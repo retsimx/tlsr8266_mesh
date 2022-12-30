@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Activity Labels -->
+    <string name="app_name">TelinkMesh</string>
+    <string name="app_copyright">©2020 Telink Semiconductor</string>
+    <string name="activity_device_setting_label">Device Setting</string>
+    <string name="activity_device_scanning_label">Device Scanning</string>
+    <string name="activity_device_grouping">Device Grouping</string>
+    <string name="activity_group_setting">Group Setting</string>
+    <string name="activity_mesh_add_lable">Add Mesh</string>
+
+    <!-- Bottom Nav -->
+    <string name="header_devices">Lights</string>
+    <string name="header_groups">Groups</string>
+    <string name="header_account">Me</string>
+
+    <!-- DeviceSchema List -->
+    <string name="device_list_header">Lights</string>
+    <string name="device_list_menu_left">Meshs</string>
+    <string name="device_list_all_on">All On</string>
+    <string name="device_list_all_off">All Off</string>
+    <!--<string name="device_list_Scene">Ota</string>-->
+
+    <string name="device_list_btn_mesh_ota">MeshOTA</string>
+    <string name="device_list_Scene_night">Night Scene</string>
+    <string name="device_list_Scene_sleep">Sleep Scene</string>
+
+    <!-- DeviceSchema Setting -->
+    <string name="device_setting_header">Light Setting</string>
+    <string name="device_setting_brightness">Brightness</string>
+    <string name="device_setting_color">Color</string>
+    <string name="device_setting_temperature">Color Temperature</string>
+    <string name="device_setting_music">Music</string>
+    <string name="device_setting_sound">Playing by heart</string>
+    <string name="device_setting_remove_device">Remove Device</string>
+
+    <!-- DeviceSchema Grouping -->
+    <string name="device_grouping_header">Grouping</string>
+
+    <!-- Scan DeviceSchema -->
+    <string name="device_scan_header">Network Scanning</string>
+    <string name="device_scan_scan">Scan Device</string>
+    <string name="device_scan_add">Add Device</string>
+
+    <!-- GroupSchema List -->
+    <string name="group_list_header">Groups</string>
+    <string name="group_list_on">On</string>
+    <string name="group_list_off">Off</string>
+
+    <!-- GroupSchema Setting -->
+    <string name="group_setting_header">Group Setting</string>
+
+    <!-- MeshSchema Add -->
+    <string name="mesh_add_header">Add Mesh</string>
+    <string name="mesh_add_label_mesh_setting">Mesh Setting</string>
+    <string name="mesh_add_label_factory_setting">Factory Default Setting</string>
+    <string name="mesh_add_button_save">Save Mesh</string>
+    <string name="mesh_add_button_share">Share Mesh</string>
+    <string name="mesh_add_button_clear">Clear Mesh</string>
+    <string name="mesh_add_default_factory_name">telink_mesh1</string>
+    <string name="mesh_add_default_factory_password">123</string>
+    <string name="mesh_add_mesh_name">Default Mesh Name</string>
+    <string name="mesh_add_mesh_password">Default Mesh Password</string>
+    <string name="mesh_add_factory_mesh_name">Factory Mesh Name</string>
+    <string name="mesh_add_factory_mesh_password">Factory Mesh Password</string>
+
+    <string name="title_activity_group_setting">GroupSettingActivity</string>
+    <string name="title_activity_test">TestActivity</string>
+
+    <string name="select_file">Select file(%s)</string>
+    <string name="ota_prepare_title">OTA Prepare</string>
+    <string name="ota_update_title">OTA Processing</string>
+    <string name="progress_ota">OTA Progress: %s </string>
+    <string name="progress_mesh_ota">Progress: %s</string>
+    <string name="target_version">Target Version : %s</string>
+
+    <!--main test fragment-->
+    <string name="main_test_title">Model</string>
+    <string name="hex_input_digit">0123456789abcdefABCDEF </string>
+    <string name="main_test_model_setting">Setting </string>
+
+    <string name="main_test">Test</string>
+
+    <string-array name="model_names">
+
+        <item>ON/OFF</item>
+
+        <!--空白位置-->
+        <item>placeholder</item>
+
+        <!--空白位置-->
+        <item>placeholder</item>
+
+        <item>Fade</item>
+        <item>Twinkling</item>
+        <item>Flash White</item>
+        <item>Dual Color</item>
+        <item>Chasing</item>
+        <item>Steady</item>
+        <item>Combo</item>
+
+        <!--空白位置-->
+        <item>placeholder</item>
+
+        <item>Auto</item>
+    </string-array>
+
+    <string name="ota_device_info">DeviceId: %1$s </string>
+
+    <string name="temp_test_cur_adr">Current Connect： %1$s</string>
+
+    <string name="mesh_ota_title">Mesh OTA</string>
+
+
+    <string name="mesh_ota_state">State: %s</string>
+
+    <string name="scanning_test">ScanningTest</string>
+
+    <string name="tip_scanning_test">Tips: \n1. Mesh name should not be null;\n2. Valid Device Type value is 0x00~0xFF; \n3. Device Type can be null if want to scan for ALL types</string>
+
+</resources>

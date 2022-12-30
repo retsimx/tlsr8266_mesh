@@ -1,0 +1,183 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/white"
+    android:orientation="vertical">
+
+    <include layout="@layout/title" />
+
+    <TextView
+        android:id="@+id/tv_version"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:padding="5dp"
+        android:textSize="12sp"
+        android:textStyle="italic" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="5dp"
+            android:layout_marginTop="5dp"
+            android:layout_marginRight="5dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="5dp"
+                android:padding="5dp"
+                android:text="@string/mesh_add_label_mesh_setting" />
+
+            <EditText
+                android:id="@+id/txt_mesh_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="@string/mesh_add_mesh_name"
+                android:labelFor="@+id/txt_mesh_name"
+                android:text="@string/mesh_add_default_factory_name" />
+
+            <EditText
+                android:id="@+id/txt_mesh_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="@string/mesh_add_mesh_password"
+                android:inputType="textPassword"
+                android:labelFor="@+id/txt_mesh_password"
+                android:text="@string/mesh_add_default_factory_password" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:layout_marginBottom="5dp"
+                android:padding="5dp"
+                android:text="@string/mesh_add_label_factory_setting" />
+
+            <EditText
+                android:id="@+id/txt_factory_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="@string/mesh_add_factory_mesh_name"
+                android:labelFor="@+id/txt_factory_name"
+                android:text="" />
+
+            <EditText
+                android:id="@+id/txt_factory_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="@string/mesh_add_factory_mesh_password"
+                android:inputType="textPassword"
+                android:labelFor="@+id/txt_factory_password"
+                android:text="" />
+
+            <!--<TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="5dp"
+                android:layout_marginTop="10dp"
+                android:padding="5dp"
+                android:text="OTA Device" />
+
+            <EditText
+                android:id="@+id/ota_device"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="FF:FF:FF:FF:FF:FF"
+                android:inputType="text"
+                android:labelFor="@+id/ota_device" />-->
+
+            <Button
+                android:id="@+id/btn_save"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="15dp"
+                android:text="@string/mesh_add_button_save"
+                android:textColor="@android:color/white"
+                android:textSize="18sp" />
+
+
+            <Button
+                android:id="@+id/btn_share"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="15dp"
+                android:text="@string/mesh_add_button_share"
+                android:textColor="@android:color/white"
+                android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/btn_clear"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="15dp"
+                android:text="@string/mesh_add_button_clear"
+                android:textColor="@android:color/white"
+                android:textSize="18sp" />
+            <!--filter-->
+            <!--<TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="5dp"
+                android:layout_marginTop="10dp"
+                android:padding="5dp"
+                android:text="Scan mac address filter" />
+
+            <EditText
+                android:id="@+id/mac_1"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="mac_1"
+                android:inputType="text"
+                android:labelFor="@+id/txt_factory_name" />
+
+            <EditText
+                android:id="@+id/mac_2"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="mac_2"
+                android:inputType="text"
+                android:labelFor="@+id/txt_factory_name" />
+
+            <EditText
+                android:id="@+id/mac_3"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="mac_3"
+                android:inputType="text"
+                android:labelFor="@+id/txt_factory_name" />
+
+            <EditText
+                android:id="@+id/mac_4"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:hint="mac_4"
+                android:inputType="text"
+                android:labelFor="@+id/txt_factory_name" />
+
+            <Button
+                android:id="@+id/btn_save_filter"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="15dp"
+                android:background="@color/theme_positive_color"
+                android:text="save filters"
+                android:textColor="@android:color/white"
+                android:textSize="18sp" />-->
+        </LinearLayout>
+
+    </ScrollView>
+</LinearLayout>

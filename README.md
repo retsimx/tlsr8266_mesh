@@ -1,4 +1,8 @@
 # 
+#### References
+Heavily inspired by the work from Raphael Baron's project here https://rbaron.net/blog/2021/07/06/Reverse-engineering-the-M6-smart-fitness-band.html (https://github.com/rbaron/m6-reveng)
+
+
 #### Includes
 * telink mesh SDK
 * tc32 toolchain

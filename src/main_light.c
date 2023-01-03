@@ -222,9 +222,21 @@ void device_status_update(){
 #else
     st_val_par[0] = light_off ? 0x00 : (led_lum ? led_lum : 1);     //Note: bit7 of par[0] have been use internal for FLD_SYNCED
 #endif
-	st_val_par[1] = 0xFF;   // rsv
+    st_val_par[1] = 0xFF;   // rsv
     // end
-    
+
+    ll_device_status_update(st_val_par, sizeof(st_val_par));
+}
+
+void device_status_update2(unsigned char cmd){
+    // packet
+    u8 st_val_par[MESH_NODE_ST_PAR_LEN] = {0};
+    memset(st_val_par, 0xFF, sizeof(st_val_par));
+    // led_lum should not be 0, because app will take it to be light off
+    st_val_par[0] = cmd;     //Note: bit7 of par[0] have been use internal for FLD_SYNCED
+    st_val_par[1] = 0xFE;   // rsv
+    // end
+
     ll_device_status_update(st_val_par, sizeof(st_val_par));
 }
 
@@ -880,6 +892,7 @@ void light_lum_erase(void){
 #if 1
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
+char lightOn = 0;
 void rf_link_data_callback (u8 *p)
 {
     // p start from l2capLen of rf_packet_att_cmd_t
@@ -900,7 +913,7 @@ void rf_link_data_callback (u8 *p)
     }else if(op_cmd_len == op_type_3){
         u16 vendor_id = op_cmd[2] << 8 | op_cmd[1];
         op = op_cmd[0] & 0x3F;
-        if(vendor_id == VENDOR_ID){
+
         	if(op == LGT_CMD_LIGHT_ONOFF){
         		if(cmd_left_delay_ms){
         			return;
@@ -1015,28 +1028,39 @@ void rf_link_data_callback (u8 *p)
         	    if(light_off){
         	        return;
         	    }
-        		if(params[0] == 1){		        //R
-        		    led_val[0] = params[1];
-                    light_adjust_R (led_val[0], led_lum);
-        		}else if(params[0] == 2){		//G
-        		    led_val[1] = params[1];
-                    light_adjust_G (led_val[1], led_lum);
-        		}else if(params[0] == 3){		//B
-        		    led_val[2] = params[1];
-                    light_adjust_B (led_val[2], led_lum);
-        		}else if(params[0] == 4){		//RGB
-        		    led_val[0] = params[1];
-        		    led_val[1] = params[2];
-        		    led_val[2] = params[3];
-        		    light_adjust_RGB(led_val[0], led_val[1], led_val[2], led_lum);
-        		}else if(params[0] == 5){		//CT
-        		    //temporary processing as brightness
-                    if(light_off || params[1] > 100 || led_lum == params[1]){
+                if (params[8] & 0x4) {
+                    // Brightness
+                    // params[6]
+                    if(light_off || params[6] > 100 || led_lum == params[6]){
                         return;
                     }
-                    led_lum = params[1];
+                    led_lum = params[6];
                     light_adjust_RGB(led_val[0], led_val[1], led_val[2], led_lum);
-        		}
+                }
+                if (params[8] & 0x8) {
+                    // Temperature
+                    // params[4]
+                    led_val[0] = 0;
+                    led_val[1] = params[5];
+                    led_val[2] = params[4];
+                    light_adjust_RGB(led_val[0], led_val[1], led_val[2], led_lum);
+                }
+//                device_status_update2(params[8]);
+//        		if(params[0] == 1){		        //R
+//        		    led_val[0] = params[1];
+//                    light_adjust_R (led_val[0], led_lum);
+//        		}else if(params[0] == 2){		//G
+//        		    led_val[1] = params[1];
+//                    light_adjust_G (led_val[1], led_lum);
+//        		}else if(params[0] == 3){		//B
+//        		    led_val[2] = params[1];
+//                    light_adjust_B (led_val[2], led_lum);
+//        		}else if(params[0] == 4) {        //RGB
+//                    led_val[0] = params[1];
+//                    led_val[1] = params[2];
+//                    led_val[2] = params[3];
+//                    light_adjust_RGB(led_val[0], led_val[1], led_val[2], led_lum);
+//                }
         		
                 lum_changed_time = clock_time();
         	}
@@ -1150,7 +1174,6 @@ void rf_link_data_callback (u8 *p)
 			SWTxCnt = 0;
 		}
 #endif
-        }
     }
 }
 

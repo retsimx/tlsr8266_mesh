@@ -123,8 +123,8 @@ extern "C" {
 #define SWITCH_MODE_BUTTON1     GPIO_PD4
 #define SWITCH_MODE_BUTTON2     GPIO_PD5
 #endif
-#define ALARM_EN                1
-#define SCENE_EN                1
+#define ALARM_EN                0
+#define SCENE_EN                0
 #define MESH_OTA_MASTER_FLAG_EN 1
 
 #define SYNC_TIME_EN            0

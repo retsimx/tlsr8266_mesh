@@ -902,7 +902,9 @@ typedef struct{
 #define GATEWAY_EVENT_PROVISION_COMPLETE          0x83
 #define GATEWAY_EVENT_PROVISION_BY_OTHERS         0x84
 
+#if PROVISIONING_ENABLE
 gateway_status_t gateway_status = GATEWAY_STATUS_NORMAL;
+#endif
 
 #if GATEWAY_EN
 
@@ -4372,7 +4374,7 @@ u8 vendor_rf_link_is_notify_rsp(u8 op){
 }
 
 u8 vendor_mesh_op_is_conflict(u8 op, u16 vendor_id){
-	return ((op == LGT_CMD_MESH_OTA_READ)&&(vendor_id != 0x0211)); //oplle use c7 command
+	return ((op == LGT_CMD_MESH_OTA_READ)&&(vendor_id != 0x01FF)); //oplle use c7 command
 }
 
 // must

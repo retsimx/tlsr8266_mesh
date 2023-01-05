@@ -174,7 +174,7 @@ const	u8  control_cct_name[]          = {'C', 'C', 'T'};
 const	u8  control_rgb_name[]          = {'R', 'G', 'B'};
 
 extern  u8 	light_off;
-extern  u8	led_val[6];
+extern  u16	led_val[3];
 
 #define ControlOnOffData        light_off
 u8 ControlDimLevelData          = 0;
@@ -273,7 +273,7 @@ attribute_t gAttributes_vendor[] = {
 	{0,2,sizeof (control_cct_name), sizeof (control_cct_name),(u8*)(&userdesc_UUID_light), (u8*)(control_cct_name), 0},
 	
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ControlRGBProp), 0},				//prop
-	{0,16,4,4,(u8*)(ControlRGBUUID), 	(u8*)(ControlRGBData), 0},	//value
+	{0,16,6,6,(u8*)(ControlRGBUUID), 	(u8*)(ControlRGBData), 0},	//value
 	{0,2,sizeof (control_rgb_name), sizeof (control_rgb_name),(u8*)(&userdesc_UUID_light), (u8*)(control_rgb_name), 0},
 
 	// connect

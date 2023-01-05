@@ -18,8 +18,6 @@ DRIVERS_SRC = \
 	./sdk/proj/mcu/clock.c \
 	./sdk/proj/drivers/flash.c \
 	./sdk/proj/drivers/flash_mesh_extend.c
-#	./sdk/proj/drivers/adc.c \
-#	./sdk/proj/drivers/uart.c
 DRIVERS_OBJS = $(addprefix $(BUILD_DIR)/drivers/, $(notdir $(DRIVERS_SRC:%.c=%.o)))
 
 SDK_COMMON_SRC = \

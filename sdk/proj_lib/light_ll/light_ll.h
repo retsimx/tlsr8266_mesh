@@ -95,6 +95,7 @@
 #define         LGT_CMD_LIGHT_RC_SET_RGB        0x2d
 #define         LGT_CMD_SET_SCENE               0x2e
 #define         LGT_CMD_LOAD_SCENE              0x2f
+#define         LGT_CMD_SET_LIGHT               0x30
 //------jump to 0x00
 //------0x30 ~ 0x3f for customer
 

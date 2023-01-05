@@ -785,25 +785,26 @@ public final class LightController extends EventBus<Integer> implements LightPer
     }
 
     private boolean validateOta() {
-        int sectionSize = Manufacture.getDefault().getOtaSize();
-        int sendTotal = otaPacketParser.getNextPacketIndex() * 16;
-        TelinkLog.d("ota onCommandSampled byte length : " + sendTotal);
-        if (sendTotal > 0 && sendTotal % sectionSize == 0) {
-            TelinkLog.d("onCommandSampled ota read packet " + otaPacketParser.getNextPacketIndex());
-            Manufacture manufacture = Manufacture.getDefault();
-            UUID serviceUUID = manufacture.getUUID(Manufacture.UUIDType.SERVICE);
-            UUID characteristicUUID = manufacture.getUUID(Manufacture.UUIDType.OTA);
-
-            Command cmd = Command.newInstance();
-            cmd.serviceUUID = serviceUUID;
-            cmd.characteristicUUID = characteristicUUID;
-            cmd.type = Command.CommandType.READ;
-            cmd.tag = TAG_OTA_READ;
-            this.sendCommand(otaCallback, cmd);
-            return true;
-        }
-
         return false;
+//        int sectionSize = Manufacture.getDefault().getOtaSize();
+//        int sendTotal = otaPacketParser.getNextPacketIndex() * 16;
+//        TelinkLog.d("ota onCommandSampled byte length : " + sendTotal);
+//        if (sendTotal > 0 && sendTotal % sectionSize == 0) {
+//            TelinkLog.d("onCommandSampled ota read packet " + otaPacketParser.getNextPacketIndex());
+//            Manufacture manufacture = Manufacture.getDefault();
+//            UUID serviceUUID = manufacture.getUUID(Manufacture.UUIDType.SERVICE);
+//            UUID characteristicUUID = manufacture.getUUID(Manufacture.UUIDType.OTA);
+//
+//            Command cmd = Command.newInstance();
+//            cmd.serviceUUID = serviceUUID;
+//            cmd.characteristicUUID = characteristicUUID;
+//            cmd.type = Command.CommandType.READ;
+//            cmd.tag = TAG_OTA_READ;
+//            this.sendCommand(otaCallback, cmd);
+//            return true;
+//        }
+//
+//        return false;
     }
 
     private void sendOtaCheckPacket() {

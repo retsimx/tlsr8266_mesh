@@ -322,5 +322,7 @@ enum{
 
 #define OUT_OF_MESH						    "out_of_mesh"
 
+#define MAX_LUM_BRIGHTNESS_VALUE 0xffff
+
 #include "../../version.h"
 

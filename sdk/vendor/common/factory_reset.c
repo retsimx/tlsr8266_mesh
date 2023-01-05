@@ -38,8 +38,8 @@ static int reset_cnt = 0;
 u8 factory_reset_serials[SERIALS_CNT * 2]   = { 0, 3,    // [0]:must 0
                                                 0, 3,    // [2]:must 0
                                                 0, 3,    // [4]:must 0
-                                                0, 3,
-                                                0, 3};
+                                                3, 30,
+                                                3, 30};
 
 #define RESET_CNT_RECOUNT_FLAG          0
 #define RESET_FLAG                      0x80

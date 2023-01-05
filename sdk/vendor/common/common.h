@@ -32,7 +32,7 @@
 
 void light_onoff_step(u8 on);
 void light_onoff_step_timer();
-void light_step_correct_mod(u16 *pwm_val, u8 lum);
+void light_step_correct_mod(float *pwm_val, u16 lum);
 void light_onoff(u8 on);
 void light_onoff_step_init();
 u8 is_lum_invalid(u8 lum);
@@ -418,9 +418,9 @@ static inline void set_sub_addr2rsp(device_addr_sub_t *p_src, u8 *p_dst, bool ds
 
 void light_multy_onoff(u8 *dst_addr, u8 on);
 u8 get_sub_addr_onoff();
-void light_adjust_R(u8 val, u8 lum);
-void light_adjust_G(u8 val, u8 lum);
-void light_adjust_B(u8 val, u8 lum);
+void light_adjust_R(u16 val, u16 lum);
+void light_adjust_G(u16 val, u16 lum);
+void light_adjust_B(u16 val, u16 lum);
 
 void cb_set_sub_addr_tx_cmd(u8 *src, u16 sub_adr);
 #if AUTO_ADAPT_MAC_ADDR_TO_FLASH_TYPE_EN

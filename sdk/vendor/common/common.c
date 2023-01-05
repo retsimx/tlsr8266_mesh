@@ -126,22 +126,22 @@ u8 mesh_cmd_cache_num = RC_PKT_BUF_MAX;
 #define LIGHT_ADJUST_INTERVAL       (2)   // unit :10ms;     min:20ms
 #endif
 
-extern void light_adjust_RGB_hw(u8 val_R, u8 val_G, u8 val_B, u8 lum);
+extern void light_adjust_RGB_hw(u16 val_R, u16 val_G, u16 val_B, u16 lum);
 void light_onoff_normal(u8 on);
 
-extern u16 rgb_lumen_map[101];
+extern float calculate_lumen_map(u16 val);
 extern u8 light_off;
-extern u8 led_lum;
-extern u8 led_val[6];
+extern u16 led_lum;
+extern u16 led_val[3];
 extern ll_adv_rsp_private_t adv_rsp_pri_data;
 
 typedef struct{
     u32 time;
-    s16 lum_temp;
-    s16 lum_dst;
-    u8 step;
-    u8 step_mod;
-    u8 remainder;
+    s32 lum_temp;
+    s32 lum_dst;
+    u16 step;
+    u16 step_mod;
+    u16 remainder;
     u8 adjusting_flag;
 }light_step_t;
 
@@ -154,11 +154,11 @@ enum{
 
 void get_next_lum(u8 direction){    
     u32 temp = light_step.remainder + light_step.step_mod;
-    light_step.remainder = (u8)temp;
+    light_step.remainder = (u16)temp;
     
     if(LUM_UP == direction){
         light_step.lum_temp += light_step.step;
-        if(temp >= 0x100){
+        if(temp >= 0x10000){
             light_step.lum_temp += 1;
         }
         if(light_step.lum_temp >= light_step.lum_dst){
@@ -167,7 +167,7 @@ void get_next_lum(u8 direction){
         }
     }else{
         light_step.lum_temp -= light_step.step;
-        if(temp >= 0x100){
+        if(temp >= 0x10000){
             light_step.lum_temp -= 1;
         }
         if(light_step.lum_temp <= light_step.lum_dst){
@@ -193,21 +193,21 @@ void get_step(u8 direction){
     #endif
 }
 
-void light_step_correct_mod(u16 *pwm_val, u8 lum){
+void light_step_correct_mod(float *pwm_val, u16 lum){
     #if(STEP_TYPE == TYPE_FIX_TIME)
     int temp_pwm = light_step.remainder;
     
     if(light_step.adjusting_flag && (light_step.lum_dst != light_step.lum_temp)
-   && ((lum > 0) && (lum < ARRAY_SIZE(rgb_lumen_map) -1))
+   && (lum > 0)
    && (light_step.remainder)){
         if(light_step.lum_dst > light_step.lum_temp){
-            temp_pwm = *pwm_val + (temp_pwm * (rgb_lumen_map[lum+1] - rgb_lumen_map[lum])) / 256;
+            temp_pwm = *pwm_val + (temp_pwm * (calculate_lumen_map(lum+1) - calculate_lumen_map(lum))) / 256;
 
             if(temp_pwm > U16_MAX){
                 temp_pwm = U16_MAX;
             }
         }else{
-            temp_pwm = *pwm_val - (temp_pwm * (rgb_lumen_map[lum] - rgb_lumen_map[lum-1])) / 256;
+            temp_pwm = *pwm_val - (temp_pwm * (calculate_lumen_map(lum) - calculate_lumen_map(lum-1))) / 256;
             if(temp_pwm < 0){
                 temp_pwm = 0;
             }
@@ -222,6 +222,45 @@ void light_onoff_step_init()
 {
     //light_step.adjusting_flag = 0;
     memset((u8 *)(&light_step), 0, sizeof(light_step));
+}
+
+void light_step_reset(u16 target) {
+    u8 r = irq_disable();
+    if (light_step.adjusting_flag == 0 && target == led_lum) {
+        light_adjust_RGB_hw(led_val[0], led_val[1], led_val[2], target);
+        goto end;
+    }
+
+    if (light_step.adjusting_flag == 1) {
+        if (target < light_step.lum_temp) {
+            light_step.lum_dst = target;
+            get_step(LUM_DOWN);
+        }
+
+        if (target > light_step.lum_temp) {
+            light_step.lum_dst = target;
+            get_step(LUM_UP);
+        }
+    } else {
+        if (target < led_lum) {
+            light_step.lum_temp = led_lum;
+            light_step.lum_dst = target;
+            get_step(LUM_DOWN);
+        }
+
+        if (target > led_lum) {
+            light_step.lum_temp = led_lum;
+            light_step.lum_dst = target;
+            get_step(LUM_UP);
+        }
+    }
+
+    light_step.adjusting_flag = 1;
+    light_step.time = 0;
+    led_lum = target;
+
+    end:
+    irq_restore(r);
 }
 
 void light_onoff_step(u8 on){
@@ -2511,7 +2550,7 @@ void light_multy_onoff_sub_addr(u8 sub_addr, u8 on, bool update_online_st)
 {
     if(sub_addr && sub_addr <= TEST_LED_CNT){
         int index = sub_addr - 1;
-        led_val[index] = on ? 0xff : 0;
+        led_val[index] = on ? MAX_LUM_BRIGHTNESS_VALUE : 0;
         if(0 == index){
             light_adjust_R(led_val[index], led_lum);
         }else if(1 == index){

@@ -176,12 +176,15 @@ def read_addr(addr, len):
     return result
 
 
-def reset_mcu():
+def reset_mcu(reset_only=False):
     # Halt the CPU
     while True:
         reset_pin.low()
         time.sleep_ms(100)
         reset_pin.high()
+
+        if reset_only:
+            return
 
         try:
             while read_addr(0x00b2, 1)[0] != 127:
@@ -386,6 +389,8 @@ while True:
             except:
                 print("Write error writing flash to", waddr)
                 reset_mcu()
+    elif data[0] == 4:
+        reset_mcu(True)
     else:
         print("Unknown command")
 

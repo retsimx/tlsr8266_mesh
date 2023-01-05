@@ -247,7 +247,7 @@ public final class Manufacture {
         private UUID commandUUID = UuidInformation.TELINK_CHARACTERISTIC_COMMAND.getValue();
         private UUID notifyUUID = UuidInformation.TELINK_CHARACTERISTIC_NOTIFY.getValue();
         private UUID otaUUID = UuidInformation.TELINK_CHARACTERISTIC_OTA.getValue();
-        private int otaDelay = 0;
+        private int otaDelay = 100;
         private int otaSize = 128;
 
         public Builder() {

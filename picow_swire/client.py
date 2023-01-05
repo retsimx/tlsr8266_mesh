@@ -225,6 +225,13 @@ def cpu_run_main(args):
     make_write_request(0x0602, [0x88])
 
 
+def cpu_reset_main(args):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST, PORT))
+        data = struct.pack('B', 4)
+        s.sendall(data)
+
+
 def main():
     args_parser = argparse.ArgumentParser(description='TLSR')
     args_parser.add_argument(
@@ -249,8 +256,11 @@ def main():
     erase_flash_parser = subparsers.add_parser('erase_flash')
     erase_flash_parser.set_defaults(func=erase_flash_main)
 
-    erase_flash_parser = subparsers.add_parser('cpu_run')
-    erase_flash_parser.set_defaults(func=cpu_run_main)
+    cpu_run_parser = subparsers.add_parser('cpu_run')
+    cpu_run_parser.set_defaults(func=cpu_run_main)
+
+    cpu_reset_parser = subparsers.add_parser('cpu_reset')
+    cpu_reset_parser.set_defaults(func=cpu_reset_main)
 
     args = args_parser.parse_args()
 

@@ -232,6 +232,13 @@ def cpu_reset_main(args):
         s.sendall(data)
 
 
+def flashing_reset_main(args):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST, PORT))
+        data = struct.pack('B', 5)
+        s.sendall(data)
+
+
 def main():
     args_parser = argparse.ArgumentParser(description='TLSR')
     args_parser.add_argument(
@@ -240,27 +247,30 @@ def main():
 
     dump_flash_parser = subparsers.add_parser('dump_flash')
     dump_flash_parser.set_defaults(func=dump_flash_main)
-    dump_flash_parser.add_argument('filename', type=str)
+    dump_flash_parser.add_argument('filename', type=str, help="Dump chip firmware.")
 
-    dump_ram_parser = subparsers.add_parser('dump_ram')
+    dump_ram_parser = subparsers.add_parser('dump_ram', help="Dump chip ram.")
     dump_ram_parser.set_defaults(func=dump_ram_main)
     dump_ram_parser.add_argument('filename', type=str)
 
-    get_soc_id_parser = subparsers.add_parser('get_soc_id')
+    get_soc_id_parser = subparsers.add_parser('get_soc_id', help="Get the SoC chip ID.")
     get_soc_id_parser.set_defaults(func=get_soc_id_main)
 
-    write_flash_parser = subparsers.add_parser('write_flash')
+    write_flash_parser = subparsers.add_parser('write_flash', help="Write firmware to chip.")
     write_flash_parser.set_defaults(func=write_flash_main)
     write_flash_parser.add_argument('filename', type=str)
 
-    erase_flash_parser = subparsers.add_parser('erase_flash')
+    erase_flash_parser = subparsers.add_parser('erase_flash', help="Erase chip flash.")
     erase_flash_parser.set_defaults(func=erase_flash_main)
 
-    cpu_run_parser = subparsers.add_parser('cpu_run')
+    cpu_run_parser = subparsers.add_parser('cpu_run', help="Resumes the CPU if it's in a paused state.")
     cpu_run_parser.set_defaults(func=cpu_run_main)
 
-    cpu_reset_parser = subparsers.add_parser('cpu_reset')
+    cpu_reset_parser = subparsers.add_parser('cpu_reset', help="Resets the entire CPU via the reset pin.")
     cpu_reset_parser.set_defaults(func=cpu_reset_main)
+
+    flashing_reset_parser = subparsers.add_parser('flashing_reset', help="Resets the entire CPU via the reset pin, renegotiates the SWire interface, then pauses the CPU ready for flashing. (Default at Pico power on)")
+    flashing_reset_parser.set_defaults(func=flashing_reset_main)
 
     args = args_parser.parse_args()
 

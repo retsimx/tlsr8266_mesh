@@ -391,6 +391,8 @@ while True:
                 reset_mcu()
     elif data[0] == 4:
         reset_mcu(True)
+    elif data[0] == 5:
+        reset_mcu(False)
     else:
         print("Unknown command")
 

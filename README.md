@@ -12,4 +12,4 @@ Heavily inspired by the work from Raphael Baron's project here https://rbaron.ne
 * original TYBT1 firmware
 
 #### Versions
-rust 1.64.0 is the last version that works with llvm-cbe
+rust 1.64.0 works with llvm-cbe built against LLVM 13

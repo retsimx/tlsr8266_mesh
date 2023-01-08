@@ -38,7 +38,7 @@ pub const PWMID_G: u32 =     0;
 pub const PWMID_B: u32 =     1;
 pub const PWMID_W: u32 =     3;
 
-pub static FLASH_SECTOR_SIZE: u16 = 4096;
+pub const FLASH_SECTOR_SIZE: u16 = 4096;
 
 extern "C" {
     fn rf_drv_init(mode: i32);

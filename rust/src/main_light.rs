@@ -1,6 +1,6 @@
 use std::mem::{size_of, size_of_val, transmute};
 use std::ptr::{copy_nonoverlapping, write_bytes, addr_of};
-use common::{erase_ota_data, is_ota_area_valid, mesh_pair_init, mesh_pair_proc_effect};
+use common::{erase_ota_data, is_ota_area_valid, mesh_ota_master_100_flag_check, mesh_pair_init, mesh_pair_proc_effect, RECOVER_STATUS, rega_light_off};
 use ::{flash_adr_light_new_fw, PAIR_VALID_FLAG};
 use ::{MESH_NAME, MESH_PWD};
 use ::{MESH_LTK, VENDOR_ID};
@@ -12,6 +12,7 @@ use ::{flash_adr_lum, FLASH_SECTOR_SIZE};
 use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use sdk::light::{adv_private_data_len, AUTH_TIME, BRIDGE_MAX_CNT, IRQ_TIME1_INTERVAL, is_receive_ota_window, light_set_tick_per_us, ll_adv_private_t, ll_adv_rsp_private_t, mesh_get_fw_version, mesh_security_enable, online_status_timeout, ONLINE_STATUS_TIMEOUT, p_adv_pri_data, p_adv_rsp_data, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_config_valid_flag, pair_login_ok, PMW_MAX_TICK, register_mesh_ota_master_ui, rf_link_slave_proc, security_enable, setSppUUID, slave_first_connected_tick, user_data, user_data_len, vendor_id_init};
+use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
 use sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, write_reg_irq_mask, write_reg_tmr1_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, read_reg_tmr_ctrl};
@@ -27,15 +28,15 @@ extern "C" {
 
 
     // todo
-    fn light_lum_retrieve();
     fn factory_reset_handle();
     fn factory_reset_cnt_check();
     fn vendor_set_adv_data();
     fn device_status_update();
-    fn light_onoff_hw(on: bool);
+    fn light_onoff_step(on: bool);
     fn light_adjust_R(val: u16, lum: u16);
     fn light_adjust_G(val: u16, lum: u16);
     fn light_adjust_B(val: u16, lum: u16);
+    fn light_adjust_RGB_hw(val_R: u16, val_G: u16, val_B: u16, lum: u16);
 
     static mut light_off: u8;
     static mut lum_changed_time: u32;
@@ -325,6 +326,49 @@ unsafe fn light_lum_store(){
 	light_lum_addr += size_of::<lum_save_t>() as u32;
 
 	return;
+}
+
+pub fn light_onoff_hw(on: bool) {
+    unsafe { light_onoff_step(on); }
+}
+
+pub fn light_onoff(on: bool) {
+    light_onoff_hw(on);
+
+    unsafe { device_status_update(); }
+}
+
+//retrieve LUM : brightness or RGB/CT value
+unsafe fn light_lum_retrieve() {
+    let mut i = 0;
+    while i < FLASH_SECTOR_SIZE
+    {
+		light_lum_addr = flash_adr_lum + i as u32;
+
+        let lum_save = light_lum_addr as *const lum_save_t;
+		if LUM_SAVE_FLAG == (*lum_save).save_falg {
+            led_lum = (*lum_save).lum;
+            #[allow(unaligned_references)]
+            copy_nonoverlapping((*lum_save).ledval.as_ptr(), led_val.as_mut_ptr(), led_val.len());
+		}else if (*lum_save).save_falg == 0xFF {
+		    break;
+		}
+
+        i += size_of::<lum_save_t>() as u16
+	}
+
+	//effect
+	light_adjust_RGB_hw(0, 0, 0, 0);
+
+	mesh_ota_master_100_flag_check();
+
+	let val = analog_read__attribute_ram_code(rega_light_off);
+	if val & RECOVER_STATUS::FLD_LIGHT_OFF as u8 != 0 {
+	    analog_write__attribute_ram_code(rega_light_off, val & !(RECOVER_STATUS::FLD_LIGHT_OFF as u8));
+	    light_onoff(false);
+	}else{
+	    light_onoff(true);
+	}
 }
 
 fn light_user_func() {

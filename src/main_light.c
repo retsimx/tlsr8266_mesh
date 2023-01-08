@@ -656,38 +656,7 @@ typedef struct{
 }lum_save_t;
 
 extern void light_lum_erase(void);
-//retrieve LUM : brightness or RGB/CT value
-void light_lum_retrieve(void){
-    for(int i = 0; i < (FLASH_SECTOR_SIZE); i += sizeof(lum_save_t)){
-		light_lum_addr = flash_adr_lum + i;
-	
-        lum_save_t *lum_save = (lum_save_t *)(light_lum_addr);
-		if(LUM_SAVE_FLAG == lum_save->save_falg){
-            led_lum = lum_save->lum;
-            memcpy(led_val, lum_save->ledval, sizeof(led_val));
-		}else if(lum_save->save_falg != 0xFF){
-		    //invalid
-		    continue;
-		}else{
-		    break;
-		}
-	}
 
-	//effect
-    #if LIGHT_ADJUST_STEP_EN
-	light_adjust_RGB_hw(0, 0, 0, 0);
-	#endif
-
-	mesh_ota_master_100_flag_check();
-	
-	u8 val = analog_read(rega_light_off);
-	if(val & FLD_LIGHT_OFF){
-	    analog_write(rega_light_off, val & (~ FLD_LIGHT_OFF));
-	    light_onoff(0);
-	}else{
-	    light_onoff(1);
-	}
-}
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */

@@ -114,7 +114,7 @@ extern u8	rf_link_key[];
 extern u8 	max_relay_num;
 extern ll_adv_private_t adv_pri_data;
 extern ll_adv_rsp_private_t adv_rsp_pri_data;
-extern u8	adv_private_data_len;
+extern
 extern u8 security_enable;
 
 ////////////////////////////////////////////////////////////////////////////

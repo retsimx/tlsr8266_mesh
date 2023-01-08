@@ -225,35 +225,35 @@ attribute_t gAttributes_vendor[] = {
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&SppDataPairProp_light), 0},				//prop
 	{0,16,16,16,(u8*)(TelinkSppDataPairUUID_light),	(SppDataPairData_light), &pairWrite, &pairRead},//value
 	{0,2,sizeof (spp_pairname_light), sizeof (spp_pairname_light),(u8*)(&userdesc_UUID_light), (u8*)(spp_pairname_light), 0},
-	
+
 	// device
 	{13,2,16,16,(u8*)(&primaryServiceUUID_light), 	(u8*)(DeviceServiceUUID), 0},
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&DeviceMacAddrProp), 0},				//prop
 	{0,16,6,6,(u8*)(DeviceMacAddrUUID), 	(u8*)(DeviceMacAddrData), 0},	//value
 	{0,2,sizeof (device_mac_addr_name), sizeof (device_mac_addr_name),(u8*)(&userdesc_UUID_light), (u8*)(device_mac_addr_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&DeviceNameProp), 0},				//prop
 	{0,16,sizeof(DeviceNameData),sizeof(DeviceNameData),(u8*)(DeviceNameUUID), 	(u8*)(DeviceNameData), 0},	//value
 	{0,2,sizeof (device_name), sizeof (device_name),(u8*)(&userdesc_UUID_light), (u8*)(device_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&DeviceVersionProp), 0},				//prop
 	{0,16,2,2,(u8*)(DeviceVersionUUID), 	(u8*)(DeviceVersionData), 0},	//value
 	{0,2,sizeof (device_version_name), sizeof (device_version_name),(u8*)(&userdesc_UUID_light), (u8*)(device_version_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&DeviceTypeProp), 0},				//prop
 	{0,16,2,2,(u8*)(DeviceTypeUUID), 	(u8*)(&DeviceTypeData), 0},	//value
 	{0,2,sizeof (device_type_name), sizeof (device_type_name),(u8*)(&userdesc_UUID_light), (u8*)(device_type_name), 0},
-	
+
 	// config
 	{10,2,16,16,(u8*)(&primaryServiceUUID_light), 	(u8*)(ConfigServiceUUID), 0},
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ConfigSceneIDProp), 0},				//prop
 	{0,16,2,2,(u8*)(ConfigSceneIDUUID), 	(u8*)(&ConfigSceneIDData), 0},	//value
 	{0,2,sizeof (config_scene_id_name), sizeof (config_scene_id_name),(u8*)(&userdesc_UUID_light), (u8*)(config_scene_id_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ConfigRelayTimesProp), 0},				//prop
 	{0,16,1,1,(u8*)(ConfigRelayTimesUUID), 	(u8*)(&ConfigRelayTimesData), 0},	//value
 	{0,2,sizeof (config_relay_times_name), sizeof (config_relay_times_name),(u8*)(&userdesc_UUID_light), (u8*)(config_relay_times_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ConfigOthersProp), 0},				//prop
 	{0,16,2,2,(u8*)(ConfigOthersUUID), 	(u8*)(&ConfigOthersData), 0},	//value
 	{0,2,sizeof (config_others_name), sizeof (config_others_name),(u8*)(&userdesc_UUID_light), (u8*)(config_others_name), 0},
@@ -263,15 +263,15 @@ attribute_t gAttributes_vendor[] = {
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ControlOnOffProp), 0},				//prop
 	{0,16,1,1,(u8*)(ControlOnOffUUID), 	(u8*)(&ControlOnOffData), 0},	//value
 	{0,2,sizeof (control_on_off_name), sizeof (control_on_off_name),(u8*)(&userdesc_UUID_light), (u8*)(control_on_off_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ControlDimLevelProp), 0},				//prop
 	{0,16,1,1,(u8*)(ControlDimLevelUUID), 	(u8*)(&ControlDimLevelData), 0},	//value
 	{0,2,sizeof (control_dim_level_name), sizeof (control_dim_level_name),(u8*)(&userdesc_UUID_light), (u8*)(control_dim_level_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ControlCCTProp), 0},				//prop
 	{0,16,2,2,(u8*)(ControlCCTUUID), 	(u8*)(&ControlCCTData), 0},	//value
 	{0,2,sizeof (control_cct_name), sizeof (control_cct_name),(u8*)(&userdesc_UUID_light), (u8*)(control_cct_name), 0},
-	
+
 	{0,16,1,1,(u8*)(&characterUUID_light), 		(u8*)(&ControlRGBProp), 0},				//prop
 	{0,16,6,6,(u8*)(ControlRGBUUID), 	(u8*)(ControlRGBData), 0},	//value
 	{0,2,sizeof (control_rgb_name), sizeof (control_rgb_name),(u8*)(&userdesc_UUID_light), (u8*)(control_rgb_name), 0},

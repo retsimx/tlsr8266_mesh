@@ -115,10 +115,10 @@ static inline unsigned char dma_chn_irq_status_get(void)
 }
 
 #else
-static inline void dma_init(){
-	reg_dma_chn_irq_msk =
-			(RF_RX_USE_DMA_IRQ ? FLD_DMA_RF_RX : 0) | (RF_TX_USE_DMA_IRQ ? FLD_DMA_RF_TX : 0);
-}
+//static inline void dma_init(){
+//	reg_dma_chn_irq_msk =
+//			(RF_RX_USE_DMA_IRQ ? FLD_DMA_RF_RX : 0) | (RF_TX_USE_DMA_IRQ ? FLD_DMA_RF_TX : 0);
+//}
 
 static inline void dma_irq_clear(){
 	reg_dma_chn_irq_msk = 0;

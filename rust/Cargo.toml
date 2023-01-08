@@ -1,0 +1,15 @@
+[package]
+name = "tlsr8266_mesh"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+paste = "1.0"
+#micromath = "2.0"

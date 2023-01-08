@@ -1,10 +1,14 @@
 
 TARGET=lightblemesh
 
+CXX = /opt/llvm10/bin/clang
+CBE = /home/lewis/Projects/llvm-cbe/build/tools/llvm-cbe/llvm-cbe
 CC = ./toolchain/tc32/bin/tc32-elf-gcc
 LD = ./toolchain/tc32/bin/tc32-elf-ld
 CP = ./toolchain/tc32/bin/tc32-elf-objcopy
 
+CXXFLAGS = -m32 -S -emit-llvm -g -Os -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -DMCU_STARTUP_8266 -D__PROJECT_LIGHT_8266__=1 -DPROVISIONING_ENABLE -I ./sdk/ -ffunction-sections -fdata-sections
+CBEFLAGS =
 CCFLAGS = -O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -DMCU_STARTUP_8266 -D__PROJECT_LIGHT_8266__=1 -DPROVISIONING_ENABLE -I ./sdk/ -ffunction-sections -fdata-sections
 
 LDFLAGS = --gc-sections -T ./sdk/boot.link
@@ -43,7 +47,6 @@ DIVMOD_SRC = #./sdk/div_mod.S
 DIVMOD_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(DIVMOD_SRC:%.S=%.o)))
 
 SRC = \
-	src/main.c \
 	src/main_light.c \
 	src/vendor_att_light.c \
 	src/vendor_light.c
@@ -53,7 +56,13 @@ $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 	$(CP) -O binary $< $@
 
 $(BUILD_DIR)/$(TARGET): $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(OBJS)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(LIB)
+	cd rust && rm -Rf target/i686-unknown-linux-gnu/release/deps
+	cd rust && cargo build --color=always --message-format=json-diagnostic-rendered-ansi --release
+	cd rust && sed -e 's/\<mustprogress\>//g' target/i686-unknown-linux-gnu/release/deps/*.ll > target/i686-unknown-linux-gnu/release/deps/processed.ll
+	cd rust && $(CBE) target/i686-unknown-linux-gnu/release/deps/processed.ll
+	cd rust && python ../toolchain/fix_ramcode.py target/i686-unknown-linux-gnu/release/deps/processed.cbe.c
+	cd rust && ../$(CC) -c $(CCFLAGS) -o target/i686-unknown-linux-gnu/release/deps/processed.o target/i686-unknown-linux-gnu/release/deps/processed.cbe.c.rc.c
+	$(LD) $(LDFLAGS) -o $@ rust/target/i686-unknown-linux-gnu/release/deps/processed.o $(CPPOBJS) $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(LIB)
 
 # Drivers.
 $(BUILD_DIR)/drivers/%.o: ./sdk/proj/drivers/%.c

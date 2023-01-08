@@ -56,7 +56,7 @@ __start:					@ MUST,  referenced by boot.link
 @********************************************************************************************************
 @                                   LOW-LEVEL INITIALIZATION
 @********************************************************************************************************
-	.extern  main
+	.extern  main_entrypoint
 
 	.org 0x20
 __reset:
@@ -184,7 +184,7 @@ SETSPISPEED:
 	tstorerb	r0, [r1, #1]
 #endif
 
-	tjl	main
+	tjl	main_entrypoint
 END:	tj	END
 
 	.balign	4

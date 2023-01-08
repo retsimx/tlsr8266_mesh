@@ -1,0 +1,3 @@
+[build]
+rustflags = ["--emit=llvm-ir"]
+target = "i686-unknown-linux-gnu"

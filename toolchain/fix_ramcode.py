@@ -6,4 +6,7 @@ with open(inputfile + ".rc.c", 'w') as outputfile:
             bits = line.split(';')
             line = bits[0] + ' __attribute__((section(".ram_code")));\n'
 
+        if '_ZN4core9panicking18panic_bounds_check' in line:
+            line = '// ' + line
+
         outputfile.writelines([line])

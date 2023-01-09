@@ -35,7 +35,6 @@ VENDORS_SRC = \
 	./sdk/vendor/common/common.c \
 	./sdk/vendor/common/crc.c \
 	./sdk/vendor/common/dual_mode_adapt.c \
-	./sdk/vendor/common/factory_reset.c \
 	./sdk/vendor/common/rtc.c \
 	./sdk/vendor/common/scene.c
 VENDORS_OBJS = $(addprefix $(BUILD_DIR)/vendor/common/, $(notdir $(VENDORS_SRC:%.c=%.o)))

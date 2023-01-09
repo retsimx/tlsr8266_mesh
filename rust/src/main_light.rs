@@ -1,4 +1,4 @@
-use std::mem::{size_of, size_of_val, transmute};
+use std::mem::{size_of};
 use std::ptr::{copy_nonoverlapping, write_bytes, addr_of};
 use common::{erase_ota_data, is_ota_area_valid, mesh_ota_master_100_flag_check, mesh_pair_init, mesh_pair_proc_effect, RECOVER_STATUS, rega_light_off};
 use ::{flash_adr_light_new_fw, PAIR_VALID_FLAG};
@@ -11,6 +11,7 @@ use ::{BIT, PWM_B};
 use ::{flash_adr_lum, FLASH_SECTOR_SIZE};
 use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
+use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle};
 use sdk::light::{adv_private_data_len, AUTH_TIME, BRIDGE_MAX_CNT, IRQ_TIME1_INTERVAL, is_receive_ota_window, light_set_tick_per_us, ll_adv_private_t, ll_adv_rsp_private_t, mesh_get_fw_version, mesh_security_enable, online_status_timeout, ONLINE_STATUS_TIMEOUT, p_adv_pri_data, p_adv_rsp_data, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_config_valid_flag, pair_login_ok, PMW_MAX_TICK, register_mesh_ota_master_ui, rf_link_slave_proc, security_enable, setSppUUID, slave_first_connected_tick, user_data, user_data_len, vendor_id_init};
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
@@ -28,8 +29,6 @@ extern "C" {
 
 
     // todo
-    fn factory_reset_handle();
-    fn factory_reset_cnt_check();
     fn vendor_set_adv_data();
     fn device_status_update();
     fn light_onoff_step(on: bool);

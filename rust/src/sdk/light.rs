@@ -15,6 +15,11 @@ extern "C" {
     pub fn is_receive_ota_window() -> bool;
     pub fn rf_link_slave_proc();
 
+    pub fn light_sw_reboot();
+
+    pub fn encode_password(pd: *mut u8);
+    pub fn decode_password(pd: *mut u8);
+
     pub static mut user_data: [u8; 16];
     pub static mut user_data_len: u8;
     pub static mut pair_config_valid_flag: u8;

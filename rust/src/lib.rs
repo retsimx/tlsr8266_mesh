@@ -4,11 +4,13 @@ use sdk::mcu::gpio::{gpio_init, GPIO_PIN_TYPE};
 use sdk::mcu::clock::clock_init;
 use sdk::mcu::gpio::GPIO_PIN_TYPE::{GPIO_PA1, GPIO_PC0, GPIO_PC2, GPIO_PC4};
 use sdk::mcu::irq_i::{irq_enable, irq_init};
+use sdk::mcu::watchdog::wd_clear;
 use sdk::pm;
 
 mod sdk;
 mod main_light;
 mod common;
+mod vendor_light;
 
 // General stuff
 pub const PAIR_VALID_FLAG: u8 = 0xFA;
@@ -42,7 +44,6 @@ pub const FLASH_SECTOR_SIZE: u16 = 4096;
 
 extern "C" {
     fn rf_drv_init(mode: i32);
-    fn wd_clear();
 }
 
 // 512K flash

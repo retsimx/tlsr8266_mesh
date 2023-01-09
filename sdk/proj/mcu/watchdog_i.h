@@ -40,5 +40,8 @@ static inline void wd_stop(void)
 	CLR_FLD(reg_tmr_ctrl, FLD_TMR_WD_EN);
 }
 
-void wd_clear(void);
+static inline void wd_clear(void)
+{
+  SET_FLD(reg_tmr_ctrl, FLD_CLR_WD);
+}
 

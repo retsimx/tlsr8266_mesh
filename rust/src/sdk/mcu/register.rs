@@ -2,7 +2,7 @@ use ::{BIT, BIT_RNG, BIT_MASK_LEN};
 extern crate core;
 extern crate paste;
 
-pub static REG_BASE_ADDR: u32 =	0x800000;
+pub const REG_BASE_ADDR: u32 =	0x800000;
 
 #[macro_export]
 macro_rules! regrw_idx {
@@ -436,7 +436,7 @@ pub enum FLD_TMR {
     CLR_WD =				BIT!(27),
 }
 
-pub static WATCHDOG_TIMEOUT_COEFF: u32 =	18;		//  check register definiton, 0x622
+pub const WATCHDOG_TIMEOUT_COEFF: u32 =	18;		//  check register definiton, 0x622
 
 regrw!(reg_tmr_sta, 0x623, u8);
 pub enum FLD_TMR_STA {

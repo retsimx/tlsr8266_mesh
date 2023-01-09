@@ -47,3 +47,72 @@ macro_rules! MASK_VAL {
         (($v << BIT_LOW_BIT!($m)) & $m) | MASK_VAL!($($extra),*)
     )
 }
+
+#[macro_export]
+macro_rules! BM_MASK_VAL {
+    ($x:expr, $mask:expr, $v:expr) => (
+        ((($x) & !($mask)) | ($v))
+    )
+}
+
+#[macro_export]
+macro_rules! BM_SET_MASK_FLD {
+    ($x:expr, $mask:expr, $v:expr) => (
+        (($x) = BM_MASK_VAL!($x,$mask,$v))
+    )
+}
+
+#[macro_export]
+macro_rules! SET_FLD_V {
+    ($x:expr, $m:expr, $v:expr) => (
+        BM_SET_MASK_FLD!($x, $m, MASK_VAL!($m,$v))
+    );
+    
+    ($x:expr, $m1:expr, $v1:expr, $m2:expr, $v2:expr) => (
+        BM_SET_MASK_FLD!($x, $m1|$m2, MASK_VAL!($m1,$v1)| MASK_VAL!($m2,$v2))
+    );
+    
+    ($x:expr, $m1:expr, $v1:expr, $m2:expr, $v2:expr, $m3:expr, $v3:expr) => (
+        BM_SET_MASK_FLD!($x, $m1|$m2|$m3, MASK_VAL!($m1,$v1)| MASK_VAL!($m2,$v2)| MASK_VAL!($m3,$v3))
+    );
+    
+    ($x:expr, $m1:expr, $v1:expr, $m2:expr, $v2:expr, $m3:expr, $v3:expr, $m4:expr, $v4:expr) => (
+        BM_SET_MASK_FLD!($x, $m1|$m2|$m3|$m4, MASK_VAL!($m1,$v1)| MASK_VAL!($m2,$v2)| MASK_VAL!($m3,$v3)| MASK_VAL!($m4,$v4))
+    );
+    
+    ($x:expr, $m1:expr, $v1:expr, $m2:expr, $v2:expr, $m3:expr, $v3:expr, $m4:expr, $v4:expr, $m5:expr, $v5:expr) => (
+        BM_SET_MASK_FLD!($x, $m1|$m2|$m3|$m4|$m5, MASK_VAL!($m1,$v1)| MASK_VAL!($m2,$v2)| MASK_VAL!($m3,$v3)| MASK_VAL!($m4,$v4)| MASK_VAL!($m5,$v5))
+    );
+    
+    ($x:expr, $m1:expr, $v1:expr, $m2:expr, $v2:expr, $m3:expr, $v3:expr, $m4:expr, $v4:expr, $m5:expr, $v5:expr, $m6:expr, $v6:expr) => (
+        BM_SET_MASK_FLD!($x, $m1|$m2|$m3|$m4|$m5|$m6, MASK_VAL!($m1,$v1)| MASK_VAL!($m2,$v2)| MASK_VAL!($m3,$v3)| MASK_VAL!($m4,$v4)| MASK_VAL!($m5,$v5)| MASK_VAL!($m6,$v6))
+    );
+}
+
+#[macro_export]
+macro_rules! SET_FLD {
+    ($x:expr, $mask:expr) => (
+        BM_SET!($x, $mask)
+    )
+}
+
+#[macro_export]
+macro_rules! BM_SET {
+    ($x:expr, $mask:expr) => (
+        (($x) |= ($mask))
+    )
+}
+
+#[macro_export]
+macro_rules! CLR_FLD {
+    ($x:expr, $mask:expr) => (
+        BM_CLR!($x, $mask)
+    )
+}
+
+#[macro_export]
+macro_rules! BM_CLR {
+    ($x:expr, $mask:expr) => (
+        (($x) &= !($mask))
+    )
+}

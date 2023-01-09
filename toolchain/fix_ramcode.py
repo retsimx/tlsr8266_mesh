@@ -1,4 +1,11 @@
 import sys
+
+ignored = [
+    '_ZN4core6result13unwrap_failed',
+    '_ZN4core9panicking18panic_bounds_check',
+    '15copy_from_slice17len_mismatch_fail'
+]
+
 inputfile = sys.argv[-1]
 with open(inputfile + ".rc.c", 'w') as outputfile:
     for line in open(inputfile, 'r'):
@@ -6,7 +13,9 @@ with open(inputfile + ".rc.c", 'w') as outputfile:
             bits = line.split(';')
             line = bits[0] + ' __attribute__((section(".ram_code")));\n'
 
-        if '_ZN4core9panicking18panic_bounds_check' in line:
-            line = '// ' + line
+        for kind in ignored:
+            if kind in line:
+                line = '// ' + line
+                break
 
         outputfile.writelines([line])

@@ -3,7 +3,7 @@ use std::ptr::{null, null_mut};
 use sdk::drivers::spi::{mspi_ctrl_write, mspi_get, mspi_high, mspi_low, mspi_read, mspi_wait, mspi_write};
 use sdk::mcu::clock::sleep_us;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use wd_clear;
+use sdk::mcu::watchdog::wd_clear;
 
 static PAGE_SIZE : u32 =			   256;
 static PAGE_SIZE_OTP : u32 =		   256;
@@ -328,7 +328,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, buf: *const u8)
  */
 pub fn flash_erase_sector(addr: u32)
 {
-	unsafe { wd_clear(); }
+	wd_clear();
 
 	flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::SECT_ERASE_CMD, addr, 1, null_mut(), 0);
 }

@@ -1,11 +1,12 @@
 use std::cmp::min;
+use std::convert::TryFrom;
 use std::ptr::{copy_nonoverlapping, addr_of};
 use ::{BIT, flash_adr_reset_cnt};
 use ::{flash_adr_pairing, MESH_PWD};
 use ::{OUT_OF_MESH, PAIR_VALID_FLAG};
 use common::mesh_pair_enable;
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use sdk::light::{encode_password, light_sw_reboot, pair_config_mesh_ltk};
+use sdk::light::{encode_password, get_mac_en, light_sw_reboot, pair_config_mesh_ltk};
 use sdk::mcu::clock::clock_time_exceed;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 
@@ -14,7 +15,6 @@ extern "C" {
 	fn rf_led_ota_ok();
 
 	static mut pair_config_pwd_encode_enable: u8;
-	static mut get_mac_en: u8;
 }
 
 const SERIALS_CNT: u8 = 5;   // must less than 7
@@ -178,8 +178,21 @@ pub enum KICKOUT_REASON{
 	MODE_MAX,
 }
 
+impl TryFrom<u32> for KICKOUT_REASON {
+	type Error = ();
+
+	fn try_from(v: u32) -> Result<Self, Self::Error> {
+		match v {
+			x if x == KICKOUT_REASON::OUT_OF_MESH as u32 => Ok(KICKOUT_REASON::OUT_OF_MESH),
+			x if x == KICKOUT_REASON::DEFAULT_NAME as u32 => Ok(KICKOUT_REASON::DEFAULT_NAME),
+			x if x == KICKOUT_REASON::MODE_MAX as u32 => Ok(KICKOUT_REASON::MODE_MAX),
+			_ => Err(()),
+		}
+	}
+}
+
 #[no_mangle]
-unsafe fn kick_out(par: KICKOUT_REASON) {
+pub unsafe fn kick_out(par: KICKOUT_REASON) {
     factory_reset();
 
     if par == KICKOUT_REASON::OUT_OF_MESH {
@@ -202,9 +215,9 @@ unsafe fn kick_out(par: KICKOUT_REASON) {
             buff[15] = PAIR_VALID_FLAG;
         }
 
-		if mesh_pair_enable != 0 {
-	        get_mac_en = 1;
-	        buff[1] = get_mac_en;
+		if mesh_pair_enable {
+	        get_mac_en = true;
+	        buff[1] = 1;
         }
         flash_write_page (flash_adr_pairing, 16, buff.as_mut_ptr());
     }

@@ -1,8 +1,8 @@
 use sdk::mcu::register::{FLD_IRQ, read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask};
 
-pub static IRQ_TIMER1_ENABLE : bool = true;
-pub static IRQ_GPIO_ENABLE : bool = false;
-pub static IRQ_RF_RTX_ENABLE : bool = true;
+pub const IRQ_TIMER1_ENABLE : bool = true;
+pub const IRQ_GPIO_ENABLE : bool = false;
+pub const IRQ_RF_RTX_ENABLE : bool = true;
 
 pub static IRQ_INIT_VALUE : u32 = ((if IRQ_TIMER1_ENABLE {FLD_IRQ::TMR1_EN as u32} else {0}) | (if IRQ_GPIO_ENABLE {FLD_IRQ::GPIO_RISC0_EN as u32} else {0})
 | (if IRQ_RF_RTX_ENABLE {FLD_IRQ::ZB_RT_EN as u32} else {0}) );

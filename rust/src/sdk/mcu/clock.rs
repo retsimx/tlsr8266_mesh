@@ -1,23 +1,23 @@
 use ::{BIT, BIT_LOW_BIT, MASK_VAL};
 use sdk::mcu::register::{FLD_TMR, FLD_CLK_EN, FLD_CLK_SEL, WATCHDOG_TIMEOUT_COEFF, write_reg_rst_clk0, write_reg_clk_sel, write_reg_tmr_ctrl, read_reg_system_tick};
 
-pub static CLOCK_SYS_CLOCK_HZ : u32 = 	32000000;
+pub const CLOCK_SYS_CLOCK_HZ : u32 = 	32000000;
 
-pub static CLK_SBC_ENABLE : u8 =		1;
-pub static CLK_AUD_ENABLE : u8 = 		1;
-pub static CLK_DFIFO_ENABLE	: u8 =      1;
-pub static CLK_USB_ENABLE : bool =		true;
-pub static WATCHDOG_INIT_TIMEOUT : u32 =  2000;
+pub const CLK_SBC_ENABLE : u8 =		1;
+pub const CLK_AUD_ENABLE : u8 = 		1;
+pub const CLK_DFIFO_ENABLE	: u8 =      1;
+pub const CLK_USB_ENABLE : bool =		true;
+pub const WATCHDOG_INIT_TIMEOUT : u32 =  2000;
 
 
-pub static  CLOCK_PLL_CLOCK : u32 = 192000000;
+pub const  CLOCK_PLL_CLOCK : u32 = 192000000;
 
-pub static CLOCK_SYS_CLOCK_1S : u32 = CLOCK_SYS_CLOCK_HZ;
-pub static CLOCK_SYS_CLOCK_1MS : u32 = (CLOCK_SYS_CLOCK_1S / 1000);
-pub static CLOCK_SYS_CLOCK_1US : u32 = (CLOCK_SYS_CLOCK_1S / 1000000);
-pub static CLOCK_SYS_CLOCK_4S : u32 = CLOCK_SYS_CLOCK_1S << 2;
-pub static CLOCK_MAX_MS : u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1MS);
-pub static CLOCK_MAX_US : u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1US);
+pub const CLOCK_SYS_CLOCK_1S : u32 = CLOCK_SYS_CLOCK_HZ;
+pub const CLOCK_SYS_CLOCK_1MS : u32 = (CLOCK_SYS_CLOCK_1S / 1000);
+pub const CLOCK_SYS_CLOCK_1US : u32 = (CLOCK_SYS_CLOCK_1S / 1000000);
+pub const CLOCK_SYS_CLOCK_4S : u32 = CLOCK_SYS_CLOCK_1S << 2;
+pub const CLOCK_MAX_MS : u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1MS);
+pub const CLOCK_MAX_US : u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1US);
 
 enum CLOCK_SEL {
     SEL_32M_RC = 	0,

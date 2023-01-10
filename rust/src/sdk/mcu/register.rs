@@ -184,6 +184,266 @@ pub enum FLD_ANA {
 }
 
 /****************************************************
+	RF : begin  addr : 0x4e8
+ *****************************************************/
+regrw!(reg_rf_tx_mode1, 0x400, u8);
+regrw!(reg_rf_tx_mode, 0x400, u16);
+pub enum FLD_RF_TX_MODE {
+	DMA_EN =			BIT!(0),
+	CRC_EN =			BIT!(1),
+	BANDWIDTH =		BIT_RNG!(2,3),
+	OUTPUT = 			BIT!(4),
+	TST_OUT =			BIT!(5),
+	TST_EN =			BIT!(6),
+	TST_MODE =		BIT!(7),
+	ZB_PN_EN =		BIT!(8),
+	ZB_FEC_EN =		BIT!(9),
+	ZB_INTL_EN =		BIT!(10),	// interleaving
+	TX_1M2M_PN_EN =		BIT!(11),
+	TX_1M2M_FEC_EN =		BIT!(12),
+	TX_1M2M_INTL_EN =	BIT!(13), 	// interleaving
+}
+regrw!(reg_rf_tx_buf_sta, 0x41c, u32);
+
+regrw!(reg_rf_rx_sense_thr, 0x422, u8);
+regrw!(reg_rf_rx_auto, 0x426, u8);
+pub enum FLD_RF_RX_AUTO {
+	IRR_GAIN =		BIT!(0),
+	RX_IRR_PHASE =		BIT!(1),
+	RX_DAC_I =			BIT!(2),
+	RX_DAC_Q =			BIT!(3),
+	RX_LNA_GAIN =		BIT!(4),
+	RX_MIX2_GAIN =		BIT!(5),
+	RX_PGA_GAIN =		BIT!(6),
+	RX_CAL_EN =			BIT!(7),
+}
+
+regrw!(reg_rf_rx_sync, 0x427, u8);
+pub enum FLD_RF_SYNC {
+	FREQ_COMP_EN =		BIT!(0),
+	ADC_SYNC =			BIT!(1),
+	ADC_INP_SIGNED =		BIT!(2),
+	SWAP_ADC_IQ =		BIT!(3),
+	NOTCH_FREQ_SEL =		BIT!(4),
+	NOTCH_BAND_SEL = 	BIT!(5),
+	NOTCH_EN = 			BIT!(6),
+	DN_CONV_FREQ_SEL =	BIT!(7),
+}
+
+regrw!(reg_rf_rx_mode, 0x428, u8);
+pub enum FLD_RF_RX_MODE {
+	EN =				BIT!(0),
+	MODE_1M =			BIT!(1),
+	MODE_2M =			BIT!(2),
+	LOW_IF =			BIT!(3),
+	BYPASS_DCOC =		BIT!(4),
+	MAN_FINE_TUNE = 	BIT!(5),
+	SINGLE_CAL =		BIT!(6),
+	LOW_PASS_FILTER =	BIT!(7),
+}
+
+regrw!(reg_rf_rx_pilot, 0x42b, u8);
+pub enum FLD_RF_PILOT {
+	LEN =			BIT_RNG!(0,3),
+	RF_ZB_SFD_CHK =			BIT!(4),
+	RF_1M_SFD_CHK =			BIT!(5),
+	RF_2M_SFD_CHK = 		BIT!(6),
+	RF_ZB_OR_AUTO = 		BIT!(7),
+}
+
+regrw!(reg_rf_rx_chn_dc, 0x42c, u32);
+regrw!(reg_rf_rx_q_chn_cal, 0x42f, u8);
+pub enum FLD_RF_RX_DCQ_CAL {
+	FLD_RF_RX_DCQ_HIGH =		BIT_RNG!(0,6),
+	FLD_RF_RX_DCQ_CAL_START =	BIT!(7),
+}
+regrw!(reg_rf_rx_pel, 0x434, u16);
+regrw!(reg_rf_rx_pel_gain, 0x434, u32);
+regrw!(reg_rf_rx_rssi_offset, 0x439, u8);
+
+regrw!(reg_rf_rx_hdx, 0x43b, u8);
+pub enum FLD_RF_RX_HDX {
+	RX_HEADER_LEN =			BIT_RNG!(0,3),
+	RT_TICK_LO_SEL = 		BIT!(4),
+	RT_TICK_HI_SEL = 		BIT!(5),
+	RT_TICK_FRAME = 		BIT!(6),
+	PKT_LEN_OUTP_EN = 		BIT!(7),
+}
+
+regrw!(reg_rf_rx_gctl, 0x43c, u8);
+pub enum FLD_RF_RX_GCTL {
+	CIC_SAT_LO_EN =	BIT!(0),
+	CIC_SAT_HI_EN = BIT!(1),
+	AUTO_PWR =		BIT!(2),
+	ADC_RST_VAL =	BIT!(4),
+	ADC_RST_EN =	BIT!(5),
+	PWR_CHG_DET_S =	BIT!(6),
+	PWR_CHG_DET_N = BIT!(7),
+}
+regrw!(reg_rf_rx_peak, 0x43d, u8);
+pub enum FLD_RF_RX_PEAK {
+	FLD_RX_PEAK_DET_SRC_EN =	BIT_RNG!(0,2),
+	FLD_TX_PEAK_DET_EN =		BIT!(3),
+	FLD_PEAK_DET_NUM =			BIT_RNG!(4,5),
+	FLD_PEAK_MAX_CNT_PRD =		BIT_RNG!(6,7),
+}
+
+regrw!(reg_rf_rx_status, 0x443, u8);
+pub enum FLD_RF_RX_STATUS {
+	RX_STATE =			BIT_RNG!(0,3),
+	RX_STA_RSV = 		BIT_RNG!(4,5),
+	RX_INTR = 			BIT!(6),
+	TX_INTR =			BIT!(7),
+}
+
+regrw!(reg_rf_irq_mask, 0xf1c, u16);
+regrw!(reg_rf_irq_status, 0xf20, u16);
+
+pub enum FLD_RF_IRQ_MASK {
+	IRQ_RX = 			BIT!(0),
+	IRQ_TX =				BIT!(1),
+	IRX_RX_TIMEOUT =		BIT!(2),
+	IRX_CMD_DONE  =		BIT!(5),
+	IRX_RETRY_HIT =		BIT!(7),
+}
+
+// The value for FLD_RF_RX_STATE
+pub enum FLD_RF_RX_STATE {
+	IDLE = 0,
+	SET_GAIN = 1,
+	CIC_SETTLE = 2,
+	LPF_SETTLE = 3,
+	PE = 4,
+	SYN_START = 5,
+	GLOB_SYN = 6,
+	GLOB_LOCK = 7,
+	LOCAL_SYN = 8,
+	LOCAL_LOCK = 9,
+	ALIGN = 10,
+	ADJUST = 11,
+	DEMOD = 12,		// de modulation
+	FOOTER = 13,
+}
+
+regrw!(reg_rx_rnd_mode, 0x447, u8);
+pub enum FLD_RX_RND_MODE {
+	SRC =			BIT!(0),
+	MANU_MODE =		BIT!(1),
+	AUTO_RD =		BIT!(2),
+	FREE_MODE =		BIT!(3),
+	CLK_DIV =		BIT_RNG!(4,7),
+}
+regrw!(reg_rnd_number, 0x448, u16);
+
+regrw!(reg_bb_max_tick, 0x44c, u16);
+regrw!(reg_rf_rtt, 0x454, u32);
+pub enum FLD_RF_RTT {
+	CAL =				BIT_RNG!(0,7),
+	CYC1 =				BIT_RNG!(8,15),
+	LOCK =				BIT_RNG!(16,23),
+	SD_DLY_40M =			BIT_RNG!(24,27),
+	SD_DLY_BYPASS = 		BIT!(28),
+}
+
+regrw!(reg_rf_chn_rssi, 0x458, u8);
+
+// regrw!(reg_rf_rx_gain_agc(i)	REG_ADDR32(0x480+((i)<<2))
+
+regrw!(reg_rf_rx_dci, 0x4cb, u8);	//  different from the document, why
+regrw!(reg_rf_rx_dcq, 0x4cf, u8);	//  different from the document, why
+
+regrw!(reg_pll_rx_coarse_tune	,0x4d0, u16);
+regrw!(reg_pll_rx_coarse_div,0x4d2, 	u8);
+regrw!(reg_pll_rx_fine_tune		,0x4d4, u16);
+regrw!(reg_pll_rx_fine_div	,0x4d6, 	u8);
+regrw!(reg_pll_tx_coarse_tune	,0x4d8, u16);
+regrw!(reg_pll_tx_coarse_div,0x4da, 	u8);
+regrw!(reg_pll_tx_fine_tune		,0x4dc, u16);
+regrw!(reg_pll_tx_fine_div	,0x4de, 	u8);
+
+regrw!(reg_pll_rx_frac			,0x4e0, u32);
+regrw!(reg_pll_tx_frac			,0x4e4, u32);
+
+regrw!(reg_pll_tx_ctrl		,0x4e8, 	u8);
+regrw!(reg_pll_ctrl16			,0x4e8, u16);
+regrw!(reg_pll_ctrl				,0x4e8, u32);
+pub enum FLD_PLL_CTRL {
+	TX_CYC0 =			BIT!(0),
+	TX_SOF =			BIT!(1),
+	TX_CYC1 =			BIT!(2),
+	TX_PRE_EN =			BIT!(3),
+	TX_VCO_EN =			BIT!(4),
+	TX_PWDN_DIV =		BIT!(5),
+	TX_MOD_EN =			BIT!(6),
+	TX_MOD_TRAN_EN =	BIT!(7),
+	RX_CYC0 =			BIT!(8),
+	RX_SOF = 			BIT!(9),
+	RX_CYC1 =			BIT!(10),
+	RX_PRES_EN = 		BIT!(11),
+	RX_VCO_EN =			BIT!(12),
+	RX_PWDN_DIV =		BIT!(13),
+	RX_PEAK_EN =		BIT!(14),
+	RX_TP_CYC = 		BIT!(15),
+	SD_RSTB =			BIT!(16),
+	SD_INTG_EN =		BIT!(17),
+	CP_TRI = 			BIT!(18),
+	PWDN_INTG1 = 		BIT!(19),
+	PWDN_INTG2 =		BIT!(20),
+	PWDN_INTG_DIV =		BIT!(21),
+	PEAK_DET_EN =		BIT!(22),
+	OPEN_LOOP_EN =		BIT!(23),
+	RX_TICK_EN =		BIT!(24),
+	TX_TICK_EN =		BIT!(25),
+	RX_ALWAYS_ON =		BIT!(26),
+	TX_ALWAYS_ON =		BIT!(27),
+	MANUAL_MODE_EN =	BIT!(28),
+	CAL_DONE_EN =		BIT!(29),
+	LOCK_EN =			BIT!(30),
+}
+regrw!(reg_pll_rx_ctrl, 0x4e9, u8);
+pub enum FLD_PLL_RX_CTRL {
+	CYC0 =			BIT!(0),
+	SOF = 			BIT!(1),
+	CYC1 =			BIT!(2),
+	PRES_EN = 		BIT!(3),
+	VCO_EN =		BIT!(4),
+	PD_DIV =		BIT!(5),
+	PEAK_EN =		BIT!(6),
+	TP_CYC = 		BIT!(7),
+}
+
+regrw!(reg_pll_ctrl_a, 0x4eb, u8);
+pub enum FLD_PLL_CTRL_A {
+	RX_TICK_EN =		BIT!(0),
+	TX_TICK_EN =		BIT!(1),
+	RX_ALWAYS_ON =	BIT!(2),
+	TX_ALWAYS_ON =	BIT!(3),
+	MANUAL_MODE_EN =	BIT!(4),
+	CAL_DONE_EN =		BIT!(5),
+	LOCK_EN =			BIT!(6),
+}
+// pll polarity
+regrw!(reg_pll_pol_ctrl, 0x4ec, u16);
+pub enum FLD_PLL_POL_CTRL {
+	TX_PRE_EN =		BIT!(0),
+	TX_VCO_EN =		BIT!(1),
+	TX_PD_DIV =		BIT!(2),
+	MOD_EN =		BIT!(3),
+	MOD_TRAN_EN =	BIT!(4),
+	RX_PRE_EN =		BIT!(5),
+	RX_VCO_EN =		BIT!(6),
+	RX_PD_DIV =		BIT!(7),
+	SD_RSTB =		BIT!(8),
+	SD_INTG_EN =	BIT!(9),
+	CP_TRI =		BIT!(10),
+	TX_SOF =		BIT!(11),
+	RX_SOF =		BIT!(12),
+}
+
+regrw!(reg_rf_rx_cap, 0x4f0, u16);		//  ����
+regrw!(reg_rf_tx_cap, 0x4f0, u16);		//  ����
+
+/****************************************************
  dma mac regs struct: begin  addr : 0x500
  *****************************************************/
 regrw!(reg_dma0_addr, 0x500, u16);
@@ -533,3 +793,7 @@ pub enum FLD_PWM {
 regrw_idx!(reg_pwm_pulse_num, 0x7ac, u16);   // i == 0, 1
 regrw!(reg_pwm_irq_mask, 0x7b0, u8);
 regrw!(reg_pwm_irq_sta, 0x7b1, u8);
+
+pub fn write_reg32(addr: u32, v: u32) {
+    unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
+}

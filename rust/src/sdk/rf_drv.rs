@@ -1,4 +1,5 @@
 use sdk::light::ll_packet_l2cap_data_t;
+use sdk::mcu::register::write_reg32;
 
 extern "C" {
     pub fn rf_set_power_level_index (level: u32);
@@ -10,6 +11,7 @@ extern "C" {
     pub fn rf_link_del_group(group: u16) -> bool;
     pub fn rf_link_add_group(group: u16) -> bool;
     pub fn rf_link_add_dev_addr(deviceaddress: u16) -> bool;
+    pub fn rf_link_slave_set_adv_private_data(pdata: *const u8, data_len: u8);
 }
 
 pub enum RF_POWER {
@@ -25,4 +27,9 @@ pub enum RF_POWER {
     RF_POWER_m30dBm	= 10,
     RF_POWER_m37dBm	= 11,
     RF_POWER_OFF	= 16,
+}
+
+pub unsafe fn rf_set_ble_access_code(p: *const u8)
+{
+	write_reg32 (0x800408, *p.offset(3) as u32 | (*p.offset(2) as u32) << 8 | (*p.offset(1) as u32) << 16 | (*p.offset(0) as u32) << 24);
 }

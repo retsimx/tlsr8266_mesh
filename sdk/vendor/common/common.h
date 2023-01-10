@@ -273,7 +273,6 @@ extern u32 mesh_pair_cmd_interval;
 //unit: ms
 #define MESH_PAIR_NOTIFY_TIMEOUT        2500
 extern u32 mesh_pair_timeout;
-extern u32 mesh_pair_start_time;
 extern u8 new_mesh_name[];
 extern u8 new_mesh_pwd[];
 extern u8 new_mesh_ltk[];

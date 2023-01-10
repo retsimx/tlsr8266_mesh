@@ -6,10 +6,10 @@ version = "0.1.0"
 
 [profile.release]
 opt-level = "z"
-lto = false
+lto = true
 codegen-units = 1
 panic = "abort"
 
 [dependencies]
 paste = "1.0"
-#micromath = "2.0"
+micromath = "2.0"

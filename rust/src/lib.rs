@@ -1,4 +1,6 @@
+use std::io::Write;
 use main_light::{main_loop, user_init};
+use sdk::light::pair_config_pwd_encode_sk;
 use sdk::mcu::dma::dma_init;
 use sdk::mcu::gpio::{gpio_init, GPIO_PIN_TYPE};
 use sdk::mcu::clock::clock_init;
@@ -68,9 +70,15 @@ pub static mut flash_adr_user_data: u32 = 0x7D000;
 #[no_mangle]
 pub static mut flash_adr_light_new_fw: u32 = 0x40000;
 
+fn fill_from_str(mut bytes: &mut [u8], s: &str) {
+    bytes.write(s.as_bytes()).unwrap();
+}
+
 #[no_mangle]
 pub fn main_entrypoint() -> i32 {
     unsafe { pm::cpu_wakeup_init() }
+
+    unsafe { fill_from_str(&mut pair_config_pwd_encode_sk, MESH_PWD_ENCODE_SK); }
 
     clock_init();
     dma_init();

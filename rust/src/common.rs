@@ -245,8 +245,8 @@ pub unsafe fn mesh_pair_proc_get_mac_flag(){
 #[repr(C, packed)]
 pub struct light_step_t {
 	pub time: u32,
-	pub lum_temp: u32,
-	pub lum_dst: u32,
+	pub lum_temp: i32,
+	pub lum_dst: i32,
 	pub step: u16,
 	pub step_mod: u16,
 	pub remainder: u16,
@@ -272,11 +272,11 @@ const LIGHT_ADJUST_INTERVAL : u16 = 2;  // unit :10ms;     min:20ms
 unsafe fn get_step(direction: u8){
     light_step.remainder = 0;       // reset
     if LUM_UP == direction {
-        light_step.step = ((light_step.lum_dst - light_step.lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32)) as u16;
-        light_step.step_mod = ((((light_step.lum_dst - light_step.lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32)) as u16;
+        light_step.step = ((light_step.lum_dst - light_step.lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step_mod = ((((light_step.lum_dst - light_step.lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     } else {
-        light_step.step = ((light_step.lum_temp - light_step.lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32)) as u16;
-        light_step.step_mod = ((((light_step.lum_temp - light_step.lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as u32)) as u16;
+        light_step.step = ((light_step.lum_temp - light_step.lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step_mod = ((((light_step.lum_temp - light_step.lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     }
 }
 
@@ -288,7 +288,7 @@ pub unsafe fn light_onoff_step(on: bool){
             if !light_step.adjusting_flag {
                 light_step.lum_temp = 0;
             }
-            light_step.lum_dst = led_lum as u32;
+            light_step.lum_dst = led_lum as i32;
             get_step(LUM_UP);
     	}else{
     	    set_flag = false;
@@ -301,7 +301,7 @@ pub unsafe fn light_onoff_step(on: bool){
     	    light_onoff_normal(false); // make sure off. unnecessary.
     	}else{
             if !light_step.adjusting_flag {
-                light_step.lum_temp = led_lum as u32;
+                light_step.lum_temp = led_lum as i32;
             }
             light_step.lum_dst = 0;
             get_step(LUM_DOWN);
@@ -322,25 +322,25 @@ pub unsafe fn light_step_reset(target: u16) {
     }
 
     if light_step.adjusting_flag {
-        if (target as u32) < light_step.lum_temp {
-            light_step.lum_dst = target as u32;
+        if (target as i32) < light_step.lum_temp {
+            light_step.lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
-        if (target as u32) > light_step.lum_temp {
-            light_step.lum_dst = target as u32;
+        if (target as i32) > light_step.lum_temp {
+            light_step.lum_dst = target as i32;
             get_step(LUM_UP);
         }
     } else {
         if target < led_lum {
-            light_step.lum_temp = led_lum as u32;
-            light_step.lum_dst = target as u32;
+            light_step.lum_temp = led_lum as i32;
+            light_step.lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
         if target > led_lum {
-            light_step.lum_temp = led_lum as u32;
-            light_step.lum_dst = target as u32;
+            light_step.lum_temp = led_lum as i32;
+            light_step.lum_dst = target as i32;
             get_step(LUM_UP);
         }
     }
@@ -354,10 +354,10 @@ pub unsafe fn light_step_reset(target: u16) {
 
 unsafe fn get_next_lum(direction: u8){
     let temp = light_step.remainder as u32 + light_step.step_mod as u32;
-    light_step.remainder = temp as u16;
+    light_step.remainder = (temp & 0xffff) as u16;
 
     if LUM_UP == direction {
-        light_step.lum_temp += light_step.step as u32;
+        light_step.lum_temp += light_step.step as i32;
         if temp >= 0x10000 {
             light_step.lum_temp += 1;
         }
@@ -366,7 +366,7 @@ unsafe fn get_next_lum(direction: u8){
             light_step.remainder = 0;
         }
     }else{
-        light_step.lum_temp -= light_step.step as u32;
+        light_step.lum_temp -= light_step.step as i32;
         if temp >= 0x10000 {
             light_step.lum_temp -= 1;
         }

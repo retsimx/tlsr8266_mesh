@@ -55,6 +55,7 @@ pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
 }
 
 #[inline(always)]
+#[no_mangle] // required by light_ll
 pub fn sleep_us(us: u32)
 {
 	let t = clock_time();

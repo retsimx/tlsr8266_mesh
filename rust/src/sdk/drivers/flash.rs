@@ -5,9 +5,9 @@ use sdk::mcu::clock::sleep_us;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use sdk::mcu::watchdog::wd_clear;
 
-static PAGE_SIZE : u32 =			   256;
-static PAGE_SIZE_OTP : u32 =		   256;
-static FLASH_LOCK_EN : u32 =           0;
+pub static PAGE_SIZE : u32 =			   256;
+pub static PAGE_SIZE_OTP : u32 =		   256;
+pub static FLASH_LOCK_EN : u32 =           0;
 
 /**
  * @brief     flash command definition
@@ -270,6 +270,7 @@ pub fn flash_read_mid() -> u32
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[no_mangle] // required by light_ll
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
 {
 	flash_mspi_read_ram__attribute_ram_code(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
@@ -293,6 +294,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[no_mangle] // required by light_ll
 pub fn flash_write_page(mut addr: u32, mut len: u32, buf: *const u8)
 {
 	let mut ns = PAGE_SIZE - (addr&(PAGE_SIZE - 1));
@@ -326,6 +328,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, buf: *const u8)
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[no_mangle] // required by light_ll
 pub fn flash_erase_sector(addr: u32)
 {
 	wd_clear();

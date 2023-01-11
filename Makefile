@@ -14,20 +14,14 @@ LIB = ./sdk/proj_lib/libble_app_8266.a ./sdk/proj_lib/libsoft-fp.a
 
 BUILD_DIR = _build
 
-DRIVERS_SRC = \
-	./sdk/proj/mcu/clock.c \
-	./sdk/proj/drivers/flash.c \
-	./sdk/proj/drivers/flash_mesh_extend.c
+DRIVERS_SRC =
 DRIVERS_OBJS = $(addprefix $(BUILD_DIR)/drivers/, $(notdir $(DRIVERS_SRC:%.c=%.o)))
 
-SDK_COMMON_SRC = \
-	./sdk/proj/common/compatibility.c \
-	./sdk/proj/common/string.c
+SDK_COMMON_SRC =
 #	./sdk/proj/common/printf.c
 SDK_COMMON_OBJS = $(addprefix $(BUILD_DIR)/sdk-common/, $(notdir $(SDK_COMMON_SRC:%.c=%.o)))
 
 VENDORS_SRC = \
-	./sdk/vendor/common/app_att_light.c \
 	./sdk/vendor/common/common.c
 VENDORS_OBJS = $(addprefix $(BUILD_DIR)/vendor/common/, $(notdir $(VENDORS_SRC:%.c=%.o)))
 

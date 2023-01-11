@@ -1,3 +1,26 @@
+pub const SERVICE_UUID_ALERT_NOTIFICATION            : u16 =               0x1811;
+pub const SERVICE_UUID_BATTERY                       : u16 =               0x180F;
+pub const SERVICE_UUID_BLOOD_PRESSURE                : u16 =               0x1810;
+pub const SERVICE_UUID_CURRENT_TIME                  : u16 =               0x1805;
+pub const SERVICE_UUID_CYCLING_POWER                 : u16 =               0x1818;
+pub const SERVICE_UUID_CYCLING_SPEED_AND_CADENCE     : u16 =               0x1816;
+pub const SERVICE_UUID_DEVICE_INFORMATION            : u16 =               0x180A;
+pub const SERVICE_UUID_GENERIC_ACCESS                : u16 =               0x1800;
+pub const SERVICE_UUID_GENERIC_ATTRIBUTE             : u16 =               0x1801;
+pub const SERVICE_UUID_GLUCOSE                       : u16 =               0x1808;
+pub const SERVICE_UUID_HEALTH_THERMOMETER            : u16 =               0x1809;
+pub const SERVICE_UUID_HEART_RATE                    : u16 =               0x180D;
+pub const SERVICE_UUID_HUMAN_INTERFACE_DEVICE        : u16 =               0x1812;
+pub const SERVICE_UUID_IMMEDIATE_ALERT               : u16 =               0x1802;
+pub const SERVICE_UUID_LINK_LOSS                     : u16 =               0x1803;
+pub const SERVICE_UUID_LOCATION_AND_NAVIGATION       : u16 =               0x1819;
+pub const SERVICE_UUID_NEXT_DST_CHANGE               : u16 =               0x1807;
+pub const SERVICE_UUID_PHONE_ALERT_STATUS            : u16 =               0x180E;
+pub const SERVICE_UUID_REFERENCE_TIME_UPDATE         : u16 =               0x1806;
+pub const SERVICE_UUID_RUNNING_SPEED_AND_CADENCE     : u16 =               0x1814;
+pub const SERVICE_UUID_SCAN_PARAMETER                : u16 =               0x1813;
+pub const SERVICE_UUID_TX_POWER                      : u16 =               0x1804;
+pub const SERVICE_UUID_USER_DATA                     : u16 =               0x181C;
 
 pub const TELINK_SPP_UUID_SERVICE: [u8; 16]        = [0x10,0x19,0x0d,0x0c,0x0b,0x0a,0x09,0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,0x00];		// TELINK_SPP service
 pub const TELINK_SPP_DATA_SERVER2CLIENT: [u8; 16]  = [0x11,0x19,0x0d,0x0c,0x0b,0x0a,0x09,0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,0x00]; 		// TELINK_SPP data from server to client

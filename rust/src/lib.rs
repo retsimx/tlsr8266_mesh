@@ -1,4 +1,6 @@
+use std::ffi::CStr;
 use std::io::Write;
+use std::mem::transmute;
 use main_light::{main_loop, user_init};
 use sdk::light::pair_config_pwd_encode_sk;
 use sdk::mcu::dma::dma_init;
@@ -24,6 +26,8 @@ pub const MESH_PWD: &str = "123";
 pub const MESH_PWD_ENCODE_SK: &str = "0123456789ABCDEF";
 // max 16 bytes, random data from master
 pub const MESH_LTK: [u8; 16] = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf];
+
+pub const DEVICE_NAME: const_cstr::ConstCStr = const_cstr::const_cstr!("Telink tLight");
 
 pub const OUT_OF_MESH: &str = "out_of_mesh";
 
@@ -70,15 +74,16 @@ pub static mut flash_adr_user_data: u32 = 0x7D000;
 #[no_mangle]
 pub static mut flash_adr_light_new_fw: u32 = 0x40000;
 
-fn fill_from_str(mut bytes: &mut [u8], s: &str) {
-    bytes.write(s.as_bytes()).unwrap();
+fn fill_from_str(mut bytes: &mut [u8], s: &[u8]) {
+    bytes.write(s).unwrap();
 }
 
 #[no_mangle]
 pub fn main_entrypoint() -> i32 {
     unsafe { pm::cpu_wakeup_init() }
 
-    unsafe { fill_from_str(&mut pair_config_pwd_encode_sk, MESH_PWD_ENCODE_SK); }
+    unsafe { fill_from_str(&mut pair_config_pwd_encode_sk, MESH_PWD_ENCODE_SK.as_bytes()); }
+
 
     clock_init();
     dma_init();

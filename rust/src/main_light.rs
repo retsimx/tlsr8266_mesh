@@ -33,9 +33,9 @@ extern "C" {
     static mut max_mesh_name_len: u8;
 }
 
-const LED_INDICATE_VAL: u16 = 0xffff;
-const LED_MASK: u8 = 0x07;
-const LUM_SAVE_FLAG: u8 = 0xA5;
+pub const LED_INDICATE_VAL: u16 = 0xffff;
+pub const LED_MASK: u8 = 0x07;
+pub const LUM_SAVE_FLAG: u8 = 0xA5;
 
 macro_rules! config_led_event {
     ($on:expr, $off:expr, $n:expr, $sel:expr) => {
@@ -43,18 +43,18 @@ macro_rules! config_led_event {
     }
 }
 
-const LED_EVENT_FLASH_4HZ_10S: u32 = config_led_event!(2,2,40,LED_MASK);
-const LED_EVENT_FLASH_STOP: u32 = config_led_event!(1,1,1,LED_MASK);
-const LED_EVENT_FLASH_2HZ_2S: u32 = config_led_event!(4,4,4,LED_MASK);
-const LED_EVENT_FLASH_1HZ_1S: u32 = config_led_event!(8,8,1,LED_MASK);
-const LED_EVENT_FLASH_1HZ_2S: u32 = config_led_event!(8,8,2,LED_MASK);
-const LED_EVENT_FLASH_1HZ_3S: u32 = config_led_event!(8,8,3,LED_MASK);
-const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8,8,4,LED_MASK);
-const LED_EVENT_FLASH_4HZ: u32 = config_led_event!(2,2,0,LED_MASK);
-const LED_EVENT_FLASH_1HZ: u32 = config_led_event!(8,8,0,LED_MASK);
-const LED_EVENT_FLASH_4HZ_3T: u32 = config_led_event!(2,2,3,LED_MASK);
-const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
-const LED_EVENT_FLASH_0p25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
+pub const LED_EVENT_FLASH_4HZ_10S: u32 = config_led_event!(2,2,40,LED_MASK);
+pub const LED_EVENT_FLASH_STOP: u32 = config_led_event!(1,1,1,LED_MASK);
+pub const LED_EVENT_FLASH_2HZ_2S: u32 = config_led_event!(4,4,4,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_1S: u32 = config_led_event!(8,8,1,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_2S: u32 = config_led_event!(8,8,2,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_3S: u32 = config_led_event!(8,8,3,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8,8,4,LED_MASK);
+pub const LED_EVENT_FLASH_4HZ: u32 = config_led_event!(2,2,0,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ: u32 = config_led_event!(8,8,0,LED_MASK);
+pub const LED_EVENT_FLASH_4HZ_3T: u32 = config_led_event!(2,2,3,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
+pub const LED_EVENT_FLASH_0p25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
 
 
 #[no_mangle]

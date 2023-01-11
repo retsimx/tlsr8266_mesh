@@ -26,13 +26,13 @@ const factory_reset_serials : [u8; (SERIALS_CNT * 2) as usize] = [
 	3, 30
 ];
 
-const RESET_CNT_RECOUNT_FLAG: u8 =          0;
-const RESET_FLAG: u8 =                      0x80;
+pub const RESET_CNT_RECOUNT_FLAG: u8 =          0;
+pub const RESET_FLAG: u8 =                      0x80;
 
-const FLASH_ADR_RESET_CNT: u32 = 0x7A000;
-const FLASH_ADR_PAR_MAX: u32 = 0x80000;
-const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
-const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
+pub const FLASH_ADR_RESET_CNT: u32 = 0x7A000;
+pub const FLASH_ADR_PAR_MAX: u32 = 0x80000;
+pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
+pub const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
 
 static mut adr_reset_cnt_idx : u32 = 0;
 static mut reset_cnt: u8 = 0;

@@ -1840,15 +1840,7 @@ int mesh_ota_slave_need_ota(u8 *params)
     return ret;
 }
 
-void mesh_ota_start_unprotect_flash()   // it will be called by library after receive CMD_OTA_START
-{
-    if(flash_protect_en){
-        flash_unprotect_OTA_start();
-    }
-}
-
-
-/* 
+/*
 for start mesh ota, user should call 
 mesh_ota_master_start_firmware() or mesh_ota_master_start_firmware_from_own();
 
@@ -1954,7 +1946,6 @@ int is_tx_cmd_busy(){   // it must be used, if want enough bridges(default is BR
 ////////////////// OTA  /////////////////////////////////////
 extern void ota_boot_check();
 extern int rf_ota_save_data(u8 * data);
-extern void rf_ota_set_flag();
 
 u32  rf_slave_ota_finished_time = 0;
 extern u8  rf_slave_ota_terminate_flag;
@@ -1978,32 +1969,7 @@ void rf_ota_set_flag()
     if(flag_new != fw_flag_telink){
         return ; // invalid flag
     }
-    
-#if(__TL_LIB_8267__ || (MCU_CORE_TYPE && MCU_CORE_TYPE == MCU_CORE_8267) \
-    || __TL_LIB_8269__ || (MCU_CORE_TYPE && MCU_CORE_TYPE == MCU_CORE_8269) \
-    || __TL_LIB_8258__ || (MCU_CORE_TYPE && MCU_CORE_TYPE == MCU_CORE_8258)	\
-    || __TL_LIB_8278__ || (MCU_CORE_TYPE && MCU_CORE_TYPE == MCU_CORE_8278))
-	u32 flag = 0x4b;
-	flash_write_page(flash_adr_ota_offset + 8, 1, (u8 *)&flag);		//Set FW flag
 
-    if(flash_protect_en){
-	    flash_protect_8267_OTA_clr_flag();
-	}
-	#if (!PINGPONG_OTA_DISABLE)
-	flag = 0;
-	flash_write_page((flash_adr_ota_offset ? 0 : flash_adr_light_new_fw) + 8, 4, (u8 *)&flag);	//Invalid flag
-	#endif
-	
-    if(0x40000 == ota_program_offset){
-    	#define ADR_20008		(0x20008)
-    	u32 start_flag = 0;
-    	flash_read_page(ADR_20008, 4, (u8 *)&start_flag);
-    	if(0x544c4e4b == start_flag){
-    		u32 zero = 0;
-    		flash_write_page(ADR_20008, 1, (u8 *)&zero);	//make sure not valid flag in 0x20008
-    	}
-	}
-#else
 	u32 flag0 = 0;
 	flash_read_page(flash_adr_ota_offset + 8, 1, (u8 *)&flag0);
 	if(0x4b != flag0){
@@ -2011,17 +1977,9 @@ void rf_ota_set_flag()
 	    flash_write_page(flash_adr_ota_offset + 8, 1, (u8 *)&flag0);		//Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
 	}
 	
-    if(flash_protect_en){
-        flash_protect_8266_OTA_clr_flag();
-    }
 	flash_erase_sector (FLASH_ADR_OTA_READY_FLAG);
 	u32 flag = 0xa5;
 	flash_write_page (FLASH_ADR_OTA_READY_FLAG, 4, (u8 *)&flag);
-
-    if(flash_protect_en){
-        flash_protect_OTA_copy(); // prepare for OTA_COPY
-    }
-#endif
 }
 
 void rf_slave_ota_finished_flag_set(u8 reset_flag)
@@ -2106,10 +2064,6 @@ int	rf_link_slave_data_ota_save()
 	                    #if(__TL_LIB_8266__ || (MCU_CORE_TYPE && MCU_CORE_TYPE == MCU_CORE_8266))
 	                    ota_boot_check();
 	                    #endif
-	                    
-	                    if(flash_protect_en){
-					        flash_unprotect_OTA_start();
-					    }
 					    
 						#if (ZBIT_FLASH_WRITE_TIME_LONG_WORKAROUND_EN)
 						check_and_set_1p95v_to_zbit_flash();
@@ -2276,7 +2230,6 @@ int is_ota_area_valid(u32 adr){
 
 void erase_ota_data(u32 adr){
 #if (! __PROJECT_BLE_MASTER__)  // 	master dongle can't erase 0x40000,because new firmware size would be greater than 128K, and will use 0x40000
-    flash_protect_OTA_data_erase();
     #if 1
     foreach(i, ERASE_SECTORS_FOR_OTA){
         flash_erase_sector(adr+(ERASE_SECTORS_FOR_OTA -1 - i)*0x1000);
@@ -3814,4 +3767,3 @@ void register_mesh_node_rcv_online_callback (void *p)
 	p_mesh_node_any_online_status = (cb_mesh_node_any_online_status) p;
 }
 //**************************end OPPLE callback********************************************/
-

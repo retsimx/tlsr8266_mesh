@@ -98,8 +98,6 @@ void blc_readFlashSize_autoConfigCustomFlashSector(void)
 #define FLASH_PROTECT_ENABLE    0
 #endif
 
-u8 flash_protect_en = FLASH_PROTECT_ENABLE;
-
 #if (!__PROJECT_OTA_BOOT__)
 #if 1
 enum{

@@ -103,7 +103,7 @@ pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
 
 pub const rega_light_off: u8 = 0x3a;
 
-const MESH_NODE_MAX_NUM: u16 = 64;
+pub const MESH_NODE_MAX_NUM: u16 = 64;
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]

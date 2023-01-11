@@ -8,3 +8,4 @@ pub mod light;
 pub mod service;
 pub mod rf_drv;
 pub mod factory_reset;
+pub mod app_att_light;

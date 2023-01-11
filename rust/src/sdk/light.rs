@@ -2,6 +2,7 @@
 
 use common::PAIR_STATE;
 use MESH_PWD_ENCODE_SK;
+use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 extern "C" {
     pub fn light_set_tick_per_us(tick: u32);
@@ -22,6 +23,8 @@ extern "C" {
 
     pub fn light_sw_reboot();
 
+    pub fn pairRead(p: *const u8) -> u32;
+    pub fn pairWrite(p: *const u8) -> u32;
     pub fn pair_save_key();
     pub fn pair_load_key();
     pub fn encode_password(pd: *mut u8);
@@ -38,6 +41,8 @@ extern "C" {
     pub fn mesh_ota_master_cancle(reset_flag: u8, complete: bool);
     pub fn mesh_push_user_command(sno: u32, dst: u16, p: *const u8, len: u8) -> u32;
     pub fn mesh_node_init();
+    pub fn mesh_report_status_enable(mask: u8);
+    pub fn mesh_report_status_enable_mask(val: *const u8, len: u16);
 
     pub fn irq_light_slave_handler();
 
@@ -269,6 +274,19 @@ pub struct ll_packet_l2cap_data_t {
 }
 
 #[repr(C, packed)]
+pub struct rf_packet_att_write_t {
+	dma_len: u32,
+	pub	rtype: u8,
+	pub  rf_len: u8,
+	pub l2capLen: u16,
+	pub	chanId: u16,
+	pub  opcode: u8,
+	pub handle: u8,
+	pub handle1: u8,
+	pub value: u8//sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+}
+
+#[repr(C, packed)]
 pub struct rf_packet_att_cmd_t {
 	pub dma_len: u32,
 	pub _type: u8,
@@ -402,3 +420,12 @@ fn tlk_mesh_access_code_backup(ac: u32){}
 
 #[no_mangle]
 fn dual_mode_select(sdk_rf_mode: u32){}
+
+// flash mesh extend shit needed to link
+pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10; // don't change
+pub const CFG_SECTOR_ADR_CALIBRATION_CODE: u32 = CFG_ADR_CALIBRATION_512K_FLASH;
+#[no_mangle]
+static mut flash_sector_calibration: u32 = CFG_SECTOR_ADR_CALIBRATION_CODE;
+
+#[no_mangle]
+fn mesh_ota_start_unprotect_flash() {}

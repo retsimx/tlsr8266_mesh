@@ -794,6 +794,10 @@ regrw_idx!(reg_pwm_pulse_num, 0x7ac, u16);   // i == 0, 1
 regrw!(reg_pwm_irq_mask, 0x7b0, u8);
 regrw!(reg_pwm_irq_sta, 0x7b1, u8);
 
+pub fn write_reg8(addr: u32, v: u8) {
+	unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u8, v) }
+}
+
 pub fn write_reg32(addr: u32, v: u32) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
 }

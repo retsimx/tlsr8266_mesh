@@ -96,8 +96,9 @@ struct LumSaveT {
 }
 
 fn calculate_lumen_map(val: u16) -> f32 {
-    let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.0;
-    return (-0.00539160*micromath::F32Ext::powf(percentage, 3.0))+(4.47709595*micromath::F32Ext::powf(percentage, 2.0))+(153.72442036*percentage);
+    let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.;
+    // return keyframe::ease(keyframe::functions::EaseInOutCubic, 0., 0xffff as f32, percentage);
+    return (-0.00539160*libm::powf(percentage, 3.0))+(4.47709595*libm::powf(percentage, 2.0))+(153.72442036*percentage);
 }
 
 fn pwm_set_lum(id: u32, y: u32, pol: bool) {

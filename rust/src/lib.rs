@@ -12,6 +12,7 @@ mod vendor_light;
 mod ota;
 mod config;
 mod app;
+mod math_wrapper;
 
 pub static APP: App = App::default();
 

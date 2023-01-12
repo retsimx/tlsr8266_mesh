@@ -12,5 +12,7 @@ panic = "abort"
 
 [dependencies]
 paste = "1.0"
-micromath = "2.0"
 const-cstr = "0.3"
+keyframe = "1.1"
+libm = "0.2"
+micromath = "2.0"

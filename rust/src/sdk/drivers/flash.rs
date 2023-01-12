@@ -205,7 +205,7 @@ fn flash_mspi_write_ram__attribute_ram_code(cmd: FLASH_CMD, addr: u32, addr_en: 
 	{
 		flash_send_addr__attribute_ram_code(addr);
 	}
-	for i in 0 .. data_len
+	for i in 0..data_len
 	{
 		unsafe { mspi_write(*data.offset(i as isize)) }
 		mspi_wait();
@@ -214,44 +214,6 @@ fn flash_mspi_write_ram__attribute_ram_code(cmd: FLASH_CMD, addr: u32, addr_en: 
 	flash_wait_done__attribute_ram_code();
 
 	irq_restore(r);
-}
-
-/**
- * @brief	  	This function serves to read MID of flash(MAC id). Before reading UID of flash,
- * 				you must read MID of flash. and then you can look up the related table to select
- * 				the idcmd and read UID of flash.
- * @return    	MID of the flash(4 bytes).
- * @note        Attention: Before calling the FLASH function, please check the power supply voltage of the chip.
- *              Only if the detected voltage is greater than the safe voltage value, the FLASH function can be called.
- *              Taking into account the factors such as power supply fluctuations, the safe voltage value needs to be greater
- *              than the minimum chip operating voltage. For the specific value, please make a reasonable setting according
- *              to the specific application and hardware circuit.
- *
- *              Risk description: When the chip power supply voltage is relatively low, due to the unstable power supply,
- *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
- *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
- */
-pub fn flash_read_mid() -> u32
-{
-	let mut flash_mid: [u8; 4] = [0; 4];
-	flash_mspi_read_ram__attribute_ram_code(FLASH_CMD::GET_JEDEC_ID, 0, 0, 0, flash_mid.as_mut_ptr(), 3);
-	let mut flash_mid = unsafe { std::mem::transmute::<[u8; 4], u32>(flash_mid) }.to_be();
-	/*
-	 * The mids of GD25LD80C and GD25LE80C are both 0x1460c8, but the status register of GD25LD80C is 8 bits,
-	 * and the status register of GD25LE80C is 16 bits. The functions of the two chips are different.
-	 * The software detection method is to read SFDP Signature. If it is 50444653H, it is GD25LE80C,
-	 * if it is all zeros, it is GD25LD80C.
-	 */
-	if flash_mid == 0x1460c8
-	{
-		let mut buf: [u8; 4] = [0; 4];
-		flash_mspi_read_ram__attribute_ram_code(FLASH_CMD::READ_UID_CMD_XTX, 0x00, 1, 1, buf.as_mut_ptr(), 4);
-		if (buf[0] == 0x53) && (buf[1] == 0x46) && (buf[2] == 0x44) && (buf[3] == 0x50)
-		{
-			flash_mid = 0x011460c8;
-		}
-	}
-	return flash_mid;
 }
 
 /**
@@ -270,6 +232,7 @@ pub fn flash_read_mid() -> u32
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[inline(always)]
 #[no_mangle] // required by light_ll
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
 {
@@ -294,21 +257,21 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[inline(always)]
 #[no_mangle] // required by light_ll
-pub fn flash_write_page(mut addr: u32, mut len: u32, buf: *const u8)
+pub unsafe fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 {
 	let mut ns = PAGE_SIZE - (addr&(PAGE_SIZE - 1));
 	let mut nw = 0;
-	let mut ptr: u32 = buf as u32;
 
 	loop {
 		nw = if len > ns {ns} else {len};
-		flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::WRITE_CMD, addr, 1, ptr as *const u8, nw);
+		flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
 		ns = PAGE_SIZE;
 		addr += nw;
-		ptr += nw;
+		buf = buf.offset(nw as isize);
 		len -= nw;
-		if len <= 0 {
+		if len == 0 {
 			break;
 		}
 	}
@@ -328,6 +291,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, buf: *const u8)
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
+#[inline(always)]
 #[no_mangle] // required by light_ll
 pub fn flash_erase_sector(addr: u32)
 {

@@ -29,11 +29,11 @@ pub struct TBLCMDSET {
 }
 
 #[no_mangle]
-unsafe fn LoadTblCmdSet (pt: *const TBLCMDSET, size: u32) -> u32 {
+pub fn LoadTblCmdSet (pt: *const TBLCMDSET, size: u32) -> u32 {
 	let mut l= 0;
 
 	while l < size {
-        let ptr = &(*pt.offset(l as isize));
+        let ptr = unsafe { &(*pt.offset(l as isize)) };
 		let cadr: u32 = 0x800000 | ptr.adr as u32;
 		let cdat: u8 = ptr.dat;
 		let mut ccmd: u8 = ptr.cmd;

@@ -21,8 +21,7 @@ SDK_COMMON_SRC =
 #	./sdk/proj/common/printf.c
 SDK_COMMON_OBJS = $(addprefix $(BUILD_DIR)/sdk-common/, $(notdir $(SDK_COMMON_SRC:%.c=%.o)))
 
-VENDORS_SRC = \
-	./sdk/vendor/common/common.c
+VENDORS_SRC =
 VENDORS_OBJS = $(addprefix $(BUILD_DIR)/vendor/common/, $(notdir $(VENDORS_SRC:%.c=%.o)))
 
 STARTUP_SRC = ./sdk/proj/mcu_spec/cstartup_8266.S
@@ -31,9 +30,7 @@ STARTUP_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(STARTUP_SRC:%.S=%.o)))
 DIVMOD_SRC = #./sdk/div_mod.S
 DIVMOD_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(DIVMOD_SRC:%.S=%.o)))
 
-SRC = \
-	src/main_light.c \
-	src/vendor_att_light.c
+SRC =
 OBJS = $(addprefix $(BUILD_DIR)/, $(SRC:%.c=%.o))
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)

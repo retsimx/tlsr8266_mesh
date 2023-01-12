@@ -168,6 +168,63 @@ regrw!(reg_i2s_mod, 0x68, u8);
 //     write_reg_i2s_mod(0xc0);
 // }
 
+/****************************************************
+	 ADC: 0x69
+ *****************************************************/
+regrw!(reg_adc_step_l, 0x69, u8);
+regrw!(reg_adc_mod_l, 0x6a, u8);
+regrw!(reg_adc_mod, 0x6a, u16);
+pub enum FLD_ADC_MOD {
+	MOD = 				BIT_RNG!(0,11),
+	STEP_H = 			BIT_RNG!(12,14),
+	CLK_EN =			BIT!(15),
+}
+
+regrw!(reg_adc_clk_en, 0x6b, u8);
+regrw!(reg_adc_mod_h, 0x6b, u8);
+pub enum FLD_ADC_MOD_H {
+	H = 			BIT_RNG!(0,3),
+	H_STEP =		BIT_RNG!(4,6),
+	H_CLK =			BIT!(7),
+}
+
+regrw!(reg_dmic_step, 0x6c, u8);
+pub enum FLD_DMIC_STEP {
+	STEP = 			BIT_RNG!(0,6),
+	CLK_EN =			BIT!(7),
+}
+regrw!(reg_dmic_mod, 0x6d, u8);
+
+
+regrw!(reg_wakeup_en, 0x6e, u8);
+pub enum FLD_WAKEUP_SRC {
+	I2C = 		BIT!(0),
+	SPI =		BIT!(1),
+	USB =		BIT!(2),
+	GPIO =		BIT!(3),
+	I2C_SYN =	BIT!(4),
+	GPIO_RM =	BIT!(5),
+	USB_RESM =	BIT!(6),
+	RST_SYS =	BIT!(7),
+}
+
+regrw!(reg_pwdn_ctrl, 0x6f, u8);
+pub enum FLD_PWDN_CTRL_ {
+	REBOOT = 		BIT!(5),
+	SLEEP =		BIT!(7),
+}
+
+regrw!(reg_fhs_sel, 0x70, u8);
+pub enum FLD_FHS_SELECT {
+	SELECT = 			BIT_RNG!(0,1),
+}
+pub enum FHS_SEL {
+	SEL_192M_PLL = 0,
+//	SEL_48M_PLL = 1,
+	SEL_32M_OSC = 1,
+//	SEL_16M_OSC = 3,
+}
+
 //////  analog controls 0xb8 ///////
 regrw!(reg_ana_ctrl32, 0xb8, u32);
 regrw!(reg_ana_addr_data, 0xb8, u16);

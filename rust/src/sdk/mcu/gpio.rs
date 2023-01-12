@@ -1,7 +1,8 @@
 use ::{BIT, regrw_idx};
+use ::{BM_CLR, BM_SET};
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::gpio::GPIO_PIN_TYPE::*;
-use sdk::mcu::register::{write_reg_gpio_gpio_func, read_reg_gpio_gpio_func, write_reg_gpio_pa_setting1, write_reg_gpio_pa_setting2, write_reg_gpio_pb_setting1, write_reg_gpio_pb_setting2, write_reg_gpio_pc_setting1, write_reg_gpio_pc_setting2, write_reg_gpio_pd_setting1, write_reg_gpio_pd_setting2, write_reg_gpio_pe_setting1, write_reg_gpio_pe_setting2, write_reg_gpio_pf_setting1, write_reg_gpio_pf_setting2};
+use sdk::mcu::register::{write_reg_gpio_gpio_func, read_reg_gpio_gpio_func, write_reg_gpio_pa_setting1, write_reg_gpio_pa_setting2, write_reg_gpio_pb_setting1, write_reg_gpio_pb_setting2, write_reg_gpio_pc_setting1, write_reg_gpio_pc_setting2, write_reg_gpio_pd_setting1, write_reg_gpio_pd_setting2, write_reg_gpio_pe_setting1, write_reg_gpio_pe_setting2, write_reg_gpio_pf_setting1, write_reg_gpio_pf_setting2, read_reg_gpio_oen, write_reg_gpio_oen, write_reg_gpio_out, read_reg_gpio_out};
 
 pub const RF_FAST_MODE_1M: u8 = 1;
 pub const PM_PIN_PULL_DEFAULT: u8 = 1;
@@ -577,4 +578,30 @@ pub fn gpio_set_func(pin: u32, func: u8){
 	}else{
         write_reg_gpio_gpio_func(read_reg_gpio_gpio_func((pin>>8)<<3) & !bit, ((pin>>8)<<3));
 	}
+}
+
+pub fn gpio_set_output_en(pin: u32, value: u32){
+	let	bit = (pin & 0xff) as u8;
+	if value == 0 {
+        let mut val = read_reg_gpio_oen(pin);
+		BM_SET!(val, bit);
+        write_reg_gpio_oen(val, pin);
+	}else{
+        let mut val = read_reg_gpio_oen(pin);
+		BM_CLR!(val, bit);
+        write_reg_gpio_oen(val, pin);
+	}
+}
+
+pub fn gpio_write(pin: u32, value: u32){
+    let	bit = (pin & 0xff) as u8;
+    if value != 0 {
+        let mut val = read_reg_gpio_out(pin);
+        BM_SET!(val, bit);
+        write_reg_gpio_out(val, pin);
+    }else{
+        let mut val = read_reg_gpio_out(pin);
+        BM_CLR!(val, bit);
+        write_reg_gpio_out(val, pin);
+    }
 }

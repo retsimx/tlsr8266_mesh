@@ -128,38 +128,38 @@ SETIC:
 	@tmov		r0, #0;
 	@tstorerb	r0, [r1, #2]
 
-COPY_CODE_INIT:
-     tmov		r3, #63			@ OTA FW ready flag at 0x3f000; (0x3f000 = #63 << 12)
-     tshftl		r3, r3, #12		@ 0x3f<<12
-     tloadr		r3, [r3, #0]
-#ifdef MCU_CORE_8266_OTA_BOOT
-	 tcmp		r3, #0			@ 0x0
-#else
-     tcmp		r3, #165		@ *(u32 *)0x3f000 == 0xa5
-#endif
-     tjne		COPY_DATA_INIT
-
-     tmov		r2, #31		@ OTA boot code at: 0x1f000 (OTA128K: 0x1f000 = 31 << 12)
-     tloadr		r3, COPY_CODE_DAT
-     tloadr		r0, COPY_CODE_DAT + 4
-     tshftl		r2, r2, #12		@ (OTA128K: #12)
-COPY_CODE_START:
-     tloadm		r2!, {r1}
-     tstorem	r3!, {r1}
-     tcmp		r3, r0
-     tjne		COPY_CODE_START
-
-     tloadr		r3, COPY_CODE_DAT + 8
-     tmov		r2, #136		@0x88
-     tstorerb	r2, [r3, #0]
-
-COPY_CODE_END:
-     tj		COPY_CODE_END
-	.balign	4
-COPY_CODE_DAT:
-	.word	(0x808000)
-	.word	(0x808600)
-	.word	(0x800602)
+//COPY_CODE_INIT:
+//     tmov		r3, #63			@ OTA FW ready flag at 0x3f000; (0x3f000 = #63 << 12)
+//     tshftl		r3, r3, #12		@ 0x3f<<12
+//     tloadr		r3, [r3, #0]
+//#ifdef MCU_CORE_8266_OTA_BOOT
+//	 tcmp		r3, #0			@ 0x0
+//#else
+//     tcmp		r3, #165		@ *(u32 *)0x3f000 == 0xa5
+//#endif
+//     tjne		COPY_DATA_INIT
+//
+//     tmov		r2, #31		@ OTA boot code at: 0x1f000 (OTA128K: 0x1f000 = 31 << 12)
+//     tloadr		r3, COPY_CODE_DAT
+//     tloadr		r0, COPY_CODE_DAT + 4
+//     tshftl		r2, r2, #12		@ (OTA128K: #12)
+//COPY_CODE_START:
+//     tloadm		r2!, {r1}
+//     tstorem	r3!, {r1}
+//     tcmp		r3, r0
+//     tjne		COPY_CODE_START
+//
+//     tloadr		r3, COPY_CODE_DAT + 8
+//     tmov		r2, #136		@0x88
+//     tstorerb	r2, [r3, #0]
+//
+//COPY_CODE_END:
+//     tj		COPY_CODE_END
+//	.balign	4
+//COPY_CODE_DAT:
+//	.word	(0x808000)
+//	.word	(0x808600)
+//	.word	(0x800602)
 
 COPY_DATA_INIT:
 	tloadr		r1, DATA_I

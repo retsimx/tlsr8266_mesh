@@ -1,19 +1,24 @@
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 use std::ptr::{copy_nonoverlapping, write_bytes};
 use ::{BIT, flash_adr_pairing};
 use common::RECOVER_STATUS::FLD_LIGHT_OFF;
-use main_light::{cmd_delay, cmd_delay_ms, cmd_left_delay_ms, device_status_update, irq_timer1_cb_time, led_lum, led_val, light_adjust_RGB_hw, light_off, light_onoff_normal, light_slave_tx_command, rf_link_light_event_callback};
+use main_light::{buff_response, cmd_delay, cmd_delay_ms, cmd_left_delay_ms, device_status_update, irq_timer1_cb_time, led_lum, led_val, light_adjust_RGB_hw, light_off, light_onoff_normal, light_slave_tx_command, rf_link_light_event_callback};
 use sdk::common::bit::ONES_32;
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use sdk::light::{access_code, adr_flash_cfg_idx, CMD_NOTIFY_MESH_PAIR_END, DEV_ADDR_PAR_WITH_MAC, device_address, get_mac_en, is_add_packet_buf_ready, is_mesh_ota_slave_running, LGT_CMD_MESH_CMD_NOTIFY, LGT_CMD_MESH_OTA_READ, LGT_CMD_MESH_PAIR, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO, ll_packet_l2cap_data_t, mesh_node_init, mesh_node_max, mesh_ota_master_100_flag, pair_ac, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_load_key, pair_login_ok, pair_ltk, pair_ltk_mesh, pair_nn, pair_pass, pair_save_key, pair_setting_flag, PAR_READ_MESH_PAIR_CONFIRM, rf_link_add_tx_packet, rf_packet_att_cmd_t, rf_slave_ota_busy, slave_link_connected, slave_p_mac};
+use sdk::light::{access_code, adr_flash_cfg_idx, APP_OTA_HCI_TYPE, app_ota_hci_type, CMD_NOTIFY_MESH_PAIR_END, cur_ota_flash_addr, DEV_ADDR_PAR_WITH_MAC, device_address, get_fw_version, is_add_packet_buf_ready, is_master_sending_ota_st, is_mesh_ota_slave_running, LGT_CMD_MESH_CMD_NOTIFY, LGT_CMD_MESH_OTA_READ, LGT_CMD_MESH_PAIR, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO, light_sw_reboot, ll_packet_l2cap_data_t, mesh_node_init, mesh_node_max, mesh_ota_dev_info_t, MESH_OTA_LED, mesh_ota_master_100_flag, mesh_ota_master_start, mesh_ota_master_start_firmware_from_backup, mesh_ota_pkt_start_command_t, OtaState, pair_ac, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_load_key, pair_login_ok, pair_ltk, pair_ltk_mesh, pair_nn, pair_pass, pair_save_key, pair_setting_flag, PAR_READ_MESH_PAIR_CONFIRM, rf_link_add_tx_packet, rf_link_data_callback, rf_link_slave_read_status_stop, rf_ota_save_data, rf_packet_att_cmd_t, rf_packet_att_data_t, rf_pkt_l2cap_sig_connParaUpRsp_t, rf_slave_ota_busy, rf_slave_ota_finished_flag, rf_slave_ota_terminate_flag, rf_slave_ota_timeout_def_s, rf_slave_ota_timeout_s, setup_ble_parameter_start, slave_link_connected, slave_p_mac, slave_read_status_busy, START_UP_FLAG, tick_per_us};
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use vendor_light::adv_rsp_pri_data;
 use std::ptr::addr_of;
+use sdk::common::crc::crc16;
+use sdk::light::OtaState::{ERROR, OK};
 use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use sdk::rf_drv::rf_set_ble_access_code;
-use VENDOR_ID;
+use ::{flash_adr_light_new_fw, VENDOR_ID};
+use ::{FLASH_ADR_OTA_READY_FLAG, OTA_LED};
+use sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
+use sdk::mcu::watchdog::wd_clear;
 
 #[no_mangle]
 pub static mut mesh_pair_start_time: u32 = 0;
@@ -49,6 +54,8 @@ pub static mut mesh_pair_enable: bool = false;
 pub static mut mesh_pair_checksum: [u8; 8] = [0; 8];
 #[no_mangle]
 pub static mut mesh_pair_retry_max: u8 = 3;
+#[no_mangle]
+pub static mut get_mac_en: bool = false;
 
 // BEGIN SHIT LIGHT_LL HAX
 #[no_mangle]
@@ -62,6 +69,26 @@ static mut mesh_node_st_par_len: u8 = MESH_NODE_ST_PAR_LEN;
 #[no_mangle]
 static mut mesh_node_st_len: u8 = size_of::<mesh_node_st_t>() as u8;
 // END SHIT LIGHT_LL HAX
+
+static mut ota_pkt_cnt: u16 = 0;
+static mut ota_rcv_last_idx: u16 = 0xffff;
+static mut fw_check_val: u32 = 0;
+static mut need_check_type: u8 = 0;//=1:crc val sum
+static mut ota_pkt_total: u16 = 0;
+static mut slave_ota_data_cache_idx: u8 = 0;
+static mut rf_slave_ota_finished_time: u32 = 0;
+static mut terminate_cnt: u8 = 0;
+
+#[no_mangle]
+static mut conn_update_successed: u8 = 0;
+#[no_mangle]
+static mut conn_update_cnt: u8 = 0;
+
+const UPDATE_CONN_PARA_CNT: u8 = 4;
+const conn_para_data: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [[18, 18+16, 200], [16, 16+16, 200], [32, 32+16, 200], [48, 48+16, 200]];
+const SYS_CHN_LISTEN_MESH: [u8; 4] = [2, 12, 23, 34];	//8, 30, 52, 74
+#[no_mangle]
+static mut sys_chn_listen: [u8; 4] = SYS_CHN_LISTEN_MESH;
 
 pub static mut mesh_pair_time: u32 = 0;
 pub static mut mesh_pair_state: MESH_PAIR_STATE = MESH_PAIR_STATE::MESH_PAIR_NAME1;
@@ -105,6 +132,8 @@ pub const rega_light_off: u8 = 0x3a;
 
 pub const MESH_NODE_MAX_NUM: u16 = 64;
 
+pub static pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
+
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 struct mesh_node_st_val_t {
@@ -141,7 +170,7 @@ pub enum PAIR_STATE {
 pub fn is_ota_area_valid(adr: u32) -> bool {
 	let mut buf : [u8; 4] = [0; 4];
 	for i in 0..ERASE_SECTORS_FOR_OTA {
-    	flash_read_page(adr + i*0x1000, 4, buf.as_mut_ptr());
+        unsafe { flash_read_page(adr + i * 0x1000, 4, buf.as_mut_ptr()); }
     	let tmp = buf[0] as u32 | (buf[1] as u32) << 8 | (buf[2] as u32) << 16 | (buf[3] as u32) << 24;
     	if tmp != ONES_32 {
             return false;
@@ -152,7 +181,7 @@ pub fn is_ota_area_valid(adr: u32) -> bool {
 
 pub fn erase_ota_data(adr: u32){
     for i in 0..ERASE_SECTORS_FOR_OTA {
-        flash_erase_sector(adr+(ERASE_SECTORS_FOR_OTA -1 - i)*0x1000);
+        unsafe { flash_erase_sector(adr + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000); }
     }
 }
 
@@ -183,6 +212,7 @@ pub fn mesh_ota_master_100_flag_check()
 	}
 }
 
+#[no_mangle]
 pub unsafe fn dev_addr_with_mac_flag(params: *const u8) -> bool
 {
 	return DEV_ADDR_PAR_WITH_MAC == *params.offset(2);
@@ -780,4 +810,408 @@ unsafe fn mesh_node_buf_init()
     } }; MESH_NODE_MAX_NUM as usize];
 
 	device_status_update();
+}
+
+#[no_mangle]
+pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
+{
+    if rf_slave_ota_finished_flag != OtaState::CONTINUE {
+        return true;
+    }
+
+    if !rf_slave_ota_busy {
+        if !pair_login_ok || is_master_sending_ota_st() || is_mesh_ota_slave_running() {
+            return true;
+        }
+
+        rf_slave_ota_busy = true;
+        if slave_read_status_busy
+        {
+            rf_link_slave_read_status_stop ();
+        }
+    }
+	copy_nonoverlapping(ph, buff_response[(slave_ota_data_cache_idx%16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
+    slave_ota_data_cache_idx += 1;
+	return true;
+}
+
+#[no_mangle]
+unsafe fn get_ota_check_type(par: *const u8) -> u8
+{
+	if *par.offset(0) == 0x5D {
+		return *par.offset(1);
+	}
+	return 0;
+}
+
+#[no_mangle]
+unsafe fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
+{
+	rf_slave_ota_finished_flag = reset_flag;
+	rf_slave_ota_finished_time = clock_time();
+}
+
+pub unsafe fn rf_link_slave_data_ota_save() -> bool
+{
+    let mut reset_flag= OtaState::CONTINUE;
+	for i in 0..slave_ota_data_cache_idx {
+		let p = buff_response[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
+		let nDataLen = (*p).l2cap - 7;
+
+		if crc16((*p).dat.as_ptr(), nDataLen + 2) == (*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) << 8 {
+			rf_slave_ota_timeout_s = rf_slave_ota_timeout_def_s;	// refresh timeout
+
+			let cur_idx = (*p).dat[0] as u16 | ((*p).dat[1] as u16) << 8;
+			if nDataLen == 0 {
+				if (cur_idx == ota_rcv_last_idx+1) && (cur_idx == ota_pkt_total) {
+					// ota ok, save, reboot
+					reset_flag = OK;
+				}else{
+					// ota err
+					cur_ota_flash_addr = 0;
+                    ota_pkt_cnt = 0;
+                    ota_rcv_last_idx = 0;
+					reset_flag = ERROR;
+				}
+			}else{
+				if cur_idx == 0 {
+					// start ota
+					if cur_ota_flash_addr != 0 {
+					    // 0x10000 should be 0x00
+						cur_ota_flash_addr = 0;
+                        ota_pkt_cnt = 0;
+                        ota_rcv_last_idx = 0;
+	                    reset_flag = ERROR;
+					}else{
+					    need_check_type = get_ota_check_type(&(*p).dat[8]);
+					    if need_check_type == 1 {
+					    	fw_check_val = ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
+					    }
+	    				reset_flag = rf_ota_save_data((*p).dat.as_ptr().offset(2));
+					}
+				}else if cur_idx == ota_rcv_last_idx + 1 {
+					// ota fw check
+					if cur_idx == 1 {
+						ota_pkt_total = (((((*p).dat[10] as u32) |( (((*p).dat[11] as u32) << 8) & 0xFF00) | ((((*p).dat[12] as u32) << 16) & 0xFF0000) | ((((*p).dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16;
+						if(ota_pkt_total < 3){
+							// invalid fw
+							cur_ota_flash_addr = 0;
+                            ota_pkt_cnt = 0;
+                            ota_rcv_last_idx = 0;
+							reset_flag = ERROR;
+						}else if need_check_type == 1 {
+							fw_check_val += ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
+						}
+					}else if cur_idx < ota_pkt_total - 1 && need_check_type == 1 {
+						fw_check_val += ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
+					}else if cur_idx == ota_pkt_total - 1 && need_check_type == 1 {
+						if fw_check_val != (((*p).dat[2] as u32) |( (((*p).dat[3] as u32) << 8) & 0xFF00) | ((((*p).dat[4] as u32) << 16) & 0xFF0000) | ((((*p).dat[5] as u32) << 24) & 0xFF000000)) {
+							cur_ota_flash_addr = 0;
+                            ota_pkt_cnt = 0;
+                            ota_rcv_last_idx = 0;
+							reset_flag = ERROR;
+						}
+					}
+
+					if cur_ota_flash_addr + 16 > (FW_SIZE_MAX_K * 1024) { // !is_valid_fw_len()
+					    reset_flag = ERROR;
+				    }else{
+					    reset_flag = rf_ota_save_data(&(*p).dat[2]);
+					}
+				}else{
+					// error, ota failed
+					cur_ota_flash_addr = 0;
+                    ota_pkt_cnt = 0;
+                    ota_rcv_last_idx = 0;
+					reset_flag = ERROR;
+				}
+
+				ota_rcv_last_idx = cur_idx;
+			}
+		}else{
+			// error, ota failed
+			cur_ota_flash_addr = 0;
+            ota_pkt_cnt = 0;
+            ota_rcv_last_idx = 0;
+		    reset_flag = ERROR;
+		}
+
+		if reset_flag != OtaState::CONTINUE {
+		    if rf_slave_ota_finished_flag == OtaState::CONTINUE {
+		    	if (APP_OTA_HCI_TYPE::MESH == app_ota_hci_type)
+		    	&& (OK == reset_flag) {
+		    		mesh_ota_master_start_firmware_from_backup();
+		    		rf_slave_ota_timeout_s = 0;	// stop gatt ota timeout check
+		    		rf_slave_ota_busy = false;		// must
+			    }else{
+			    	rf_slave_ota_finished_flag_set(reset_flag);
+			    }
+		    }
+
+			break;
+		}
+	}
+	slave_ota_data_cache_idx = 0;
+	return true;
+}
+
+#[no_mangle]
+unsafe fn rf_ota_set_flag()
+{
+    let fw_flag_telink = START_UP_FLAG;
+    let mut flag_new = 0;
+	flash_read_page(flash_adr_light_new_fw + 8, size_of_val(&flag_new) as u32, addr_of!(flag_new) as *mut u8);
+	flag_new &= 0xffffff4b;
+    if flag_new != fw_flag_telink {
+        return ; // invalid flag
+    }
+
+	let mut flag0 = 0;
+	flash_read_page(flash_adr_light_new_fw + 8, 1, addr_of!(flag0) as *mut u8);
+	if 0x4b != flag0 {
+	    flag0 = 0x4b;
+	    flash_write_page(flash_adr_light_new_fw + 8, 1, addr_of!(flag0) as *mut u8);		//Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
+	}
+
+	flash_erase_sector (FLASH_ADR_OTA_READY_FLAG);
+	let flag: u32 = 0xa5;
+	flash_write_page (FLASH_ADR_OTA_READY_FLAG, 4, addr_of!(flag) as *mut u8);
+}
+
+pub fn rf_led_ota_ok(){
+	gpio_set_func(OTA_LED as u32, AS_GPIO);
+	gpio_set_output_en(OTA_LED as u32, 1);
+	let mut led_onoff = 1;
+	for i in 0..6
+    {
+		gpio_write(OTA_LED as u32, led_onoff);
+		led_onoff = !led_onoff;
+        wd_clear();
+		sleep_us(1000*1000);
+	}
+}
+
+#[no_mangle]
+fn rf_led_ota_error(){
+	gpio_set_func(OTA_LED as u32, AS_GPIO);
+	gpio_set_output_en(OTA_LED as u32, 1);
+	let mut led_onoff = 1;
+	for i in 0..60
+	{
+		gpio_write(OTA_LED as u32, led_onoff);
+		led_onoff = !led_onoff;
+        wd_clear();
+		sleep_us(100*1000);
+	}
+}
+
+#[no_mangle]
+unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
+{
+    if OtaState::ERROR == st {
+        erase_ota_data(flash_adr_light_new_fw);
+        rf_led_ota_error();
+    }else if(OtaState::OK == st){
+        //rf_ota_save_data(0);
+        rf_ota_set_flag ();
+        rf_led_ota_ok();
+    }else if(OtaState::MASTER_OTA_REBOOT_ONLY == st){
+    	// just reboot
+    }
+    irq_disable ();
+    light_sw_reboot();
+}
+
+#[no_mangle]
+unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
+{
+	rf_link_slave_data_ota_save();
+
+    if rf_slave_ota_finished_flag != OtaState::CONTINUE {
+        let mut reboot_flag = false;
+        if (0 == terminate_cnt) && rf_slave_ota_terminate_flag {
+            if is_add_packet_buf_ready() {
+                terminate_cnt = 6;
+                rf_link_add_tx_packet (pkt_terminate.as_ptr());
+            }
+        }
+
+        if terminate_cnt != 0 {
+            terminate_cnt -= 1;
+            if terminate_cnt == 0{
+                reboot_flag = true;
+            }
+        }
+
+        if !rf_slave_ota_terminate_flag && (clock_time() - rf_slave_ota_finished_time) > 2000*1000 * tick_per_us {
+            rf_slave_ota_terminate_flag = true;    // for ios: no last read command
+        }
+
+        if (clock_time() - rf_slave_ota_finished_time) > 4000*1000 * tick_per_us {
+            reboot_flag = true;
+        }
+
+        if reboot_flag {
+            rf_link_slave_ota_finish_led_and_reboot(rf_slave_ota_finished_flag);
+            // have been reboot
+        }
+    }
+}
+
+#[no_mangle]
+fn mesh_ota_led_cb(_type: MESH_OTA_LED)
+{
+    if MESH_OTA_LED::OK == _type {
+        rf_led_ota_ok();
+    }else if MESH_OTA_LED::ERROR == _type{
+        rf_led_ota_error();
+    }else if MESH_OTA_LED::STOP == _type{
+        rf_led_ota_error();
+    }
+}
+
+// adr:0=flag 16=name 32=pwd 48=ltk
+// p:data
+// n:length
+#[no_mangle]
+unsafe fn save_pair_info(adr: u32, p: *const u8, n: u32)
+{
+	flash_write_page (flash_adr_pairing + adr_flash_cfg_idx + adr, n, p);
+}
+
+#[no_mangle]
+fn get_ota_erase_sectors() -> u32
+{
+   return ERASE_SECTORS_FOR_OTA;
+}
+
+#[no_mangle]
+fn is_valid_fw_len(fw_len: u32) -> bool
+{
+	return fw_len <= (FW_SIZE_MAX_K * 1024);
+}
+
+#[no_mangle]
+fn get_fw_len(fw_adr: u32) -> u32
+{
+	let mut fw_len = 0;
+	flash_read_page(fw_adr+0x18, 4, addr_of!(fw_len) as *mut u8);	// use flash read should be better
+	return fw_len;
+}
+
+#[no_mangle]
+unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32)
+{
+	let fw_len = get_fw_len(new_fw_adr);
+	if is_valid_fw_len(fw_len) {
+		mesh_ota_master_start(new_fw_adr as *const u8, fw_len, p_dev_info);
+	}
+}
+
+#[no_mangle]
+unsafe fn mesh_ota_master_start_firmware_from_own()
+{
+    let adr_fw = 0;
+    let fw_len = get_fw_len(adr_fw);
+	if is_valid_fw_len(fw_len) {
+		let dev_info: mesh_ota_dev_info_t = mesh_ota_dev_info_t{
+            dev_mode: 0x02, // LIGHT_MODE
+            no_check_dev_mode_flag_rsv: 0,
+            rsv: [0; 4],
+        };
+		mesh_ota_master_start(adr_fw as *const u8, fw_len, addr_of!(dev_info));
+	}
+}
+
+#[no_mangle]
+unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
+{
+   let mut ret = true;
+   let p = params.offset(2) as *const mesh_ota_pkt_start_command_t;
+
+   if 0x02 == (*p).dev_info.dev_mode { // LIGHT_MODE
+       let mut ver_myself: [u8; 4] = [0; 4];
+       get_fw_version(ver_myself.as_mut_ptr());
+       if (*p).version[1] < ver_myself[1] {
+           ret = false;
+       }else if (*p).version[1] == ver_myself[1] {
+           if (*p).version[3] <= ver_myself[3] {
+               ret = false;
+           }
+       }
+   }else{
+       ret = false;
+   }
+
+   return ret;
+}
+
+#[no_mangle]
+unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
+{
+   let light_mode_self: u16 = 0x02; // LIGHT_MODE;
+   return *(new_fw_dev_info as *const u16) == light_mode_self;
+}
+
+/************
+*
+* int setup_ble_parameter_start(u16 delay, u16 interval_min, u16 interval_max, u16 timeout);
+*
+* delay   :  unit: one ble interval
+* interval_min,interval_max:  if all 0,will keep the system parameter for android but not ios.   unit: 1.25ms; must longer than 20ms.
+* timeout:  if 0,will keep the system parameter.   unit: 10ms; must longer than 3second for steady connect.
+*
+* return 0 means setup parameters is valid.
+* return -1 means parameter of interval is invalid.
+* return -2 means parameter of timeout is invalid.
+*
+*
+* void rf_link_slave_connect_callback()
+* system will call this function when receive command of BLE connect request.
+    IOS Note:
+    20 ms <= interval_min
+    interval_min + 20 ms <= interval_max <= 2second
+    timeout <= 6second
+*/
+#[no_mangle]
+unsafe fn update_ble_parameter_cb() {
+   if conn_update_successed == 0 {
+       setup_ble_parameter_start(1, conn_para_data[0][0], conn_para_data[0][1], conn_para_data[0][2]);  // interval 32: means 40ms;   timeout 200: means 2000ms
+       conn_update_cnt += 1;
+   }
+}
+
+#[no_mangle]
+unsafe fn rf_update_conn_para(p: *const u8) -> u8
+{
+   let pp = p as *const rf_pkt_l2cap_sig_connParaUpRsp_t;
+   let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
+    let mut equal = true;
+    for i in 0..9
+    {
+        if *((&(*pp).rf_len) as *const u8).offset(i) != sig_conn_param_update_rsp[i as usize] {
+            equal = false;
+        }
+    }
+
+   if equal && (((*pp)._type & 0b11) == 2){//l2cap data pkt, start pkt
+       if (*pp).result == 0x0000 {
+           conn_update_cnt = 0;
+           conn_update_successed = 1;
+       }else if (*pp).result == 0x0001 {
+           if conn_update_cnt >= UPDATE_CONN_PARA_CNT {
+               conn_update_cnt = 0;
+           }else{
+               setup_ble_parameter_start(1, conn_para_data[conn_update_cnt as usize][0], conn_para_data[conn_update_cnt as usize][1], conn_para_data[conn_update_cnt as usize][2]);
+               conn_update_cnt += 1;
+           }
+       }
+   }
+
+   return 0;
+}
+
+#[no_mangle]
+unsafe fn light_slave_tx_command_callback (p: *const u8) {
+    rf_link_data_callback(p);
 }

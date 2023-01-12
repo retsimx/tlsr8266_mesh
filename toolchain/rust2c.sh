@@ -8,7 +8,7 @@ CC=./toolchain/tc32/bin/tc32-elf-gcc
 LD=./toolchain/tc32/bin/tc32-elf-ld
 CP=./toolchain/tc32/bin/tc32-elf-objcopy
 
-CCFLAGS="-O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -ffunction-sections -fdata-sections"
+CCFLAGS="-O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -ffunction-sections -fdata-sections -w"
 
 cd rust
 rm -Rf target/i686-unknown-linux-gnu/release/deps

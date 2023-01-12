@@ -29,7 +29,7 @@ use sdk::service::{TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SP
 use vendor_light::{adv_pri_data, adv_rsp_pri_data, vendor_set_adv_data};
 
 extern "C" {
-    static advData: [u8; 3];
+    static mut advData: [u8; 3];
     static mut max_mesh_name_len: u8;
 }
 
@@ -58,7 +58,7 @@ pub const LED_EVENT_FLASH_0p25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
 
 
 #[no_mangle]
-static mut buff_response: [[u32; 9]; 48] = [[0; 9]; 48];
+pub static mut buff_response: [[u32; 9]; 48] = [[0; 9]; 48];
 
 #[no_mangle]
 static mut led_event_pending: u32 = 0;
@@ -98,10 +98,7 @@ struct lum_save_t {
 
 fn calculate_lumen_map(val: u16) -> f32 {
     let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.0;
-    let x3 = percentage * percentage * percentage;
-    let x2 = percentage * percentage;
-    return (-0.00539160 * x3) + (4.47709595 * x2) + (153.72442036 * percentage);
-    // return (-0.00539160*micromath::F32Ext::powf(percentage, 3.0))+(4.47709595*micromath::F32Ext::powf(percentage, 2.0))+(153.72442036*percentage);
+    return (-0.00539160*micromath::F32Ext::powf(percentage, 3.0))+(4.47709595*micromath::F32Ext::powf(percentage, 2.0))+(153.72442036*percentage);
 }
 
 fn pwm_set_lum(id: u32, y: u32, pol: bool) {
@@ -632,7 +629,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
             }
         } else {
             if CMD_STOP_MESH_OTA == idx {
-                mesh_ota_master_cancle(OtaState::OTA_STATE_MASTER_OTA_REBOOT_ONLY as u8, false);
+                mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
                 //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
             }
         }

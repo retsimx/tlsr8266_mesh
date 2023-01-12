@@ -4,16 +4,13 @@ use std::ptr::{copy_nonoverlapping, addr_of};
 use ::{BIT, flash_adr_reset_cnt};
 use ::{flash_adr_pairing, MESH_PWD};
 use ::{OUT_OF_MESH, PAIR_VALID_FLAG};
-use common::mesh_pair_enable;
+use common::{get_mac_en, mesh_pair_enable, rf_led_ota_ok};
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use sdk::light::{encode_password, get_mac_en, light_sw_reboot, pair_config_mesh_ltk};
+use sdk::light::{encode_password, light_sw_reboot, pair_config_mesh_ltk};
 use sdk::mcu::clock::clock_time_exceed;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 
 extern "C" {
-	// todo
-	fn rf_led_ota_ok();
-
 	static mut pair_config_pwd_encode_enable: u8;
 }
 
@@ -162,11 +159,11 @@ fn factory_reset() {
 	{
 	    let adr = CFG_SECTOR_ADR_MAC_CODE + i*0x1000;
 	    if FLASH_ADR_RESET_CNT != adr {
-		    flash_erase_sector(adr);
+			unsafe { flash_erase_sector(adr); }
 		}
 	}
 
-    flash_erase_sector(FLASH_ADR_RESET_CNT); // at last should be better, when power off during factory reset erase.
+	unsafe { flash_erase_sector(FLASH_ADR_RESET_CNT); } // at last should be better, when power off during factory reset erase.
 
     irq_restore(r);
 }

@@ -1,18 +1,14 @@
-use std::mem::{MaybeUninit, transmute};
+use std::mem::{MaybeUninit};
 use app::App;
 use config::get_flash_adr_light_new_fw;
-use main_light::{user_init};
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use sdk::mcu::gpio::{GPIO_PIN_TYPE};
-use sdk::mcu::gpio::GPIO_PIN_TYPE::{GPIO_PC0, GPIO_PC2, GPIO_PC4};
-use sdk::mcu::irq_i::{irq_disable, irq_init};
+use sdk::mcu::irq_i::irq_disable;
 use sdk::mcu::register::{write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 
 mod sdk;
 mod main_light;
 mod common;
 mod vendor_light;
-mod math_wrapper;
 mod app;
 mod config;
 
@@ -22,6 +18,7 @@ const FLASH_ADR_OTA_READY_FLAG: u32 = 0x3F000;
 const FLASH_OTA_READY_FLAG: u8 = 0xa5;
 
 #[inline(never)]
+#[allow(non_snake_case)]
 unsafe fn handle_ota_update__attribute_ram_code() {
     // This function requires that *everything* be in ram
     if *(FLASH_ADR_OTA_READY_FLAG as *const u8) != FLASH_OTA_READY_FLAG {

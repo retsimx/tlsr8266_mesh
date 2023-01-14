@@ -26,7 +26,7 @@ impl App {
 
     pub unsafe fn init(&self) {
         // Copy the password in to the pair config
-        unsafe { fill_from_str(get_pair_config_pwd_encode_sk(), MESH_PWD_ENCODE_SK.as_bytes()); }
+        fill_from_str(get_pair_config_pwd_encode_sk(), MESH_PWD_ENCODE_SK.as_bytes());
 
         // Init various subsystems
         cpu_wakeup_init();

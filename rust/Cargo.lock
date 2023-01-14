@@ -15,6 +15,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed3d0b5ff30645a68f35ece8cea4556ca14ef8a1651455f789a099a0513532a6"
 
 [[package]]
+name = "externc-libm"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a92d5ce4982632e52cebdfdef7580f2f1b3dc02f541a74ac8838412bb3e9b123"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "keyframe"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -29,12 +38,6 @@ name = "libm"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "348108ab3fba42ec82ff6e9564fc4ca0247bdccdc68dd8af9764bbc79c3c8ffb"
-
-[[package]]
-name = "micromath"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39617bc909d64b068dcffd0e3e31679195b5576d0c83fadc52690268cc2b2b55"
 
 [[package]]
 name = "mint"
@@ -63,8 +66,8 @@ name = "tlsr8266_mesh"
 version = "0.1.0"
 dependencies = [
  "const-cstr",
+ "externc-libm",
  "keyframe",
  "libm",
- "micromath",
  "paste",
 ]

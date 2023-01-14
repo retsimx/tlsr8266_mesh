@@ -2,7 +2,7 @@
 
 use std::mem;
 use std::mem::{MaybeUninit, size_of, size_of_val};
-use common::{MESH_NODE_MAX_NUM, PAIR_STATE};
+use common::{MESH_NODE_MAX_NUM, PairState};
 use ::{no_mangle_fn, no_mangle_fn_def};
 use pub_mut;
 use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
@@ -93,7 +93,7 @@ pub_mut!(pkt_light_notify, rf_packet_att_cmd_t);
 pub_mut!(slave_read_status_busy, bool);
 pub_mut!(rf_slave_ota_busy, bool);
 
-pub_mut!(pair_setting_flag, PAIR_STATE);
+pub_mut!(pair_setting_flag, PairState);
 pub_mut!(pair_nn, [u8; 16]);
 pub_mut!(pair_pass, [u8; 16]);
 pub_mut!(pair_ltk, [u8; 16]);

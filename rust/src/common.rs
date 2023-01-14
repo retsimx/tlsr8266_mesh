@@ -804,7 +804,7 @@ pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
             _rf_link_slave_read_status_stop ();
         }
     }
-	copy_nonoverlapping(ph, buff_response[(slave_ota_data_cache_idx%16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
+	copy_nonoverlapping(ph, get_buff_response()[(slave_ota_data_cache_idx%16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
     slave_ota_data_cache_idx += 1;
 	return true;
 }
@@ -829,7 +829,7 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 {
     let mut reset_flag= OtaState::CONTINUE;
 	for i in 0..slave_ota_data_cache_idx {
-		let p = buff_response[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
+		let p = get_buff_response()[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
 		let n_data_len = (*p).l2cap - 7;
 
 		if crc16((*p).dat.as_ptr(), n_data_len + 2) == (*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) << 8 {

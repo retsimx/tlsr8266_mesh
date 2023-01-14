@@ -21,11 +21,6 @@ use sdk::rf_drv::*;
 use sdk::service::*;
 use vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 
-extern "C" {
-    static mut advData: [u8; 3];
-    static mut max_mesh_name_len: u8;
-}
-
 pub const LED_INDICATE_VAL: u16 = 0xffff;
 pub const LED_MASK: u8 = 0x07;
 pub const LUM_SAVE_FLAG: u8 = 0xA5;
@@ -49,9 +44,9 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8,8,4,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
 pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
 
-
-#[no_mangle]
-pub static mut buff_response: [[u32; 9]; 48] = [[0; 9]; 48];
+pub_mut!(buff_response, [[u32; 9]; 48], [[0; 9]; 48]);
+pub_mut!(adv_data, [u8; 3]);
+pub_mut!(max_mesh_name_len, u8);
 
 pub_mut!(led_event_pending, u32, 0);
 
@@ -127,16 +122,12 @@ pub fn light_hw_timer1_config() {
     write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
 }
 
-unsafe fn light_init_default() {
-    // unsafe { rest_light_init(); }
-    // return;
-    let len = (advData.len() + size_of::<ll_adv_private_t>() + 2) as u8;
-    if len >= 31 {
-        // error
-        max_mesh_name_len = 0;
-    } else {
-        max_mesh_name_len = 31 - len - 2;
-        max_mesh_name_len = if max_mesh_name_len < 16 { max_mesh_name_len } else { 16 };
+fn light_init_default() {
+    let mut _max_mesh_name_len = 0;
+    let len = (get_adv_data().len() + size_of::<ll_adv_private_t>() + 2) as u8;
+    if len < 31 {
+        _max_mesh_name_len = 31 - len - 2;
+        set_max_mesh_name_len(if _max_mesh_name_len < 16 { _max_mesh_name_len } else { 16 });
     }
 
     // get fw version @flash 0x02,0x03,0x04,0x05
@@ -153,7 +144,7 @@ unsafe fn light_init_default() {
     set_pair_config_valid_flag(PAIR_VALID_FLAG);
 
     get_pair_config_mesh_name().iter_mut().for_each(|m| *m = 0);
-    let len = min(MESH_NAME.len(), max_mesh_name_len as usize);
+    let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);
     get_pair_config_mesh_name()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
 
     get_pair_config_mesh_pwd().iter_mut().for_each(|m| *m = 0);
@@ -177,7 +168,7 @@ unsafe fn light_init_default() {
 
     _rf_link_slave_pairing_enable(1);
     _rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
-    _rf_link_slave_set_buffer(buff_response.as_mut_ptr(), 48);
+    _rf_link_slave_set_buffer(get_buff_response().as_mut_ptr(), 48);
     _rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 
     _vendor_id_init(VENDOR_ID);
@@ -191,7 +182,7 @@ unsafe fn light_init_default() {
     mesh_pair_init();
 }
 
-pub unsafe fn user_init()
+pub fn user_init()
 {
     // for app ota
     if !is_ota_area_valid(*get_flash_adr_light_new_fw()) {
@@ -224,7 +215,7 @@ pub unsafe fn user_init()
 
     vendor_set_adv_data();
 
-    device_status_update();
+    unsafe { device_status_update(); }
     _mesh_security_enable(true);
 
     _register_mesh_ota_master_ui(mesh_ota_master_led);   //  mesh_ota_master_led() will be called when sending mesh ota data.
@@ -324,18 +315,17 @@ unsafe fn light_lum_store() {
 }
 
 //retrieve LUM : brightness or RGB/CT value
-unsafe fn light_lum_retrieve() {
+fn light_lum_retrieve() {
     let mut i = 0;
     while i < FLASH_SECTOR_SIZE
     {
-        light_lum_addr = *get_flash_adr_lum() + i as u32;
+        set_light_lum_addr(*get_flash_adr_lum() + i as u32);
 
-        let lum_save = light_lum_addr as *const lum_save_t;
+        let lum_save = unsafe { &*(*get_light_lum_addr() as *const lum_save_t) };
         if LUM_SAVE_FLAG == (*lum_save).save_falg {
-            led_lum = (*lum_save).lum;
-            #[allow(unaligned_references)]
-            copy_nonoverlapping((*lum_save).ledval.as_ptr(), led_val.as_mut_ptr(), led_val.len());
-        } else if (*lum_save).save_falg == 0xFF {
+            set_led_lum(lum_save.lum);
+            *get_led_val() = lum_save.ledval;
+        } else if lum_save.save_falg == 0xFF {
             break;
         }
 
@@ -372,7 +362,7 @@ fn light_user_func() {
     mesh_pair_proc_effect();
 }
 
-pub unsafe fn main_loop()
+pub fn main_loop()
 {
     if _is_receive_ota_window() {
         return;
@@ -380,7 +370,7 @@ pub unsafe fn main_loop()
 
     light_user_func();
     _rf_link_slave_proc();
-    proc_led();
+    unsafe { proc_led(); }
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.

@@ -12,7 +12,7 @@ mod ota;
 pub static APP: App = App::default();
 
 #[no_mangle]
-pub unsafe fn main_entrypoint() {
+pub fn main_entrypoint() {
     // Must happen first
     handle_ota_update__attribute_ram_code();
 

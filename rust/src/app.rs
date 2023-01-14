@@ -20,7 +20,7 @@ impl App {
         }
     }
 
-    pub unsafe fn init(&self) {
+    pub fn init(&self) {
         // Copy the password in to the pair config
         get_pair_config_pwd_encode_sk().as_mut_slice().write(MESH_PWD_ENCODE_SK.as_bytes()).unwrap();
 
@@ -36,7 +36,7 @@ impl App {
         user_init();
     }
 
-    pub unsafe fn run(&self) {
+    pub fn run(&self) {
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 

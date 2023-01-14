@@ -34,32 +34,32 @@ pub_mut!(reset_cnt, u8, 0);
 pub_mut!(clear_st, u8, 3);
 pub_mut!(reset_check_time, u32, 0);
 
-unsafe fn reset_cnt_clean()
+fn reset_cnt_clean()
 {
-	if adr_reset_cnt_idx < 3840
+	if *get_adr_reset_cnt_idx() < 3840
 	{
 		return;
 	}
 	flash_erase_sector (*get_flash_adr_reset_cnt());
-	adr_reset_cnt_idx = 0;
+	set_adr_reset_cnt_idx(0);
 }
 
-unsafe fn write_reset_cnt(cnt: u8)
+fn write_reset_cnt(cnt: u8)
 {
 	let data = [cnt];
-	flash_write_page (*get_flash_adr_reset_cnt() + adr_reset_cnt_idx, 1, data.as_ptr());
+	flash_write_page (*get_flash_adr_reset_cnt() + *get_adr_reset_cnt_idx(), 1, data.as_ptr());
 }
 
-unsafe fn clear_reset_cnt ()
+fn clear_reset_cnt ()
 {
     write_reset_cnt(RESET_CNT_RECOUNT_FLAG);
 }
 
-unsafe fn reset_cnt_get_idx()
+fn reset_cnt_get_idx()
 {
 	let pf = *get_flash_adr_reset_cnt() as *const u8;
-	adr_reset_cnt_idx = 0;
-	while adr_reset_cnt_idx < 4096
+	set_adr_reset_cnt_idx(0);
+	while *get_adr_reset_cnt_idx() < 4096
 	{
 	    let restcnt_bit = unsafe { *pf.offset(adr_reset_cnt_idx as isize) };
 		if restcnt_bit != RESET_CNT_RECOUNT_FLAG    //end
@@ -71,37 +71,37 @@ unsafe fn reset_cnt_get_idx()
 			    break;
 			}
 		}
-		adr_reset_cnt_idx += 1;
+		set_adr_reset_cnt_idx(*get_adr_reset_cnt_idx() + 1);
 	}
 
     reset_cnt_clean();
 }
 
-unsafe fn get_reset_cnt_bit() -> u8
+fn get_reset_cnt_bit() -> u8
 {
-	if adr_reset_cnt_idx < 0
+	if *get_adr_reset_cnt_idx() < 0
 	{
 	    reset_cnt_clean();
 		return 0;
 	}
 
 	let mut data = [0];
-	flash_read_page(*get_flash_adr_reset_cnt() + adr_reset_cnt_idx, 1, data.as_mut_ptr());
-	reset_cnt = data[0];
-	return reset_cnt;
+	flash_read_page(*get_flash_adr_reset_cnt() + *get_adr_reset_cnt_idx(), 1, data.as_mut_ptr());
+	set_reset_cnt(data[0]);
+	return *get_reset_cnt();
 }
 
-unsafe fn increase_reset_cnt()
+fn increase_reset_cnt()
 {
 	let mut restcnt_bit = get_reset_cnt_bit();
 	for i in 0..8 {
         if restcnt_bit & BIT!(i) != 0 {
             if i < 3 {
-                reset_cnt = i;
+                set_reset_cnt(i);
             }else if i < 5 {
-                reset_cnt = 3;
+                set_reset_cnt(3);
             }else if i < 7 {
-                reset_cnt = 4;
+                set_reset_cnt(4);
             }
 
             restcnt_bit &= !(BIT!(i));
@@ -111,7 +111,7 @@ unsafe fn increase_reset_cnt()
 	}
 }
 
-pub unsafe fn factory_reset_handle()
+pub fn factory_reset_handle()
 {
     reset_cnt_get_idx();
     let restcnt_bit = get_reset_cnt_bit();

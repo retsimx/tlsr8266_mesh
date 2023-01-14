@@ -183,7 +183,7 @@ def write_flash_main(args):
 
     print(f'Writing flash from {args.filename}...')
 
-    CHUNK_SIZE = 256
+    CHUNK_SIZE = 256 * 3
     with open(args.filename, 'rb') as f:
         contents = f.read()
         size = len(contents)
@@ -195,13 +195,7 @@ def write_flash_main(args):
             if args.debug:
                 print(f'writing: {hexdump(data)}')
 
-            while True:
-                write_flash(addr, list(data))
-                res = read_flash(addr, len(data))
-                if data == res:
-                    break
-
-                print(f"Error writing to 0x{addr:04x}, trying again...")
+            write_flash(addr, list(data))
 
     while True:
         res = send_flash_get_status()

@@ -1,16 +1,12 @@
-import struct
-
-import gc
-
-import binascii
-import machine
-import network
 import socket
+import struct
 import time
+
+import micropython
+import network
+import rp2
 from machine import Pin
 from rp2 import PIO, StateMachine, asm_pio
-import rp2
-import micropython
 
 WIFI_SSID = ""
 WIFI_PASS = ""
@@ -19,9 +15,17 @@ rp2.country('AU')
 rp2.PIO(0).remove_program()
 rp2.PIO(1).remove_program()
 
-# UART_BAUD = 3187850       # This was the value when the chip was programmed with the original firmware
-UART_BAUD = 2838900         # This is the value when the chip is erased
-TX_RATE = 2500000
+# Connect to WLAN
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+
+# Set power mode to get WiFi power-saving off (if needed)
+wlan.config(pm=0xa11140)
+
+wlan.connect(WIFI_SSID, WIFI_PASS)
+
+RX_RATE = 2838900 * 2   # The receive speed
+TX_RATE = 5000000       # The transmission speed
 
 reset_pin = Pin(16, Pin.OUT)
 reset_pin.high()
@@ -33,7 +37,7 @@ input_pin = Pin(15, Pin.IN)
     push_thresh=8,
     in_shiftdir=rp2.PIO.SHIFT_LEFT
 )
-def uart_rx_mini():
+def rx_pio():
     # fmt: off
     # Wait for low to be sent from tx
     wait(0, pin, 0)
@@ -53,7 +57,7 @@ def uart_rx_mini():
     out_shiftdir=rp2.PIO.SHIFT_LEFT,
     set_init=PIO.OUT_HIGH,
 )
-def uart_tx_mini():
+def tx_pio():
     # fmt: off
     pull(block)
     # Skip the first 22 bits
@@ -90,16 +94,16 @@ def uart_tx_mini():
     # fmt: on
 
 # Set up the state machine we're going to use to receive the characters.
-sm = StateMachine(
+rx_sm = StateMachine(
     1,
-    uart_rx_mini,
-    freq=UART_BAUD,
+    rx_pio,
+    freq=RX_RATE,
     in_base=input_pin  # For WAIT, IN
 )
 
 tx_sm = StateMachine(
     0,
-    uart_tx_mini,
+    tx_pio,
     freq=TX_RATE,
     set_base=Pin(17)
 )
@@ -146,30 +150,30 @@ def read_addr(addr, len):
         time.sleep_us(70)
 
         # After sending the RW_ID byte, the master sends one unit of low level.
-        sm.restart()
-        sm.active(1)
+        rx_sm.restart()
+        rx_sm.active(1)
 
         # Wait for the sm to become active
-        while not sm.active():
+        while not rx_sm.active():
             pass
 
         # Clear any data in the fifo
-        while sm.rx_fifo():
-            sm.get()
+        while rx_sm.rx_fifo():
+            rx_sm.get()
 
         # Trigger a low level
         tx_sm.put(0)
 
         now = time.ticks_ms()
-        while not sm.rx_fifo():
+        while not rx_sm.rx_fifo():
             if time.ticks_ms() - now > 100:
                 send_byte(1, 0xff)
                 raise Exception("Timeout waiting for data")
 
-        value = sm.get() & 0xff
+        value = rx_sm.get() & 0xff
         result[idx] = ~value & 0xff
 
-        sm.active(0)
+        rx_sm.active(0)
 
     send_byte(1, 0xff)
 
@@ -178,6 +182,7 @@ def read_addr(addr, len):
 
 def reset_mcu(reset_only=False):
     # Halt the CPU
+    count = 0
     while True:
         reset_pin.low()
         time.sleep_ms(100)
@@ -186,9 +191,15 @@ def reset_mcu(reset_only=False):
         if reset_only:
             return
 
+        time.sleep_ms(count)
+        count += 1
+
+        write_addr(0x0602, [0x05])
+        write_addr(0x00b2, [63])
+
         try:
-            while read_addr(0x00b2, 1)[0] != 127:
-                write_addr(0x00b2, [127])
+            while read_addr(0x00b2, 1)[0] != 63:
+                write_addr(0x00b2, [63])
                 write_addr(0x0602, [0x05])
 
             break
@@ -202,14 +213,20 @@ print("About to reset MCU")
 # time.sleep_ms(100)
 # reset_pin.high()
 #
-# write_addr(0x0602, [0x05])
-# write_addr(0x00b2, [127])
+# time.sleep_ms(500)
 #
 # while True:
+#     write_addr(0x0602, [0x05])
+#     write_addr(0x00b2, [7])
+#
 #     errors = 0
-#     for i in range(100):
-#         value = read_addr(0x007e, 2)
-#         if value[0] != 0x25 or value[1] != 0x53:
+#     for i in range(1000):
+#         value = b'\0'
+#         try:
+#             value = read_addr(0x007e, 2)
+#             if value[0] != 0x25 or value[1] != 0x53:
+#                 errors += 1
+#         except:
 #             errors += 1
 #
 #     print(binascii.hexlify(value), UART_BAUD, errors)
@@ -224,7 +241,7 @@ print("About to reset MCU")
 #         in_base=input_pin  # For WAIT, IN
 #     )
 #
-#     UART_BAUD += 100
+#     UART_BAUD += 1000
 #
 # start_baud = UART_BAUD
 # print("Found start baud", start_baud)
@@ -232,8 +249,12 @@ print("About to reset MCU")
 # while True:
 #     errors = 0
 #     for i in range(100):
-#         value = read_addr(0x007e, 2)
-#         if value[0] != 0x25 or value[1] != 0x53:
+#         value = b'\0'
+#         try:
+#             value = read_addr(0x007e, 2)
+#             if value[0] != 0x25 or value[1] != 0x53:
+#                 errors += 1
+#         except:
 #             errors += 1
 #
 #     print(binascii.hexlify(read_addr(0x007e, 2)), UART_BAUD, errors)
@@ -248,28 +269,19 @@ print("About to reset MCU")
 #         in_base=input_pin  # For WAIT, IN
 #     )
 #
-#     UART_BAUD += 100
+#     UART_BAUD += 1000
 #
 # print("Found")
 # print("Start baud", start_baud)
 # print("End baud", UART_BAUD)
-# print("Recommended baud", (start_baud+UART_BAUD)/2)
+# print("Recommended baud", int((start_baud+UART_BAUD)/2))
 #
 # while True:
-#     pass
+#     time.sleep(10)
 
 reset_mcu()
 
 print("MCU Configured")
-
-# Connect to WLAN
-wlan = network.WLAN(network.STA_IF)
-wlan.active(True)
-
-# Set power mode to get WiFi power-saving off (if needed)
-wlan.config(pm=0xa11140)
-
-wlan.connect(WIFI_SSID, WIFI_PASS)
 
 while not wlan.isconnected():
     print('Waiting for wifi connection...')
@@ -319,7 +331,7 @@ def send_flash_write_enable():
     write_addr(0x0d, [0x01])
 
 
-def write_flash(addr, data):
+def write_flash_sector(addr, data):
     send_flash_write_enable()
 
     # CNS low.
@@ -345,6 +357,24 @@ def write_flash(addr, data):
     write_addr(0x0d, [0x01])
 
 
+def write_flash(inaddr, indata):
+    CHUNK_SIZE = 256
+    size = len(indata) + inaddr
+    for addr in range(inaddr, size, CHUNK_SIZE):
+        data = list(indata[addr - inaddr:min(addr + CHUNK_SIZE - inaddr, size - inaddr)])
+
+        for count in range(5):
+            write_flash_sector(addr, data)
+            res = read_flash(addr, len(data))
+            if data == res:
+                break
+
+            print(f"Error writing to 0x{addr:04x}, trying again...")
+
+            if count == 4:
+                raise Exception("Couldn't write sector")
+
+
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('0.0.0.0', 8000))
@@ -352,7 +382,7 @@ s.listen(5)
 while True:
     conn, addr = s.accept()
 
-    data = conn.recv(4096)
+    data = conn.recv(1024*2)
 
     if data[0] == 1:
         raddr = struct.unpack('H', data[1:3])[0]
@@ -386,8 +416,8 @@ while True:
                 write_flash(waddr, data)
                 conn.send(bytearray([1]))
                 break
-            except:
-                print("Write error writing flash to", waddr)
+            except Exception as e:
+                print("Write error writing flash to", waddr, e)
                 reset_mcu()
     elif data[0] == 4:
         reset_mcu(True)
@@ -397,4 +427,3 @@ while True:
         print("Unknown command")
 
     conn.close()
-    gc.collect()

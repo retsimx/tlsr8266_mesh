@@ -149,9 +149,9 @@ unsafe fn light_init_default() {
     //add the user_data after the adv_pri_data
     let user_const_data: [u8; 6] = [0x05, 0x02, 0x19, 0x00, 0x69, 0x69];
     unsafe {
-        user_data[0..user_const_data.len()].clone_from_slice(&user_const_data);
+        get_user_data()[0..user_const_data.len()].clone_from_slice(&user_const_data);
 
-        user_data_len = 0; // disable add the userdata after the adv_pridata
+        set_user_data_len(0); // disable add the userdata after the adv_pridata
 
         _light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
@@ -192,7 +192,7 @@ unsafe fn light_init_default() {
 
     light_hw_timer1_config();
 
-    unsafe { online_status_timeout = ONLINE_STATUS_TIMEOUT; }
+    set_online_status_timeout(ONLINE_STATUS_TIMEOUT);
 
     mesh_pair_init();
 }
@@ -297,9 +297,9 @@ unsafe fn proc_led()
 
 fn light_auth_check() {
     unsafe {
-        if security_enable && !pair_login_ok && slave_first_connected_tick != 0 && clock_time_exceed(slave_first_connected_tick, AUTH_TIME * 1000 * 1000) {
+        if *get_security_enable() && !*get_pair_login_ok() && *get_slave_first_connected_tick() != 0 && clock_time_exceed(*get_slave_first_connected_tick(), AUTH_TIME * 1000 * 1000) {
             //rf_link_slave_disconnect(); // must login in 60s after connected, if need
-            slave_first_connected_tick = 0;
+            set_slave_first_connected_tick(0);
         }
     }
 }
@@ -403,8 +403,8 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
     let dst_unicast = is_unicast_addr((*p_req).dst.as_ptr());
     (*ppp).dst[0] = (*p_req).src[0];
     (*ppp).dst[1] = (*p_req).src[1];
-    (*ppp).src[0] = (device_address & 0xff) as u8;
-    (*ppp).src[1] = ((device_address >> 8) & 0xff) as u8;
+    (*ppp).src[0] = (*get_device_address() & 0xff) as u8;
+    (*ppp).src[1] = ((*get_device_address() >> 8) & 0xff) as u8;
 
     let mut params: [u8; 10] = [0; 10];
     copy_nonoverlapping((*ppp).val.as_ptr().offset(3), params.as_mut_ptr(), params.len()); // be same with p_req->val+3
@@ -413,7 +413,7 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
     (*ppp).val[1] = (VENDOR_ID & 0xFF) as u8;
     (*ppp).val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
-    (*ppp).val[18] = max_relay_num;
+    (*ppp).val[18] = *get_max_relay_num();
 
     let mut idx = 0;
     if (*ppp).val[15] == GET_STATUS {
@@ -426,8 +426,8 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
             (*ppp).val[i + 3] = 0xFF;
-            if group_address[i] != 0 {
-                (*ppp).val[idx + 3] = group_address[i] as u8;
+            if get_group_address()[i] != 0 {
+                (*ppp).val[idx + 3] = get_group_address()[i] as u8;
                 idx += 1;
             }
         }
@@ -435,8 +435,8 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
             (*ppp).val[i + 3] = 0xFF;
-            if group_address[i / 2] != 0 {
-                (*ppp).val[idx + 3] = if (i % 2) != 0 { (group_address[i / 2] >> 8) as u8 } else { group_address[i / 2] as u8 };
+            if get_group_address()[i / 2] != 0 {
+                (*ppp).val[idx + 3] = if (i % 2) != 0 { (get_group_address()[i / 2] >> 8) as u8 } else { get_group_address()[i / 2] as u8 };
                 idx += 1;
             }
         }
@@ -444,8 +444,8 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
             (*ppp).val[i + 3] = 0xFF;
-            if group_address[4 + i / 2] != 0 {
-                (*ppp).val[idx + 3] = if (i % 2) != 0 { (group_address[4 + i / 2] >> 8) as u8 } else { group_address[4 + i / 2] as u8 };
+            if get_group_address()[4 + i / 2] != 0 {
+                (*ppp).val[idx + 3] = if (i % 2) != 0 { (get_group_address()[4 + i / 2] >> 8) as u8 } else { get_group_address()[4 + i / 2] as u8 };
                 idx += 1;
             }
         }
@@ -454,8 +454,8 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         if dev_addr_with_mac_flag(params.as_ptr()) {
             return dev_addr_with_mac_rsp(params.as_ptr(), (*ppp).val.as_mut_ptr().offset(3));
         } else {
-            (*ppp).val[3] = (device_address & 0xFF) as u8;
-            (*ppp).val[4] = ((device_address >> 8) & 0xff) as u8;
+            (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
+            (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
         }
     } else if (*ppp).val[15] == GET_USER_NOTIFY {
         /*user can get parameters from APP.
@@ -474,16 +474,16 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         for i in 0..8 {//params[2]
             (*ppp).val[5 + i] = i as u8;
         }
-        (*ppp).val[3] = (device_address & 0xFF) as u8;
-        (*ppp).val[4] = ((device_address >> 8) & 0xff) as u8;
+        (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
+        (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
     } else if (*ppp).val[15] == GET_MESH_OTA {
         (*ppp).val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
         if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
             for i in 0..8 {
                 (*ppp).val[5 + i] = get_mesh_pair_checksum(i as u8);
             }
-            (*ppp).val[3] = (device_address & 0xFF) as u8;
-            (*ppp).val[4] = ((device_address >> 8) & 0xff) as u8;
+            (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
+            (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
             return true;
         }
         return _mesh_ota_slave_set_response((*ppp).val.as_mut_ptr().offset(3), params[1]);
@@ -631,7 +631,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
 unsafe fn light_slave_tx_command_ll(p_cmd: *const u8, para: u16) -> bool
 {
     let mut cmd_op_para: [u8; 16] = [0; 16];
-    let cmd_sno = clock_time() + device_address as u32;
+    let cmd_sno = clock_time() + *get_device_address() as u32;
 
     let slice = slice::from_raw_parts(p_cmd, 13);
     cmd_op_para[0..13].copy_from_slice(slice);
@@ -653,22 +653,22 @@ pub unsafe fn light_slave_tx_command(p_cmd: *const u8, para: u16) -> bool
 
 unsafe fn light_notify(p: *const u8, len: u8, p_src: *const u8) -> i32 {
     let mut err = -1;
-    if slave_link_connected && pair_login_ok {
+    if *get_slave_link_connected() && *get_pair_login_ok() {
         if len > 10 {   //max length of par is 10
             return -1;
         }
 
-        pkt_light_notify.value[3] = *p_src.offset(0);
-        pkt_light_notify.value[4] = *p_src.offset(1);
+        get_pkt_light_notify().value[3] = *p_src.offset(0);
+        get_pkt_light_notify().value[4] = *p_src.offset(1);
 
-        let valptr = pkt_light_notify.value.as_mut_ptr().offset(10);
+        let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
 
         write_bytes(valptr, 0, 10);
         copy_nonoverlapping(p, valptr, len as usize);
 
         let r = irq_disable();
         if _is_add_packet_buf_ready() {
-            if !_rf_link_add_tx_packet(addr_of!(pkt_light_notify) as *const u8) {
+            if !_rf_link_add_tx_packet(get_pkt_light_notify_addr() as *const u8) {
                 err = 0;
             }
         }

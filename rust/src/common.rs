@@ -206,7 +206,7 @@ pub fn mesh_ota_master_100_flag_check()
 {
 	let val = analog_read__attribute_ram_code(rega_light_off);
 	if val & RECOVER_STATUS::FLD_MESH_OTA_MASTER_100 as u8 != 0 {
-		unsafe { mesh_ota_master_100_flag = 1; }
+		set_mesh_ota_master_100_flag(1);
 		analog_write__attribute_ram_code(rega_light_off, val & !(RECOVER_STATUS::FLD_MESH_OTA_MASTER_100 as u8));
 	}
 }
@@ -220,10 +220,10 @@ pub unsafe fn dev_addr_with_mac_flag(params: *const u8) -> bool
 pub unsafe fn dev_addr_with_mac_rsp(params: *const u8, par_rsp: *mut u8) -> bool
 {
 	if dev_addr_with_mac_match(params) {
-		*par_rsp.offset(0) = (device_address & 0xff) as u8;
-		*par_rsp.offset(1) = ((device_address >> 8) & 0xff) as u8;
+		*par_rsp.offset(0) = (*get_device_address() & 0xff) as u8;
+		*par_rsp.offset(1) = ((*get_device_address() >> 8) & 0xff) as u8;
 
-		copy_nonoverlapping(slave_p_mac, par_rsp.offset( 2), 6);
+		copy_nonoverlapping(*get_slave_p_mac(), par_rsp.offset( 2), 6);
 		#[allow(unaligned_references)]
 		copy_nonoverlapping(&adv_rsp_pri_data.ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
 		return true;
@@ -237,7 +237,7 @@ pub unsafe fn dev_addr_with_mac_match(params: *const u8) -> bool
 		get_mac_en
 	} else {
 		for i in 0..6 {
-			if params.offset(4+i) != slave_p_mac.offset(i) {
+			if params.offset(4+i) != get_slave_p_mac().offset(i) {
 				return false;
 			}
 		}
@@ -266,7 +266,7 @@ pub unsafe fn mesh_pair_proc_get_mac_flag(){
 	get_mac_en = false; 	// set success
 	if mesh_pair_enable {
 		let mut data: [u8; 1] = [0];
-		flash_write_page(flash_adr_pairing + adr_flash_cfg_idx + 1, 1, data.as_mut_ptr());
+		flash_write_page(flash_adr_pairing + *get_adr_flash_cfg_idx() + 1, 1, data.as_mut_ptr());
 		if data[0] == 1 {get_mac_en = true} else {get_mac_en = false}
 	}
 }
@@ -431,7 +431,7 @@ pub unsafe fn light_onoff_step_timer() {
 // recover status before software reboot
 #[no_mangle]
 unsafe fn light_sw_reboot_callback() {
-    if rf_slave_ota_busy || _is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
+    if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
         analog_write__attribute_ram_code (rega_light_off, if light_off {FLD_LIGHT_OFF as u8} else {0});
     }
 }
@@ -509,7 +509,7 @@ pub unsafe fn mesh_pair_cb(params: *const u8)
 unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
 {
     let mut err = -1;
-    if slave_link_connected && pair_login_ok {
+    if *get_slave_link_connected() && *get_pair_login_ok() {
         if len > 10 {   //max length of par is 10
             return -1;
         }
@@ -550,7 +550,7 @@ unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
 unsafe fn mesh_pair_complete_notify() -> i32
 {
 	let par = [CMD_NOTIFY_MESH_PAIR_END];
-	return mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, par.as_ptr(), par.len() as u8, device_address);
+	return mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, par.as_ptr(), par.len() as u8, *get_device_address());
 }
 
 unsafe fn _safe_effect_new_mesh_finish() {
@@ -561,7 +561,7 @@ unsafe fn _safe_effect_new_mesh_finish() {
     mesh_pair_retry_cnt = 0;
     mesh_pair_start_time = 0;
     mesh_pair_notify_rsp_mask = [0; 32];
-    pair_setting_flag = PAIR_STATE::PAIR_SETTED;
+    set_pair_setting_flag(PAIR_STATE::PAIR_SETTED);
 }
 
 unsafe fn save_effect_new_mesh()
@@ -581,13 +581,13 @@ unsafe fn save_effect_new_mesh()
     }
 
     if effect_new_mesh == 0 {
-        copy_nonoverlapping(new_mesh_name.as_ptr(), pair_nn.as_mut_ptr(), 16);
-        copy_nonoverlapping(new_mesh_pwd.as_ptr(), pair_pass.as_mut_ptr(), 16);
-        copy_nonoverlapping(new_mesh_ltk.as_ptr(), pair_ltk.as_mut_ptr(), 16);
+        copy_nonoverlapping(new_mesh_name.as_ptr(), get_pair_nn().as_mut_ptr(), 16);
+        copy_nonoverlapping(new_mesh_pwd.as_ptr(), get_pair_pass().as_mut_ptr(), 16);
+        copy_nonoverlapping(new_mesh_ltk.as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
     }
     else
     {
-        copy_nonoverlapping(pair_ltk_mesh.as_ptr(), pair_ltk.as_mut_ptr(), 16);
+        copy_nonoverlapping(get_pair_ltk_mesh().as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
     }
 
 	mesh_pair_complete_notify();
@@ -595,7 +595,7 @@ unsafe fn save_effect_new_mesh()
     // make sure not receive legacy mesh data from now on
     let r = irq_disable();
     _pair_save_key();
-    rf_set_ble_access_code (addr_of!(pair_ac) as *const u8);// use new access code at once.
+    rf_set_ble_access_code (get_pair_ac_addr() as *const u8);// use new access code at once.
     rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO);	// clear online status :mesh_node_init()
 	sleep_us (1000);
     write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16);		// clear current rx in buffer
@@ -629,14 +629,14 @@ unsafe fn switch_to_default_mesh(delay_s: u8)
     default_mesh_time = (delay_s as u32 * 1000);
 
     /* Only change AC and LTK */
-    pair_ac = _access_code(get_pair_config_mesh_name().as_ptr(), get_pair_config_mesh_pwd().as_ptr());
-    copy_nonoverlapping(get_pair_config_mesh_ltk().as_ptr(), pair_ltk.as_mut_ptr(), 16);
+    set_pair_ac(_access_code(get_pair_config_mesh_name().as_ptr(), get_pair_config_mesh_pwd().as_ptr()));
+    copy_nonoverlapping(get_pair_config_mesh_ltk().as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
 }
 
 unsafe fn get_online_node_cnt() -> u8
 {
     let mut cnt = 0;
-	for i in 0..mesh_node_max {
+	for i in 0..*get_mesh_node_max() {
 	    if mesh_node_st[i as usize].tick != 0 {
 	        cnt += 0;
 	        if i > 0 {
@@ -702,12 +702,12 @@ unsafe fn mesh_pair_proc()
         mesh_pair_retry_cnt = 0;
         mesh_pair_start_time = 0;
         mesh_pair_notify_rsp_mask = [0; 32];
-        pair_setting_flag = PAIR_STATE::PAIR_SETTED;
+        set_pair_setting_flag(PAIR_STATE::PAIR_SETTED);
         rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
         return;
     }
 
-    if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_START && mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME1 && get_online_node_cnt() == 1 {
+    if *get_pair_setting_flag() == PAIR_STATE::PAIR_SET_MESH_TX_START && mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME1 && get_online_node_cnt() == 1 {
         op_para[0] = LGT_CMD_MESH_PAIR;
         op_para[3] = MESH_PAIR_STATE::MESH_PAIR_EFFECT as u8;
         dst_addr = 0x0000;// there is noly one device in mesh,just effect itself.
@@ -716,63 +716,63 @@ unsafe fn mesh_pair_proc()
         mesh_pair_retry_cnt = 0;
         mesh_pair_start_time = 0;
         mesh_pair_notify_rsp_mask = [0; 32];
-        pair_setting_flag = PAIR_STATE::PAIR_SETTED;
-    }else if pair_setting_flag as u8 >= PAIR_STATE::PAIR_SET_MESH_TX_START as u8 && clock_time_exceed(mesh_pair_time, mesh_pair_cmd_interval*1000) {
+        set_pair_setting_flag(PAIR_STATE::PAIR_SETTED);
+    }else if *get_pair_setting_flag() as u8 >= PAIR_STATE::PAIR_SET_MESH_TX_START as u8 && clock_time_exceed(mesh_pair_time, mesh_pair_cmd_interval*1000) {
         mesh_pair_time = clock_time();
-        if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_START {
+        if *get_pair_setting_flag() == PAIR_STATE::PAIR_SET_MESH_TX_START {
             op_para[0] = LGT_CMD_MESH_PAIR;
             op_para[3] = mesh_pair_state as u8;
             if mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME1 {
                 // send mesh name [0-7]
-                copy_nonoverlapping(pair_nn.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_nn().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME2;
             }else if mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME2 {
                 // send mesh name [8-15]
-                copy_nonoverlapping(pair_nn.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_nn().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_PWD1;
             }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_PWD1){
                 // send mesh pwd [0-7]
-                copy_nonoverlapping(pair_pass.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_pass().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_PWD2;
             }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_PWD2){
                 // send mesh pwd [8-15]
-                copy_nonoverlapping(pair_pass.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_pass().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_LTK1;
             }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_LTK1){
                 // send mesh ltk [0-7]
-                copy_nonoverlapping(pair_ltk_mesh.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_ltk_mesh().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_LTK2;
             }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_LTK2){
                 // send mesh ltk [8-15]
-                copy_nonoverlapping(pair_ltk_mesh.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
+                copy_nonoverlapping(get_pair_ltk_mesh().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
         		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
-        		pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_TX_DONE;
+        		set_pair_setting_flag(PAIR_STATE::PAIR_SET_MESH_TX_DONE);
             }else{
                 mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
                 mesh_pair_start_notify_time = 0;
                 mesh_pair_retry_cnt = 0;
                 mesh_pair_start_time = 0;
                 mesh_pair_notify_rsp_mask = [0; 32];
-        		pair_setting_flag = PAIR_STATE::PAIR_SETTED;
+        		set_pair_setting_flag(PAIR_STATE::PAIR_SETTED);
         		return;
             }
-        }else if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_DONE {
+        }else if *get_pair_setting_flag() == PAIR_STATE::PAIR_SET_MESH_TX_DONE {
             // get mesh nodes' confirm value
             //rf_link_slave_read_status_start();
             op_para[0] = LGT_CMD_MESH_OTA_READ;
             op_para[3] = 0x10;// bridge cnt
             op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
-            pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_RX_DONE;
+            set_pair_setting_flag(PAIR_STATE::PAIR_SET_MESH_RX_DONE);
             mesh_pair_start_notify_time = clock_time() | 0;
             for i in 0..8 {
                 mesh_pair_checksum[i] = get_mesh_pair_checksum(i as u8);
             }
-        }else if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_RX_DONE {
+        }else if *get_pair_setting_flag() == PAIR_STATE::PAIR_SET_MESH_RX_DONE {
             let mut effect_flag = mesh_pair_notify_rsp_mask == [0; 32];
             if !effect_flag && clock_time_exceed(mesh_pair_start_time, MESH_PAIR_NOTIFY_TIMEOUT*1000) {
                 if mesh_pair_retry_cnt < mesh_pair_retry_max {
                     mesh_pair_start_time = clock_time() | 1;
-                    pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_TX_START;
+                    set_pair_setting_flag(PAIR_STATE::PAIR_SET_MESH_TX_START);
                     mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
                 }else{
                     // retry timeout, effect or cancel?? effect now
@@ -789,7 +789,7 @@ unsafe fn mesh_pair_proc()
                 mesh_pair_retry_cnt = 0;
                 mesh_pair_start_time = 0;
                 mesh_pair_notify_rsp_mask = [0; 32];
-                pair_setting_flag = PAIR_STATE::PAIR_SETTED;
+                set_pair_setting_flag(PAIR_STATE::PAIR_SETTED);
             }
         }
     }else{
@@ -814,17 +814,17 @@ unsafe fn mesh_node_buf_init()
 #[no_mangle]
 pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
 {
-    if rf_slave_ota_finished_flag != OtaState::CONTINUE {
+    if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
         return true;
     }
 
-    if !rf_slave_ota_busy {
-        if !pair_login_ok || _is_master_sending_ota_st() || _is_mesh_ota_slave_running() {
+    if !*get_rf_slave_ota_busy() {
+        if !*get_pair_login_ok() || _is_master_sending_ota_st() || _is_mesh_ota_slave_running() {
             return true;
         }
 
-        rf_slave_ota_busy = true;
-        if slave_read_status_busy
+        set_rf_slave_ota_busy(true);
+        if *get_slave_read_status_busy()
         {
             _rf_link_slave_read_status_stop ();
         }
@@ -846,7 +846,7 @@ unsafe fn get_ota_check_type(par: *const u8) -> u8
 #[no_mangle]
 unsafe fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
 {
-	rf_slave_ota_finished_flag = reset_flag;
+	set_rf_slave_ota_finished_flag(reset_flag);
 	rf_slave_ota_finished_time = clock_time();
 }
 
@@ -858,7 +858,7 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 		let nDataLen = (*p).l2cap - 7;
 
 		if crc16((*p).dat.as_ptr(), nDataLen + 2) == (*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) << 8 {
-			rf_slave_ota_timeout_s = rf_slave_ota_timeout_def_s;	// refresh timeout
+			set_rf_slave_ota_timeout_s(*get_rf_slave_ota_timeout_def_s());	// refresh timeout
 
 			let cur_idx = (*p).dat[0] as u16 | ((*p).dat[1] as u16) << 8;
 			if nDataLen == 0 {
@@ -867,7 +867,7 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 					reset_flag = OK;
 				}else{
 					// ota err
-					cur_ota_flash_addr = 0;
+					set_cur_ota_flash_addr(0);
                     ota_pkt_cnt = 0;
                     ota_rcv_last_idx = 0;
 					reset_flag = ERROR;
@@ -875,9 +875,9 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 			}else{
 				if cur_idx == 0 {
 					// start ota
-					if cur_ota_flash_addr != 0 {
+					if *get_cur_ota_flash_addr() != 0 {
 					    // 0x10000 should be 0x00
-						cur_ota_flash_addr = 0;
+						set_cur_ota_flash_addr(0);
                         ota_pkt_cnt = 0;
                         ota_rcv_last_idx = 0;
 	                    reset_flag = ERROR;
@@ -894,7 +894,7 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 						ota_pkt_total = (((((*p).dat[10] as u32) |( (((*p).dat[11] as u32) << 8) & 0xFF00) | ((((*p).dat[12] as u32) << 16) & 0xFF0000) | ((((*p).dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16;
 						if(ota_pkt_total < 3){
 							// invalid fw
-							cur_ota_flash_addr = 0;
+							set_cur_ota_flash_addr(0);
                             ota_pkt_cnt = 0;
                             ota_rcv_last_idx = 0;
 							reset_flag = ERROR;
@@ -905,21 +905,21 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 						fw_check_val += ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
 					}else if cur_idx == ota_pkt_total - 1 && need_check_type == 1 {
 						if fw_check_val != (((*p).dat[2] as u32) |( (((*p).dat[3] as u32) << 8) & 0xFF00) | ((((*p).dat[4] as u32) << 16) & 0xFF0000) | ((((*p).dat[5] as u32) << 24) & 0xFF000000)) {
-							cur_ota_flash_addr = 0;
+							set_cur_ota_flash_addr(0);
                             ota_pkt_cnt = 0;
                             ota_rcv_last_idx = 0;
 							reset_flag = ERROR;
 						}
 					}
 
-					if cur_ota_flash_addr + 16 > (FW_SIZE_MAX_K * 1024) { // !is_valid_fw_len()
+					if *get_cur_ota_flash_addr() + 16 > (FW_SIZE_MAX_K * 1024) { // !is_valid_fw_len()
 					    reset_flag = ERROR;
 				    }else{
 					    reset_flag = _rf_ota_save_data(&(*p).dat[2]);
 					}
 				}else{
 					// error, ota failed
-					cur_ota_flash_addr = 0;
+					set_cur_ota_flash_addr(0);
                     ota_pkt_cnt = 0;
                     ota_rcv_last_idx = 0;
 					reset_flag = ERROR;
@@ -929,19 +929,19 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 			}
 		}else{
 			// error, ota failed
-			cur_ota_flash_addr = 0;
+			set_cur_ota_flash_addr(0);
             ota_pkt_cnt = 0;
             ota_rcv_last_idx = 0;
 		    reset_flag = ERROR;
 		}
 
 		if reset_flag != OtaState::CONTINUE {
-		    if rf_slave_ota_finished_flag == OtaState::CONTINUE {
-		    	if (APP_OTA_HCI_TYPE::MESH == app_ota_hci_type)
+		    if *get_rf_slave_ota_finished_flag() == OtaState::CONTINUE {
+		    	if (APP_OTA_HCI_TYPE::MESH == *get_app_ota_hci_type())
 		    	&& (reset_flag == OtaState::OK) {
 		    		_mesh_ota_master_start_firmware_from_backup();
-		    		rf_slave_ota_timeout_s = 0;	// stop gatt ota timeout check
-		    		rf_slave_ota_busy = false;		// must
+		    		set_rf_slave_ota_timeout_s(0);	// stop gatt ota timeout check
+		    		set_rf_slave_ota_busy(false);		// must
 			    }else{
 			    	rf_slave_ota_finished_flag_set(reset_flag);
 			    }
@@ -1026,9 +1026,9 @@ unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
 {
 	rf_link_slave_data_ota_save();
 
-    if rf_slave_ota_finished_flag != OtaState::CONTINUE {
+    if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
         let mut reboot_flag = false;
-        if (0 == terminate_cnt) && rf_slave_ota_terminate_flag {
+        if (0 == terminate_cnt) && *get_rf_slave_ota_terminate_flag() {
             if _is_add_packet_buf_ready() {
                 terminate_cnt = 6;
                 _rf_link_add_tx_packet (pkt_terminate.as_ptr());
@@ -1042,16 +1042,16 @@ unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
             }
         }
 
-        if !rf_slave_ota_terminate_flag && (clock_time() - rf_slave_ota_finished_time) > 2000*1000 * tick_per_us {
-            rf_slave_ota_terminate_flag = true;    // for ios: no last read command
+        if !*get_rf_slave_ota_terminate_flag() && (clock_time() - rf_slave_ota_finished_time) > 2000*1000 * *get_tick_per_us() {
+            set_rf_slave_ota_terminate_flag(true);    // for ios: no last read command
         }
 
-        if (clock_time() - rf_slave_ota_finished_time) > 4000*1000 * tick_per_us {
+        if (clock_time() - rf_slave_ota_finished_time) > 4000*1000 * *get_tick_per_us() {
             reboot_flag = true;
         }
 
         if reboot_flag {
-            rf_link_slave_ota_finish_led_and_reboot(rf_slave_ota_finished_flag);
+            rf_link_slave_ota_finish_led_and_reboot(*get_rf_slave_ota_finished_flag());
             // have been reboot
         }
     }
@@ -1075,7 +1075,7 @@ fn mesh_ota_led_cb(_type: MESH_OTA_LED)
 #[no_mangle]
 unsafe fn save_pair_info(adr: u32, p: *const u8, n: u32)
 {
-	flash_write_page (flash_adr_pairing + adr_flash_cfg_idx + adr, n, p);
+	flash_write_page (flash_adr_pairing + *get_adr_flash_cfg_idx() + adr, n, p);
 }
 
 #[no_mangle]

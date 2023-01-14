@@ -190,7 +190,7 @@ static spp_devicename: const_cstr::ConstCStr = const_cstr::const_cstr!("DevName"
 
 unsafe fn meshStatusWrite(pw: *const u8) -> u32
 {
-    if !pair_login_ok {
+    if !*get_pair_login_ok() {
         return 1;
     }
 

@@ -71,51 +71,50 @@ pub_mut!(p_adv_pri_data, *const ll_adv_private_t);
 pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t);
 pub_mut!(adv_private_data_len, u8);
 
-extern "C" {
-    pub static mut online_status_timeout: u32;
+pub_mut!(online_status_timeout, u32);
 
-    pub static mut security_enable: bool;
-    pub static mut pair_login_ok: bool;
-    pub static mut slave_first_connected_tick: u32;
+pub_mut!(security_enable, bool);
+pub_mut!(pair_login_ok, bool);
+pub_mut!(slave_first_connected_tick, u32);
 
-    pub static device_address: u16;
-    pub static max_relay_num: u8;
+pub_mut!(device_address, u16);
+pub_mut!(max_relay_num, u8);
 
-    pub static group_address: [u16; MAX_GROUP_NUM as usize];
+pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]);
 
-    pub static mut slave_p_mac: *const u8;
+pub_mut!(slave_p_mac, *const u8);
 
-    pub static mut adr_flash_cfg_idx: u32;
+pub_mut!(adr_flash_cfg_idx, u32);
 
-    pub static mut slave_link_connected: bool;
+pub_mut!(slave_link_connected, bool);
 
-    pub static mut pkt_light_notify: rf_packet_att_cmd_t;
+pub_mut!(pkt_light_notify, rf_packet_att_cmd_t);
 
-    pub static mut slave_read_status_busy: bool;
-    pub static mut rf_slave_ota_busy: bool;
+pub_mut!(slave_read_status_busy, bool);
+pub_mut!(rf_slave_ota_busy, bool);
 
-    pub static mut pair_setting_flag: PAIR_STATE;
-    pub static mut pair_nn: [u8; 16];
-    pub static mut pair_pass: [u8; 16];
-    pub static mut pair_ltk: [u8; 16];
-    pub static mut pair_ltk_mesh: [u8; 16];
-    pub static mut pair_ac: u32;
+pub_mut!(pair_setting_flag, PAIR_STATE);
+pub_mut!(pair_nn, [u8; 16]);
+pub_mut!(pair_pass, [u8; 16]);
+pub_mut!(pair_ltk, [u8; 16]);
+pub_mut!(pair_ltk_mesh, [u8; 16]);
+pub_mut!(pair_ac, u32);
 
-    pub static mut cur_ota_flash_addr: u32;
-    pub static mut mesh_ota_master_100_flag: u8;
-    pub static mut rf_slave_ota_finished_flag: OtaState;
-    pub static mut rf_slave_ota_terminate_flag: bool;
-    pub static mut app_ota_hci_type: APP_OTA_HCI_TYPE;
-    pub static mut mesh_node_max: u8;
+pub_mut!(cur_ota_flash_addr, u32);
+pub_mut!(mesh_ota_master_100_flag, u8);
+pub_mut!(rf_slave_ota_finished_flag, OtaState);
+pub_mut!(rf_slave_ota_terminate_flag, bool);
+pub_mut!(app_ota_hci_type, APP_OTA_HCI_TYPE);
+pub_mut!(mesh_node_max, u8);
 
-    pub static mut rf_slave_ota_timeout_def_s: u16;
-    pub static mut rf_slave_ota_timeout_s: u16;
+pub_mut!(rf_slave_ota_timeout_def_s, u16);
+pub_mut!(rf_slave_ota_timeout_s, u16);
 
-    pub static mut tick_per_us: u32;
+pub_mut!(tick_per_us, u32);
 
-    pub static mut user_data: [u8; 16];
-    pub static mut user_data_len: u8;
-}
+pub_mut!(user_data, [u8; 16]);
+pub_mut!(user_data_len, u8);
+
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255

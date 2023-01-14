@@ -7,12 +7,13 @@ use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_
 use sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use std::ptr::addr_of;
-use ::{BIT, FLASH_ADR_OTA_READY_FLAG};
+use ::{BIT};
 use sdk::common::crc::crc16;
 use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use sdk::rf_drv::rf_set_ble_access_code;
 use config::*;
 use main_light::*;
+use ota::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
 use pub_mut;
 use sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
 use sdk::mcu::watchdog::wd_clear;
@@ -950,7 +951,7 @@ unsafe fn rf_ota_set_flag()
 	}
 
 	flash_erase_sector (FLASH_ADR_OTA_READY_FLAG);
-	let flag: u32 = 0xa5;
+	let flag: u32 = FLASH_OTA_READY_FLAG as u32;
 	flash_write_page (FLASH_ADR_OTA_READY_FLAG, 4, addr_of!(flag) as *mut u8);
 }
 

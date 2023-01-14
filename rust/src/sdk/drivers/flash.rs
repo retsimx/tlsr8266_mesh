@@ -259,7 +259,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
  */
 #[inline(always)]
 #[no_mangle] // required by light_ll
-pub unsafe fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
+pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 {
 	let mut ns = PAGE_SIZE - (addr&(PAGE_SIZE - 1));
 	let mut nw = 0;
@@ -269,7 +269,7 @@ pub unsafe fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 		flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
 		ns = PAGE_SIZE;
 		addr += nw;
-		buf = buf.offset(nw as isize);
+		buf = unsafe { buf.offset(nw as isize) };
 		len -= nw;
 		if len == 0 {
 			break;

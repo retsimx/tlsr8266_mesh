@@ -9,10 +9,6 @@ use sdk::mcu::irq_i::{irq_enable, irq_init};
 use sdk::mcu::watchdog::wd_clear;
 use sdk::pm::cpu_wakeup_init;
 
-fn fill_from_str(mut bytes: &mut [u8], s: &[u8]) {
-    bytes.write(s).unwrap();
-}
-
 pub struct App {
 
 }
@@ -26,7 +22,7 @@ impl App {
 
     pub unsafe fn init(&self) {
         // Copy the password in to the pair config
-        fill_from_str(get_pair_config_pwd_encode_sk(), MESH_PWD_ENCODE_SK.as_bytes());
+        get_pair_config_pwd_encode_sk().as_mut_slice().write(MESH_PWD_ENCODE_SK.as_bytes()).unwrap();
 
         // Init various subsystems
         cpu_wakeup_init();

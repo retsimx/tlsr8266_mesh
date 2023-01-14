@@ -19,9 +19,6 @@ mod sdk;
 mod main_light;
 mod common;
 mod vendor_light;
-mod ota;
-mod config;
-mod app;
 mod math_wrapper;
 
 // General stuff

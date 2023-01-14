@@ -3,6 +3,7 @@ use std::ffi::CStr;
 use std::ptr::{addr_of, null};
 use std::mem::{transmute};
 use config::{DEVICE_NAME, MESH_NAME};
+use ::{pub_mut, pub_static};
 use sdk::light::*;
 use sdk::service::{SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE};
 
@@ -117,8 +118,7 @@ static appearance: u16 = GAP_APPEARE_UNKNOWN;
 static periConnParamChar: u8 = CHAR_PROP_READ;
 
 static fwRevisionChar: u8 = CHAR_PROP_READ;
-#[no_mangle] // required by light_ll
-static mut fwRevision_value: [u8; 16] = [0; 16];
+pub_static!(fwRevision_value, [u8; 16], [0; 16]);
 
 static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();
@@ -145,19 +145,15 @@ struct gap_periConnectParams_t
 const periConnParameters: gap_periConnectParams_t = gap_periConnectParams_t { intervalMin: 20, intervalMax: 40, latency: 0, timeout: 1000 };
 
 // note !!!DEVICE_NAME max 13 bytes
-pub static ble_g_devName: &[u8] = DEVICE_NAME.val.as_bytes();
+pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.val.as_bytes());
 
 //////////////////////// SPP /////////////////////////////////////////////////////
-#[no_mangle]
-static mut TelinkSppServiceUUID: [u8; 16] = TELINK_SPP_UUID_SERVICE;
-#[no_mangle]
-static mut TelinkSppDataServer2ClientUUID: [u8; 16] = TELINK_SPP_DATA_SERVER2CLIENT;
-#[no_mangle]
-static mut TelinkSppDataClient2ServiceUUID: [u8; 16] = TELINK_SPP_DATA_CLIENT2SERVER;
-#[no_mangle]
-static mut TelinkSppDataOtaUUID: [u8; 16] = TELINK_SPP_DATA_OTA;
-#[no_mangle]
-static mut TelinkSppDataPairUUID: [u8; 16] = TELINK_SPP_DATA_PAIR;
+// These must be pub_mut
+pub_mut!(TelinkSppServiceUUID, [u8; 16], TELINK_SPP_UUID_SERVICE);
+pub_mut!(TelinkSppDataServer2ClientUUID, [u8; 16], TELINK_SPP_DATA_SERVER2CLIENT);
+pub_mut!(TelinkSppDataClient2ServiceUUID, [u8; 16], TELINK_SPP_DATA_CLIENT2SERVER);
+pub_mut!(TelinkSppDataOtaUUID, [u8; 16], TELINK_SPP_DATA_OTA);
+pub_mut!(TelinkSppDataPairUUID, [u8; 16], TELINK_SPP_DATA_PAIR);
 
 // Spp data from Server to Client characteristic variables
 static SppDataServer2ClientProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE | CHAR_PROP_NOTIFY;
@@ -176,7 +172,7 @@ static status_ccc: [u8; 2] = [0x01, 0x00];
 static SppDataPairProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE;
 static SppDataPairData: [u8; 20] = [0xe0; 20];
 
-extern "C" { static mut send_to_master: [u8; 16]; }
+pub_mut!(send_to_master, [u8; 16]);
 
 static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master };
 
@@ -205,7 +201,7 @@ unsafe fn meshStatusWrite(pw: *const u8) -> u32
 }
 
 #[repr(C, packed)]
-struct attribute_t
+pub struct attribute_t
 {
     pub attNum: u8,
     pub uuidLen: u8,
@@ -251,8 +247,7 @@ const fn size_of_val<T>(_: &T) -> usize {
     std::mem::size_of::<T>()
 }
 
-#[no_mangle]
-static mut gAttributes_def: [attribute_t; 29] = [
+pub_mut!(gAttributes_def, [attribute_t; 29], [
     attrdef!((unsafe { gAttributes_def.len() - 1 }) as u8, 0, 0, 0),
 
     // gatt
@@ -297,4 +292,4 @@ static mut gAttributes_def: [attribute_t; 29] = [
     attrdefu!(0,2,1,1,characterUUID,         SppDataPairProp),                //prop
     attrdef!(0,16,16,16,TelinkSppDataPairUUID,   SppDataPairData, _pairWrite, _pairRead),//value
     attrdef!(0,2,spp_pairname.val.as_bytes().len(), spp_pairname.val.as_bytes().len(),userdesc_UUID, spp_pairname.val),
-];
+]);

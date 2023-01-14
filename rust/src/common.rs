@@ -13,90 +13,64 @@ use sdk::light::OtaState::{ERROR, OK};
 use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use sdk::rf_drv::rf_set_ble_access_code;
 use common::RECOVER_STATUS::FLD_LIGHT_OFF;
-use config::{flash_adr_light_new_fw, flash_adr_pairing, OTA_LED, VENDOR_ID};
-use main_light::{cmd_delay, buff_response, cmd_delay_ms, cmd_left_delay_ms, device_status_update, irq_timer1_cb_time, led_lum, led_val, light_adjust_RGB_hw, light_off, light_onoff_normal, light_slave_tx_command, rf_link_light_event_callback};
+use config::*;
+use main_light::*;
+use pub_mut;
 use sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
 use sdk::mcu::watchdog::wd_clear;
-use vendor_light::adv_rsp_pri_data;
+use vendor_light::get_adv_rsp_pri_data;
 
-#[no_mangle]
-pub static mut mesh_pair_start_time: u32 = 0;
-#[no_mangle]
-pub static mut default_mesh_time: u32 = 0;
-#[no_mangle]
-pub static mut default_mesh_effect_delay_ref: u32 = 0;  /* When receive change to default mesh command, shall delay at least 500ms */
-#[no_mangle]
-pub static mut mesh_pair_start_notify_time: u32 = 0;
-#[no_mangle]
-pub static mut mesh_pair_retry_cnt: u8 = 0;
-#[no_mangle]
-pub static mut mesh_pair_notify_rsp_mask: [u8; 32] = [0; 32];
-#[no_mangle]
-pub static mut new_mesh_name: [u8; 16] = [0; 16];
-#[no_mangle]
-pub static mut new_mesh_pwd: [u8; 16] = [0; 16];
-#[no_mangle]
-pub static mut new_mesh_ltk: [u8; 16] = [0; 16];
-#[no_mangle]
-pub static mut default_mesh_time_ref: u32 = 0;
-#[no_mangle]
-static mut effect_new_mesh: u8 = 0;
-#[no_mangle]
-static mut effect_new_mesh_delay_time: u32 = 0;
-#[no_mangle]
-static mut mesh_pair_cmd_interval: u32 = 0;
-#[no_mangle]
-static mut mesh_pair_timeout: u32 = 0;
-#[no_mangle]
-pub static mut mesh_pair_enable: bool = false;
-#[no_mangle]
-pub static mut mesh_pair_checksum: [u8; 8] = [0; 8];
-#[no_mangle]
-pub static mut mesh_pair_retry_max: u8 = 3;
-#[no_mangle]
-pub static mut get_mac_en: bool = false;
+pub_mut!(mesh_pair_start_time, u32, 0);
+pub_mut!(default_mesh_time, u32, 0);
+pub_mut!(default_mesh_effect_delay_ref, u32, 0);  /* When receive change to default mesh command, shall delay at least 500ms */
+pub_mut!(mesh_pair_start_notify_time, u32, 0);
+pub_mut!(mesh_pair_retry_cnt, u8, 0);
+pub_mut!(mesh_pair_notify_rsp_mask, [u8; 32], [0; 32]);
+pub_mut!(new_mesh_name, [u8; 16], [0; 16]);
+pub_mut!(new_mesh_pwd, [u8; 16], [0; 16]);
+pub_mut!(new_mesh_ltk, [u8; 16], [0; 16]);
+pub_mut!(default_mesh_time_ref, u32, 0);
+pub_mut!(effect_new_mesh, u8, 0);
+pub_mut!(effect_new_mesh_delay_time, u32, 0);
+pub_mut!(mesh_pair_cmd_interval, u32, 0);
+pub_mut!(mesh_pair_timeout, u32, 0);
+pub_mut!(mesh_pair_enable, bool, false);
+pub_mut!(mesh_pair_checksum, [u8; 8], [0; 8]);
+pub_mut!(mesh_pair_retry_max, u8, 3);
+pub_mut!(get_mac_en, bool, false);
 
 // BEGIN SHIT LIGHT_LL HAX
-#[no_mangle]
-static mut mesh_node_mask: [u32; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize] = [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize];
-#[no_mangle]
-static mut mesh_node_max_num: u16 = MESH_NODE_MAX_NUM;
-#[no_mangle]
-static mut mesh_node_st_val_len: u8 = MESH_NODE_ST_VAL_LEN;
-#[no_mangle]
-static mut mesh_node_st_par_len: u8 = MESH_NODE_ST_PAR_LEN;
-#[no_mangle]
-static mut mesh_node_st_len: u8 = size_of::<mesh_node_st_t>() as u8;
+pub_mut!(mesh_node_mask, [u32; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize], [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize]);
+pub_mut!(mesh_node_max_num, u16, MESH_NODE_MAX_NUM);
+pub_mut!(mesh_node_st_val_len, u8, MESH_NODE_ST_VAL_LEN);
+pub_mut!(mesh_node_st_par_len, u8, MESH_NODE_ST_PAR_LEN);
+pub_mut!(mesh_node_st_len, u8, size_of::<mesh_node_st_t>() as u8);
 // END SHIT LIGHT_LL HAX
 
-static mut ota_pkt_cnt: u16 = 0;
-static mut ota_rcv_last_idx: u16 = 0xffff;
-static mut fw_check_val: u32 = 0;
-static mut need_check_type: u8 = 0;//=1:crc val sum
-static mut ota_pkt_total: u16 = 0;
-static mut slave_ota_data_cache_idx: u8 = 0;
-static mut rf_slave_ota_finished_time: u32 = 0;
-static mut terminate_cnt: u8 = 0;
+pub_mut!(ota_pkt_cnt, u16, 0);
+pub_mut!(ota_rcv_last_idx, u16, 0xffff);
+pub_mut!(fw_check_val, u32, 0);
+pub_mut!(need_check_type, u8, 0);//=1:crc val sum
+pub_mut!(ota_pkt_total, u16, 0);
+pub_mut!(slave_ota_data_cache_idx, u8, 0);
+pub_mut!(rf_slave_ota_finished_time, u32, 0);
+pub_mut!(terminate_cnt, u8, 0);
 
-#[no_mangle]
-static mut conn_update_successed: u8 = 0;
-#[no_mangle]
-static mut conn_update_cnt: u8 = 0;
+pub_mut!(conn_update_successed, u8, 0);
+pub_mut!(conn_update_cnt, u8, 0);
 
 const UPDATE_CONN_PARA_CNT: u8 = 4;
 const conn_para_data: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [[18, 18+16, 200], [16, 16+16, 200], [32, 32+16, 200], [48, 48+16, 200]];
 const SYS_CHN_LISTEN_MESH: [u8; 4] = [2, 12, 23, 34];	//8, 30, 52, 74
-#[no_mangle]
-static mut sys_chn_listen: [u8; 4] = SYS_CHN_LISTEN_MESH;
+pub_mut!(sys_chn_listen, [u8; 4], SYS_CHN_LISTEN_MESH);
 
-pub static mut mesh_pair_time: u32 = 0;
-pub static mut mesh_pair_state: MESH_PAIR_STATE = MESH_PAIR_STATE::MESH_PAIR_NAME1;
-#[no_mangle]
-pub static mut mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM as usize] = [mesh_node_st_t{ tick: 0, val: mesh_node_st_val_t {
+pub_mut!(mesh_pair_time, u32, 0);
+pub_mut!(mesh_pair_state, MESH_PAIR_STATE, MESH_PAIR_STATE::MESH_PAIR_NAME1);
+pub_mut!(mesh_node_st, [mesh_node_st_t; MESH_NODE_MAX_NUM as usize], [mesh_node_st_t{ tick: 0, val: mesh_node_st_val_t {
     dev_adr: 0,
     sn: 0,
     par: [0; MESH_NODE_ST_PAR_LEN as usize],
-} }; MESH_NODE_MAX_NUM as usize];
+} }; MESH_NODE_MAX_NUM as usize]);
 
 #[derive(PartialEq)]
 pub enum gateway_status_t
@@ -112,7 +86,7 @@ pub enum gateway_status_t
     GATEWAY_STATUS_ADD_CONFIGURED_DEVICE,  /* Add configured device */
 }
 
-pub static mut gateway_status: gateway_status_t = gateway_status_t::GATEWAY_STATUS_NORMAL;
+pub_mut!(gateway_status, gateway_status_t, gateway_status_t::GATEWAY_STATUS_NORMAL);
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -131,7 +105,7 @@ pub const rega_light_off: u8 = 0x3a;
 
 pub const MESH_NODE_MAX_NUM: u16 = 64;
 
-pub static pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
+pub_mut!(pkt_terminate, [u8; 8], [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13]);
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -211,7 +185,7 @@ pub fn mesh_ota_master_100_flag_check()
 	}
 }
 
-#[no_mangle]
+#[no_mangle] // Required by light_ll
 pub unsafe fn dev_addr_with_mac_flag(params: *const u8) -> bool
 {
 	return DEV_ADDR_PAR_WITH_MAC == *params.offset(2);
@@ -225,7 +199,7 @@ pub unsafe fn dev_addr_with_mac_rsp(params: *const u8, par_rsp: *mut u8) -> bool
 
 		copy_nonoverlapping(*get_slave_p_mac(), par_rsp.offset( 2), 6);
 		#[allow(unaligned_references)]
-		copy_nonoverlapping(&adv_rsp_pri_data.ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
+		copy_nonoverlapping(&get_adv_rsp_pri_data().ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
 		return true;
 	}
 	return false;
@@ -245,7 +219,7 @@ pub unsafe fn dev_addr_with_mac_match(params: *const u8) -> bool
 	}
 }
 
-pub unsafe fn get_mesh_pair_checksum(idx: u8) -> u8 {
+pub unsafe fn get_mesh_pair_checksum_fn(idx: u8) -> u8 {
     let i = (idx % 8) as usize;
     return (new_mesh_name[i] ^ new_mesh_name[i+8]) ^ (new_mesh_pwd[i] ^ new_mesh_pwd[i+8]) ^ (new_mesh_ltk[i] ^ new_mesh_ltk[i+8]);
 }
@@ -266,7 +240,7 @@ pub unsafe fn mesh_pair_proc_get_mac_flag(){
 	get_mac_en = false; 	// set success
 	if mesh_pair_enable {
 		let mut data: [u8; 1] = [0];
-		flash_write_page(flash_adr_pairing + *get_adr_flash_cfg_idx() + 1, 1, data.as_mut_ptr());
+		flash_write_page(*get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + 1, 1, data.as_mut_ptr());
 		if data[0] == 1 {get_mac_en = true} else {get_mac_en = false}
 	}
 }
@@ -313,29 +287,29 @@ pub unsafe fn light_onoff_step(on: bool){
     let mut set_flag= true;
 
     if on {
-        if light_off {
+        if *get_light_off() {
             if !light_step.adjusting_flag {
                 light_step.lum_temp = 0;
             }
-            light_step.lum_dst = led_lum as i32;
+            light_step.lum_dst = *get_led_lum() as i32;
             get_step(LUM_UP);
     	}else{
     	    set_flag = false;
     	    light_onoff_normal(true); // make sure on. unnecessary.
     	}
-        light_off = false;
+        set_light_off(false);
 	}else{
-        if light_off {
+        if *get_light_off() {
     	    set_flag = false;
     	    light_onoff_normal(false); // make sure off. unnecessary.
     	}else{
             if !light_step.adjusting_flag {
-                light_step.lum_temp = led_lum as i32;
+                light_step.lum_temp = *get_led_lum() as i32;
             }
             light_step.lum_dst = 0;
             get_step(LUM_DOWN);
     	}
-        light_off = true;
+        set_light_off(true);
 	}
 
     light_step.adjusting_flag = set_flag;
@@ -344,8 +318,8 @@ pub unsafe fn light_onoff_step(on: bool){
 
 pub unsafe fn light_step_reset(target: u16) {
     let r = irq_disable();
-    if !light_step.adjusting_flag && target == led_lum {
-        light_adjust_RGB_hw(led_val[0], led_val[1], led_val[2], target);
+    if !light_step.adjusting_flag && target == *get_led_lum() {
+        light_adjust_RGB_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], target);
         irq_restore(r);
 		return
     }
@@ -361,14 +335,14 @@ pub unsafe fn light_step_reset(target: u16) {
             get_step(LUM_UP);
         }
     } else {
-        if target < led_lum {
-            light_step.lum_temp = led_lum as i32;
+        if target < *get_led_lum() {
+            light_step.lum_temp = *get_led_lum() as i32;
             light_step.lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
-        if target > led_lum {
-            light_step.lum_temp = led_lum as i32;
+        if target > *get_led_lum() {
+            light_step.lum_temp = *get_led_lum() as i32;
             light_step.lum_dst = target as i32;
             get_step(LUM_UP);
         }
@@ -376,7 +350,7 @@ pub unsafe fn light_step_reset(target: u16) {
 
     light_step.adjusting_flag = true;
     light_step.time = 0;
-    led_lum = target;
+    set_led_lum(target);
 
     irq_restore(r);
 }
@@ -415,7 +389,7 @@ pub unsafe fn light_onoff_step_timer() {
                 }else{
                     get_next_lum(LUM_DOWN);
                 }
-                light_adjust_RGB_hw(led_val[0], led_val[1], led_val[2], light_step.lum_temp as u16);
+                light_adjust_RGB_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], light_step.lum_temp as u16);
             }else{
                 light_step.adjusting_flag = false;
             }
@@ -429,10 +403,10 @@ pub unsafe fn light_onoff_step_timer() {
 }
 
 // recover status before software reboot
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn light_sw_reboot_callback() {
     if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
-        analog_write__attribute_ram_code (rega_light_off, if light_off {FLD_LIGHT_OFF as u8} else {0});
+        analog_write__attribute_ram_code (rega_light_off, if *get_light_off() {FLD_LIGHT_OFF as u8} else {0});
     }
 }
 
@@ -440,16 +414,16 @@ pub unsafe fn is_mesh_cmd_need_delay(p_cmd: *const u8, params: *const u8, ttc: u
 {
 	let delay_tmp = (*params.offset(1) as u16) | ((*params.offset(2) as u16) << 8);
 	if delay_tmp != 0 {
-		if cmd_left_delay_ms != 0 {
+		if *get_cmd_left_delay_ms() != 0 {
 			return true;
 		}
-		cmd_delay_ms = delay_tmp;
-		if cmd_delay_ms != 0 && irq_timer1_cb_time == 0 {
+		set_cmd_delay_ms(delay_tmp);
+		if *get_cmd_delay_ms() != 0 && *get_irq_timer1_cb_time() == 0 {
 			let cmd_delayed_ms = light_cmd_delayed_ms(ttc);
-			if cmd_delay_ms > cmd_delayed_ms {
-				copy_nonoverlapping(p_cmd, addr_of!(cmd_delay) as *mut u8, size_of::<ll_packet_l2cap_data_t>());
-				cmd_left_delay_ms = cmd_delay_ms - cmd_delayed_ms;
-				irq_timer1_cb_time = clock_time();
+			if *get_cmd_delay_ms() > cmd_delayed_ms {
+				copy_nonoverlapping(p_cmd, get_cmd_delay_addr() as *mut u8, size_of::<ll_packet_l2cap_data_t>());
+				set_cmd_left_delay_ms(*get_cmd_delay_ms() - cmd_delayed_ms);
+				set_irq_timer1_cb_time(clock_time());
 				return true;
 			}
 		}
@@ -765,7 +739,7 @@ unsafe fn mesh_pair_proc()
             set_pair_setting_flag(PAIR_STATE::PAIR_SET_MESH_RX_DONE);
             mesh_pair_start_notify_time = clock_time() | 0;
             for i in 0..8 {
-                mesh_pair_checksum[i] = get_mesh_pair_checksum(i as u8);
+                mesh_pair_checksum[i] = get_mesh_pair_checksum_fn(i as u8);
             }
         }else if *get_pair_setting_flag() == PAIR_STATE::PAIR_SET_MESH_RX_DONE {
             let mut effect_flag = mesh_pair_notify_rsp_mask == [0; 32];
@@ -811,7 +785,7 @@ unsafe fn mesh_node_buf_init()
 	device_status_update();
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
 {
     if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
@@ -834,7 +808,7 @@ pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
 	return true;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn get_ota_check_type(par: *const u8) -> u8
 {
 	if *par.offset(0) == 0x5D {
@@ -843,7 +817,7 @@ unsafe fn get_ota_check_type(par: *const u8) -> u8
 	return 0;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
 {
 	set_rf_slave_ota_finished_flag(reset_flag);
@@ -954,22 +928,22 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 	return true;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_ota_set_flag()
 {
     let fw_flag_telink = START_UP_FLAG;
     let mut flag_new = 0;
-	flash_read_page(flash_adr_light_new_fw + 8, size_of_val(&flag_new) as u32, addr_of!(flag_new) as *mut u8);
+	flash_read_page(*get_flash_adr_light_new_fw() + 8, size_of_val(&flag_new) as u32, addr_of!(flag_new) as *mut u8);
 	flag_new &= 0xffffff4b;
     if flag_new != fw_flag_telink {
         return ; // invalid flag
     }
 
 	let mut flag0 = 0;
-	flash_read_page(flash_adr_light_new_fw + 8, 1, addr_of!(flag0) as *mut u8);
+	flash_read_page(*get_flash_adr_light_new_fw() + 8, 1, addr_of!(flag0) as *mut u8);
 	if 0x4b != flag0 {
 	    flag0 = 0x4b;
-	    flash_write_page(flash_adr_light_new_fw + 8, 1, addr_of!(flag0) as *mut u8);		//Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
+	    flash_write_page(*get_flash_adr_light_new_fw() + 8, 1, addr_of!(flag0) as *mut u8);		//Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
 	}
 
 	flash_erase_sector (FLASH_ADR_OTA_READY_FLAG);
@@ -990,7 +964,7 @@ pub fn rf_led_ota_ok(){
 	}
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn rf_led_ota_error(){
 	gpio_set_func(OTA_LED as u32, AS_GPIO);
 	gpio_set_output_en(OTA_LED as u32, 1);
@@ -1004,11 +978,11 @@ fn rf_led_ota_error(){
 	}
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
 {
     if OtaState::ERROR == st {
-        erase_ota_data(flash_adr_light_new_fw);
+        erase_ota_data(*get_flash_adr_light_new_fw());
         rf_led_ota_error();
     }else if(OtaState::OK == st){
         //rf_ota_save_data(0);
@@ -1021,7 +995,7 @@ unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
     _light_sw_reboot();
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
 {
 	rf_link_slave_data_ota_save();
@@ -1057,7 +1031,7 @@ unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
     }
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn mesh_ota_led_cb(_type: MESH_OTA_LED)
 {
     if MESH_OTA_LED::OK == _type {
@@ -1072,25 +1046,25 @@ fn mesh_ota_led_cb(_type: MESH_OTA_LED)
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn save_pair_info(adr: u32, p: *const u8, n: u32)
 {
-	flash_write_page (flash_adr_pairing + *get_adr_flash_cfg_idx() + adr, n, p);
+	flash_write_page (*get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + adr, n, p);
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn get_ota_erase_sectors() -> u32
 {
    return ERASE_SECTORS_FOR_OTA;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn is_valid_fw_len(fw_len: u32) -> bool
 {
 	return fw_len <= (FW_SIZE_MAX_K * 1024);
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn get_fw_len(fw_adr: u32) -> u32
 {
 	let mut fw_len = 0;
@@ -1098,7 +1072,7 @@ fn get_fw_len(fw_adr: u32) -> u32
 	return fw_len;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32)
 {
 	let fw_len = get_fw_len(new_fw_adr);
@@ -1107,7 +1081,6 @@ unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t,
 	}
 }
 
-#[no_mangle]
 pub unsafe fn mesh_ota_master_start_firmware_from_own()
 {
     let adr_fw = 0;
@@ -1122,7 +1095,7 @@ pub unsafe fn mesh_ota_master_start_firmware_from_own()
 	}
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
 {
    let mut ret = true;
@@ -1145,7 +1118,7 @@ unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
    return ret;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
 {
    let light_mode_self: u16 = 0x02; // LIGHT_MODE;
@@ -1172,7 +1145,7 @@ unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
     interval_min + 20 ms <= interval_max <= 2second
     timeout <= 6second
 */
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn update_ble_parameter_cb() {
    if conn_update_successed == 0 {
        _setup_ble_parameter_start(1, conn_para_data[0][0], conn_para_data[0][1], conn_para_data[0][2]);  // interval 32: means 40ms;   timeout 200: means 2000ms
@@ -1180,7 +1153,7 @@ unsafe fn update_ble_parameter_cb() {
    }
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_update_conn_para(p: *const u8) -> u8
 {
    let pp = p as *const rf_pkt_l2cap_sig_connParaUpRsp_t;
@@ -1210,7 +1183,7 @@ unsafe fn rf_update_conn_para(p: *const u8) -> u8
    return 0;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn light_slave_tx_command_callback (p: *const u8) {
     _rf_link_data_callback(p);
 }

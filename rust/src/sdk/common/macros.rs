@@ -59,6 +59,52 @@ macro_rules! pub_mut {
 }
 
 #[macro_export]
+macro_rules! pub_static {
+    ( $name:ident, $typ:ty, $val:expr ) => {
+        #[no_mangle]
+        static $name: $typ = $val;
+
+        paste::paste! {
+            #[allow(dead_code)]
+            pub fn [<get_ $name>]() -> &'static $typ {
+                unsafe {
+                    return &$name;
+                }
+            }
+
+            #[allow(dead_code)]
+            pub fn [<get_ $name _addr>]() -> *const $typ {
+                unsafe {
+                    use std::ptr::addr_of;
+                    return addr_of!($name);
+                }
+            }
+        }
+    };
+
+    ( $name:ident, $typ:ty ) => {
+        extern "C" { static $name: $typ; }
+
+        paste::paste! {
+            #[allow(dead_code)]
+            pub fn [<get_ $name>]() -> &'static $typ {
+                unsafe {
+                    return &$name;
+                }
+            }
+
+            #[allow(dead_code)]
+            pub fn [<get_ $name _addr>]() -> *const $typ {
+                unsafe {
+                    use std::ptr::addr_of;
+                    return addr_of!($name);
+                }
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! pub_mut_no_move {
     ( $name:ident, $typ:ty, $val:expr ) => {
         #[no_mangle]

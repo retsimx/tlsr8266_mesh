@@ -5,9 +5,9 @@ use sdk::mcu::clock::sleep_us;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use sdk::mcu::watchdog::wd_clear;
 
-pub static PAGE_SIZE : u32 =			   256;
-pub static PAGE_SIZE_OTP : u32 =		   256;
-pub static FLASH_LOCK_EN : u32 =           0;
+pub const PAGE_SIZE : u32 =			   256;
+pub const PAGE_SIZE_OTP : u32 =		   256;
+pub const FLASH_LOCK_EN : u32 =           0;
 
 /**
  * @brief     flash command definition

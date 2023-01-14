@@ -7,7 +7,7 @@ pub fn analog_wait(){
 }
 
 #[inline(never)]
-#[no_mangle]
+#[no_mangle] // required by light_ll
 pub fn analog_read__attribute_ram_code(addr: u8) -> u8 {
     let r = irq_disable();
 

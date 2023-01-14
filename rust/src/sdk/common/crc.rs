@@ -1,4 +1,4 @@
-#[no_mangle]
+#[no_mangle] // required by light_ll
 pub unsafe fn crc16 (mut pD: *const u8, len: u16) -> u16
 {
     let poly: [u16; 2] = [0, 0xa001];              //0x8005 <==> 0xa001

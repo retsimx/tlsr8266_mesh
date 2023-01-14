@@ -1,4 +1,4 @@
-pub static ONES_32 : u32 =  0xffffffff;
+pub const ONES_32 : u32 =  0xffffffff;
 
 #[macro_export]
 macro_rules! BIT {

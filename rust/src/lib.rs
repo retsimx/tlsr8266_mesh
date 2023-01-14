@@ -1,20 +1,12 @@
-use std::ffi::CStr;
-use std::io::Write;
-use std::mem;
 use std::mem::{MaybeUninit, transmute};
-use std::ptr::addr_of;
 use app::App;
-use config::flash_adr_light_new_fw;
-use main_light::{main_loop, user_init};
+use config::get_flash_adr_light_new_fw;
+use main_light::{user_init};
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use sdk::mcu::dma::dma_init;
-use sdk::mcu::gpio::{gpio_init, GPIO_PIN_TYPE};
-use sdk::mcu::clock::clock_init;
-use sdk::mcu::gpio::GPIO_PIN_TYPE::{GPIO_PA1, GPIO_PC0, GPIO_PC2, GPIO_PC4};
-use sdk::mcu::irq_i::{irq_disable, irq_enable, irq_init};
+use sdk::mcu::gpio::{GPIO_PIN_TYPE};
+use sdk::mcu::gpio::GPIO_PIN_TYPE::{GPIO_PC0, GPIO_PC2, GPIO_PC4};
+use sdk::mcu::irq_i::{irq_disable, irq_init};
 use sdk::mcu::register::{write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
-use sdk::mcu::watchdog::wd_clear;
-use sdk::pm;
 
 mod sdk;
 mod main_light;
@@ -45,7 +37,7 @@ unsafe fn handle_ota_update__attribute_ram_code() {
 
     let mut	buff: [u8; 256] = MaybeUninit::uninit().assume_init();
 
-    flash_read_page (flash_adr_light_new_fw, PAGE_SIZE, buff.as_mut_ptr());
+    flash_read_page (*get_flash_adr_light_new_fw(), PAGE_SIZE, buff.as_mut_ptr());
 	let	n = *(buff.as_ptr().offset(0x18) as *const u32);
     let mut i = 0;
     while i < n
@@ -55,7 +47,7 @@ unsafe fn handle_ota_update__attribute_ram_code() {
 			flash_erase_sector (i);
 		}
 
-		flash_read_page (flash_adr_light_new_fw + i, PAGE_SIZE, buff.as_mut_ptr());
+		flash_read_page (*get_flash_adr_light_new_fw() + i, PAGE_SIZE, buff.as_mut_ptr());
 		flash_write_page (i, PAGE_SIZE, buff.as_mut_ptr());
 
         i += PAGE_SIZE;

@@ -2,31 +2,16 @@ use std::mem::size_of;
 use sdk::light::{get_slave_p_mac, ll_adv_private_t, ll_adv_rsp_private_t};
 use std::ptr::addr_of;
 use config::VENDOR_ID;
+use pub_mut_no_move;
 use sdk::rf_drv::_rf_link_slave_set_adv_private_data;
 
-// pub_mut_no_move!(adv_pri_data, ll_adv_private_t, ll_adv_private_t {
-//     ManufactureID: VENDOR_ID,
-//     MeshProductUUID: VENDOR_ID,
-//     MacAddress: 0
-// });
-pub static mut adv_pri_data: ll_adv_private_t = ll_adv_private_t {
-ManufactureID: VENDOR_ID,
-MeshProductUUID: VENDOR_ID,
-MacAddress: 0
-};
+pub_mut_no_move!(adv_pri_data, ll_adv_private_t, ll_adv_private_t {
+    ManufactureID: VENDOR_ID,
+    MeshProductUUID: VENDOR_ID,
+    MacAddress: 0
+});
 
-// required by light_ll
-// pub_mut_no_move!(adv_rsp_pri_data, ll_adv_rsp_private_t, ll_adv_rsp_private_t {
-//     ManufactureID: VENDOR_ID,
-//     MeshProductUUID: VENDOR_ID,
-//     MacAddress: 0,
-//     ProductUUID: 0x1234,
-//     status: 0x01,
-//     DeviceAddress: [0; 2],
-//     rsv: [0; 16]
-// });
-#[no_mangle]
-pub static mut adv_rsp_pri_data: ll_adv_rsp_private_t = ll_adv_rsp_private_t {
+pub_mut_no_move!(adv_rsp_pri_data, ll_adv_rsp_private_t, ll_adv_rsp_private_t {
     ManufactureID: VENDOR_ID,
     MeshProductUUID: VENDOR_ID,
     MacAddress: 0,
@@ -34,7 +19,7 @@ pub static mut adv_rsp_pri_data: ll_adv_rsp_private_t = ll_adv_rsp_private_t {
     status: 0x01,
     DeviceAddress: [0; 2],
     rsv: [0; 16]
-};
+});
 
 pub unsafe fn vendor_set_adv_data() {
     // config adv data

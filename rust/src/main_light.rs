@@ -1,13 +1,12 @@
 use std::cmp::{max, min};
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ops::Deref;
-use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, write_bytes};
+use std::ptr::{addr_of, copy_nonoverlapping, write_bytes};
 use std::slice;
-use BIT;
+use ::{BIT, pub_mut};
 
 use common::*;
-use config::{flash_adr_light_new_fw, flash_adr_lum, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, MESH_LTK, MESH_NAME, MESH_PWD, PAIR_VALID_FLAG, PWM_B, PWM_G, PWM_R, PWMID_B, PWMID_G, PWMID_R, VENDOR_ID};
+use config::*;
 use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
@@ -20,7 +19,7 @@ use sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl,
 use sdk::pm::usb_dp_pullup_en;
 use sdk::rf_drv::*;
 use sdk::service::*;
-use vendor_light::{adv_pri_data, adv_rsp_pri_data, vendor_set_adv_data};
+use vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 
 extern "C" {
     static mut advData: [u8; 3];
@@ -54,34 +53,33 @@ pub const LED_EVENT_FLASH_0p25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
 #[no_mangle]
 pub static mut buff_response: [[u32; 9]; 48] = [[0; 9]; 48];
 
-#[no_mangle]
-static mut led_event_pending: u32 = 0;
+pub_mut!(led_event_pending, u32, 0);
 
-static mut led_count: u32 = 0;
-static mut led_ton: u32 = 0;
-static mut led_toff: u32 = 0;
-static mut led_sel: u32 = 0;
-static mut led_tick: u32 = 0;
-static mut led_no: u32 = 0;
-static mut led_is_on: u32 = 0;
+pub_mut!(led_count, u32, 0);
+pub_mut!(led_ton, u32, 0);
+pub_mut!(led_toff, u32, 0);
+pub_mut!(led_sel, u32, 0);
+pub_mut!(led_tick, u32, 0);
+pub_mut!(led_no, u32, 0);
+pub_mut!(led_is_on, u32, 0);
 
-static mut lum_changed_time: u32 = 0;
-static mut light_lum_addr: u32 = 0;
+pub_mut!(lum_changed_time, u32, 0);
+pub_mut!(light_lum_addr, u32, 0);
 
-pub static mut light_off: bool = true;
-pub static mut led_lum: u16 = 0xFFFF;
-pub static mut led_val: [u16; 3] = [MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE];
-pub static mut cmd_left_delay_ms: u16 = 0;
-pub static mut cmd_delay_ms: u16 = 0;
-pub static mut irq_timer1_cb_time: u32 = 0;
-pub static mut cmd_delay: ll_packet_l2cap_data_t = ll_packet_l2cap_data_t {
+pub_mut!(light_off, bool, true);
+pub_mut!(led_lum, u16, 0xFFFF);
+pub_mut!(led_val, [u16; 3], [MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE]);
+pub_mut!(cmd_left_delay_ms, u16, 0);
+pub_mut!(cmd_delay_ms, u16, 0);
+pub_mut!(irq_timer1_cb_time, u32, 0);
+pub_mut!(cmd_delay, ll_packet_l2cap_data_t, ll_packet_l2cap_data_t {
     l2capLen: 0,
     chanId: 0,
     opcode: 0,
     handle: 0,
     handle1: 0,
     value: [0; 30],
-};
+});
 
 #[repr(C, packed)]
 struct lum_save_t {
@@ -177,9 +175,9 @@ unsafe fn light_init_default() {
         TELINK_SPP_DATA_PAIR.as_ptr(),
     );
 
-    set_p_adv_pri_data(&adv_pri_data);
+    set_p_adv_pri_data(get_adv_pri_data());
     set_adv_private_data_len(size_of::<ll_adv_private_t>() as u8);
-    set_p_adv_rsp_data(&adv_rsp_pri_data);
+    set_p_adv_rsp_data(get_adv_rsp_pri_data());
 
     _rf_link_slave_pairing_enable(1);
     _rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
@@ -201,8 +199,8 @@ pub unsafe fn user_init()
 {
     // for app ota
     unsafe {
-        if !is_ota_area_valid(flash_adr_light_new_fw) {
-            erase_ota_data(flash_adr_light_new_fw);
+        if !is_ota_area_valid(*get_flash_adr_light_new_fw()) {
+            erase_ota_data(*get_flash_adr_light_new_fw());
         }
     }
 
@@ -306,14 +304,14 @@ fn light_auth_check() {
 
 //erase flash
 unsafe fn light_lum_erase() {
-    light_lum_addr = flash_adr_lum;
-    flash_erase_sector(flash_adr_lum);
+    light_lum_addr = *get_flash_adr_lum();
+    flash_erase_sector(*get_flash_adr_lum());
     light_lum_store();
 }
 
 //save cur lum value, if disconnected for a while
 unsafe fn light_lum_store() {
-    if light_lum_addr >= (flash_adr_lum + FLASH_SECTOR_SIZE as u32 - size_of::<lum_save_t>() as u32) {
+    if light_lum_addr >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<lum_save_t>() as u32) {
         light_lum_erase();
         return;
     }
@@ -338,7 +336,7 @@ unsafe fn light_lum_retrieve() {
     let mut i = 0;
     while i < FLASH_SECTOR_SIZE
     {
-        light_lum_addr = flash_adr_lum + i as u32;
+        light_lum_addr = *get_flash_adr_lum() + i as u32;
 
         let lum_save = light_lum_addr as *const lum_save_t;
         if LUM_SAVE_FLAG == (*lum_save).save_falg {
@@ -396,7 +394,7 @@ pub unsafe fn main_loop()
 /*@brief: This function is called in IRQ state, use IRQ stack.
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_packet_att_value_t) -> bool
 {
     // mac-app[5] low 2 bytes used as ttc && hop-count
@@ -480,7 +478,7 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
         (*ppp).val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
         if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
             for i in 0..8 {
-                (*ppp).val[5 + i] = get_mesh_pair_checksum(i as u8);
+                (*ppp).val[5 + i] = get_mesh_pair_checksum_fn(i as u8);
             }
             (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
             (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
@@ -496,7 +494,7 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
 {
     // p start from l2capLen of rf_packet_att_cmd_t
@@ -678,7 +676,7 @@ unsafe fn light_notify(p: *const u8, len: u8, p_src: *const u8) -> i32 {
     return err;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 pub unsafe fn rf_link_light_event_callback(status: u8)
 {
     if status == LGT_CMD_SET_MESH_INFO
@@ -697,7 +695,7 @@ pub unsafe fn rf_link_light_event_callback(status: u8)
     }
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn irq_timer1() {
     if irq_timer1_cb_time != 0 && clock_time_exceed(irq_timer1_cb_time, (cmd_left_delay_ms * 1000) as u32) {
         cmd_left_delay_ms = 0;
@@ -709,10 +707,10 @@ unsafe fn irq_timer1() {
     light_onoff_step_timer();
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn irq_timer0() {}
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 unsafe fn irq_handler__attribute_ram_code()
 {
     _irq_light_slave_handler();
@@ -728,7 +726,6 @@ fn light_onoff(on: bool) {
     unsafe { device_status_update(); }
 }
 
-#[no_mangle]
 pub unsafe fn device_status_update() {
     // packet
     let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
@@ -743,7 +740,6 @@ pub unsafe fn device_status_update() {
     _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
 }
 
-#[no_mangle]
 pub unsafe fn light_onoff_normal(on: bool) {
     if on {
         light_off = false;
@@ -766,7 +762,6 @@ fn light_adjust_B(val: u16, lum: u16) {
     unsafe { pwm_set_lum(PWMID_B, get_pwm_cmp(val, lum), true); }
 }
 
-#[no_mangle]
 pub fn light_adjust_RGB_hw(val_R: u16, val_G: u16, val_B: u16, lum: u16) {
     light_adjust_R(val_R, lum);
     light_adjust_G(val_G, lum);

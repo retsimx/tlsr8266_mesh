@@ -6,7 +6,7 @@ extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 fn bcmp (s1: *const u8, s2: *const u8, count: usize) -> i32
 {
     unsafe { return memcmp(s1, s2, count); }
@@ -28,7 +28,7 @@ pub struct TBLCMDSET {
 	pub cmd: u8
 }
 
-#[no_mangle]
+#[no_mangle] // required by light_ll
 pub fn LoadTblCmdSet (pt: *const TBLCMDSET, size: u32) -> u32 {
 	let mut l= 0;
 

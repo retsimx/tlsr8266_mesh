@@ -9,7 +9,7 @@ pub static PAGE_SIZE : u32 =			   256;
 pub static PAGE_SIZE_OTP : u32 =		   256;
 pub static FLASH_LOCK_EN : u32 =           0;
 
-/*
+/**
  * @brief     flash command definition
  */
 enum FLASH_CMD {
@@ -38,7 +38,7 @@ enum FLASH_CMD {
 	WRITE_ENABLE_CMD 				= 	0x06,
 }
 
-/*
+/**
  * @brief     flash status type definition
  */
 enum FLASH_STATUS {
@@ -47,7 +47,7 @@ enum FLASH_STATUS {
 	TYPE_16BIT_STATUS_TWO_CMD  	= 2,
 }
 
-/*
+/**
  * @brief     flash uid cmd definition
  */
 enum FLASH_UID_CMD {
@@ -55,7 +55,7 @@ enum FLASH_UID_CMD {
 	XTX_READ_UID_CMD	= 0x5A,
 }
 
-/*
+/**
  * @brief	flash capacity definition
  *			Call flash_read_mid function to get the size of flash capacity.
  *			Example is as follows:
@@ -73,7 +73,7 @@ enum FLASH_CAPACITY {
 	SIZE_8M 	= 0x17,
 }
 
-/*
+/**
  * @brief	flash voltage definition
  */
 enum FLASH_VOLTAGE{
@@ -87,7 +87,7 @@ enum FLASH_VOLTAGE{
 	VOLTAGE_1V6      = 0x00,
 }
 
-/*
+/**
  * @brief		This function to determine whether the flash is busy..
  * @return		1:Indicates that the flash is busy. 0:Indicates that the flash is free
  */
@@ -96,7 +96,7 @@ fn flash_is_busy() -> bool {
 	return mspi_read() & 0x01 != 0;		//the busy bit, pls check flash spec
 }
 
-/*
+/**
  * @brief     This function serves to wait flash done.(make this a asynchorous version).
  * @return    none.
  */
@@ -115,7 +115,7 @@ fn flash_wait_done__attribute_ram_code()
 	mspi_high();
 }
 
-/*
+/**
  * @brief		This function serves to set flash write command.
  * @param[in]	cmd	- set command.
  * @return		none.
@@ -129,7 +129,7 @@ fn flash_send_cmd__attribute_ram_code(cmd: FLASH_CMD){
 	mspi_wait();
 }
 
-/*
+/**
  * @brief		This function serves to send flash address.
  * @param[in]	addr	- the flash address.
  * @return		none.
@@ -144,7 +144,7 @@ pub fn flash_send_addr__attribute_ram_code(addr: u32){
 	mspi_wait();
 }
 
-/*
+/**
  * @brief 		This function is used to read data from flash or read the status of flash.
  * @param[in]   cmd			- the read command.
  * @param[in]   addr		- starting address.
@@ -184,7 +184,7 @@ fn flash_mspi_read_ram__attribute_ram_code(cmd: FLASH_CMD, addr: u32, addr_en: u
 	irq_restore(r);
 }
 
-/*
+/**
  * @brief 		This function is used to write data or status to flash.
  * @param[in]   cmd			- the write command.
  * @param[in]   addr		- starting address.
@@ -216,7 +216,7 @@ fn flash_mspi_write_ram__attribute_ram_code(cmd: FLASH_CMD, addr: u32, addr_en: 
 	irq_restore(r);
 }
 
-/*
+/**
  * @brief 		This function reads the content from a page to the buf.
  * @param[in]   addr	- the start address of the page.
  * @param[in]   len		- the length(in byte) of content needs to read out from the page.
@@ -239,7 +239,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
 	flash_mspi_read_ram__attribute_ram_code(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
 }
 
-/*
+/**
  * @brief 		This function writes the buffer's content to the flash.
  * @param[in]   addr	- the start address of the area.
  * @param[in]   len		- the length(in byte) of content needs to write into the flash.
@@ -259,7 +259,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8)
  */
 #[inline(always)]
 #[no_mangle] // required by light_ll
-pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
+pub unsafe fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 {
 	let mut ns = PAGE_SIZE - (addr&(PAGE_SIZE - 1));
 	let mut nw = 0;
@@ -269,7 +269,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 		flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
 		ns = PAGE_SIZE;
 		addr += nw;
-		buf = unsafe { buf.offset(nw as isize) };
+		buf = buf.offset(nw as isize);
 		len -= nw;
 		if len == 0 {
 			break;
@@ -277,7 +277,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8)
 	}
 }
 
-/*
+/**
  * @brief 		This function serves to erase a sector.
  * @param[in]   addr	- the start address of the sector needs to erase.
  * @return 		none.

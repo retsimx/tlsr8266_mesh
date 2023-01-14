@@ -1,23 +1,22 @@
 use std::mem::{size_of, size_of_val};
-use std::ptr::{copy_nonoverlapping};
+use std::ptr::{copy_nonoverlapping, write_bytes};
 use ::{BIT, flash_adr_pairing};
-use common::RecoverStatus::FldLightOff;
-use main_light::{CMD_DELAY, CMD_DELAY_MS, CMD_LEFT_DELAY_MS, device_status_update, get_buff_response, IRQ_TIMER1_CB_TIME, LED_LUM, LED_VAL, light_adjust_rgb_hw, LIGHT_OFF, light_onoff_normal, light_slave_tx_command, rf_link_light_event_callback};
+use common::RECOVER_STATUS::FLD_LIGHT_OFF;
+use main_light::{buff_response, cmd_delay, cmd_delay_ms, cmd_left_delay_ms, device_status_update, irq_timer1_cb_time, led_lum, led_val, light_adjust_RGB_hw, light_off, light_onoff_normal, light_slave_tx_command, rf_link_light_event_callback};
 use sdk::common::bit::ONES_32;
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use sdk::light::*;
+use sdk::light::{access_code, adr_flash_cfg_idx, APP_OTA_HCI_TYPE, app_ota_hci_type, CMD_NOTIFY_MESH_PAIR_END, cur_ota_flash_addr, DEV_ADDR_PAR_WITH_MAC, device_address, get_fw_version, is_add_packet_buf_ready, is_master_sending_ota_st, is_mesh_ota_slave_running, LGT_CMD_MESH_CMD_NOTIFY, LGT_CMD_MESH_OTA_READ, LGT_CMD_MESH_PAIR, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO, light_sw_reboot, ll_packet_l2cap_data_t, mesh_node_init, mesh_node_max, mesh_ota_dev_info_t, MESH_OTA_LED, mesh_ota_master_100_flag, mesh_ota_master_start, mesh_ota_master_start_firmware_from_backup, mesh_ota_pkt_start_command_t, OtaState, pair_ac, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_load_key, pair_login_ok, pair_ltk, pair_ltk_mesh, pair_nn, pair_pass, pair_save_key, pair_setting_flag, PAR_READ_MESH_PAIR_CONFIRM, rf_link_add_tx_packet, rf_link_data_callback, rf_link_slave_read_status_stop, rf_ota_save_data, rf_packet_att_cmd_t, rf_packet_att_data_t, rf_pkt_l2cap_sig_connParaUpRsp_t, rf_slave_ota_busy, rf_slave_ota_finished_flag, rf_slave_ota_terminate_flag, rf_slave_ota_timeout_def_s, rf_slave_ota_timeout_s, setup_ble_parameter_start, slave_link_connected, slave_p_mac, slave_read_status_busy, START_UP_FLAG, tick_per_us};
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use vendor_light::{get_adv_rsp_pri_data};
+use vendor_light::adv_rsp_pri_data;
 use std::ptr::addr_of;
 use sdk::common::crc::crc16;
+use sdk::light::OtaState::{ERROR, OK};
 use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use sdk::rf_drv::rf_set_ble_access_code;
 use ::{flash_adr_light_new_fw, VENDOR_ID};
-use ::{OTA_LED};
-use ota::FLASH_ADR_OTA_READY_FLAG;
-use pub_mut;
+use ::{FLASH_ADR_OTA_READY_FLAG, OTA_LED};
 use sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
 use sdk::mcu::watchdog::wd_clear;
 
@@ -49,12 +48,14 @@ static mut effect_new_mesh_delay_time: u32 = 0;
 static mut mesh_pair_cmd_interval: u32 = 0;
 #[no_mangle]
 static mut mesh_pair_timeout: u32 = 0;
-pub_mut!(mesh_pair_enable, bool, false);
+#[no_mangle]
+pub static mut mesh_pair_enable: bool = false;
 #[no_mangle]
 pub static mut mesh_pair_checksum: [u8; 8] = [0; 8];
 #[no_mangle]
 pub static mut mesh_pair_retry_max: u8 = 3;
-pub_mut!(get_mac_en, bool, false);
+#[no_mangle]
+pub static mut get_mac_en: bool = false;
 
 // BEGIN SHIT LIGHT_LL HAX
 #[no_mangle]
@@ -69,14 +70,14 @@ static mut mesh_node_st_par_len: u8 = MESH_NODE_ST_PAR_LEN;
 static mut mesh_node_st_len: u8 = size_of::<mesh_node_st_t>() as u8;
 // END SHIT LIGHT_LL HAX
 
-static mut OTA_PKT_CNT: u16 = 0;
-static mut OTA_RCV_LAST_IDX: u16 = 0xffff;
-static mut FW_CHECK_VAL: u32 = 0;
-static mut NEED_CHECK_TYPE: u8 = 0;//=1:crc val sum
-static mut OTA_PKT_TOTAL: u16 = 0;
-static mut SLAVE_OTA_DATA_CACHE_IDX: u8 = 0;
-static mut RF_SLAVE_OTA_FINISHED_TIME: u32 = 0;
-static mut TERMINATE_CNT: u8 = 0;
+static mut ota_pkt_cnt: u16 = 0;
+static mut ota_rcv_last_idx: u16 = 0xffff;
+static mut fw_check_val: u32 = 0;
+static mut need_check_type: u8 = 0;//=1:crc val sum
+static mut ota_pkt_total: u16 = 0;
+static mut slave_ota_data_cache_idx: u8 = 0;
+static mut rf_slave_ota_finished_time: u32 = 0;
+static mut terminate_cnt: u8 = 0;
 
 #[no_mangle]
 static mut conn_update_successed: u8 = 0;
@@ -84,13 +85,13 @@ static mut conn_update_successed: u8 = 0;
 static mut conn_update_cnt: u8 = 0;
 
 const UPDATE_CONN_PARA_CNT: u8 = 4;
-const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [[18, 18+16, 200], [16, 16+16, 200], [32, 32+16, 200], [48, 48+16, 200]];
+const conn_para_data: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [[18, 18+16, 200], [16, 16+16, 200], [32, 32+16, 200], [48, 48+16, 200]];
 const SYS_CHN_LISTEN_MESH: [u8; 4] = [2, 12, 23, 34];	//8, 30, 52, 74
 #[no_mangle]
 static mut sys_chn_listen: [u8; 4] = SYS_CHN_LISTEN_MESH;
 
-pub static mut MESH_PAIR_TIME: u32 = 0;
-pub static mut MESH_PAIR_STATE: MeshPairState = MeshPairState::MeshPairName1;
+pub static mut mesh_pair_time: u32 = 0;
+pub static mut mesh_pair_state: MESH_PAIR_STATE = MESH_PAIR_STATE::MESH_PAIR_NAME1;
 #[no_mangle]
 pub static mut mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM as usize] = [mesh_node_st_t{ tick: 0, val: mesh_node_st_val_t {
     dev_adr: 0,
@@ -99,20 +100,20 @@ pub static mut mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM as usize] = [mes
 } }; MESH_NODE_MAX_NUM as usize];
 
 #[derive(PartialEq)]
-pub enum GatewayStatusT
+pub enum gateway_status_t
 {
-    GatewayStatusNormal = 0,             /* Normal gateway role */
-    // GatewayStatusNodeRole,              /* As node role, when pushed button */
+    GATEWAY_STATUS_NORMAL = 0,             /* Normal gateway role */
+    GATEWAY_STATUS_NODE_ROLE,              /* As node role, when pushed button */
 
-    // GatewayStatusTempDefaltMesh,       /* In default mesh temporary */
-    // GatewayStatusSwitchToDefaultMesh,
-    // GatewayStatusScanUnprovDev,        /* Scanning unpair device status */
-    GatewayStatusCfgUnproDev,          /* Only provision device */
-    // GatewayStatusCfgCurNetwork,        /* Change current network's information */
-    GatewayStatusAddConfiguredDevice,  /* Add configured device */
+    GATEWAY_STATUS_TEMP_DEFALT_MESH,       /* In default mesh temporary */
+    GATEWAY_STATUS_SWITCH_TO_DEFAULT_MESH,
+    GATEWAY_STATUS_SCAN_UNPROV_DEV,        /* Scanning unpair device status */
+    GATEWAY_STATUS_CFG_UNPRO_DEV,          /* Only provision device */
+    GATEWAY_STATUS_CFG_CUR_NETWORK,        /* Change current network's information */
+    GATEWAY_STATUS_ADD_CONFIGURED_DEVICE,  /* Add configured device */
 }
 
-pub static mut GATEWAY_STATUS: GatewayStatusT = GatewayStatusT::GatewayStatusNormal;
+pub static mut gateway_status: gateway_status_t = gateway_status_t::GATEWAY_STATUS_NORMAL;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -127,11 +128,11 @@ pub const ERASE_SECTORS_FOR_OTA : u32 = (FW_SIZE_MAX_K + 3) / 4;
 pub const MESH_NODE_ST_VAL_LEN: u8 = 4;       // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
 
-pub const REGA_LIGHT_OFF: u8 = 0x3a;
+pub const rega_light_off: u8 = 0x3a;
 
 pub const MESH_NODE_MAX_NUM: u16 = 64;
 
-pub static PKT_TERMINATE: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
+pub static pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -149,27 +150,27 @@ pub struct mesh_node_st_t {
 }
 
 // recover status before software reboot
-pub enum RecoverStatus {
-	FldLightOff = BIT!(0),
-	FldMeshOtaMaster100 = BIT!(1),
-	// LowBattFlg = BIT!(2),
+pub enum RECOVER_STATUS {
+	FLD_LIGHT_OFF				= BIT!(0),
+	FLD_MESH_OTA_MASTER_100		= BIT!(1),
+	LOW_BATT_FLG                = BIT!(2),
 	// LOW_BATT_LOOP_FLG           = BIT(3),    // 0 means check by user_init, 1 means by main loop
 }
 
 #[derive(PartialEq)]
 #[derive(Clone, Copy)]
-pub enum PairState {
-    PairSetted = 0,
-    // PairSetting,
-    PairSetMeshTxStart,
-    PairSetMeshTxDone,// send notify req, get mesh nodes' ac
-    PairSetMeshRxDone,// received all mesh nodes' ac, send cmd to switch to new mesh
+pub enum PAIR_STATE {
+    PAIR_SETTED = 0,
+    PAIR_SETTING,
+    PAIR_SET_MESH_TX_START,
+    PAIR_SET_MESH_TX_DONE,// send notify req, get mesh nodes' ac
+    PAIR_SET_MESH_RX_DONE,// received all mesh nodes' ac, send cmd to switch to new mesh
 }
 
 pub fn is_ota_area_valid(adr: u32) -> bool {
 	let mut buf : [u8; 4] = [0; 4];
 	for i in 0..ERASE_SECTORS_FOR_OTA {
-        flash_read_page(adr + i * 0x1000, 4, buf.as_mut_ptr());
+        unsafe { flash_read_page(adr + i * 0x1000, 4, buf.as_mut_ptr()); }
     	let tmp = buf[0] as u32 | (buf[1] as u32) << 8 | (buf[2] as u32) << 16 | (buf[3] as u32) << 24;
     	if tmp != ONES_32 {
             return false;
@@ -180,7 +181,7 @@ pub fn is_ota_area_valid(adr: u32) -> bool {
 
 pub fn erase_ota_data(adr: u32){
     for i in 0..ERASE_SECTORS_FOR_OTA {
-        flash_erase_sector(adr + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000);
+        unsafe { flash_erase_sector(adr + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000); }
     }
 }
 
@@ -204,10 +205,10 @@ pub fn mesh_pair_proc_effect() {
 
 pub fn mesh_ota_master_100_flag_check()
 {
-	let val = analog_read__attribute_ram_code(REGA_LIGHT_OFF);
-	if val & RecoverStatus::FldMeshOtaMaster100 as u8 != 0 {
+	let val = analog_read__attribute_ram_code(rega_light_off);
+	if val & RECOVER_STATUS::FLD_MESH_OTA_MASTER_100 as u8 != 0 {
 		unsafe { mesh_ota_master_100_flag = 1; }
-		analog_write__attribute_ram_code(REGA_LIGHT_OFF, val & !(RecoverStatus::FldMeshOtaMaster100 as u8));
+		analog_write__attribute_ram_code(rega_light_off, val & !(RECOVER_STATUS::FLD_MESH_OTA_MASTER_100 as u8));
 	}
 }
 
@@ -223,10 +224,9 @@ pub unsafe fn dev_addr_with_mac_rsp(params: *const u8, par_rsp: *mut u8) -> bool
 		*par_rsp.offset(0) = (device_address & 0xff) as u8;
 		*par_rsp.offset(1) = ((device_address >> 8) & 0xff) as u8;
 
-		copy_nonoverlapping(get_slave_p_mac_val(), par_rsp.offset( 2), 6);
+		copy_nonoverlapping(slave_p_mac, par_rsp.offset( 2), 6);
 		#[allow(unaligned_references)]
-
-		copy_nonoverlapping(&get_adv_rsp_pri_data().ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
+		copy_nonoverlapping(&adv_rsp_pri_data.ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
 		return true;
 	}
 	return false;
@@ -238,7 +238,7 @@ pub unsafe fn dev_addr_with_mac_match(params: *const u8) -> bool
 		get_mac_en
 	} else {
 		for i in 0..6 {
-			if params.offset(4+i) != get_slave_p_mac_val().offset(i) {
+			if params.offset(4+i) != slave_p_mac.offset(i) {
 				return false;
 			}
 		}
@@ -283,7 +283,7 @@ pub struct light_step_t {
 	pub adjusting_flag: bool
 }
 
-static mut LIGHT_STEP: light_step_t = light_step_t {
+static mut light_step: light_step_t = light_step_t {
 	time: 0,
 	lum_temp: 0,
 	lum_dst: 0,
@@ -300,13 +300,13 @@ const LIGHT_ADJUST_TIME     : u16 = 100;   //unit: 10ms
 const LIGHT_ADJUST_INTERVAL : u16 = 2;  // unit :10ms;     min:20ms
 
 unsafe fn get_step(direction: u8){
-    LIGHT_STEP.remainder = 0;       // reset
+    light_step.remainder = 0;       // reset
     if LUM_UP == direction {
-        LIGHT_STEP.step = ((LIGHT_STEP.lum_dst - LIGHT_STEP.lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
-        LIGHT_STEP.step_mod = ((((LIGHT_STEP.lum_dst - LIGHT_STEP.lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step = ((light_step.lum_dst - light_step.lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step_mod = ((((light_step.lum_dst - light_step.lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     } else {
-        LIGHT_STEP.step = ((LIGHT_STEP.lum_temp - LIGHT_STEP.lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
-        LIGHT_STEP.step_mod = ((((LIGHT_STEP.lum_temp - LIGHT_STEP.lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step = ((light_step.lum_temp - light_step.lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        light_step.step_mod = ((((light_step.lum_temp - light_step.lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     }
 }
 
@@ -314,117 +314,117 @@ pub unsafe fn light_onoff_step(on: bool){
     let mut set_flag= true;
 
     if on {
-        if LIGHT_OFF {
-            if !LIGHT_STEP.adjusting_flag {
-                LIGHT_STEP.lum_temp = 0;
+        if light_off {
+            if !light_step.adjusting_flag {
+                light_step.lum_temp = 0;
             }
-            LIGHT_STEP.lum_dst = LED_LUM as i32;
+            light_step.lum_dst = led_lum as i32;
             get_step(LUM_UP);
     	}else{
     	    set_flag = false;
     	    light_onoff_normal(true); // make sure on. unnecessary.
     	}
-        LIGHT_OFF = false;
+        light_off = false;
 	}else{
-        if LIGHT_OFF {
+        if light_off {
     	    set_flag = false;
     	    light_onoff_normal(false); // make sure off. unnecessary.
     	}else{
-            if !LIGHT_STEP.adjusting_flag {
-                LIGHT_STEP.lum_temp = LED_LUM as i32;
+            if !light_step.adjusting_flag {
+                light_step.lum_temp = led_lum as i32;
             }
-            LIGHT_STEP.lum_dst = 0;
+            light_step.lum_dst = 0;
             get_step(LUM_DOWN);
     	}
-        LIGHT_OFF = true;
+        light_off = true;
 	}
 
-    LIGHT_STEP.adjusting_flag = set_flag;
-    LIGHT_STEP.time = 0;
+    light_step.adjusting_flag = set_flag;
+    light_step.time = 0;
 }
 
 pub unsafe fn light_step_reset(target: u16) {
     let r = irq_disable();
-    if !LIGHT_STEP.adjusting_flag && target == LED_LUM {
-        light_adjust_rgb_hw(LED_VAL[0], LED_VAL[1], LED_VAL[2], target);
+    if !light_step.adjusting_flag && target == led_lum {
+        light_adjust_RGB_hw(led_val[0], led_val[1], led_val[2], target);
         irq_restore(r);
 		return
     }
 
-    if LIGHT_STEP.adjusting_flag {
-        if (target as i32) < LIGHT_STEP.lum_temp {
-            LIGHT_STEP.lum_dst = target as i32;
+    if light_step.adjusting_flag {
+        if (target as i32) < light_step.lum_temp {
+            light_step.lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
-        if (target as i32) > LIGHT_STEP.lum_temp {
-            LIGHT_STEP.lum_dst = target as i32;
+        if (target as i32) > light_step.lum_temp {
+            light_step.lum_dst = target as i32;
             get_step(LUM_UP);
         }
     } else {
-        if target < LED_LUM {
-            LIGHT_STEP.lum_temp = LED_LUM as i32;
-            LIGHT_STEP.lum_dst = target as i32;
+        if target < led_lum {
+            light_step.lum_temp = led_lum as i32;
+            light_step.lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
-        if target > LED_LUM {
-            LIGHT_STEP.lum_temp = LED_LUM as i32;
-            LIGHT_STEP.lum_dst = target as i32;
+        if target > led_lum {
+            light_step.lum_temp = led_lum as i32;
+            light_step.lum_dst = target as i32;
             get_step(LUM_UP);
         }
     }
 
-    LIGHT_STEP.adjusting_flag = true;
-    LIGHT_STEP.time = 0;
-    LED_LUM = target;
+    light_step.adjusting_flag = true;
+    light_step.time = 0;
+    led_lum = target;
 
     irq_restore(r);
 }
 
 unsafe fn get_next_lum(direction: u8){
-    let temp = LIGHT_STEP.remainder as u32 + LIGHT_STEP.step_mod as u32;
-    LIGHT_STEP.remainder = (temp & 0xffff) as u16;
+    let temp = light_step.remainder as u32 + light_step.step_mod as u32;
+    light_step.remainder = (temp & 0xffff) as u16;
 
     if LUM_UP == direction {
-        LIGHT_STEP.lum_temp += LIGHT_STEP.step as i32;
+        light_step.lum_temp += light_step.step as i32;
         if temp >= 0x10000 {
-            LIGHT_STEP.lum_temp += 1;
+            light_step.lum_temp += 1;
         }
-        if LIGHT_STEP.lum_temp >= LIGHT_STEP.lum_dst {
-            LIGHT_STEP.lum_temp = LIGHT_STEP.lum_dst;
-            LIGHT_STEP.remainder = 0;
+        if light_step.lum_temp >= light_step.lum_dst {
+            light_step.lum_temp = light_step.lum_dst;
+            light_step.remainder = 0;
         }
     }else{
-        LIGHT_STEP.lum_temp -= LIGHT_STEP.step as i32;
+        light_step.lum_temp -= light_step.step as i32;
         if temp >= 0x10000 {
-            LIGHT_STEP.lum_temp -= 1;
+            light_step.lum_temp -= 1;
         }
-        if LIGHT_STEP.lum_temp <= LIGHT_STEP.lum_dst {
-            LIGHT_STEP.lum_temp = LIGHT_STEP.lum_dst;
-            LIGHT_STEP.remainder = 0;
+        if light_step.lum_temp <= light_step.lum_dst {
+            light_step.lum_temp = light_step.lum_dst;
+            light_step.remainder = 0;
         }
     }
 }
 
 pub unsafe fn light_onoff_step_timer() {
-    if LIGHT_STEP.adjusting_flag {
-        if LIGHT_STEP.time == 0 {
-            if LIGHT_STEP.lum_dst != LIGHT_STEP.lum_temp {
-                if LIGHT_STEP.lum_temp < LIGHT_STEP.lum_dst {
+    if light_step.adjusting_flag {
+        if light_step.time == 0 {
+            if light_step.lum_dst != light_step.lum_temp {
+                if light_step.lum_temp < light_step.lum_dst {
                     get_next_lum(LUM_UP);
                 }else{
                     get_next_lum(LUM_DOWN);
                 }
-                light_adjust_rgb_hw(LED_VAL[0], LED_VAL[1], LED_VAL[2], LIGHT_STEP.lum_temp as u16);
+                light_adjust_RGB_hw(led_val[0], led_val[1], led_val[2], light_step.lum_temp as u16);
             }else{
-                LIGHT_STEP.adjusting_flag = false;
+                light_step.adjusting_flag = false;
             }
         }
 
-        LIGHT_STEP.time += 1;
-        if LIGHT_STEP.time >= LIGHT_ADJUST_INTERVAL as u32 {
-            LIGHT_STEP.time = 0;
+        light_step.time += 1;
+        if light_step.time >= LIGHT_ADJUST_INTERVAL as u32 {
+            light_step.time = 0;
         }
     }
 }
@@ -432,8 +432,8 @@ pub unsafe fn light_onoff_step_timer() {
 // recover status before software reboot
 #[no_mangle]
 unsafe fn light_sw_reboot_callback() {
-    if rf_slave_ota_busy || _is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
-        analog_write__attribute_ram_code (REGA_LIGHT_OFF, if LIGHT_OFF { FldLightOff as u8} else {0});
+    if rf_slave_ota_busy || is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
+        analog_write__attribute_ram_code (rega_light_off, if light_off {FLD_LIGHT_OFF as u8} else {0});
     }
 }
 
@@ -441,16 +441,16 @@ pub unsafe fn is_mesh_cmd_need_delay(p_cmd: *const u8, params: *const u8, ttc: u
 {
 	let delay_tmp = (*params.offset(1) as u16) | ((*params.offset(2) as u16) << 8);
 	if delay_tmp != 0 {
-		if CMD_LEFT_DELAY_MS != 0 {
+		if cmd_left_delay_ms != 0 {
 			return true;
 		}
-		CMD_DELAY_MS = delay_tmp;
-		if CMD_DELAY_MS != 0 && IRQ_TIMER1_CB_TIME == 0 {
+		cmd_delay_ms = delay_tmp;
+		if cmd_delay_ms != 0 && irq_timer1_cb_time == 0 {
 			let cmd_delayed_ms = light_cmd_delayed_ms(ttc);
-			if CMD_DELAY_MS > cmd_delayed_ms {
-				copy_nonoverlapping(p_cmd, addr_of!(CMD_DELAY) as *mut u8, size_of::<ll_packet_l2cap_data_t>());
-				CMD_LEFT_DELAY_MS = CMD_DELAY_MS - cmd_delayed_ms;
-				IRQ_TIMER1_CB_TIME = clock_time();
+			if cmd_delay_ms > cmd_delayed_ms {
+				copy_nonoverlapping(p_cmd, addr_of!(cmd_delay) as *mut u8, size_of::<ll_packet_l2cap_data_t>());
+				cmd_left_delay_ms = cmd_delay_ms - cmd_delayed_ms;
+				irq_timer1_cb_time = clock_time();
 				return true;
 			}
 		}
@@ -460,16 +460,16 @@ pub unsafe fn is_mesh_cmd_need_delay(p_cmd: *const u8, params: *const u8, ttc: u
 
 #[derive(Clone, Copy)]
 #[derive(PartialEq)]
-pub enum MeshPairState {
-    MeshPairName1 = 0,
-    MeshPairName2,
-    MeshPairPwd1,
-    MeshPairPwd2,
-    MeshPairLtk1,
-    MeshPairLtk2,
-    MeshPairEffectDelay,
-    MeshPairEffect,
-    MeshPairDefaultMesh,
+pub enum MESH_PAIR_STATE {
+    MESH_PAIR_NAME1 = 0,
+    MESH_PAIR_NAME2,
+    MESH_PAIR_PWD1,
+    MESH_PAIR_PWD2,
+    MESH_PAIR_LTK1,
+    MESH_PAIR_LTK2,
+    MESH_PAIR_EFFECT_DELAY,
+    MESH_PAIR_EFFECT,
+    MESH_PAIR_DEFAULT_MESH,
 }
 
 pub unsafe fn mesh_pair_cb(params: *const u8)
@@ -479,29 +479,29 @@ pub unsafe fn mesh_pair_cb(params: *const u8)
         default_mesh_time_ref = clock_time() | 1;
     }
 	let cmd = *params.offset(0);
-    if cmd == MeshPairState::MeshPairName1 as u8 {
+    if cmd == MESH_PAIR_STATE::MESH_PAIR_NAME1 as u8 {
         mesh_pair_start_time = clock_time() | 1;
         copy_nonoverlapping(params.offset(1), new_mesh_name.as_mut_ptr(), 8);
-    }else if cmd == MeshPairState::MeshPairName2 as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_NAME2 as u8 {
         copy_nonoverlapping(params.offset(1), new_mesh_name.as_mut_ptr().offset(8), 8);
-    }else if cmd == MeshPairState::MeshPairPwd1 as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_PWD1 as u8 {
         copy_nonoverlapping(params.offset(1), new_mesh_pwd.as_mut_ptr(), 8);
-    }else if cmd == MeshPairState::MeshPairPwd2 as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_PWD2 as u8 {
         copy_nonoverlapping(params.offset(1), new_mesh_pwd.as_mut_ptr().offset(8), 8);
-    }else if cmd == MeshPairState::MeshPairLtk1 as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_LTK1 as u8 {
         copy_nonoverlapping(params.offset(1), new_mesh_ltk.as_mut_ptr(), 8);
-    }else if cmd == MeshPairState::MeshPairLtk2 as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_LTK2 as u8 {
         copy_nonoverlapping(params.offset(1), new_mesh_ltk.as_mut_ptr().offset(8), 8);
-    }else if cmd == MeshPairState::MeshPairEffectDelay as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_EFFECT_DELAY as u8 {
         effect_new_mesh_delay_time = clock_time() | 1;
         if default_mesh_time_ref != 0 {
             /* Keep default_mesh_time_ref non-zero */
             default_mesh_time = mesh_pair_cmd_interval * 2;
         }
-    }else if cmd == MeshPairState::MeshPairEffect as u8 {
+    }else if cmd == MESH_PAIR_STATE::MESH_PAIR_EFFECT as u8 {
         effect_new_mesh = 1;
     }
-    else if cmd == MeshPairState::MeshPairDefaultMesh as u8 {
+    else if cmd == MESH_PAIR_STATE::MESH_PAIR_DEFAULT_MESH as u8 {
         default_mesh_effect_delay_ref = clock_time() | 1;
         default_mesh_time = *params.offset(1) as u32 * 1000;
     }
@@ -537,8 +537,8 @@ unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
         copy_nonoverlapping(p, p_par, len as usize);
 
         let r = irq_disable();
-        if _is_add_packet_buf_ready() {
-            if _rf_link_add_tx_packet (addr_of!(pkt_notify) as *const u8) {
+        if is_add_packet_buf_ready() {
+            if rf_link_add_tx_packet (addr_of!(pkt_notify) as *const u8) {
                 err = 0;
             }
         }
@@ -562,7 +562,7 @@ unsafe fn _safe_effect_new_mesh_finish() {
     mesh_pair_retry_cnt = 0;
     mesh_pair_start_time = 0;
     mesh_pair_notify_rsp_mask = [0; 32];
-    pair_setting_flag = PairState::PairSetted;
+    pair_setting_flag = PAIR_STATE::PAIR_SETTED;
 }
 
 unsafe fn save_effect_new_mesh()
@@ -572,10 +572,10 @@ unsafe fn save_effect_new_mesh()
 		mesh_pair_complete_notify();
 		sleep_us(1000);
         /* Switch to normal mesh */
-        _pair_load_key();
+        pair_load_key();
         default_mesh_time_ref = 0;
 
-        _mesh_node_init();
+        mesh_node_init();
         device_status_update();
         _safe_effect_new_mesh_finish();
         return;
@@ -595,7 +595,7 @@ unsafe fn save_effect_new_mesh()
 
     // make sure not receive legacy mesh data from now on
     let r = irq_disable();
-    _pair_save_key();
+    pair_save_key();
     rf_set_ble_access_code (addr_of!(pair_ac) as *const u8);// use new access code at once.
     rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO);	// clear online status :mesh_node_init()
 	sleep_us (1000);
@@ -627,11 +627,11 @@ pub unsafe fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
 unsafe fn switch_to_default_mesh(delay_s: u8)
 {
     default_mesh_time_ref = clock_time() | 1;
-    default_mesh_time = delay_s as u32 * 1000;
+    default_mesh_time = (delay_s as u32 * 1000);
 
     /* Only change AC and LTK */
-    pair_ac = _access_code(get_pair_config_mesh_name().as_ptr(), get_pair_config_mesh_pwd().as_ptr());
-    copy_nonoverlapping(get_pair_config_mesh_ltk().as_ptr(), pair_ltk.as_mut_ptr(), 16);
+    pair_ac = access_code(pair_config_mesh_name.as_ptr(), pair_config_mesh_pwd.as_ptr());
+    copy_nonoverlapping(pair_config_mesh_ltk.as_ptr(), pair_ltk.as_mut_ptr(), 16);
 }
 
 unsafe fn get_online_node_cnt() -> u8
@@ -646,7 +646,7 @@ unsafe fn get_online_node_cnt() -> u8
 	    }
 	}
 
-    if GATEWAY_STATUS == GatewayStatusT::GatewayStatusCfgUnproDev || GATEWAY_STATUS == GatewayStatusT::GatewayStatusAddConfiguredDevice
+    if gateway_status == gateway_status_t::GATEWAY_STATUS_CFG_UNPRO_DEV || gateway_status == gateway_status_t::GATEWAY_STATUS_ADD_CONFIGURED_DEVICE
     {
         /* If provisioning device to network, shall at least return two device */
         if cnt < 2
@@ -670,7 +670,7 @@ unsafe fn mesh_pair_proc()
 
         if default_mesh_time == 0x00
         {
-            _pair_load_key();
+            pair_load_key();
             default_mesh_time_ref = 0;
         }
         else
@@ -688,93 +688,93 @@ unsafe fn mesh_pair_proc()
         }
         else
         {
-            _pair_load_key();
+            pair_load_key();
             default_mesh_time_ref = 0;
         }
     }
     if mesh_pair_start_time != 0 && clock_time_exceed(mesh_pair_start_time, mesh_pair_timeout*1000*1000) {
         //mesh pair time out
-        _pair_load_key();
+        pair_load_key();
         new_mesh_name = [0; 16];
         new_mesh_pwd = [0; 16];
         new_mesh_ltk = [0; 16];
-        MESH_PAIR_STATE = MeshPairState::MeshPairName1;
+        mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
         mesh_pair_start_notify_time = 0;
         mesh_pair_retry_cnt = 0;
         mesh_pair_start_time = 0;
         mesh_pair_notify_rsp_mask = [0; 32];
-        pair_setting_flag = PairState::PairSetted;
+        pair_setting_flag = PAIR_STATE::PAIR_SETTED;
         rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
         return;
     }
 
-    if pair_setting_flag == PairState::PairSetMeshTxStart && MESH_PAIR_STATE == MeshPairState::MeshPairName1 && get_online_node_cnt() == 1 {
+    if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_START && mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME1 && get_online_node_cnt() == 1 {
         op_para[0] = LGT_CMD_MESH_PAIR;
-        op_para[3] = MeshPairState::MeshPairEffect as u8;
+        op_para[3] = MESH_PAIR_STATE::MESH_PAIR_EFFECT as u8;
         dst_addr = 0x0000;// there is noly one device in mesh,just effect itself.
-        MESH_PAIR_STATE = MeshPairState::MeshPairName1;
+        mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
         mesh_pair_start_notify_time = 0;
         mesh_pair_retry_cnt = 0;
         mesh_pair_start_time = 0;
         mesh_pair_notify_rsp_mask = [0; 32];
-        pair_setting_flag = PairState::PairSetted;
-    }else if pair_setting_flag as u8 >= PairState::PairSetMeshTxStart as u8 && clock_time_exceed(MESH_PAIR_TIME, mesh_pair_cmd_interval*1000) {
-        MESH_PAIR_TIME = clock_time();
-        if pair_setting_flag == PairState::PairSetMeshTxStart {
+        pair_setting_flag = PAIR_STATE::PAIR_SETTED;
+    }else if pair_setting_flag as u8 >= PAIR_STATE::PAIR_SET_MESH_TX_START as u8 && clock_time_exceed(mesh_pair_time, mesh_pair_cmd_interval*1000) {
+        mesh_pair_time = clock_time();
+        if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_START {
             op_para[0] = LGT_CMD_MESH_PAIR;
-            op_para[3] = MESH_PAIR_STATE as u8;
-            if MESH_PAIR_STATE == MeshPairState::MeshPairName1 {
+            op_para[3] = mesh_pair_state as u8;
+            if mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME1 {
                 // send mesh name [0-7]
                 copy_nonoverlapping(pair_nn.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairName2;
-            }else if MESH_PAIR_STATE == MeshPairState::MeshPairName2 {
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME2;
+            }else if mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_NAME2 {
                 // send mesh name [8-15]
                 copy_nonoverlapping(pair_nn.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairPwd1;
-            }else if MESH_PAIR_STATE == MeshPairState::MeshPairPwd1 {
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_PWD1;
+            }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_PWD1){
                 // send mesh pwd [0-7]
                 copy_nonoverlapping(pair_pass.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairPwd2;
-            }else if MESH_PAIR_STATE == MeshPairState::MeshPairPwd2 {
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_PWD2;
+            }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_PWD2){
                 // send mesh pwd [8-15]
                 copy_nonoverlapping(pair_pass.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairLtk1;
-            }else if MESH_PAIR_STATE == MeshPairState::MeshPairLtk1 {
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_LTK1;
+            }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_LTK1){
                 // send mesh ltk [0-7]
                 copy_nonoverlapping(pair_ltk_mesh.as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairLtk2;
-            }else if MESH_PAIR_STATE == MeshPairState::MeshPairLtk2 {
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_LTK2;
+            }else if(mesh_pair_state == MESH_PAIR_STATE::MESH_PAIR_LTK2){
                 // send mesh ltk [8-15]
                 copy_nonoverlapping(pair_ltk_mesh.as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		MESH_PAIR_STATE = MeshPairState::MeshPairName1;
-        		pair_setting_flag = PairState::PairSetMeshTxDone;
+        		mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
+        		pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_TX_DONE;
             }else{
-                MESH_PAIR_STATE = MeshPairState::MeshPairName1;
+                mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
                 mesh_pair_start_notify_time = 0;
                 mesh_pair_retry_cnt = 0;
                 mesh_pair_start_time = 0;
                 mesh_pair_notify_rsp_mask = [0; 32];
-        		pair_setting_flag = PairState::PairSetted;
+        		pair_setting_flag = PAIR_STATE::PAIR_SETTED;
         		return;
             }
-        }else if pair_setting_flag == PairState::PairSetMeshTxDone {
+        }else if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_TX_DONE {
             // get mesh nodes' confirm value
             //rf_link_slave_read_status_start();
             op_para[0] = LGT_CMD_MESH_OTA_READ;
             op_para[3] = 0x10;// bridge cnt
             op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
-            pair_setting_flag = PairState::PairSetMeshRxDone;
+            pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_RX_DONE;
             mesh_pair_start_notify_time = clock_time() | 0;
             for i in 0..8 {
                 mesh_pair_checksum[i] = get_mesh_pair_checksum(i as u8);
             }
-        }else if pair_setting_flag == PairState::PairSetMeshRxDone {
+        }else if pair_setting_flag == PAIR_STATE::PAIR_SET_MESH_RX_DONE {
             let mut effect_flag = mesh_pair_notify_rsp_mask == [0; 32];
             if !effect_flag && clock_time_exceed(mesh_pair_start_time, MESH_PAIR_NOTIFY_TIMEOUT*1000) {
                 if mesh_pair_retry_cnt < mesh_pair_retry_max {
                     mesh_pair_start_time = clock_time() | 1;
-                    pair_setting_flag = PairState::PairSetMeshTxStart;
-                    MESH_PAIR_STATE = MeshPairState::MeshPairName1;
+                    pair_setting_flag = PAIR_STATE::PAIR_SET_MESH_TX_START;
+                    mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
                 }else{
                     // retry timeout, effect or cancel?? effect now
                     effect_flag = true;
@@ -784,13 +784,13 @@ unsafe fn mesh_pair_proc()
             if effect_flag {
                 //send cmd to switch to new mesh
                 op_para[0] = LGT_CMD_MESH_PAIR;
-                op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
-                MESH_PAIR_STATE = MeshPairState::MeshPairName1;
+                op_para[3] = MESH_PAIR_STATE::MESH_PAIR_EFFECT_DELAY as u8;
+                mesh_pair_state = MESH_PAIR_STATE::MESH_PAIR_NAME1;
                 mesh_pair_start_notify_time = 0;
                 mesh_pair_retry_cnt = 0;
                 mesh_pair_start_time = 0;
                 mesh_pair_notify_rsp_mask = [0; 32];
-                pair_setting_flag = PairState::PairSetted;
+                pair_setting_flag = PAIR_STATE::PAIR_SETTED;
             }
         }
     }else{
@@ -820,18 +820,18 @@ pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
     }
 
     if !rf_slave_ota_busy {
-        if !pair_login_ok || _is_master_sending_ota_st() || _is_mesh_ota_slave_running() {
+        if !pair_login_ok || is_master_sending_ota_st() || is_mesh_ota_slave_running() {
             return true;
         }
 
         rf_slave_ota_busy = true;
         if slave_read_status_busy
         {
-            _rf_link_slave_read_status_stop ();
+            rf_link_slave_read_status_stop ();
         }
     }
-	copy_nonoverlapping(ph, get_buff_response()[(SLAVE_OTA_DATA_CACHE_IDX %16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
-    SLAVE_OTA_DATA_CACHE_IDX += 1;
+	copy_nonoverlapping(ph, buff_response[(slave_ota_data_cache_idx%16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
+    slave_ota_data_cache_idx += 1;
 	return true;
 }
 
@@ -848,30 +848,30 @@ unsafe fn get_ota_check_type(par: *const u8) -> u8
 unsafe fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
 {
 	rf_slave_ota_finished_flag = reset_flag;
-	RF_SLAVE_OTA_FINISHED_TIME = clock_time();
+	rf_slave_ota_finished_time = clock_time();
 }
 
 pub unsafe fn rf_link_slave_data_ota_save() -> bool
 {
     let mut reset_flag= OtaState::CONTINUE;
-	for i in 0..SLAVE_OTA_DATA_CACHE_IDX {
-		let p = get_buff_response()[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
-		let n_data_len = (*p).l2cap - 7;
+	for i in 0..slave_ota_data_cache_idx {
+		let p = buff_response[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
+		let nDataLen = (*p).l2cap - 7;
 
-		if crc16((*p).dat.as_ptr(), n_data_len + 2) == (*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) << 8 {
+		if crc16((*p).dat.as_ptr(), nDataLen + 2) == (*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) << 8 {
 			rf_slave_ota_timeout_s = rf_slave_ota_timeout_def_s;	// refresh timeout
 
 			let cur_idx = (*p).dat[0] as u16 | ((*p).dat[1] as u16) << 8;
-			if n_data_len == 0 {
-				if (cur_idx == OTA_RCV_LAST_IDX +1) && (cur_idx == OTA_PKT_TOTAL) {
+			if nDataLen == 0 {
+				if (cur_idx == ota_rcv_last_idx+1) && (cur_idx == ota_pkt_total) {
 					// ota ok, save, reboot
-					reset_flag = OtaState::OK;
+					reset_flag = OK;
 				}else{
 					// ota err
 					cur_ota_flash_addr = 0;
-                    OTA_PKT_CNT = 0;
-                    OTA_RCV_LAST_IDX = 0;
-					reset_flag = OtaState::ERROR;
+                    ota_pkt_cnt = 0;
+                    ota_rcv_last_idx = 0;
+					reset_flag = ERROR;
 				}
 			}else{
 				if cur_idx == 0 {
@@ -879,68 +879,68 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 					if cur_ota_flash_addr != 0 {
 					    // 0x10000 should be 0x00
 						cur_ota_flash_addr = 0;
-                        OTA_PKT_CNT = 0;
-                        OTA_RCV_LAST_IDX = 0;
-	                    reset_flag = OtaState::ERROR;
+                        ota_pkt_cnt = 0;
+                        ota_rcv_last_idx = 0;
+	                    reset_flag = ERROR;
 					}else{
-					    NEED_CHECK_TYPE = get_ota_check_type(&(*p).dat[8]);
-					    if NEED_CHECK_TYPE == 1 {
-					    	FW_CHECK_VAL = ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
+					    need_check_type = get_ota_check_type(&(*p).dat[8]);
+					    if need_check_type == 1 {
+					    	fw_check_val = ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
 					    }
-	    				reset_flag = _rf_ota_save_data((*p).dat.as_ptr().offset(2));
+	    				reset_flag = rf_ota_save_data((*p).dat.as_ptr().offset(2));
 					}
-				}else if cur_idx == OTA_RCV_LAST_IDX + 1 {
+				}else if cur_idx == ota_rcv_last_idx + 1 {
 					// ota fw check
 					if cur_idx == 1 {
-						OTA_PKT_TOTAL = (((((*p).dat[10] as u32) |( (((*p).dat[11] as u32) << 8) & 0xFF00) | ((((*p).dat[12] as u32) << 16) & 0xFF0000) | ((((*p).dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16;
-						if OTA_PKT_TOTAL < 3 {
+						ota_pkt_total = (((((*p).dat[10] as u32) |( (((*p).dat[11] as u32) << 8) & 0xFF00) | ((((*p).dat[12] as u32) << 16) & 0xFF0000) | ((((*p).dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16;
+						if(ota_pkt_total < 3){
 							// invalid fw
 							cur_ota_flash_addr = 0;
-                            OTA_PKT_CNT = 0;
-                            OTA_RCV_LAST_IDX = 0;
-							reset_flag = OtaState::ERROR;
-						}else if NEED_CHECK_TYPE == 1 {
-							FW_CHECK_VAL += ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
+                            ota_pkt_cnt = 0;
+                            ota_rcv_last_idx = 0;
+							reset_flag = ERROR;
+						}else if need_check_type == 1 {
+							fw_check_val += ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
 						}
-					}else if cur_idx < OTA_PKT_TOTAL - 1 && NEED_CHECK_TYPE == 1 {
-						FW_CHECK_VAL += ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
-					}else if cur_idx == OTA_PKT_TOTAL - 1 && NEED_CHECK_TYPE == 1 {
-						if FW_CHECK_VAL != (((*p).dat[2] as u32) |( (((*p).dat[3] as u32) << 8) & 0xFF00) | ((((*p).dat[4] as u32) << 16) & 0xFF0000) | ((((*p).dat[5] as u32) << 24) & 0xFF000000)) {
+					}else if cur_idx < ota_pkt_total - 1 && need_check_type == 1 {
+						fw_check_val += ((*p).dat[(nDataLen+2) as usize] as u16 | ((*p).dat[(nDataLen+3) as usize] as u16) <<8) as u32;
+					}else if cur_idx == ota_pkt_total - 1 && need_check_type == 1 {
+						if fw_check_val != (((*p).dat[2] as u32) |( (((*p).dat[3] as u32) << 8) & 0xFF00) | ((((*p).dat[4] as u32) << 16) & 0xFF0000) | ((((*p).dat[5] as u32) << 24) & 0xFF000000)) {
 							cur_ota_flash_addr = 0;
-                            OTA_PKT_CNT = 0;
-                            OTA_RCV_LAST_IDX = 0;
-							reset_flag = OtaState::ERROR;
+                            ota_pkt_cnt = 0;
+                            ota_rcv_last_idx = 0;
+							reset_flag = ERROR;
 						}
 					}
 
-					if cur_ota_flash_addr + 16 > (FW_SIZE_MAX_K * 1024) || reset_flag != OtaState::CONTINUE { // !is_valid_fw_len()
-					    reset_flag = OtaState::ERROR;
+					if cur_ota_flash_addr + 16 > (FW_SIZE_MAX_K * 1024) { // !is_valid_fw_len()
+					    reset_flag = ERROR;
 				    }else{
-					    reset_flag = _rf_ota_save_data(&(*p).dat[2]);
+					    reset_flag = rf_ota_save_data(&(*p).dat[2]);
 					}
 				}else{
 					// error, ota failed
 					cur_ota_flash_addr = 0;
-                    OTA_PKT_CNT = 0;
-                    OTA_RCV_LAST_IDX = 0;
-					reset_flag = OtaState::ERROR;
+                    ota_pkt_cnt = 0;
+                    ota_rcv_last_idx = 0;
+					reset_flag = ERROR;
 				}
 
-				OTA_RCV_LAST_IDX = cur_idx;
+				ota_rcv_last_idx = cur_idx;
 			}
 		}else{
 			// error, ota failed
 			cur_ota_flash_addr = 0;
-            OTA_PKT_CNT = 0;
-            OTA_RCV_LAST_IDX = 0;
-		    reset_flag = OtaState::ERROR;
+            ota_pkt_cnt = 0;
+            ota_rcv_last_idx = 0;
+		    reset_flag = ERROR;
 		}
 
 		if reset_flag != OtaState::CONTINUE {
 		    if rf_slave_ota_finished_flag == OtaState::CONTINUE {
 		    	if (APP_OTA_HCI_TYPE::MESH == app_ota_hci_type)
-		    	&& (reset_flag == OtaState::OK) {
-		    		_mesh_ota_master_start_firmware_from_backup();
+		    	&& (OK == reset_flag) {
+		    		mesh_ota_master_start_firmware_from_backup();
 		    		rf_slave_ota_timeout_s = 0;	// stop gatt ota timeout check
 		    		rf_slave_ota_busy = false;		// must
 			    }else{
@@ -951,7 +951,7 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 			break;
 		}
 	}
-	SLAVE_OTA_DATA_CACHE_IDX = 0;
+	slave_ota_data_cache_idx = 0;
 	return true;
 }
 
@@ -982,7 +982,7 @@ pub fn rf_led_ota_ok(){
 	gpio_set_func(OTA_LED as u32, AS_GPIO);
 	gpio_set_output_en(OTA_LED as u32, 1);
 	let mut led_onoff = 1;
-	for _ in 0..6
+	for i in 0..6
     {
 		gpio_write(OTA_LED as u32, led_onoff);
 		led_onoff = !led_onoff;
@@ -996,7 +996,7 @@ fn rf_led_ota_error(){
 	gpio_set_func(OTA_LED as u32, AS_GPIO);
 	gpio_set_output_en(OTA_LED as u32, 1);
 	let mut led_onoff = 1;
-	for _ in 0..60
+	for i in 0..60
 	{
 		gpio_write(OTA_LED as u32, led_onoff);
 		led_onoff = !led_onoff;
@@ -1011,15 +1011,15 @@ unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
     if OtaState::ERROR == st {
         erase_ota_data(flash_adr_light_new_fw);
         rf_led_ota_error();
-    }else if OtaState::OK == st {
+    }else if(OtaState::OK == st){
         //rf_ota_save_data(0);
         rf_ota_set_flag ();
         rf_led_ota_ok();
-    }else if OtaState::MASTER_OTA_REBOOT_ONLY == st {
+    }else if(OtaState::MASTER_OTA_REBOOT_ONLY == st){
     	// just reboot
     }
     irq_disable ();
-    _light_sw_reboot();
+    light_sw_reboot();
 }
 
 #[no_mangle]
@@ -1029,25 +1029,25 @@ unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
 
     if rf_slave_ota_finished_flag != OtaState::CONTINUE {
         let mut reboot_flag = false;
-        if (0 == TERMINATE_CNT) && rf_slave_ota_terminate_flag {
-            if _is_add_packet_buf_ready() {
-                TERMINATE_CNT = 6;
-                _rf_link_add_tx_packet (PKT_TERMINATE.as_ptr());
+        if (0 == terminate_cnt) && rf_slave_ota_terminate_flag {
+            if is_add_packet_buf_ready() {
+                terminate_cnt = 6;
+                rf_link_add_tx_packet (pkt_terminate.as_ptr());
             }
         }
 
-        if TERMINATE_CNT != 0 {
-            TERMINATE_CNT -= 1;
-            if TERMINATE_CNT == 0{
+        if terminate_cnt != 0 {
+            terminate_cnt -= 1;
+            if terminate_cnt == 0{
                 reboot_flag = true;
             }
         }
 
-        if !rf_slave_ota_terminate_flag && (clock_time() - RF_SLAVE_OTA_FINISHED_TIME) > 2000*1000 * tick_per_us {
+        if !rf_slave_ota_terminate_flag && (clock_time() - rf_slave_ota_finished_time) > 2000*1000 * tick_per_us {
             rf_slave_ota_terminate_flag = true;    // for ios: no last read command
         }
 
-        if (clock_time() - RF_SLAVE_OTA_FINISHED_TIME) > 4000*1000 * tick_per_us {
+        if (clock_time() - rf_slave_ota_finished_time) > 4000*1000 * tick_per_us {
             reboot_flag = true;
         }
 
@@ -1094,7 +1094,7 @@ fn is_valid_fw_len(fw_len: u32) -> bool
 #[no_mangle]
 fn get_fw_len(fw_adr: u32) -> u32
 {
-	let fw_len = 0;
+	let mut fw_len = 0;
 	flash_read_page(fw_adr+0x18, 4, addr_of!(fw_len) as *mut u8);	// use flash read should be better
 	return fw_len;
 }
@@ -1104,12 +1104,12 @@ unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t,
 {
 	let fw_len = get_fw_len(new_fw_adr);
 	if is_valid_fw_len(fw_len) {
-		_mesh_ota_master_start(new_fw_adr as *const u8, fw_len, p_dev_info);
+		mesh_ota_master_start(new_fw_adr as *const u8, fw_len, p_dev_info);
 	}
 }
 
 #[no_mangle]
-pub fn mesh_ota_master_start_firmware_from_own()
+unsafe fn mesh_ota_master_start_firmware_from_own()
 {
     let adr_fw = 0;
     let fw_len = get_fw_len(adr_fw);
@@ -1119,7 +1119,7 @@ pub fn mesh_ota_master_start_firmware_from_own()
             no_check_dev_mode_flag_rsv: 0,
             rsv: [0; 4],
         };
-		_mesh_ota_master_start(adr_fw as *const u8, fw_len, addr_of!(dev_info));
+		mesh_ota_master_start(adr_fw as *const u8, fw_len, addr_of!(dev_info));
 	}
 }
 
@@ -1131,7 +1131,7 @@ unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
 
    if 0x02 == (*p).dev_info.dev_mode { // LIGHT_MODE
        let mut ver_myself: [u8; 4] = [0; 4];
-       _get_fw_version(ver_myself.as_mut_ptr());
+       get_fw_version(ver_myself.as_mut_ptr());
        if (*p).version[1] < ver_myself[1] {
            ret = false;
        }else if (*p).version[1] == ver_myself[1] {
@@ -1176,7 +1176,7 @@ unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
 #[no_mangle]
 unsafe fn update_ble_parameter_cb() {
    if conn_update_successed == 0 {
-       _setup_ble_parameter_start(1, CONN_PARA_DATA[0][0], CONN_PARA_DATA[0][1], CONN_PARA_DATA[0][2]);  // interval 32: means 40ms;   timeout 200: means 2000ms
+       setup_ble_parameter_start(1, conn_para_data[0][0], conn_para_data[0][1], conn_para_data[0][2]);  // interval 32: means 40ms;   timeout 200: means 2000ms
        conn_update_cnt += 1;
    }
 }
@@ -1202,7 +1202,7 @@ unsafe fn rf_update_conn_para(p: *const u8) -> u8
            if conn_update_cnt >= UPDATE_CONN_PARA_CNT {
                conn_update_cnt = 0;
            }else{
-               _setup_ble_parameter_start(1, CONN_PARA_DATA[conn_update_cnt as usize][0], CONN_PARA_DATA[conn_update_cnt as usize][1], CONN_PARA_DATA[conn_update_cnt as usize][2]);
+               setup_ble_parameter_start(1, conn_para_data[conn_update_cnt as usize][0], conn_para_data[conn_update_cnt as usize][1], conn_para_data[conn_update_cnt as usize][2]);
                conn_update_cnt += 1;
            }
        }
@@ -1213,5 +1213,5 @@ unsafe fn rf_update_conn_para(p: *const u8) -> u8
 
 #[no_mangle]
 unsafe fn light_slave_tx_command_callback (p: *const u8) {
-    _rf_link_data_callback(p);
+    rf_link_data_callback(p);
 }

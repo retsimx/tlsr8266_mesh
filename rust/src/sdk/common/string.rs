@@ -47,7 +47,7 @@ pub unsafe fn memcmp(
     let mut s2 = m2;
     loop {
         let fresh3 = n;
-        n = n.wrapping_sub(1);
+        n -= 1;
         if !(fresh3 != 0) {
             break;
         }
@@ -92,7 +92,7 @@ pub unsafe fn memmove(
     let mut s = src;
     loop {
         let fresh5 = n;
-        n = n.wrapping_sub(1);
+        n -= 1;
         if !(fresh5 != 0) {
             break;
         }
@@ -111,15 +111,11 @@ pub unsafe fn bcopy(
     mut dest: *mut u8,
     mut len: u32,
 ) {
-    if len == 0 {
-        return;
-    }
-
     if dest < src {
         loop {
             let fresh8 = len;
-            len = len.wrapping_sub(1);
-            if fresh8 == 0 {
+            len = len - 1;
+            if !(fresh8 != 0) {
                 break;
             }
             let fresh9 = src;
@@ -133,8 +129,8 @@ pub unsafe fn bcopy(
         let mut lastd= dest.offset((len - 1) as isize);
         loop {
             let fresh11 = len;
-            len = len.wrapping_sub(1);
-            if fresh11 == 0 {
+            len = len - 1;
+            if !(fresh11 != 0) {
                 break;
             }
             let fresh12 = lasts;
@@ -155,7 +151,7 @@ pub unsafe fn memset(
     let mut ptr = dest;
     loop {
         let fresh14 = len;
-        len = len.wrapping_sub(1);
+        len -= 1;
         if !(fresh14 > 0) {
             break;
         }

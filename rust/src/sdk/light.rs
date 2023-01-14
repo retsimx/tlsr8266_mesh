@@ -2,77 +2,75 @@
 
 use std::mem;
 use std::mem::{MaybeUninit, size_of, size_of_val};
-use common::{MESH_NODE_MAX_NUM, PairState};
-use ::{MESH_PWD_ENCODE_SK, pub_mut};
-use ::{no_mangle_fn, no_mangle_fn_def};
+use common::{MESH_NODE_MAX_NUM, PAIR_STATE};
+use MESH_PWD_ENCODE_SK;
 use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
-no_mangle_fn!(light_set_tick_per_us, tick: u32);
-
-    no_mangle_fn!(mesh_security_enable, en: bool);
-    no_mangle_fn!(mesh_get_fw_version);
-
-    no_mangle_fn!(register_mesh_ota_master_ui, p: fn(*const u8));
-
-    no_mangle_fn!(setSppUUID, p_service_uuid: *const u8, p_data_s2c_uuid: *const u8, p_data_c2s_uuid: *const u8, p_data_ota_uuid: *const u8, p_data_pair_uuid: *const u8);
-
-    no_mangle_fn!(vendor_id_init, vendor_id: u16);
-
-    no_mangle_fn!(is_receive_ota_window, bool);
-    no_mangle_fn!(rf_link_slave_proc);
-    no_mangle_fn!(is_add_packet_buf_ready, bool);
-    no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8);  // return value: 1 success,  0 faile)d
-    no_mangle_fn!(rf_link_slave_read_status_stop);
-    no_mangle_fn!(rf_link_data_callback,p: *const u8);
-    no_mangle_fn!(light_sw_reboot);
-    no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
-
-    no_mangle_fn!(pairRead, u32, p: *const u8);
-    no_mangle_fn!(pairWrite, u32, p: *const u8);
-    no_mangle_fn!(pair_save_key);
-    no_mangle_fn!(pair_load_key);
-    no_mangle_fn!(encode_password, pd: *mut u8);
-    no_mangle_fn!(decode_password, pd: *mut u8);
-    no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
-
-    no_mangle_fn!(is_master_sending_ota_st, bool);
-    no_mangle_fn!(mesh_ota_slave_set_response, bool, params: *mut u8, rtype: u8);
-    no_mangle_fn!(mesh_ota_timeout_handle, op: u8, params: *const u8);
-    no_mangle_fn!(mesh_ota_master_start, adr: *const u8, len: u32, p_dev_info: *const mesh_ota_dev_info_t);
-    no_mangle_fn!(is_master_ota_st, bool);
-    no_mangle_fn!(is_mesh_ota_slave_running, bool);
-    no_mangle_fn!(mesh_ota_slave_reboot_delay);
-    no_mangle_fn!(mesh_ota_slave_save_data, bool, params: *const u8);
-    no_mangle_fn!(mesh_ota_master_cancle, reset_flag: u8, complete: bool);
-    no_mangle_fn!(mesh_ota_master_start_firmware_from_backup);
-    no_mangle_fn!(mesh_push_user_command, u32, sno: u32, dst: u16, p: *const u8, len: u8);
-    no_mangle_fn!(mesh_node_init);
-    no_mangle_fn!(mesh_report_status_enable, mask: u8);
-    no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
-
-    no_mangle_fn!(get_fw_version, ver: *const u8);
-
-    no_mangle_fn!(irq_light_slave_handler);
-
-    // param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv);
-    no_mangle_fn!(ll_device_status_update, st_val_par: *const u8, len: u8);
-
-    no_mangle_fn!(setup_ble_parameter_start, u32, delay: u16, interval_min: u16, interval_max: u16, timeout: u16);
-
-    no_mangle_fn!(rf_drv_init, mode: u32);
-
-pub_mut!(pair_config_mesh_name, [u8; 17]);
-pub_mut!(pair_config_mesh_pwd, [u8; 17]);
-pub_mut!(pair_config_mesh_ltk, [u8; 17]);
-
-pub_mut!(slave_p_mac, *const u8);
-
-pub_mut!(p_adv_pri_data, *const ll_adv_private_t);
-pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t);
-pub_mut!(adv_private_data_len, u8);
-
 extern "C" {
+    pub fn light_set_tick_per_us(tick: u32);
+
+    pub fn mesh_security_enable(en: bool);
+    pub fn mesh_get_fw_version();
+
+    pub fn register_mesh_ota_master_ui(p: fn(*const u8));
+
+    pub fn setSppUUID(p_service_uuid: *const u8, p_data_s2c_uuid: *const u8, p_data_c2s_uuid: *const u8, p_data_ota_uuid: *const u8, p_data_pair_uuid: *const u8);
+
+    pub fn vendor_id_init(vendor_id: u16);
+
+    pub fn is_receive_ota_window() -> bool;
+    pub fn rf_link_slave_proc();
+    pub fn is_add_packet_buf_ready() -> bool;
+    pub fn rf_link_add_tx_packet(p: *const u8) -> bool;  // return value: 1 success,  0 failed
+    pub fn rf_link_slave_read_status_stop();
+    pub fn rf_link_data_callback(p: *const u8);
+    pub fn light_sw_reboot();
+    pub fn rf_ota_save_data(data: *const u8) -> OtaState;
+
+    pub fn pairRead(p: *const u8) -> u32;
+    pub fn pairWrite(p: *const u8) -> u32;
+    pub fn pair_save_key();
+    pub fn pair_load_key();
+    pub fn encode_password(pd: *mut u8);
+    pub fn decode_password(pd: *mut u8);
+    pub fn access_code(p_name: *const u8, p_pw: *const u8) -> u32;
+
+    pub fn is_master_sending_ota_st() -> bool;
+    pub fn mesh_ota_slave_set_response(params: *mut u8, rtype: u8) -> bool;
+    pub fn mesh_ota_timeout_handle(op: u8, params: *const u8);
+    pub fn mesh_ota_master_start_firmware_from_own();
+    pub fn mesh_ota_master_start(adr: *const u8, len: u32, p_dev_info: *const mesh_ota_dev_info_t);
+    pub fn is_master_ota_st() -> bool;
+    pub fn is_mesh_ota_slave_running() -> bool;
+    pub fn mesh_ota_slave_reboot_delay();
+    pub fn mesh_ota_slave_save_data(params: *const u8) -> bool;
+    pub fn mesh_ota_master_cancle(reset_flag: u8, complete: bool);
+    pub fn mesh_ota_master_start_firmware_from_backup();
+    pub fn mesh_push_user_command(sno: u32, dst: u16, p: *const u8, len: u8) -> u32;
+    pub fn mesh_node_init();
+    pub fn mesh_report_status_enable(mask: u8);
+    pub fn mesh_report_status_enable_mask(val: *const u8, len: u16);
+
+    pub fn get_fw_version(ver: *const u8);
+
+    pub fn irq_light_slave_handler();
+
+    // param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv;
+    pub fn ll_device_status_update(st_val_par: *const u8, len: u8);
+
+    pub fn setup_ble_parameter_start(delay: u16, interval_min: u16, interval_max: u16, timeout: u16) -> u32;
+
+    pub static mut user_data: [u8; 16];
+    pub static mut user_data_len: u8;
     pub static mut pair_config_valid_flag: u8;
+
+    pub static mut pair_config_mesh_name: [u8; 17];
+    pub static mut pair_config_mesh_pwd: [u8; 17];
+    pub static mut pair_config_mesh_ltk: [u8; 17];
+
+    pub static mut p_adv_pri_data: *const ll_adv_private_t;
+    pub static mut p_adv_rsp_data: *const ll_adv_rsp_private_t;
+    pub static mut adv_private_data_len: u8;
 
     pub static mut online_status_timeout: u32;
 
@@ -85,6 +83,8 @@ extern "C" {
 
     pub static group_address: [u16; MAX_GROUP_NUM as usize];
 
+    pub static mut slave_p_mac: *const u8;
+
     pub static mut adr_flash_cfg_idx: u32;
 
     pub static mut slave_link_connected: bool;
@@ -94,7 +94,7 @@ extern "C" {
     pub static mut slave_read_status_busy: bool;
     pub static mut rf_slave_ota_busy: bool;
 
-    pub static mut pair_setting_flag: PairState;
+    pub static mut pair_setting_flag: PAIR_STATE;
     pub static mut pair_nn: [u8; 16];
     pub static mut pair_pass: [u8; 16];
     pub static mut pair_ltk: [u8; 16];
@@ -113,9 +113,6 @@ extern "C" {
 
     pub static mut tick_per_us: u32;
 }
-
-pub_mut!(user_data, [u8; 16]);
-pub_mut!(user_data_len, u8);
 
 pub const PMW_MAX_TICK_BASE	 : u16 =           255;   // must 255
 pub const PMW_MAX_TICK_MULTI	 : u16 =           209;   // 209: freq = 600.4Hz
@@ -144,8 +141,8 @@ pub const		    LGT_CMD_MESH_OTA_DATA		:u8 =	0x06;//internal use
 pub const             CMD_OTA_FW_VERSION		:u16 =			0xff00;          // must larger than 0xff00
 pub const             CMD_OTA_START			:u16 =			0xff01;
 pub const             CMD_OTA_END				:u16 =			0xff02;
-pub const             CMD_STOP_MESH_OTA		:u16 =			0xfffe;//APP use
-pub const             CMD_START_MESH_OTA		:u16 =			0xffff;//APP use  	// use in rf_link_data_callback()
+pub const             CMD_STOP_MESH_OTA		:u16 =			0xfffe;//app use
+pub const             CMD_START_MESH_OTA		:u16 =			0xffff;//app use  	// use in rf_link_data_callback()
 
 pub const		    LGT_CMD_MESH_OTA_READ		:u8 =	0x07;//internal use
 pub const		        PAR_READ_VER			   :u8 =     0x00;//internal use
@@ -153,8 +150,8 @@ pub const		        PAR_READ_END			   :u8 =     0x01;//internal use
 pub const		        PAR_READ_MAP			   :u8 =     0x02;//internal use
 pub const		        PAR_READ_CALI			   :u8 =     0x03;//internal use
 pub const		        PAR_READ_PROGRESS		:u8 =	    0x04;//internal use
-pub const		        PAR_APP_READ_ST			   :u8 =     0x05;//APP use: 0 : idle; 1: slave mode; 2: master mode
-pub const             PAR_APP_OTA_HCI_TYPE_SET:u8 =		0x06;//APP use
+pub const		        PAR_APP_READ_ST			   :u8 =     0x05;//app use: 0 : idle; 1: slave mode; 2: master mode
+pub const             PAR_APP_OTA_HCI_TYPE_SET:u8 =		0x06;//app use
 pub const		        PAR_READ_MESH_PAIR_CONFIRM:u8 =		0x0a;
 pub const		    LGT_CMD_MESH_OTA_READ_RSP	:u8 =	0x08;//internal use
 pub const         LGT_CMD_MESH_PAIR              :u8 = 0x09;
@@ -303,9 +300,9 @@ pub struct rf_packet_att_value_t {
     pub sno: [u8; 3],
     pub src: [u8; 2],
     pub dst: [u8; 2],
-    pub val: [u8; 23],// op[1~3],params[0~10],mac-APP[5],ttl[1],mac-net[4]
-    // get status req: params[0]=tick  mac-APP[2-3]=src-mac1...
-    // get status rsp: mac-APP[0]=ttc  mac-APP[1]=hop-count
+    pub val: [u8; 23],// op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+    // get status req: params[0]=tick  mac-app[2-3]=src-mac1...
+    // get status rsp: mac-app[0]=ttc  mac-app[1]=hop-count
 }
 
 #[derive(Clone, Copy)]
@@ -342,7 +339,7 @@ pub struct rf_packet_att_write_t {
 	pub  opcode: u8,
 	pub handle: u8,
 	pub handle1: u8,
-	pub value: u8//sno[3],src[2],dst[2],op[1~3],params[0~10],mac-APP[5],ttl[1],mac-net[4]
+	pub value: u8//sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
 #[repr(C, packed)]
@@ -355,7 +352,7 @@ pub struct rf_packet_att_cmd_t {
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
-    pub value: [u8; 30] //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-APP[5],ttl[1],mac-net[4]
+    pub value: [u8; 30] //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
 #[repr(C, packed)]
@@ -410,7 +407,9 @@ pub unsafe fn is_unicast_addr(p_addr: *const u8) -> bool
 }
 
 // required callback fns
-no_mangle_fn_def!(gpio_irq_user_handle);
+#[no_mangle]
+fn gpio_irq_user_handle() {}
+
 #[no_mangle]
 fn gpio_risc0_user_handle() {}
 
@@ -422,8 +421,8 @@ fn gpio_risc2_user_handle() {}
 
 // Shit required for linking
 /////////////// password encode sk initial  ///////////////////////////////////////////////////
-
-pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
+#[no_mangle]
+pub static mut pair_config_pwd_encode_sk: [u8; 17] = [0; 17];
 #[no_mangle]
 static mut pair_config_pwd_encode_enable: u8 = 1;
 #[no_mangle]

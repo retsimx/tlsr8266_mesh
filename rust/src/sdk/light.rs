@@ -452,7 +452,7 @@ pub struct mesh_ota_pkt_start_command_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-struct status_record_t {
+pub struct status_record_t {
     adr: [u8; 1],
     // don't modify, use internal
     alarm_id: u8,    // don't modify, use internal
@@ -460,7 +460,7 @@ struct status_record_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-struct rc_pkt_buf_t {
+pub struct rc_pkt_buf_t {
     pub op: u8,
     pub sno: [u8; 3],
     pub notify_ok_flag: u8,
@@ -481,37 +481,26 @@ no_mangle_fn_def!(gpio_risc2_user_handle);
 
 // Shit required for linking
 /////////////// password encode sk initial  ///////////////////////////////////////////////////
-#[no_mangle]
-pub static mut pair_config_pwd_encode_sk: [u8; 17] = [0; 17];
-#[no_mangle]
-static mut pair_config_pwd_encode_enable: u8 = 1;
-#[no_mangle]
-static mut auth_code: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
-#[no_mangle]
-static mut auth_code_en: u8 = 0;
-#[no_mangle]
-static mut tx_packet_bridge_random_en: u8 = 0;
+pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
+pub_mut!(pair_config_pwd_encode_enable, u8, 1);
+pub_mut!(auth_code, [u8; 4], [0x01, 0x02, 0x03, 0x04]);
+pub_mut!(auth_code_en, u8, 0);
+pub_mut!(tx_packet_bridge_random_en, u8, 0);
 
 /////////////// adv par define ///////////////////////////////////////////////////
-#[no_mangle]
-static mut adv_interval2listen_interval: u16 = 4;
+pub_mut!(adv_interval2listen_interval, u16, 4);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-#[no_mangle]
-static mut online_status_interval2listen_interval: u16 = 8;
+pub_mut!(online_status_interval2listen_interval, u16, 8);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-#[no_mangle]
-static mut rf_slave_ota_busy_mesh_en: u8 = 0;
+pub_mut!(rf_slave_ota_busy_mesh_en, u8, 0);
 
 /////////////// for passive switch ///////////////////////////////////////////////
-#[no_mangle]
-static mut separate_ADVpkt: u8 = 0;
+pub_mut!(separate_ADVpkt, u8, 0);
 //if 1 send one adv packet in each interrupt
-#[no_mangle]
-static mut mesh_chn_amount: u8 = 4;                //amount of sys_chn_listen
+pub_mut!(mesh_chn_amount, u8, 4);                //amount of sys_chn_listen
 
 // Scene shit needed to link
-#[no_mangle]
-static mut pkt_mesh_scene_rsp: [u8; 1] = [0];
+pub_mut!(pkt_mesh_scene_rsp, [u8; 1], [0]);
 
 #[no_mangle]
 fn is_scene_poll_notify_busy() -> u32 {
@@ -525,7 +514,7 @@ fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_val
 
 // Alarm shit needed to link
 #[no_mangle]
-static mut pkt_mesh_alarm_rsp: [u8; 1] = [0];
+pub_mut!(pkt_mesh_alarm_rsp, [u8; 1], [0]);
 
 #[no_mangle]
 fn is_alarm_poll_notify_busy() -> u32 {
@@ -580,8 +569,7 @@ fn dual_mode_select(sdk_rf_mode: u32) {}
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
 // don't change
 pub const CFG_SECTOR_ADR_CALIBRATION_CODE: u32 = CFG_ADR_CALIBRATION_512K_FLASH;
-#[no_mangle]
-static mut flash_sector_calibration: u32 = CFG_SECTOR_ADR_CALIBRATION_CODE;
+pub_mut!(flash_sector_calibration, u32, CFG_SECTOR_ADR_CALIBRATION_CODE);
 
 no_mangle_fn_def!(mesh_ota_start_unprotect_flash);
 
@@ -596,17 +584,12 @@ fn rx_mesh_adv_message_cb(p: *const u8, mac_match: u32) {}
 
 no_mangle_fn_def!(sensor_enter_deep_cb);
 
-#[no_mangle]
-static mut sensor_enable: u8 = 0;
-#[no_mangle]
-static mut sensor_last_adv_sleep_time_us: u16 = 1200;
+pub_mut!(sensor_enable, u8, 0);
+pub_mut!(sensor_last_adv_sleep_time_us, u16, 1200);
 // us
-#[no_mangle]
-static mut adv_uuid_flag: u8 = 0;
-#[no_mangle]
-static mut adv_uuid: [u8; 4] = [0x03, 0x02, 0xAB, 0xCD];
-#[no_mangle]
-static mut passive_en: u8 = 0;
+pub_mut!(adv_uuid_flag, u8, 0);
+pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
+pub_mut!(passive_en, u8, 0);
 
 #[no_mangle]
 fn get_command_type(p_att_value: *const u8) -> CMD_TYPE { return CMD_TYPE::NORMAL; }
@@ -615,8 +598,7 @@ fn get_command_type(p_att_value: *const u8) -> CMD_TYPE { return CMD_TYPE::NORMA
 #[no_mangle]
 fn set_command_type2alt(p_att_value: *const u8) {}
 
-#[no_mangle]
-static mut cb_mesh_node_filter: u32 = 0;
+pub_mut!(cb_mesh_node_filter, u32, 0);
 
 #[no_mangle]
 fn proc_sig_mesh_to_telink_mesh() -> u8 { return 0; }
@@ -627,8 +609,7 @@ fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
 #[no_mangle]
 fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) {}
 
-#[no_mangle]
-static mut p_cb_rx_from_mesh: u32 = 0;
+pub_mut!(p_cb_rx_from_mesh, u32, 0);
 
 #[no_mangle]
 fn is_bridge_task_busy() -> bool { return false; }
@@ -636,28 +617,21 @@ fn is_bridge_task_busy() -> bool { return false; }
 #[no_mangle]
 fn mesh_ota_third_complete_cb(calibrate_flag: u32) {}
 
-#[no_mangle]
-static mut mesh_ota_third_fw_flag: u8 = 0;
+pub_mut!(mesh_ota_third_fw_flag, u8, 0);
 
 #[no_mangle]
 fn mesh_ota_set_start_par_user(p: *const mesh_ota_pkt_start_command_t) {}
 
-#[no_mangle]
-static mut p_cb_pair_failed: u32 = 0;
-#[no_mangle]
-static mut p_cb_ble_slave_disconnect: u32 = 0;
+pub_mut!(p_cb_pair_failed, u32, 0);
+pub_mut!(p_cb_ble_slave_disconnect, u32, 0);
 
 no_mangle_fn_def!(rf_link_slave_connect_callback);
 
-#[no_mangle]
-static mut work_sleep_en: u8 = 0;
-#[no_mangle]
-static mut start2adv: u32 = 0;
+pub_mut!(work_sleep_en, u8, 0);
+pub_mut!(start2adv, u32, 0);
 //us
-#[no_mangle]
-static mut iBeaconInterval: u8 = 0;
-#[no_mangle]
-static mut beacon_with_mesh_adv: u8 = 0;
+pub_mut!(iBeaconInterval, u8, 0);
+pub_mut!(beacon_with_mesh_adv, u8, 0);
 
 // 0 means only send beacon adv pkt;  1 means send both of beacon pkt and mesh adv pkt
 #[no_mangle]
@@ -666,28 +640,21 @@ fn pa_txrx(val: u8) {}
 #[no_mangle]
 fn pa_init(tx_pin_level: u8, rx_pin_level: u8) {}
 
-#[no_mangle]
-static mut slave_status_record: [status_record_t; MESH_NODE_MAX_NUM as usize] = [status_record_t { adr: [0], alarm_id: 0 }; MESH_NODE_MAX_NUM as usize];
-#[no_mangle]
-static mut slave_status_record_size: u16 = size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16;
-#[no_mangle]
-static mut SW_Low_Power: u8 = 0;
-#[no_mangle]
-static mut SW_Low_Power_rsp_flag: u8 = 0;
-#[no_mangle]
-static mut mesh_ota_only_calibrate_type1: u8 = 0;
+pub_mut!(slave_status_record, [status_record_t; MESH_NODE_MAX_NUM as usize], [status_record_t { adr: [0], alarm_id: 0 }; MESH_NODE_MAX_NUM as usize]);
+pub_mut!(slave_status_record_size, u16, size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16);
+pub_mut!(SW_Low_Power, u8, 0);
+pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
+pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
 const RC_PKT_BUF_MAX: u8 = 2;
-#[no_mangle]
-static mut rc_pkt_buf: [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize] = [rc_pkt_buf_t {
+pub_mut!(rc_pkt_buf, [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize], [rc_pkt_buf_t {
     op: 0,
     sno: [0; 3],
     notify_ok_flag: 0,
     sno2: [0; 2],
-}; RC_PKT_BUF_MAX as usize];
-#[no_mangle]
-static mut mesh_cmd_cache_num: u8 = RC_PKT_BUF_MAX;
-#[no_mangle]
-static mut device_address_mask: u16 = DEVICE_ADDR_MASK_DEFAULT;
+}; RC_PKT_BUF_MAX as usize]);
+
+pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
+pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
 
 #[no_mangle]
 fn fn_rx_push_to_cache(p: *const u8) {}

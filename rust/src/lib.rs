@@ -7,7 +7,6 @@ use app::App;
 use config::flash_adr_light_new_fw;
 use main_light::{main_loop, user_init};
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use sdk::light::pair_config_pwd_encode_sk;
 use sdk::mcu::dma::dma_init;
 use sdk::mcu::gpio::{gpio_init, GPIO_PIN_TYPE};
 use sdk::mcu::clock::clock_init;

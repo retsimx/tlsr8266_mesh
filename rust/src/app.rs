@@ -1,7 +1,7 @@
 use std::io::Write;
 use config::MESH_PWD_ENCODE_SK;
 use main_light::{main_loop, user_init};
-use sdk::light::{pair_config_pwd_encode_sk, _rf_drv_init};
+use sdk::light::{_rf_drv_init, get_pair_config_pwd_encode_sk};
 use sdk::mcu::clock::clock_init;
 use sdk::mcu::dma::dma_init;
 use sdk::mcu::gpio::gpio_init;
@@ -26,7 +26,7 @@ impl App {
 
     pub unsafe fn init(&self) {
         // Copy the password in to the pair config
-        unsafe { fill_from_str(&mut pair_config_pwd_encode_sk, MESH_PWD_ENCODE_SK.as_bytes()); }
+        unsafe { fill_from_str(get_pair_config_pwd_encode_sk(), MESH_PWD_ENCODE_SK.as_bytes()); }
 
         // Init various subsystems
         cpu_wakeup_init();

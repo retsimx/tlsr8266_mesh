@@ -4,28 +4,22 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, write_bytes};
 use std::slice;
+use BIT;
 
-use ::{flash_adr_light_new_fw, PAIR_VALID_FLAG};
-use ::{MESH_NAME, MESH_PWD};
-use ::{MESH_LTK, VENDOR_ID};
-use ::{MAX_LUM_BRIGHTNESS_VALUE, PWMID_B};
-use ::{PWMID_G, PWMID_R};
-use ::{PWM_G, PWM_R};
-use ::{BIT, PWM_B};
-use ::{flash_adr_lum, FLASH_SECTOR_SIZE};
-use common::{dev_addr_with_mac_flag, dev_addr_with_mac_match, dev_addr_with_mac_rsp, erase_ota_data, get_mesh_pair_checksum, is_mesh_cmd_need_delay, is_ota_area_valid, light_cmd_delayed_ms, light_onoff_step, light_onoff_step_timer, light_step_reset, MESH_NODE_ST_PAR_LEN, mesh_ota_master_100_flag_check, mesh_pair_cb, mesh_pair_init, mesh_pair_proc_effect, mesh_pair_proc_get_mac_flag, RECOVER_STATUS, rega_light_off};
+use common::*;
+use config::{flash_adr_light_new_fw, flash_adr_lum, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, MESH_LTK, MESH_NAME, MESH_PWD, PAIR_VALID_FLAG, PWM_B, PWM_G, PWM_R, PWMID_B, PWMID_G, PWMID_R, VENDOR_ID};
 use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
-use sdk::light::{adv_private_data_len, AUTH_TIME, BRIDGE_MAX_CNT, CMD_START_MESH_OTA, CMD_STOP_MESH_OTA, device_address, GET_DEV_ADDR, GET_GROUP1, GET_GROUP2, GET_GROUP3, GET_MESH_OTA, GET_STATUS, GET_USER_NOTIFY, group_address, irq_light_slave_handler, IRQ_TIME1_INTERVAL, is_add_packet_buf_ready, is_master_ota_st, is_mesh_ota_slave_running, is_receive_ota_window, is_unicast_addr, LGT_CMD_CONFIG_DEV_ADDR, LGT_CMD_DEL_PAIR, LGT_CMD_DEV_ADDR_RSP, LGT_CMD_KICK_OUT, LGT_CMD_LIGHT_CONFIG_GRP, LGT_CMD_LIGHT_GRP_RSP1, LGT_CMD_LIGHT_GRP_RSP2, LGT_CMD_LIGHT_GRP_RSP3, LGT_CMD_LIGHT_ONOFF, LGT_CMD_LIGHT_STATUS, LGT_CMD_MESH_OTA_DATA, LGT_CMD_MESH_OTA_READ_RSP, LGT_CMD_MESH_PAIR, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_NOTIFY_MESH, LGT_CMD_SET_DEV_ADDR, LGT_CMD_SET_LIGHT, LGT_CMD_SET_MESH_INFO, LGT_CMD_USER_NOTIFY_RSP, LIGHT_ADD_GRP_PARAM, LIGHT_DEL_GRP_PARAM, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, light_set_tick_per_us, light_sw_reboot, LightOpType, ll_adv_private_t, ll_adv_rsp_private_t, ll_device_status_update, ll_packet_l2cap_data_t, MAX_GROUP_NUM, max_relay_num, mesh_get_fw_version, mesh_node_init, mesh_ota_master_cancle, mesh_ota_master_start_firmware_from_own, mesh_ota_slave_reboot_delay, mesh_ota_slave_save_data, mesh_ota_slave_set_response, mesh_ota_timeout_handle, mesh_push_user_command, mesh_security_enable, ON_OFF_FROM_OTA, online_status_timeout, ONLINE_STATUS_TIMEOUT, OtaState, p_adv_pri_data, p_adv_rsp_data, pair_config_mesh_ltk, pair_config_mesh_name, pair_config_mesh_pwd, pair_config_valid_flag, pair_login_ok, PAR_READ_MESH_PAIR_CONFIRM, pkt_light_notify, PMW_MAX_TICK, register_mesh_ota_master_ui, rf_link_add_tx_packet, rf_link_slave_proc, rf_packet_att_value_t, security_enable, setSppUUID, slave_first_connected_tick, slave_link_connected, user_data, user_data_len, vendor_id_init};
+use sdk::light::*;
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl};
 use sdk::pm::usb_dp_pullup_en;
-use sdk::rf_drv::{rf_link_add_dev_addr, rf_link_add_group, rf_link_del_group, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_init, rf_link_slave_pairing_enable, rf_link_slave_set_buffer, RF_POWER, rf_set_power_level_index};
-use sdk::service::{TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE};
+use sdk::rf_drv::*;
+use sdk::service::*;
 use vendor_light::{adv_pri_data, adv_rsp_pri_data, vendor_set_adv_data};
 
 extern "C" {
@@ -135,7 +129,7 @@ pub fn light_hw_timer1_config() {
     write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
 }
 
-fn light_init_default() {
+unsafe fn light_init_default() {
     // unsafe { rest_light_init(); }
     // return;
     let len = (unsafe { advData }.len() + size_of::<ll_adv_private_t>() + 2) as u8;
@@ -150,7 +144,7 @@ fn light_init_default() {
     }
 
     // get fw version @flash 0x02,0x03,0x04,0x05
-    unsafe { mesh_get_fw_version(); }
+    _mesh_get_fw_version();
 
     //add the user_data after the adv_pri_data
     let user_const_data: [u8; 6] = [0x05, 0x02, 0x19, 0x00, 0x69, 0x69];
@@ -159,44 +153,40 @@ fn light_init_default() {
 
         user_data_len = 0; // disable add the userdata after the adv_pridata
 
-        light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
+        _light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
-        pair_config_valid_flag = PAIR_VALID_FLAG;
+        set_pair_config_valid_flag(PAIR_VALID_FLAG);
 
-        pair_config_mesh_name.iter_mut().for_each(|m| *m = 0);
+        get_pair_config_mesh_name().iter_mut().for_each(|m| *m = 0);
         let len = min(MESH_NAME.len(), max_mesh_name_len as usize);
-        pair_config_mesh_name[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
+        get_pair_config_mesh_name()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
 
-        pair_config_mesh_pwd.iter_mut().for_each(|m| *m = 0);
+        get_pair_config_mesh_pwd().iter_mut().for_each(|m| *m = 0);
         let len = min(MESH_PWD.len(), 16);
-        pair_config_mesh_pwd[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
+        get_pair_config_mesh_pwd()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
 
-        pair_config_mesh_ltk.iter_mut().for_each(|m| *m = 0);
-        pair_config_mesh_ltk[0..16].copy_from_slice(&MESH_LTK[0..16]);
+        get_pair_config_mesh_ltk().iter_mut().for_each(|m| *m = 0);
+        get_pair_config_mesh_ltk()[0..16].copy_from_slice(&MESH_LTK[0..16]);
     }
 
-    unsafe {
-        setSppUUID(
-            TELINK_SPP_UUID_SERVICE.as_ptr(),
-            TELINK_SPP_DATA_SERVER2CLIENT.as_ptr(),
-            TELINK_SPP_DATA_CLIENT2SERVER.as_ptr(),
-            TELINK_SPP_DATA_OTA.as_ptr(),
-            TELINK_SPP_DATA_PAIR.as_ptr(),
-        );
-    }
+    _setSppUUID(
+        TELINK_SPP_UUID_SERVICE.as_ptr(),
+        TELINK_SPP_DATA_SERVER2CLIENT.as_ptr(),
+        TELINK_SPP_DATA_CLIENT2SERVER.as_ptr(),
+        TELINK_SPP_DATA_OTA.as_ptr(),
+        TELINK_SPP_DATA_PAIR.as_ptr(),
+    );
 
-    unsafe { p_adv_pri_data = &adv_pri_data; }
-    unsafe { adv_private_data_len = size_of::<ll_adv_private_t>() as u8; }
-    unsafe { p_adv_rsp_data = &adv_rsp_pri_data; }
+    set_p_adv_pri_data(&adv_pri_data);
+    set_adv_private_data_len(size_of::<ll_adv_private_t>() as u8);
+    set_p_adv_rsp_data(&adv_rsp_pri_data);
 
-    unsafe { rf_link_slave_pairing_enable(1); }
+    _rf_link_slave_pairing_enable(1);
+    _rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
+    _rf_link_slave_set_buffer(buff_response.as_mut_ptr(), 48);
+    _rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 
-    unsafe { rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32); }
-
-    unsafe { rf_link_slave_set_buffer(buff_response.as_mut_ptr(), 48); }
-
-    unsafe { rf_link_set_max_bridge(BRIDGE_MAX_CNT); }
-    unsafe { vendor_id_init(VENDOR_ID); }
+    _vendor_id_init(VENDOR_ID);
 
     usb_dp_pullup_en(true);
 
@@ -207,7 +197,7 @@ fn light_init_default() {
     mesh_pair_init();
 }
 
-pub fn user_init()
+pub unsafe fn user_init()
 {
     // for app ota
     unsafe {
@@ -216,7 +206,7 @@ pub fn user_init()
         }
     }
 
-    light_init_default();
+    unsafe { light_init_default(); }
 
     // unsafe { rest_user_init(); }
     // return;
@@ -236,16 +226,16 @@ pub fn user_init()
     gpio_set_func(PWM_G as u32, !AS_GPIO);
     gpio_set_func(PWM_B as u32, !AS_GPIO);
 
-    unsafe { rf_link_slave_init(40000); }
+    _rf_link_slave_init(40000);
 
     unsafe { factory_reset_handle(); }
 
     unsafe { vendor_set_adv_data(); }
 
-    unsafe { device_status_update(); }
-    unsafe { mesh_security_enable(true); }
+    unsafe { device_status_update() };
+    _mesh_security_enable(true);
 
-    unsafe { register_mesh_ota_master_ui(mesh_ota_master_led); }   //  mesh_ota_master_led() will be called when sending mesh ota data.
+    _register_mesh_ota_master_ui(mesh_ota_master_led);   //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
 
 unsafe fn proc_led()
@@ -392,18 +382,14 @@ fn light_user_func() {
     mesh_pair_proc_effect();
 }
 
-pub fn main_loop()
+pub unsafe fn main_loop()
 {
-    unsafe {
-        if is_receive_ota_window() {
-            return;
-        }
+    if _is_receive_ota_window() {
+        return;
     }
 
     light_user_func();
-
-    unsafe { rf_link_slave_proc(); }
-
+    _rf_link_slave_proc();
     unsafe { proc_led(); }
 }
 
@@ -500,7 +486,7 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
             (*ppp).val[4] = ((device_address >> 8) & 0xff) as u8;
             return true;
         }
-        return mesh_ota_slave_set_response((*ppp).val.as_mut_ptr().offset(3), params[1]);
+        return _mesh_ota_slave_set_response((*ppp).val.as_mut_ptr().offset(3), params[1]);
     } else {
         return false;
     }
@@ -519,7 +505,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
     let mut params: [u8; 16] = [0; 16];
     let params_len: u8 = 0;
     let pp = (*p).value.as_ptr() as *const rf_packet_att_value_t;
-    rf_link_get_op_para(p, op_cmd.as_mut_ptr(), &op_cmd_len, params.as_mut_ptr(), &params_len, 1);
+    _rf_link_get_op_para(p, op_cmd.as_mut_ptr(), &op_cmd_len, params.as_mut_ptr(), &params_len, 1);
 
     if op_cmd_len != LightOpType::op_type_3 as u8 {
         return;
@@ -544,7 +530,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         }
     }
 
-    mesh_ota_timeout_handle(op, params.as_ptr());
+    _mesh_ota_timeout_handle(op, params.as_ptr());
 
     if op == LGT_CMD_LIGHT_ONOFF {
         if params[0] == LIGHT_ON_PARAM {
@@ -559,18 +545,18 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
     } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
         let val = params[1] as u16 | ((params[2] as u16) << 8);
         if params[0] == LIGHT_DEL_GRP_PARAM {
-            if rf_link_del_group(val) {
+            if _rf_link_del_group(val) {
                 cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
             }
         } else if params[0] == LIGHT_ADD_GRP_PARAM {
-            if rf_link_add_group(val) {
+            if _rf_link_add_group(val) {
                 cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
             }
         }
     } else if op == LGT_CMD_CONFIG_DEV_ADDR {
         let val = params[0] as u16 | ((params[1] as u16) << 8);
         if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(params.as_ptr()) {
-            if rf_link_add_dev_addr(val) {
+            if _rf_link_add_dev_addr(val) {
                 mesh_pair_proc_get_mac_flag();
             }
         }
@@ -609,28 +595,28 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         }
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());
-        light_sw_reboot();
+        _light_sw_reboot();
     } else if op == LGT_CMD_NOTIFY_MESH
     {
         light_notify((*pp).val.as_ptr().offset(3), 10, (*pp).src.as_ptr());
     } else if op == LGT_CMD_MESH_OTA_DATA
     {
         let idx = (params[0] as u16) | ((params[1] as u16) << 8);
-        if !is_master_ota_st() {  // no update firmware for itself
+        if !_is_master_ota_st() {  // no update firmware for itself
             if CMD_START_MESH_OTA == idx {
                 mesh_ota_master_start_firmware_from_own();
                 //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-            } else if CMD_START_MESH_OTA == idx {
-                if is_mesh_ota_slave_running() {
+            } else if CMD_STOP_MESH_OTA == idx {
+                if _is_mesh_ota_slave_running() {
                     // reboot to initial flash: should be delay to relay command.
-                    mesh_ota_slave_reboot_delay();  // reboot after 320ms
+                    _mesh_ota_slave_reboot_delay();  // reboot after 320ms
                 }
             } else {
-                mesh_ota_slave_save_data(params.as_ptr());
+                _mesh_ota_slave_save_data(params.as_ptr());
             }
         } else {
             if CMD_STOP_MESH_OTA == idx {
-                mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
+                _mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
                 //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
             }
         }
@@ -655,7 +641,7 @@ unsafe fn light_slave_tx_command_ll(p_cmd: *const u8, para: u16) -> bool
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13);
+    _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13);
 
     return true;
 }
@@ -681,8 +667,8 @@ unsafe fn light_notify(p: *const u8, len: u8, p_src: *const u8) -> i32 {
         copy_nonoverlapping(p, valptr, len as usize);
 
         let r = irq_disable();
-        if is_add_packet_buf_ready() {
-            if !rf_link_add_tx_packet(addr_of!(pkt_light_notify) as *const u8) {
+        if _is_add_packet_buf_ready() {
+            if !_rf_link_add_tx_packet(addr_of!(pkt_light_notify) as *const u8) {
                 err = 0;
             }
         }
@@ -697,11 +683,11 @@ pub unsafe fn rf_link_light_event_callback(status: u8)
 {
     if status == LGT_CMD_SET_MESH_INFO
     {
-        mesh_node_init();
+        _mesh_node_init();
         device_status_update();
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
     } else if status == LGT_CMD_SET_DEV_ADDR {
-        mesh_node_init();
+        _mesh_node_init();
         device_status_update();
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
     } else if status == LGT_CMD_DEL_PAIR {
@@ -729,7 +715,7 @@ fn irq_timer0() {}
 #[no_mangle]
 unsafe fn irq_handler__attribute_ram_code()
 {
-    irq_light_slave_handler();
+    _irq_light_slave_handler();
 }
 
 fn light_onoff_hw(on: bool) {
@@ -754,7 +740,7 @@ pub unsafe fn device_status_update() {
     st_val_par[1] = ((value >> 8) & 0xff) as u8;   // rsv
     // end
 
-    ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
+    _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
 }
 
 #[no_mangle]

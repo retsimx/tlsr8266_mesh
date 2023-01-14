@@ -2,8 +2,8 @@ use std::convert::AsRef;
 use std::ffi::CStr;
 use std::ptr::{addr_of, null};
 use std::mem::{transmute};
-use ::{DEVICE_NAME, MESH_NAME};
-use sdk::light::{mesh_report_status_enable, mesh_report_status_enable_mask, pair_login_ok, rf_packet_att_write_t, pairWrite, pairRead};
+use config::{DEVICE_NAME, MESH_NAME};
+use sdk::light::*;
 use sdk::service::{SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
@@ -197,9 +197,9 @@ unsafe fn meshStatusWrite(pw: *const u8) -> u32
     let p: *const rf_packet_att_write_t = pw as *const rf_packet_att_write_t;
     *transmute::<&[u8; 4], *mut u8>(&SppDataServer2ClientData) = (*p).value;
     if (*p).l2capLen > (3 + 1) {
-        mesh_report_status_enable_mask(&(*p).value, (*p).l2capLen - 3);
+        _mesh_report_status_enable_mask(&(*p).value, (*p).l2capLen - 3);
     } else {
-        mesh_report_status_enable((*p).value);
+        _mesh_report_status_enable((*p).value);
     }
     return 1;
 }
@@ -295,6 +295,6 @@ static mut gAttributes_def: [attribute_t; 29] = [
     attrdef!(0,16,16,16,TelinkSppDataOtaUUID,    SppDataOtaData),//value
     attrdef!(0,2,spp_otaname.val.as_bytes().len(), spp_otaname.val.as_bytes().len(),userdesc_UUID, spp_otaname.val),
     attrdefu!(0,2,1,1,characterUUID,         SppDataPairProp),                //prop
-    attrdef!(0,16,16,16,TelinkSppDataPairUUID,   SppDataPairData, pairWrite, pairRead),//value
+    attrdef!(0,16,16,16,TelinkSppDataPairUUID,   SppDataPairData, _pairWrite, _pairRead),//value
     attrdef!(0,2,spp_pairname.val.as_bytes().len(), spp_pairname.val.as_bytes().len(),userdesc_UUID, spp_pairname.val),
 ];

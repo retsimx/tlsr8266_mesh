@@ -12,7 +12,7 @@ pub unsafe fn strcpy(
         let fresh1 = dst0;
         dst0 = dst0.offset(1);
         *fresh1 = *fresh0;
-        if !(*fresh1 != 0) {
+        if *fresh1 == 0 {
             break;
         }
     }
@@ -30,7 +30,7 @@ pub unsafe fn strchr(
         }
         let fresh2 = s;
         s = s.offset(1);
-        if !(*fresh2 != 0) {
+        if *fresh2 == 0 {
             break;
         }
     }
@@ -48,7 +48,7 @@ pub unsafe fn memcmp(
     loop {
         let fresh3 = n;
         n -= 1;
-        if !(fresh3 != 0) {
+        if fresh3 == 0 {
             break;
         }
         if *s1 != *s2 {
@@ -70,7 +70,7 @@ pub unsafe fn memchr(
     loop {
         let fresh4 = length;
         length -= 1;
-        if !(fresh4 > 0) {
+        if fresh4 == 0 {
             break;
         }
         if *src == c as u8 {
@@ -93,7 +93,7 @@ pub unsafe fn memmove(
     loop {
         let fresh5 = n;
         n -= 1;
-        if !(fresh5 != 0) {
+        if fresh5 == 0 {
             break;
         }
         let fresh6 = s;
@@ -114,8 +114,8 @@ pub unsafe fn bcopy(
     if dest < src {
         loop {
             let fresh8 = len;
-            len = len - 1;
-            if !(fresh8 != 0) {
+            len -= 1;
+            if fresh8 == 0 {
                 break;
             }
             let fresh9 = src;
@@ -129,8 +129,8 @@ pub unsafe fn bcopy(
         let mut lastd= dest.offset((len - 1) as isize);
         loop {
             let fresh11 = len;
-            len = len - 1;
-            if !(fresh11 != 0) {
+            len -= 1;
+            if fresh11 == 0 {
                 break;
             }
             let fresh12 = lasts;
@@ -152,7 +152,7 @@ pub unsafe fn memset(
     loop {
         let fresh14 = len;
         len -= 1;
-        if !(fresh14 > 0) {
+        if fresh14 == 0 {
             break;
         }
         let fresh15 = ptr;
@@ -184,7 +184,7 @@ pub unsafe fn memcpy4(
     loop {
         let fresh16 = len;
         len -= 1;
-        if fresh16 <= 0 {
+        if fresh16 == 0 {
             break;
         }
         let fresh17 = src;

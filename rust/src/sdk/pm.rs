@@ -1,26 +1,24 @@
-use BIT;
 use sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use BIT;
 
-pub fn usb_dp_pullup_en (en: bool)
-{
+pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read__attribute_ram_code(0x00);
     if en {
         dat &= !BIT!(4);
-    }
-    else {
-    dat |= BIT!(4);
+    } else {
+        dat |= BIT!(4);
     }
 
-    analog_write__attribute_ram_code (0x00, dat);
+    analog_write__attribute_ram_code(0x00, dat);
 }
 
 pub enum PM_WAKEUP {
     // WAKEUP_SRC_ANA 0 -- 2  not supported
-    CORE  = BIT!(5),
+    CORE = BIT!(5),
     TIMER = BIT!(6),
-    COMP  = BIT!(7),
-    PAD   = BIT!(8),
+    COMP = BIT!(7),
+    PAD = BIT!(8),
 }
 
 //
@@ -192,9 +190,9 @@ pub enum PM_WAKEUP {
 
 // deepsleep mode must use this function for resume 1.8V analog register
 extern "C" {
-    pub fn cpu_set_gpio_wakeup (pin: u32, pol: u32, en: u32);
-    pub fn cpu_sleep_wakeup (deepsleep: u32, wakeup_src: u32, wakeup_tick: u32) -> u32;
-    pub fn cpu_sleep_wakeup_long_time_deep (wakeup_src: u32, deep_time_ms: u32) -> u32;
+    pub fn cpu_set_gpio_wakeup(pin: u32, pol: u32, en: u32);
+    pub fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, wakeup_tick: u32) -> u32;
+    pub fn cpu_sleep_wakeup_long_time_deep(wakeup_src: u32, deep_time_ms: u32) -> u32;
 }
 //
 // extern const u16 wakeup_src_pin[];
@@ -202,37 +200,113 @@ extern "C" {
 //
 // #endif
 
-pub const TCMD_UNDER_RD		: u8 = 0x80;
-pub const TCMD_UNDER_WR		: u8 = 0x40;
-pub const TCMD_UNDER_BOTH	: u8 = 	0xc0;
-pub const TCMD_MASK			: u8 = 0x3f;
+pub const TCMD_UNDER_RD: u8 = 0x80;
+pub const TCMD_UNDER_WR: u8 = 0x40;
+pub const TCMD_UNDER_BOTH: u8 = 0xc0;
+pub const TCMD_MASK: u8 = 0x3f;
 
-pub const TCMD_WRITE		: u8 = 	0x3;
-pub const TCMD_WAIT			: u8 = 0x7;
-pub const TCMD_WAREG		: u8 = 	0x8;
+pub const TCMD_WRITE: u8 = 0x3;
+pub const TCMD_WAIT: u8 = 0x7;
+pub const TCMD_WAREG: u8 = 0x8;
 
 const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
-    TBLCMDSET {adr: 0x60, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x61, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x62, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x63, dat: 0xff, cmd: 0xc3},
-    TBLCMDSET {adr: 0x64, dat: 0xff, cmd: 0xc3},
-    TBLCMDSET {adr: 0x74, dat: 0x53, cmd: 0xc3},
-    TBLCMDSET {adr: 0x7c, dat: 0xf7, cmd: 0xc3},
-    TBLCMDSET {adr: 0x74, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x67, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x66, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x73, dat: 0, cmd: 0xc3},
-    TBLCMDSET {adr: 0x620, dat: 1, cmd: 0xc3},
-    TBLCMDSET {adr: 0x74f, dat: 1, cmd: 0xc3},
-    TBLCMDSET {adr: 0x81, dat: 0xc0, cmd: 0xc8},
-    TBLCMDSET {adr: 0x20, dat: 0xd0, cmd: 0xc8},
-    TBLCMDSET {adr: 0x2d, dat: 0x0f, cmd: 0xc8},
-    TBLCMDSET {adr: 0x81, dat: 0xc0, cmd: 0xc8},
-    TBLCMDSET {adr: 0x2c, dat: 0, cmd: 0xc8},
-    TBLCMDSET {adr: 0x05, dat: 0x62, cmd: 0xc8},
+    TBLCMDSET {
+        adr: 0x60,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x61,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x62,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x63,
+        dat: 0xff,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x64,
+        dat: 0xff,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x74,
+        dat: 0x53,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x7c,
+        dat: 0xf7,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x74,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x67,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x66,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x73,
+        dat: 0,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x620,
+        dat: 1,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x74f,
+        dat: 1,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {
+        adr: 0x81,
+        dat: 0xc0,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {
+        adr: 0x20,
+        dat: 0xd0,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {
+        adr: 0x2d,
+        dat: 0x0f,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {
+        adr: 0x81,
+        dat: 0xc0,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {
+        adr: 0x2c,
+        dat: 0,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {
+        adr: 0x05,
+        dat: 0x62,
+        cmd: 0xc8,
+    },
 ];
 
-pub fn cpu_wakeup_init(){
+pub fn cpu_wakeup_init() {
     LoadTblCmdSet(tbl_cpu_wakeup_init.as_ptr(), 0x13);
 }

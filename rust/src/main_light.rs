@@ -1,9 +1,9 @@
+use app;
 use std::cmp::{max, min};
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ptr::{addr_of};
-use ::{BIT, pub_mut};
-use app;
+use std::ptr::addr_of;
+use {pub_mut, BIT};
 
 use common::*;
 use config::*;
@@ -12,10 +12,13 @@ use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use sdk::light::*;
 use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
-use sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
+use sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ};
+use sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl};
+use sdk::mcu::register::{
+    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt,
+    write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
+};
 use sdk::pm::usb_dp_pullup_en;
 use sdk::rf_drv::*;
 use sdk::service::*;
@@ -28,21 +31,21 @@ pub const LUM_SAVE_FLAG: u8 = 0xA5;
 macro_rules! config_led_event {
     ($on:expr, $off:expr, $n:expr, $sel:expr) => {
         $on as u32 | ($off as u32) << 8 | ($n as u32) << 16 | ($sel as u32) << 24
-    }
+    };
 }
 
 // pub const LED_EVENT_FLASH_4HZ_10S: u32 = config_led_event!(2,2,40,LED_MASK);
 // pub const LED_EVENT_FLASH_STOP: u32 = config_led_event!(1,1,1,LED_MASK);
-pub const LED_EVENT_FLASH_2HZ_2S: u32 = config_led_event!(4,4,4,LED_MASK);
+pub const LED_EVENT_FLASH_2HZ_2S: u32 = config_led_event!(4, 4, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_1S: u32 = config_led_event!(8,8,1,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_2S: u32 = config_led_event!(8,8,2,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3S: u32 = config_led_event!(8,8,3,LED_MASK);
-pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8,8,4,LED_MASK);
+pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_4HZ: u32 = config_led_event!(2,2,0,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ: u32 = config_led_event!(8,8,0,LED_MASK);
 // pub const LED_EVENT_FLASH_4HZ_3T: u32 = config_led_event!(2,2,3,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
-pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4,60,1,LED_MASK);
+pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
 pub_mut!(buff_response, [[u32; 9]; 48], [[0; 9]; 48]);
 pub_mut!(adv_data, [u8; 3]);
@@ -63,18 +66,30 @@ pub_mut!(light_lum_addr, u32, 0);
 
 pub_mut!(light_off, bool, true);
 pub_mut!(led_lum, u16, 0xFFFF);
-pub_mut!(led_val, [u16; 3], [MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE, MAX_LUM_BRIGHTNESS_VALUE]);
+pub_mut!(
+    led_val,
+    [u16; 3],
+    [
+        MAX_LUM_BRIGHTNESS_VALUE,
+        MAX_LUM_BRIGHTNESS_VALUE,
+        MAX_LUM_BRIGHTNESS_VALUE
+    ]
+);
 pub_mut!(cmd_left_delay_ms, u16, 0);
 pub_mut!(cmd_delay_ms, u16, 0);
 pub_mut!(irq_timer1_cb_time, u32, 0);
-pub_mut!(cmd_delay, ll_packet_l2cap_data_t, ll_packet_l2cap_data_t {
-    l2capLen: 0,
-    chanId: 0,
-    opcode: 0,
-    handle: 0,
-    handle1: 0,
-    value: [0; 30],
-});
+pub_mut!(
+    cmd_delay,
+    ll_packet_l2cap_data_t,
+    ll_packet_l2cap_data_t {
+        l2capLen: 0,
+        chanId: 0,
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: [0; 30],
+    }
+);
 
 #[repr(C, packed)]
 struct LumSaveT {
@@ -86,7 +101,9 @@ struct LumSaveT {
 fn calculate_lumen_map(val: u16) -> f32 {
     let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.;
     // return keyframe::ease(keyframe::functions::EaseInOutCubic, 0., 0xffff as f32, percentage);
-    return (-0.00539160*libm::powf(percentage, 3.0))+(4.47709595*libm::powf(percentage, 2.0))+(153.72442036*percentage);
+    return (-0.00539160 * libm::powf(percentage, 3.0))
+        + (4.47709595 * libm::powf(percentage, 2.0))
+        + (153.72442036 * percentage);
 }
 
 fn pwm_set_lum(id: u32, y: u32, pol: bool) {
@@ -125,7 +142,11 @@ fn light_init_default() {
     let len = (get_adv_data().len() + size_of::<ll_adv_private_t>() + 2) as u8;
     if len < 31 {
         _max_mesh_name_len = 31 - len - 2;
-        set_max_mesh_name_len(if _max_mesh_name_len < 16 { _max_mesh_name_len } else { 16 });
+        set_max_mesh_name_len(if _max_mesh_name_len < 16 {
+            _max_mesh_name_len
+        } else {
+            16
+        });
     }
 
     // get fw version @flash 0x02,0x03,0x04,0x05
@@ -180,8 +201,7 @@ fn light_init_default() {
     mesh_pair_init();
 }
 
-pub fn user_init()
-{
+pub fn user_init() {
     // for app ota
     app().ota_manager.check_ota_area_startup();
 
@@ -211,17 +231,15 @@ pub fn user_init()
     device_status_update();
     _mesh_security_enable(true);
 
-    _register_mesh_ota_master_ui(mesh_ota_master_led);   //  mesh_ota_master_led() will be called when sending mesh ota data.
+    _register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
 
-fn proc_led()
-{
+fn proc_led() {
     if *get_led_count() == 0 && *get_led_event_pending() == 0 {
-        return;  //led flash finished
+        return; //led flash finished
     }
 
-    if *get_led_event_pending() != 0
-    {
+    if *get_led_event_pending() != 0 {
         // new event
         set_led_ton((*get_led_event_pending() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
         set_led_toff(((*get_led_event_pending() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
@@ -234,17 +252,21 @@ fn proc_led()
         set_led_is_on(0);
     }
 
-    if clock_time() - *get_led_tick() >= (if *get_led_is_on() != 0 { *get_led_ton() } else { *get_led_toff() }) {
+    if clock_time() - *get_led_tick()
+        >= (if *get_led_is_on() != 0 {
+            *get_led_ton()
+        } else {
+            *get_led_toff()
+        })
+    {
         set_led_tick(clock_time());
         let led_off = (*get_led_is_on() != 0 || *get_led_ton() == 0) && *get_led_toff() != 0;
         let led_on = *get_led_is_on() == 0 && *get_led_ton() != 0;
 
         set_led_is_on(!*get_led_is_on());
-        if *get_led_is_on() != 0
-        {
+        if *get_led_is_on() != 0 {
             set_led_no(*get_led_no() + 1);
-            if *get_led_no() - 1 == *get_led_count()
-            {
+            if *get_led_no() - 1 == *get_led_count() {
                 set_led_count(0);
                 set_led_no(0);
                 light_onoff_hw(!*get_light_off()); // should not report online status again
@@ -253,26 +275,26 @@ fn proc_led()
         }
 
         if led_off || led_on {
-            if *get_led_sel() & BIT!(0) != 0
-            {
+            if *get_led_sel() & BIT!(0) != 0 {
                 light_adjust_g(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if *get_led_sel() & BIT!(1) != 0
-            {
+            if *get_led_sel() & BIT!(1) != 0 {
                 light_adjust_b(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if *get_led_sel() & BIT!(2) != 0
-            {
+            if *get_led_sel() & BIT!(2) != 0 {
                 light_adjust_r(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if *get_led_sel() & BIT!(5) != 0
-            {}
+            if *get_led_sel() & BIT!(5) != 0 {}
         }
     }
 }
 
 fn light_auth_check() {
-    if *get_security_enable() && !*get_pair_login_ok() && *get_slave_first_connected_tick() != 0 && clock_time_exceed(*get_slave_first_connected_tick(), AUTH_TIME * 1000 * 1000) {
+    if *get_security_enable()
+        && !*get_pair_login_ok()
+        && *get_slave_first_connected_tick() != 0
+        && clock_time_exceed(*get_slave_first_connected_tick(), AUTH_TIME * 1000 * 1000)
+    {
         //rf_link_slave_disconnect(); // must login in 60s after connected, if need
         set_slave_first_connected_tick(0);
     }
@@ -287,7 +309,9 @@ fn light_lum_erase() {
 
 //save cur lum value, if disconnected for a while
 fn light_lum_store() {
-    if *get_light_lum_addr() >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32) {
+    if *get_light_lum_addr()
+        >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
+    {
         light_lum_erase();
         return;
     }
@@ -298,15 +322,18 @@ fn light_lum_store() {
         ledval: *get_led_val(),
     };
 
-    flash_write_page(*get_light_lum_addr(), size_of::<LumSaveT>() as u32, addr_of!(lum_save) as *const u8);
+    flash_write_page(
+        *get_light_lum_addr(),
+        size_of::<LumSaveT>() as u32,
+        addr_of!(lum_save) as *const u8,
+    );
     set_light_lum_addr(*get_light_lum_addr() + size_of::<LumSaveT>() as u32);
 }
 
 //retrieve LUM : brightness or RGB/CT value
 fn light_lum_retrieve() {
     let mut i = 0;
-    while i < FLASH_SECTOR_SIZE
-    {
+    while i < FLASH_SECTOR_SIZE {
         set_light_lum_addr(*get_flash_adr_lum() + i as u32);
 
         let lum_save = unsafe { &*(*get_light_lum_addr() as *const LumSaveT) };
@@ -348,8 +375,7 @@ fn light_user_func() {
     mesh_pair_proc_effect();
 }
 
-pub fn main_loop()
-{
+pub fn main_loop() {
     if _is_receive_ota_window() {
         return;
     }
@@ -363,10 +389,12 @@ pub fn main_loop()
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
 #[no_mangle] // required by light_ll
-fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_packet_att_value_t) -> bool
-{
-    let ppp = unsafe {&mut (*ppp)};
-    let p_req = unsafe {&(*p_req)};
+fn rf_link_response_callback(
+    ppp: *mut rf_packet_att_value_t,
+    p_req: *const rf_packet_att_value_t,
+) -> bool {
+    let ppp = unsafe { &mut (*ppp) };
+    let p_req = unsafe { &(*p_req) };
     // mac-app[5] low 2 bytes used as ttc && hop-count
     let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
@@ -374,8 +402,8 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
     ppp.src[1] = ((*get_device_address() >> 8) & 0xff) as u8;
 
     let mut params: [u8; 10] = [0; 10];
-    params[0..10].copy_from_slice(&ppp.val[3..10+3]);
-    ppp.val[3..10+3].copy_from_slice(&[0; 10]);
+    params[0..10].copy_from_slice(&ppp.val[3..10 + 3]);
+    ppp.val[3..10 + 3].copy_from_slice(&[0; 10]);
 
     ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
     ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
@@ -385,9 +413,18 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
     let mut idx = 0;
     if ppp.val[15] == GET_STATUS {
         ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
-        for i in 0..3 {//params[0]
-            ppp.val[i * 2 + 3] = if *get_light_off() { 0 } else { (get_led_val()[i] & 0xff) as u8 };
-            ppp.val[i * 2 + 4] = if *get_light_off() { 0 } else { ((get_led_val()[i] >> 8) & 0xff) as u8 };
+        for i in 0..3 {
+            //params[0]
+            ppp.val[i * 2 + 3] = if *get_light_off() {
+                0
+            } else {
+                (get_led_val()[i] & 0xff) as u8
+            };
+            ppp.val[i * 2 + 4] = if *get_light_off() {
+                0
+            } else {
+                ((get_led_val()[i] >> 8) & 0xff) as u8
+            };
         }
     } else if ppp.val[15] == GET_GROUP1 {
         ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
@@ -403,7 +440,11 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
         for i in 0..MAX_GROUP_NUM as usize {
             ppp.val[i + 3] = 0xFF;
             if get_group_address()[i / 2] != 0 {
-                ppp.val[idx + 3] = if (i % 2) != 0 { (get_group_address()[i / 2] >> 8) as u8 } else { get_group_address()[i / 2] as u8 };
+                ppp.val[idx + 3] = if (i % 2) != 0 {
+                    (get_group_address()[i / 2] >> 8) as u8
+                } else {
+                    get_group_address()[i / 2] as u8
+                };
                 idx += 1;
             }
         }
@@ -412,7 +453,11 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
         for i in 0..MAX_GROUP_NUM as usize {
             ppp.val[i + 3] = 0xFF;
             if get_group_address()[4 + i / 2] != 0 {
-                ppp.val[idx + 3] = if (i % 2) != 0 { (get_group_address()[4 + i / 2] >> 8) as u8 } else { get_group_address()[4 + i / 2] as u8 };
+                ppp.val[idx + 3] = if (i % 2) != 0 {
+                    (get_group_address()[4 + i / 2] >> 8) as u8
+                } else {
+                    get_group_address()[4 + i / 2] as u8
+                };
                 idx += 1;
             }
         }
@@ -426,11 +471,11 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
         }
     } else if ppp.val[15] == GET_USER_NOTIFY {
         /*user can get parameters from APP.
-             params[0] is relay times.
-             params[1 -- 9] is parameters from APP if haved been set by user.
+        params[0] is relay times.
+        params[1 -- 9] is parameters from APP if haved been set by user.
 
-             dst_unicast == 1 means destination address is unicast address.
-             */
+        dst_unicast == 1 means destination address is unicast address.
+        */
         if dst_unicast {
             // params[0 -- 9] is valid
         } else {
@@ -438,7 +483,8 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
         }
 
         ppp.val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
-        for i in 0..8 {//params[2]
+        for i in 0..8 {
+            //params[2]
             ppp.val[5 + i] = i as u8;
         }
         ppp.val[3] = (*get_device_address() & 0xFF) as u8;
@@ -464,8 +510,7 @@ fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_p
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
 #[no_mangle] // required by light_ll
-fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
-{
+fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
     let op_cmd_len: u8 = 0;
@@ -473,7 +518,14 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
     let params_len: u8 = 0;
     let p = unsafe { &*p };
     let pp = unsafe { &*(p.value.as_ptr() as *const rf_packet_att_value_t) };
-    _rf_link_get_op_para(p, op_cmd.as_mut_ptr(), &op_cmd_len, params.as_mut_ptr(), &params_len, 1);
+    _rf_link_get_op_para(
+        p,
+        op_cmd.as_mut_ptr(),
+        &op_cmd_len,
+        params.as_mut_ptr(),
+        &params_len,
+        1,
+    );
 
     if op_cmd_len != LightOpType::op_type_3 as u8 {
         return;
@@ -504,7 +556,8 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         if params[0] == LIGHT_ON_PARAM {
             light_onoff(true);
         } else if params[0] == LIGHT_OFF_PARAM {
-            if ON_OFF_FROM_OTA == params[3] { // only PWM off,
+            if ON_OFF_FROM_OTA == params[3] {
+                // only PWM off,
                 light_step_reset(0);
             } else {
                 light_onoff(false);
@@ -528,8 +581,7 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
                 mesh_pair_proc_get_mac_flag();
             }
         }
-    } else if op == LGT_CMD_SET_LIGHT
-    {
+    } else if op == LGT_CMD_SET_LIGHT {
         if params[8] & 0x1 != 0 {
             // Brightness
             let value = (params[1] as u16) << 8 | params[0] as u16;
@@ -556,28 +608,26 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         }
 
         set_lum_changed_time(clock_time());
-    } else if op == LGT_CMD_KICK_OUT
-    {
+    } else if op == LGT_CMD_KICK_OUT {
         if is_mesh_cmd_need_delay(p, &params, pp.val[(op_cmd_len + params_len) as usize]) {
             return;
         }
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());
         _light_sw_reboot();
-    } else if op == LGT_CMD_NOTIFY_MESH
-    {
-        light_notify(&pp.val[3..3+10], &pp.src);
-    } else if op == LGT_CMD_MESH_OTA_DATA
-    {
+    } else if op == LGT_CMD_NOTIFY_MESH {
+        light_notify(&pp.val[3..3 + 10], &pp.src);
+    } else if op == LGT_CMD_MESH_OTA_DATA {
         let idx = (params[0] as u16) | ((params[1] as u16) << 8);
-        if !_is_master_ota_st() {  // no update firmware for itself
+        if !_is_master_ota_st() {
+            // no update firmware for itself
             if CMD_START_MESH_OTA == idx {
                 app().ota_manager.mesh_ota_master_start_firmware_from_own();
                 //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
             } else if CMD_STOP_MESH_OTA == idx {
                 if _is_mesh_ota_slave_running() {
                     // reboot to initial flash: should be delay to relay command.
-                    _mesh_ota_slave_reboot_delay();  // reboot after 320ms
+                    _mesh_ota_slave_reboot_delay(); // reboot after 320ms
                 }
             } else {
                 _mesh_ota_slave_save_data(params.as_ptr());
@@ -588,16 +638,14 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
                 //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
             }
         }
-    } else if op == LGT_CMD_MESH_PAIR
-    {
+    } else if op == LGT_CMD_MESH_PAIR {
         mesh_pair_cb(&params);
     }
 }
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16)
-{
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) {
     let mut cmd_op_para: [u8; 16] = [0; 16];
     let cmd_sno = clock_time() + *get_device_address() as u32;
 
@@ -614,7 +662,8 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16)
 fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
     let mut err = -1;
     if *get_slave_link_connected() && *get_pair_login_ok() {
-        if p.len() > 10 {   //max length of par is 10
+        if p.len() > 10 {
+            //max length of par is 10
             return -1;
         }
 
@@ -622,8 +671,8 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
         get_pkt_light_notify().value[4] = p_src[1];
 
         // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
-        get_pkt_light_notify().value[10..10+10].copy_from_slice(&[0; 10]);
-        get_pkt_light_notify().value[10..10+10].copy_from_slice(&p[0..p.len()]);
+        get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&[0; 10]);
+        get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&p[0..p.len()]);
 
         let r = irq_disable();
         if _is_add_packet_buf_ready() {
@@ -638,10 +687,8 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
 }
 
 #[no_mangle] // required by light_ll
-pub fn rf_link_light_event_callback(status: u8)
-{
-    if status == LGT_CMD_SET_MESH_INFO
-    {
+pub fn rf_link_light_event_callback(status: u8) {
+    if status == LGT_CMD_SET_MESH_INFO {
         _mesh_node_init();
         device_status_update();
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
@@ -658,7 +705,12 @@ pub fn rf_link_light_event_callback(status: u8)
 
 #[no_mangle] // required by light_ll
 fn irq_timer1() {
-    if *get_irq_timer1_cb_time() != 0 && clock_time_exceed(*get_irq_timer1_cb_time(), (*get_cmd_left_delay_ms() * 1000) as u32) {
+    if *get_irq_timer1_cb_time() != 0
+        && clock_time_exceed(
+            *get_irq_timer1_cb_time(),
+            (*get_cmd_left_delay_ms() * 1000) as u32,
+        )
+    {
         set_cmd_left_delay_ms(0);
         rf_link_data_callback(get_cmd_delay());
         set_cmd_delay_ms(0);
@@ -673,8 +725,7 @@ fn irq_timer0() {}
 
 #[no_mangle] // required by light_ll
 #[allow(non_snake_case)]
-fn irq_handler__attribute_ram_code()
-{
+fn irq_handler__attribute_ram_code() {
     _irq_light_slave_handler();
 }
 
@@ -692,12 +743,16 @@ pub fn device_status_update() {
     // packet
     let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 
-    let value = if *get_light_off() { 0 } else { max(*get_led_lum(), 1) };
+    let value = if *get_light_off() {
+        0
+    } else {
+        max(*get_led_lum(), 1)
+    };
 
     // led_lum should not be 0, because app will take it to be light off
-    st_val_par[0] = (value & 0xff) as u8;     //Note: bit7 of par[0] have been use internal for FLD_SYNCED
-    st_val_par[1] = ((value >> 8) & 0xff) as u8;   // rsv
-    // end
+    st_val_par[0] = (value & 0xff) as u8; //Note: bit7 of par[0] have been use internal for FLD_SYNCED
+    st_val_par[1] = ((value >> 8) & 0xff) as u8; // rsv
+                                                 // end
 
     _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
 }
@@ -705,7 +760,12 @@ pub fn device_status_update() {
 pub fn light_onoff_normal(on: bool) {
     if on {
         set_light_off(false);
-        light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], *get_led_lum());
+        light_adjust_rgb_hw(
+            get_led_val()[0],
+            get_led_val()[1],
+            get_led_val()[2],
+            *get_led_lum(),
+        );
     } else {
         set_light_off(true);
         light_adjust_rgb_hw(0, 0, 0, 0);

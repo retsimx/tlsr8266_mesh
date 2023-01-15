@@ -1,11 +1,11 @@
 #![allow(warnings)]
 
-pub mod pm;
-pub mod common;
-pub mod mcu;
-pub mod drivers;
-pub mod light;
-pub mod service;
-pub mod rf_drv;
-pub mod factory_reset;
 pub mod app_att_light;
+pub mod common;
+pub mod drivers;
+pub mod factory_reset;
+pub mod light;
+pub mod mcu;
+pub mod pm;
+pub mod rf_drv;
+pub mod service;

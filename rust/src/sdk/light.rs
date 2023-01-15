@@ -1,12 +1,11 @@
 // Stuff from the libble library
 
-use std::mem;
-use std::mem::{MaybeUninit, size_of, size_of_val};
-use common::{MESH_NODE_MAX_NUM, PairState};
-use ::{no_mangle_fn, no_mangle_fn_def};
-use ::{BIT, pub_mut};
+use common::{PairState, MESH_NODE_MAX_NUM};
 use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
-
+use std::mem;
+use std::mem::{size_of, size_of_val, MaybeUninit};
+use {no_mangle_fn, no_mangle_fn_def};
+use {pub_mut, BIT};
 
 no_mangle_fn!(light_set_tick_per_us, tick: u32);
 
@@ -15,16 +14,23 @@ no_mangle_fn!(mesh_get_fw_version);
 
 no_mangle_fn!(register_mesh_ota_master_ui, p: fn(*const u8));
 
-no_mangle_fn!(setSppUUID, p_service_uuid: *const u8, p_data_s2c_uuid: *const u8, p_data_c2s_uuid: *const u8, p_data_ota_uuid: *const u8, p_data_pair_uuid: *const u8);
+no_mangle_fn!(
+    setSppUUID,
+    p_service_uuid: *const u8,
+    p_data_s2c_uuid: *const u8,
+    p_data_c2s_uuid: *const u8,
+    p_data_ota_uuid: *const u8,
+    p_data_pair_uuid: *const u8
+);
 
 no_mangle_fn!(vendor_id_init, vendor_id: u16);
 
 no_mangle_fn!(is_receive_ota_window, bool);
 no_mangle_fn!(rf_link_slave_proc);
 no_mangle_fn!(is_add_packet_buf_ready, bool);
-no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8);  // return value: 1 success,  0 faile)d
+no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8); // return value: 1 success,  0 faile)d
 no_mangle_fn!(rf_link_slave_read_status_stop);
-no_mangle_fn!(rf_link_data_callback,p: *const u8);
+no_mangle_fn!(rf_link_data_callback, p: *const u8);
 no_mangle_fn!(light_sw_reboot);
 no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
 
@@ -37,16 +43,33 @@ no_mangle_fn!(decode_password, pd: *mut u8);
 no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
 
 no_mangle_fn!(is_master_sending_ota_st, bool);
-no_mangle_fn!(mesh_ota_slave_set_response, bool, params: *mut u8, rtype: u8);
+no_mangle_fn!(
+    mesh_ota_slave_set_response,
+    bool,
+    params: *mut u8,
+    rtype: u8
+);
 no_mangle_fn!(mesh_ota_timeout_handle, op: u8, params: *const u8);
-no_mangle_fn!(mesh_ota_master_start, adr: *const u8, len: u32, p_dev_info: *const mesh_ota_dev_info_t);
+no_mangle_fn!(
+    mesh_ota_master_start,
+    adr: *const u8,
+    len: u32,
+    p_dev_info: *const mesh_ota_dev_info_t
+);
 no_mangle_fn!(is_master_ota_st, bool);
 no_mangle_fn!(is_mesh_ota_slave_running, bool);
 no_mangle_fn!(mesh_ota_slave_reboot_delay);
 no_mangle_fn!(mesh_ota_slave_save_data, bool, params: *const u8);
 no_mangle_fn!(mesh_ota_master_cancle, reset_flag: u8, complete: bool);
 no_mangle_fn!(mesh_ota_master_start_firmware_from_backup);
-no_mangle_fn!(mesh_push_user_command, u32, sno: u32, dst: u16, p: *const u8, len: u8);
+no_mangle_fn!(
+    mesh_push_user_command,
+    u32,
+    sno: u32,
+    dst: u16,
+    p: *const u8,
+    len: u8
+);
 no_mangle_fn!(mesh_node_init);
 no_mangle_fn!(mesh_report_status_enable, mask: u8);
 no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
@@ -58,7 +81,14 @@ no_mangle_fn!(irq_light_slave_handler);
 // param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv);
 no_mangle_fn!(ll_device_status_update, st_val_par: *const u8, len: u8);
 
-no_mangle_fn!(setup_ble_parameter_start, u32, delay: u16, interval_min: u16, interval_max: u16, timeout: u16);
+no_mangle_fn!(
+    setup_ble_parameter_start,
+    u32,
+    delay: u16,
+    interval_min: u16,
+    interval_max: u16,
+    timeout: u16
+);
 
 no_mangle_fn!(rf_drv_init, mode: u32);
 
@@ -115,7 +145,6 @@ pub_mut!(tick_per_us, u32);
 pub_mut!(user_data, [u8; 16]);
 pub_mut!(user_data_len, u8);
 
-
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
 pub const PMW_MAX_TICK_MULTI: u16 = 209;
@@ -154,7 +183,7 @@ pub const CMD_OTA_START: u16 = 0xff01;
 pub const CMD_OTA_END: u16 = 0xff02;
 pub const CMD_STOP_MESH_OTA: u16 = 0xfffe;
 //app use
-pub const CMD_START_MESH_OTA: u16 = 0xffff;//app use  	// use in rf_link_data_callback()
+pub const CMD_START_MESH_OTA: u16 = 0xffff; //app use  	// use in rf_link_data_callback()
 
 pub const LGT_CMD_MESH_OTA_READ: u8 = 0x07;
 //internal use
@@ -250,7 +279,6 @@ pub const LGT_CMD_SET_SCENE: u8 = 0x2e;
 pub const LGT_CMD_LOAD_SCENE: u8 = 0x2f;
 pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 
-
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;
 // return 8 group_address(low 1byte)
@@ -268,8 +296,7 @@ pub const GET_USER_NOTIFY: u8 = 7;
 // return user notify info
 pub const GET_SCENE: u8 = 8;
 //
-pub const GET_MESH_OTA: u8 = 9;    //
-
+pub const GET_MESH_OTA: u8 = 9; //
 
 pub const LGT_CMD_FRIEND_SHIP_OK: u8 = 0xb0;
 pub const LGT_CMD_FRIEND_SHIP_DISCONNECT: u8 = 0xb1;
@@ -291,7 +318,7 @@ pub const ON_OFF_NORMAL: u8 = 0x00;
 pub const ON_OFF_FROM_OTA: u8 = 0x01;
 pub const ON_OFF_FROM_PASSIVE_DEV: u8 = 0x02;
 // sent from passive device
-pub const ON_OFF_FROM_PASSIVE_DEV_ALT: u8 = 0x03;    // tx command: alter from passive device command
+pub const ON_OFF_FROM_PASSIVE_DEV_ALT: u8 = 0x03; // tx command: alter from passive device command
 
 pub const LIGHT_SYNC_REST_PARAM: u8 = 0x02;
 
@@ -312,8 +339,7 @@ pub enum APP_OTA_HCI_TYPE {
     MESH = 1,
 }
 
-#[derive(PartialEq)]
-#[derive(Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum OtaState {
     CONTINUE = 0,
     // must zero
@@ -348,7 +374,7 @@ pub struct ll_adv_private_t {
     pub ManufactureID: u16,
     // must vendor id to follow spec
     pub MeshProductUUID: u16,
-    pub MacAddress: u32,// low 4 byte
+    pub MacAddress: u32, // low 4 byte
 }
 
 #[repr(C, packed)]
@@ -369,9 +395,9 @@ pub struct rf_packet_att_value_t {
     pub sno: [u8; 3],
     pub src: [u8; 2],
     pub dst: [u8; 2],
-    pub val: [u8; 23],// op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
-    // get status req: params[0]=tick  mac-app[2-3]=src-mac1...
-    // get status rsp: mac-app[0]=ttc  mac-app[1]=hop-count
+    pub val: [u8; 23], // op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+                       // get status req: params[0]=tick  mac-app[2-3]=src-mac1...
+                       // get status rsp: mac-app[0]=ttc  mac-app[1]=hop-count
 }
 
 #[derive(Clone, Copy)]
@@ -408,7 +434,7 @@ pub struct rf_packet_att_write_t {
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
-    pub value: u8,//sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+    pub value: u8, //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
 #[repr(C, packed)]
@@ -427,7 +453,7 @@ pub struct rf_packet_att_cmd_t {
 
 #[repr(C, packed)]
 pub struct rf_packet_att_data_t {
-    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub dma_len: u32, //won't be a fixed number as previous, should adjust with the mouse package number
 
     pub _type: u8,
     //RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
@@ -435,13 +461,13 @@ pub struct rf_packet_att_data_t {
     //LEN(5)_RFU(3)
     pub l2cap: u16,
     //0x17
-    pub chanid: u16,                //0x04,
+    pub chanid: u16, //0x04,
 
     pub att: u8,
     //0x12 for master; 0x1b for slave// as ttl when relay
     pub hl: u8,
     // assigned by master
-    pub hh: u8,                    //
+    pub hh: u8, //
 
     pub dat: [u8; 23],
 }
@@ -457,14 +483,14 @@ pub struct mesh_ota_dev_info_t {
 pub struct mesh_ota_pkt_start_command_t {
     pub version: [u8; 4],
     pub dev_info: mesh_ota_dev_info_t,
-}  // don't modify element in it
+} // don't modify element in it
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct status_record_t {
     adr: [u8; 1],
     // don't modify, use internal
-    alarm_id: u8,    // don't modify, use internal
+    alarm_id: u8, // don't modify, use internal
 }
 
 #[derive(Clone, Copy)]
@@ -473,12 +499,11 @@ pub struct rc_pkt_buf_t {
     pub op: u8,
     pub sno: [u8; 3],
     pub notify_ok_flag: u8,
-    pub sno2: [u8; 2],   // for passive
+    pub sno2: [u8; 2], // for passive
 }
 
 #[inline(always)]
-pub fn is_unicast_addr(p_addr: &[u8]) -> bool
-{
+pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
     return p_addr[1] & 0x80 == 0;
 }
 
@@ -506,7 +531,7 @@ pub_mut!(rf_slave_ota_busy_mesh_en, u8, 0);
 /////////////// for passive switch ///////////////////////////////////////////////
 pub_mut!(separate_ADVpkt, u8, 0);
 //if 1 send one adv packet in each interrupt
-pub_mut!(mesh_chn_amount, u8, 4);                //amount of sys_chn_listen
+pub_mut!(mesh_chn_amount, u8, 4); //amount of sys_chn_listen
 
 // Scene shit needed to link
 pub_mut!(pkt_mesh_scene_rsp, [u8; 1], [0]);
@@ -536,8 +561,7 @@ fn is_new_alarm(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_val
 }
 
 #[no_mangle]
-fn memcopy_rtc_hhmmss(out: u32)
-{}
+fn memcopy_rtc_hhmmss(out: u32) {}
 
 #[no_mangle]
 fn is_need_sync_time() -> bool {
@@ -554,16 +578,22 @@ no_mangle_fn_def!(mesh_send_alarm_time);
 
 // dual mode shit needed to link
 #[no_mangle]
-fn dual_mode_rx_sig_beacon_proc(p: *const u8, t: u32) -> u32 { return 0; }
+fn dual_mode_rx_sig_beacon_proc(p: *const u8, t: u32) -> u32 {
+    return 0;
+}
 
 #[no_mangle]
-fn get_gatt_adv_cnt() -> u8 { return 3; }
+fn get_gatt_adv_cnt() -> u8 {
+    return 3;
+}
 
 no_mangle_fn_def!(dual_mode_channel_ac_set_with_check_TLK);
 no_mangle_fn_def!(dual_mode_check_and_select_disconnect_cb);
 
 #[no_mangle]
-fn get_sig_mesh_adv() -> u32 { return 0; }
+fn get_sig_mesh_adv() -> u32 {
+    return 0;
+}
 
 #[no_mangle]
 fn dual_mode_channel_ac_proc(connect_st: u32) {}
@@ -578,7 +608,11 @@ fn dual_mode_select(sdk_rf_mode: u32) {}
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
 // don't change
 pub const CFG_SECTOR_ADR_CALIBRATION_CODE: u32 = CFG_ADR_CALIBRATION_512K_FLASH;
-pub_mut!(flash_sector_calibration, u32, CFG_SECTOR_ADR_CALIBRATION_CODE);
+pub_mut!(
+    flash_sector_calibration,
+    u32,
+    CFG_SECTOR_ADR_CALIBRATION_CODE
+);
 
 no_mangle_fn_def!(mesh_ota_start_unprotect_flash);
 
@@ -601,7 +635,9 @@ pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
 pub_mut!(passive_en, u8, 0);
 
 #[no_mangle]
-fn get_command_type(p_att_value: *const u8) -> CMD_TYPE { return CMD_TYPE::NORMAL; }
+fn get_command_type(p_att_value: *const u8) -> CMD_TYPE {
+    return CMD_TYPE::NORMAL;
+}
 
 // Note: par[8], par[9] of passive command have been used internal for sno2.
 #[no_mangle]
@@ -610,7 +646,9 @@ fn set_command_type2alt(p_att_value: *const u8) {}
 pub_mut!(cb_mesh_node_filter, u32, 0);
 
 #[no_mangle]
-fn proc_sig_mesh_to_telink_mesh() -> u8 { return 0; }
+fn proc_sig_mesh_to_telink_mesh() -> u8 {
+    return 0;
+}
 
 #[no_mangle]
 fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
@@ -621,7 +659,9 @@ fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) 
 pub_mut!(p_cb_rx_from_mesh, u32, 0);
 
 #[no_mangle]
-fn is_bridge_task_busy() -> bool { return false; }
+fn is_bridge_task_busy() -> bool {
+    return false;
+}
 
 #[no_mangle]
 fn mesh_ota_third_complete_cb(calibrate_flag: u32) {}
@@ -649,18 +689,33 @@ fn pa_txrx(val: u8) {}
 #[no_mangle]
 fn pa_init(tx_pin_level: u8, rx_pin_level: u8) {}
 
-pub_mut!(slave_status_record, [status_record_t; MESH_NODE_MAX_NUM as usize], [status_record_t { adr: [0], alarm_id: 0 }; MESH_NODE_MAX_NUM as usize]);
-pub_mut!(slave_status_record_size, u16, size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16);
+pub_mut!(
+    slave_status_record,
+    [status_record_t; MESH_NODE_MAX_NUM as usize],
+    [status_record_t {
+        adr: [0],
+        alarm_id: 0
+    }; MESH_NODE_MAX_NUM as usize]
+);
+pub_mut!(
+    slave_status_record_size,
+    u16,
+    size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
+);
 pub_mut!(SW_Low_Power, u8, 0);
 pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
 pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
 const RC_PKT_BUF_MAX: u8 = 2;
-pub_mut!(rc_pkt_buf, [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize], [rc_pkt_buf_t {
-    op: 0,
-    sno: [0; 3],
-    notify_ok_flag: 0,
-    sno2: [0; 2],
-}; RC_PKT_BUF_MAX as usize]);
+pub_mut!(
+    rc_pkt_buf,
+    [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize],
+    [rc_pkt_buf_t {
+        op: 0,
+        sno: [0; 3],
+        notify_ok_flag: 0,
+        sno2: [0; 2],
+    }; RC_PKT_BUF_MAX as usize]
+);
 
 pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
 pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);

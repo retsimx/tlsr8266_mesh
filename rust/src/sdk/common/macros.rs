@@ -30,7 +30,9 @@ macro_rules! pub_mut {
     };
 
     ( $name:ident, $typ:ty ) => {
-        extern "C" { static mut $name: $typ; }
+        extern "C" {
+            static mut $name: $typ;
+        }
 
         paste::paste! {
             #[allow(dead_code)]
@@ -83,7 +85,9 @@ macro_rules! pub_static {
     };
 
     ( $name:ident, $typ:ty ) => {
-        extern "C" { static $name: $typ; }
+        extern "C" {
+            static $name: $typ;
+        }
 
         paste::paste! {
             #[allow(dead_code)]
@@ -133,7 +137,7 @@ macro_rules! pub_mut_no_move {
                 }
             }
         }
-    }
+    };
 }
 
 #[macro_export]

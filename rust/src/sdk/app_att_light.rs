@@ -1,11 +1,14 @@
+use config::{DEVICE_NAME, MESH_NAME};
+use sdk::light::*;
+use sdk::service::{
+    SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
+    TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
+};
 use std::convert::AsRef;
 use std::ffi::CStr;
+use std::mem::transmute;
 use std::ptr::{addr_of, null};
-use std::mem::{transmute};
-use config::{DEVICE_NAME, MESH_NAME};
-use ::{pub_mut, pub_static};
-use sdk::light::*;
-use sdk::service::{SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE};
+use {pub_mut, pub_static};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -28,7 +31,6 @@ pub const CHAR_PROP_EXTENDED: u8 = 0x80;
 // additional characteristic properties are defined
 /** @} end of group GATT_Characteristic_Property */
 
-
 /** @addtogroup GATT_CCCC_Bits Client CharacteristicConfiguration bits
 * @{
  */
@@ -37,7 +39,6 @@ pub const CLIENT_CHAR_CFG_NOTI: u16 = 0x0001;
 pub const CLIENT_CHAR_CFG_IND: u16 = 0x0002;
 // permit reads of the Characteristic Value
 /** @} end of group GATT_CCCC_Bits */
-
 
 /** @addtogroup GATT_Property_length GATT characteristic property length
 * @{
@@ -75,9 +76,9 @@ pub const GATT_UUID_VALID_RANGE: u16 = 0x2906;
 // Valid Range
 pub const GATT_UUID_EXT_REPORT_REF: u16 = 0x2907;
 // External Report Reference
-pub const GATT_UUID_REPORT_REF: u16 = 0x2908;     // Report Reference
+pub const GATT_UUID_REPORT_REF: u16 = 0x2908; // Report Reference
 
-pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00;     // Report Reference
+pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00; // Report Reference
 
 pub const CHARACTERISTIC_UUID_MANU_NAME_STRING: u16 = 0x2A29;
 pub const CHARACTERISTIC_UUID_MODEL_NUM_STRING: u16 = 0x2A24;
@@ -130,8 +131,7 @@ static hwRevisionChar: u8 = CHAR_PROP_READ;
 static hwRevision_value: u32 = 0x22222222;
 
 #[repr(C, packed)]
-struct gap_periConnectParams_t
-{
+struct gap_periConnectParams_t {
     /** Minimum value for the connection event (interval. 0x0006 - 0x0C80 * 1.25 ms) */
     pub intervalMin: u16,
     /** Maximum value for the connection event (interval. 0x0006 - 0x0C80 * 1.25 ms) */
@@ -142,7 +142,12 @@ struct gap_periConnectParams_t
     pub timeout: u16,
 }
 
-const periConnParameters: gap_periConnectParams_t = gap_periConnectParams_t { intervalMin: 20, intervalMax: 40, latency: 0, timeout: 1000 };
+const periConnParameters: gap_periConnectParams_t = gap_periConnectParams_t {
+    intervalMin: 20,
+    intervalMax: 40,
+    latency: 0,
+    timeout: 1000,
+};
 
 // note !!!DEVICE_NAME max 13 bytes
 pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.val.as_bytes());
@@ -150,8 +155,16 @@ pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.val.as_bytes());
 //////////////////////// SPP /////////////////////////////////////////////////////
 // These must be pub_mut
 pub_mut!(TelinkSppServiceUUID, [u8; 16], TELINK_SPP_UUID_SERVICE);
-pub_mut!(TelinkSppDataServer2ClientUUID, [u8; 16], TELINK_SPP_DATA_SERVER2CLIENT);
-pub_mut!(TelinkSppDataClient2ServiceUUID, [u8; 16], TELINK_SPP_DATA_CLIENT2SERVER);
+pub_mut!(
+    TelinkSppDataServer2ClientUUID,
+    [u8; 16],
+    TELINK_SPP_DATA_SERVER2CLIENT
+);
+pub_mut!(
+    TelinkSppDataClient2ServiceUUID,
+    [u8; 16],
+    TELINK_SPP_DATA_CLIENT2SERVER
+);
 pub_mut!(TelinkSppDataOtaUUID, [u8; 16], TELINK_SPP_DATA_OTA);
 pub_mut!(TelinkSppDataPairUUID, [u8; 16], TELINK_SPP_DATA_PAIR);
 
@@ -159,7 +172,8 @@ pub_mut!(TelinkSppDataPairUUID, [u8; 16], TELINK_SPP_DATA_PAIR);
 static SppDataServer2ClientProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE | CHAR_PROP_NOTIFY;
 
 // Spp data from Client to Server characteristic variables
-static SppDataClient2ServerProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RSP;
+static SppDataClient2ServerProp: u8 =
+    CHAR_PROP_READ | CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RSP;
 
 // Spp data for OTA characteristic variables
 static SppDataOtaProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE_WITHOUT_RSP;
@@ -184,8 +198,7 @@ static spp_otaname: const_cstr::ConstCStr = const_cstr::const_cstr!("OTA");
 static spp_pairname: const_cstr::ConstCStr = const_cstr::const_cstr!("Pair");
 static spp_devicename: const_cstr::ConstCStr = const_cstr::const_cstr!("DevName");
 
-unsafe fn meshStatusWrite(pw: *const u8) -> u32
-{
+unsafe fn meshStatusWrite(pw: *const u8) -> u32 {
     if !*get_pair_login_ok() {
         return 1;
     }
@@ -201,8 +214,7 @@ unsafe fn meshStatusWrite(pw: *const u8) -> u32
 }
 
 #[repr(C, packed)]
-pub struct attribute_t
-{
+pub struct attribute_t {
     pub attNum: u8,
     pub uuidLen: u8,
     pub attrLen: u8,
@@ -215,81 +227,222 @@ pub struct attribute_t
 
 #[macro_export]
 macro_rules! attrdef {
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr, $w:expr, $r: expr) => (
-        attribute_t {attNum: $attNum as u8, uuidLen: $uuidLen as u8, attrLen: $attrLen as u8, attrMaxLen: $attrMaxLen as u8, uuid: unsafe { addr_of!($uuid) as *const u8 }, pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 }, w: $w as *const u8, r: $r as *const u8}
-    );
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr, $w:expr, $r: expr) => {
+        attribute_t {
+            attNum: $attNum as u8,
+            uuidLen: $uuidLen as u8,
+            attrLen: $attrLen as u8,
+            attrMaxLen: $attrMaxLen as u8,
+            uuid: unsafe { addr_of!($uuid) as *const u8 },
+            pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 },
+            w: $w as *const u8,
+            r: $r as *const u8,
+        }
+    };
 
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr) => (
-        attribute_t {attNum: $attNum as u8, uuidLen: $uuidLen as u8, attrLen: $attrLen as u8, attrMaxLen: $attrMaxLen as u8, uuid: unsafe { addr_of!($uuid) as *const u8 }, pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 }, w: null(), r: null()}
-    );
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr) => {
+        attribute_t {
+            attNum: $attNum as u8,
+            uuidLen: $uuidLen as u8,
+            attrLen: $attrLen as u8,
+            attrMaxLen: $attrMaxLen as u8,
+            uuid: unsafe { addr_of!($uuid) as *const u8 },
+            pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 },
+            w: null(),
+            r: null(),
+        }
+    };
 
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr) => (
-        attribute_t {attNum: $attNum, uuidLen: $uuidLen, attrLen: $attrLen, attrMaxLen: $attrMaxLen, uuid: null(), pAttrValue: null(), w: null(), r: null()}
-    )
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr) => {
+        attribute_t {
+            attNum: $attNum,
+            uuidLen: $uuidLen,
+            attrLen: $attrLen,
+            attrMaxLen: $attrMaxLen,
+            uuid: null(),
+            pAttrValue: null(),
+            w: null(),
+            r: null(),
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! attrdefu {
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr, $w:expr, $r: expr) => (
-        attribute_t {attNum: $attNum as u8, uuidLen: $uuidLen as u8, attrLen: $attrLen as u8, attrMaxLen: $attrMaxLen as u8, uuid: addr_of!($uuid) as *const u8, pAttrValue: addr_of!($pAttrValue) as *const u8, w: $w as *const u8, r: $r as *const u8}
-    );
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr, $w:expr, $r: expr) => {
+        attribute_t {
+            attNum: $attNum as u8,
+            uuidLen: $uuidLen as u8,
+            attrLen: $attrLen as u8,
+            attrMaxLen: $attrMaxLen as u8,
+            uuid: addr_of!($uuid) as *const u8,
+            pAttrValue: addr_of!($pAttrValue) as *const u8,
+            w: $w as *const u8,
+            r: $r as *const u8,
+        }
+    };
 
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr) => (
-        attribute_t {attNum: $attNum as u8, uuidLen: $uuidLen as u8, attrLen: $attrLen as u8, attrMaxLen: $attrMaxLen as u8, uuid: addr_of!($uuid) as *const u8, pAttrValue: addr_of!($pAttrValue) as *const u8, w: null(), r: null()}
-    );
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr, $uuid:expr, $pAttrValue:expr) => {
+        attribute_t {
+            attNum: $attNum as u8,
+            uuidLen: $uuidLen as u8,
+            attrLen: $attrLen as u8,
+            attrMaxLen: $attrMaxLen as u8,
+            uuid: addr_of!($uuid) as *const u8,
+            pAttrValue: addr_of!($pAttrValue) as *const u8,
+            w: null(),
+            r: null(),
+        }
+    };
 
-    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr) => (
-        attribute_t {attNum: $attNum, uuidLen: $uuidLen, attrLen: $attrLen, attrMaxLen: $attrMaxLen, uuid: null(), pAttrValue: null(), w: null(), r: null()}
-    )
+    ($attNum:expr, $uuidLen:expr, $attrLen:expr, $attrMaxLen:expr) => {
+        attribute_t {
+            attNum: $attNum,
+            uuidLen: $uuidLen,
+            attrLen: $attrLen,
+            attrMaxLen: $attrMaxLen,
+            uuid: null(),
+            pAttrValue: null(),
+            w: null(),
+            r: null(),
+        }
+    };
 }
 
 const fn size_of_val<T>(_: &T) -> usize {
     std::mem::size_of::<T>()
 }
 
-pub_mut!(gAttributes_def, [attribute_t; 29], [
-    attrdef!((unsafe { gAttributes_def.len() - 1 }) as u8, 0, 0, 0),
-
-    // gatt
-    attrdefu!(6, 2, 2, 2, primaryServiceUUID, gapServiceUUID),
-
-    attrdefu!(0,2,1,1,characterUUID, 		devNameCharacter),
-    attrdef!(0,2,ble_g_devName.len(), ble_g_devName.len(),devNameUUID, 			ble_g_devName),
-    attrdef!(0,2,spp_devicename.val.as_bytes().len(), spp_devicename.val.as_bytes().len(),userdesc_UUID, spp_devicename.val),
-
-    attrdefu!(0,2,1,1,characterUUID, 		appearanceCharacter),
-    attrdefu!(0,2,size_of_val(&appearance), size_of_val(&appearance),appearanceUIID, 	appearance),
-
-    // device info
-    attrdefu!(9,2,2,2,primaryServiceUUID,  devInfoUUID),
-
-    attrdefu!(0,2,1,1,characterUUID,         fwRevisionChar),
-    attrdef!(0,2,12, 12, fwRevision_charUUID, fwRevision_value),
-
-    attrdefu!(0,2,1,1,characterUUID,         manuNameStringChar),
-    attrdef!(0,2,manuNameString_value.len(), manuNameString_value.len(), manuNameString_charUUID,    manuNameString_value),
-
-    attrdefu!(0,2,1,1,characterUUID,         modelIdChar),
-    attrdef!(0,2,modelId_value.val.as_bytes().len(), modelId_value.val.as_bytes().len(), modelId_charUUID,    modelId_value.val),
-
-    attrdefu!(0,2,1,1,characterUUID,         hwRevisionChar),
-    attrdefu!(0,2,size_of_val(&hwRevision_value), size_of_val(&hwRevision_value), hwRevision_charUUID,    hwRevision_value),
-
-    // spp u//0x10
-    attrdef!(13,2,16,16,primaryServiceUUID,     TelinkSppServiceUUID),
-
-    attrdefu!(0,2,1,1,characterUUID,         SppDataServer2ClientProp),               //prop
-    attrdef!(0,16,1,1,TelinkSppDataServer2ClientUUID,    SppDataServer2ClientData, meshStatusWrite, 0),    //value
-    attrdef!(0,2,status_ccc.len(),status_ccc.len(),clientCharacterCfgUUID,     status_ccc), /*value, CCC is must for some third-party APP if there is notify or indication*/
-
-    attrdefu!(0,2,1,1,characterUUID,         SppDataClient2ServerProp),               //prop
-    attrdef!(0,16,16,16,TelinkSppDataClient2ServiceUUID,     SppDataClient2ServerData),//value
-    attrdef!(0,2,spp_Commandname.val.as_bytes().len(), spp_Commandname.val.as_bytes().len(),userdesc_UUID, spp_Commandname.val),
-
-    attrdefu!(0,2,1,1,characterUUID,         SppDataOtaProp),             //prop
-    attrdef!(0,16,16,16,TelinkSppDataOtaUUID,    SppDataOtaData),//value
-    attrdef!(0,2,spp_otaname.val.as_bytes().len(), spp_otaname.val.as_bytes().len(),userdesc_UUID, spp_otaname.val),
-    attrdefu!(0,2,1,1,characterUUID,         SppDataPairProp),                //prop
-    attrdef!(0,16,16,16,TelinkSppDataPairUUID,   SppDataPairData, _pairWrite, _pairRead),//value
-    attrdef!(0,2,spp_pairname.val.as_bytes().len(), spp_pairname.val.as_bytes().len(),userdesc_UUID, spp_pairname.val),
-]);
+pub_mut!(
+    gAttributes_def,
+    [attribute_t; 29],
+    [
+        attrdef!((unsafe { gAttributes_def.len() - 1 }) as u8, 0, 0, 0),
+        // gatt
+        attrdefu!(6, 2, 2, 2, primaryServiceUUID, gapServiceUUID),
+        attrdefu!(0, 2, 1, 1, characterUUID, devNameCharacter),
+        attrdef!(
+            0,
+            2,
+            ble_g_devName.len(),
+            ble_g_devName.len(),
+            devNameUUID,
+            ble_g_devName
+        ),
+        attrdef!(
+            0,
+            2,
+            spp_devicename.val.as_bytes().len(),
+            spp_devicename.val.as_bytes().len(),
+            userdesc_UUID,
+            spp_devicename.val
+        ),
+        attrdefu!(0, 2, 1, 1, characterUUID, appearanceCharacter),
+        attrdefu!(
+            0,
+            2,
+            size_of_val(&appearance),
+            size_of_val(&appearance),
+            appearanceUIID,
+            appearance
+        ),
+        // device info
+        attrdefu!(9, 2, 2, 2, primaryServiceUUID, devInfoUUID),
+        attrdefu!(0, 2, 1, 1, characterUUID, fwRevisionChar),
+        attrdef!(0, 2, 12, 12, fwRevision_charUUID, fwRevision_value),
+        attrdefu!(0, 2, 1, 1, characterUUID, manuNameStringChar),
+        attrdef!(
+            0,
+            2,
+            manuNameString_value.len(),
+            manuNameString_value.len(),
+            manuNameString_charUUID,
+            manuNameString_value
+        ),
+        attrdefu!(0, 2, 1, 1, characterUUID, modelIdChar),
+        attrdef!(
+            0,
+            2,
+            modelId_value.val.as_bytes().len(),
+            modelId_value.val.as_bytes().len(),
+            modelId_charUUID,
+            modelId_value.val
+        ),
+        attrdefu!(0, 2, 1, 1, characterUUID, hwRevisionChar),
+        attrdefu!(
+            0,
+            2,
+            size_of_val(&hwRevision_value),
+            size_of_val(&hwRevision_value),
+            hwRevision_charUUID,
+            hwRevision_value
+        ),
+        // spp u//0x10
+        attrdef!(13, 2, 16, 16, primaryServiceUUID, TelinkSppServiceUUID),
+        attrdefu!(0, 2, 1, 1, characterUUID, SppDataServer2ClientProp), //prop
+        attrdef!(
+            0,
+            16,
+            1,
+            1,
+            TelinkSppDataServer2ClientUUID,
+            SppDataServer2ClientData,
+            meshStatusWrite,
+            0
+        ), //value
+        attrdef!(
+            0,
+            2,
+            status_ccc.len(),
+            status_ccc.len(),
+            clientCharacterCfgUUID,
+            status_ccc
+        ), /*value, CCC is must for some third-party APP if there is notify or indication*/
+        attrdefu!(0, 2, 1, 1, characterUUID, SppDataClient2ServerProp), //prop
+        attrdef!(
+            0,
+            16,
+            16,
+            16,
+            TelinkSppDataClient2ServiceUUID,
+            SppDataClient2ServerData
+        ), //value
+        attrdef!(
+            0,
+            2,
+            spp_Commandname.val.as_bytes().len(),
+            spp_Commandname.val.as_bytes().len(),
+            userdesc_UUID,
+            spp_Commandname.val
+        ),
+        attrdefu!(0, 2, 1, 1, characterUUID, SppDataOtaProp), //prop
+        attrdef!(0, 16, 16, 16, TelinkSppDataOtaUUID, SppDataOtaData), //value
+        attrdef!(
+            0,
+            2,
+            spp_otaname.val.as_bytes().len(),
+            spp_otaname.val.as_bytes().len(),
+            userdesc_UUID,
+            spp_otaname.val
+        ),
+        attrdefu!(0, 2, 1, 1, characterUUID, SppDataPairProp), //prop
+        attrdef!(
+            0,
+            16,
+            16,
+            16,
+            TelinkSppDataPairUUID,
+            SppDataPairData,
+            _pairWrite,
+            _pairRead
+        ), //value
+        attrdef!(
+            0,
+            2,
+            spp_pairname.val.as_bytes().len(),
+            spp_pairname.val.as_bytes().len(),
+            userdesc_UUID,
+            spp_pairname.val
+        ),
+    ]
+);

@@ -1,10 +1,7 @@
 use std::ptr::null_mut;
 
 #[no_mangle]
-pub unsafe fn strcpy(
-    mut dst0: *mut u8,
-    mut src0: *const u8,
-) -> *mut u8 {
+pub unsafe fn strcpy(mut dst0: *mut u8, mut src0: *const u8) -> *mut u8 {
     let mut s = dst0;
     loop {
         let fresh0 = src0;
@@ -20,10 +17,7 @@ pub unsafe fn strcpy(
 }
 
 #[no_mangle]
-pub unsafe fn strchr(
-    mut s: *const u8,
-    mut c: u8,
-) -> *mut u8 {
+pub unsafe fn strchr(mut s: *const u8, mut c: u8) -> *mut u8 {
     loop {
         if *s == c {
             return s as *mut u8;
@@ -38,11 +32,7 @@ pub unsafe fn strchr(
 }
 
 #[no_mangle]
-pub unsafe fn memcmp(
-    mut m1: *const u8,
-    mut m2: *const u8,
-    mut n: u32,
-) -> i32 {
+pub unsafe fn memcmp(mut m1: *const u8, mut m2: *const u8, mut n: u32) -> i32 {
     let mut s1 = m1;
     let mut s2 = m2;
     loop {
@@ -61,11 +51,7 @@ pub unsafe fn memcmp(
 }
 
 #[no_mangle]
-pub unsafe fn memchr(
-    mut src_void: *const u8,
-    mut c: i32,
-    mut length: u32,
-) -> *mut u8 {
+pub unsafe fn memchr(mut src_void: *const u8, mut c: i32, mut length: u32) -> *mut u8 {
     let mut src = src_void;
     loop {
         let fresh4 = length;
@@ -83,11 +69,7 @@ pub unsafe fn memchr(
 }
 
 #[no_mangle]
-pub unsafe fn memmove(
-    mut dest: *mut u8,
-    mut src: *const u8,
-    mut n: u32,
-) -> *mut u8 {
+pub unsafe fn memmove(mut dest: *mut u8, mut src: *const u8, mut n: u32) -> *mut u8 {
     let mut d = dest;
     let mut s = src;
     loop {
@@ -106,11 +88,7 @@ pub unsafe fn memmove(
 }
 
 #[no_mangle]
-pub unsafe fn bcopy(
-    mut src: *mut u8,
-    mut dest: *mut u8,
-    mut len: u32,
-) {
+pub unsafe fn bcopy(mut src: *mut u8, mut dest: *mut u8, mut len: u32) {
     if dest < src {
         loop {
             let fresh8 = len;
@@ -125,8 +103,8 @@ pub unsafe fn bcopy(
             *fresh10 = *fresh9;
         }
     } else {
-        let mut lasts= src.offset(len.wrapping_sub(1) as isize);
-        let mut lastd= dest.offset(len.wrapping_sub(1) as isize);
+        let mut lasts = src.offset(len.wrapping_sub(1) as isize);
+        let mut lastd = dest.offset(len.wrapping_sub(1) as isize);
         loop {
             let fresh11 = len;
             len = len.wrapping_sub(1);
@@ -143,11 +121,7 @@ pub unsafe fn bcopy(
 }
 
 #[no_mangle]
-pub unsafe fn memset(
-    mut dest: *mut u8,
-    mut val: i32,
-    mut len: u32,
-) -> *mut u8 {
+pub unsafe fn memset(mut dest: *mut u8, mut val: i32, mut len: u32) -> *mut u8 {
     let mut ptr = dest;
     loop {
         let fresh14 = len;
@@ -163,21 +137,13 @@ pub unsafe fn memset(
 }
 
 #[no_mangle]
-pub unsafe fn memcpy(
-    mut out: *mut u8,
-    mut in_0: *const u8,
-    mut length: u32,
-) -> *mut u8 {
+pub unsafe fn memcpy(mut out: *mut u8, mut in_0: *const u8, mut length: u32) -> *mut u8 {
     bcopy(in_0 as *mut u8, out, length);
     return out;
 }
 
 #[no_mangle]
-pub unsafe fn memcpy4(
-    mut d: *mut u8,
-    mut s: *const u8,
-    mut length: u32,
-) {
+pub unsafe fn memcpy4(mut d: *mut u8, mut s: *const u8, mut length: u32) {
     let mut dst = d as *mut u32;
     let mut src = s as *mut u32;
     let mut len = length >> 2;
@@ -192,12 +158,12 @@ pub unsafe fn memcpy4(
         let fresh18 = dst;
         dst = dst.offset(1);
         *fresh18 = *fresh17;
-    };
+    }
 }
 
 #[no_mangle]
 pub unsafe fn strlen(mut str: *const u8) -> u32 {
-	let mut len = 0;
+    let mut len = 0;
 
     if !str.is_null() {
         while *str != 0 {
@@ -206,14 +172,11 @@ pub unsafe fn strlen(mut str: *const u8) -> u32 {
         }
     }
 
-	return len;
+    return len;
 }
 
 #[no_mangle]
-pub unsafe fn strcmp(
-    mut first_string: *const u8,
-    mut second_string: *const u8,
-) -> i32 {
+pub unsafe fn strcmp(mut first_string: *const u8, mut second_string: *const u8) -> i32 {
     while *first_string == *second_string {
         if *first_string == 0 {
             return 0;
@@ -221,19 +184,14 @@ pub unsafe fn strcmp(
         first_string = first_string.offset(1);
         second_string = second_string.offset(1);
     }
-    if (*first_string as i8 - *second_string as i8) < 0
-    {
+    if (*first_string as i8 - *second_string as i8) < 0 {
         return -1;
     }
     return 1;
 }
 
 #[no_mangle]
-pub unsafe fn strncpy(
-    mut s: *mut u8,
-    mut t: *const u8,
-    mut n: u32,
-) -> *mut u8 {
+pub unsafe fn strncpy(mut s: *mut u8, mut t: *const u8, mut n: u32) -> *mut u8 {
     let mut p: *mut u8 = s;
     let mut i: u32 = 0;
     if s.is_null() {
@@ -263,10 +221,7 @@ pub unsafe fn strncpy(
 }
 
 #[no_mangle]
-pub unsafe fn ismemzero4(
-    mut data: *mut u8,
-    mut len: u32,
-) -> i32 {
+pub unsafe fn ismemzero4(mut data: *mut u8, mut len: u32) -> i32 {
     let mut p = data as *mut u32;
     len = len >> 2;
     let mut i = 0;
@@ -281,10 +236,7 @@ pub unsafe fn ismemzero4(
 }
 
 #[no_mangle]
-pub unsafe fn ismemf4(
-    mut data: *mut u8,
-    mut len: u32,
-) -> i32 {
+pub unsafe fn ismemf4(mut data: *mut u8, mut len: u32) -> i32 {
     let mut p = data as *mut u32;
     len = len >> 2;
     let mut i = 0;
@@ -299,11 +251,7 @@ pub unsafe fn ismemf4(
 }
 
 #[no_mangle]
-pub unsafe fn memset4(
-    mut dest: *mut u8,
-    mut val: u32,
-    mut len: u32,
-) -> *mut u8 {
+pub unsafe fn memset4(mut dest: *mut u8, mut val: u32, mut len: u32) -> *mut u8 {
     let mut p = dest as *mut u32;
     len = len >> 2;
     let mut i = 0;

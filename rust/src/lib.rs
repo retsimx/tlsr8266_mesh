@@ -1,13 +1,13 @@
 use app::App;
 use ota::OtaManager;
 
-mod sdk;
-mod main_light;
-mod common;
-mod vendor_light;
 mod app;
+mod common;
 mod config;
+mod main_light;
 mod ota;
+mod sdk;
+mod vendor_light;
 
 static mut APP: App = App::default();
 

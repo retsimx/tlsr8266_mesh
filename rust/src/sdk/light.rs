@@ -1,6 +1,4 @@
 // Stuff from the libble library
-
-use common::{PairState, MESH_NODE_MAX_NUM};
 use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use std::mem;
 use std::mem::{size_of, size_of_val, MaybeUninit};
@@ -327,10 +325,22 @@ pub const LIGHT_DEL_GRP_PARAM: u8 = 0x00;
 
 pub const DEVICE_ADDR_MASK_DEFAULT: u16 = 0x7FFF;
 
+pub const MESH_NODE_MAX_NUM: u16 = 64;
+
 pub enum LightOpType {
     op_type_1 = 1,
     op_type_2 = 2,
     op_type_3 = 3,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+#[allow(dead_code)]
+pub enum PairState {
+    PairSetted = 0,
+    PairSetting,
+    PairSetMeshTxStart,
+    PairSetMeshTxDone, // send notify req, get mesh nodes' ac
+    PairSetMeshRxDone, // received all mesh nodes' ac, send cmd to switch to new mesh
 }
 
 #[derive(PartialEq)]

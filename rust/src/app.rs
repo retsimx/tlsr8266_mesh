@@ -1,5 +1,6 @@
 use config::MESH_PWD_ENCODE_SK;
 use main_light::{main_loop, user_init};
+use mesh::MeshManager;
 use ota::OtaManager;
 use sdk::light::{_rf_drv_init, get_pair_config_pwd_encode_sk};
 use sdk::mcu::clock::clock_init;
@@ -12,12 +13,14 @@ use std::io::Write;
 
 pub struct App {
     pub ota_manager: OtaManager,
+    pub mesh_manager: MeshManager,
 }
 
 impl App {
     pub const fn default() -> App {
         App {
             ota_manager: OtaManager::default(),
+            mesh_manager: MeshManager::default(),
         }
     }
 

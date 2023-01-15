@@ -1,4 +1,4 @@
-use common::{get_pkt_terminate, REGA_LIGHT_OFF};
+use common::REGA_LIGHT_OFF;
 use config::{get_flash_adr_light_new_fw, OTA_LED};
 use main_light::get_buff_response;
 use sdk::common::bit::ONES_32;
@@ -388,12 +388,14 @@ impl OtaManager {
     {
         self.rf_link_slave_data_ota_save();
 
+        let pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
+
         if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
             let mut reboot_flag = false;
             if 0 == self.terminate_cnt && *get_rf_slave_ota_terminate_flag() {
                 if _is_add_packet_buf_ready() {
                     self.terminate_cnt = 6;
-                    _rf_link_add_tx_packet(get_pkt_terminate().as_ptr());
+                    _rf_link_add_tx_packet(pkt_terminate.as_ptr());
                 }
             }
 

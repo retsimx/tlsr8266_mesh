@@ -5,6 +5,7 @@ mod app;
 mod common;
 mod config;
 mod main_light;
+mod mesh;
 mod ota;
 mod sdk;
 mod vendor_light;

@@ -1,7 +1,8 @@
-use common::{get_mesh_pair_enable, set_get_mac_en};
+use common::set_get_mac_en;
 use config::{
     get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
+use mesh::wrappers::get_mesh_pair_enable;
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
 use sdk::mcu::clock::clock_time_exceed;

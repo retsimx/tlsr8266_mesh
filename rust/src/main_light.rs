@@ -7,6 +7,7 @@ use {pub_mut, BIT};
 
 use common::*;
 use config::*;
+use mesh::MESH_NODE_ST_PAR_LEN;
 use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
@@ -74,21 +75,6 @@ pub_mut!(
         MAX_LUM_BRIGHTNESS_VALUE,
         MAX_LUM_BRIGHTNESS_VALUE
     ]
-);
-pub_mut!(cmd_left_delay_ms, u16, 0);
-pub_mut!(cmd_delay_ms, u16, 0);
-pub_mut!(irq_timer1_cb_time, u32, 0);
-pub_mut!(
-    cmd_delay,
-    ll_packet_l2cap_data_t,
-    ll_packet_l2cap_data_t {
-        l2capLen: 0,
-        chanId: 0,
-        opcode: 0,
-        handle: 0,
-        handle1: 0,
-        value: [0; 30],
-    }
 );
 
 #[repr(C, packed)]
@@ -198,7 +184,7 @@ fn light_init_default() {
 
     set_online_status_timeout(ONLINE_STATUS_TIMEOUT);
 
-    mesh_pair_init();
+    app().mesh_manager.mesh_pair_init();
 }
 
 pub fn user_init() {
@@ -372,7 +358,7 @@ fn light_user_func() {
         light_lum_store();
     }
 
-    mesh_pair_proc_effect();
+    app().mesh_manager.mesh_pair_proc_effect();
 }
 
 pub fn main_loop() {
@@ -493,7 +479,7 @@ fn rf_link_response_callback(
         ppp.val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
         if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
             for i in 0..8 {
-                ppp.val[5 + i] = get_mesh_pair_checksum_fn(i as u8);
+                ppp.val[5 + i] = app().mesh_manager.get_mesh_pair_checksum_fn(i as u8);
             }
             ppp.val[3] = (*get_device_address() & 0xFF) as u8;
             ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
@@ -510,7 +496,7 @@ fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
 #[no_mangle] // required by light_ll
-fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
+pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
     let op_cmd_len: u8 = 0;
@@ -535,18 +521,11 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     let op = op_cmd[0] & 0x3F;
 
     if op == LGT_CMD_LIGHT_ONOFF {
-        if *get_cmd_left_delay_ms() != 0 {
+        if app()
+            .mesh_manager
+            .check_cmd_delay(&params, p, pp, op_cmd_len, params_len)
+        {
             return;
-        }
-        set_cmd_delay_ms(params[1] as u16 | ((params[2] as u16) << 8));
-        if *get_cmd_delay_ms() != 0 && *get_irq_timer1_cb_time() == 0 {
-            let cmd_delayed_ms = light_cmd_delayed_ms(pp.val[(op_cmd_len + params_len) as usize]);
-            if *get_cmd_delay_ms() > cmd_delayed_ms {
-                set_cmd_delay(p.clone());
-                set_cmd_left_delay_ms(*get_cmd_delay_ms() - cmd_delayed_ms);
-                set_irq_timer1_cb_time(clock_time());
-                return;
-            }
         }
     }
 
@@ -578,7 +557,7 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         let val = params[0] as u16 | ((params[1] as u16) << 8);
         if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
             if _rf_link_add_dev_addr(val) {
-                mesh_pair_proc_get_mac_flag();
+                app().mesh_manager.mesh_pair_proc_get_mac_flag();
             }
         }
     } else if op == LGT_CMD_SET_LIGHT {
@@ -609,7 +588,11 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
 
         set_lum_changed_time(clock_time());
     } else if op == LGT_CMD_KICK_OUT {
-        if is_mesh_cmd_need_delay(p, &params, pp.val[(op_cmd_len + params_len) as usize]) {
+        if app().mesh_manager.is_mesh_cmd_need_delay(
+            p,
+            &params,
+            pp.val[(op_cmd_len + params_len) as usize],
+        ) {
             return;
         }
         irq_disable();
@@ -639,7 +622,7 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
         }
     } else if op == LGT_CMD_MESH_PAIR {
-        mesh_pair_cb(&params);
+        app().mesh_manager.mesh_pair_cb(&params);
     }
 }
 
@@ -705,17 +688,7 @@ pub fn rf_link_light_event_callback(status: u8) {
 
 #[no_mangle] // required by light_ll
 fn irq_timer1() {
-    if *get_irq_timer1_cb_time() != 0
-        && clock_time_exceed(
-            *get_irq_timer1_cb_time(),
-            (*get_cmd_left_delay_ms() * 1000) as u32,
-        )
-    {
-        set_cmd_left_delay_ms(0);
-        rf_link_data_callback(get_cmd_delay());
-        set_cmd_delay_ms(0);
-        set_irq_timer1_cb_time(0);
-    }
+    app().mesh_manager.check_cmd_delay_timer();
 
     light_onoff_step_timer();
 }

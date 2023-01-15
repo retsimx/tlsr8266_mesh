@@ -1,5 +1,4 @@
 use std::mem::{size_of, size_of_val};
-use std::ptr::{copy_nonoverlapping};
 use sdk::common::bit::ONES_32;
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use sdk::light::*;
@@ -7,6 +6,7 @@ use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_
 use sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use std::ptr::addr_of;
+use std::slice;
 use ::{BIT};
 use sdk::common::crc::crc16;
 use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
@@ -160,21 +160,17 @@ pub fn erase_ota_data(adr: u32){
 }
 
 pub fn mesh_pair_init() {
-	unsafe {
-		mesh_pair_enable = true;
-		mesh_pair_cmd_interval = MESH_PAIR_CMD_INTERVAL;
-		mesh_pair_timeout = MESH_PAIR_TIMEOUT;
-	}
+    set_mesh_pair_enable(true);
+    set_mesh_pair_cmd_interval(MESH_PAIR_CMD_INTERVAL);
+    set_mesh_pair_timeout(MESH_PAIR_TIMEOUT);
 }
 
 pub fn mesh_pair_proc_effect() {
-	unsafe {
-		if effect_new_mesh != 0 || (effect_new_mesh_delay_time != 0 && (clock_time_exceed(effect_new_mesh_delay_time, mesh_pair_cmd_interval * 1000))) {
-			save_effect_new_mesh();
-			effect_new_mesh = 0;
-			effect_new_mesh_delay_time = 0;
-		}
-	}
+    if *get_effect_new_mesh() != 0 || (*get_effect_new_mesh_delay_time() != 0 && (clock_time_exceed(*get_effect_new_mesh_delay_time(), *get_mesh_pair_cmd_interval() * 1000))) {
+        save_effect_new_mesh();
+        set_effect_new_mesh(0);
+        set_effect_new_mesh_delay_time(0);
+    }
 }
 
 pub fn mesh_ota_master_100_flag_check()
@@ -187,32 +183,34 @@ pub fn mesh_ota_master_100_flag_check()
 }
 
 #[no_mangle] // Required by light_ll
-pub unsafe fn dev_addr_with_mac_flag(params: *const u8) -> bool
+pub fn dev_addr_with_mac_flag(params: *const u8) -> bool
 {
-	return DEV_ADDR_PAR_WITH_MAC == *params.offset(2);
+	return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
 }
 
-pub unsafe fn dev_addr_with_mac_rsp(params: *const u8, par_rsp: *mut u8) -> bool
+pub fn dev_addr_with_mac_rsp(params: &[u8], par_rsp: &mut [u8]) -> bool
 {
 	if dev_addr_with_mac_match(params) {
-		*par_rsp.offset(0) = (*get_device_address() & 0xff) as u8;
-		*par_rsp.offset(1) = ((*get_device_address() >> 8) & 0xff) as u8;
+		par_rsp[0] = (*get_device_address() & 0xff) as u8;
+		par_rsp[1] = ((*get_device_address() >> 8) & 0xff) as u8;
 
-		copy_nonoverlapping(*get_slave_p_mac(), par_rsp.offset( 2), 6);
-		#[allow(unaligned_references)]
-		copy_nonoverlapping(&get_adv_rsp_pri_data().ProductUUID, par_rsp.offset( 8) as *mut u16, 2);
+        let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
+        par_rsp[0..6].copy_from_slice(slave_mac);
+        par_rsp[8] = (get_adv_rsp_pri_data().ProductUUID & 0xff) as u8;
+        par_rsp[9] = (get_adv_rsp_pri_data().ProductUUID >> 8 & 0xff) as u8;
 		return true;
 	}
 	return false;
 }
 
-pub unsafe fn dev_addr_with_mac_match(params: *const u8) -> bool
+pub fn dev_addr_with_mac_match(params: &[u8]) -> bool
 {
-	return if (*params.offset(0) == 0xff) && (*params.offset(1) == 0xff) {    // get
-		get_mac_en
+	return if params[0] == 0xff && params[1] == 0xff {    // get
+		*get_get_mac_en()
 	} else {
+        let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
 		for i in 0..6 {
-			if params.offset(4+i) != get_slave_p_mac().offset(i) {
+			if params[i] != slave_mac[i] {
 				return false;
 			}
 		}
@@ -220,9 +218,9 @@ pub unsafe fn dev_addr_with_mac_match(params: *const u8) -> bool
 	}
 }
 
-pub unsafe fn get_mesh_pair_checksum_fn(idx: u8) -> u8 {
+pub fn get_mesh_pair_checksum_fn(idx: u8) -> u8 {
     let i = (idx % 8) as usize;
-    return (new_mesh_name[i] ^ new_mesh_name[i+8]) ^ (new_mesh_pwd[i] ^ new_mesh_pwd[i+8]) ^ (new_mesh_ltk[i] ^ new_mesh_ltk[i+8]);
+    return (get_new_mesh_name()[i] ^ get_new_mesh_name()[i+8]) ^ (get_new_mesh_pwd()[i] ^ get_new_mesh_pwd()[i+8]) ^ (get_new_mesh_ltk()[i] ^ get_new_mesh_ltk()[i+8]);
 }
 
 pub fn light_cmd_delayed_ms(data: u8) -> u16 {
@@ -237,12 +235,12 @@ pub fn light_cmd_delayed_ms(data: u8) -> u16 {
 	}
 }
 
-pub unsafe fn mesh_pair_proc_get_mac_flag(){
-	get_mac_en = false; 	// set success
-	if mesh_pair_enable {
+pub fn mesh_pair_proc_get_mac_flag(){
+	set_get_mac_en(false); 	// set success
+	if *get_mesh_pair_enable() {
 		let mut data: [u8; 1] = [0];
 		flash_write_page(*get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + 1, 1, data.as_mut_ptr());
-		if data[0] == 1 {get_mac_en = true} else {get_mac_en = false}
+		set_get_mac_en(if data[0] == 1 { true } else { false });
 	}
 }
 
@@ -273,26 +271,26 @@ const LUM_DOWN: u8 = 1;
 const LIGHT_ADJUST_TIME     : u16 = 100;   //unit: 10ms
 const LIGHT_ADJUST_INTERVAL : u16 = 2;  // unit :10ms;     min:20ms
 
-unsafe fn get_step(direction: u8){
-    light_step.remainder = 0;       // reset
+fn get_step(direction: u8){
+    get_light_step().remainder = 0;       // reset
     if LUM_UP == direction {
-        light_step.step = ((light_step.lum_dst - light_step.lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
-        light_step.step_mod = ((((light_step.lum_dst - light_step.lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        get_light_step().step = ((get_light_step().lum_dst - get_light_step().lum_temp)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        get_light_step().step_mod = ((((get_light_step().lum_dst - get_light_step().lum_temp)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     } else {
-        light_step.step = ((light_step.lum_temp - light_step.lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
-        light_step.step_mod = ((((light_step.lum_temp - light_step.lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        get_light_step().step = ((get_light_step().lum_temp - get_light_step().lum_dst)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
+        get_light_step().step_mod = ((((get_light_step().lum_temp - get_light_step().lum_dst)%((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32))*256)/((LIGHT_ADJUST_TIME / LIGHT_ADJUST_INTERVAL) as i32)) as u16;
     }
 }
 
-pub unsafe fn light_onoff_step(on: bool){
+pub fn light_onoff_step(on: bool){
     let mut set_flag= true;
 
     if on {
         if *get_light_off() {
-            if !light_step.adjusting_flag {
-                light_step.lum_temp = 0;
+            if !get_light_step().adjusting_flag {
+                get_light_step().lum_temp = 0;
             }
-            light_step.lum_dst = *get_led_lum() as i32;
+            get_light_step().lum_dst = *get_led_lum() as i32;
             get_step(LUM_UP);
     	}else{
     	    set_flag = false;
@@ -304,116 +302,116 @@ pub unsafe fn light_onoff_step(on: bool){
     	    set_flag = false;
     	    light_onoff_normal(false); // make sure off. unnecessary.
     	}else{
-            if !light_step.adjusting_flag {
-                light_step.lum_temp = *get_led_lum() as i32;
+            if !get_light_step().adjusting_flag {
+                get_light_step().lum_temp = *get_led_lum() as i32;
             }
-            light_step.lum_dst = 0;
+            get_light_step().lum_dst = 0;
             get_step(LUM_DOWN);
     	}
         set_light_off(true);
 	}
 
-    light_step.adjusting_flag = set_flag;
-    light_step.time = 0;
+    get_light_step().adjusting_flag = set_flag;
+    get_light_step().time = 0;
 }
 
-pub unsafe fn light_step_reset(target: u16) {
+pub fn light_step_reset(target: u16) {
     let r = irq_disable();
-    if !light_step.adjusting_flag && target == *get_led_lum() {
+    if !get_light_step().adjusting_flag && target == *get_led_lum() {
         light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], target);
         irq_restore(r);
 		return
     }
 
-    if light_step.adjusting_flag {
-        if (target as i32) < light_step.lum_temp {
-            light_step.lum_dst = target as i32;
+    if get_light_step().adjusting_flag {
+        if (target as i32) < get_light_step().lum_temp {
+            get_light_step().lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
-        if (target as i32) > light_step.lum_temp {
-            light_step.lum_dst = target as i32;
+        if (target as i32) > get_light_step().lum_temp {
+            get_light_step().lum_dst = target as i32;
             get_step(LUM_UP);
         }
     } else {
         if target < *get_led_lum() {
-            light_step.lum_temp = *get_led_lum() as i32;
-            light_step.lum_dst = target as i32;
+            get_light_step().lum_temp = *get_led_lum() as i32;
+            get_light_step().lum_dst = target as i32;
             get_step(LUM_DOWN);
         }
 
         if target > *get_led_lum() {
-            light_step.lum_temp = *get_led_lum() as i32;
-            light_step.lum_dst = target as i32;
+            get_light_step().lum_temp = *get_led_lum() as i32;
+            get_light_step().lum_dst = target as i32;
             get_step(LUM_UP);
         }
     }
 
-    light_step.adjusting_flag = true;
-    light_step.time = 0;
+    get_light_step().adjusting_flag = true;
+    get_light_step().time = 0;
     set_led_lum(target);
 
     irq_restore(r);
 }
 
-unsafe fn get_next_lum(direction: u8){
-    let temp = light_step.remainder as u32 + light_step.step_mod as u32;
-    light_step.remainder = (temp & 0xffff) as u16;
+fn get_next_lum(direction: u8){
+    let temp = get_light_step().remainder as u32 + get_light_step().step_mod as u32;
+    get_light_step().remainder = (temp & 0xffff) as u16;
 
     if LUM_UP == direction {
-        light_step.lum_temp += light_step.step as i32;
+        get_light_step().lum_temp += get_light_step().step as i32;
         if temp >= 0x10000 {
-            light_step.lum_temp += 1;
+            get_light_step().lum_temp += 1;
         }
-        if light_step.lum_temp >= light_step.lum_dst {
-            light_step.lum_temp = light_step.lum_dst;
-            light_step.remainder = 0;
+        if get_light_step().lum_temp >= get_light_step().lum_dst {
+            get_light_step().lum_temp = get_light_step().lum_dst;
+            get_light_step().remainder = 0;
         }
     }else{
-        light_step.lum_temp -= light_step.step as i32;
+        get_light_step().lum_temp -= get_light_step().step as i32;
         if temp >= 0x10000 {
-            light_step.lum_temp -= 1;
+            get_light_step().lum_temp -= 1;
         }
-        if light_step.lum_temp <= light_step.lum_dst {
-            light_step.lum_temp = light_step.lum_dst;
-            light_step.remainder = 0;
+        if get_light_step().lum_temp <= get_light_step().lum_dst {
+            get_light_step().lum_temp = get_light_step().lum_dst;
+            get_light_step().remainder = 0;
         }
     }
 }
 
-pub unsafe fn light_onoff_step_timer() {
-    if light_step.adjusting_flag {
-        if light_step.time == 0 {
-            if light_step.lum_dst != light_step.lum_temp {
-                if light_step.lum_temp < light_step.lum_dst {
+pub fn light_onoff_step_timer() {
+    if get_light_step().adjusting_flag {
+        if get_light_step().time == 0 {
+            if get_light_step().lum_dst != get_light_step().lum_temp {
+                if get_light_step().lum_temp < get_light_step().lum_dst {
                     get_next_lum(LUM_UP);
                 }else{
                     get_next_lum(LUM_DOWN);
                 }
-                light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], light_step.lum_temp as u16);
+                light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], get_light_step().lum_temp as u16);
             }else{
-                light_step.adjusting_flag = false;
+                get_light_step().adjusting_flag = false;
             }
         }
 
-        light_step.time += 1;
-        if light_step.time >= LIGHT_ADJUST_INTERVAL as u32 {
-            light_step.time = 0;
+        get_light_step().time += 1;
+        if get_light_step().time >= LIGHT_ADJUST_INTERVAL as u32 {
+            get_light_step().time = 0;
         }
     }
 }
 
 // recover status before software reboot
 #[no_mangle] // required by light_ll
-unsafe fn light_sw_reboot_callback() {
+fn light_sw_reboot_callback() {
     if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {	// rf_slave_ota_busy means mesh ota master busy also.
         analog_write__attribute_ram_code (REGA_LIGHT_OFF, if *get_light_off() {RecoverStatus::LightOff as u8} else {0});
     }
 }
 
-pub unsafe fn is_mesh_cmd_need_delay(p_cmd: *const u8, params: *const u8, ttc: u8) -> bool
+pub fn is_mesh_cmd_need_delay(p_cmd: *const ll_packet_l2cap_data_t, params: &[u8], ttc: u8) -> bool
 {
-	let delay_tmp = (*params.offset(1) as u16) | ((*params.offset(2) as u16) << 8);
+	let delay_tmp = params[1] as u16 | (params[2] as u16) << 8;
 	if delay_tmp != 0 {
 		if *get_cmd_left_delay_ms() != 0 {
 			return true;
@@ -422,7 +420,7 @@ pub unsafe fn is_mesh_cmd_need_delay(p_cmd: *const u8, params: *const u8, ttc: u
 		if *get_cmd_delay_ms() != 0 && *get_irq_timer1_cb_time() == 0 {
 			let cmd_delayed_ms = light_cmd_delayed_ms(ttc);
 			if *get_cmd_delay_ms() > cmd_delayed_ms {
-				copy_nonoverlapping(p_cmd, get_cmd_delay_addr() as *mut u8, size_of::<ll_packet_l2cap_data_t>());
+                unsafe { *get_cmd_delay() = *p_cmd; }
 				set_cmd_left_delay_ms(*get_cmd_delay_ms() - cmd_delayed_ms);
 				set_irq_timer1_cb_time(clock_time());
 				return true;
@@ -446,46 +444,45 @@ pub enum MeshPairState {
     MeshPairDefaultMesh,
 }
 
-pub unsafe fn mesh_pair_cb(params: *const u8)
+pub fn mesh_pair_cb(params: &[u8])
 {
-    if default_mesh_time_ref != 0 {
-        // return;
-        default_mesh_time_ref = clock_time() | 1;
+    if *get_default_mesh_time_ref() != 0 {
+        set_default_mesh_time_ref(clock_time() | 1);
     }
-	let cmd = *params.offset(0);
+	let cmd = params[0];
     if cmd == MeshPairState::MeshPairName1 as u8 {
-        mesh_pair_start_time = clock_time() | 1;
-        copy_nonoverlapping(params.offset(1), new_mesh_name.as_mut_ptr(), 8);
+        set_mesh_pair_start_time(clock_time() | 1);
+        get_new_mesh_name()[0..8].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairName2 as u8 {
-        copy_nonoverlapping(params.offset(1), new_mesh_name.as_mut_ptr().offset(8), 8);
+        get_new_mesh_name()[8..16].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairPwd1 as u8 {
-        copy_nonoverlapping(params.offset(1), new_mesh_pwd.as_mut_ptr(), 8);
+        get_new_mesh_pwd()[0..8].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairPwd2 as u8 {
-        copy_nonoverlapping(params.offset(1), new_mesh_pwd.as_mut_ptr().offset(8), 8);
+        get_new_mesh_pwd()[8..16].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairLtk1 as u8 {
-        copy_nonoverlapping(params.offset(1), new_mesh_ltk.as_mut_ptr(), 8);
+        get_new_mesh_ltk()[0..8].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairLtk2 as u8 {
-        copy_nonoverlapping(params.offset(1), new_mesh_ltk.as_mut_ptr().offset(8), 8);
+        get_new_mesh_ltk()[8..16].copy_from_slice(&params[1..9]);
     }else if cmd == MeshPairState::MeshPairEffectDelay as u8 {
-        effect_new_mesh_delay_time = clock_time() | 1;
-        if default_mesh_time_ref != 0 {
+        set_effect_new_mesh_delay_time(clock_time() | 1);
+        if *get_default_mesh_time_ref() != 0 {
             /* Keep default_mesh_time_ref non-zero */
-            default_mesh_time = mesh_pair_cmd_interval * 2;
+            set_default_mesh_time(*get_mesh_pair_cmd_interval() * 2);
         }
     }else if cmd == MeshPairState::MeshPairEffect as u8 {
-        effect_new_mesh = 1;
+        set_effect_new_mesh(1);
     }
     else if cmd == MeshPairState::MeshPairDefaultMesh as u8 {
-        default_mesh_effect_delay_ref = clock_time() | 1;
-        default_mesh_time = *params.offset(1) as u32 * 1000;
+        set_default_mesh_effect_delay_ref(clock_time() | 1);
+        set_default_mesh_time(params[1] as u32 * 1000);
     }
 }
 
-unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
+fn mesh_cmd_notify(op: u8, p: &[u8], dev_adr: u16) -> i32
 {
     let mut err = -1;
     if *get_slave_link_connected() && *get_pair_login_ok() {
-        if len > 10 {   //max length of par is 10
+        if p.len() > 10 {   //max length of par is 10
             return -1;
         }
 
@@ -507,8 +504,7 @@ unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
         pkt_notify.value[4] = (dev_adr >> 8) as u8;
 		pkt_notify.value[7] = op | 0xc0;
 
-        let p_par = pkt_notify.value.as_mut_ptr().offset(10);
-        copy_nonoverlapping(p, p_par, len as usize);
+        pkt_notify.value[10..10+p.len()].copy_from_slice(&p[0..p.len()]);
 
         let r = irq_disable();
         if _is_add_packet_buf_ready() {
@@ -522,32 +518,32 @@ unsafe fn mesh_cmd_notify(op: u8, p: *const u8, len: u8, dev_adr: u16) -> i32
     return err;
 }
 
-unsafe fn mesh_pair_complete_notify() -> i32
+fn mesh_pair_complete_notify() -> i32
 {
 	let par = [CMD_NOTIFY_MESH_PAIR_END];
-	return mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, par.as_ptr(), par.len() as u8, *get_device_address());
+	return mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &par, *get_device_address());
 }
 
-unsafe fn _safe_effect_new_mesh_finish() {
-    new_mesh_name = [0; 16];
-    new_mesh_pwd = [0; 16];
-    new_mesh_ltk = [0; 16];
-    mesh_pair_start_notify_time = 0;
-    mesh_pair_retry_cnt = 0;
-    mesh_pair_start_time = 0;
-    mesh_pair_notify_rsp_mask = [0; 32];
+fn _safe_effect_new_mesh_finish() {
+    set_new_mesh_name([0; 16]);
+    set_new_mesh_pwd([0; 16]);
+    set_new_mesh_ltk([0; 16]);
+    set_mesh_pair_start_notify_time(0);
+    set_mesh_pair_retry_cnt(0);
+    set_mesh_pair_start_time(0);
+    set_mesh_pair_notify_rsp_mask([0; 32]);
     set_pair_setting_flag(PairState::PairSetted);
 }
 
-unsafe fn save_effect_new_mesh()
+fn save_effect_new_mesh()
 {
-    if default_mesh_time_ref != 0 || get_mac_en
+    if *get_default_mesh_time_ref() != 0 || *get_get_mac_en()
     {
 		mesh_pair_complete_notify();
 		sleep_us(1000);
         /* Switch to normal mesh */
         _pair_load_key();
-        default_mesh_time_ref = 0;
+        set_default_mesh_time_ref(0);
 
         _mesh_node_init();
         device_status_update();
@@ -555,14 +551,14 @@ unsafe fn save_effect_new_mesh()
         return;
     }
 
-    if effect_new_mesh == 0 {
-        copy_nonoverlapping(new_mesh_name.as_ptr(), get_pair_nn().as_mut_ptr(), 16);
-        copy_nonoverlapping(new_mesh_pwd.as_ptr(), get_pair_pass().as_mut_ptr(), 16);
-        copy_nonoverlapping(new_mesh_ltk.as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
+    if *get_effect_new_mesh() == 0 {
+        get_pair_nn()[0..16].copy_from_slice(&get_new_mesh_name()[0..16]);
+        get_pair_pass()[0..16].copy_from_slice(&get_new_mesh_pwd()[0..16]);
+        get_pair_ltk()[0..16].copy_from_slice(&get_new_mesh_ltk()[0..16]);
     }
     else
     {
-        copy_nonoverlapping(get_pair_ltk_mesh().as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
+        get_pair_ltk()[0..16].copy_from_slice(&get_pair_ltk_mesh()[0..16]);
     }
 
 	mesh_pair_complete_notify();
@@ -580,47 +576,40 @@ unsafe fn save_effect_new_mesh()
 }
 
 #[no_mangle] // Required by light_ll rf_link_slave_add_status_ll
-pub unsafe fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
-    let mut same = true;
-    for i in 0..8
-    {
-        if mesh_pair_checksum[i] != *(*p).value.as_ptr().offset(12 + i as isize) {
-            same = false;
-            break;
-        }
-    }
+pub fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
+    let p = &(unsafe { *p });
 
-    if same {
+    if get_mesh_pair_checksum()[0..8] == p.value[12..12+8] {
         // mesh pair : success one device, clear the mask flag
-        mesh_pair_notify_rsp_mask[((*p).value[10] / 8) as usize] &= !(BIT!((*p).value[10] % 8));
+        get_mesh_pair_notify_rsp_mask()[(p.value[10] / 8) as usize] &= !(BIT!(p.value[10] % 8));
     }
 
     return 1;// if return 2, then the notify rsp will not report to master.
 }
 
-unsafe fn switch_to_default_mesh(delay_s: u8)
+fn switch_to_default_mesh(delay_s: u8)
 {
-    default_mesh_time_ref = clock_time() | 1;
-    default_mesh_time = delay_s as u32 * 1000;
+    set_default_mesh_time_ref(clock_time() | 1);
+    set_default_mesh_time(delay_s as u32 * 1000);
 
     /* Only change AC and LTK */
     set_pair_ac(_access_code(get_pair_config_mesh_name().as_ptr(), get_pair_config_mesh_pwd().as_ptr()));
-    copy_nonoverlapping(get_pair_config_mesh_ltk().as_ptr(), get_pair_ltk().as_mut_ptr(), 16);
+    get_pair_ltk()[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
 }
 
-unsafe fn get_online_node_cnt() -> u8
+fn get_online_node_cnt() -> u8
 {
     let mut cnt = 0;
 	for i in 0..*get_mesh_node_max() {
-	    if mesh_node_st[i as usize].tick != 0 {
+	    if get_mesh_node_st()[i as usize].tick != 0 {
 	        cnt += 0;
 	        if i > 0 {
-	            mesh_pair_notify_rsp_mask[(mesh_node_st[i as usize].val.dev_adr / 8) as usize] |= BIT!(mesh_node_st[i as usize].val.dev_adr % 8);
+	            get_mesh_pair_notify_rsp_mask()[(get_mesh_node_st()[i as usize].val.dev_adr / 8) as usize] |= BIT!(get_mesh_node_st()[i as usize].val.dev_adr % 8);
 	        }
 	    }
 	}
 
-    if gateway_status == GatewayStatus::GatewayStatusCfgUnproDev || gateway_status == GatewayStatus::GatewayStatusAddConfiguredDevice
+    if *get_gateway_status() == GatewayStatus::GatewayStatusCfgUnproDev || *get_gateway_status() == GatewayStatus::GatewayStatusAddConfiguredDevice
     {
         /* If provisioning device to network, shall at least return two device */
         if cnt < 2
@@ -633,101 +622,101 @@ unsafe fn get_online_node_cnt() -> u8
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn mesh_pair_proc()
+fn mesh_pair_proc()
 {
     let mut dst_addr = 0xFFFF;
     let mut op_para: [u8; 16] = [0; 16];
 
-    if default_mesh_effect_delay_ref != 0 && clock_time_exceed(default_mesh_effect_delay_ref, MESH_PAIR_CMD_INTERVAL * 1000)
+    if *get_default_mesh_effect_delay_ref() != 0 && clock_time_exceed(*get_default_mesh_effect_delay_ref(), MESH_PAIR_CMD_INTERVAL * 1000)
     {
-        default_mesh_effect_delay_ref = 0;
+        set_default_mesh_effect_delay_ref(0);
 
-        if default_mesh_time == 0x00
+        if *get_default_mesh_time() == 0x00
         {
             _pair_load_key();
-            default_mesh_time_ref = 0;
+            set_default_mesh_time_ref(0);
         }
         else
         {
-            switch_to_default_mesh((default_mesh_time / 1000) as u8);
-            default_mesh_time_ref = clock_time() | 1;
+            switch_to_default_mesh((*get_default_mesh_time() / 1000) as u8);
+            set_default_mesh_time_ref(clock_time() | 1);
         }
     }
-    else if default_mesh_time_ref != 0 && clock_time_exceed(default_mesh_time_ref, default_mesh_time * 1000)
+    else if *get_default_mesh_time_ref() != 0 && clock_time_exceed(*get_default_mesh_time_ref(), *get_default_mesh_time() * 1000)
     {
         /* Switch to normal mesh */
-        if default_mesh_time == 255000
+        if *get_default_mesh_time() == 255000
         {
-            default_mesh_time_ref = clock_time() | 1;
+            set_default_mesh_time_ref(clock_time() | 1);
         }
         else
         {
             _pair_load_key();
-            default_mesh_time_ref = 0;
+            set_default_mesh_time_ref(0);
         }
     }
-    if mesh_pair_start_time != 0 && clock_time_exceed(mesh_pair_start_time, mesh_pair_timeout*1000*1000) {
+    if *get_mesh_pair_start_time() != 0 && clock_time_exceed(*get_mesh_pair_start_time(), *get_mesh_pair_timeout()*1000*1000) {
         //mesh pair time out
         _pair_load_key();
-        new_mesh_name = [0; 16];
-        new_mesh_pwd = [0; 16];
-        new_mesh_ltk = [0; 16];
-        mesh_pair_state = MeshPairState::MeshPairName1;
-        mesh_pair_start_notify_time = 0;
-        mesh_pair_retry_cnt = 0;
-        mesh_pair_start_time = 0;
-        mesh_pair_notify_rsp_mask = [0; 32];
+        set_new_mesh_name([0; 16]);
+        set_new_mesh_pwd([0; 16]);
+        set_new_mesh_ltk([0; 16]);
+        set_mesh_pair_state(MeshPairState::MeshPairName1);
+        set_mesh_pair_start_notify_time(0);
+        set_mesh_pair_retry_cnt(0);
+        set_mesh_pair_start_time(0);
+        set_mesh_pair_notify_rsp_mask([0; 32]);
         set_pair_setting_flag(PairState::PairSetted);
         rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
         return;
     }
 
-    if *get_pair_setting_flag() == PairState::PairSetMeshTxStart && mesh_pair_state == MeshPairState::MeshPairName1 && get_online_node_cnt() == 1 {
+    if *get_pair_setting_flag() == PairState::PairSetMeshTxStart && *get_mesh_pair_state() == MeshPairState::MeshPairName1 && get_online_node_cnt() == 1 {
         op_para[0] = LGT_CMD_MESH_PAIR;
         op_para[3] = MeshPairState::MeshPairEffect as u8;
         dst_addr = 0x0000;// there is noly one device in mesh,just effect itself.
-        mesh_pair_state = MeshPairState::MeshPairName1;
-        mesh_pair_start_notify_time = 0;
-        mesh_pair_retry_cnt = 0;
-        mesh_pair_start_time = 0;
-        mesh_pair_notify_rsp_mask = [0; 32];
+        set_mesh_pair_state(MeshPairState::MeshPairName1);
+        set_mesh_pair_start_notify_time(0);
+        set_mesh_pair_retry_cnt(0);
+        set_mesh_pair_start_time(0);
+        set_mesh_pair_notify_rsp_mask([0; 32]);
         set_pair_setting_flag(PairState::PairSetted);
-    }else if *get_pair_setting_flag() as u8 >= PairState::PairSetMeshTxStart as u8 && clock_time_exceed(mesh_pair_time, mesh_pair_cmd_interval*1000) {
-        mesh_pair_time = clock_time();
+    }else if *get_pair_setting_flag() as u8 >= PairState::PairSetMeshTxStart as u8 && clock_time_exceed(*get_mesh_pair_time(), *get_mesh_pair_cmd_interval()*1000) {
+        set_mesh_pair_time(clock_time());
         if *get_pair_setting_flag() == PairState::PairSetMeshTxStart {
             op_para[0] = LGT_CMD_MESH_PAIR;
-            op_para[3] = mesh_pair_state as u8;
-            if mesh_pair_state == MeshPairState::MeshPairName1 {
+            op_para[3] = *get_mesh_pair_state() as u8;
+            if *get_mesh_pair_state() == MeshPairState::MeshPairName1 {
                 // send mesh name [0-7]
-                copy_nonoverlapping(get_pair_nn().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairName2;
-            }else if mesh_pair_state == MeshPairState::MeshPairName2 {
+                op_para[4..4+8].copy_from_slice(&get_pair_nn()[0..8]);
+        		set_mesh_pair_state(MeshPairState::MeshPairName2);
+            }else if *get_mesh_pair_state() == MeshPairState::MeshPairName2 {
                 // send mesh name [8-15]
-                copy_nonoverlapping(get_pair_nn().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairPwd1;
-            }else if mesh_pair_state == MeshPairState::MeshPairPwd1 {
+                op_para[4..4+8].copy_from_slice(&get_pair_nn()[8..16]);
+        		set_mesh_pair_state(MeshPairState::MeshPairPwd1);
+            }else if *get_mesh_pair_state() == MeshPairState::MeshPairPwd1 {
                 // send mesh pwd [0-7]
-                copy_nonoverlapping(get_pair_pass().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairPwd2;
-            }else if mesh_pair_state == MeshPairState::MeshPairPwd2 {
+                op_para[4..4+8].copy_from_slice(&get_pair_pass()[0..8]);
+        		set_mesh_pair_state(MeshPairState::MeshPairPwd2);
+            }else if *get_mesh_pair_state() == MeshPairState::MeshPairPwd2 {
                 // send mesh pwd [8-15]
-                copy_nonoverlapping(get_pair_pass().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairLtk1;
-            }else if mesh_pair_state == MeshPairState::MeshPairLtk1 {
+                op_para[4..4+8].copy_from_slice(&get_pair_pass()[8..16]);
+        		set_mesh_pair_state(MeshPairState::MeshPairLtk1);
+            }else if *get_mesh_pair_state() == MeshPairState::MeshPairLtk1 {
                 // send mesh ltk [0-7]
-                copy_nonoverlapping(get_pair_ltk_mesh().as_mut_ptr(), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairLtk2;
-            }else if mesh_pair_state == MeshPairState::MeshPairLtk2 {
+                op_para[4..4+8].copy_from_slice(&get_pair_ltk_mesh()[0..8]);
+        		set_mesh_pair_state(MeshPairState::MeshPairLtk2);
+            }else if *get_mesh_pair_state() == MeshPairState::MeshPairLtk2 {
                 // send mesh ltk [8-15]
-                copy_nonoverlapping(get_pair_ltk_mesh().as_mut_ptr().offset(8), op_para.as_mut_ptr().offset(4), 8);
-        		mesh_pair_state = MeshPairState::MeshPairName1;
+                op_para[4..4+8].copy_from_slice(&get_pair_ltk_mesh()[8..16]);
+        		set_mesh_pair_state(MeshPairState::MeshPairName1);
         		set_pair_setting_flag(PairState::PairSetMeshTxDone);
             }else{
-                mesh_pair_state = MeshPairState::MeshPairName1;
-                mesh_pair_start_notify_time = 0;
-                mesh_pair_retry_cnt = 0;
-                mesh_pair_start_time = 0;
-                mesh_pair_notify_rsp_mask = [0; 32];
+                set_mesh_pair_state(MeshPairState::MeshPairName1);
+                set_mesh_pair_start_notify_time(0);
+                set_mesh_pair_retry_cnt(0);
+                set_mesh_pair_start_time(0);
+                set_mesh_pair_notify_rsp_mask([0; 32]);
         		set_pair_setting_flag(PairState::PairSetted);
         		return;
             }
@@ -738,32 +727,30 @@ unsafe fn mesh_pair_proc()
             op_para[3] = 0x10;// bridge cnt
             op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
             set_pair_setting_flag(PairState::PairSetMeshRxDone);
-            mesh_pair_start_notify_time = clock_time() | 0;
-            for i in 0..8 {
-                mesh_pair_checksum[i] = get_mesh_pair_checksum_fn(i as u8);
-            }
+            set_mesh_pair_start_notify_time(clock_time() | 0);
+            get_mesh_pair_checksum().iter_mut().enumerate().for_each(|(i, x) | {*x = get_mesh_pair_checksum_fn(i as u8)});
         }else if *get_pair_setting_flag() == PairState::PairSetMeshRxDone {
-            let mut effect_flag = mesh_pair_notify_rsp_mask == [0; 32];
-            if !effect_flag && clock_time_exceed(mesh_pair_start_time, MESH_PAIR_NOTIFY_TIMEOUT*1000) {
-                if mesh_pair_retry_cnt < mesh_pair_retry_max {
-                    mesh_pair_start_time = clock_time() | 1;
+            let mut effect_flag = *get_mesh_pair_notify_rsp_mask() == [0; 32];
+            if !effect_flag && clock_time_exceed(*get_mesh_pair_start_time(), MESH_PAIR_NOTIFY_TIMEOUT*1000) {
+                if *get_mesh_pair_retry_cnt() < *get_mesh_pair_retry_max() {
+                    set_mesh_pair_start_time(clock_time() | 1);
                     set_pair_setting_flag(PairState::PairSetMeshTxStart);
-                    mesh_pair_state = MeshPairState::MeshPairName1;
+                    set_mesh_pair_state(MeshPairState::MeshPairName1);
                 }else{
                     // retry timeout, effect or cancel?? effect now
                     effect_flag = true;
                 }
-                mesh_pair_retry_cnt += 1;
+                set_mesh_pair_retry_cnt(*get_mesh_pair_retry_cnt() + 1);
             }
             if effect_flag {
                 //send cmd to switch to new mesh
                 op_para[0] = LGT_CMD_MESH_PAIR;
                 op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
-                mesh_pair_state = MeshPairState::MeshPairName1;
-                mesh_pair_start_notify_time = 0;
-                mesh_pair_retry_cnt = 0;
-                mesh_pair_start_time = 0;
-                mesh_pair_notify_rsp_mask = [0; 32];
+                set_mesh_pair_state(MeshPairState::MeshPairName1);
+                set_mesh_pair_start_notify_time(0);
+                set_mesh_pair_retry_cnt(0);
+                set_mesh_pair_start_time(0);
+                set_mesh_pair_notify_rsp_mask([0; 32]);
                 set_pair_setting_flag(PairState::PairSetted);
             }
         }
@@ -771,11 +758,11 @@ unsafe fn mesh_pair_proc()
         return;
     }
 
-    light_slave_tx_command(op_para.as_mut_ptr(), dst_addr);
+    light_slave_tx_command(&op_para, dst_addr);
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn mesh_node_buf_init()
+fn mesh_node_buf_init()
 {
     [mesh_node_st_t{ tick: 0, val: mesh_node_st_val_t {
         dev_adr: 0,
@@ -787,7 +774,7 @@ unsafe fn mesh_node_buf_init()
 }
 
 #[no_mangle] // required by light_ll
-pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
+pub fn rf_link_slave_data_ota(ph: *const u8) -> bool
 {
     if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
         return true;
@@ -804,47 +791,53 @@ pub unsafe fn rf_link_slave_data_ota(ph: *const u8) -> bool
             _rf_link_slave_read_status_stop ();
         }
     }
-	copy_nonoverlapping(ph, get_buff_response()[(slave_ota_data_cache_idx%16) as usize].as_mut_ptr() as *mut u8, size_of::<rf_packet_att_data_t>());
-    slave_ota_data_cache_idx += 1;
+
+    let len = size_of::<rf_packet_att_data_t>() / size_of::<u32>();
+    let data: &[u32] = unsafe { slice::from_raw_parts(ph as *const u32, len) };
+    get_buff_response()[(*get_slave_ota_data_cache_idx()%16) as usize][0..len].copy_from_slice(&data[0..len]);
+
+    set_slave_ota_data_cache_idx(*get_slave_ota_data_cache_idx() + 1);
 	return true;
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn get_ota_check_type(par: *const u8) -> u8
+fn get_ota_check_type(par: *const u8) -> u8
 {
-	if *par.offset(0) == 0x5D {
-		return *par.offset(1);
-	}
+    unsafe {
+        if *par.offset(0) == 0x5D {
+            return *par.offset(1);
+        }
+    }
 	return 0;
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
+fn rf_slave_ota_finished_flag_set(reset_flag: OtaState)
 {
 	set_rf_slave_ota_finished_flag(reset_flag);
-	rf_slave_ota_finished_time = clock_time();
+	set_rf_slave_ota_finished_time(clock_time());
 }
 
-pub unsafe fn rf_link_slave_data_ota_save() -> bool
+pub fn rf_link_slave_data_ota_save() -> bool
 {
     let mut reset_flag= OtaState::CONTINUE;
-	for i in 0..slave_ota_data_cache_idx {
-		let p = get_buff_response()[i as usize].as_mut_ptr() as *const rf_packet_att_data_t;
-		let n_data_len = (*p).l2cap - 7;
+	for i in 0..*get_slave_ota_data_cache_idx() {
+		let p = unsafe { &*(get_buff_response()[i as usize].as_mut_ptr() as *const rf_packet_att_data_t) };
+		let n_data_len = p.l2cap - 7;
 
-		if crc16((*p).dat.as_ptr(), n_data_len + 2) == (*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) << 8 {
+		if crc16(&p.dat[0..(n_data_len+2) as usize]) == p.dat[(n_data_len+2) as usize] as u16 | (p.dat[(n_data_len+3) as usize] as u16) << 8 {
 			set_rf_slave_ota_timeout_s(*get_rf_slave_ota_timeout_def_s());	// refresh timeout
 
-			let cur_idx = (*p).dat[0] as u16 | ((*p).dat[1] as u16) << 8;
+			let cur_idx = p.dat[0] as u16 | (p.dat[1] as u16) << 8;
 			if n_data_len == 0 {
-				if (cur_idx == ota_rcv_last_idx+1) && (cur_idx == ota_pkt_total) {
+				if (cur_idx == *get_ota_rcv_last_idx()+1) && (cur_idx == *get_ota_pkt_total()) {
 					// ota ok, save, reboot
 					reset_flag = OtaState::OK;
 				}else{
 					// ota err
 					set_cur_ota_flash_addr(0);
-                    ota_pkt_cnt = 0;
-                    ota_rcv_last_idx = 0;
+                    set_ota_pkt_cnt(0);
+                    set_ota_rcv_last_idx(0);
 					reset_flag = OtaState::ERROR;
 				}
 			}else{
@@ -853,36 +846,36 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 					if *get_cur_ota_flash_addr() != 0 {
 					    // 0x10000 should be 0x00
 						set_cur_ota_flash_addr(0);
-                        ota_pkt_cnt = 0;
-                        ota_rcv_last_idx = 0;
+                        set_ota_pkt_cnt(0);
+                        set_ota_rcv_last_idx(0);
 	                    reset_flag = OtaState::ERROR;
 					}else{
-					    need_check_type = get_ota_check_type(&(*p).dat[8]);
-					    if need_check_type == 1 {
-					    	fw_check_val = ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
+					    set_need_check_type(get_ota_check_type(&p.dat[8]));
+					    if *get_need_check_type() == 1 {
+					    	set_fw_check_val((p.dat[(n_data_len +2) as usize] as u16 | (p.dat[(n_data_len +3) as usize] as u16) <<8) as u32);
 					    }
-	    				reset_flag = _rf_ota_save_data((*p).dat.as_ptr().offset(2));
+	    				reset_flag = _rf_ota_save_data(p.dat[2..].as_ptr());
 					}
-				}else if cur_idx == ota_rcv_last_idx + 1 {
+				}else if cur_idx == *get_ota_rcv_last_idx() + 1 {
 					// ota fw check
 					if cur_idx == 1 {
-						ota_pkt_total = (((((*p).dat[10] as u32) |( (((*p).dat[11] as u32) << 8) & 0xFF00) | ((((*p).dat[12] as u32) << 16) & 0xFF0000) | ((((*p).dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16;
-						if ota_pkt_total < 3 {
+						set_ota_pkt_total(((((p.dat[10] as u32) |( ((p.dat[11] as u32) << 8) & 0xFF00) | (((p.dat[12] as u32) << 16) & 0xFF0000) | (((p.dat[13] as u32) << 24) & 0xFF000000)) + 15)/16) as u16);
+						if *get_ota_pkt_total() < 3 {
 							// invalid fw
 							set_cur_ota_flash_addr(0);
-                            ota_pkt_cnt = 0;
-                            ota_rcv_last_idx = 0;
+                            set_ota_pkt_cnt(0);
+                            set_ota_rcv_last_idx(0);
 							reset_flag = OtaState::ERROR;
-						}else if need_check_type == 1 {
-							fw_check_val += ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
+						}else if *get_need_check_type() == 1 {
+							set_fw_check_val(*get_fw_check_val() + (p.dat[(n_data_len +2) as usize] as u16 | (p.dat[(n_data_len +3) as usize] as u16) <<8) as u32);
 						}
-					}else if cur_idx < ota_pkt_total - 1 && need_check_type == 1 {
-						fw_check_val += ((*p).dat[(n_data_len +2) as usize] as u16 | ((*p).dat[(n_data_len +3) as usize] as u16) <<8) as u32;
-					}else if cur_idx == ota_pkt_total - 1 && need_check_type == 1 {
-						if fw_check_val != (((*p).dat[2] as u32) |( (((*p).dat[3] as u32) << 8) & 0xFF00) | ((((*p).dat[4] as u32) << 16) & 0xFF0000) | ((((*p).dat[5] as u32) << 24) & 0xFF000000)) {
+					}else if cur_idx < *get_ota_pkt_total() - 1 && *get_need_check_type() == 1 {
+						set_fw_check_val(*get_fw_check_val() + (p.dat[(n_data_len +2) as usize] as u16 | (p.dat[(n_data_len +3) as usize] as u16) <<8) as u32);
+					}else if cur_idx == *get_ota_pkt_total() - 1 && *get_need_check_type() == 1 {
+						if *get_fw_check_val() != ((p.dat[2] as u32) |( ((p.dat[3] as u32) << 8) & 0xFF00) | (((p.dat[4] as u32) << 16) & 0xFF0000) | (((p.dat[5] as u32) << 24) & 0xFF000000)) {
 							set_cur_ota_flash_addr(0);
-                            ota_pkt_cnt = 0;
-                            ota_rcv_last_idx = 0;
+                            set_ota_pkt_cnt(0);
+                            set_ota_rcv_last_idx(0);
 							reset_flag = OtaState::ERROR;
 						}
 					}
@@ -892,24 +885,24 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
                         if *get_cur_ota_flash_addr() + 16 > (FW_SIZE_MAX_K * 1024) { // !is_valid_fw_len()
                             reset_flag = OtaState::ERROR;
                         } else {
-                            reset_flag = _rf_ota_save_data(&(*p).dat[2]);
+                            reset_flag = _rf_ota_save_data(&p.dat[2]);
                         }
                     }
 				}else{
 					// error, ota failed
 					set_cur_ota_flash_addr(0);
-                    ota_pkt_cnt = 0;
-                    ota_rcv_last_idx = 0;
+                    set_ota_pkt_cnt(0);
+                    set_ota_rcv_last_idx(0);
 					reset_flag = OtaState::ERROR;
 				}
 
-				ota_rcv_last_idx = cur_idx;
+				set_ota_rcv_last_idx(cur_idx);
 			}
 		}else{
 			// error, ota failed
 			set_cur_ota_flash_addr(0);
-            ota_pkt_cnt = 0;
-            ota_rcv_last_idx = 0;
+            set_ota_pkt_cnt(0);
+            set_ota_rcv_last_idx(0);
 		    reset_flag = OtaState::ERROR;
 		}
 
@@ -928,12 +921,12 @@ pub unsafe fn rf_link_slave_data_ota_save() -> bool
 			break;
 		}
 	}
-	slave_ota_data_cache_idx = 0;
+	set_slave_ota_data_cache_idx(0);
 	return true;
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn rf_ota_set_flag()
+fn rf_ota_set_flag()
 {
     let fw_flag_telink = START_UP_FLAG;
     let mut flag_new = 0;
@@ -983,7 +976,7 @@ fn rf_led_ota_error(){
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
+fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
 {
     if OtaState::ERROR == st {
         erase_ota_data(*get_flash_adr_light_new_fw());
@@ -1000,31 +993,31 @@ unsafe fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState)
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
+fn rf_link_slave_ota_finish_handle()		// poll when ota busy in bridge
 {
 	rf_link_slave_data_ota_save();
 
     if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
         let mut reboot_flag = false;
-        if (0 == terminate_cnt) && *get_rf_slave_ota_terminate_flag() {
+        if (0 == *get_terminate_cnt()) && *get_rf_slave_ota_terminate_flag() {
             if _is_add_packet_buf_ready() {
-                terminate_cnt = 6;
-                _rf_link_add_tx_packet (pkt_terminate.as_ptr());
+                set_terminate_cnt(6);
+                _rf_link_add_tx_packet (get_pkt_terminate().as_ptr());
             }
         }
 
-        if terminate_cnt != 0 {
-            terminate_cnt -= 1;
-            if terminate_cnt == 0{
+        if *get_terminate_cnt() != 0 {
+            set_terminate_cnt(*get_terminate_cnt() - 1);
+            if *get_terminate_cnt() == 0 {
                 reboot_flag = true;
             }
         }
 
-        if !*get_rf_slave_ota_terminate_flag() && (clock_time() - rf_slave_ota_finished_time) > 2000*1000 * *get_tick_per_us() {
+        if !*get_rf_slave_ota_terminate_flag() && (clock_time() - *get_rf_slave_ota_finished_time()) > 2000*1000 * *get_tick_per_us() {
             set_rf_slave_ota_terminate_flag(true);    // for ios: no last read command
         }
 
-        if (clock_time() - rf_slave_ota_finished_time) > 4000*1000 * *get_tick_per_us() {
+        if (clock_time() - *get_rf_slave_ota_finished_time()) > 4000*1000 * *get_tick_per_us() {
             reboot_flag = true;
         }
 
@@ -1051,7 +1044,7 @@ fn mesh_ota_led_cb(_type: MESH_OTA_LED)
 // p:data
 // n:length
 #[no_mangle] // required by light_ll
-unsafe fn save_pair_info(adr: u32, p: *const u8, n: u32)
+fn save_pair_info(adr: u32, p: *const u8, n: u32)
 {
 	flash_write_page (*get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + adr, n, p);
 }
@@ -1077,7 +1070,7 @@ fn get_fw_len(fw_adr: u32) -> u32
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32)
+fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32)
 {
 	let fw_len = get_fw_len(new_fw_adr);
 	if is_valid_fw_len(fw_len) {
@@ -1085,7 +1078,7 @@ unsafe fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t,
 	}
 }
 
-pub unsafe fn mesh_ota_master_start_firmware_from_own()
+pub fn mesh_ota_master_start_firmware_from_own()
 {
     let adr_fw = 0;
     let fw_len = get_fw_len(adr_fw);
@@ -1100,18 +1093,18 @@ pub unsafe fn mesh_ota_master_start_firmware_from_own()
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
+fn mesh_ota_slave_need_ota(params: *const u8) -> bool
 {
    let mut ret = true;
-   let p = params.offset(2) as *const mesh_ota_pkt_start_command_t;
+   let p = unsafe { &*(params.offset(2) as *const mesh_ota_pkt_start_command_t) };
 
-   if 0x02 == (*p).dev_info.dev_mode { // LIGHT_MODE
+   if 0x02 == p.dev_info.dev_mode { // LIGHT_MODE
        let mut ver_myself: [u8; 4] = [0; 4];
        _get_fw_version(ver_myself.as_mut_ptr());
-       if (*p).version[1] < ver_myself[1] {
+       if p.version[1] < ver_myself[1] {
            ret = false;
-       }else if (*p).version[1] == ver_myself[1] {
-           if (*p).version[3] <= ver_myself[3] {
+       }else if p.version[1] == ver_myself[1] {
+           if p.version[3] <= ver_myself[3] {
                ret = false;
            }
        }
@@ -1123,10 +1116,9 @@ unsafe fn mesh_ota_slave_need_ota(params: *const u8) -> bool
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
+fn is_light_mode_match_check_fw(_: *const u8) -> bool
 {
-   let light_mode_self: u16 = 0x02; // LIGHT_MODE;
-   return *(new_fw_dev_info as *const u16) == light_mode_self;
+    return true;
 }
 
 /************
@@ -1150,36 +1142,43 @@ unsafe fn is_light_mode_match_check_fw(new_fw_dev_info: *const u8) -> bool
     timeout <= 6second
 */
 #[no_mangle] // required by light_ll
-unsafe fn update_ble_parameter_cb() {
-   if conn_update_successed == 0 {
+fn update_ble_parameter_cb() {
+   if *get_conn_update_successed() == 0 {
        _setup_ble_parameter_start(1, CONN_PARA_DATA[0][0], CONN_PARA_DATA[0][1], CONN_PARA_DATA[0][2]);  // interval 32: means 40ms;   timeout 200: means 2000ms
-       conn_update_cnt += 1;
+       set_conn_update_cnt(*get_conn_update_cnt() + 1);
    }
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn rf_update_conn_para(p: *const u8) -> u8
+fn rf_update_conn_para(p: *const u8) -> u8
 {
-   let pp = p as *const rf_pkt_l2cap_sig_connParaUpRsp_t;
+   let pp = unsafe { &*(p as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
    let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
     for i in 0..9
     {
-        if *((&(*pp).rf_len) as *const u8).offset(i) != sig_conn_param_update_rsp[i as usize] {
-            equal = false;
+        unsafe {
+            if *((&pp.rf_len) as *const u8).offset(i) != sig_conn_param_update_rsp[i as usize] {
+                equal = false;
+            }
         }
     }
 
    if equal && (((*pp)._type & 0b11) == 2){//l2cap data pkt, start pkt
        if (*pp).result == 0x0000 {
-           conn_update_cnt = 0;
-           conn_update_successed = 1;
+           set_conn_update_cnt(0);
+           set_conn_update_successed(1);
        }else if (*pp).result == 0x0001 {
-           if conn_update_cnt >= UPDATE_CONN_PARA_CNT {
-               conn_update_cnt = 0;
+           if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
+               set_conn_update_cnt(0);
            }else{
-               _setup_ble_parameter_start(1, CONN_PARA_DATA[conn_update_cnt as usize][0], CONN_PARA_DATA[conn_update_cnt as usize][1], CONN_PARA_DATA[conn_update_cnt as usize][2]);
-               conn_update_cnt += 1;
+               _setup_ble_parameter_start(
+                   1,
+                   CONN_PARA_DATA[*get_conn_update_cnt() as usize][0],
+                   CONN_PARA_DATA[*get_conn_update_cnt() as usize][1],
+                   CONN_PARA_DATA[*get_conn_update_cnt() as usize][2]
+               );
+               set_conn_update_cnt(*get_conn_update_cnt() + 1);
            }
        }
    }
@@ -1188,6 +1187,6 @@ unsafe fn rf_update_conn_para(p: *const u8) -> u8
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn light_slave_tx_command_callback (p: *const u8) {
+fn light_slave_tx_command_callback (p: *const u8) {
     _rf_link_data_callback(p);
 }

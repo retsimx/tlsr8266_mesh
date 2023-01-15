@@ -1,8 +1,7 @@
 use std::cmp::{max, min};
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ptr::{addr_of, copy_nonoverlapping, write_bytes};
-use std::slice;
+use std::ptr::{addr_of};
 use ::{BIT, pub_mut};
 
 use common::*;
@@ -77,7 +76,7 @@ pub_mut!(cmd_delay, ll_packet_l2cap_data_t, ll_packet_l2cap_data_t {
 });
 
 #[repr(C, packed)]
-struct lum_save_t {
+struct LumSaveT {
     save_falg: u8,
     lum: u16,
     ledval: [u16; 3],
@@ -102,14 +101,12 @@ fn get_pwm_cmp(val: u16, lum: u16) -> u32 {
 }
 
 fn cfg_led_event(e: u32) {
-    unsafe { led_event_pending = e; }
+    set_led_event_pending(e);
 }
 
 fn mesh_ota_master_led(_: *const u8) {
-    unsafe {
-        if led_count == 0 && led_event_pending == 0 {
-            cfg_led_event(LED_EVENT_FLASH_0P25HZ_1T);
-        }
+    if *get_led_count() == 0 && *get_led_event_pending() == 0 {
+        cfg_led_event(LED_EVENT_FLASH_0P25HZ_1T);
     }
 }
 
@@ -191,9 +188,6 @@ pub fn user_init()
 
     light_init_default();
 
-    // unsafe { rest_user_init(); }
-    // return;
-
     pwm_set_duty(PWMID_R, PMW_MAX_TICK, PMW_MAX_TICK);
     pwm_set_duty(PWMID_G, PMW_MAX_TICK, PMW_MAX_TICK);
     pwm_set_duty(PWMID_B, PMW_MAX_TICK, 0);
@@ -215,64 +209,64 @@ pub fn user_init()
 
     vendor_set_adv_data();
 
-    unsafe { device_status_update(); }
+    device_status_update();
     _mesh_security_enable(true);
 
     _register_mesh_ota_master_ui(mesh_ota_master_led);   //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
 
-unsafe fn proc_led()
+fn proc_led()
 {
-    if led_count == 0 && led_event_pending == 0 {
+    if *get_led_count() == 0 && *get_led_event_pending() == 0 {
         return;  //led flash finished
     }
 
-    if led_event_pending != 0
+    if *get_led_event_pending() != 0
     {
         // new event
-        led_ton = (led_event_pending & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US;
-        led_toff = ((led_event_pending >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US;
-        led_count = (led_event_pending >> 16) & 0xff;
-        led_sel = led_event_pending >> 24;
+        set_led_ton((*get_led_event_pending() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        set_led_toff(((*get_led_event_pending() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        set_led_count((*get_led_event_pending() >> 16) & 0xff);
+        set_led_sel(*get_led_event_pending() >> 24);
 
-        led_event_pending = 0;
-        led_tick = clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US;
-        led_no = 0;
-        led_is_on = 0;
+        set_led_event_pending(0);
+        set_led_tick(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
+        set_led_no(0);
+        set_led_is_on(0);
     }
 
-    if clock_time() - led_tick >= (if led_is_on != 0 { led_ton } else { led_toff }) {
-        led_tick = clock_time();
-        let led_off = (led_is_on != 0 || led_ton == 0) && led_toff != 0;
-        let led_on = led_is_on == 0 && led_ton != 0;
+    if clock_time() - *get_led_tick() >= (if *get_led_is_on() != 0 { *get_led_ton() } else { *get_led_toff() }) {
+        set_led_tick(clock_time());
+        let led_off = (*get_led_is_on() != 0 || *get_led_ton() == 0) && *get_led_toff() != 0;
+        let led_on = *get_led_is_on() == 0 && *get_led_ton() != 0;
 
-        led_is_on = !led_is_on;
-        if led_is_on != 0
+        set_led_is_on(!*get_led_is_on());
+        if *get_led_is_on() != 0
         {
-            led_no += 1;
-            if led_no - 1 == led_count
+            set_led_no(*get_led_no() + 1);
+            if *get_led_no() - 1 == *get_led_count()
             {
-                led_count = 0;
-                led_no = 0;
-                light_onoff_hw(!light_off); // should not report online status again
+                set_led_count(0);
+                set_led_no(0);
+                light_onoff_hw(!*get_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
-            if led_sel & BIT!(0) != 0
+            if *get_led_sel() & BIT!(0) != 0
             {
                 light_adjust_g(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if led_sel & BIT!(1) != 0
+            if *get_led_sel() & BIT!(1) != 0
             {
                 light_adjust_b(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if led_sel & BIT!(2) != 0
+            if *get_led_sel() & BIT!(2) != 0
             {
                 light_adjust_r(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
-            if led_sel & BIT!(5) != 0
+            if *get_led_sel() & BIT!(5) != 0
             {}
         }
     }
@@ -286,32 +280,27 @@ fn light_auth_check() {
 }
 
 //erase flash
-unsafe fn light_lum_erase() {
-    light_lum_addr = *get_flash_adr_lum();
+fn light_lum_erase() {
+    set_light_lum_addr(*get_flash_adr_lum());
     flash_erase_sector(*get_flash_adr_lum());
     light_lum_store();
 }
 
 //save cur lum value, if disconnected for a while
-unsafe fn light_lum_store() {
-    if light_lum_addr >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<lum_save_t>() as u32) {
+fn light_lum_store() {
+    if *get_light_lum_addr() >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32) {
         light_lum_erase();
         return;
     }
 
-    let mut lum_save = lum_save_t {
+    let lum_save = LumSaveT {
         save_falg: LUM_SAVE_FLAG,
-        lum: led_lum,
-        ledval: [0, 0, 0],
+        lum: *get_led_lum(),
+        ledval: *get_led_val(),
     };
 
-    #[allow(unaligned_references)]
-    copy_nonoverlapping(led_val.as_ptr(), lum_save.ledval.as_mut_ptr(), led_val.len());
-
-    flash_write_page(light_lum_addr, size_of::<lum_save_t>() as u32, addr_of!(lum_save) as *const u8);
-    light_lum_addr += size_of::<lum_save_t>() as u32;
-
-    return;
+    flash_write_page(*get_light_lum_addr(), size_of::<LumSaveT>() as u32, addr_of!(lum_save) as *const u8);
+    set_light_lum_addr(*get_light_lum_addr() + size_of::<LumSaveT>() as u32);
 }
 
 //retrieve LUM : brightness or RGB/CT value
@@ -321,7 +310,7 @@ fn light_lum_retrieve() {
     {
         set_light_lum_addr(*get_flash_adr_lum() + i as u32);
 
-        let lum_save = unsafe { &*(*get_light_lum_addr() as *const lum_save_t) };
+        let lum_save = unsafe { &*(*get_light_lum_addr() as *const LumSaveT) };
         if LUM_SAVE_FLAG == (*lum_save).save_falg {
             set_led_lum(lum_save.lum);
             *get_led_val() = lum_save.ledval;
@@ -329,7 +318,7 @@ fn light_lum_retrieve() {
             break;
         }
 
-        i += size_of::<lum_save_t>() as u16
+        i += size_of::<LumSaveT>() as u16
     }
 
     //effect
@@ -349,14 +338,12 @@ fn light_lum_retrieve() {
 fn light_user_func() {
     light_auth_check();
 
-    unsafe { factory_reset_cnt_check(); }
+    factory_reset_cnt_check();
 
     // save current lum-val
-    unsafe {
-        if lum_changed_time != 0 && clock_time_exceed(lum_changed_time, 5000 * 1000) {
-            lum_changed_time = 0;
-            light_lum_store();
-        }
+    if *get_lum_changed_time() != 0 && clock_time_exceed(*get_lum_changed_time(), 5000 * 1000) {
+        set_lum_changed_time(0);
+        light_lum_store();
     }
 
     mesh_pair_proc_effect();
@@ -370,74 +357,75 @@ pub fn main_loop()
 
     light_user_func();
     _rf_link_slave_proc();
-    unsafe { proc_led(); }
+    proc_led();
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
 #[no_mangle] // required by light_ll
-unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_packet_att_value_t) -> bool
+fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *const rf_packet_att_value_t) -> bool
 {
+    let ppp = unsafe {&mut (*ppp)};
+    let p_req = unsafe {&(*p_req)};
     // mac-app[5] low 2 bytes used as ttc && hop-count
-    let dst_unicast = is_unicast_addr((*p_req).dst.as_ptr());
-    (*ppp).dst[0] = (*p_req).src[0];
-    (*ppp).dst[1] = (*p_req).src[1];
-    (*ppp).src[0] = (*get_device_address() & 0xff) as u8;
-    (*ppp).src[1] = ((*get_device_address() >> 8) & 0xff) as u8;
+    let dst_unicast = is_unicast_addr(&p_req.dst);
+    ppp.dst = p_req.src;
+    ppp.src[0] = (*get_device_address() & 0xff) as u8;
+    ppp.src[1] = ((*get_device_address() >> 8) & 0xff) as u8;
 
     let mut params: [u8; 10] = [0; 10];
-    copy_nonoverlapping((*ppp).val.as_ptr().offset(3), params.as_mut_ptr(), params.len()); // be same with p_req->val+3
-    write_bytes((*ppp).val.as_mut_ptr().offset(3), 0, params.len());
+    params[0..10].copy_from_slice(&ppp.val[3..10+3]);
+    ppp.val[3..10+3].copy_from_slice(&[0; 10]);
 
-    (*ppp).val[1] = (VENDOR_ID & 0xFF) as u8;
-    (*ppp).val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
+    ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
+    ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
-    (*ppp).val[18] = *get_max_relay_num();
+    ppp.val[18] = *get_max_relay_num();
 
     let mut idx = 0;
-    if (*ppp).val[15] == GET_STATUS {
-        (*ppp).val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
+    if ppp.val[15] == GET_STATUS {
+        ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
         for i in 0..3 {//params[0]
-            (*ppp).val[i * 2 + 3] = if light_off { 0 } else { (led_val[i] & 0xff) as u8 };
-            (*ppp).val[i * 2 + 4] = if light_off { 0 } else { ((led_val[i] >> 8) & 0xff) as u8 };
+            ppp.val[i * 2 + 3] = if *get_light_off() { 0 } else { (get_led_val()[i] & 0xff) as u8 };
+            ppp.val[i * 2 + 4] = if *get_light_off() { 0 } else { ((get_led_val()[i] >> 8) & 0xff) as u8 };
         }
-    } else if (*ppp).val[15] == GET_GROUP1 {
-        (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
+    } else if ppp.val[15] == GET_GROUP1 {
+        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
-            (*ppp).val[i + 3] = 0xFF;
+            ppp.val[i + 3] = 0xFF;
             if get_group_address()[i] != 0 {
-                (*ppp).val[idx + 3] = get_group_address()[i] as u8;
+                ppp.val[idx + 3] = get_group_address()[i] as u8;
                 idx += 1;
             }
         }
-    } else if (*ppp).val[15] == GET_GROUP2 {
-        (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
+    } else if ppp.val[15] == GET_GROUP2 {
+        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
-            (*ppp).val[i + 3] = 0xFF;
+            ppp.val[i + 3] = 0xFF;
             if get_group_address()[i / 2] != 0 {
-                (*ppp).val[idx + 3] = if (i % 2) != 0 { (get_group_address()[i / 2] >> 8) as u8 } else { get_group_address()[i / 2] as u8 };
+                ppp.val[idx + 3] = if (i % 2) != 0 { (get_group_address()[i / 2] >> 8) as u8 } else { get_group_address()[i / 2] as u8 };
                 idx += 1;
             }
         }
-    } else if (*ppp).val[15] == GET_GROUP3 {
-        (*ppp).val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
+    } else if ppp.val[15] == GET_GROUP3 {
+        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
-            (*ppp).val[i + 3] = 0xFF;
+            ppp.val[i + 3] = 0xFF;
             if get_group_address()[4 + i / 2] != 0 {
-                (*ppp).val[idx + 3] = if (i % 2) != 0 { (get_group_address()[4 + i / 2] >> 8) as u8 } else { get_group_address()[4 + i / 2] as u8 };
+                ppp.val[idx + 3] = if (i % 2) != 0 { (get_group_address()[4 + i / 2] >> 8) as u8 } else { get_group_address()[4 + i / 2] as u8 };
                 idx += 1;
             }
         }
-    } else if (*ppp).val[15] == GET_DEV_ADDR {
-        (*ppp).val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
+    } else if ppp.val[15] == GET_DEV_ADDR {
+        ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
         if dev_addr_with_mac_flag(params.as_ptr()) {
-            return dev_addr_with_mac_rsp(params.as_ptr(), (*ppp).val.as_mut_ptr().offset(3));
+            return dev_addr_with_mac_rsp(&params, &mut ppp.val);
         } else {
-            (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
-            (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+            ppp.val[3] = (*get_device_address() & 0xFF) as u8;
+            ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
         }
-    } else if (*ppp).val[15] == GET_USER_NOTIFY {
+    } else if ppp.val[15] == GET_USER_NOTIFY {
         /*user can get parameters from APP.
              params[0] is relay times.
              params[1 -- 9] is parameters from APP if haved been set by user.
@@ -450,23 +438,23 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
             // only params[0 -- 4] is valid
         }
 
-        (*ppp).val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
+        ppp.val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
         for i in 0..8 {//params[2]
-            (*ppp).val[5 + i] = i as u8;
+            ppp.val[5 + i] = i as u8;
         }
-        (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
-        (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
-    } else if (*ppp).val[15] == GET_MESH_OTA {
-        (*ppp).val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
+        ppp.val[3] = (*get_device_address() & 0xFF) as u8;
+        ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+    } else if ppp.val[15] == GET_MESH_OTA {
+        ppp.val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
         if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
             for i in 0..8 {
-                (*ppp).val[5 + i] = get_mesh_pair_checksum_fn(i as u8);
+                ppp.val[5 + i] = get_mesh_pair_checksum_fn(i as u8);
             }
-            (*ppp).val[3] = (*get_device_address() & 0xFF) as u8;
-            (*ppp).val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+            ppp.val[3] = (*get_device_address() & 0xFF) as u8;
+            ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
             return true;
         }
-        return _mesh_ota_slave_set_response((*ppp).val.as_mut_ptr().offset(3), params[1]);
+        return _mesh_ota_slave_set_response(ppp.val[3..].as_mut_ptr(), params[1]);
     } else {
         return false;
     }
@@ -477,14 +465,15 @@ unsafe fn rf_link_response_callback(ppp: *mut rf_packet_att_value_t, p_req: *con
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
 #[no_mangle] // required by light_ll
-unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
+fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
 {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
     let op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let params_len: u8 = 0;
-    let pp = (*p).value.as_ptr() as *const rf_packet_att_value_t;
+    let p = unsafe { &*p };
+    let pp = unsafe { &*(p.value.as_ptr() as *const rf_packet_att_value_t) };
     _rf_link_get_op_para(p, op_cmd.as_mut_ptr(), &op_cmd_len, params.as_mut_ptr(), &params_len, 1);
 
     if op_cmd_len != LightOpType::op_type_3 as u8 {
@@ -495,16 +484,16 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
     let op = op_cmd[0] & 0x3F;
 
     if op == LGT_CMD_LIGHT_ONOFF {
-        if cmd_left_delay_ms != 0 {
+        if *get_cmd_left_delay_ms() != 0 {
             return;
         }
-        cmd_delay_ms = params[1] as u16 | ((params[2] as u16) << 8);
-        if cmd_delay_ms != 0 && irq_timer1_cb_time == 0 {
-            let cmd_delayed_ms = light_cmd_delayed_ms((*pp).val[(op_cmd_len + params_len) as usize]);
-            if cmd_delay_ms > cmd_delayed_ms {
-                cmd_delay = (*p).clone();
-                cmd_left_delay_ms = cmd_delay_ms - cmd_delayed_ms;
-                irq_timer1_cb_time = clock_time();
+        set_cmd_delay_ms(params[1] as u16 | ((params[2] as u16) << 8));
+        if *get_cmd_delay_ms() != 0 && *get_irq_timer1_cb_time() == 0 {
+            let cmd_delayed_ms = light_cmd_delayed_ms(pp.val[(op_cmd_len + params_len) as usize]);
+            if *get_cmd_delay_ms() > cmd_delayed_ms {
+                set_cmd_delay(p.clone());
+                set_cmd_left_delay_ms(*get_cmd_delay_ms() - cmd_delayed_ms);
+                set_irq_timer1_cb_time(clock_time());
                 return;
             }
         }
@@ -535,7 +524,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         }
     } else if op == LGT_CMD_CONFIG_DEV_ADDR {
         let val = params[0] as u16 | ((params[1] as u16) << 8);
-        if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(params.as_ptr()) {
+        if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
             if _rf_link_add_dev_addr(val) {
                 mesh_pair_proc_get_mac_flag();
             }
@@ -546,8 +535,8 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
             // Brightness
             let value = (params[1] as u16) << 8 | params[0] as u16;
 
-            if light_off {
-                led_lum = value;
+            if *get_light_off() {
+                set_led_lum(value);
                 return;
             }
             light_step_reset(value);
@@ -556,21 +545,21 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
             // Temperature
             let value = (params[3] as u16) << 8 | params[2] as u16;
 
-            led_val[0] = 0;
-            led_val[1] = MAX_LUM_BRIGHTNESS_VALUE - value;
-            led_val[2] = value;
+            get_led_val()[0] = 0;
+            get_led_val()[1] = MAX_LUM_BRIGHTNESS_VALUE - value;
+            get_led_val()[2] = value;
 
-            if light_off {
+            if *get_light_off() {
                 return;
             }
 
-            light_step_reset(led_lum);
+            light_step_reset(*get_led_lum());
         }
 
-        lum_changed_time = clock_time();
+        set_lum_changed_time(clock_time());
     } else if op == LGT_CMD_KICK_OUT
     {
-        if is_mesh_cmd_need_delay(p as *const u8, params.as_ptr(), (*pp).val[(op_cmd_len + params_len) as usize]) {
+        if is_mesh_cmd_need_delay(p, &params, pp.val[(op_cmd_len + params_len) as usize]) {
             return;
         }
         irq_disable();
@@ -578,7 +567,7 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         _light_sw_reboot();
     } else if op == LGT_CMD_NOTIFY_MESH
     {
-        light_notify((*pp).val.as_ptr().offset(3), 10, (*pp).src.as_ptr());
+        light_notify(&pp.val[3..3+10], &pp.src);
     } else if op == LGT_CMD_MESH_OTA_DATA
     {
         let idx = (params[0] as u16) | ((params[1] as u16) << 8);
@@ -602,49 +591,40 @@ unsafe fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         }
     } else if op == LGT_CMD_MESH_PAIR
     {
-        mesh_pair_cb(params.as_ptr());
+        mesh_pair_cb(&params);
     }
 }
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-unsafe fn light_slave_tx_command_ll(p_cmd: *const u8, para: u16) -> bool
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16)
 {
     let mut cmd_op_para: [u8; 16] = [0; 16];
     let cmd_sno = clock_time() + *get_device_address() as u32;
 
-    let slice = slice::from_raw_parts(p_cmd, 13);
-    cmd_op_para[0..13].copy_from_slice(slice);
+    cmd_op_para[0..13].copy_from_slice(&p_cmd[0..13]);
 
-    cmd_op_para[0] = *p_cmd.offset(0) | 0xc0;
+    cmd_op_para[0] |= 0xc0;
     cmd_op_para[1] = (VENDOR_ID & 0xFF) as u8;
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
     _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13);
-
-    return true;
 }
 
-pub unsafe fn light_slave_tx_command(p_cmd: *const u8, para: u16) -> bool
-{
-    return light_slave_tx_command_ll(p_cmd, para);
-}
-
-unsafe fn light_notify(p: *const u8, len: u8, p_src: *const u8) -> i32 {
+fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
     let mut err = -1;
     if *get_slave_link_connected() && *get_pair_login_ok() {
-        if len > 10 {   //max length of par is 10
+        if p.len() > 10 {   //max length of par is 10
             return -1;
         }
 
-        get_pkt_light_notify().value[3] = *p_src.offset(0);
-        get_pkt_light_notify().value[4] = *p_src.offset(1);
+        get_pkt_light_notify().value[3] = p_src[0];
+        get_pkt_light_notify().value[4] = p_src[1];
 
-        let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
-
-        write_bytes(valptr, 0, 10);
-        copy_nonoverlapping(p, valptr, len as usize);
+        // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
+        get_pkt_light_notify().value[10..10+10].copy_from_slice(&[0; 10]);
+        get_pkt_light_notify().value[10..10+10].copy_from_slice(&p[0..p.len()]);
 
         let r = irq_disable();
         if _is_add_packet_buf_ready() {
@@ -659,7 +639,7 @@ unsafe fn light_notify(p: *const u8, len: u8, p_src: *const u8) -> i32 {
 }
 
 #[no_mangle] // required by light_ll
-pub unsafe fn rf_link_light_event_callback(status: u8)
+pub fn rf_link_light_event_callback(status: u8)
 {
     if status == LGT_CMD_SET_MESH_INFO
     {
@@ -678,12 +658,12 @@ pub unsafe fn rf_link_light_event_callback(status: u8)
 }
 
 #[no_mangle] // required by light_ll
-unsafe fn irq_timer1() {
-    if irq_timer1_cb_time != 0 && clock_time_exceed(irq_timer1_cb_time, (cmd_left_delay_ms * 1000) as u32) {
-        cmd_left_delay_ms = 0;
-        rf_link_data_callback(&cmd_delay);
-        cmd_delay_ms = 0;
-        irq_timer1_cb_time = 0;
+fn irq_timer1() {
+    if *get_irq_timer1_cb_time() != 0 && clock_time_exceed(*get_irq_timer1_cb_time(), (*get_cmd_left_delay_ms() * 1000) as u32) {
+        set_cmd_left_delay_ms(0);
+        rf_link_data_callback(get_cmd_delay());
+        set_cmd_delay_ms(0);
+        set_irq_timer1_cb_time(0);
     }
 
     light_onoff_step_timer();
@@ -694,26 +674,26 @@ fn irq_timer0() {}
 
 #[no_mangle] // required by light_ll
 #[allow(non_snake_case)]
-unsafe fn irq_handler__attribute_ram_code()
+fn irq_handler__attribute_ram_code()
 {
     _irq_light_slave_handler();
 }
 
 fn light_onoff_hw(on: bool) {
-    unsafe { light_onoff_step(on); }
+    light_onoff_step(on);
 }
 
 fn light_onoff(on: bool) {
     light_onoff_hw(on);
 
-    unsafe { device_status_update(); }
+    device_status_update();
 }
 
-pub unsafe fn device_status_update() {
+pub fn device_status_update() {
     // packet
     let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 
-    let value = if light_off { 0 } else { max(led_lum, 1) };
+    let value = if *get_light_off() { 0 } else { max(*get_led_lum(), 1) };
 
     // led_lum should not be 0, because app will take it to be light off
     st_val_par[0] = (value & 0xff) as u8;     //Note: bit7 of par[0] have been use internal for FLD_SYNCED
@@ -723,12 +703,12 @@ pub unsafe fn device_status_update() {
     _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
 }
 
-pub unsafe fn light_onoff_normal(on: bool) {
+pub fn light_onoff_normal(on: bool) {
     if on {
-        light_off = false;
-        light_adjust_rgb_hw(led_val[0], led_val[1], led_val[2], led_lum);
+        set_light_off(false);
+        light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], *get_led_lum());
     } else {
-        light_off = true;
+        set_light_off(true);
         light_adjust_rgb_hw(0, 0, 0, 0);
     }
 }

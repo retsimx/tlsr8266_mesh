@@ -10,7 +10,11 @@ ignored = [
     'double _ZN4libm4math5k_sin5k_sin17h743f95627beab611E(double, double, uint32_t);',
     'struct l_unnamed_2 _ZN4libm4math8rem_pio28rem_pio217h40920cee4af4bef4E(double);',
     'struct l_struct_core_KD__KD_option_KD__KD_Option_MD__IC_char_MC__AC__GC_str_JC__OD_ _ZN39__EC_LT_EC_f32_EC_u20_EC_as_EC_u20_EC_num_traits_OC__OC_Num_EC_GT_EC_14from_str_radix16slice_shift_char17he08e093b84df50afE(uint8_t*, uint32_t);',
-    'struct l_struct_core_KD__KD_option_KD__KD_Option_MD__IC_char_MC__AC__GC_str_JC__OD_ _ZN39__EC_LT_EC_f64_EC_u20_EC_as_EC_u20_EC_num_traits_OC__OC_Num_EC_GT_EC_14from_str_radix16slice_shift_char17h8acdf53a12542ba2E(uint8_t*, uint32_t);']
+    'struct l_struct_core_KD__KD_option_KD__KD_Option_MD__IC_char_MC__AC__GC_str_JC__OD_ _ZN39__EC_LT_EC_f64_EC_u20_EC_as_EC_u20_EC_num_traits_OC__OC_Num_EC_GT_EC_14from_str_radix16slice_shift_char17h8acdf53a12542ba2E(uint8_t*, uint32_t);',
+    'bool _ZN13tlsr8266_mesh6common23dev_addr_with_mac_match17h93136f98706a255dE(uint8_t*, uint32_t);',
+    '_ZN4core5slice5index22slice_index_order_fail17hd5857b7e24cbbcffE',
+    'void _ZN13tlsr8266_mesh10main_light20device_status_update17h4034b73cf581c5e5E(void);'
+]
 
 inputfile = sys.argv[-1]
 with open(inputfile + ".rc.c", 'w') as outputfile:

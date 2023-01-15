@@ -404,6 +404,7 @@ pub struct rf_packet_att_write_t {
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct rf_packet_att_cmd_t {
     pub dma_len: u32,
     pub _type: u8,
@@ -468,9 +469,9 @@ pub struct rc_pkt_buf_t {
 }
 
 #[inline(always)]
-pub unsafe fn is_unicast_addr(p_addr: *const u8) -> bool
+pub fn is_unicast_addr(p_addr: &[u8]) -> bool
 {
-    return (*p_addr.offset(1) & 0x80) == 0;
+    return p_addr[1] & 0x80 == 0;
 }
 
 // required callback fns

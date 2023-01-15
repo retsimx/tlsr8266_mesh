@@ -13,7 +13,7 @@ use sdk::mcu::irq_i::{irq_disable, irq_restore};
 pub_mut!(pair_config_pwd_encode_enable, u8);
 
 const SERIALS_CNT: u8 = 5;   // must less than 7
-const factory_reset_serials : [u8; (SERIALS_CNT * 2) as usize] = [
+const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
 	0, 3,    // [0]:must 0
 	0, 3,    // [2]:must 0
 	0, 3,    // [4]:must 0
@@ -125,27 +125,27 @@ pub fn factory_reset_handle()
 	}
 }
 
-pub unsafe fn factory_reset_cnt_check()
+pub fn factory_reset_cnt_check()
 {
-	if clear_st == 0 {
+	if *get_clear_st() == 0 {
 		return;
 	}
 
-	if clear_st == 3 {
-        clear_st = clear_st - 1;
-        reset_check_time = factory_reset_serials[reset_cnt as usize * 2] as u32;
+	if *get_clear_st() == 3 {
+        set_clear_st(*get_clear_st() - 1);
+        set_reset_check_time(FACTORY_RESET_SERIALS[*get_reset_cnt() as usize * 2] as u32);
     }
 
-	if clear_st == 2 && clock_time_exceed(0, reset_check_time*1000*1000) {
-	    clear_st = clear_st - 1;
-	    reset_check_time = factory_reset_serials[reset_cnt as usize * 2 + 1] as u32;
-	    if reset_cnt == 3 || reset_cnt == 4{
+	if *get_clear_st() == 2 && clock_time_exceed(0, *get_reset_check_time()*1000*1000) {
+	    set_clear_st(*get_clear_st() - 1);
+	    set_reset_check_time(FACTORY_RESET_SERIALS[*get_reset_cnt() as usize * 2 + 1] as u32);
+	    if *get_reset_cnt() == 3 || *get_reset_cnt() == 4{
             increase_reset_cnt();
         }
 	}
 
-	if clear_st == 1 && clock_time_exceed(0, reset_check_time*1000*1000) {
-	    clear_st = 0;
+	if *get_clear_st() == 1 && clock_time_exceed(0, *get_reset_check_time()*1000*1000) {
+	    set_clear_st(0);
         clear_reset_cnt();
 	}
 }
@@ -167,30 +167,30 @@ fn factory_reset() {
 }
 
 #[derive(PartialEq)]
-pub enum KICKOUT_REASON{
-	OUT_OF_MESH = 0,
-	DEFAULT_NAME,
-	MODE_MAX,
+pub enum KickoutReason {
+	OutOfMesh = 0,
+	DefaultName,
+	ModeMax,
 }
 
-impl TryFrom<u32> for KICKOUT_REASON {
+impl TryFrom<u32> for KickoutReason {
 	type Error = ();
 
 	fn try_from(v: u32) -> Result<Self, Self::Error> {
 		match v {
-			x if x == KICKOUT_REASON::OUT_OF_MESH as u32 => Ok(KICKOUT_REASON::OUT_OF_MESH),
-			x if x == KICKOUT_REASON::DEFAULT_NAME as u32 => Ok(KICKOUT_REASON::DEFAULT_NAME),
-			x if x == KICKOUT_REASON::MODE_MAX as u32 => Ok(KICKOUT_REASON::MODE_MAX),
+			x if x == KickoutReason::OutOfMesh as u32 => Ok(KickoutReason::OutOfMesh),
+			x if x == KickoutReason::DefaultName as u32 => Ok(KickoutReason::DefaultName),
+			x if x == KickoutReason::ModeMax as u32 => Ok(KickoutReason::ModeMax),
 			_ => Err(()),
 		}
 	}
 }
 
 #[no_mangle]
-pub unsafe fn kick_out(par: KICKOUT_REASON) {
+pub fn kick_out(par: KickoutReason) {
     factory_reset();
 
-    if par == KICKOUT_REASON::OUT_OF_MESH {
+    if par == KickoutReason::OutOfMesh {
 		let pairing_addr = *get_flash_adr_pairing();
 		let mut buff: [u8; 16] = [0; 16];
 		buff[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
@@ -203,12 +203,13 @@ pub unsafe fn kick_out(par: KICKOUT_REASON) {
         flash_write_page (pairing_addr + 32, 16, buff.as_mut_ptr());
 
 		let mut buff: [u8; 16] = [0; 16];
-		copy_nonoverlapping(OUT_OF_MESH.as_ptr(), buff.as_mut_ptr(), min(OUT_OF_MESH.len(), buff.len()));
+		let len = min(OUT_OF_MESH.len(), buff.len());
+		buff[0..len].copy_from_slice(&OUT_OF_MESH.as_bytes()[0..len]);
         flash_write_page (pairing_addr + 16, 16, buff.as_mut_ptr());
 
 		let mut buff: [u8; 16] = [0; 16];
         buff[0] = PAIR_VALID_FLAG;
-        if pair_config_pwd_encode_enable != 0 {
+        if *get_pair_config_pwd_encode_enable() != 0 {
             buff[15] = PAIR_VALID_FLAG;
         }
 

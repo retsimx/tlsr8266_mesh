@@ -4,7 +4,7 @@ use std::mem;
 use std::mem::{MaybeUninit, size_of, size_of_val};
 use common::{MESH_NODE_MAX_NUM, PairState};
 use ::{no_mangle_fn, no_mangle_fn_def};
-use pub_mut;
+use ::{BIT, pub_mut};
 use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 
@@ -333,6 +333,14 @@ pub enum CMD_TYPE {
     NORMAL = 0,
     PASSIVE_DEV = 1,
     PASSIVE_DEV_ALT = 2,
+}
+
+// recover status before software reboot
+pub enum RecoverStatus {
+    LightOff = BIT!(0),
+    MeshOtaMaster100 = BIT!(1),
+    // LowBattFlg = BIT!(2),
+    // LOW_BATT_LOOP_FLG           = BIT(3),    // 0 means check by user_init, 1 means by main loop
 }
 
 #[repr(C, packed)]

@@ -2,9 +2,9 @@ use std::cmp::min;
 use std::convert::TryFrom;
 use std::ptr::{copy_nonoverlapping, addr_of};
 use ::{BIT};
-use common::{get_mesh_pair_enable, rf_led_ota_ok, set_get_mac_en};
+use common::{get_mesh_pair_enable, set_get_mac_en};
 use config::{get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use pub_mut;
+use ::{app, pub_mut};
 use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
 use sdk::mcu::clock::clock_time_exceed;
@@ -118,7 +118,7 @@ pub fn factory_reset_handle()
 	if restcnt_bit == RESET_FLAG {
         irq_disable();
         factory_reset();
-        rf_led_ota_ok();
+        app().ota_manager.rf_led_ota_ok();
 	    _light_sw_reboot();
 	} else {
         increase_reset_cnt();
@@ -220,5 +220,5 @@ pub fn kick_out(par: KickoutReason) {
         flash_write_page (pairing_addr, 16, buff.as_mut_ptr());
     }
 
-    rf_led_ota_ok();
+	app().ota_manager.rf_led_ota_ok();
 }

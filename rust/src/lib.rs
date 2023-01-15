@@ -1,5 +1,5 @@
 use app::App;
-use ota::handle_ota_update__attribute_ram_code;
+use ota::OtaManager;
 
 mod sdk;
 mod main_light;
@@ -9,16 +9,20 @@ mod app;
 mod config;
 mod ota;
 
-pub static APP: App = App::default();
+static mut APP: App = App::default();
+
+pub fn app() -> &'static mut App {
+    return unsafe { &mut APP };
+}
 
 #[no_mangle]
 pub fn main_entrypoint() {
     // Must happen first
-    handle_ota_update__attribute_ram_code();
+    OtaManager::handle_ota_update__attribute_ram_code();
 
     // Configure the system
-    APP.init();
+    app().init();
 
     // Run the application
-    APP.run();
+    app().run();
 }

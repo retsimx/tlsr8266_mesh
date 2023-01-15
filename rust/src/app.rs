@@ -1,6 +1,7 @@
 use std::io::Write;
 use config::MESH_PWD_ENCODE_SK;
 use main_light::{main_loop, user_init};
+use ota::OtaManager;
 use sdk::light::{_rf_drv_init, get_pair_config_pwd_encode_sk};
 use sdk::mcu::clock::clock_init;
 use sdk::mcu::dma::dma_init;
@@ -10,13 +11,13 @@ use sdk::mcu::watchdog::wd_clear;
 use sdk::pm::cpu_wakeup_init;
 
 pub struct App {
-
+    pub ota_manager: OtaManager
 }
 
 impl App {
     pub const fn default() -> App {
         App {
-
+            ota_manager: OtaManager::default()
         }
     }
 

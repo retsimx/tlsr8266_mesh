@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use std::mem::size_of;
 use std::ptr::{addr_of};
 use ::{BIT, pub_mut};
+use app;
 
 use common::*;
 use config::*;
@@ -182,9 +183,7 @@ fn light_init_default() {
 pub fn user_init()
 {
     // for app ota
-    if !is_ota_area_valid(*get_flash_adr_light_new_fw()) {
-        erase_ota_data(*get_flash_adr_light_new_fw());
-    }
+    app().ota_manager.check_ota_area_startup();
 
     light_init_default();
 
@@ -324,7 +323,7 @@ fn light_lum_retrieve() {
     //effect
     light_adjust_rgb_hw(0, 0, 0, 0);
 
-    mesh_ota_master_100_flag_check();
+    app().ota_manager.mesh_ota_master_100_flag_check();
 
     let val = analog_read__attribute_ram_code(REGA_LIGHT_OFF);
     if val & RecoverStatus::LightOff as u8 != 0 {
@@ -573,7 +572,7 @@ fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t)
         let idx = (params[0] as u16) | ((params[1] as u16) << 8);
         if !_is_master_ota_st() {  // no update firmware for itself
             if CMD_START_MESH_OTA == idx {
-                mesh_ota_master_start_firmware_from_own();
+                app().ota_manager.mesh_ota_master_start_firmware_from_own();
                 //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
             } else if CMD_STOP_MESH_OTA == idx {
                 if _is_mesh_ota_slave_running() {

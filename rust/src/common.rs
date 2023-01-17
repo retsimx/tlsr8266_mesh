@@ -7,9 +7,10 @@ use sdk::mcu::analog::analog_write__attribute_ram_code;
 use sdk::mcu::irq_i::{irq_disable, irq_restore};
 use std::ptr::addr_of;
 use std::slice;
+use mesh::wrappers::get_get_mac_en;
 use vendor_light::get_adv_rsp_pri_data;
 
-pub_mut!(get_mac_en, bool, false);
+
 
 pub_mut!(conn_update_successed, u8, 0);
 pub_mut!(conn_update_cnt, u8, 0);
@@ -335,7 +336,4 @@ fn rf_update_conn_para(p: *const u8) -> u8 {
     return 0;
 }
 
-#[no_mangle] // required by light_ll
-fn light_slave_tx_command_callback(p: *const u8) {
-    _rf_link_data_callback(p);
-}
+

@@ -1,10 +1,9 @@
-use common::{get_get_mac_en, set_get_mac_en};
 use config::{get_flash_adr_pairing, VENDOR_ID};
 use main_light::{
     device_status_update, light_slave_tx_command, rf_link_data_callback,
     rf_link_light_event_callback,
 };
-use mesh::wrappers::{get_mesh_node_st, get_mesh_pair_enable, set_mesh_pair_enable};
+use mesh::wrappers::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en, set_mesh_pair_enable};
 use sdk::drivers::flash::flash_write_page;
 use sdk::light::{
     _access_code, _is_add_packet_buf_ready, _mesh_node_init, _pair_load_key, _pair_save_key,
@@ -98,7 +97,7 @@ pub struct MeshManager {
     cmd_delay_ms: u16,
     cmd_delay: ll_packet_l2cap_data_t,
     gateway_status: GatewayStatus,
-    irq_timer1_cb_time: u32,
+    irq_timer1_cb_time: u32
 }
 
 impl MeshManager {
@@ -133,7 +132,7 @@ impl MeshManager {
                 value: [0; 30],
             },
             gateway_status: GatewayStatus::GatewayStatusNormal,
-            irq_timer1_cb_time: 0,
+            irq_timer1_cb_time: 0
         }
     }
 
@@ -164,7 +163,7 @@ impl MeshManager {
             ^ (self.new_mesh_ltk[i] ^ self.new_mesh_ltk[i + 8]);
     }
 
-    pub fn mesh_pair_proc_get_mac_flag(&self) {
+    pub fn mesh_pair_proc_get_mac_flag(&mut self) {
         set_get_mac_en(false); // set success
         if *get_mesh_pair_enable() {
             let mut data: [u8; 1] = [0];
@@ -596,7 +595,7 @@ impl MeshManager {
 
 pub mod wrappers {
     use mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
-    use sdk::light::{rf_packet_att_cmd_t, MESH_NODE_MAX_NUM};
+    use sdk::light::{rf_packet_att_cmd_t, MESH_NODE_MAX_NUM, _rf_link_data_callback};
     use std::mem::size_of;
     use {app, pub_mut};
 
@@ -612,6 +611,7 @@ pub mod wrappers {
     pub_mut!(mesh_node_st_len, u8, size_of::<mesh_node_st_t>() as u8);
     // END SHIT LIGHT_LL HAX
 
+    pub_mut!(get_mac_en, bool, false);
     pub_mut!(mesh_pair_enable, bool, false);
     pub_mut!(
         mesh_node_st,
@@ -641,5 +641,10 @@ pub mod wrappers {
     #[no_mangle] // required by light_ll
     fn mesh_node_buf_init() {
         app().mesh_manager.mesh_node_buf_init();
+    }
+
+    #[no_mangle] // required by light_ll
+    fn light_slave_tx_command_callback(p: *const u8) {
+        _rf_link_data_callback(p);
     }
 }

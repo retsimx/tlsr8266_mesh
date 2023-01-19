@@ -1,6 +1,6 @@
-use sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
-use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use BIT;
+use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
+use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::BIT;
 
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read__attribute_ram_code(0x00);

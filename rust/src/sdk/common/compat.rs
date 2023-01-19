@@ -1,6 +1,6 @@
-use sdk::mcu::analog::analog_write__attribute_ram_code;
-use sdk::mcu::clock::sleep_us;
-use sdk::mcu::register::write_reg8;
+use crate::sdk::mcu::analog::analog_write__attribute_ram_code;
+use crate::sdk::mcu::clock::sleep_us;
+use crate::sdk::mcu::register::write_reg8;
 
 extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;

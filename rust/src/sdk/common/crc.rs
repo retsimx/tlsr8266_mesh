@@ -21,7 +21,7 @@ pub fn crc16(mut pD: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use sdk::common::crc::crc16;
+    use crate::sdk::common::crc::crc16;
 
     #[test]
     fn test_crc16() {

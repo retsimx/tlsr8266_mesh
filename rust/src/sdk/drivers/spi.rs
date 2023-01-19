@@ -1,4 +1,4 @@
-use sdk::mcu::register::{
+use crate::sdk::mcu::register::{
     read_reg_master_spi_ctrl, read_reg_master_spi_data, write_reg_master_spi_ctrl,
     write_reg_master_spi_data, FLD_MASTER_SPI,
 };

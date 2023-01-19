@@ -1,8 +1,8 @@
-use sdk::mcu::register::{
+use crate::sdk::mcu::register::{
     read_reg_system_tick, write_reg_clk_sel, write_reg_rst_clk0, write_reg_tmr_ctrl, FLD_CLK_EN,
     FLD_CLK_SEL, FLD_TMR, WATCHDOG_TIMEOUT_COEFF,
 };
-use {BIT, BIT_LOW_BIT, MASK_VAL};
+use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 
 pub const CLOCK_SYS_CLOCK_HZ: u32 = 32000000;
 

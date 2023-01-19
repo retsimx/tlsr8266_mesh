@@ -1,9 +1,9 @@
-use sdk::drivers::spi::{
+use crate::sdk::drivers::spi::{
     mspi_ctrl_write, mspi_get, mspi_high, mspi_low, mspi_read, mspi_wait, mspi_write,
 };
-use sdk::mcu::clock::sleep_us;
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use sdk::mcu::watchdog::wd_clear;
+use crate::sdk::mcu::clock::sleep_us;
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::watchdog::wd_clear;
 use std::mem::transmute;
 use std::ptr::{null, null_mut};
 

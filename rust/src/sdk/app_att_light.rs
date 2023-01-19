@@ -1,6 +1,6 @@
-use config::{DEVICE_NAME, MESH_NAME};
-use sdk::light::*;
-use sdk::service::{
+use crate::config::{DEVICE_NAME, MESH_NAME};
+use crate::sdk::light::*;
+use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
@@ -8,7 +8,7 @@ use std::convert::AsRef;
 use std::ffi::CStr;
 use std::mem::transmute;
 use std::ptr::{addr_of, null};
-use {pub_mut, pub_static};
+use crate::{pub_mut, pub_static};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{

@@ -1,5 +1,5 @@
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use sdk::mcu::register::{
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::register::{
     read_reg_ana_ctrl, read_reg_ana_data, write_reg_ana_addr, write_reg_ana_ctrl,
     write_reg_ana_data, FLD_ANA,
 };

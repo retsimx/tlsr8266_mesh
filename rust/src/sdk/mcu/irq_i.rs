@@ -1,4 +1,4 @@
-use sdk::mcu::register::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
+use crate::sdk::mcu::register::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
 
 pub const IRQ_TIMER1_ENABLE: bool = true;
 pub const IRQ_GPIO_ENABLE: bool = false;

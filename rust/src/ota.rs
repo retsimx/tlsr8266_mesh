@@ -1,32 +1,20 @@
-use common::REGA_LIGHT_OFF;
-use config::{get_flash_adr_light_new_fw, OTA_LED};
-use main_light::get_buff_response;
-use sdk::common::bit::ONES_32;
-use sdk::common::crc::crc16;
-use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use sdk::light::{
-    _get_fw_version, _is_add_packet_buf_ready, _is_master_sending_ota_st,
-    _is_mesh_ota_slave_running, _light_sw_reboot, _mesh_ota_master_start,
-    _mesh_ota_master_start_firmware_from_backup, _rf_link_add_tx_packet,
-    _rf_link_slave_read_status_stop, _rf_ota_save_data, get_app_ota_hci_type,
-    get_cur_ota_flash_addr, get_pair_login_ok, get_rf_slave_ota_busy,
-    get_rf_slave_ota_finished_flag, get_rf_slave_ota_terminate_flag,
-    get_rf_slave_ota_timeout_def_s, get_slave_read_status_busy, get_tick_per_us,
-    mesh_ota_dev_info_t, mesh_ota_pkt_start_command_t, rf_packet_att_data_t,
-    set_cur_ota_flash_addr, set_mesh_ota_master_100_flag, set_rf_slave_ota_busy,
-    set_rf_slave_ota_finished_flag, set_rf_slave_ota_terminate_flag, set_rf_slave_ota_timeout_s,
-    OtaState, RecoverStatus, APP_OTA_HCI_TYPE, MESH_OTA_LED, START_UP_FLAG,
-};
-use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use sdk::mcu::clock::{clock_time, sleep_us};
-use sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
-use sdk::mcu::irq_i::irq_disable;
-use sdk::mcu::register::{
+use crate::common::REGA_LIGHT_OFF;
+use crate::config::{get_flash_adr_light_new_fw, OTA_LED};
+use crate::sdk::common::bit::ONES_32;
+use crate::sdk::common::crc::crc16;
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
+use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::clock::{clock_time, sleep_us};
+use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
+use crate::sdk::mcu::irq_i::irq_disable;
+use crate::sdk::mcu::register::{
     write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl,
 };
-use sdk::mcu::watchdog::wd_clear;
+use crate::sdk::mcu::watchdog::wd_clear;
 use std::mem::{size_of_val, MaybeUninit};
 use std::ptr::addr_of;
+use crate::main_light::get_buff_response;
+use crate::sdk::light::*;
 
 pub struct OtaManager {
     ota_pkt_cnt: u16,
@@ -500,8 +488,8 @@ impl OtaManager {
 }
 
 mod wrappers {
-    use app;
-    use sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MESH_OTA_LED};
+    use crate::app;
+    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MESH_OTA_LED};
     use std::mem::size_of;
     use std::slice;
 

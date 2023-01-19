@@ -1,20 +1,25 @@
-use config::MESH_PWD_ENCODE_SK;
-use main_light::{main_loop, user_init};
-use mesh::MeshManager;
-use ota::OtaManager;
-use sdk::light::{_rf_drv_init, get_pair_config_pwd_encode_sk};
-use sdk::mcu::clock::clock_init;
-use sdk::mcu::dma::dma_init;
-use sdk::mcu::gpio::gpio_init;
-use sdk::mcu::irq_i::{irq_enable, irq_init};
-use sdk::mcu::watchdog::wd_clear;
-use sdk::pm::cpu_wakeup_init;
+use crate::config::MESH_PWD_ENCODE_SK;
+use crate::main_light::{main_loop, user_init};
+use crate::mesh::MeshManager;
+use crate::ota::OtaManager;
+use crate::sdk::mcu::clock::clock_init;
+use crate::sdk::mcu::dma::dma_init;
+use crate::sdk::mcu::gpio::gpio_init;
+use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
+use crate::sdk::mcu::watchdog::wd_clear;
+use crate::sdk::pm::cpu_wakeup_init;
 use std::io::Write;
+use crate::sdk::light::*;
 
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
 }
+
+// #[embassy_executor::task]
+// async fn my_task() {
+//
+// }
 
 impl App {
     pub const fn default() -> App {

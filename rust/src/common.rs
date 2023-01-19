@@ -1,14 +1,14 @@
-use config::*;
-use main_light::*;
-use pub_mut;
-use sdk::drivers::flash::flash_write_page;
-use sdk::light::*;
-use sdk::mcu::analog::analog_write__attribute_ram_code;
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::config::*;
+use crate::main_light::*;
+use crate::pub_mut;
+use crate::sdk::drivers::flash::flash_write_page;
+use crate::sdk::light::*;
+use crate::sdk::mcu::analog::analog_write__attribute_ram_code;
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use std::ptr::addr_of;
 use std::slice;
-use mesh::wrappers::get_get_mac_en;
-use vendor_light::get_adv_rsp_pri_data;
+use crate::mesh::wrappers::get_get_mac_en;
+use crate::vendor_light::get_adv_rsp_pri_data;
 
 
 

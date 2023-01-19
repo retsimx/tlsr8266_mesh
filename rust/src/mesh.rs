@@ -1,26 +1,17 @@
-use config::{get_flash_adr_pairing, VENDOR_ID};
-use main_light::{
+use crate::config::{get_flash_adr_pairing, VENDOR_ID};
+use crate::main_light::{
     device_status_update, light_slave_tx_command, rf_link_data_callback,
     rf_link_light_event_callback,
 };
-use mesh::wrappers::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en, set_mesh_pair_enable};
-use sdk::drivers::flash::flash_write_page;
-use sdk::light::{
-    _access_code, _is_add_packet_buf_ready, _mesh_node_init, _pair_load_key, _pair_save_key,
-    _rf_link_add_tx_packet, get_adr_flash_cfg_idx, get_device_address, get_mesh_node_max,
-    get_pair_ac_addr, get_pair_config_mesh_ltk, get_pair_config_mesh_name,
-    get_pair_config_mesh_pwd, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_nn,
-    get_pair_pass, get_pair_setting_flag, get_slave_link_connected, ll_packet_l2cap_data_t,
-    rf_packet_att_cmd_t, rf_packet_att_value_t, set_pair_ac, set_pair_setting_flag, PairState,
-    CMD_NOTIFY_MESH_PAIR_END, LGT_CMD_MESH_CMD_NOTIFY, LGT_CMD_MESH_OTA_READ, LGT_CMD_MESH_PAIR,
-    LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO, PAR_READ_MESH_PAIR_CONFIRM,
-};
-use sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
-use sdk::rf_drv::rf_set_ble_access_code;
+use crate::sdk::drivers::flash::flash_write_page;
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
+use crate::sdk::rf_drv::rf_set_ble_access_code;
 use std::ptr::addr_of;
-use BIT;
+use crate::BIT;
+use crate::mesh::wrappers::*;
+use crate::sdk::light::*;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -594,10 +585,10 @@ impl MeshManager {
 }
 
 pub mod wrappers {
-    use mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
-    use sdk::light::{rf_packet_att_cmd_t, MESH_NODE_MAX_NUM, _rf_link_data_callback};
+    use crate::mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
+    use crate::sdk::light::*;
     use std::mem::size_of;
-    use {app, pub_mut};
+    use crate::{app, pub_mut};
 
     // BEGIN SHIT LIGHT_LL HAX
     pub_mut!(

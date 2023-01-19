@@ -1,29 +1,29 @@
-use app;
+use crate::app;
 use std::cmp::{max, min};
 use std::convert::TryInto;
 use std::mem::size_of;
 use std::ptr::addr_of;
-use {pub_mut, BIT};
+use crate::{pub_mut, BIT};
 
-use common::*;
-use config::*;
-use mesh::MESH_NODE_ST_PAR_LEN;
-use sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
-use sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
-use sdk::light::*;
-use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ};
-use sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
-use sdk::mcu::register::{
+use crate::common::*;
+use crate::config::*;
+use crate::mesh::MESH_NODE_ST_PAR_LEN;
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
+use crate::sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
+use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
+use crate::sdk::light::*;
+use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ};
+use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::register::{
     read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt,
     write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
 };
-use sdk::pm::usb_dp_pullup_en;
-use sdk::rf_drv::*;
-use sdk::service::*;
-use vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
+use crate::sdk::pm::usb_dp_pullup_en;
+use crate::sdk::rf_drv::*;
+use crate::sdk::service::*;
+use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 
 pub const LED_INDICATE_VAL: u16 = 0xffff;
 pub const LED_MASK: u8 = 0x07;

@@ -1,6 +1,6 @@
-use sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use sdk::mcu::gpio::GPIO_PIN_TYPE::*;
-use sdk::mcu::register::{
+use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
+use crate::sdk::mcu::register::{
     read_reg_gpio_gpio_func, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_gpio_func,
     write_reg_gpio_oen, write_reg_gpio_out, write_reg_gpio_pa_setting1, write_reg_gpio_pa_setting2,
     write_reg_gpio_pb_setting1, write_reg_gpio_pb_setting2, write_reg_gpio_pc_setting1,
@@ -8,8 +8,8 @@ use sdk::mcu::register::{
     write_reg_gpio_pe_setting1, write_reg_gpio_pe_setting2, write_reg_gpio_pf_setting1,
     write_reg_gpio_pf_setting2,
 };
-use {regrw_idx, BIT};
-use {BM_CLR, BM_SET};
+use crate::{regrw_idx, BIT};
+use crate::{BM_CLR, BM_SET};
 
 pub const RF_FAST_MODE_1M: u8 = 1;
 pub const PM_PIN_PULL_DEFAULT: u8 = 1;

@@ -1,4 +1,4 @@
-use {BIT, BIT_MASK_LEN, BIT_RNG};
+use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
 extern crate core;
 extern crate paste;
 

@@ -1,8 +1,8 @@
-use sdk::mcu::clock::CLOCK_SYS_CLOCK_1MS;
-use sdk::mcu::register::WATCHDOG_TIMEOUT_COEFF;
-use sdk::mcu::register::{read_reg_tmr_ctrl, write_reg_tmr2_tick, write_reg_tmr_ctrl, FLD_TMR};
-use CLR_FLD;
-use {
+use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1MS;
+use crate::sdk::mcu::register::WATCHDOG_TIMEOUT_COEFF;
+use crate::sdk::mcu::register::{read_reg_tmr_ctrl, write_reg_tmr2_tick, write_reg_tmr_ctrl, FLD_TMR};
+use crate::CLR_FLD;
+use crate::{
     BIT, BIT_LOW_BIT, BM_CLR, BM_MASK_VAL, BM_SET, BM_SET_MASK_FLD, MASK_VAL, SET_FLD, SET_FLD_V,
 };
 

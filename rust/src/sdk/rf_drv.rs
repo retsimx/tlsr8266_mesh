@@ -1,6 +1,6 @@
-use no_mangle_fn;
-use sdk::light::ll_packet_l2cap_data_t;
-use sdk::mcu::register::write_reg32;
+use crate::no_mangle_fn;
+use crate::sdk::light::ll_packet_l2cap_data_t;
+use crate::sdk::mcu::register::write_reg32;
 
 no_mangle_fn!(rf_set_power_level_index, level: u32);
 no_mangle_fn!(rf_link_slave_pairing_enable, en: u32);

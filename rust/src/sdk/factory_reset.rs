@@ -1,16 +1,16 @@
-use config::{
+use crate::config::{
     get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
-use mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
-use sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
-use sdk::mcu::clock::clock_time_exceed;
-use sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
+use crate::sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
+use crate::sdk::mcu::clock::clock_time_exceed;
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use std::cmp::min;
 use std::convert::TryFrom;
 use std::ptr::{addr_of, copy_nonoverlapping};
-use BIT;
-use {app, pub_mut};
+use crate::BIT;
+use crate::{app, pub_mut};
 
 pub_mut!(pair_config_pwd_encode_enable, u8);
 

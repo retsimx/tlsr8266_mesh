@@ -1,9 +1,9 @@
 // Stuff from the libble library
-use sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
+use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use std::mem;
 use std::mem::{size_of, size_of_val, MaybeUninit};
-use {no_mangle_fn, no_mangle_fn_def};
-use {pub_mut, BIT};
+use crate::{no_mangle_fn, no_mangle_fn_def};
+use crate::{pub_mut, BIT};
 
 no_mangle_fn!(light_set_tick_per_us, tick: u32);
 

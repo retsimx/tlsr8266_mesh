@@ -1,5 +1,9 @@
+#![feature(type_alias_impl_trait)]
+
+use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
+use crate::executor::Executor;
 
 mod app;
 mod common;
@@ -9,11 +13,21 @@ mod mesh;
 mod ota;
 mod sdk;
 mod vendor_light;
+mod executor;
 
 static mut APP: App = App::default();
 
 pub fn app() -> &'static mut App {
     return unsafe { &mut APP };
+}
+
+unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
+    core::mem::transmute(t)
+}
+
+#[embassy_executor::task]
+pub async fn run(spawner: Spawner) {
+    app().run(spawner).await;
 }
 
 #[no_mangle]
@@ -25,5 +39,9 @@ pub fn main_entrypoint() {
     app().init();
 
     // Run the application
-    app().run();
+    let mut executor = Executor::new();
+    let executor = unsafe { __make_static(&mut executor) };
+    executor.run(|spawner| {
+        spawner.must_spawn(run(spawner));
+    });
 }

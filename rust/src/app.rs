@@ -9,17 +9,13 @@ use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
 use std::io::Write;
+use embassy_executor::Spawner;
 use crate::sdk::light::*;
 
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
 }
-
-// #[embassy_executor::task]
-// async fn my_task() {
-//
-// }
 
 impl App {
     pub const fn default() -> App {
@@ -48,11 +44,13 @@ impl App {
         user_init();
     }
 
-    pub fn run(&self) {
+    pub async fn run(&self, spawner: Spawner) {
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
         loop {
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
+
             wd_clear();
             main_loop();
         }

@@ -7,7 +7,7 @@ edition = "2021"
 
 [profile.release]
 opt-level = "z"
-lto = true
+lto = false
 codegen-units = 1
 panic = "abort"
 
@@ -17,4 +17,5 @@ const-cstr = "0.3"
 keyframe = "1.1"
 libm = "0.2"
 externc-libm = "0.1.0"
-embassy-executor = "0.1.1"
+embassy-time = "0.1.0"
+embassy-executor = { version = "0.1.1", features = ["nightly", "integrated-timers"]}

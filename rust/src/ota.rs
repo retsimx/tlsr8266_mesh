@@ -65,6 +65,7 @@ impl OtaManager {
         write_reg_system_tick_ctrl(0x01);
         irq_disable();
 
+        #[allow(invalid_value)]
         let mut buff: [u8; 256] = unsafe { MaybeUninit::uninit().assume_init() };
 
         flash_read_page(*get_flash_adr_light_new_fw(), PAGE_SIZE, buff.as_mut_ptr());

@@ -1,9 +1,38 @@
 use crate::sdk::mcu::analog::analog_write__attribute_ram_code;
 use crate::sdk::mcu::clock::sleep_us;
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 
 extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
+}
+
+static mut critical_section_state: u8 = 0;
+
+#[no_mangle]
+fn _critical_section_1_0_acquire() {
+    unsafe { critical_section_state = irq_disable(); }
+}
+
+#[no_mangle]
+fn _critical_section_1_0_release() {
+    unsafe { irq_restore(critical_section_state); }
+}
+
+#[no_mangle]
+unsafe fn __atomic_compare_exchange_4(ptr: *mut u32, expected: *const u32, desired: u32, success_order: u32, failure_order: u32) -> bool {
+    return if *ptr == *expected {
+        *ptr = desired;
+        true
+    } else {
+        *ptr = *expected;
+        false
+    }
+}
+
+#[no_mangle]
+fn abort() {
+    loop {}
 }
 
 #[no_mangle] // required by light_ll

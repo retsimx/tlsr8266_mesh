@@ -686,8 +686,13 @@ pub fn rf_link_light_event_callback(status: u8) {
     }
 }
 
+// Counts the number of 10 microsecond units triggered by the timer.
+pub static mut TIME_COUNTER_10US: u64 = 0;
+
 #[no_mangle] // required by light_ll
 fn irq_timer1() {
+    unsafe { TIME_COUNTER_10US += 1; }
+
     app().mesh_manager.check_cmd_delay_timer();
 
     light_onoff_step_timer();

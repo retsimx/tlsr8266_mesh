@@ -3,7 +3,7 @@
 use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
-use crate::executor::Executor;
+use crate::embassy::executor::Executor;
 
 mod app;
 mod common;
@@ -13,7 +13,7 @@ mod mesh;
 mod ota;
 mod sdk;
 mod vendor_light;
-mod executor;
+mod embassy;
 
 static mut APP: App = App::default();
 

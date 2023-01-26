@@ -18,8 +18,8 @@ pub const CLOCK_SYS_CLOCK_1S: u32 = CLOCK_SYS_CLOCK_HZ;
 pub const CLOCK_SYS_CLOCK_1MS: u32 = (CLOCK_SYS_CLOCK_1S / 1000);
 pub const CLOCK_SYS_CLOCK_1US: u32 = (CLOCK_SYS_CLOCK_1S / 1000000);
 pub const CLOCK_SYS_CLOCK_4S: u32 = CLOCK_SYS_CLOCK_1S << 2;
-pub const CLOCK_MAX_MS: u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1MS);
-pub const CLOCK_MAX_US: u32 = (u32::max_value() / CLOCK_SYS_CLOCK_1US);
+pub const CLOCK_MAX_MS: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1MS);
+pub const CLOCK_MAX_US: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1US);
 
 enum CLOCK_SEL {
     SEL_32M_RC = 0,

@@ -15,13 +15,18 @@ ignored = [
     'void _ZN13tlsr8266_mesh10main_light20device_status_update17h4034b73cf581c5e5E(void);',
     '((&llvm_cbe_self->field0))',
     '** l_fptr_',
-    'struct l_struct_embassy_KD__KD_executor_KD__KD_Executor _ZN13tlsr8266_mesh7embassy8executor8Executor3new17heceac9128e7afb9eE(void);',
+    'struct l_struct_embassy_KD__KD_executor_KD__KD_Executor _ZN13tlsr8266_mesh7embassy8executor8Executor3new17h111412efea70e942E(void);',
     '_ZN42__EC_LT_EC_str_EC_u20_EC_as_EC_u20_EC_core_OC__OC_fmt_OC__OC_Display_EC_GT_EC_3fmt17h35803dd981c70790E',
-    'bool _ZN13tlsr8266_mesh6common23dev_addr_with_mac_match17h0c39e0018941422fE(uint8_t*, uint32_t);',
+    'bool _ZN13tlsr8266_mesh6common23dev_addr_with_mac_match17h923025d02b8a608eE(uint8_t*, uint32_t);',
     '_ZN4core3fmt9Formatter9write_str17h3d8ad84d80640ea1E',
     '_ZN4core9panicking9panic_fmt17h030ddd32bba63c84E',
-    '_ZN4core9panicking5panic17h430c2a43a300922eE'
+    '_ZN4core9panicking5panic17h430c2a43a300922eE',
+    '_ZN4core6option13expect_failed17hc880daf17d89e424E'
 ]
+
+replaced = {
+    '((l_fptr_1*)(void*)__atomic_compare_exchange_4)': '__atomic_compare_exchange_4'
+}
 
 inputfile = sys.argv[-1]
 with open(inputfile + ".rc.c", 'w') as outputfile:
@@ -36,6 +41,12 @@ with open(inputfile + ".rc.c", 'w') as outputfile:
         for kind in ignored:
             if kind in line or kind == line:
                 line = '// ' + line
+                break
+
+        for find, replace in replaced.items():
+            if find in line or find == line:
+                line = line.replace(find, replace)
+
                 break
 
         outputfile.writelines([line])

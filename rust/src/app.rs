@@ -1,5 +1,5 @@
 use crate::config::MESH_PWD_ENCODE_SK;
-use crate::main_light::{main_loop, user_init};
+use crate::main_light::{light_adjust_rgb_hw, main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
 use crate::sdk::mcu::clock::clock_init;
@@ -10,11 +10,29 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
 use std::io::Write;
 use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+use crate::embassy::yield_now::yield_now;
 use crate::sdk::light::*;
 
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
+}
+
+#[embassy_executor::task]
+async fn light_driver() {
+    let mut idx = 0;
+    loop {
+        if idx % 2 == 0 {
+            light_adjust_rgb_hw(0xffff, 0xffff, 0xffff, 0xffff);
+        } else {
+            light_adjust_rgb_hw(0, 0, 0, 0);
+        }
+
+        Timer::after(Duration::from_secs(1)).await;
+
+        idx = idx + 1;
+    }
 }
 
 impl App {
@@ -48,11 +66,15 @@ impl App {
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
-        loop {
-            embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
+        //
+        spawner.spawn(light_driver()).unwrap();
 
+        loop {
             wd_clear();
             main_loop();
+
+            // Let other tasks run
+            yield_now().await;
         }
     }
 }

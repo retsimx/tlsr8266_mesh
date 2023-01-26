@@ -13,13 +13,10 @@ use crate::sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ};
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1MS, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{
-    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt,
-    write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
-};
+use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr2_tick, write_reg_tmr2_capt, write_reg_tmr0_tick, write_reg_tmr0_capt};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
@@ -118,9 +115,16 @@ pub fn light_hw_timer1_config() {
     //enable timer1 interrupt
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
     write_reg_tmr1_tick(0);
-    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1US * IRQ_TIME1_INTERVAL as u32 * 1000);
+    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1US);
 
     write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+
+    // enable timer0 interrupt for tracking clock_time overflow
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
+    write_reg_tmr0_tick(0);
+    write_reg_tmr0_capt(CLOCK_SYS_CLOCK_1S );
+
+    write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN as u32);
 }
 
 fn light_init_default() {
@@ -318,6 +322,7 @@ fn light_lum_store() {
 
 //retrieve LUM : brightness or RGB/CT value
 fn light_lum_retrieve() {
+    return;
     let mut i = 0;
     while i < FLASH_SECTOR_SIZE {
         set_light_lum_addr(*get_flash_adr_lum() + i as u32);
@@ -686,20 +691,42 @@ pub fn rf_link_light_event_callback(status: u8) {
     }
 }
 
-// Counts the number of 10 microsecond units triggered by the timer.
-pub static mut TIME_COUNTER_10US: u64 = 0;
-
 #[no_mangle] // required by light_ll
 fn irq_timer1() {
-    unsafe { TIME_COUNTER_10US += 1; }
-
     app().mesh_manager.check_cmd_delay_timer();
 
     light_onoff_step_timer();
 }
 
+// Counts the number of microseconds triggered by the timer.
+pub static mut CLOCK_TIME_UPPER: u32 = 0;
+static mut LAST_CLOCK_TIME: u32 = 0;
+
+unsafe fn check_clock_overflow() -> u32 {
+    let time = clock_time();
+    if clock_time() < LAST_CLOCK_TIME {
+        // Overflow has occurred
+        CLOCK_TIME_UPPER += 1;
+    }
+
+    LAST_CLOCK_TIME = time;
+
+    time
+}
+
 #[no_mangle] // required by light_ll
-fn irq_timer0() {}
+// This timer is configured to run once per second to check if the internal clock has overflowed.
+// this is a workaround in case there are no 'clock_time64' calls between overflows
+fn irq_timer0() {
+    unsafe { check_clock_overflow(); }
+}
+
+pub fn clock_time64() -> u64 {
+    unsafe {
+        let time = check_clock_overflow();
+        return (CLOCK_TIME_UPPER as u64) << 32 | time as u64;
+    }
+}
 
 #[no_mangle] // required by light_ll
 #[allow(non_snake_case)]
@@ -736,6 +763,7 @@ pub fn device_status_update() {
 }
 
 pub fn light_onoff_normal(on: bool) {
+    return;
     if on {
         set_light_off(false);
         light_adjust_rgb_hw(

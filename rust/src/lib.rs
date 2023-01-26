@@ -4,6 +4,8 @@ use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
 use crate::embassy::executor::Executor;
+use crate::main_light::light_adjust_rgb_hw;
+use crate::sdk::mcu::watchdog::wd_clear;
 
 mod app;
 mod common;
@@ -28,6 +30,26 @@ unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
 #[embassy_executor::task]
 pub async fn run(spawner: Spawner) {
     app().run(spawner).await;
+}
+
+#[no_mangle]
+pub fn blinken() {
+    let mut led_onoff = true;
+    for idx in 0..6 {
+        if idx % 2 == 0 {
+            light_adjust_rgb_hw(0xffff, 0xffff, 0xffff, 0xffff);
+        } else {
+            light_adjust_rgb_hw(0, 0, 0, 0);
+        }
+
+        for _ in 0..1000000 {
+            wd_clear();
+        }
+
+        led_onoff = !led_onoff;
+    }
+
+    light_adjust_rgb_hw(0, 0, 0, 0);
 }
 
 #[no_mangle]

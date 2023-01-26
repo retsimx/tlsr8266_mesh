@@ -1,5 +1,5 @@
 use embassy_time::driver::{Driver, AlarmHandle};
-use crate::main_light::TIME_COUNTER_10US;
+use crate::main_light::{clock_time64};
 
 struct MyDriver {
 
@@ -9,15 +9,15 @@ embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{});
 
 impl Driver for MyDriver {
     fn now(&self) -> u64 {
-        unsafe { return TIME_COUNTER_10US; }
+        return clock_time64();
     }
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        todo!()
+        return Option::from(AlarmHandle::new(0));
     }
-    fn set_alarm_callback(&self, alarm: AlarmHandle, callback: fn(*mut ()), ctx: *mut ()) {
-        todo!()
+    fn set_alarm_callback(&self, _alarm: AlarmHandle, _callback: fn(*mut ()), _ctx: *mut ()) {
+
     }
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
-        todo!()
+    fn set_alarm(&self, _alarm: AlarmHandle, _timestamp: u64) -> bool {
+        true
     }
 }

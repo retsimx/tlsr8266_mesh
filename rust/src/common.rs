@@ -149,6 +149,7 @@ pub fn light_onoff_step(on: bool) {
 }
 
 pub fn light_step_reset(target: u16) {
+    return;
     let r = irq_disable();
     if !get_light_step().adjusting_flag && target == *get_led_lum() {
         light_adjust_rgb_hw(get_led_val()[0], get_led_val()[1], get_led_val()[2], target);
@@ -213,6 +214,7 @@ fn get_next_lum(direction: u8) {
 }
 
 pub fn light_onoff_step_timer() {
+    return;
     if get_light_step().adjusting_flag {
         if get_light_step().time == 0 {
             if get_light_step().lum_dst != get_light_step().lum_temp {

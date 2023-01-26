@@ -17,5 +17,5 @@ const-cstr = "0.3"
 keyframe = "1.1"
 libm = "0.2"
 externc-libm = "0.1.0"
-embassy-time = { version = "0.1.0", features = ["tick-hz-100_000"] }
+embassy-time = { version = "0.1.0", features = ["tick-hz-32_000_000"] }
 embassy-executor = { version = "0.1.1", features = ["nightly", "integrated-timers"] }

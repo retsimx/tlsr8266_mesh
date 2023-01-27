@@ -1,6 +1,6 @@
 use crate::config::{get_flash_adr_pairing, VENDOR_ID};
 use crate::main_light::{
-    device_status_update, light_slave_tx_command,
+    light_slave_tx_command,
     rf_link_light_event_callback,
 };
 use crate::sdk::drivers::flash::flash_write_page;
@@ -9,7 +9,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use crate::sdk::rf_drv::rf_set_ble_access_code;
 use std::ptr::addr_of;
-use crate::BIT;
+use crate::{app, BIT};
 use crate::mesh::wrappers::*;
 use crate::sdk::light::*;
 
@@ -20,7 +20,7 @@ pub const MESH_PAIR_TIMEOUT: u32 = 10;
 //unit: ms
 pub const MESH_PAIR_NOTIFY_TIMEOUT: u32 = 2500;
 
-pub const MESH_NODE_ST_VAL_LEN: u8 = 4; // MIN: 4,   MAX: 10
+pub const MESH_NODE_ST_VAL_LEN: u8 = 8; // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -250,7 +250,7 @@ impl MeshManager {
             self.default_mesh_time_ref = 0;
 
             _mesh_node_init();
-            device_status_update();
+            app().light_manager.device_status_update();
             self.safe_effect_new_mesh_finish();
             return;
         }
@@ -476,7 +476,7 @@ impl MeshManager {
         //     },
         // }; MESH_NODE_MAX_NUM as usize];
 
-        device_status_update();
+        app().light_manager.device_status_update();
     }
 }
 

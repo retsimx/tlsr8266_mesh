@@ -1,6 +1,5 @@
 use crate::config::*;
-use crate::main_light::*;
-use crate::pub_mut;
+use crate::{app, pub_mut};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::analog_write__attribute_ram_code;
@@ -67,7 +66,7 @@ fn light_sw_reboot_callback() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write__attribute_ram_code(
             REGA_LIGHT_OFF,
-            if *get_light_off() {
+            if app().light_manager.is_light_off() {
                 RecoverStatus::LightOff as u8
             } else {
                 0

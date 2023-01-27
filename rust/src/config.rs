@@ -25,17 +25,15 @@ pub const VENDOR_ID: u16 = 0x0211;
 pub const PAIR_VALID_FLAG: u8 = 0xFA;
 
 // don't use GPIO_PB0(pwm5) of 8266, because its default status is ouput 1 as GPIO.
-pub const PWM_R: GPIO_PIN_TYPE = GPIO_PIN_TYPE::GPIO_PC4;
 pub const PWM_G: GPIO_PIN_TYPE = GPIO_PIN_TYPE::GPIO_PC0;
 pub const PWM_B: GPIO_PIN_TYPE = GPIO_PIN_TYPE::GPIO_PC2;
 // pub const PWM_W: GPIO_PIN_TYPE = GPIO_PIN_TYPE::GPIO_PA1;
 
-pub const PWMID_R: u32 = 2;
 pub const PWMID_G: u32 = 0;
 pub const PWMID_B: u32 = 1;
 // pub const PWMID_W: u32 = 3;
 
-pub const OTA_LED: GPIO_PIN_TYPE = PWM_R;
+pub const OTA_LED: GPIO_PIN_TYPE = PWM_G;
 
 pub const FLASH_SECTOR_SIZE: u16 = 4096;
 

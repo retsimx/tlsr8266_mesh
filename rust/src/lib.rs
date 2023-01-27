@@ -4,7 +4,6 @@ use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
 use crate::embassy::executor::Executor;
-use crate::main_light::light_adjust_rgb_hw;
 use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
 use crate::sdk::mcu::watchdog::wd_clear;
@@ -67,9 +66,9 @@ pub fn blinken_testboard() {
 pub fn blinken() {
     for idx in 0..6 {
         if idx % 2 == 0 {
-            light_adjust_rgb_hw(0xffff, 0xffff, 0xffff, 0xffff);
+            app().light_manager.light_adjust_rgb_hw(0xffff, 0xffff, 0xffff);
         } else {
-            light_adjust_rgb_hw(0, 0, 0, 0);
+            app().light_manager.light_adjust_rgb_hw(0, 0, 0);
         }
 
         for _ in 0..1000000 {
@@ -77,7 +76,7 @@ pub fn blinken() {
         }
     }
 
-    light_adjust_rgb_hw(0, 0, 0, 0);
+    app().light_manager.light_adjust_rgb_hw(0, 0, 0);
 }
 
 #[no_mangle]

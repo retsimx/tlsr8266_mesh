@@ -1,5 +1,5 @@
 use crate::app;
-use std::cmp::{max, min};
+use std::cmp::{min};
 use std::convert::TryInto;
 use std::mem::size_of;
 use std::ptr::addr_of;
@@ -7,12 +7,9 @@ use crate::{pub_mut, BIT};
 
 use crate::common::*;
 use crate::config::*;
-use crate::mesh::MESH_NODE_ST_PAR_LEN;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
+use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
@@ -24,7 +21,6 @@ use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv
 
 pub const LED_INDICATE_VAL: u16 = 0xffff;
 pub const LED_MASK: u8 = 0x07;
-pub const LUM_SAVE_FLAG: u8 = 0xA5;
 
 macro_rules! config_led_event {
     ($on:expr, $off:expr, $n:expr, $sel:expr) => {
@@ -59,47 +55,6 @@ pub_mut!(led_tick, u32, 0);
 pub_mut!(led_no, u32, 0);
 pub_mut!(led_is_on, u32, 0);
 
-pub_mut!(lum_changed_time, u32, 0);
-pub_mut!(light_lum_addr, u32, 0);
-
-pub_mut!(light_off, bool, true);
-pub_mut!(led_lum, u16, 0xFFFF);
-pub_mut!(
-    led_val,
-    [u16; 3],
-    [
-        MAX_LUM_BRIGHTNESS_VALUE,
-        MAX_LUM_BRIGHTNESS_VALUE,
-        MAX_LUM_BRIGHTNESS_VALUE
-    ]
-);
-
-#[repr(C, packed)]
-struct LumSaveT {
-    save_falg: u8,
-    lum: u16,
-    ledval: [u16; 3],
-}
-
-fn calculate_lumen_map(val: u16) -> f32 {
-    let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.;
-    // return keyframe::ease(keyframe::functions::EaseInOutCubic, 0., 0xffff as f32, percentage);
-    return (-0.00539160 * libm::powf(percentage, 3.0))
-        + (4.47709595 * libm::powf(percentage, 2.0))
-        + (153.72442036 * percentage);
-}
-
-fn pwm_set_lum(id: u32, y: u32, pol: bool) {
-    let lum = (y * PMW_MAX_TICK as u32) / MAX_LUM_BRIGHTNESS_VALUE as u32;
-
-    pwm_set_cmp(id, if pol { PMW_MAX_TICK as u32 - lum } else { lum } as u16);
-}
-
-fn get_pwm_cmp(val: u16, lum: u16) -> u32 {
-    let val_lumen_map = calculate_lumen_map(lum);
-
-    return ((val as f32 * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as f32) as u32;
-}
 
 fn cfg_led_event(e: u32) {
     set_led_event_pending(e);
@@ -197,18 +152,15 @@ pub fn user_init() {
 
     light_init_default();
 
-    pwm_set_duty(PWMID_R, PMW_MAX_TICK, PMW_MAX_TICK);
     pwm_set_duty(PWMID_G, PMW_MAX_TICK, PMW_MAX_TICK);
     pwm_set_duty(PWMID_B, PMW_MAX_TICK, 0);
 
     //retrieve lumen value
-    light_lum_retrieve();
+    app().light_manager.light_lum_retrieve();
 
-    pwm_start(PWMID_R);
     pwm_start(PWMID_G);
     pwm_start(PWMID_B);
 
-    gpio_set_func(PWM_R as u32, !AS_GPIO);
     gpio_set_func(PWM_G as u32, !AS_GPIO);
     gpio_set_func(PWM_B as u32, !AS_GPIO);
 
@@ -218,7 +170,7 @@ pub fn user_init() {
 
     vendor_set_adv_data();
 
-    device_status_update();
+    app().light_manager.device_status_update();
     _mesh_security_enable(true);
 
     _register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
@@ -259,20 +211,17 @@ fn proc_led() {
             if *get_led_no() - 1 == *get_led_count() {
                 set_led_count(0);
                 set_led_no(0);
-                light_onoff_hw(!*get_light_off()); // should not report online status again
+                app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
             if *get_led_sel() & BIT!(0) != 0 {
-                light_adjust_g(LED_INDICATE_VAL * led_on as u16, 0xffff);
+                app().light_manager.light_adjust_g(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
             if *get_led_sel() & BIT!(1) != 0 {
-                light_adjust_b(LED_INDICATE_VAL * led_on as u16, 0xffff);
-            }
-            if *get_led_sel() & BIT!(2) != 0 {
-                light_adjust_r(LED_INDICATE_VAL * led_on as u16, 0xffff);
+                app().light_manager.light_adjust_b(LED_INDICATE_VAL * led_on as u16, 0xffff);
             }
             if *get_led_sel() & BIT!(5) != 0 {}
         }
@@ -290,78 +239,14 @@ fn light_auth_check() {
     }
 }
 
-//erase flash
-fn light_lum_erase() {
-    set_light_lum_addr(*get_flash_adr_lum());
-    flash_erase_sector(*get_flash_adr_lum());
-    light_lum_store();
-}
 
-//save cur lum value, if disconnected for a while
-fn light_lum_store() {
-    if *get_light_lum_addr()
-        >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
-    {
-        light_lum_erase();
-        return;
-    }
-
-    let lum_save = LumSaveT {
-        save_falg: LUM_SAVE_FLAG,
-        lum: *get_led_lum(),
-        ledval: *get_led_val(),
-    };
-
-    flash_write_page(
-        *get_light_lum_addr(),
-        size_of::<LumSaveT>() as u32,
-        addr_of!(lum_save) as *const u8,
-    );
-    set_light_lum_addr(*get_light_lum_addr() + size_of::<LumSaveT>() as u32);
-}
-
-//retrieve LUM : brightness or RGB/CT value
-fn light_lum_retrieve() {
-    let mut i = 0;
-    while i < FLASH_SECTOR_SIZE {
-        set_light_lum_addr(*get_flash_adr_lum() + i as u32);
-
-        let lum_save = unsafe { &*(*get_light_lum_addr() as *const LumSaveT) };
-        if LUM_SAVE_FLAG == (*lum_save).save_falg {
-            set_led_lum(lum_save.lum);
-            *get_led_val() = lum_save.ledval;
-        } else if lum_save.save_falg == 0xFF {
-            break;
-        }
-
-        i += size_of::<LumSaveT>() as u16
-    }
-
-    //effect
-    light_adjust_rgb_hw(0, 0, 0, 0);
-
-    app().ota_manager.mesh_ota_master_100_flag_check();
-
-    let val = analog_read__attribute_ram_code(REGA_LIGHT_OFF);
-    if val & RecoverStatus::LightOff as u8 != 0 {
-        analog_write__attribute_ram_code(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
-        light_onoff(false);
-    } else {
-        light_onoff(true);
-    }
-}
 
 fn light_user_func() {
     light_auth_check();
 
     factory_reset_cnt_check();
 
-    // save current lum-val
-    if *get_lum_changed_time() != 0 && clock_time_exceed(*get_lum_changed_time(), 5000 * 1000) {
-        set_lum_changed_time(0);
-        light_lum_store();
-    }
-
+    app().light_manager.check_light_state_save();
     app().mesh_manager.mesh_pair_proc_effect();
 }
 
@@ -403,19 +288,14 @@ fn rf_link_response_callback(
     let mut idx = 0;
     if ppp.val[15] == GET_STATUS {
         ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
-        for i in 0..3 {
-            //params[0]
-            ppp.val[i * 2 + 3] = if *get_light_off() {
-                0
-            } else {
-                (get_led_val()[i] & 0xff) as u8
-            };
-            ppp.val[i * 2 + 4] = if *get_light_off() {
-                0
-            } else {
-                ((get_led_val()[i] >> 8) & 0xff) as u8
-            };
-        }
+
+        let state = app().light_manager.get_current_light_state();
+        ppp.val[3] = (state.g & 0xff) as u8;
+        ppp.val[4] = ((state.g >> 8) & 0xff) as u8;
+        ppp.val[5] = (state.b & 0xff) as u8;
+        ppp.val[6] = ((state.b >> 8) & 0xff) as u8;
+        ppp.val[7] = (state.brightness & 0xff) as u8;
+        ppp.val[8] = ((state.brightness >> 8) & 0xff) as u8;
     } else if ppp.val[15] == GET_GROUP1 {
         ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
@@ -551,30 +431,30 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             // Brightness
             let value = (params[1] as u16) << 8 | params[0] as u16;
 
-            set_led_lum(value);
+            app().light_manager.set_brightness(value);
 
-            if *get_light_off() {
+            if app().light_manager.is_light_off() {
                 return;
             }
 
-            app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], value);
+            let state = app().light_manager.get_current_light_state();
+            app().light_manager.begin_transition(state.g, state.b, value);
         }
         if params[8] & 0x2 != 0 {
             // Temperature
             let value = (params[3] as u16) << 8 | params[2] as u16;
 
-            get_led_val()[0] = 0;
-            get_led_val()[1] = MAX_LUM_BRIGHTNESS_VALUE - value;
-            get_led_val()[2] = value;
+            let state = app().light_manager.get_current_light_state();
 
-            if *get_light_off() {
+            state.g = MAX_LUM_BRIGHTNESS_VALUE - value;
+            state.b = value;
+
+            if app().light_manager.is_light_off() {
                 return;
             }
 
-            app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], *get_led_lum());
+            app().light_manager.begin_transition(state.g, state.b, value);
         }
-
-        set_lum_changed_time(clock_time());
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());
@@ -654,11 +534,11 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
 pub fn rf_link_light_event_callback(status: u8) {
     if status == LGT_CMD_SET_MESH_INFO {
         _mesh_node_init();
-        device_status_update();
+        app().light_manager.device_status_update();
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
     } else if status == LGT_CMD_SET_DEV_ADDR {
         _mesh_node_init();
-        device_status_update();
+        app().light_manager.device_status_update();
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
     } else if status == LGT_CMD_DEL_PAIR {
         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
@@ -704,50 +584,4 @@ pub fn clock_time64() -> u64 {
 #[allow(non_snake_case)]
 fn irq_handler__attribute_ram_code() {
     _irq_light_slave_handler();
-}
-
-fn light_onoff_hw(on: bool) {
-    app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], match on {true => 0xffff, false => 0});
-}
-
-pub fn light_onoff(on: bool) {
-    light_onoff_hw(on);
-
-    device_status_update();
-}
-
-pub fn device_status_update() {
-    // packet
-    let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
-
-    let value = if *get_light_off() {
-        0
-    } else {
-        max(*get_led_lum(), 1)
-    };
-
-    // led_lum should not be 0, because app will take it to be light off
-    st_val_par[0] = (value & 0xff) as u8; //Note: bit7 of par[0] have been use internal for FLD_SYNCED
-    st_val_par[1] = ((value >> 8) & 0xff) as u8; // rsv
-                                                 // end
-
-    _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
-}
-
-fn light_adjust_r(val: u16, lum: u16) {
-    pwm_set_lum(PWMID_R, get_pwm_cmp(val, lum), false);
-}
-
-fn light_adjust_g(val: u16, lum: u16) {
-    pwm_set_lum(PWMID_G, get_pwm_cmp(val, lum), false);
-}
-
-fn light_adjust_b(val: u16, lum: u16) {
-    pwm_set_lum(PWMID_B, get_pwm_cmp(val, lum), true);
-}
-
-pub fn light_adjust_rgb_hw(val_r: u16, val_g: u16, val_b: u16, lum: u16) {
-    light_adjust_r(val_r, lum);
-    light_adjust_g(val_g, lum);
-    light_adjust_b(val_b, lum);
 }

@@ -152,17 +152,17 @@ pub fn user_init() {
 
     light_init_default();
 
-    pwm_set_duty(PWMID_G, PMW_MAX_TICK, PMW_MAX_TICK);
+    pwm_set_duty(PWMID_G, PMW_MAX_TICK, 0);
     pwm_set_duty(PWMID_B, PMW_MAX_TICK, 0);
-
-    //retrieve lumen value
-    app().light_manager.light_lum_retrieve();
 
     pwm_start(PWMID_G);
     pwm_start(PWMID_B);
 
     gpio_set_func(PWM_G as u32, !AS_GPIO);
     gpio_set_func(PWM_B as u32, !AS_GPIO);
+
+    //retrieve lumen value
+    app().light_manager.light_lum_retrieve();
 
     _rf_link_slave_init(40000);
 
@@ -238,8 +238,6 @@ fn light_auth_check() {
         set_slave_first_connected_tick(0);
     }
 }
-
-
 
 fn light_user_func() {
     light_auth_check();
@@ -432,28 +430,27 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             let value = (params[1] as u16) << 8 | params[0] as u16;
 
             app().light_manager.set_brightness(value);
+            let state = app().light_manager.get_current_light_state();
 
             if app().light_manager.is_light_off() {
-                return;
+                app().light_manager.begin_transition(state.g, state.b, 0);
+            } else {
+                app().light_manager.begin_transition(state.g, state.b, value);
             }
-
-            let state = app().light_manager.get_current_light_state();
-            app().light_manager.begin_transition(state.g, state.b, value);
         }
         if params[8] & 0x2 != 0 {
             // Temperature
             let value = (params[3] as u16) << 8 | params[2] as u16;
 
-            let state = app().light_manager.get_current_light_state();
-
-            state.g = MAX_LUM_BRIGHTNESS_VALUE - value;
-            state.b = value;
+            let g = MAX_LUM_BRIGHTNESS_VALUE - value;
+            let b = value;
 
             if app().light_manager.is_light_off() {
-                return;
+                app().light_manager.begin_transition(g, b, 0);
+            } else {
+                app().light_manager.begin_transition(g, b, app().light_manager.get_brightness());
             }
 
-            app().light_manager.begin_transition(state.g, state.b, value);
         }
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();

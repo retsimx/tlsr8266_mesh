@@ -45,7 +45,7 @@ struct LumSaveT {
 impl LightState {
     pub const fn default() -> Self {
         Self {
-            g: 0,
+            g: u16::MAX,
             b: 0,
             brightness: 0,
             timestamp: Instant::from_ticks(0)
@@ -83,7 +83,7 @@ impl LightManager {
             current_light_state: LightState::default(),
             light_lum_addr: 0,
             last_transition_time: 0,
-            brightness: 0
+            brightness: u16::MAX
         }
     }
 
@@ -164,11 +164,10 @@ impl LightManager {
     }
 
     pub fn is_light_off(&self) -> bool {
+        if self.new_light_state.timestamp > self.current_light_state.timestamp {
+            return self.new_light_state.brightness == 0;
+        }
         self.current_light_state.brightness == 0
-    }
-
-    pub fn get_current_brightness(&self) -> u16 {
-        self.current_light_state.brightness
     }
 
     //erase flash
@@ -188,7 +187,7 @@ impl LightManager {
 
         let lum_save = LumSaveT {
             save_flag: LIGHT_SAVE_VALID_FLAG,
-            brightness: self.current_light_state.brightness,
+            brightness: self.brightness,
             g: self.current_light_state.g,
             b: self.current_light_state.b
         };
@@ -210,7 +209,7 @@ impl LightManager {
 
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
             if LIGHT_SAVE_VALID_FLAG == lum_save.save_flag {
-                self.current_light_state.brightness = lum_save.brightness;
+                self.brightness = lum_save.brightness;
                 self.current_light_state.g = lum_save.g;
                 self.current_light_state.b = lum_save.b;
             } else if lum_save.save_flag == 0xFF {
@@ -240,6 +239,10 @@ impl LightManager {
     }
 
     pub fn get_current_light_state(&mut self) -> &mut LightState {
+        if self.new_light_state.timestamp > self.current_light_state.timestamp {
+            return &mut self.new_light_state;
+        }
+
         &mut self.current_light_state
     }
 
@@ -284,7 +287,7 @@ impl LightManager {
         self.light_adjust_b(val_b, lum);
     }
 
-    pub(crate) fn light_onoff_hw(&mut self, on: bool) {
+    pub fn light_onoff_hw(&mut self, on: bool) {
         let state = app().light_manager.get_current_light_state();
         self.begin_transition(state.g, state.b, match on { true => self.brightness, false => 0 });
     }
@@ -294,7 +297,7 @@ impl LightManager {
         self.device_status_update();
     }
 
-    pub(crate) fn device_status_update(&self) {
+    pub fn device_status_update(&self) {
         // packet
         let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 
@@ -304,14 +307,14 @@ impl LightManager {
             max(app().light_manager.get_brightness(), 1)
         };
 
-        let state = app().light_manager.get_current_light_state();
+        // let state = app().light_manager.get_current_light_state();
 
         st_val_par[0] = (brightness & 0xff) as u8;
         st_val_par[1] = ((brightness >> 8) & 0xff) as u8;
-        st_val_par[2] = (state.g & 0xff) as u8;
-        st_val_par[3] = ((state.g >> 8) & 0xff) as u8;
-        st_val_par[4] = (state.b & 0xff) as u8;
-        st_val_par[5] = ((state.b >> 8) & 0xff) as u8;
+        // st_val_par[2] = (state.g & 0xff) as u8;
+        // st_val_par[3] = ((state.g >> 8) & 0xff) as u8;
+        // st_val_par[4] = (state.b & 0xff) as u8;
+        // st_val_par[5] = ((state.b >> 8) & 0xff) as u8;
 
         _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
     }

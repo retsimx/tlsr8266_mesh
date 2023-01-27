@@ -20,7 +20,7 @@ pub const MESH_PAIR_TIMEOUT: u32 = 10;
 //unit: ms
 pub const MESH_PAIR_NOTIFY_TIMEOUT: u32 = 2500;
 
-pub const MESH_NODE_ST_VAL_LEN: u8 = 8; // MIN: 4,   MAX: 10
+pub const MESH_NODE_ST_VAL_LEN: u8 = 4; // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
 
 #[derive(Clone, Copy, PartialEq)]

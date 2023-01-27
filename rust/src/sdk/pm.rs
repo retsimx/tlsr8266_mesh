@@ -258,7 +258,7 @@ const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
     TBLCMDSET {
         adr: 0x66,
         dat: 0,
-        cmd: 0xc3,
+        cmd: 0xc3, // 0b11000011
     },
     TBLCMDSET {
         adr: 0x73,

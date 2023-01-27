@@ -42,19 +42,19 @@ pub const AS_TEST: u8 = 14;
 pub const AS_ADC: u8 = 15;
 
 pub const PA0_INPUT_ENABLE: u8 = 1;
-pub const PA1_INPUT_ENABLE: u8 = 1;
+pub const PA1_INPUT_ENABLE: u8 = 0;
 pub const PA2_INPUT_ENABLE: u8 = 1;
 pub const PA3_INPUT_ENABLE: u8 = 1;
 pub const PA4_INPUT_ENABLE: u8 = 1;
-pub const PA5_INPUT_ENABLE: u8 = 1;
+pub const PA5_INPUT_ENABLE: u8 = 0;
 pub const PA6_INPUT_ENABLE: u8 = 1;
 pub const PA7_INPUT_ENABLE: u8 = 1;
 pub const PA0_OUTPUT_ENABLE: u8 = 0;
-pub const PA1_OUTPUT_ENABLE: u8 = 0;
+pub const PA1_OUTPUT_ENABLE: u8 = 1;
 pub const PA2_OUTPUT_ENABLE: u8 = 0;
 pub const PA3_OUTPUT_ENABLE: u8 = 0;
 pub const PA4_OUTPUT_ENABLE: u8 = 0;
-pub const PA5_OUTPUT_ENABLE: u8 = 0;
+pub const PA5_OUTPUT_ENABLE: u8 = 1;
 pub const PA6_OUTPUT_ENABLE: u8 = 0;
 pub const PA7_OUTPUT_ENABLE: u8 = 0;
 pub const PA0_DATA_STRENGTH: u8 = 1;
@@ -67,11 +67,11 @@ pub const PA6_DATA_STRENGTH: u8 = 1;
 pub const PA7_DATA_STRENGTH: u8 = 1;
 pub const PA0_DATA_OUT: u8 = 1;
 //open SWS output to avoid MCU err
-pub const PA1_DATA_OUT: u8 = 0;
+pub const PA1_DATA_OUT: u8 = 1; // PW1
 pub const PA2_DATA_OUT: u8 = 0;
 pub const PA3_DATA_OUT: u8 = 0;
 pub const PA4_DATA_OUT: u8 = 0;
-pub const PA5_DATA_OUT: u8 = 0;
+pub const PA5_DATA_OUT: u8 = 1; // PW2
 pub const PA6_DATA_OUT: u8 = 0;
 pub const PA7_DATA_OUT: u8 = 0;
 pub const PA0_FUNC: u8 = AS_SWIRE;
@@ -464,7 +464,7 @@ pub fn gpio_init() {
             | (if PA6_FUNC == AS_GPIO { BIT!(22) } else { 0 })
             | (if PA7_FUNC == AS_GPIO { BIT!(23) } else { 0 }),
     );
-
+return;
     write_reg_gpio_pb_setting1(
         ((PB0_INPUT_ENABLE as u32) << 8)
             | ((PB1_INPUT_ENABLE as u32) << 9)
@@ -664,6 +664,7 @@ pub fn gpio_init() {
             | (if PF0_FUNC == AS_GPIO { BIT!(16) } else { 0 })
             | (if PF1_FUNC == AS_GPIO { BIT!(17) } else { 0 }),
     );
+    return;
 
     /*  do later
     reg_gpio_config_func = ((if PA0_FUNC==AS_DMIC||PA4_FUNC==AS_DMIC) { BITS(0,7)} else {0}) | ((PA1_FUNC==AS_PWM { BIT!(2)} else {0}) |
@@ -777,8 +778,9 @@ pub fn gpio_set_func(pin: u32, func: u8) {
     }
 }
 
-pub fn gpio_set_output_en(pin: u32, value: u32) {
+pub fn gpio_set_output_en(mut pin: u32, value: u32) {
     let bit = (pin & 0xff) as u8;
+    pin = (pin >> 8) << 3;
     if value == 0 {
         let mut val = read_reg_gpio_oen(pin);
         BM_SET!(val, bit);
@@ -790,8 +792,9 @@ pub fn gpio_set_output_en(pin: u32, value: u32) {
     }
 }
 
-pub fn gpio_write(pin: u32, value: u32) {
+pub fn gpio_write(mut pin: u32, value: u32) {
     let bit = (pin & 0xff) as u8;
+    pin = (pin >> 8) << 3;
     if value != 0 {
         let mut val = read_reg_gpio_out(pin);
         BM_SET!(val, bit);

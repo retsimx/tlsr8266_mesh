@@ -13,10 +13,10 @@ use crate::sdk::drivers::pwm::{pwm_set_cmp, pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1MS, CLOCK_SYS_CLOCK_1S};
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr2_tick, write_reg_tmr2_capt, write_reg_tmr0_tick, write_reg_tmr0_capt};
+use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
@@ -112,12 +112,12 @@ fn mesh_ota_master_led(_: *const u8) {
 }
 
 pub fn light_hw_timer1_config() {
-    //enable timer1 interrupt
-    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
-    write_reg_tmr1_tick(0);
-    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1US);
-
-    write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+    // Enable timer1 interrupts for controlling the lights
+    // write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
+    // write_reg_tmr1_tick(0);
+    // write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1MS );
+    //
+    // write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
 
     // enable timer0 interrupt for tracking clock_time overflow
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
@@ -322,7 +322,6 @@ fn light_lum_store() {
 
 //retrieve LUM : brightness or RGB/CT value
 fn light_lum_retrieve() {
-    return;
     let mut i = 0;
     while i < FLASH_SECTOR_SIZE {
         set_light_lum_addr(*get_flash_adr_lum() + i as u32);
@@ -525,28 +524,10 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // let vendor_id = (op_cmd[2] as u16) << 8 | op_cmd[1] as u16;
     let op = op_cmd[0] & 0x3F;
 
-    if op == LGT_CMD_LIGHT_ONOFF {
-        if app()
-            .mesh_manager
-            .check_cmd_delay(&params, p, pp, op_cmd_len, params_len)
-        {
-            return;
-        }
-    }
-
     _mesh_ota_timeout_handle(op, params.as_ptr());
 
     if op == LGT_CMD_LIGHT_ONOFF {
-        if params[0] == LIGHT_ON_PARAM {
-            light_onoff(true);
-        } else if params[0] == LIGHT_OFF_PARAM {
-            if ON_OFF_FROM_OTA == params[3] {
-                // only PWM off,
-                light_step_reset(0);
-            } else {
-                light_onoff(false);
-            }
-        }
+        app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params);
     } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
         let val = params[1] as u16 | ((params[2] as u16) << 8);
         if params[0] == LIGHT_DEL_GRP_PARAM {
@@ -570,11 +551,13 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             // Brightness
             let value = (params[1] as u16) << 8 | params[0] as u16;
 
+            set_led_lum(value);
+
             if *get_light_off() {
-                set_led_lum(value);
                 return;
             }
-            light_step_reset(value);
+
+            app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], value);
         }
         if params[8] & 0x2 != 0 {
             // Temperature
@@ -588,18 +571,11 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
                 return;
             }
 
-            light_step_reset(*get_led_lum());
+            app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], *get_led_lum());
         }
 
         set_lum_changed_time(clock_time());
     } else if op == LGT_CMD_KICK_OUT {
-        if app().mesh_manager.is_mesh_cmd_need_delay(
-            p,
-            &params,
-            pp.val[(op_cmd_len + params_len) as usize],
-        ) {
-            return;
-        }
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());
         _light_sw_reboot();
@@ -692,14 +668,10 @@ pub fn rf_link_light_event_callback(status: u8) {
 }
 
 #[no_mangle] // required by light_ll
-fn irq_timer1() {
-    app().mesh_manager.check_cmd_delay_timer();
+fn irq_timer1() {}
 
-    light_onoff_step_timer();
-}
-
-// Counts the number of microseconds triggered by the timer.
-pub static mut CLOCK_TIME_UPPER: u32 = 0;
+// Counts any clock_time overflows
+static mut CLOCK_TIME_UPPER: u32 = 0;
 static mut LAST_CLOCK_TIME: u32 = 0;
 
 unsafe fn check_clock_overflow() -> u32 {
@@ -735,10 +707,10 @@ fn irq_handler__attribute_ram_code() {
 }
 
 fn light_onoff_hw(on: bool) {
-    light_onoff_step(on);
+    app().light_manager.begin_transition(get_led_val()[0], get_led_val()[1], get_led_val()[2], match on {true => 0xffff, false => 0});
 }
 
-fn light_onoff(on: bool) {
+pub fn light_onoff(on: bool) {
     light_onoff_hw(on);
 
     device_status_update();
@@ -760,22 +732,6 @@ pub fn device_status_update() {
                                                  // end
 
     _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
-}
-
-pub fn light_onoff_normal(on: bool) {
-    return;
-    if on {
-        set_light_off(false);
-        light_adjust_rgb_hw(
-            get_led_val()[0],
-            get_led_val()[1],
-            get_led_val()[2],
-            *get_led_lum(),
-        );
-    } else {
-        set_light_off(true);
-        light_adjust_rgb_hw(0, 0, 0, 0);
-    }
 }
 
 fn light_adjust_r(val: u16, lum: u16) {

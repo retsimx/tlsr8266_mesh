@@ -1,6 +1,6 @@
 use crate::config::{get_flash_adr_pairing, VENDOR_ID};
 use crate::main_light::{
-    device_status_update, light_slave_tx_command, rf_link_data_callback,
+    device_status_update, light_slave_tx_command,
     rf_link_light_event_callback,
 };
 use crate::sdk::drivers::flash::flash_write_page;
@@ -84,16 +84,12 @@ pub struct MeshManager {
     mesh_pair_retry_max: u8,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    cmd_left_delay_ms: u16,
-    cmd_delay_ms: u16,
-    cmd_delay: ll_packet_l2cap_data_t,
     gateway_status: GatewayStatus,
-    irq_timer1_cb_time: u32
 }
 
 impl MeshManager {
-    pub const fn default() -> MeshManager {
-        MeshManager {
+    pub const fn default() -> Self {
+        Self {
             mesh_pair_start_time: 0,
             default_mesh_time: 0,
             default_mesh_effect_delay_ref: 0, /* When receive change to default mesh command, shall delay at least 500ms */
@@ -112,18 +108,7 @@ impl MeshManager {
             mesh_pair_retry_max: 3,
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
-            cmd_left_delay_ms: 0,
-            cmd_delay_ms: 0,
-            cmd_delay: ll_packet_l2cap_data_t {
-                l2capLen: 0,
-                chanId: 0,
-                opcode: 0,
-                handle: 0,
-                handle1: 0,
-                value: [0; 30],
-            },
             gateway_status: GatewayStatus::GatewayStatusNormal,
-            irq_timer1_cb_time: 0
         }
     }
 
@@ -254,33 +239,6 @@ impl MeshManager {
         self.mesh_pair_start_time = 0;
         self.mesh_pair_notify_rsp_mask = [0; 32];
         set_pair_setting_flag(PairState::PairSetted);
-    }
-
-    pub fn is_mesh_cmd_need_delay(
-        &mut self,
-        p_cmd: *const ll_packet_l2cap_data_t,
-        params: &[u8],
-        ttc: u8,
-    ) -> bool {
-        let delay_tmp = params[1] as u16 | (params[2] as u16) << 8;
-        if delay_tmp != 0 {
-            if self.cmd_left_delay_ms != 0 {
-                return true;
-            }
-            self.cmd_delay_ms = delay_tmp;
-            if self.cmd_delay_ms != 0 && self.irq_timer1_cb_time == 0 {
-                let cmd_delayed_ms = self.light_cmd_delayed_ms(ttc);
-                if self.cmd_delay_ms > cmd_delayed_ms {
-                    unsafe {
-                        self.cmd_delay = *p_cmd;
-                    }
-                    self.cmd_left_delay_ms = self.cmd_delay_ms - cmd_delayed_ms;
-                    self.irq_timer1_cb_time = clock_time();
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     fn save_effect_new_mesh(&mut self) {
@@ -519,68 +477,6 @@ impl MeshManager {
         // }; MESH_NODE_MAX_NUM as usize];
 
         device_status_update();
-    }
-
-    pub fn light_cmd_delayed_ms(&self, data: u8) -> u16 {
-        let ttc_prec = data >> 6;
-        let ttc_val: u16 = (data & 0x3F) as u16;
-        return if ttc_prec == 0 {
-            ttc_val
-        } else {
-            if ttc_prec == 1 {
-                ttc_val << 2
-            } else {
-                if ttc_prec == 2 {
-                    ttc_val << 4
-                } else {
-                    if ttc_prec == 3 {
-                        ttc_val << 8
-                    } else {
-                        0
-                    }
-                }
-            }
-        };
-    }
-
-    pub fn check_cmd_delay(
-        &mut self,
-        params: &[u8],
-        p: &ll_packet_l2cap_data_t,
-        pp: &rf_packet_att_value_t,
-        op_cmd_len: u8,
-        params_len: u8,
-    ) -> bool {
-        if self.cmd_left_delay_ms != 0 {
-            return true;
-        }
-        self.cmd_delay_ms = params[1] as u16 | ((params[2] as u16) << 8);
-        if self.cmd_delay_ms != 0 && self.irq_timer1_cb_time == 0 {
-            let cmd_delayed_ms =
-                self.light_cmd_delayed_ms(pp.val[(op_cmd_len + params_len) as usize]);
-            if self.cmd_delay_ms > cmd_delayed_ms {
-                self.cmd_delay = p.clone();
-                self.cmd_left_delay_ms = self.cmd_delay_ms - cmd_delayed_ms;
-                self.irq_timer1_cb_time = clock_time();
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    pub fn check_cmd_delay_timer(&mut self) {
-        if self.irq_timer1_cb_time != 0
-            && clock_time_exceed(
-                self.irq_timer1_cb_time,
-                (self.cmd_left_delay_ms * 1000) as u32,
-            )
-        {
-            self.cmd_left_delay_ms = 0;
-            rf_link_data_callback(&self.cmd_delay);
-            self.cmd_delay_ms = 0;
-            self.irq_timer1_cb_time = 0;
-        }
     }
 }
 

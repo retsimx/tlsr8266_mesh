@@ -1,5 +1,5 @@
 use crate::config::MESH_PWD_ENCODE_SK;
-use crate::main_light::{light_adjust_rgb_hw, main_loop, user_init};
+use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
 use crate::sdk::mcu::clock::clock_init;
@@ -10,29 +10,20 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
 use std::io::Write;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use crate::app;
 use crate::embassy::yield_now::yield_now;
+use crate::light_manager::LightManager;
 use crate::sdk::light::*;
 
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
+    pub light_manager: LightManager
 }
 
 #[embassy_executor::task]
-async fn light_driver() {
-    let mut idx = 0;
-    loop {
-        if idx % 2 == 0 {
-            light_adjust_rgb_hw(0xffff, 0xffff, 0xffff, 0xffff);
-        } else {
-            light_adjust_rgb_hw(0, 0, 0, 0);
-        }
-
-        Timer::after(Duration::from_secs(1)).await;
-
-        idx = idx + 1;
-    }
+async fn light_manager(spawner: Spawner) {
+    app().light_manager.run(spawner).await;
 }
 
 impl App {
@@ -40,18 +31,20 @@ impl App {
         App {
             ota_manager: OtaManager::default(),
             mesh_manager: MeshManager::default(),
+            light_manager: LightManager::default()
         }
     }
 
     pub fn init(&self) {
+        // Init various subsystems
+        cpu_wakeup_init();
+
         // Copy the password in to the pair config
         get_pair_config_pwd_encode_sk()
             .as_mut_slice()
             .write(MESH_PWD_ENCODE_SK.as_bytes())
             .unwrap();
 
-        // Init various subsystems
-        cpu_wakeup_init();
         clock_init();
         dma_init();
         gpio_init();
@@ -66,8 +59,8 @@ impl App {
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
-        //
-        spawner.spawn(light_driver()).unwrap();
+        // Start the light manager
+        spawner.spawn(light_manager(spawner)).unwrap();
 
         loop {
             wd_clear();

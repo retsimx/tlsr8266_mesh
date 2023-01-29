@@ -581,4 +581,6 @@ pub fn clock_time64() -> u64 {
 #[allow(non_snake_case)]
 fn irq_handler__attribute_ram_code() {
     _irq_light_slave_handler();
+
+    app().uart_manager.check_irq();
 }

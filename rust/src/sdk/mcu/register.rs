@@ -402,7 +402,7 @@ pub enum FLD_RF_RTT {
 
 regrw!(reg_rf_chn_rssi, 0x458, u8);
 
-// regrw!(reg_rf_rx_gain_agc(i)	REG_ADDR32(0x480+((i)<<2))
+regrw_idx!(reg_rf_rx_gain_agc, 0x480, u32);
 
 regrw!(reg_rf_rx_dci, 0x4cb, u8); //  different from the document, why
 regrw!(reg_rf_rx_dcq, 0x4cf, u8); //  different from the document, why
@@ -852,6 +852,36 @@ pub fn write_reg8(addr: u32, v: u8) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u8, v) }
 }
 
+pub fn write_reg16(addr: u32, v: u16) {
+    unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u16, v) }
+}
+
 pub fn write_reg32(addr: u32, v: u32) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
 }
+
+pub fn read_reg8(addr: u32) -> u8 {
+    unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u8) }
+}
+
+pub fn read_reg16(addr: u32) -> u16 {
+    unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u16) }
+}
+
+pub fn read_reg32(addr: u32) -> u32 {
+    unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u32) }
+}
+
+///////////////////// PM register /////////////////////////
+
+pub const  		rega_deepsleep_flag: u8 =		0x3f;		//0x34 - 0x39 (watch dog reset)
+// #define		rega_deepsleep_flag: u8 =		0x34		//0x3a - 0x3b (power-on reset)
+// pub const  		flag_deepsleep_wakeup	(analog_read(0x3f) & 0x40)
+
+pub const  		rega_wakeup_en_val0: u8 =		0x41;
+pub const  		rega_wakeup_en_val1: u8 =		0x42;
+pub const  		rega_wakeup_en_val2: u8 =		0x43;
+pub const  		raga_gpio_wkup_pol: u8 =		0x44;
+
+pub const  		raga_pga_gain0: u8 =		0x86;
+pub const  		raga_pga_gain1: u8 = 0x87;

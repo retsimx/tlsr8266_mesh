@@ -20,3 +20,4 @@ externc-libm = "0.1.0"
 embassy-time = { version = "0.1.0", features = ["tick-hz-32_000_000"] }
 embassy-executor = { version = "0.1.1", features = ["nightly", "integrated-timers"] }
 embassy-sync = "0.1.0"
+arrform = "0.1.1"

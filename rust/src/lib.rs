@@ -18,6 +18,7 @@ mod sdk;
 mod vendor_light;
 mod embassy;
 mod light_manager;
+mod uart_manager;
 
 static mut APP: App = App::default();
 

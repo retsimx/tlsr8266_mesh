@@ -10,7 +10,7 @@ use crate::sdk::mcu::watchdog::wd_clear;
 
 const UART_DATA_LEN: usize = 44;      // data max 252
 
-enum UARTIRQMASK {
+pub enum UARTIRQMASK {
 	RX      = BIT!(0),
 	TX      = BIT!(1),
 	ALL     = UARTIRQMASK::RX as isize | UARTIRQMASK::TX as isize,
@@ -25,7 +25,7 @@ enum HARDWARECONTROL {
     NOCONTROL = 0x00,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
 // This struct must be a multiple of 16 bytes in size
 pub struct uart_data_t {
     pub len: u32,        // data max 252
@@ -33,31 +33,27 @@ pub struct uart_data_t {
 }
 
 
-pub struct UartManager {
+pub struct UartDriver {
     pub txdata_user: uart_data_t,
     txdata_buf: uart_data_t, // not for user
 
-    pub rxdata_user: uart_data_t,
     // data max 252, user must copy rxdata to other Ram,but not use directly
-    rxdata_buf: uart_data_t,
+    pub rxdata_buf: uart_data_t,
 
-    pub uart_rx_true: bool,
     uart_tx_busy_flag: bool,
     uart_continue_delay_time: u32,
     baudrate_set: u32
 }
 
-impl UartManager {
+impl UartDriver {
     pub const fn default() -> Self {
         Self {
             txdata_user: uart_data_t{len: 0, data: [0; UART_DATA_LEN]},
             txdata_buf: uart_data_t{len: 0, data: [0; UART_DATA_LEN]}, // not for user
 
-            rxdata_user: uart_data_t{len: 0, data: [0; UART_DATA_LEN]},
             // data max 252, user must copy rxdata to other Ram,but not use directly
             rxdata_buf: uart_data_t{len: 0, data: [0; UART_DATA_LEN]},
 
-            uart_rx_true: false,
             uart_tx_busy_flag: false,
             uart_continue_delay_time: 0,
             baudrate_set: 0
@@ -151,24 +147,13 @@ impl UartManager {
     *	@return		uart_irq_src- enum variable of uart IRQ source, 'UARTRXIRQ' or 'UARTTXIRQ'
     *
     */
-    fn uart_irqsource_get() -> u8 {
+    pub fn uart_irqsource_get() -> u8 {
         let irq_s = read_reg_dma_rx_rdy0();
         write_reg_dma_rx_rdy0(irq_s);//CLR irq source
         return irq_s & UARTIRQMASK::ALL as u8;
     }
 
-    pub fn check_irq(&mut self) {
-        let irq_s = Self::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            self.uart_rx_true = true;
-        }
-
-        if irq_s & UARTIRQMASK::TX as u8 != 0 {
-            self.uart_clr_tx_busy_flag();
-        }
-    }
-
-    fn uart_clr_tx_busy_flag(&mut self) {
+    pub fn uart_clr_tx_busy_flag(&mut self) {
         self.uart_tx_busy_flag = false;
         self.uart_continue_delay_time = 0;
     }
@@ -259,17 +244,6 @@ impl UartManager {
             return true;
         }
         return false;
-    }
-
-    pub fn data_ready(&mut self) -> u8 {
-        if self.uart_rx_true {
-            self.uart_rx_true = false;
-            self.rxdata_user = self.rxdata_buf.clone();
-
-            return 1
-        }
-
-        return 0
     }
 
     pub async fn printf_async(&mut self, msg: &[u8]) {

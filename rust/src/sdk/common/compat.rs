@@ -7,16 +7,14 @@ extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
 }
 
-static mut critical_section_state: u8 = 0;
-
 #[no_mangle]
-fn _critical_section_1_0_acquire() {
-    unsafe { critical_section_state = irq_disable(); }
+fn _critical_section_1_0_acquire() -> u8 {
+    irq_disable()
 }
 
 #[no_mangle]
-fn _critical_section_1_0_release() {
-    unsafe { irq_restore(critical_section_state); }
+fn _critical_section_1_0_release(state: u8) {
+    unsafe { irq_restore(state); }
 }
 
 

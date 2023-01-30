@@ -4,7 +4,7 @@ use std::ptr::addr_of;
 use easer::functions::{Cubic, Easing};
 use embassy_executor::Spawner;
 use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
 use crate::app;
@@ -54,8 +54,8 @@ impl LightState {
 }
 
 pub struct LightManager {
-    channel: Channel::<NoopRawMutex, Message, 5>,
-    transition_signal: Channel::<NoopRawMutex, bool, 1>,
+    channel: Channel::<CriticalSectionRawMutex, Message, 5>,
+    transition_signal: Channel::<CriticalSectionRawMutex, bool, 1>,
 
     old_light_state: LightState,
     new_light_state: LightState,
@@ -76,8 +76,8 @@ async fn start_transitioner() {
 impl LightManager {
     pub const fn default() -> Self {
         Self {
-            channel: Channel::<NoopRawMutex, Message, 5>::new(),
-            transition_signal: Channel::<NoopRawMutex, bool, 1>::new(),
+            channel: Channel::<CriticalSectionRawMutex, Message, 5>::new(),
+            transition_signal: Channel::<CriticalSectionRawMutex, bool, 1>::new(),
             old_light_state: LightState::default(),
             new_light_state: LightState::default(),
             current_light_state: LightState::default(),

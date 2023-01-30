@@ -1,18 +1,18 @@
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use crate::sdk::drivers::uart::{uart_data_t, UartDriver, UARTIRQMASK};
 
 pub struct UartManager {
     pub driver: UartDriver,
-    channel: Channel::<NoopRawMutex, uart_data_t, 5>,
+    channel: Channel::<CriticalSectionRawMutex, uart_data_t, 5>,
 }
 
 impl UartManager {
     pub const fn default() -> Self {
         Self {
             driver: UartDriver::default(),
-            channel: Channel::<NoopRawMutex, uart_data_t, 5>::new(),
+            channel: Channel::<CriticalSectionRawMutex, uart_data_t, 5>::new(),
         }
     }
 

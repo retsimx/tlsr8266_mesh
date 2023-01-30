@@ -376,6 +376,7 @@ name = "tlsr8266_mesh"
 version = "0.1.0"
 dependencies = [
  "const-cstr",
+ "critical-section",
  "easer",
  "embassy-executor",
  "embassy-sync",

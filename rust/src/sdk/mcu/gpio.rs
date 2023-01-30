@@ -1,4 +1,4 @@
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
 use crate::sdk::mcu::register::{
     read_reg_gpio_gpio_func, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_gpio_func,
@@ -674,14 +674,14 @@ return;
         ((if PA0_FUNC==AS_I2S||PA1_FUNC==AS_I2S||PA2_FUNC==AS_I2S||PA3_FUNC==AS_I2S||PA4_FUNC==AS_I2S) { (BIT_RNG(21,23)|BIT_RNG(29,30))} else {0});
     */
 
-    let areg = analog_read__attribute_ram_code(0x0a) & 0x0f;
+    let areg = analog_read(0x0a) & 0x0f;
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0a,
         areg | (PULL_WAKEUP_SRC_PA0 << 4) | (PULL_WAKEUP_SRC_PA1 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0b,
         PULL_WAKEUP_SRC_PA2
             | (PULL_WAKEUP_SRC_PA3 << 2)
@@ -689,7 +689,7 @@ return;
             | (PULL_WAKEUP_SRC_PA5 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0c,
         PULL_WAKEUP_SRC_PA6
             | (PULL_WAKEUP_SRC_PA7 << 2)
@@ -697,7 +697,7 @@ return;
             | (PULL_WAKEUP_SRC_PB1 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0d,
         PULL_WAKEUP_SRC_PB2
             | (PULL_WAKEUP_SRC_PB3 << 2)
@@ -705,7 +705,7 @@ return;
             | (PULL_WAKEUP_SRC_PB5 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0e,
         PULL_WAKEUP_SRC_PB6
             | (PULL_WAKEUP_SRC_PB7 << 2)
@@ -713,7 +713,7 @@ return;
             | (PULL_WAKEUP_SRC_PC1 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x0f,
         PULL_WAKEUP_SRC_PC2
             | (PULL_WAKEUP_SRC_PC3 << 2)
@@ -721,7 +721,7 @@ return;
             | (PULL_WAKEUP_SRC_PC5 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x10,
         PULL_WAKEUP_SRC_PC6
             | (PULL_WAKEUP_SRC_PC7 << 2)
@@ -729,7 +729,7 @@ return;
             | (PULL_WAKEUP_SRC_PD1 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x11,
         PULL_WAKEUP_SRC_PD2
             | (PULL_WAKEUP_SRC_PD3 << 2)
@@ -737,7 +737,7 @@ return;
             | (PULL_WAKEUP_SRC_PD5 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x12,
         PULL_WAKEUP_SRC_PD6
             | (PULL_WAKEUP_SRC_PD7 << 2)
@@ -745,7 +745,7 @@ return;
             | (PULL_WAKEUP_SRC_PE1 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x13,
         PULL_WAKEUP_SRC_PE2
             | (PULL_WAKEUP_SRC_PE3 << 2)
@@ -753,7 +753,7 @@ return;
             | (PULL_WAKEUP_SRC_PE5 << 6),
     );
 
-    analog_write__attribute_ram_code(
+    analog_write(
         0x14,
         PULL_WAKEUP_SRC_PE6
             | (PULL_WAKEUP_SRC_PE7 << 2)
@@ -782,6 +782,20 @@ pub fn gpio_set_output_en(mut pin: u32, value: u32) {
     let bit = (pin & 0xff) as u8;
     pin = (pin >> 8) << 3;
     if value == 0 {
+        let mut val = read_reg_gpio_oen(pin);
+        BM_SET!(val, bit);
+        write_reg_gpio_oen(val, pin);
+    } else {
+        let mut val = read_reg_gpio_oen(pin);
+        BM_CLR!(val, bit);
+        write_reg_gpio_oen(val, pin);
+    }
+}
+
+pub fn gpio_set_input_en(mut pin: u32, value: u32) {
+    let bit = (pin & 0xff) as u8;
+    pin = (pin >> 8) << 3;
+    if value != 0 {
         let mut val = read_reg_gpio_oen(pin);
         BM_SET!(val, bit);
         write_reg_gpio_oen(val, pin);

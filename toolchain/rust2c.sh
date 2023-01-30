@@ -11,14 +11,16 @@ CP=./toolchain/tc32/bin/tc32-elf-objcopy
 CCFLAGS="-O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -ffunction-sections -fdata-sections -w"
 
 cd rust
-rm -Rf target/i686-unknown-linux-gnu/release/deps
+rm -Rf target/i686-unknown-linux-gnu/release/deps/*.c
+#find ./ -name "" -exec rm -rf {} \;
+
 cargo build --color=always --release
 
 for i in target/i686-unknown-linux-gnu/release/deps/*.ll; do
   bname="${i%.*}"
 
-  $CBE $i
+  $CBE $bname.ll
 
-  python ../toolchain/fix_ramcode.py $bname.cbe.c
+  python ../toolchain/fix_c.py $bname.cbe.c
   ../$CC -c $CCFLAGS -o $bname.o $bname.cbe.c.rc.c
 done

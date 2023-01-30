@@ -13,9 +13,9 @@ use embassy_executor::Spawner;
 use crate::{app, blinken};
 use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;
+use crate::sdk::common::compat::ultoa;
 use crate::sdk::drivers::uart::UartManager;
 use crate::sdk::light::*;
-use arrform::{arrform, ArrForm};
 
 pub struct App {
     pub ota_manager: OtaManager,
@@ -75,9 +75,12 @@ impl App {
             if self.uart_manager.data_ready() == 1 {
                 self.uart_manager.txdata_user = self.uart_manager.rxdata_user.clone();
                 self.uart_manager.uart_send_async().await;
-            }
 
-            self.uart_manager.printf("Time").await;
+                // let s: heapless::String<43> = heapless::String::from("Data! Time: ");
+                // let s = ultoa(clock_time(), s, 10);
+                //
+                // self.uart_manager.printf_async(s.as_bytes()).await;
+            }
 
             UartManager::uart_error_clr();
 

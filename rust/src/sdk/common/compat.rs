@@ -1,4 +1,4 @@
-use crate::sdk::mcu::analog::analog_write__attribute_ram_code;
+use crate::sdk::mcu::analog::analog_write;
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
@@ -176,7 +176,7 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
             if ccmd == TCMD_WRITE {
                 write_reg8(cadr, cdat);
             } else if ccmd == TCMD_WAREG {
-                analog_write__attribute_ram_code(cadr as u8, cdat);
+                analog_write(cadr as u8, cdat);
             } else if ccmd == TCMD_WAIT {
                 sleep_us((ptr.adr as u32) * 256 + cdat as u32);
             }
@@ -184,6 +184,43 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
         l += 1;
     }
     return size;
+}
+
+pub const XTOA_UPPER: u16 = 0x0200;
+pub fn ultoa(mut val: u32, mut string: heapless::String<43>, mut base: u16) -> heapless::String<43> {
+    let mut buffer: heapless::String<43> = heapless::String::new();
+
+    let mut upper = false;
+
+    if base & XTOA_UPPER != 0 {
+        upper = true;
+        base &= !XTOA_UPPER;
+    }
+
+    loop {
+        let mut v = val % base as u32;
+        val = val / base as u32;
+        if v <= 9 {
+            v += '0' as u32;
+        } else {
+            if (upper) {
+                v += 'A' as u32 - 10;
+            } else {
+                v += 'a' as u32 - 10;
+            }
+        }
+        buffer.push(v as u8 as char);
+
+        if val == 0 {
+            break;
+        }
+    }
+
+    buffer = buffer.chars().rev().collect::<heapless::String<43>>();
+
+    string.push_str(&buffer.as_str()).unwrap();
+
+    string
 }
 
 #[cfg(test)]

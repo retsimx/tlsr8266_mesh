@@ -82,7 +82,7 @@ pub fn blinken() {
 #[no_mangle]
 pub fn main_entrypoint() {
     // Must happen first
-    OtaManager::handle_ota_update__attribute_ram_code();
+    OtaManager::handle_ota_update();
 
     // Configure the system
     app().init();

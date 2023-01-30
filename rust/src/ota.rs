@@ -3,7 +3,7 @@ use crate::config::{get_flash_adr_light_new_fw, OTA_LED};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
@@ -47,8 +47,8 @@ impl OtaManager {
     }
 
     #[inline(never)]
-    #[allow(non_snake_case)]
-    pub fn handle_ota_update__attribute_ram_code() {
+    #[link_section = ".ram_code"]
+    pub fn handle_ota_update() {
         // This function requires that *everything* be in ram
         unsafe {
             if *(OtaManager::FLASH_ADR_OTA_READY_FLAG as *const u8)
@@ -131,10 +131,10 @@ impl OtaManager {
     }
 
     pub fn mesh_ota_master_100_flag_check(&self) {
-        let val = analog_read__attribute_ram_code(REGA_LIGHT_OFF);
+        let val = analog_read(REGA_LIGHT_OFF);
         if val & RecoverStatus::MeshOtaMaster100 as u8 != 0 {
             set_mesh_ota_master_100_flag(1);
-            analog_write__attribute_ram_code(
+            analog_write(
                 REGA_LIGHT_OFF,
                 val & !(RecoverStatus::MeshOtaMaster100 as u8),
             );

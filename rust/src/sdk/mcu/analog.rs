@@ -11,7 +11,8 @@ pub fn analog_wait() {
 
 #[inline(never)]
 #[no_mangle] // required by light_ll
-pub fn analog_read__attribute_ram_code(addr: u8) -> u8 {
+#[link_section = ".ram_code"]
+pub fn analog_read(addr: u8) -> u8 {
     let r = irq_disable();
 
     write_reg_ana_addr(addr);
@@ -28,7 +29,8 @@ pub fn analog_read__attribute_ram_code(addr: u8) -> u8 {
 
 #[inline(never)]
 #[no_mangle]
-pub fn analog_write__attribute_ram_code(addr: u8, v: u8) {
+#[link_section = ".ram_code"]
+pub fn analog_write(addr: u8, v: u8) {
     let r = irq_disable();
 
     write_reg_ana_addr(addr);

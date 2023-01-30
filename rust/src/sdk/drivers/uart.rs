@@ -4,8 +4,8 @@ use std::ptr::addr_of;
 use crate::{BIT, blinken};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
-use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func};
-use crate::sdk::mcu::register::{read_reg8, read_reg_dma_rx_rdy0, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma_rx_rdy0};
+use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_input_en, gpio_set_output_en};
+use crate::sdk::mcu::register::{FLD_DMA, FLD_IRQ, read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_irq_mask, write_reg_rst0};
 use crate::sdk::mcu::watchdog::wd_clear;
 
 const UART_DATA_LEN: usize = 44;      // data max 252
@@ -68,10 +68,12 @@ impl UartManager {
         gpio_set_func(GPIO_PIN_TYPE::GPIO_UTX as u32, AS_UART);
         gpio_set_func(GPIO_PIN_TYPE::GPIO_URX as u32, AS_UART);
 
-        // CLK32M_UART115200
-        self.uart_init(69, 3, true, true, HARDWARECONTROL::NOCONTROL);
+        gpio_set_input_en(GPIO_PIN_TYPE::GPIO_URX as u32, 1);
 
         self.uart_buff_init();
+
+        // CLK32M_UART115200
+        self.uart_init(69, 3, true, true, HARDWARECONTROL::NOCONTROL);
     }
 
     /*******************************************************
@@ -126,14 +128,18 @@ impl UartManager {
         write_reg8(0x800507,0x00); //DMA1 mode to send
         Self::uart_irqsource_get(); //clear uart irq
         if en_rx_irq {
-            write_reg8(0x800521, read_reg8(0x800521) | 0x01); //open dma1 interrupt mask
-            write_reg8(0x800640, read_reg8(0x800640) | 0x10); //open dma interrupt mask
+            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_RX as u8); //open dma1 interrupt mask
+            write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN as u32); //open dma interrupt mask
+
+            write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(0));
             //irq_enable(); // write_reg8(0x800643,0x01);//enable intterupt
         }
         if en_tx_irq {
-            write_reg8(0x800521, read_reg8(0x800521) | 0x02); //open dma1 interrupt mask
-            write_reg8(0x800640, read_reg8(0x800640) | 0x10); //open dma interrupt mask
+            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_TX as u8); //open dma1 interrupt mask
+            write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN as u32); //open dma interrupt mask
             //irq_enable(); // write_reg8(0x800643,0x01);//enable intterupt
+
+            write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(1));
         }
         return true;
     }
@@ -266,11 +272,19 @@ impl UartManager {
         return 0
     }
 
-    pub async fn printf(&mut self, msg: &str) {
+    pub async fn printf_async(&mut self, msg: &[u8]) {
         let len = min(43, msg.len());
         self.txdata_user.len = len as u32 + 1;
-        self.txdata_user.data[0..len].copy_from_slice(&msg.as_bytes()[0..len]);
+        self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
         self.txdata_user.data[len] = '\n' as u8;
         self.uart_send_async().await;
+    }
+
+    pub fn printf(&mut self, msg: &[u8]) {
+        let len = min(43, msg.len());
+        self.txdata_user.len = len as u32 + 1;
+        self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
+        self.txdata_user.data[len] = '\n' as u8;
+        self.uart_send();
     }
 }

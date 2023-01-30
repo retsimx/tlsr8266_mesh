@@ -14,7 +14,7 @@ use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::pwm_set_cmp;
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 
 const TRANSITION_TIME_MS: u64 = 1000;
@@ -221,9 +221,9 @@ impl LightManager {
 
         app().ota_manager.mesh_ota_master_100_flag_check();
 
-        let val = analog_read__attribute_ram_code(REGA_LIGHT_OFF);
+        let val = analog_read(REGA_LIGHT_OFF);
         if val & RecoverStatus::LightOff as u8 != 0 {
-            analog_write__attribute_ram_code(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
+            analog_write(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
             self.light_onoff(false);
         } else {
             self.light_onoff(true);

@@ -4,7 +4,7 @@ use crate::config::get_flash_adr_mac;
 use crate::{pub_mut, regrw};
 use crate::sdk::mcu::register::REG_BASE_ADDR;
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 
@@ -325,10 +325,10 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
         }
     }
     else {
-        analog_write__attribute_ram_code(6,0);  // power off sar
+        analog_write(6, 0);  // power off sar
     }
 
-    let result = analog_read__attribute_ram_code(rega_deepsleep_flag) & 0x40;
+    let result = analog_read(rega_deepsleep_flag) & 0x40;
 
     irq_restore(state);
 

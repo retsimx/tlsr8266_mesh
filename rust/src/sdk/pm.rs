@@ -1,16 +1,16 @@
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
-use crate::sdk::mcu::analog::{analog_read__attribute_ram_code, analog_write__attribute_ram_code};
+use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::BIT;
 
 pub fn usb_dp_pullup_en(en: bool) {
-    let mut dat: u8 = analog_read__attribute_ram_code(0x00);
+    let mut dat: u8 = analog_read(0x00);
     if en {
         dat &= !BIT!(4);
     } else {
         dat |= BIT!(4);
     }
 
-    analog_write__attribute_ram_code(0x00, dat);
+    analog_write(0x00, dat);
 }
 
 pub enum PM_WAKEUP {

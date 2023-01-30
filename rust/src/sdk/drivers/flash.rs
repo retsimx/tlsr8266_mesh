@@ -103,9 +103,10 @@ fn flash_is_busy() -> bool {
  * @return    none.
  */
 #[inline(never)]
-fn flash_wait_done__attribute_ram_code() {
+#[link_section = ".ram_code"]
+fn flash_wait_done() {
     sleep_us(100);
-    flash_send_cmd__attribute_ram_code(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
+    flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
 
     for i in 0..10000000 {
         if !flash_is_busy() {
@@ -121,7 +122,8 @@ fn flash_wait_done__attribute_ram_code() {
  * @return		none.
  */
 #[inline(never)]
-fn flash_send_cmd__attribute_ram_code(cmd: FLASH_CMD) {
+#[link_section = ".ram_code"]
+fn flash_send_cmd(cmd: FLASH_CMD) {
     mspi_high();
     sleep_us(1);
     mspi_low();
@@ -135,7 +137,8 @@ fn flash_send_cmd__attribute_ram_code(cmd: FLASH_CMD) {
  * @return		none.
  */
 #[inline(never)]
-pub fn flash_send_addr__attribute_ram_code(addr: u32) {
+#[link_section = ".ram_code"]
+pub fn flash_send_addr(addr: u32) {
     mspi_write(((addr >> 16) & 0xff) as u8);
     mspi_wait();
     mspi_write(((addr >> 8) & 0xff) as u8);
@@ -155,7 +158,8 @@ pub fn flash_send_addr__attribute_ram_code(addr: u32) {
  * @return 		none.
  */
 #[inline(never)]
-fn flash_mspi_read_ram__attribute_ram_code(
+#[link_section = ".ram_code"]
+fn flash_mspi_read_ram(
     cmd: FLASH_CMD,
     addr: u32,
     addr_en: u8,
@@ -165,9 +169,9 @@ fn flash_mspi_read_ram__attribute_ram_code(
 ) {
     let r = irq_disable();
 
-    flash_send_cmd__attribute_ram_code(cmd);
+    flash_send_cmd(cmd);
     if addr_en != 0 {
-        flash_send_addr__attribute_ram_code(addr);
+        flash_send_addr(addr);
     }
     for _ in 0..dummy_cnt {
         mspi_write(0x00); /* dummy */
@@ -200,7 +204,8 @@ fn flash_mspi_read_ram__attribute_ram_code(
  * @note		important:  "data" must not reside at flash, such as constant string.If that case, pls copy to memory first before write.
  */
 #[inline(never)]
-fn flash_mspi_write_ram__attribute_ram_code(
+#[link_section = ".ram_code"]
+fn flash_mspi_write_ram(
     cmd: FLASH_CMD,
     addr: u32,
     addr_en: u8,
@@ -209,17 +214,17 @@ fn flash_mspi_write_ram__attribute_ram_code(
 ) {
     let r = irq_disable();
 
-    flash_send_cmd__attribute_ram_code(FLASH_CMD::WRITE_ENABLE_CMD);
-    flash_send_cmd__attribute_ram_code(cmd);
+    flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD);
+    flash_send_cmd(cmd);
     if addr_en != 0 {
-        flash_send_addr__attribute_ram_code(addr);
+        flash_send_addr(addr);
     }
     for i in 0..data_len {
         unsafe { mspi_write(*data.offset(i as isize)) }
         mspi_wait();
     }
     mspi_high();
-    flash_wait_done__attribute_ram_code();
+    flash_wait_done();
 
     irq_restore(r);
 }
@@ -243,7 +248,7 @@ fn flash_mspi_write_ram__attribute_ram_code(
 #[inline(always)]
 #[no_mangle] // required by light_ll
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
-    flash_mspi_read_ram__attribute_ram_code(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
+    flash_mspi_read_ram(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
 }
 
 /*
@@ -272,7 +277,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
 
     loop {
         nw = if len > ns { ns } else { len };
-        flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
+        flash_mspi_write_ram(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
         ns = PAGE_SIZE;
         addr += nw;
         buf = unsafe { buf.offset(nw as isize) };
@@ -302,5 +307,5 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
 pub fn flash_erase_sector(addr: u32) {
     wd_clear();
 
-    flash_mspi_write_ram__attribute_ram_code(FLASH_CMD::SECT_ERASE_CMD, addr, 1, null_mut(), 0);
+    flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, 1, null_mut(), 0);
 }

@@ -517,7 +517,7 @@ regrw!(reg_dma_tx_rptr, 0x52a, u8);
 regrw!(reg_dma_tx_wptr, 0x52b, u8);
 regrw!(reg_dma_tx_fifo, 0x52c, u16);
 
-enum FLD_DMA {
+pub enum FLD_DMA {
     BUF_SIZE = BIT_RNG!(0, 7),
     WR_MEM = BIT!(8),
     PINGPONG_EN = BIT!(9),

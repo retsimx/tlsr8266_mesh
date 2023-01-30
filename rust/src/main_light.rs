@@ -579,7 +579,8 @@ pub fn clock_time64() -> u64 {
 
 #[no_mangle] // required by light_ll
 #[allow(non_snake_case)]
-fn irq_handler__attribute_ram_code() {
+#[link_section = ".ram_code"]
+fn irq_handler() {
     _irq_light_slave_handler();
 
     app().uart_manager.check_irq();

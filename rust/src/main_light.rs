@@ -7,6 +7,7 @@ use crate::{pub_mut, BIT};
 
 use crate::common::*;
 use crate::config::*;
+use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
@@ -153,7 +154,7 @@ pub fn user_init() {
     light_init_default();
 
     pwm_set_duty(PWMID_G, PMW_MAX_TICK, 0);
-    pwm_set_duty(PWMID_B, PMW_MAX_TICK, 0);
+    pwm_set_duty(PWMID_B, PMW_MAX_TICK, PMW_MAX_TICK);
 
     pwm_start(PWMID_G);
     pwm_start(PWMID_B);
@@ -544,8 +545,8 @@ pub fn rf_link_light_event_callback(status: u8) {
     }
 }
 
-#[no_mangle] // required by light_ll
-fn irq_timer1() {}
+#[no_mangle]
+pub fn irq_timer1() {}
 
 // Counts any clock_time overflows
 static mut CLOCK_TIME_UPPER: u32 = 0;
@@ -563,10 +564,10 @@ unsafe fn check_clock_overflow() -> u32 {
     time
 }
 
-#[no_mangle] // required by light_ll
 // This timer is configured to run once per second to check if the internal clock has overflowed.
 // this is a workaround in case there are no 'clock_time64' calls between overflows
-fn irq_timer0() {
+#[no_mangle]
+pub fn irq_timer0() {
     unsafe { check_clock_overflow(); }
 }
 
@@ -581,7 +582,7 @@ pub fn clock_time64() -> u64 {
 #[allow(non_snake_case)]
 #[link_section = ".ram_code"]
 fn irq_handler() {
-    _irq_light_slave_handler();
+    unsafe { irq_light_slave_handler(); }
 
     app().uart_manager.check_irq();
 }

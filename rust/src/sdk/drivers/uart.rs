@@ -8,7 +8,7 @@ use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_inpu
 use crate::sdk::mcu::register::{FLD_DMA, FLD_IRQ, read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_irq_mask, write_reg_rst0};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-const UART_DATA_LEN: usize = 44;      // data max 252
+pub const UART_DATA_LEN: usize = 60;      // data max 252
 
 pub enum UARTIRQMASK {
 	RX      = BIT!(0),
@@ -34,7 +34,6 @@ pub struct uart_data_t {
 
 
 pub struct UartDriver {
-    pub txdata_user: uart_data_t,
     txdata_buf: uart_data_t, // not for user
 
     // data max 252, user must copy rxdata to other Ram,but not use directly
@@ -48,7 +47,6 @@ pub struct UartDriver {
 impl UartDriver {
     pub const fn default() -> Self {
         Self {
-            txdata_user: uart_data_t{len: 0, data: [0; UART_DATA_LEN]},
             txdata_buf: uart_data_t{len: 0, data: [0; UART_DATA_LEN]}, // not for user
 
             // data max 252, user must copy rxdata to other Ram,but not use directly
@@ -171,7 +169,7 @@ impl UartDriver {
     *	@return	'1' send success; '0' DMA busy
     */
 
-    pub async fn uart_send_async(&mut self) -> bool {
+    pub async fn uart_send_async(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
             wd_clear();
@@ -185,7 +183,7 @@ impl UartDriver {
         }
 
         self.uart_set_tx_busy_flag();
-        self.txdata_buf = self.txdata_user.clone();
+        self.txdata_buf = msg.clone();
         write_reg16(0x800504,addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
         // STARTTX;
@@ -194,7 +192,7 @@ impl UartDriver {
         return true;
     }
 
-    pub fn uart_send(&mut self) -> bool {
+    pub fn uart_send(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
             wd_clear();
@@ -206,7 +204,7 @@ impl UartDriver {
         }
 
         self.uart_set_tx_busy_flag();
-        self.txdata_buf = self.txdata_user.clone();
+        self.txdata_buf = msg.clone();
         write_reg16(0x800504,addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
         // STARTTX;
@@ -246,19 +244,19 @@ impl UartDriver {
         return false;
     }
 
-    pub async fn printf_async(&mut self, msg: &[u8]) {
-        let len = min(43, msg.len());
-        self.txdata_user.len = len as u32 + 1;
-        self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
-        self.txdata_user.data[len] = '\n' as u8;
-        self.uart_send_async().await;
-    }
-
-    pub fn printf(&mut self, msg: &[u8]) {
-        let len = min(43, msg.len());
-        self.txdata_user.len = len as u32 + 1;
-        self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
-        self.txdata_user.data[len] = '\n' as u8;
-        self.uart_send();
-    }
+    // pub async fn printf_async(&mut self, msg: &[u8]) {
+    //     let len = min(43, msg.len());
+    //     self.txdata_user.len = len as u32 + 1;
+    //     self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
+    //     self.txdata_user.data[len] = '\n' as u8;
+    //     self.uart_send_async().await;
+    // }
+    //
+    // pub fn printf(&mut self, msg: &[u8]) {
+    //     let len = min(43, msg.len());
+    //     self.txdata_user.len = len as u32 + 1;
+    //     self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
+    //     self.txdata_user.data[len] = '\n' as u8;
+    //     self.uart_send();
+    // }
 }

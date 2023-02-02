@@ -121,7 +121,7 @@ fn update_ble_parameter_cb() {
 }
 
 #[no_mangle] // required by light_ll
-fn rf_update_conn_para(p: *const u8) -> u8 {
+pub fn rf_update_conn_para(p: *const u8) -> u8 {
     let pp = unsafe { &*(p as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;

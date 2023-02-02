@@ -13,6 +13,7 @@ use embassy_executor::Spawner;
 use crate::{app};
 use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;
+use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
 use crate::uart_manager::UartManager;
@@ -58,7 +59,7 @@ impl App {
         dma_init();
         gpio_init();
         irq_init();
-        _rf_drv_init(0);
+        unsafe { rf_drv_init(true); }
 
         // Get uart ready to go
         self.uart_manager.init();

@@ -31,6 +31,8 @@ no_mangle_fn!(rf_link_slave_read_status_stop);
 no_mangle_fn!(rf_link_data_callback, p: *const u8);
 no_mangle_fn!(light_sw_reboot);
 no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
+no_mangle_fn!(rf_link_slave_data_write_no_dec, u32, p: *const rf_packet_ll_data_t);
+no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32);
 
 no_mangle_fn!(pairRead, u32, p: *const u8);
 no_mangle_fn!(pairWrite, u32, p: *const u8);
@@ -142,6 +144,10 @@ pub_mut!(tick_per_us, u32);
 
 pub_mut!(user_data, [u8; 16]);
 pub_mut!(user_data_len, u8);
+
+pub_mut!(gateway_en, u8);
+pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
+pub_mut!(fp_gateway_rx_proc, fn());
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
@@ -327,6 +333,8 @@ pub const DEVICE_ADDR_MASK_DEFAULT: u16 = 0x7FFF;
 
 pub const MESH_NODE_MAX_NUM: u16 = 64;
 
+pub const PKT_CMD_LEN: usize = 11;
+
 pub enum LightOpType {
     op_type_1 = 1,
     op_type_2 = 2,
@@ -396,7 +404,7 @@ pub struct ll_adv_rsp_private_t {
     // low 4 byte
     pub ProductUUID: u16,
     pub status: u8,
-    pub DeviceAddress: [u8; 2],
+    pub DeviceAddress: u16,
     pub rsv: [u8; 16],
 }
 
@@ -408,6 +416,67 @@ pub struct rf_packet_att_value_t {
     pub val: [u8; 23], // op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
                        // get status req: params[0]=tick  mac-app[2-3]=src-mac1...
                        // get status rsp: mac-app[0]=ttc  mac-app[1]=hop-count
+}
+
+#[repr(C, packed)]
+pub struct rf_packet_ll_data_t {
+	pub dma_len: u32,   // 0         //won't be a fixed number as previous, should adjust with the mouse package number
+	pub _type: u8,		// 4		//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+	pub rf_len: u8,		// 5		//LEN(5)_RFU(3)
+    pub l2cap_low: u8,  // 6        // 0x17
+	pub l2cap_high: u8,	// 7		// 0
+	pub chanid: u16,	// 8			//0x04,
+	pub att: u8,		// 10		//0x12 for master; 0x1b for slave// as ttl when relay
+	pub hl: u8,			// 11		// assigned by master
+	pub hh: u8,			// 12		//
+	pub sno: u8,        // 13
+	pub nid: u8,        // 14
+	pub ttc: u8,        // 15
+	pub group: u16,     // 16
+	pub sid: [u16; 2],
+	pub cmd: [u8; PKT_CMD_LEN]
+}
+
+#[repr(C, packed)]
+pub struct app_cmd_value_t {
+   pub sno: [u8; 3],
+   pub src: [u8; 2],
+   pub dst: [u8; 2],
+   pub op: u8,
+   pub vendor_id: u16,
+   pub par: [u8; 10],
+}
+
+#[repr(C, packed)]
+pub struct rf_packet_ll_app_t {
+	pub dma_len: u32,   // 0
+	pub _type: u8,      // 4
+	pub rf_len: u8,     // 5
+	pub l2capLen: u16,  // 6
+	pub chanId: u16,    // 8
+	pub opcode: u8,     // 10
+	pub handle: u8,     // 11
+	pub handle1: u8,    // 12
+	pub app_cmd_v: app_cmd_value_t,
+	pub rsv: [u8; 10],
+}
+
+#[repr(C, packed)]
+pub struct rf_packet_ll_init_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4): connect request PDU
+    pub rf_len: u8,				//LEN(6)_RFU(2)
+    pub scanA: [u8; 6],			//
+    pub advA: [u8; 6],			//
+    pub aa: [u8; 4],			// access code
+    pub crcinit: [u8; 3],
+    pub wsize: u8,
+    pub woffset: u16,
+    pub interval: u16,
+    pub latency: u16,
+    pub timeout: u16,
+    pub chm: [u8; 5],
+    pub hop: u8,				//sca(3)_hop(5)
 }
 
 #[derive(Clone, Copy)]
@@ -512,11 +581,24 @@ pub struct rc_pkt_buf_t {
     pub sno2: [u8; 2], // for passive
 }
 
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct rf_packet_scan_rsp_t {
+	pub dma_len: u32,       // 0     //won't be a fixed number as previous, should adjust with the mouse package number
+
+	pub _type: u8,          // 4				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+	pub rf_len: u8,			// 5	//LEN(6)_RFU(2)
+	pub advA: [u8; 6],		// 6	//address
+	pub data: [u8; 31]		// 12	//0-31 byte
+
+}
+
 #[inline(always)]
 pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
     return p_addr[1] & 0x80 == 0;
 }
 
+no_mangle_fn!(rf_link_slave_data, u32, p: *const rf_packet_ll_data_t, t: u32);
 // required callback fns
 no_mangle_fn_def!(gpio_irq_user_handle);
 no_mangle_fn_def!(gpio_risc0_user_handle);

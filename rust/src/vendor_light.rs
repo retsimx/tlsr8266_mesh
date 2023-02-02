@@ -24,7 +24,7 @@ pub_mut_no_move!(
         MacAddress: 0,
         ProductUUID: 0x1234,
         status: 0x01,
-        DeviceAddress: [0; 2],
+        DeviceAddress: 0,
         rsv: [0; 16]
     }
 );

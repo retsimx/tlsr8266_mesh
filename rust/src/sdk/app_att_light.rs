@@ -52,33 +52,21 @@ pub const CHAR_PROP_SIZE: u8 = 1;
 pub const CHAR_CFG_BITS_SIZE: u8 = 2;
 /** @} end of group GATT_Char_Cfg_Bit_length */
 
-pub const GATT_UUID_PRIMARY_SERVICE: u16 = 0x2800;
-// Primary Service
-pub const GATT_UUID_SECONDARY_SERVICE: u16 = 0x2801;
-// Secondary Service
-pub const GATT_UUID_INCLUDE: u16 = 0x2802;
-// Include
-pub const GATT_UUID_CHARACTER: u16 = 0x2803;
-// Characteristic
-pub const GATT_UUID_CHAR_EXT_PROPS: u16 = 0x2900;
-// Characteristic Extended Properties
-pub const GATT_UUID_CHAR_USER_DESC: u16 = 0x2901;
-// Characteristic User Description
-pub const GATT_UUID_CLIENT_CHAR_CFG: u16 = 0x2902;
-// Client Characteristic Configuration
-pub const GATT_UUID_SERVER_CHAR_CFG: u16 = 0x2903;
-// Server Characteristic Configuration
-pub const GATT_UUID_CHAR_PRESENT_FORMAT: u16 = 0x2904;
-// Characteristic Present Format
-pub const GATT_UUID_CHAR_AGG_FORMAT: u16 = 0x2905;
-// Characteristic Aggregate Format
-pub const GATT_UUID_VALID_RANGE: u16 = 0x2906;
-// Valid Range
-pub const GATT_UUID_EXT_REPORT_REF: u16 = 0x2907;
-// External Report Reference
-pub const GATT_UUID_REPORT_REF: u16 = 0x2908; // Report Reference
+pub const GATT_UUID_PRIMARY_SERVICE: u16 = 0x2800;      // Primary Service
+pub const GATT_UUID_SECONDARY_SERVICE: u16 = 0x2801;    // Secondary Service
+pub const GATT_UUID_INCLUDE: u16 = 0x2802;              // Include
+pub const GATT_UUID_CHARACTER: u16 = 0x2803;            // Characteristic
+pub const GATT_UUID_CHAR_EXT_PROPS: u16 = 0x2900;       // Characteristic Extended Properties
+pub const GATT_UUID_CHAR_USER_DESC: u16 = 0x2901;       // Characteristic User Description
+pub const GATT_UUID_CLIENT_CHAR_CFG: u16 = 0x2902;      // Client Characteristic Configuration
+pub const GATT_UUID_SERVER_CHAR_CFG: u16 = 0x2903;      // Server Characteristic Configuration
+pub const GATT_UUID_CHAR_PRESENT_FORMAT: u16 = 0x2904;  // Characteristic Present Format
+pub const GATT_UUID_CHAR_AGG_FORMAT: u16 = 0x2905;      // Characteristic Aggregate Format
+pub const GATT_UUID_VALID_RANGE: u16 = 0x2906;          // Valid Range
+pub const GATT_UUID_EXT_REPORT_REF: u16 = 0x2907;       // External Report Reference
+pub const GATT_UUID_REPORT_REF: u16 = 0x2908;           // Report Reference
 
-pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00; // Report Reference
+pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00;          // Report Reference
 
 pub const CHARACTERISTIC_UUID_MANU_NAME_STRING: u16 = 0x2A29;
 pub const CHARACTERISTIC_UUID_MODEL_NUM_STRING: u16 = 0x2A24;

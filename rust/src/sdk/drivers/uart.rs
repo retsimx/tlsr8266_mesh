@@ -5,10 +5,10 @@ use crate::{BIT, blinken};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_input_en, gpio_set_output_en};
-use crate::sdk::mcu::register::{FLD_DMA, FLD_IRQ, read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_irq_mask, write_reg_rst0};
+use crate::sdk::mcu::register::{FLD_DMA, FLD_IRQ, read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma1_addr, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0, write_reg_irq_mask, write_reg_rst0};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-pub const UART_DATA_LEN: usize = 60;      // data max 252
+pub const UART_DATA_LEN: usize = 44;      // data max 252
 
 pub enum UARTIRQMASK {
 	RX      = BIT!(0),
@@ -145,12 +145,14 @@ impl UartDriver {
     *	@return		uart_irq_src- enum variable of uart IRQ source, 'UARTRXIRQ' or 'UARTTXIRQ'
     *
     */
+    #[inline(always)]
     pub fn uart_irqsource_get() -> u8 {
         let irq_s = read_reg_dma_rx_rdy0();
         write_reg_dma_rx_rdy0(irq_s);//CLR irq source
         return irq_s & UARTIRQMASK::ALL as u8;
     }
 
+    #[inline(always)]
     pub fn uart_clr_tx_busy_flag(&mut self) {
         self.uart_tx_busy_flag = false;
         self.uart_continue_delay_time = 0;
@@ -169,6 +171,7 @@ impl UartDriver {
     *	@return	'1' send success; '0' DMA busy
     */
 
+    #[inline(never)]
     pub async fn uart_send_async(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
@@ -183,11 +186,12 @@ impl UartDriver {
         }
 
         self.uart_set_tx_busy_flag();
-        self.txdata_buf = msg.clone();
-        write_reg16(0x800504,addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
+        self.txdata_buf = *msg;
+
+        write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
         // STARTTX;
-        write_reg8(0x800524,0x02); //trigger dma
+        write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX as u8); //trigger dma
 
         return true;
     }
@@ -204,7 +208,7 @@ impl UartDriver {
         }
 
         self.uart_set_tx_busy_flag();
-        self.txdata_buf = msg.clone();
+        self.txdata_buf = *msg;
         write_reg16(0x800504,addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
         // STARTTX;

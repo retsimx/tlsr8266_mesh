@@ -64,12 +64,13 @@ no_mangle_fn!(mesh_ota_master_cancle, reset_flag: u8, complete: bool);
 no_mangle_fn!(mesh_ota_master_start_firmware_from_backup);
 no_mangle_fn!(
     mesh_push_user_command,
-    u32,
+    bool,
     sno: u32,
     dst: u16,
     p: *const u8,
     len: u8
 );
+no_mangle_fn!(mesh_send_user_command, u32);
 no_mangle_fn!(mesh_node_init);
 no_mangle_fn!(mesh_report_status_enable, mask: u8);
 no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
@@ -90,7 +91,8 @@ no_mangle_fn!(
     timeout: u16
 );
 
-no_mangle_fn!(rf_drv_init, mode: u32);
+no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
+no_mangle_fn!(pair_enc_packet_mesh, u32, ps: *const u8);
 
 pub_mut!(pair_config_valid_flag, u8);
 pub_mut!(pair_config_mesh_name, [u8; 17]);
@@ -439,12 +441,12 @@ pub struct rf_packet_ll_data_t {
 
 #[repr(C, packed)]
 pub struct app_cmd_value_t {
-   pub sno: [u8; 3],
-   pub src: [u8; 2],
-   pub dst: [u8; 2],
-   pub op: u8,
-   pub vendor_id: u16,
-   pub par: [u8; 10],
+   pub sno: [u8; 3],    // 0
+   pub src: [u8; 2],    // 3
+   pub dst: [u8; 2],    // 5
+   pub op: u8,          // 7
+   pub vendor_id: u16,  // 8
+   pub par: [u8; 10],   // 10
 }
 
 #[repr(C, packed)]
@@ -457,7 +459,7 @@ pub struct rf_packet_ll_app_t {
 	pub opcode: u8,     // 10
 	pub handle: u8,     // 11
 	pub handle1: u8,    // 12
-	pub app_cmd_v: app_cmd_value_t,
+	pub app_cmd_v: app_cmd_value_t, // 13
 	pub rsv: [u8; 10],
 }
 
@@ -519,14 +521,14 @@ pub struct rf_packet_att_write_t {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct rf_packet_att_cmd_t {
-    pub dma_len: u32,
-    pub _type: u8,
-    pub rf_len: u8,
-    pub l2capLen: u16,
-    pub chanId: u16,
-    pub opcode: u8,
-    pub handle: u8,
-    pub handle1: u8,
+    pub dma_len: u32,   // 0
+    pub _type: u8,      // 4
+    pub rf_len: u8,     // 5
+    pub l2capLen: u16,  // 6
+    pub chanId: u16,    // 8
+    pub opcode: u8,     // 10
+    pub handle: u8,     // 11
+    pub handle1: u8,    // 12
     pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
@@ -635,7 +637,7 @@ fn is_scene_poll_notify_busy() -> u32 {
 
 #[no_mangle]
 fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
-    return 1;
+    return 0;
 }
 
 // Alarm shit needed to link
@@ -649,7 +651,7 @@ fn is_alarm_poll_notify_busy() -> u32 {
 
 #[no_mangle]
 fn is_new_alarm(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
-    return 1;
+    return 0;
 }
 
 #[no_mangle]

@@ -487,7 +487,7 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) {
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
     let mut cmd_op_para: [u8; 16] = [0; 16];
     let cmd_sno = clock_time() + *get_device_address() as u32;
 
@@ -498,7 +498,7 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) {
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13);
+    _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
 }
 
 fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {

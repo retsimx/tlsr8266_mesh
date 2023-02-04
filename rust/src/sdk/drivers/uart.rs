@@ -126,12 +126,10 @@ impl UartDriver {
             write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN as u32); //open dma interrupt mask
 
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(0));
-            //irq_enable(); // write_reg8(0x800643,0x01);//enable intterupt
         }
         if en_tx_irq {
             write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_TX as u8); //open dma1 interrupt mask
             write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN as u32); //open dma interrupt mask
-            //irq_enable(); // write_reg8(0x800643,0x01);//enable intterupt
 
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(1));
         }
@@ -154,10 +152,10 @@ impl UartDriver {
 
     #[inline(always)]
     pub fn uart_clr_tx_busy_flag(&mut self) {
-        self.uart_tx_busy_flag = false;
-        self.uart_continue_delay_time = 0;
+        self.uart_continue_delay_time = clock_time() | 1;
     }
 
+    #[inline(always)]
     fn uart_tx_is_busy(&self) -> bool {
         return self.uart_tx_busy_flag;
     }
@@ -171,7 +169,6 @@ impl UartDriver {
     *	@return	'1' send success; '0' DMA busy
     */
 
-    #[inline(never)]
     pub async fn uart_send_async(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
@@ -192,27 +189,6 @@ impl UartDriver {
 
         // STARTTX;
         write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX as u8); //trigger dma
-
-        return true;
-    }
-
-    pub fn uart_send(&mut self, msg: &uart_data_t) -> bool {
-        let t_timeout = clock_time();
-        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
-            wd_clear();
-
-            if self.uart_continue_delay_time != 0 && clock_time_exceed(self.uart_continue_delay_time, if self.baudrate_set > 100000 { 800 } else { 9000 }) {
-                self.uart_continue_delay_time = 0;    // minimum delay :  115200 delay 600us;  9600 delay 7200us
-                self.uart_tx_busy_flag = false;
-            }
-        }
-
-        self.uart_set_tx_busy_flag();
-        self.txdata_buf = *msg;
-        write_reg16(0x800504,addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
-
-        // STARTTX;
-        write_reg8(0x800524,0x02); //trigger dma
 
         return true;
     }
@@ -247,20 +223,4 @@ impl UartDriver {
         }
         return false;
     }
-
-    // pub async fn printf_async(&mut self, msg: &[u8]) {
-    //     let len = min(43, msg.len());
-    //     self.txdata_user.len = len as u32 + 1;
-    //     self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
-    //     self.txdata_user.data[len] = '\n' as u8;
-    //     self.uart_send_async().await;
-    // }
-    //
-    // pub fn printf(&mut self, msg: &[u8]) {
-    //     let len = min(43, msg.len());
-    //     self.txdata_user.len = len as u32 + 1;
-    //     self.txdata_user.data[0..len].copy_from_slice(&msg[0..len]);
-    //     self.txdata_user.data[len] = '\n' as u8;
-    //     self.uart_send();
-    // }
 }

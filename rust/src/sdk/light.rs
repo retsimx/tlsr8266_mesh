@@ -4,6 +4,7 @@ use std::mem;
 use std::mem::{size_of, size_of_val, MaybeUninit};
 use crate::{no_mangle_fn, no_mangle_fn_def};
 use crate::{pub_mut, BIT};
+use crate::mesh::mesh_node_st_val_t;
 
 no_mangle_fn!(light_set_tick_per_us, tick: u32);
 
@@ -93,6 +94,7 @@ no_mangle_fn!(
 
 no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
 no_mangle_fn!(pair_enc_packet_mesh, u32, ps: *const u8);
+no_mangle_fn!(pair_dec_packet_mesh, u32, ps: *const u8);
 
 pub_mut!(pair_config_valid_flag, u8);
 pub_mut!(pair_config_mesh_name, [u8; 17]);
@@ -150,6 +152,9 @@ pub_mut!(user_data_len, u8);
 pub_mut!(gateway_en, u8);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
+
+pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const app_cmd_value_t)>, Option::None);
+pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, Option::None);
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
@@ -440,6 +445,7 @@ pub struct rf_packet_ll_data_t {
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct app_cmd_value_t {
    pub sno: [u8; 3],    // 0
    pub src: [u8; 2],    // 3
@@ -450,6 +456,7 @@ pub struct app_cmd_value_t {
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct rf_packet_ll_app_t {
 	pub dma_len: u32,   // 0
 	pub _type: u8,      // 4
@@ -749,8 +756,6 @@ fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
 
 #[no_mangle]
 fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) {}
-
-pub_mut!(p_cb_rx_from_mesh, u32, 0);
 
 #[no_mangle]
 fn is_bridge_task_busy() -> bool {

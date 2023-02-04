@@ -2,7 +2,7 @@ use crate::app;
 use std::cmp::{min};
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ptr::addr_of;
+use std::ptr::{addr_of};
 use crate::{pub_mut, BIT};
 
 use crate::common::*;
@@ -514,7 +514,7 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
 
         // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
         get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&[0; 10]);
-        get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&p[0..p.len()]);
+        get_pkt_light_notify().value[10..10 + p.len()].copy_from_slice(&p[0..p.len()]);
 
         let r = irq_disable();
         if _is_add_packet_buf_ready() {

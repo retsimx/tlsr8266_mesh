@@ -52,7 +52,7 @@ pub enum GatewayStatus {
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-struct mesh_node_st_val_t {
+pub struct mesh_node_st_val_t {
     pub dev_adr: u8,                              // don't change include type
     pub sn: u8,                                   // don't change include type
     pub par: [u8; MESH_NODE_ST_PAR_LEN as usize], //lumen-rsv,
@@ -302,7 +302,7 @@ impl MeshManager {
         let mut cnt = 0;
         for i in 0..*get_mesh_node_max() {
             if get_mesh_node_st()[i as usize].tick != 0 {
-                cnt += 0;
+                cnt += 1;
                 if i > 0 {
                     self.mesh_pair_notify_rsp_mask
                         [(get_mesh_node_st()[i as usize].val.dev_adr / 8) as usize] |=

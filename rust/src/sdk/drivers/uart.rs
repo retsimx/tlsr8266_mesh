@@ -40,8 +40,6 @@ pub struct UartDriver {
     pub rxdata_buf: uart_data_t,
 
     uart_tx_busy_flag: bool,
-    uart_continue_delay_time: u32,
-    baudrate_set: u32
 }
 
 impl UartDriver {
@@ -53,8 +51,6 @@ impl UartDriver {
             rxdata_buf: uart_data_t{len: 0, data: [0; UART_DATA_LEN]},
 
             uart_tx_busy_flag: false,
-            uart_continue_delay_time: 0,
-            baudrate_set: 0
         }
     }
 
@@ -98,7 +94,6 @@ impl UartDriver {
         }
 
         let baudrate = (CLOCK_SYS_CLOCK_HZ / (uart_clkdiv as u32 + 1)) / (bwpc as u32 + 1);
-        self.baudrate_set = baudrate;
 
         write_reg16(0x800094, uart_clkdiv | 0x8000); //set uart clk divider and enable clock divider
         write_reg8(0x800096,0x30 | bwpc); //set bit width and enable rx/tx DMA
@@ -152,7 +147,7 @@ impl UartDriver {
 
     #[inline(always)]
     pub fn uart_clr_tx_busy_flag(&mut self) {
-        self.uart_continue_delay_time = clock_time() | 1;
+        self.uart_tx_busy_flag = false;
     }
 
     #[inline(always)]
@@ -175,11 +170,6 @@ impl UartDriver {
             wd_clear();
 
             yield_now().await;
-
-            if self.uart_continue_delay_time != 0 && clock_time_exceed(self.uart_continue_delay_time, if self.baudrate_set > 100000 { 800 } else { 9000 }) {
-                self.uart_continue_delay_time = 0;    // minimum delay :  115200 delay 600us;  9600 delay 7200us
-                self.uart_tx_busy_flag = false;
-            }
         }
 
         self.uart_set_tx_busy_flag();
@@ -212,7 +202,6 @@ impl UartDriver {
 
     fn uart_set_tx_busy_flag(&mut self) {
         self.uart_tx_busy_flag = true;
-        self.uart_continue_delay_time = 0;
     }
 
     pub fn uart_error_clr() -> bool {

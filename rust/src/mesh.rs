@@ -62,7 +62,7 @@ pub struct mesh_node_st_val_t {
 #[repr(C, packed)]
 pub struct mesh_node_st_t {
     pub tick: u16, // don't change include type
-    val: mesh_node_st_val_t,
+    pub val: mesh_node_st_val_t,
 }
 
 pub struct MeshManager {

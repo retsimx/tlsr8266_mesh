@@ -153,8 +153,11 @@ pub_mut!(gateway_en, u8);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
 
-pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const app_cmd_value_t)>, Option::None);
+pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, Option::None);
+
+pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
+pub_mut!(p_vendor_mesh_node_rcv_rsp, Option<fn(p: *const rf_packet_att_value_t)>);
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
@@ -166,7 +169,6 @@ pub const PMW_MAX_TICK: u16 = PMW_MAX_TICK_1;
 
 pub const BRIDGE_MAX_CNT: u32 = 0;
 pub const IRQ_TIMER1_ENABLE: bool = true;
-pub const IRQ_TIME1_INTERVAL: u8 = 10;
 
 pub const ONLINE_STATUS_TIMEOUT: u32 = 3000;
 

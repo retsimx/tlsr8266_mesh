@@ -1,8 +1,7 @@
 use std::mem::size_of;
 use std::ptr::{addr_of};
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
+use heapless::Deque;
 use crate::{app, BIT, pub_mut};
 use crate::embassy::yield_now::yield_now;
 use crate::main_light::light_slave_tx_command;
@@ -11,15 +10,14 @@ use crate::mesh::wrappers::get_mesh_node_st;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::common::string::memcpy;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{_mesh_send_command, _pair_enc_packet_mesh, app_cmd_value_t, get_mesh_node_max, get_security_enable, MESH_NODE_MAX_NUM, rf_packet_att_cmd_t, rf_packet_att_value_t, set_p_cb_rx_from_mesh, set_p_mesh_node_status_callback, set_p_vendor_mesh_node_rcv_rsp, set_p_vendor_mesh_node_status_report};
+use crate::sdk::light::{_mesh_send_command, _pair_enc_packet_mesh, app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM, rf_packet_att_cmd_t, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::watchdog::wd_clear;
 
 pub_mut!(pkt_user_cmd, rf_packet_att_cmd_t);
 
 enum UartMsg {
-    EnableUart = 0x01,      // Sent by the client to enable uart comms
+    //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
     LightCtrl = 0x02,       // Sent by the client to control the mesh
     LightOnline = 0x03,     // Sent by us to notify when a light goes on/offline or turns on/off
     MeshMessage = 0x04,     // Sent by us to notify when a mesh message is sent
@@ -92,8 +90,8 @@ async fn notification_parser() {
 
 pub struct UartManager {
     pub driver: UartDriver,
-    recv_channel: Channel::<CriticalSectionRawMutex, uart_data_t, 1>,
-    send_channel: Channel::<CriticalSectionRawMutex, uart_data_t, 1>,
+    recv_channel: Deque<uart_data_t, 5>,
+    send_channel: Deque<uart_data_t, 5>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool
@@ -103,8 +101,8 @@ impl UartManager {
     pub const fn default() -> Self {
         Self {
             driver: UartDriver::default(),
-            recv_channel: Channel::<CriticalSectionRawMutex, uart_data_t, 1>::new(),
-            send_channel: Channel::<CriticalSectionRawMutex, uart_data_t, 1>::new(),
+            recv_channel: Deque::new(),
+            send_channel: Deque::new(),
             ack_counter: 0,
             last_ack: 0,
             sender_started: false
@@ -117,17 +115,24 @@ impl UartManager {
     }
 
     pub fn send_message(&mut self, msg: &uart_data_t) -> bool {
-        match self.send_channel.try_send(*msg) {
-            Ok(..) => true,
-            Err(..) => false
+        if self.send_channel.is_full() {
+            return false;
         }
+
+        critical_section::with(|_| {
+            let _ = self.send_channel.push_back(*msg);
+        });
+
+        return true;
     }
 
     #[inline(always)]
     pub fn check_irq(&mut self) {
         let irq_s = UartDriver::uart_irqsource_get();
         if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            let _ = self.recv_channel.try_send(self.driver.rxdata_buf);
+            if !self.recv_channel.is_full() {
+                let _ = self.recv_channel.push_back(self.driver.rxdata_buf);
+            }
         }
 
         if irq_s & UARTIRQMASK::TX as u8 != 0 {
@@ -171,7 +176,13 @@ impl UartManager {
     pub async fn sender(&mut self) {
         loop {
             // Wait for a message to send
-            let mut msg = self.send_channel.recv().await;
+            while self.send_channel.is_empty() {
+                yield_now().await;
+            }
+
+            let mut msg = critical_section::with(|_| {
+                self.send_channel.pop_front().unwrap()
+            });
 
             // Set the counter
             self.ack_counter += 1;
@@ -202,10 +213,15 @@ impl UartManager {
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
-        spawner.spawn(uart_sender()).unwrap();
-
         loop {
-            let msg = self.recv_channel.recv().await;
+            // Wait for a message
+            while self.recv_channel.is_empty() {
+                yield_now().await;
+            }
+
+            let msg = critical_section::with(|_| {
+                self.recv_channel.pop_front().unwrap()
+            });
 
             // Check the crc of the packet
             let crc = crc16(&msg.data[0..42]);
@@ -214,21 +230,20 @@ impl UartManager {
                 continue;
             }
 
+            // If we receive a message, then it means we need to start the uart and notification
+            // tasks
+            if !self.sender_started {
+                self.sender_started = true;
+
+                spawner.spawn(uart_sender()).unwrap();
+                spawner.spawn(notification_parser()).unwrap();
+
+                set_p_cb_rx_from_mesh(Some(light_mesh_rx_cb));
+            }
+
             if !self.ack_msg(&msg).await {
                 // Message was an ack message, nothing more to do
                 continue;
-            }
-
-            // If this message is to enable uart, then just enable the status update callbacks
-            if msg.data[2] == UartMsg::EnableUart as u8 {
-                // Start the sender if it's not already running
-                if !self.sender_started {
-                    self.sender_started = true;
-
-                    spawner.spawn(notification_parser()).unwrap();
-
-                    set_p_cb_rx_from_mesh(Some(light_mesh_rx_cb));
-                }
             }
 
             // Light ctrl

@@ -4,9 +4,8 @@ use std::ptr::addr_of;
 use easer::functions::{Cubic, Easing};
 use embassy_executor::Spawner;
 use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
+use heapless::Deque;
 use crate::app;
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_SECTOR_SIZE, get_flash_adr_lum, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
@@ -54,8 +53,8 @@ impl LightState {
 }
 
 pub struct LightManager {
-    channel: Channel::<CriticalSectionRawMutex, Message, 5>,
-    transition_signal: Channel::<CriticalSectionRawMutex, bool, 1>,
+    channel: Deque<Message, 5>,
+    transition_signal: bool,
 
     old_light_state: LightState,
     new_light_state: LightState,
@@ -76,8 +75,8 @@ async fn start_transitioner() {
 impl LightManager {
     pub const fn default() -> Self {
         Self {
-            channel: Channel::<CriticalSectionRawMutex, Message, 5>::new(),
-            transition_signal: Channel::<CriticalSectionRawMutex, bool, 1>::new(),
+            channel: Deque::new(),
+            transition_signal: false,
             old_light_state: LightState::default(),
             new_light_state: LightState::default(),
             current_light_state: LightState::default(),
@@ -95,8 +94,12 @@ impl LightManager {
         });
     }
 
-    pub fn send_message(&self, cmd: u8, params: [u8; 16]) {
-        self.channel.try_send(Message{ cmd, params }).unwrap();
+    pub fn send_message(&mut self, cmd: u8, params: [u8; 16]) {
+        if !self.channel.is_full() {
+            critical_section::with(|_| {
+                self.channel.push_back(Message { cmd, params }).unwrap();
+            });
+        }
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
@@ -104,7 +107,13 @@ impl LightManager {
         spawner.spawn(start_transitioner()).unwrap();
 
         loop {
-            let msg = self.channel.recv().await;
+            while self.channel.is_empty() {
+                yield_now().await;
+            }
+
+            let msg = critical_section::with(|_| {
+                self.channel.pop_front().unwrap()
+            });
 
             match msg.cmd {
                 LGT_CMD_LIGHT_ONOFF => {
@@ -126,13 +135,16 @@ impl LightManager {
 
         self.last_transition_time = clock_time();
 
-        // Ignore any errors on this send
-        let _ = self.transition_signal.try_send(true);
+        self.transition_signal = true;
     }
 
     pub async fn run_transitioner(&mut self) {
         loop {
-            self.transition_signal.recv().await;
+            while !self.transition_signal {
+                yield_now().await;
+            }
+
+            self.transition_signal = false;
 
             let mut now = Instant::now();
             let mut last = false;

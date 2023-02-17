@@ -11,10 +11,10 @@ use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1MS};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt};
+use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
@@ -68,12 +68,9 @@ fn mesh_ota_master_led(_: *const u8) {
 }
 
 pub fn light_hw_timer1_config() {
-    // Enable timer1 interrupts for controlling the lights
-    // write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
-    // write_reg_tmr1_tick(0);
-    // write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1MS );
-    //
-    // write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+    // Enable timer1 interrupts for controlling light transitions
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
+    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1MS * 5);
 
     // enable timer0 interrupt for tracking clock_time overflow
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
@@ -546,7 +543,9 @@ pub fn rf_link_light_event_callback(status: u8) {
 }
 
 #[no_mangle]
-pub fn irq_timer1() {}
+pub fn irq_timer1() {
+    app().light_manager.transition_step();
+}
 
 // Counts any clock_time overflows
 static mut CLOCK_TIME_UPPER: u32 = 0;

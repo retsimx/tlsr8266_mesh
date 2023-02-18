@@ -1,20 +1,20 @@
-use crate::app;
-use std::cmp::{min};
+use std::cmp::min;
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ptr::{addr_of};
-use crate::{pub_mut, BIT};
+use std::ptr::addr_of;
 
+use crate::{BIT, pub_mut};
+use crate::app;
 use crate::common::*;
 use crate::config::*;
 use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1MS};
-use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1MS, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
+use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
+use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
@@ -286,12 +286,12 @@ fn rf_link_response_callback(
         ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 
         let state = app().light_manager.get_current_light_state();
-        ppp.val[3] = (state.g & 0xff) as u8;
-        ppp.val[4] = ((state.g >> 8) & 0xff) as u8;
-        ppp.val[5] = (state.b & 0xff) as u8;
-        ppp.val[6] = ((state.b >> 8) & 0xff) as u8;
-        ppp.val[7] = (state.brightness & 0xff) as u8;
-        ppp.val[8] = ((state.brightness >> 8) & 0xff) as u8;
+        ppp.val[3] = (state.g.to_num::<u16>() & 0xff) as u8;
+        ppp.val[4] = ((state.g.to_num::<u16>() >> 8) & 0xff) as u8;
+        ppp.val[5] = (state.b.to_num::<u16>() & 0xff) as u8;
+        ppp.val[6] = ((state.b.to_num::<u16>() >> 8) & 0xff) as u8;
+        ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
+        ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
     } else if ppp.val[15] == GET_GROUP1 {
         ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
@@ -431,9 +431,9 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             let state = app().light_manager.get_current_light_state();
 
             if app().light_manager.is_light_off() {
-                app().light_manager.begin_transition(state.g, state.b, 0);
+                app().light_manager.begin_transition(state.g.to_num(), state.b.to_num(), 0);
             } else {
-                app().light_manager.begin_transition(state.g, state.b, value);
+                app().light_manager.begin_transition(state.g.to_num(), state.b.to_num(), value);
             }
         }
         if params[8] & 0x2 != 0 {

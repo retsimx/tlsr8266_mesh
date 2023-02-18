@@ -19,8 +19,10 @@ cargo build --color=always --release
 for i in target/i686-unknown-linux-gnu/release/deps/*.ll; do
   bname="${i%.*}"
 
-  $CBE $bname.ll
+  sed -e 's/freeze i128/mul i128 1, /g' -e 's/freeze i64/mul i64 1, /g' $bname.ll > $bname.ll.parsed
 
-  python ../toolchain/fix_c.py $bname.cbe.c
-  ../$CC -c $CCFLAGS -o $bname.o $bname.cbe.c.rc.c
+  $CBE $bname.ll.parsed
+
+  python ../toolchain/fix_c.py $bname.ll.parsed.cbe.c
+  ../$CC -c $CCFLAGS -o $bname.o $bname.ll.parsed.cbe.c.rc.c
 done

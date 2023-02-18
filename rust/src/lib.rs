@@ -1,8 +1,12 @@
 #![feature(type_alias_impl_trait)]
 
+use std::ptr::null_mut;
+
 use embassy_executor::Spawner;
+
 use app::App;
 use ota::OtaManager;
+
 use crate::embassy::executor::Executor;
 use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
@@ -19,11 +23,12 @@ mod vendor_light;
 mod embassy;
 mod light_manager;
 mod uart_manager;
+mod easer;
 
-static mut APP: App = App::default();
+static mut APP: *mut App = null_mut();
 
 pub fn app() -> &'static mut App {
-    return unsafe { &mut APP };
+    return unsafe { &mut *APP };
 }
 
 unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
@@ -86,6 +91,8 @@ pub fn main_entrypoint() {
     OtaManager::handle_ota_update();
 
     // Configure the system
+    let mut _app = App::default();
+    unsafe { APP = __make_static(&mut _app); }
     app().init();
 
     // Run the application

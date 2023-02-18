@@ -36,7 +36,7 @@ async fn uart_manager(spawner: Spawner) {
 }
 
 impl App {
-    pub const fn default() -> App {
+    pub fn default() -> App {
         App {
             ota_manager: OtaManager::default(),
             mesh_manager: MeshManager::default(),

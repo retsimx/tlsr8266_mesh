@@ -1,14 +1,15 @@
 use std::cmp::{max, min};
 use std::mem::size_of;
 use std::ptr::addr_of;
-use easer::functions::{Cubic, Easing};
 use embassy_executor::Spawner;
 use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
+use fixed::FixedI32;
 use heapless::Deque;
 use crate::{app};
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_SECTOR_SIZE, get_flash_adr_lum, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
+use crate::easer::CubicInt;
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -16,6 +17,7 @@ use crate::sdk::drivers::pwm::pwm_set_cmp;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
+use fixed::types::extra::{U15};
 
 const TRANSITION_TIME_MS: u64 = 1000;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -28,9 +30,9 @@ struct Message {
 
 #[derive(Copy, Clone, Debug)]
 pub struct LightState {
-    pub g: u16,
-    pub b: u16,
-    pub brightness: u16,
+    pub g: FixedI32::<U15>,
+    pub b: FixedI32::<U15>,
+    pub brightness: FixedI32::<U15>,
     timestamp: Instant
 }
 
@@ -43,11 +45,11 @@ struct LumSaveT {
 }
 
 impl LightState {
-    pub const fn default() -> Self {
+    pub fn default() -> Self {
         Self {
-            g: u16::MAX,
-            b: 0,
-            brightness: 0,
+            g: FixedI32::<U15>::from_num(u16::MAX),
+            b: FixedI32::<U15>::from_num(0),
+            brightness: FixedI32::<U15>::from_num(0),
             timestamp: Instant::from_ticks(0)
         }
     }
@@ -68,7 +70,7 @@ pub struct LightManager {
 }
 
 impl LightManager {
-    pub const fn default() -> Self {
+    pub fn default() -> Self {
         Self {
             channel: Deque::new(),
             old_light_state: LightState::default(),
@@ -121,9 +123,9 @@ impl LightManager {
             self.old_light_state.timestamp = Instant::now();
 
             self.new_light_state = LightState {
-                g,
-                b,
-                brightness,
+                g: FixedI32::<U15>::from_num(g),
+                b: FixedI32::<U15>::from_num(b),
+                brightness: FixedI32::<U15>::from_num(brightness),
                 timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
             };
 
@@ -143,15 +145,15 @@ impl LightManager {
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !(FLD_TMR::TMR1_EN as u32));
         }
 
-        let time = (now - self.old_light_state.timestamp).as_ticks() as f32 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks() as f32;
+        let time = (((now - self.old_light_state.timestamp).as_ticks() as f32 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks() as f32) * (0xffff as f32)) as u16;
         self.current_light_state = LightState {
-            g: Cubic::ease_in_out(time, self.old_light_state.g as f32, (self.new_light_state.g as i32 - self.old_light_state.g as i32) as f32, 1.0) as u16,
-            b: Cubic::ease_in_out(time, self.old_light_state.b as f32, (self.new_light_state.b as i32 - self.old_light_state.b as i32) as f32, 1.0) as u16,
-            brightness: Cubic::ease_in_out(time, self.old_light_state.brightness as f32, (self.new_light_state.brightness as i32 - self.old_light_state.brightness as i32) as f32, 1.0) as u16,
+            g: CubicInt::ease_in_out(time, self.old_light_state.g, self.new_light_state.g - self.old_light_state.g, 0xffff),
+            b: CubicInt::ease_in_out(time, self.old_light_state.b, self.new_light_state.b - self.old_light_state.b, 0xffff),
+            brightness: CubicInt::ease_in_out(time, self.old_light_state.brightness, self.new_light_state.brightness - self.old_light_state.brightness, 0xffff),
             timestamp: now
         };
 
-        self.light_adjust_rgb_hw(self.current_light_state.g, self.current_light_state.b, self.current_light_state.brightness);
+        self.light_adjust_rgb_hw(self.current_light_state.g.to_num(), self.current_light_state.b.to_num(), self.current_light_state.brightness.to_num());
     }
 
     pub fn is_light_off(&self) -> bool {
@@ -179,8 +181,8 @@ impl LightManager {
         let lum_save = LumSaveT {
             save_flag: LIGHT_SAVE_VALID_FLAG,
             brightness: self.brightness,
-            g: self.current_light_state.g,
-            b: self.current_light_state.b
+            g: self.current_light_state.g.to_num(),
+            b: self.current_light_state.b.to_num()
         };
 
         flash_write_page(
@@ -201,8 +203,8 @@ impl LightManager {
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
             if LIGHT_SAVE_VALID_FLAG == lum_save.save_flag {
                 self.brightness = lum_save.brightness;
-                self.current_light_state.g = lum_save.g;
-                self.current_light_state.b = lum_save.b;
+                self.current_light_state.g = FixedI32::<U15>::from_num(lum_save.g);
+                self.current_light_state.b = FixedI32::<U15>::from_num(lum_save.b);
             } else if lum_save.save_flag == 0xFF {
                 break;
             }
@@ -280,7 +282,7 @@ impl LightManager {
 
     pub fn light_onoff_hw(&mut self, on: bool) {
         let state = app().light_manager.get_current_light_state();
-        self.begin_transition(state.g, state.b, match on { true => self.brightness, false => 0 });
+        self.begin_transition(state.g.to_num(), state.b.to_num(), match on { true => self.brightness, false => 0 });
     }
 
     pub fn light_onoff(&mut self, on: bool) {

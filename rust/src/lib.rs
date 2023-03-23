@@ -1,11 +1,13 @@
 #![feature(type_alias_impl_trait)]
+#![feature(const_cstr_methods)]
+#![no_std]
 
 use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
+use crate::config::{PWM_B, PWM_G};
 use crate::embassy::executor::Executor;
 use crate::sdk::mcu::gpio::*;
-use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
 use crate::sdk::mcu::watchdog::wd_clear;
 
 mod app;
@@ -36,11 +38,11 @@ pub async fn run(spawner: Spawner) {
 }
 
 fn set_pw1(on: bool) {
-    gpio_write(GPIO_PA1 as u32, if on {1} else {0});
+    gpio_write(PWM_G as u32, if on {1} else {0});
 }
 
 fn set_pw2(on: bool) {
-    gpio_write(GPIO_PA5 as u32, if on {1} else {0});
+    gpio_write(PWM_B as u32, if on {1} else {0});
 }
 
 #[no_mangle]

@@ -4,8 +4,9 @@ use crate::sdk::drivers::spi::{
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::watchdog::wd_clear;
-use std::mem::transmute;
-use std::ptr::{null, null_mut};
+use core::mem::transmute;
+use core::ptr::{null, null_mut};
+use crate::blinken_testboard;
 
 pub const PAGE_SIZE: u32 = 256;
 pub const PAGE_SIZE_OTP: u32 = 256;

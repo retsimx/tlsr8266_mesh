@@ -11,8 +11,8 @@ use crate::sdk::mcu::register::{
     write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl,
 };
 use crate::sdk::mcu::watchdog::wd_clear;
-use std::mem::{size_of_val, MaybeUninit};
-use std::ptr::addr_of;
+use core::mem::{size_of_val, MaybeUninit};
+use core::ptr::addr_of;
 use crate::main_light::get_buff_response;
 use crate::sdk::light::*;
 
@@ -491,8 +491,8 @@ impl OtaManager {
 mod wrappers {
     use crate::app;
     use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MESH_OTA_LED};
-    use std::mem::size_of;
-    use std::slice;
+    use core::mem::size_of;
+    use core::slice;
 
     // Stuff consumed by light_ll
     #[no_mangle] // required by light_ll

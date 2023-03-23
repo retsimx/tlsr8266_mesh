@@ -464,7 +464,7 @@ pub fn gpio_init() {
             | (if PA6_FUNC == AS_GPIO { BIT!(22) } else { 0 })
             | (if PA7_FUNC == AS_GPIO { BIT!(23) } else { 0 }),
     );
-return;
+
     write_reg_gpio_pb_setting1(
         ((PB0_INPUT_ENABLE as u32) << 8)
             | ((PB1_INPUT_ENABLE as u32) << 9)

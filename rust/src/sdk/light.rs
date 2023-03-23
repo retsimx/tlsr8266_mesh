@@ -1,7 +1,7 @@
 // Stuff from the libble library
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
-use std::mem;
-use std::mem::{size_of, size_of_val, MaybeUninit};
+use core::mem;
+use core::mem::{size_of, size_of_val, MaybeUninit};
 use crate::{no_mangle_fn, no_mangle_fn_def};
 use crate::{pub_mut, BIT};
 use crate::mesh::mesh_node_st_val_t;
@@ -154,7 +154,7 @@ pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
-pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, Option::None);
+pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);
 
 pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
 pub_mut!(p_vendor_mesh_node_rcv_rsp, Option<fn(p: *const rf_packet_att_value_t)>);

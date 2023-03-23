@@ -1,6 +1,6 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 /// Cooperatively gives up a timeslice to the task scheduler.
 ///

@@ -92,46 +92,6 @@ fn sum_5_16(a: u16, b: u16, c: u16, d: u16, e: u16, overflow: &mut u16) -> u16 {
 }
 
 #[no_mangle]
-fn __muldi3(a: u64, b: u64) -> u64 {
-    // extract 16 bits out of each
-    let A: [u16; 4] = [
-        a as u16, (a >> 16) as u16, (a >> 32) as u16, (a >> 48) as u16
-    ];
-    let B: [u16; 4] = [
-        b as u16, (b >> 16) as u16, (b >> 32) as u16, (b >> 48) as u16
-    ];
-
-    // store results in a 4x5 table, rows by columns. 1 extra col for overflow logic
-    let mut F: [[u16; 5]; 4] = [[0; 5]; 4];
-
-    // start multiplying it out, the long way
-    for row in 0..4 {
-        for col in row..4 {
-            // multiply, store remainder in next cell
-            let mul_res = mul_16(A[col - row], B[row], &mut F[row][col + 1]);
-
-            // add to current cell (= remainder from previous cell), keep track of remainder
-            let mut rem = 0;
-            F[row][col] = sum_16(F[row][col], mul_res, &mut rem);
-
-            // add sum remainder to mul remainder to next cell, remainder now should always be 0
-            F[row][col + 1] = sum_16(F[row][col + 1], rem, &mut rem);
-
-            assert_eq!(rem, 0);
-        }
-    }
-
-    // now sum the intermediate values into the result
-    let mut R: [u16; 5] = [0; 5]; // 1 extra to simplify logic
-    for col in 0..4 {
-        R[col] = sum_5_16(R[col], F[0][col], F[1][col], F[2][col], F[3][col], &mut R[col + 1]);
-    }
-
-    // convert back into a 64-bit number
-    R[0] as u64 + ((R[1] as u64) << 16) + ((R[2] as u64) << 32) + ((R[3] as u64) << 48)
-}
-
-#[no_mangle]
 fn abort() {
     loop {}
 }
@@ -221,18 +181,10 @@ pub fn ultoa(mut val: u32, mut string: heapless::String<43>, mut base: u16) -> h
     string
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::sdk::common::compat::__muldi3;
+use core::panic::PanicInfo;
 
-    #[test]
-    fn test_muldi3() {
-        let expected: u64 = 0x123456 * 0x123456789;
-        assert_eq!(__muldi3(0x123456, 0x123456789), expected);
-        assert_eq!(__muldi3(0x123456789, 0x123456), expected);
-
-        let expected: u64 = 0x9876543210 * 0x50;
-        assert_eq!(__muldi3(0x9876543210, 0x50), expected);
-        assert_eq!(__muldi3(0x50, 0x9876543210), expected);
-    }
+#[panic_handler]
+#[no_mangle]
+pub fn panic(_info: &PanicInfo) -> ! {
+    loop { }
 }

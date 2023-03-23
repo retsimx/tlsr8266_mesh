@@ -22,7 +22,7 @@ macro_rules! pub_mut {
             #[allow(dead_code)]
             pub fn [<get_ $name _addr>]() -> *const $typ {
                 unsafe {
-                    use std::ptr::addr_of;
+                    use core::ptr::addr_of;
                     return addr_of!($name);
                 }
             }
@@ -52,7 +52,7 @@ macro_rules! pub_mut {
             #[allow(dead_code)]
             pub fn [<get_ $name _addr>]() -> *const $typ {
                 unsafe {
-                    use std::ptr::addr_of;
+                    use core::ptr::addr_of;
                     return addr_of!($name);
                 }
             }
@@ -77,7 +77,7 @@ macro_rules! pub_static {
             #[allow(dead_code)]
             pub fn [<get_ $name _addr>]() -> *const $typ {
                 unsafe {
-                    use std::ptr::addr_of;
+                    use core::ptr::addr_of;
                     return addr_of!($name);
                 }
             }
@@ -100,7 +100,7 @@ macro_rules! pub_static {
             #[allow(dead_code)]
             pub fn [<get_ $name _addr>]() -> *const $typ {
                 unsafe {
-                    use std::ptr::addr_of;
+                    use core::ptr::addr_of;
                     return addr_of!($name);
                 }
             }
@@ -132,7 +132,7 @@ macro_rules! pub_mut_no_move {
             #[allow(dead_code)]
             pub fn [<get_ $name _addr>]() -> *const $typ {
                 unsafe {
-                    use std::ptr::addr_of;
+                    use core::ptr::addr_of;
                     return addr_of!($name);
                 }
             }

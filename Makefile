@@ -38,7 +38,7 @@ $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 
 $(BUILD_DIR)/$(TARGET): $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(OBJS)
 	bash toolchain/rust2c.sh
-	$(LD) $(LDFLAGS) -o $@ rust/target/i686-unknown-linux-gnu/release/deps/*.o $(CPPOBJS) $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(LIB)
+	$(LD) $(LDFLAGS) -o $@ rust/target/thumbv6m-none-eabi/release/deps/*.o $(CPPOBJS) $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(LIB)
 
 # Drivers.
 $(BUILD_DIR)/drivers/%.o: ./sdk/proj/drivers/%.c

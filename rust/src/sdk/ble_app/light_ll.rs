@@ -1,6 +1,6 @@
-use std::mem::size_of;
-use std::ops::Deref;
-use std::ptr::{addr_of, slice_from_raw_parts};
+use core::mem::size_of;
+use core::ops::Deref;
+use core::ptr::{addr_of, slice_from_raw_parts};
 use crate::{no_mangle_fn, pub_mut};
 use crate::common::rf_update_conn_para;
 use crate::main_light::{irq_timer0, irq_timer1};

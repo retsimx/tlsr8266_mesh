@@ -6,9 +6,9 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_writ
 use crate::sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use std::cmp::min;
-use std::convert::TryFrom;
-use std::ptr::{addr_of, copy_nonoverlapping};
+use core::cmp::min;
+use core::convert::TryFrom;
+use core::ptr::{addr_of, copy_nonoverlapping};
 use crate::BIT;
 use crate::{app, pub_mut};
 

@@ -1,8 +1,8 @@
-use crate::app;
-use std::cmp::{min};
-use std::convert::TryInto;
-use std::mem::size_of;
-use std::ptr::{addr_of};
+use crate::{app};
+use core::cmp::{min};
+use core::convert::TryInto;
+use core::mem::size_of;
+use core::ptr::{addr_of};
 use crate::{pub_mut, BIT};
 
 use crate::common::*;
@@ -96,7 +96,7 @@ fn light_init_default() {
     }
 
     // get fw version @flash 0x02,0x03,0x04,0x05
-    _mesh_get_fw_version();
+    // _mesh_get_fw_version();
 
     //add the user_data after the adv_pri_data
     let user_const_data: [u8; 6] = [0x05, 0x02, 0x19, 0x00, 0x69, 0x69];

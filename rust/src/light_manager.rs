@@ -1,6 +1,6 @@
-use std::cmp::{max, min};
-use std::mem::size_of;
-use std::ptr::addr_of;
+use core::cmp::{max, min};
+use core::mem::size_of;
+use core::ptr::addr_of;
 use easer::functions::{Cubic, Easing};
 use embassy_executor::Spawner;
 use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
@@ -152,9 +152,9 @@ impl LightManager {
             while now < self.new_light_state.timestamp || last {
                 let time = (now - self.old_light_state.timestamp).as_ticks() as f32 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks() as f32;
                 self.current_light_state = LightState {
-                    g: Cubic::ease_in_out(time, self.old_light_state.g as f32, (self.new_light_state.g as i32 - self.old_light_state.g as i32) as f32, 1.0) as u16,
-                    b: Cubic::ease_in_out(time, self.old_light_state.b as f32, (self.new_light_state.b as i32 - self.old_light_state.b as i32) as f32, 1.0) as u16,
-                    brightness: Cubic::ease_in_out(time, self.old_light_state.brightness as f32, (self.new_light_state.brightness as i32 - self.old_light_state.brightness as i32) as f32, 1.0) as u16,
+                    g: if self.old_light_state.g > self.new_light_state.g { Cubic::ease_in_out(1.0-time, self.new_light_state.g as f32, self.old_light_state.g as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.g as f32, self.new_light_state.g as f32, 1.0) as u16 },
+                    b: if self.old_light_state.b > self.new_light_state.b { Cubic::ease_in_out(1.0-time, self.new_light_state.b as f32, self.old_light_state.b as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.b as f32, self.new_light_state.b as f32, 1.0) as u16 },
+                    brightness: if self.old_light_state.brightness > self.new_light_state.brightness { Cubic::ease_in_out(1.0-time, self.new_light_state.brightness as f32, self.old_light_state.brightness as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.brightness as f32, self.new_light_state.brightness as f32, 1.0) as u16 },
                     timestamp: now
                 };
 

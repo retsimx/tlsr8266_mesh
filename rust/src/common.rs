@@ -3,8 +3,8 @@ use crate::{app, pub_mut};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::analog_write;
-use std::ptr::addr_of;
-use std::slice;
+use core::ptr::addr_of;
+use core::slice;
 use crate::mesh::wrappers::get_get_mac_en;
 use crate::vendor_light::get_adv_rsp_pri_data;
 

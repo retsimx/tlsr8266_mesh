@@ -4,10 +4,10 @@ use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use std::convert::AsRef;
-use std::ffi::CStr;
-use std::mem::transmute;
-use std::ptr::{addr_of, null};
+use core::convert::AsRef;
+use core::ffi::CStr;
+use core::mem::transmute;
+use core::ptr::{addr_of, null};
 use crate::{pub_mut, pub_static};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
@@ -113,7 +113,7 @@ static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();
 
 static modelIdChar: u8 = CHAR_PROP_READ;
-static modelId_value: const_cstr::ConstCStr = const_cstr::const_cstr!("model id 123");
+static modelId_value: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"model id 123\0") };
 
 static hwRevisionChar: u8 = CHAR_PROP_READ;
 static hwRevision_value: u32 = 0x22222222;
@@ -138,7 +138,7 @@ const periConnParameters: gap_periConnectParams_t = gap_periConnectParams_t {
 };
 
 // note !!!DEVICE_NAME max 13 bytes
-pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.val.as_bytes());
+pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.to_bytes());
 
 //////////////////////// SPP /////////////////////////////////////////////////////
 // These must be pub_mut
@@ -180,11 +180,11 @@ static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master };
 
 static userdesc_UUID: u16 = GATT_UUID_CHAR_USER_DESC;
 
-static spp_Statusname: const_cstr::ConstCStr = const_cstr::const_cstr!("Status");
-static spp_Commandname: const_cstr::ConstCStr = const_cstr::const_cstr!("Command");
-static spp_otaname: const_cstr::ConstCStr = const_cstr::const_cstr!("OTA");
-static spp_pairname: const_cstr::ConstCStr = const_cstr::const_cstr!("Pair");
-static spp_devicename: const_cstr::ConstCStr = const_cstr::const_cstr!("DevName");
+static spp_Statusname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Status\0") };
+static spp_Commandname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Command\0") };
+static spp_otaname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"OTA\0") };
+static spp_pairname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Pair\0") };
+static spp_devicename: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"DevName\0") };
 
 unsafe fn meshStatusWrite(pw: *const u8) -> u32 {
     if !*get_pair_login_ok() {
@@ -298,7 +298,7 @@ macro_rules! attrdefu {
 }
 
 const fn size_of_val<T>(_: &T) -> usize {
-    std::mem::size_of::<T>()
+    core::mem::size_of::<T>()
 }
 
 pub_mut!(
@@ -320,10 +320,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_devicename.val.as_bytes().len(),
-            spp_devicename.val.as_bytes().len(),
+            spp_devicename.to_bytes().len(),
+            spp_devicename.to_bytes().len(),
             userdesc_UUID,
-            spp_devicename.val
+            spp_devicename.to_bytes()
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, appearanceCharacter),
         attrdefu!(
@@ -351,10 +351,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            modelId_value.val.as_bytes().len(),
-            modelId_value.val.as_bytes().len(),
+            modelId_value.to_bytes().len(),
+            modelId_value.to_bytes().len(),
             modelId_charUUID,
-            modelId_value.val
+            modelId_value.to_bytes()
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, hwRevisionChar),
         attrdefu!(
@@ -398,20 +398,20 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_Commandname.val.as_bytes().len(),
-            spp_Commandname.val.as_bytes().len(),
+            spp_Commandname.to_bytes().len(),
+            spp_Commandname.to_bytes().len(),
             userdesc_UUID,
-            spp_Commandname.val
+            spp_Commandname.to_bytes()
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataOtaProp), //prop
         attrdef!(0, 16, 16, 16, TelinkSppDataOtaUUID, SppDataOtaData), //value
         attrdef!(
             0,
             2,
-            spp_otaname.val.as_bytes().len(),
-            spp_otaname.val.as_bytes().len(),
+            spp_otaname.to_bytes().len(),
+            spp_otaname.to_bytes().len(),
             userdesc_UUID,
-            spp_otaname.val
+            spp_otaname.to_bytes()
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataPairProp), //prop
         attrdef!(
@@ -427,10 +427,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_pairname.val.as_bytes().len(),
-            spp_pairname.val.as_bytes().len(),
+            spp_pairname.to_bytes().len(),
+            spp_pairname.to_bytes().len(),
             userdesc_UUID,
-            spp_pairname.val
+            spp_pairname.to_bytes()
         ),
     ]
 );

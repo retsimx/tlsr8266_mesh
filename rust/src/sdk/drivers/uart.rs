@@ -1,6 +1,6 @@
-use std::cmp::min;
-use std::mem::size_of;
-use std::ptr::addr_of;
+use core::cmp::min;
+use core::mem::size_of;
+use core::ptr::addr_of;
 use crate::{BIT, blinken};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};

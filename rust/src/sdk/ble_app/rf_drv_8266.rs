@@ -1,5 +1,5 @@
-use std::arch::asm;
-use std::ptr::{addr_of, addr_of_mut};
+use core::arch::asm;
+use core::ptr::{addr_of, addr_of_mut};
 use crate::config::get_flash_adr_mac;
 use crate::{no_mangle_fn, pub_mut, regrw};
 use crate::common::rf_update_conn_para;

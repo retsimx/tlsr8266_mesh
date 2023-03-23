@@ -8,7 +8,7 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use crate::sdk::rf_drv::rf_set_ble_access_code;
-use std::ptr::addr_of;
+use core::ptr::addr_of;
 use crate::{app, BIT};
 use crate::mesh::wrappers::*;
 use crate::sdk::light::*;
@@ -483,7 +483,7 @@ impl MeshManager {
 pub mod wrappers {
     use crate::mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
     use crate::sdk::light::*;
-    use std::mem::size_of;
+    use core::mem::size_of;
     use crate::{app, pub_mut};
 
     // BEGIN SHIT LIGHT_LL HAX

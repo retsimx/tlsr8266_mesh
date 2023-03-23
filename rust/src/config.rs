@@ -1,6 +1,7 @@
+use core::ffi::CStr;
 use crate::pub_mut;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
-
+use core::ptr::addr_of;
 // General stuff
 
 // 0~max_mesh_name_len bytes  (strlen(adv_data) + strlen(MESH_NAME) + sizeof(ll_adv_private_t))<=31
@@ -14,7 +15,7 @@ pub const MESH_LTK: [u8; 16] = [
     0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
 ];
 
-pub const DEVICE_NAME: const_cstr::ConstCStr = const_cstr::const_cstr!("Telink tLight");
+pub const DEVICE_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Telink tLight\0") };
 
 pub const OUT_OF_MESH: &str = "out_of_mesh";
 

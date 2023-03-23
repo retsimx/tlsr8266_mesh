@@ -1,3 +1,7 @@
 [build]
 rustflags = ["--emit=llvm-ir"]
-target = "i686-unknown-linux-gnu"
+target = "thumbv6m-none-eabi"
+
+[unstable]
+build-std = ["core"]
+build-std-features = []

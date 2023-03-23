@@ -8,7 +8,6 @@ use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
-use std::io::Write;
 use embassy_executor::Spawner;
 use crate::{app};
 use crate::embassy::yield_now::yield_now;
@@ -50,10 +49,9 @@ impl App {
         cpu_wakeup_init();
 
         // Copy the password in to the pair config
-        get_pair_config_pwd_encode_sk()
-            .as_mut_slice()
-            .write(MESH_PWD_ENCODE_SK.as_bytes())
-            .unwrap();
+        for i in 0..MESH_PWD_ENCODE_SK.len() {
+            get_pair_config_pwd_encode_sk()[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
+        }
 
         clock_init();
         dma_init();

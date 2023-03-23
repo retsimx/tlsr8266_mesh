@@ -1,5 +1,5 @@
-use std::mem::size_of;
-use std::ptr::{addr_of};
+use core::mem::size_of;
+use core::ptr::{addr_of};
 use embassy_executor::Spawner;
 use heapless::Deque;
 use crate::{app, BIT, pub_mut};

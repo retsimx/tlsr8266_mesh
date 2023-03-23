@@ -1,4 +1,4 @@
-use std::ptr::null_mut;
+use core::ptr::null_mut;
 
 #[no_mangle]
 pub unsafe fn strcpy(mut dst0: *mut u8, mut src0: *const u8) -> *mut u8 {

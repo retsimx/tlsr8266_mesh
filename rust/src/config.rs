@@ -19,7 +19,7 @@ pub const DEVICE_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Te
 
 pub const OUT_OF_MESH: &str = "out_of_mesh";
 
-pub const MAX_LUM_BRIGHTNESS_VALUE: u16 = 0xffff;
+pub const MAX_LUM_BRIGHTNESS_VALUE: u16 = 0x7fff;
 
 pub const VENDOR_ID: u16 = 0x0211;
 

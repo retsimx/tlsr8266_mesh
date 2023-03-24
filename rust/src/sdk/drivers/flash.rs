@@ -6,7 +6,6 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::transmute;
 use core::ptr::{null, null_mut};
-use crate::blinken_testboard;
 
 pub const PAGE_SIZE: u32 = 256;
 pub const PAGE_SIZE_OTP: u32 = 256;
@@ -248,7 +247,7 @@ fn flash_mspi_write_ram(
  */
 #[inline(always)]
 #[no_mangle] // required by light_ll
-pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
+pub extern "C" fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
     flash_mspi_read_ram(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
 }
 
@@ -272,7 +271,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
  */
 #[inline(always)]
 #[no_mangle] // required by light_ll
-pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
+pub extern "C" fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
     let mut ns = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
     let mut nw = 0;
 
@@ -305,7 +304,7 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
  */
 #[inline(always)]
 #[no_mangle] // required by light_ll
-pub fn flash_erase_sector(addr: u32) {
+pub extern "C" fn flash_erase_sector(addr: u32) {
     wd_clear();
 
     flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, 1, null_mut(), 0);

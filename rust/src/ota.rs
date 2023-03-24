@@ -413,12 +413,12 @@ impl OtaManager {
         }
     }
 
-    pub fn mesh_ota_led_cb(&self, _type: MESH_OTA_LED) {
-        if MESH_OTA_LED::OK == _type {
+    pub fn mesh_ota_led_cb(&self, _type: MeshOtaLed) {
+        if MeshOtaLed::OK == _type {
             self.rf_led_ota_ok();
-        } else if MESH_OTA_LED::ERROR == _type {
+        } else if MeshOtaLed::ERROR == _type {
             self.rf_led_ota_error();
-        } else if MESH_OTA_LED::STOP == _type {
+        } else if MeshOtaLed::STOP == _type {
             self.rf_led_ota_error();
         }
     }
@@ -490,13 +490,13 @@ impl OtaManager {
 
 mod wrappers {
     use crate::app;
-    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MESH_OTA_LED};
+    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MeshOtaLed};
     use core::mem::size_of;
     use core::slice;
 
     // Stuff consumed by light_ll
     #[no_mangle] // required by light_ll
-    fn rf_link_slave_data_ota(ph: *const u8) -> bool {
+    extern "C" fn rf_link_slave_data_ota(ph: *const u8) -> bool {
         let len = size_of::<rf_packet_att_data_t>() / size_of::<u32>();
         let data: &[u32] = unsafe { slice::from_raw_parts(ph as *const u32, len) };
 
@@ -506,7 +506,7 @@ mod wrappers {
     }
 
     #[no_mangle] // required by light_ll
-    pub fn get_ota_check_type(par: *const u8) -> u8 {
+    pub extern "C" fn get_ota_check_type(par: *const u8) -> u8 {
         unsafe {
             if *par.offset(0) == 0x5D {
                 return *par.offset(1);
@@ -516,67 +516,67 @@ mod wrappers {
     }
 
     #[no_mangle] // required by light_ll
-    fn rf_slave_ota_finished_flag_set(reset_flag: OtaState) {
+    extern "C" fn rf_slave_ota_finished_flag_set(reset_flag: OtaState) {
         app().ota_manager.rf_slave_ota_finished_flag_set(reset_flag);
     }
 
     #[no_mangle] // required by light_ll
-    fn rf_ota_set_flag() {
+    extern "C" fn rf_ota_set_flag() {
         app().ota_manager.rf_ota_set_flag();
     }
 
     #[no_mangle] // required by light_ll
-    fn rf_led_ota_error() {
+    extern "C" fn rf_led_ota_error() {
         app().ota_manager.rf_led_ota_error();
     }
 
     #[no_mangle] // required by light_ll
-    fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState) {
+    extern "C" fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState) {
         app()
             .ota_manager
             .rf_link_slave_ota_finish_led_and_reboot(st);
     }
 
     #[no_mangle] // required by light_ll
-    fn rf_link_slave_ota_finish_handle() // poll when ota busy in bridge
+    extern "C" fn rf_link_slave_ota_finish_handle() // poll when ota busy in bridge
     {
         app().ota_manager.rf_link_slave_ota_finish_handle();
     }
 
     #[no_mangle] // required by light_ll
-    fn mesh_ota_led_cb(_type: MESH_OTA_LED) {
+    extern "C" fn mesh_ota_led_cb(_type: MeshOtaLed) {
         app().ota_manager.mesh_ota_led_cb(_type);
     }
 
     #[no_mangle] // required by light_ll
-    fn get_ota_erase_sectors() -> u32 {
+    extern "C" fn get_ota_erase_sectors() -> u32 {
         return app().ota_manager.get_ota_erase_sectors();
     }
 
     #[no_mangle] // required by light_ll
-    fn is_valid_fw_len(fw_len: u32) -> bool {
+    extern "C" fn is_valid_fw_len(fw_len: u32) -> bool {
         return app().ota_manager.is_valid_fw_len(fw_len);
     }
 
     #[no_mangle] // required by light_ll
-    fn get_fw_len(fw_adr: u32) -> u32 {
+    extern "C" fn get_fw_len(fw_adr: u32) -> u32 {
         return app().ota_manager.get_fw_len(fw_adr);
     }
 
     #[no_mangle] // required by light_ll
-    fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32) {
+    extern "C" fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32) {
         app()
             .ota_manager
             .mesh_ota_master_start_firmware(p_dev_info, new_fw_adr);
     }
 
     #[no_mangle] // required by light_ll
-    fn mesh_ota_slave_need_ota(params: *const u8) -> bool {
+    extern "C" fn mesh_ota_slave_need_ota(params: *const u8) -> bool {
         return app().ota_manager.mesh_ota_slave_need_ota(params);
     }
 
     #[no_mangle] // required by light_ll
-    fn is_light_mode_match_check_fw(param: *const u8) -> bool {
+    extern "C" fn is_light_mode_match_check_fw(param: *const u8) -> bool {
         return app().ota_manager.is_light_mode_match_check_fw(param);
     }
 }

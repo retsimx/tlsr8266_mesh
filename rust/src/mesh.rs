@@ -514,24 +514,24 @@ pub mod wrappers {
     );
 
     #[no_mangle] // Required by light_ll rf_link_slave_add_status_ll
-    pub fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
+    pub extern "C" fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
         let p = &(unsafe { *p });
 
         return app().mesh_manager.mesh_pair_notify_refresh(p);
     }
 
     #[no_mangle] // required by light_ll
-    fn mesh_pair_proc() {
+    extern "C" fn mesh_pair_proc() {
         app().mesh_manager.mesh_pair_proc();
     }
 
     #[no_mangle] // required by light_ll
-    fn mesh_node_buf_init() {
+    extern "C" fn mesh_node_buf_init() {
         app().mesh_manager.mesh_node_buf_init();
     }
 
     #[no_mangle] // required by light_ll
-    fn light_slave_tx_command_callback(p: *const u8) {
+    extern "C" fn light_slave_tx_command_callback(p: *const u8) {
         _rf_link_data_callback(p);
     }
 }

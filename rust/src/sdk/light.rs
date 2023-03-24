@@ -367,6 +367,7 @@ pub enum APP_OTA_HCI_TYPE {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+#[repr(C)]
 pub enum OtaState {
     CONTINUE = 0,
     // must zero
@@ -376,7 +377,8 @@ pub enum OtaState {
 }
 
 #[derive(PartialEq)]
-pub enum MESH_OTA_LED {
+#[repr(C)]
+pub enum MeshOtaLed {
     OK,
     ERROR,
     STOP,
@@ -640,12 +642,12 @@ pub_mut!(mesh_chn_amount, u8, 4); //amount of sys_chn_listen
 pub_mut!(pkt_mesh_scene_rsp, [u8; 1], [0]);
 
 #[no_mangle]
-fn is_scene_poll_notify_busy() -> u32 {
+extern "C" fn is_scene_poll_notify_busy() -> u32 {
     return 0;
 }
 
 #[no_mangle]
-fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
+extern "C" fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
     return 0;
 }
 
@@ -654,25 +656,25 @@ fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_val
 pub_mut!(pkt_mesh_alarm_rsp, [u8; 1], [0]);
 
 #[no_mangle]
-fn is_alarm_poll_notify_busy() -> u32 {
+extern "C" fn is_alarm_poll_notify_busy() -> u32 {
     return 0;
 }
 
 #[no_mangle]
-fn is_new_alarm(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
+extern "C" fn is_new_alarm(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
     return 0;
 }
 
 #[no_mangle]
-fn memcopy_rtc_hhmmss(out: u32) {}
+extern "C" fn memcopy_rtc_hhmmss(out: u32) {}
 
 #[no_mangle]
-fn is_need_sync_time() -> bool {
+extern "C" fn is_need_sync_time() -> bool {
     return false;
 }
 
 #[no_mangle]
-fn rtc_set_time(rtc_set: u32) -> i32 {
+extern "C" fn rtc_set_time(rtc_set: u32) -> i32 {
     return -1;
 }
 
@@ -681,12 +683,12 @@ no_mangle_fn_def!(mesh_send_alarm_time);
 
 // dual mode shit needed to link
 #[no_mangle]
-fn dual_mode_rx_sig_beacon_proc(p: *const u8, t: u32) -> u32 {
+extern "C" fn dual_mode_rx_sig_beacon_proc(p: *const u8, t: u32) -> u32 {
     return 0;
 }
 
 #[no_mangle]
-fn get_gatt_adv_cnt() -> u8 {
+extern "C" fn get_gatt_adv_cnt() -> u8 {
     return 3;
 }
 
@@ -694,18 +696,18 @@ no_mangle_fn_def!(dual_mode_channel_ac_set_with_check_TLK);
 no_mangle_fn_def!(dual_mode_check_and_select_disconnect_cb);
 
 #[no_mangle]
-fn get_sig_mesh_adv() -> u32 {
+extern "C" fn get_sig_mesh_adv() -> u32 {
     return 0;
 }
 
 #[no_mangle]
-fn dual_mode_channel_ac_proc(connect_st: u32) {}
+extern "C" fn dual_mode_channel_ac_proc(connect_st: u32) {}
 
 #[no_mangle]
-fn tlk_mesh_access_code_backup(ac: u32) {}
+extern "C" fn tlk_mesh_access_code_backup(ac: u32) {}
 
 #[no_mangle]
-fn dual_mode_select(sdk_rf_mode: u32) {}
+extern "C" fn dual_mode_select(sdk_rf_mode: u32) {}
 
 // flash mesh extend shit needed to link
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
@@ -721,12 +723,12 @@ no_mangle_fn_def!(mesh_ota_start_unprotect_flash);
 
 // common shit needed to link
 #[no_mangle]
-fn forced_single_cmd_in_ble_interval_handle(ph: *const u8) {}
+extern "C" fn forced_single_cmd_in_ble_interval_handle(ph: *const u8) {}
 
 no_mangle_fn_def!(mesh_node_keep_alive_other);
 
 #[no_mangle]
-fn rx_mesh_adv_message_cb(p: *const u8, mac_match: u32) {}
+extern "C" fn rx_mesh_adv_message_cb(p: *const u8, mac_match: u32) {}
 
 no_mangle_fn_def!(sensor_enter_deep_cb);
 
@@ -738,39 +740,39 @@ pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
 pub_mut!(passive_en, u8, 0);
 
 #[no_mangle]
-fn get_command_type(p_att_value: *const u8) -> CMD_TYPE {
+extern "C" fn get_command_type(p_att_value: *const u8) -> CMD_TYPE {
     return CMD_TYPE::NORMAL;
 }
 
 // Note: par[8], par[9] of passive command have been used internal for sno2.
 #[no_mangle]
-fn set_command_type2alt(p_att_value: *const u8) {}
+extern "C" fn set_command_type2alt(p_att_value: *const u8) {}
 
 pub_mut!(cb_mesh_node_filter, u32, 0);
 
 #[no_mangle]
-fn proc_sig_mesh_to_telink_mesh() -> u8 {
+extern "C" fn proc_sig_mesh_to_telink_mesh() -> u8 {
     return 0;
 }
 
 #[no_mangle]
-fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
+extern "C" fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
 
 #[no_mangle]
-fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) {}
+extern "C" fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) {}
 
 #[no_mangle]
-fn is_bridge_task_busy() -> bool {
+extern "C" fn is_bridge_task_busy() -> bool {
     return false;
 }
 
 #[no_mangle]
-fn mesh_ota_third_complete_cb(calibrate_flag: u32) {}
+extern "C" fn mesh_ota_third_complete_cb(calibrate_flag: u32) {}
 
 pub_mut!(mesh_ota_third_fw_flag, u8, 0);
 
 #[no_mangle]
-fn mesh_ota_set_start_par_user(p: *const mesh_ota_pkt_start_command_t) {}
+extern "C" fn mesh_ota_set_start_par_user(p: *const mesh_ota_pkt_start_command_t) {}
 
 pub_mut!(p_cb_pair_failed, u32, 0);
 pub_mut!(p_cb_ble_slave_disconnect, u32, 0);
@@ -785,10 +787,10 @@ pub_mut!(beacon_with_mesh_adv, u8, 0);
 
 // 0 means only send beacon adv pkt;  1 means send both of beacon pkt and mesh adv pkt
 #[no_mangle]
-fn pa_txrx(val: u8) {}
+extern "C" fn pa_txrx(val: u8) {}
 
 #[no_mangle]
-fn pa_init(tx_pin_level: u8, rx_pin_level: u8) {}
+extern "C" fn pa_init(tx_pin_level: u8, rx_pin_level: u8) {}
 
 pub_mut!(
     slave_status_record,
@@ -822,4 +824,4 @@ pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
 pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
 
 #[no_mangle]
-fn fn_rx_push_to_cache(p: *const u8) {}
+extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

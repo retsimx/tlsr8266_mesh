@@ -10,7 +10,7 @@ CCFLAGS = -O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-stru
 
 LDFLAGS = --gc-sections -T ./sdk/boot.link
 
-LIB = ./sdk/proj_lib/libble_app_8266.a ./sdk/proj_lib/libsoft-fp.a
+LIB = ./sdk/proj_lib/libble_app_8266.a ./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a
 
 BUILD_DIR = _build
 

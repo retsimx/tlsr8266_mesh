@@ -8,7 +8,6 @@ use crate::main_light::light_slave_tx_command;
 use crate::mesh::mesh_node_st_val_t;
 use crate::mesh::wrappers::get_mesh_node_st;
 use crate::sdk::common::crc::crc16;
-use crate::sdk::common::string::memcpy;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
 use crate::sdk::light::{_mesh_send_command, _pair_enc_packet_mesh, app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM, rf_packet_att_cmd_t, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
@@ -32,7 +31,9 @@ fn light_mesh_rx_cb(data: *const u8) {
     };
 
     msg.data[2] = UartMsg::MeshMessage as u8;
-    unsafe { memcpy(msg.data.as_mut_ptr().offset(3), data as *const u8, size_of::<app_cmd_value_t>() as u32); }
+    for i in 0..size_of::<app_cmd_value_t>() {
+        unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.offset(i as isize) };
+    }
 
     app().uart_manager.send_message(&msg);
 }
@@ -62,7 +63,9 @@ async fn notification_parser() {
                     last_val[i] = get_mesh_node_st()[i].val.par;
 
                     msg.data[3] = 1;
-                    unsafe { memcpy(msg.data.as_mut_ptr().offset(4), addr_of!(get_mesh_node_st()[i].val) as *const u8, size_of::<mesh_node_st_val_t>() as u32); }
+                    for j in 0..size_of::<mesh_node_st_val_t>() {
+                        unsafe { *msg.data.as_mut_ptr().offset(4 + j as isize) = *(addr_of!(get_mesh_node_st()[i].val) as *const u8).offset(j as isize) };
+                    }
 
                     while !app().uart_manager.send_message(&msg) {
                         yield_now().await;
@@ -74,7 +77,9 @@ async fn notification_parser() {
                     last_val[i] = [0; 2];
 
                     msg.data[3] = 0;
-                    unsafe { memcpy(msg.data.as_mut_ptr().offset(4), addr_of!(get_mesh_node_st()[i].val) as *const u8, size_of::<mesh_node_st_val_t>() as u32); }
+                    for j in 0..size_of::<mesh_node_st_val_t>() {
+                        unsafe { *msg.data.as_mut_ptr().offset(4 + j as isize) = *(addr_of!(get_mesh_node_st()[i].val) as *const u8).offset(j as isize) };
+                    }
 
                     while !app().uart_manager.send_message(&msg) {
                         yield_now().await;

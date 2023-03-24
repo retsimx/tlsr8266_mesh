@@ -5,10 +5,11 @@
 use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
-use crate::config::{PWM_B, PWM_G};
+use crate::config::{MAX_LUM_BRIGHTNESS_VALUE, PWM_B, PWM_G};
 use crate::embassy::executor::Executor;
 use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::watchdog::wd_clear;
+use fixed::types::I16F16;
 
 mod app;
 mod common;
@@ -45,7 +46,6 @@ fn set_pw2(on: bool) {
     gpio_write(PWM_B as u32, if on {1} else {0});
 }
 
-#[no_mangle]
 pub fn blinken_testboard() {
     for idx in 0..6 {
         if idx % 2 == 0 {
@@ -65,13 +65,12 @@ pub fn blinken_testboard() {
     set_pw2(false);
 }
 
-#[no_mangle]
 pub fn blinken() {
     for idx in 0..6 {
         if idx % 2 == 0 {
-            app().light_manager.light_adjust_rgb_hw(0xffff, 0xffff, 0xffff);
+            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
         } else {
-            app().light_manager.light_adjust_rgb_hw(0, 0, 0);
+            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
         }
 
         for _ in 0..1000000 {
@@ -79,11 +78,11 @@ pub fn blinken() {
         }
     }
 
-    app().light_manager.light_adjust_rgb_hw(0, 0, 0);
+    app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
 }
 
 #[no_mangle]
-pub fn main_entrypoint() {
+pub extern "C" fn main_entrypoint() {
     // Must happen first
     OtaManager::handle_ota_update();
 

@@ -26,7 +26,7 @@ pub_mut!(sys_chn_listen, [u8; 4], SYS_CHN_LISTEN_MESH);
 pub const REGA_LIGHT_OFF: u8 = 0x3a;
 
 #[no_mangle] // Required by light_ll
-pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
+pub extern "C" fn dev_addr_with_mac_flag(params: *const u8) -> bool {
     return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
 }
 
@@ -61,7 +61,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 
 // recover status before software reboot
 #[no_mangle] // required by light_ll
-fn light_sw_reboot_callback() {
+extern "C" fn light_sw_reboot_callback() {
     if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
@@ -79,7 +79,7 @@ fn light_sw_reboot_callback() {
 // p:data
 // n:length
 #[no_mangle] // required by light_ll
-fn save_pair_info(adr: u32, p: *const u8, n: u32) {
+extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     flash_write_page(
         *get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + adr,
         n,
@@ -108,7 +108,7 @@ fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     timeout <= 6second
 */
 #[no_mangle] // required by light_ll
-fn update_ble_parameter_cb() {
+extern "C" fn update_ble_parameter_cb() {
     if *get_conn_update_successed() == 0 {
         _setup_ble_parameter_start(
             1,
@@ -121,7 +121,7 @@ fn update_ble_parameter_cb() {
 }
 
 #[no_mangle] // required by light_ll
-pub fn rf_update_conn_para(p: *const u8) -> u8 {
+pub extern "C" fn rf_update_conn_para(p: *const u8) -> u8 {
     let pp = unsafe { &*(p as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;

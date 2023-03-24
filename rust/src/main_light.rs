@@ -14,13 +14,14 @@ use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt};
+use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
+use fixed::types::I16F16;
 
-pub const LED_INDICATE_VAL: u16 = 0xffff;
+pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
 
 macro_rules! config_led_event {
@@ -68,17 +69,14 @@ fn mesh_ota_master_led(_: *const u8) {
 }
 
 pub fn light_hw_timer1_config() {
-    // Enable timer1 interrupts for controlling the lights
-    // write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
-    // write_reg_tmr1_tick(0);
-    // write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1MS );
-    //
-    // write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+    // Enable timer1 interrupts for controlling light transitions
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
+    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 50); // ~ 50hz
 
     // enable timer0 interrupt for tracking clock_time overflow
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
     write_reg_tmr0_tick(0);
-    write_reg_tmr0_capt(CLOCK_SYS_CLOCK_1S );
+    write_reg_tmr0_capt(CLOCK_SYS_CLOCK_1S);
 
     write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN as u32);
 }
@@ -219,10 +217,10 @@ fn proc_led() {
 
         if led_off || led_on {
             if *get_led_sel() & BIT!(0) != 0 {
-                app().light_manager.light_adjust_g(LED_INDICATE_VAL * led_on as u16, 0xffff);
+                app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
             if *get_led_sel() & BIT!(1) != 0 {
-                app().light_manager.light_adjust_b(LED_INDICATE_VAL * led_on as u16, 0xffff);
+                app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
             if *get_led_sel() & BIT!(5) != 0 {}
         }
@@ -263,7 +261,7 @@ pub fn main_loop() {
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
 #[no_mangle] // required by light_ll
-fn rf_link_response_callback(
+extern "C" fn rf_link_response_callback(
     ppp: *mut rf_packet_att_value_t,
     p_req: *const rf_packet_att_value_t,
 ) -> bool {
@@ -289,12 +287,12 @@ fn rf_link_response_callback(
         ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 
         let state = app().light_manager.get_current_light_state();
-        ppp.val[3] = (state.g & 0xff) as u8;
-        ppp.val[4] = ((state.g >> 8) & 0xff) as u8;
-        ppp.val[5] = (state.b & 0xff) as u8;
-        ppp.val[6] = ((state.b >> 8) & 0xff) as u8;
-        ppp.val[7] = (state.brightness & 0xff) as u8;
-        ppp.val[8] = ((state.brightness >> 8) & 0xff) as u8;
+        ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
+        ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
+        ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
+        ppp.val[6] = ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8;
+        ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
+        ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
     } else if ppp.val[15] == GET_GROUP1 {
         ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
         for i in 0..MAX_GROUP_NUM as usize {
@@ -379,7 +377,7 @@ fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
 #[no_mangle] // required by light_ll
-pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
+pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
     let op_cmd_len: u8 = 0;
@@ -428,20 +426,20 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     } else if op == LGT_CMD_SET_LIGHT {
         if params[8] & 0x1 != 0 {
             // Brightness
-            let value = (params[1] as u16) << 8 | params[0] as u16;
+            let value = ((params[1] as u16) << 8 | params[0] as u16) / 2;
 
             app().light_manager.set_brightness(value);
             let state = app().light_manager.get_current_light_state();
 
             if app().light_manager.is_light_off() {
-                app().light_manager.begin_transition(state.g, state.b, 0);
+                app().light_manager.begin_transition(state.cw.to_num(), state.ww.to_num(), 0);
             } else {
-                app().light_manager.begin_transition(state.g, state.b, value);
+                app().light_manager.begin_transition(state.cw.to_num(), state.ww.to_num(), value);
             }
         }
         if params[8] & 0x2 != 0 {
             // Temperature
-            let value = (params[3] as u16) << 8 | params[2] as u16;
+            let value = ((params[3] as u16) << 8 | params[2] as u16) / 2;
 
             let g = MAX_LUM_BRIGHTNESS_VALUE - value;
             let b = value;
@@ -451,7 +449,6 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             } else {
                 app().light_manager.begin_transition(g, b, app().light_manager.get_brightness());
             }
-
         }
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();
@@ -529,7 +526,7 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
 }
 
 #[no_mangle] // required by light_ll
-pub fn rf_link_light_event_callback(status: u8) {
+pub extern "C" fn rf_link_light_event_callback(status: u8) {
     if status == LGT_CMD_SET_MESH_INFO {
         _mesh_node_init();
         app().light_manager.device_status_update();
@@ -546,28 +543,39 @@ pub fn rf_link_light_event_callback(status: u8) {
 }
 
 #[no_mangle]
-pub fn irq_timer1() {}
+pub extern "C" fn irq_timer1() {
+    app().light_manager.transition_step();
+}
 
 // Counts any clock_time overflows
 static mut CLOCK_TIME_UPPER: u32 = 0;
 static mut LAST_CLOCK_TIME: u32 = 0;
 
-unsafe fn check_clock_overflow() -> u32 {
-    let time = clock_time();
-    if clock_time() < LAST_CLOCK_TIME {
-        // Overflow has occurred
-        CLOCK_TIME_UPPER += 1;
+pub fn init_clock64() {
+    unsafe {
+        CLOCK_TIME_UPPER = 0;
+        LAST_CLOCK_TIME = clock_time();
     }
+}
 
-    LAST_CLOCK_TIME = time;
+unsafe fn check_clock_overflow() -> u32 {
+    critical_section::with(|_| {
+        let time = clock_time();
+        if time < LAST_CLOCK_TIME {
+            // Overflow has occurred
+            CLOCK_TIME_UPPER += 1;
+        }
 
-    time
+        LAST_CLOCK_TIME = time;
+
+        time
+    })
 }
 
 // This timer is configured to run once per second to check if the internal clock has overflowed.
 // this is a workaround in case there are no 'clock_time64' calls between overflows
 #[no_mangle]
-pub fn irq_timer0() {
+pub extern "C" fn irq_timer0() {
     unsafe { check_clock_overflow(); }
 }
 
@@ -581,7 +589,7 @@ pub fn clock_time64() -> u64 {
 #[no_mangle] // required by light_ll
 #[allow(non_snake_case)]
 #[link_section = ".ram_code"]
-fn irq_handler() {
+extern "C" fn irq_handler() {
     unsafe { irq_light_slave_handler(); }
 
     app().uart_manager.check_irq();

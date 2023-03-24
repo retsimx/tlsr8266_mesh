@@ -1,12 +1,11 @@
 use core::cmp::{max, min};
 use core::mem::size_of;
 use core::ptr::addr_of;
-use easer::functions::{Cubic, Easing};
 use embassy_executor::Spawner;
 use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
-use crate::app;
+use crate::{app};
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_SECTOR_SIZE, get_flash_adr_lum, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::embassy::yield_now::yield_now;
@@ -15,8 +14,10 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::pwm_set_cmp;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
+use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
+use fixed::types::{I16F16, U16F16};
 
-const TRANSITION_TIME_MS: u64 = 1000;
+const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
 
 #[derive(Copy, Clone, Debug)]
@@ -27,9 +28,9 @@ struct Message {
 
 #[derive(Copy, Clone, Debug)]
 pub struct LightState {
-    pub g: u16,
-    pub b: u16,
-    pub brightness: u16,
+    pub cw: I16F16,
+    pub ww: I16F16,
+    pub brightness: I16F16,
     timestamp: Instant
 }
 
@@ -37,16 +38,16 @@ pub struct LightState {
 struct LumSaveT {
     save_flag: u8,
     brightness: u16,
-    g: u16,
-    b: u16
+    cw: u16,
+    ww: u16
 }
 
 impl LightState {
     pub const fn default() -> Self {
         Self {
-            g: u16::MAX,
-            b: 0,
-            brightness: 0,
+            cw: I16F16::lit("0x7fff"),
+            ww: I16F16::lit("0"),
+            brightness: I16F16::lit("0"),
             timestamp: Instant::from_ticks(0)
         }
     }
@@ -54,7 +55,6 @@ impl LightState {
 
 pub struct LightManager {
     channel: Deque<Message, 5>,
-    transition_signal: bool,
 
     old_light_state: LightState,
     new_light_state: LightState,
@@ -67,22 +67,16 @@ pub struct LightManager {
     brightness: u16
 }
 
-#[embassy_executor::task]
-async fn start_transitioner() {
-    app().light_manager.run_transitioner().await;
-}
-
 impl LightManager {
     pub const fn default() -> Self {
         Self {
             channel: Deque::new(),
-            transition_signal: false,
             old_light_state: LightState::default(),
             new_light_state: LightState::default(),
             current_light_state: LightState::default(),
             light_lum_addr: 0,
             last_transition_time: 0,
-            brightness: u16::MAX
+            brightness: MAX_LUM_BRIGHTNESS_VALUE
         }
     }
 
@@ -102,10 +96,7 @@ impl LightManager {
         }
     }
 
-    pub async fn run(&mut self, spawner: Spawner) {
-        // Start the transitioner
-        spawner.spawn(start_transitioner()).unwrap();
-
+    pub async fn run(&mut self, _spawner: Spawner) {
         loop {
             while self.channel.is_empty() {
                 yield_now().await;
@@ -125,54 +116,93 @@ impl LightManager {
     }
 
     pub fn begin_transition(&mut self, g: u16, b: u16, brightness: u16) {
-        self.old_light_state = self.current_light_state;
-        self.old_light_state.timestamp = Instant::now();
+        critical_section::with(|_| {
+            self.old_light_state = self.current_light_state;
+            self.old_light_state.timestamp = Instant::now();
 
-        self.new_light_state = LightState {
-            g, b, brightness,
-            timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
-        };
+            self.new_light_state = LightState {
+                cw: I16F16::from_num(g),
+                ww: I16F16::from_num(b),
+                brightness: I16F16::from_num(brightness),
+                timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
+            };
 
-        self.last_transition_time = clock_time();
+            self.last_transition_time = clock_time();
 
-        self.transition_signal = true;
+            // Enable timer1
+            write_reg_tmr1_tick(0);
+            write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+
+            // Run a single transition to avoid anything bugging out
+            self.transition_step();
+        });
     }
 
-    pub async fn run_transitioner(&mut self) {
-        loop {
-            while !self.transition_signal {
-                yield_now().await;
-            }
+    pub fn ease_in_out(&self, t: I16F16, b: I16F16, c: I16F16) -> I16F16 {
+        static TWO: I16F16 = I16F16::lit("2");
+        static D: I16F16 = I16F16::lit("0x7fff");
 
-            self.transition_signal = false;
-
-            let mut now = Instant::now();
-            let mut last = false;
-
-            while now < self.new_light_state.timestamp || last {
-                let time = (now - self.old_light_state.timestamp).as_ticks() as f32 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks() as f32;
-                self.current_light_state = LightState {
-                    g: if self.old_light_state.g > self.new_light_state.g { Cubic::ease_in_out(1.0-time, self.new_light_state.g as f32, self.old_light_state.g as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.g as f32, self.new_light_state.g as f32, 1.0) as u16 },
-                    b: if self.old_light_state.b > self.new_light_state.b { Cubic::ease_in_out(1.0-time, self.new_light_state.b as f32, self.old_light_state.b as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.b as f32, self.new_light_state.b as f32, 1.0) as u16 },
-                    brightness: if self.old_light_state.brightness > self.new_light_state.brightness { Cubic::ease_in_out(1.0-time, self.new_light_state.brightness as f32, self.old_light_state.brightness as f32, 1.0) as u16 } else { Cubic::ease_in_out(time, self.old_light_state.brightness as f32, self.new_light_state.brightness as f32, 1.0) as u16 },
-                    timestamp: now
-                };
-
-                self.light_adjust_rgb_hw(self.current_light_state.g, self.current_light_state.b, self.current_light_state.brightness);
-
-                if last {
-                    break
-                }
-
-                yield_now().await;
-
-                now = min(Instant::now(), self.new_light_state.timestamp);
-
-                if now == self.new_light_state.timestamp {
-                    last = true
-                }
-            }
+        let t = t / (D / TWO);
+        if t < 1 {
+            c / TWO * (t * t * t) + b
         }
+        else {
+            let t = t - TWO;
+            c / TWO * (t * t * t + TWO) + b
+        }
+    }
+
+    pub fn transition_step(&mut self) {
+        self.current_light_state.timestamp = min(Instant::now(), self.new_light_state.timestamp);
+
+        if self.current_light_state.timestamp == self.new_light_state.timestamp {
+            // Disable timer1
+            write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !(FLD_TMR::TMR1_EN as u32));
+
+            // Save a computation
+            self.current_light_state.cw = self.new_light_state.cw;
+            self.current_light_state.ww = self.new_light_state.ww;
+            self.current_light_state.brightness = self.new_light_state.brightness;
+
+            // Make sure we do a final light update
+            self.light_adjust_rgb_hw(
+                self.current_light_state.cw.to_num(),
+                self.current_light_state.ww.to_num(),
+                self.current_light_state.brightness.to_num()
+            );
+
+            // Nothing more to do
+            return;
+        }
+
+        // We're still transitioning. Run the calculations
+        let time = I16F16::from_num((self.current_light_state.timestamp - self.old_light_state.timestamp).as_ticks() * (u16::MAX / 2) as u64 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks());
+        self.current_light_state.cw =
+            self.ease_in_out(
+                time,
+                self.old_light_state.cw,
+                self.new_light_state.cw - self.old_light_state.cw
+            ).to_num();
+
+        self.current_light_state.ww =
+            self.ease_in_out(
+                time,
+                self.old_light_state.ww,
+                self.new_light_state.ww - self.old_light_state.ww
+            ).to_num();
+
+        self.current_light_state.brightness =
+            self.ease_in_out(
+                time,
+                self.old_light_state.brightness,
+                self.new_light_state.brightness - self.old_light_state.brightness
+            ).to_num();
+
+        self.light_adjust_rgb_hw(
+            self.current_light_state.cw.to_num(),
+            self.current_light_state.ww.to_num(),
+            self.current_light_state.brightness.to_num()
+        );
     }
 
     pub fn is_light_off(&self) -> bool {
@@ -200,8 +230,8 @@ impl LightManager {
         let lum_save = LumSaveT {
             save_flag: LIGHT_SAVE_VALID_FLAG,
             brightness: self.brightness,
-            g: self.current_light_state.g,
-            b: self.current_light_state.b
+            cw: self.current_light_state.cw.to_num(),
+            ww: self.current_light_state.ww.to_num()
         };
 
         flash_write_page(
@@ -222,8 +252,8 @@ impl LightManager {
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
             if LIGHT_SAVE_VALID_FLAG == lum_save.save_flag {
                 self.brightness = lum_save.brightness;
-                self.current_light_state.g = lum_save.g;
-                self.current_light_state.b = lum_save.b;
+                self.current_light_state.cw = I16F16::from_num(lum_save.cw);
+                self.current_light_state.ww = I16F16::from_num(lum_save.ww);
             } else if lum_save.save_flag == 0xFF {
                 break;
             }
@@ -266,42 +296,42 @@ impl LightManager {
         self.brightness
     }
 
-    fn calculate_lumen_map(&self, val: u16) -> f32 {
-        let percentage = (val as f32 / MAX_LUM_BRIGHTNESS_VALUE as f32) * 100.;
-        // return keyframe::ease(keyframe::functions::EaseInOutCubic, 0., 0xffff as f32, percentage);
-        return (-0.00539160 * libm::powf(percentage, 3.0))
-            + (4.47709595 * libm::powf(percentage, 2.0))
-            + (153.72442036 * percentage);
+    pub fn calculate_lumen_map(&self, val: I16F16) -> I16F16 {
+        static COEFF1: U16F16 = U16F16::lit("5.2221");
+        static COEFF2: U16F16 = U16F16::lit("130.5908");
+
+        let percentage = U16F16::from_num(val) / MAX_LUM_BRIGHTNESS_VALUE as u32 * 100;
+        I16F16::from_num((COEFF1 * (percentage * percentage)) + COEFF2 * percentage)
     }
 
-    fn pwm_set_lum(&self, id: u32, y: u32, pol: bool) {
-        let lum = (y * PMW_MAX_TICK as u32) / MAX_LUM_BRIGHTNESS_VALUE as u32;
+    fn pwm_set_lum(&self, id: u32, y: u16, pol: bool) {
+        let lum = (y as u32 * PMW_MAX_TICK as u32) / (255*256) as u32;
 
         pwm_set_cmp(id, if pol { PMW_MAX_TICK as u32 - lum } else { lum } as u16);
     }
 
-    fn get_pwm_cmp(&self, val: u16, lum: u16) -> u32 {
+    fn get_pwm_cmp(&self, val: I16F16, lum: I16F16) -> u16 {
         let val_lumen_map = self.calculate_lumen_map(lum);
 
-        return ((val as f32 * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as f32) as u32;
+        return ((val.to_num::<u32>() * val_lumen_map.to_num::<u32>()) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16;
     }
 
-    pub fn light_adjust_g(&self, val: u16, lum: u16) {
+    pub fn light_adjust_cw(&self, val: I16F16, lum: I16F16) {
         self.pwm_set_lum(PWMID_G, self.get_pwm_cmp(val, lum), false);
     }
 
-    pub fn light_adjust_b(&self, val: u16, lum: u16) {
+    pub fn light_adjust_ww(&self, val: I16F16, lum: I16F16) {
         self.pwm_set_lum(PWMID_B, self.get_pwm_cmp(val, lum), true);
     }
 
-    pub fn light_adjust_rgb_hw(&self, val_g: u16, val_b: u16, lum: u16) {
-        self.light_adjust_g(val_g, lum);
-        self.light_adjust_b(val_b, lum);
+    pub fn light_adjust_rgb_hw(&self, val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
+        self.light_adjust_cw(val_cw, lum);
+        self.light_adjust_ww(val_ww, lum);
     }
 
     pub fn light_onoff_hw(&mut self, on: bool) {
         let state = app().light_manager.get_current_light_state();
-        self.begin_transition(state.g, state.b, match on { true => self.brightness, false => 0 });
+        self.begin_transition(state.cw.to_num(), state.ww.to_num(), match on { true => self.brightness, false => 0 });
     }
 
     pub fn light_onoff(&mut self, on: bool) {

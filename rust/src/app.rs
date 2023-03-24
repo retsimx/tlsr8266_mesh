@@ -1,5 +1,5 @@
 use crate::config::MESH_PWD_ENCODE_SK;
-use crate::main_light::{main_loop, user_init};
+use crate::main_light::{init_clock64, main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
 use crate::sdk::mcu::clock::{clock_init};
@@ -58,6 +58,8 @@ impl App {
         gpio_init();
         irq_init();
         unsafe { rf_drv_init(true); }
+
+        init_clock64();
 
         // Get uart ready to go
         self.uart_manager.init();

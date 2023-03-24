@@ -1,5 +1,5 @@
 #[no_mangle] // required by light_ll
-pub fn crc16(mut pD: &[u8]) -> u16 {
+pub extern "C" fn crc16(mut pD: &[u8]) -> u16 {
     let poly: [u16; 2] = [0, 0xa001]; //0x8005 <==> 0xa001
     let mut crc: u16 = 0xffff;
     // let i,j;

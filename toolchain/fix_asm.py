@@ -37,6 +37,7 @@ replaced = {
     '\tbvc\t': '\ttjvc\t',
     '\tbvs\t': '\ttjvs\t',
     '\tcmp\t': '\ttcmp\t',
+    '\tcmn\t': '\ttcmpn\t',
     '\tldm\t': '\ttloadm\t',
     '\tldr\t': '\ttloadr\t',
     '\tldrb\t': '\ttloadrb\t',
@@ -76,7 +77,9 @@ last_section_extra = ""
 
 inputfile = sys.argv[-1]
 with open(inputfile + ".tc32", 'w') as outputfile:
-    for line in open(inputfile, 'r'):
+    lines = open(inputfile, 'r').readlines()
+    for index in range(len(lines)):
+        line = lines[index]
         for kind in ignored:
             if kind in line or kind == line:
                 line = '@ ' + line
@@ -91,14 +94,19 @@ with open(inputfile + ".tc32", 'w') as outputfile:
         if '.section' in line:
             section_seen = True
             last_section_name = line.split('\t')[-1].split(',')[0]
-            last_section_extra = ',' + ','.join(line.split('\t')[-1].split(',')[1:])
+            last_section_extra = ',' + ','.join(line.split('\t')[-1].split(',')[1:]).strip()
+
+            if ".ram_code" not in line and '.note' not in line:
+                line = "\t@ " + line
 
         if '.text' == line.strip():
+            line = "\t@ " + line
             section_seen = False
             last_section_name = '.text'
             last_section_extra = ""
 
         if '.data' == line.strip():
+            line = "\t@ " + line
             section_seen = False
             last_section_name = '.data'
             last_section_extra = ""
@@ -107,13 +115,28 @@ with open(inputfile + ".tc32", 'w') as outputfile:
             section_seen = False
 
         if '.type' in line and ',%object' in line:
+            if ".data" in lines[index+1]:
+                section_seen = False
+                last_section_name = '.data'
+                last_section_extra = ""
+
+            if ".comm" in lines[index+2]:
+                section_seen = False
+                last_section_name = '.data'
+                last_section_extra = ""
+
+            if '.section' in lines[index+1]:
+                section_seen = True
+                last_section_name = lines[index+1].split('\t')[-1].split(',')[0]
+                last_section_extra = ',' + ','.join(lines[index+1].split('\t')[-1].split(',')[1:]).strip()
+
             if last_section_name != '.ram_code':
                 name = line.split('\t')[-1].split(',')[0]
-                line += f"\t.section \"{last_section_name}.{name}\"\n"
+                line += f"\t.section {last_section_name}.{name}{last_section_extra}\n"
 
         if '.type' in line and ',%function' in line and not section_seen:
             if last_section_name != '.ram_code':
                 name = line.split('\t')[-1].split(',')[0]
-                line += f"\t.section \"{last_section_name}.{name}\"{last_section_extra}\n"
+                line += f"\t.section {last_section_name}.{name}{last_section_extra}\n"
 
         outputfile.writelines([line])

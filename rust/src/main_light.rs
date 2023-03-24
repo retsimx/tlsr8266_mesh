@@ -424,31 +424,31 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
         }
     } else if op == LGT_CMD_SET_LIGHT {
+        let state = app().light_manager.get_current_light_state();
+
+        let mut brightness = app().light_manager.get_brightness();
+        let mut cw = state.cw.to_num();
+        let mut ww = state.ww.to_num();
+
         if params[8] & 0x1 != 0 {
             // Brightness
-            let value = ((params[1] as u16) << 8 | params[0] as u16) / 2;
+            brightness = ((params[1] as u16) << 8 | params[0] as u16) / 2;
 
-            app().light_manager.set_brightness(value);
-            let state = app().light_manager.get_current_light_state();
-
-            if app().light_manager.is_light_off() {
-                app().light_manager.begin_transition(state.cw.to_num(), state.ww.to_num(), 0);
-            } else {
-                app().light_manager.begin_transition(state.cw.to_num(), state.ww.to_num(), value);
-            }
+            app().light_manager.set_brightness(brightness);
         }
+
         if params[8] & 0x2 != 0 {
             // Temperature
             let value = ((params[3] as u16) << 8 | params[2] as u16) / 2;
 
-            let g = MAX_LUM_BRIGHTNESS_VALUE - value;
-            let b = value;
+            cw = MAX_LUM_BRIGHTNESS_VALUE - value;
+            ww = value;
+        }
 
-            if app().light_manager.is_light_off() {
-                app().light_manager.begin_transition(g, b, 0);
-            } else {
-                app().light_manager.begin_transition(g, b, app().light_manager.get_brightness());
-            }
+        if app().light_manager.is_light_off() {
+            app().light_manager.begin_transition(cw, ww, 0);
+        } else {
+            app().light_manager.begin_transition(cw, ww, brightness);
         }
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();

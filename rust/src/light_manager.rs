@@ -142,6 +142,8 @@ impl LightManager {
         static TWO: I16F16 = I16F16::lit("2");
         static D: I16F16 = I16F16::lit("0x7fff");
 
+        return (c / D * t) + b;
+
         let t = t / (D / TWO);
         if t < 1 {
             c / TWO * (t * t * t) + b
@@ -296,12 +298,12 @@ impl LightManager {
         self.brightness
     }
 
-    pub fn calculate_lumen_map(&self, val: I16F16) -> I16F16 {
+    pub fn calculate_lumen_map(&self, val: I16F16) -> u32 {
         static COEFF1: U16F16 = U16F16::lit("5.2221");
         static COEFF2: U16F16 = U16F16::lit("130.5908");
 
         let percentage = U16F16::from_num(val) / MAX_LUM_BRIGHTNESS_VALUE as u32 * 100;
-        I16F16::from_num((COEFF1 * (percentage * percentage)) + COEFF2 * percentage)
+        ((COEFF1 * (percentage * percentage)) + COEFF2 * percentage).to_num()
     }
 
     fn pwm_set_lum(&self, id: u32, y: u16, pol: bool) {
@@ -313,7 +315,7 @@ impl LightManager {
     fn get_pwm_cmp(&self, val: I16F16, lum: I16F16) -> u16 {
         let val_lumen_map = self.calculate_lumen_map(lum);
 
-        return ((val.to_num::<u32>() * val_lumen_map.to_num::<u32>()) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16;
+        return ((val.to_num::<u32>() * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16;
     }
 
     pub fn light_adjust_cw(&self, val: I16F16, lum: I16F16) {

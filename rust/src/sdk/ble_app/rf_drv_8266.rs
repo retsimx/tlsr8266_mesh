@@ -10,13 +10,15 @@ use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 
+const ENABLE_16MHZ_XTAL: bool = false;
+
 pub_mut!(rf_tp_base, u32);
 pub_mut!(rf_tp_gain, u32);
 pub_mut!(rf_tx_mode, u8);
 pub_mut!(rfhw_tx_power, u8);
 
 
-const tbl_rf_ini: [TBLCMDSET; 57] = [
+const tbl_rf_ini: [TBLCMDSET; 61] = [
     TBLCMDSET {
         adr: 0x5b4,
         dat: 0x02,
@@ -303,28 +305,27 @@ const tbl_rf_ini: [TBLCMDSET; 57] = [
         cmd: 0xc3,
     },
 
-
-    // Maybe stuff for 16mhz xtal
-    // TBLCMDSET {     // gauss filter sel: 16M
-    //     adr: 0x99,
-    //     dat: 0x31,
-    //     cmd: 0xc8,
-    // },
-    // TBLCMDSET {     //enable rxadc clock
-    //     adr: 0x82,
-    //     dat: 0x14,
-    //     cmd: 0xc8,
-    // },
-    // TBLCMDSET {     //reg_dc_mod (500K)
-    //     adr: 0x9e,
-    //     dat: 0x41,
-    //     cmd: 0xc8,
-    // },
-    // TBLCMDSET {
-    //     adr: 0x4eb,
-    //     dat: 0x60,
-    //     cmd: 0xc3,
-    // },
+    // Enable these for BLE to work with 16mhz xtal
+    TBLCMDSET {
+        adr: 0x4eb,
+        dat: 0x60,
+        cmd: 0xc3,
+    },
+    TBLCMDSET {     // gauss filter sel: 16M
+        adr: 0x99,
+        dat: 0x31,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {     //enable rxadc clock
+        adr: 0x82,
+        dat: 0x34,
+        cmd: 0xc8,
+    },
+    TBLCMDSET {     //reg_dc_mod (500K)
+        adr: 0x9e,
+        dat: 0x41,
+        cmd: 0xc8,
+    }
 ];
 
 pub_mut!(tbl_agc, [u32; 6]);
@@ -338,7 +339,11 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
     rf_tx_mode = 0;
     if enable {
         rfhw_tx_power = 0x40; // FR_TX_PA_MAX_POWER
-        LoadTblCmdSet(tbl_rf_ini.as_ptr(), 0x39);
+        if ENABLE_16MHZ_XTAL {
+            LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
+        } else {
+            LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
+        }
         for i in 0..6 {
             write_reg_rf_rx_gain_agc((*get_tbl_agc())[i], (i << 2) as u32)
         }

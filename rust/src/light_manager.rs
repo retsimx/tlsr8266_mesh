@@ -142,8 +142,6 @@ impl LightManager {
         static TWO: I16F16 = I16F16::lit("2");
         static D: I16F16 = I16F16::lit("0x7fff");
 
-        return (c / D * t) + b;
-
         let t = t / (D / TWO);
         if t < 1 {
             c / TWO * (t * t * t) + b

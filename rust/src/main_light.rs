@@ -330,9 +330,7 @@ extern "C" fn rf_link_response_callback(
         }
     } else if ppp.val[15] == GET_DEV_ADDR {
         ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
-        if dev_addr_with_mac_flag(params.as_ptr()) {
-            return dev_addr_with_mac_rsp(&mut ppp.val);
-        }
+        return dev_addr_with_mac_rsp(&mut ppp.val);
     } else if ppp.val[15] == GET_USER_NOTIFY {
         /*user can get parameters from APP.
         params[0] is relay times.

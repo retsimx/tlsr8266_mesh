@@ -6,9 +6,6 @@ use crate::sdk::mcu::analog::analog_write;
 use core::ptr::addr_of;
 use core::slice;
 use crate::mesh::wrappers::get_get_mac_en;
-use crate::vendor_light::get_adv_rsp_pri_data;
-
-
 
 pub_mut!(conn_update_successed, u8, 0);
 pub_mut!(conn_update_cnt, u8, 0);
@@ -30,18 +27,13 @@ pub extern "C" fn dev_addr_with_mac_flag(params: *const u8) -> bool {
     return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
 }
 
-pub fn dev_addr_with_mac_rsp(params: &[u8], par_rsp: &mut [u8]) -> bool {
-    if dev_addr_with_mac_match(params) {
-        par_rsp[0] = (*get_device_address() & 0xff) as u8;
-        par_rsp[1] = ((*get_device_address() >> 8) & 0xff) as u8;
+pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
+    par_rsp[2] = (*get_device_address() & 0xff) as u8;
+    par_rsp[3] = ((*get_device_address() >> 8) & 0xff) as u8;
 
-        let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
-        par_rsp[0..6].copy_from_slice(slave_mac);
-        par_rsp[8] = (get_adv_rsp_pri_data().ProductUUID & 0xff) as u8;
-        par_rsp[9] = (get_adv_rsp_pri_data().ProductUUID >> 8 & 0xff) as u8;
-        return true;
-    }
-    return false;
+    let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
+    par_rsp[4..10].copy_from_slice(slave_mac);
+    return true;
 }
 
 pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {

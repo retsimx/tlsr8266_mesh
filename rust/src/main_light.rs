@@ -331,10 +331,7 @@ extern "C" fn rf_link_response_callback(
     } else if ppp.val[15] == GET_DEV_ADDR {
         ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
         if dev_addr_with_mac_flag(params.as_ptr()) {
-            return dev_addr_with_mac_rsp(&params, &mut ppp.val);
-        } else {
-            ppp.val[3] = (*get_device_address() & 0xFF) as u8;
-            ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+            return dev_addr_with_mac_rsp(&mut ppp.val);
         }
     } else if ppp.val[15] == GET_USER_NOTIFY {
         /*user can get parameters from APP.
@@ -500,27 +497,36 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
 
 fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
     let mut err = -1;
-    if *get_slave_link_connected() && *get_pair_login_ok() {
-        if p.len() > 10 {
-            //max length of par is 10
-            return -1;
+
+    let mut pkt: rf_packet_att_value_t = rf_packet_att_value_t {
+        sno: [0; 3],
+        src: [0; 2],
+        dst: [0; 2],
+        val: [0; 23],
+    };
+
+    pkt.src[0] = p_src[0];
+    pkt.src[1] = p_src[1];
+
+    // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
+    pkt.val[3..3 + 20].copy_from_slice(&[0; 20]);
+    pkt.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
+    pkt.val[15] = p[p.len() - 1];
+
+    rf_link_response_callback(&mut pkt, &pkt);
+
+    get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&pkt.val[0..10]);
+
+    get_pkt_light_notify().value[3] = p_src[0];
+    get_pkt_light_notify().value[4] = p_src[1];
+
+    let r = irq_disable();
+    if _is_add_packet_buf_ready() {
+        if !_rf_link_add_tx_packet(get_pkt_light_notify_addr() as *const u8) {
+            err = 0;
         }
-
-        get_pkt_light_notify().value[3] = p_src[0];
-        get_pkt_light_notify().value[4] = p_src[1];
-
-        // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
-        get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&[0; 10]);
-        get_pkt_light_notify().value[10..10 + p.len()].copy_from_slice(&p[0..p.len()]);
-
-        let r = irq_disable();
-        if _is_add_packet_buf_ready() {
-            if !_rf_link_add_tx_packet(get_pkt_light_notify_addr() as *const u8) {
-                err = 0;
-            }
-        }
-        irq_restore(r);
     }
+    irq_restore(r);
 
     return err;
 }

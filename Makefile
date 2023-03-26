@@ -61,6 +61,7 @@ $(BUILD_DIR)/vendor/common/%.o: ./sdk/vendor/common/%.c
 
 # Startup.
 $(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
+	bash sdk/increment_version.sh
 	mkdir -p $(BUILD_DIR)/asm
 	$(CC) -c $(CCFLAGS) $< -o $@
 

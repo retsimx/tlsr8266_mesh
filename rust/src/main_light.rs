@@ -20,6 +20,8 @@ use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use fixed::types::I16F16;
+use crate::sdk::app_att_light::get_fwRevision_value;
+use crate::sdk::drivers::flash::flash_read_page;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -94,7 +96,7 @@ fn light_init_default() {
     }
 
     // get fw version @flash 0x02,0x03,0x04,0x05
-    // _mesh_get_fw_version();
+    flash_read_page(0x02, 4, get_fwRevision_value().as_mut_ptr());
 
     //add the user_data after the adv_pri_data
     let user_const_data: [u8; 6] = [0x05, 0x02, 0x19, 0x00, 0x69, 0x69];

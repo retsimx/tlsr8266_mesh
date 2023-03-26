@@ -107,7 +107,7 @@ static appearance: u16 = GAP_APPEARE_UNKNOWN;
 static periConnParamChar: u8 = CHAR_PROP_READ;
 
 static fwRevisionChar: u8 = CHAR_PROP_READ;
-pub_static!(fwRevision_value, [u8; 16], [0; 16]);
+pub_mut!(fwRevision_value, [u8; 16], [0; 16]);
 
 static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();

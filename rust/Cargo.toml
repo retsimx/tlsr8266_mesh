@@ -9,7 +9,6 @@ edition = "2021"
 opt-level = "z"
 lto = false
 panic = "abort"
-strip = true
 
 [dependencies]
 paste = "1.0"

@@ -14,50 +14,15 @@ LIB = ./sdk/proj_lib/libble_app_8266.a ./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.t
 
 BUILD_DIR = _build
 
-DRIVERS_SRC =
-DRIVERS_OBJS = $(addprefix $(BUILD_DIR)/drivers/, $(notdir $(DRIVERS_SRC:%.c=%.o)))
-
-SDK_COMMON_SRC =
-#	./sdk/proj/common/printf.c
-SDK_COMMON_OBJS = $(addprefix $(BUILD_DIR)/sdk-common/, $(notdir $(SDK_COMMON_SRC:%.c=%.o)))
-
-VENDORS_SRC =
-VENDORS_OBJS = $(addprefix $(BUILD_DIR)/vendor/common/, $(notdir $(VENDORS_SRC:%.c=%.o)))
-
 STARTUP_SRC = ./sdk/proj/mcu_spec/cstartup_8266.S
 STARTUP_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(STARTUP_SRC:%.S=%.o)))
-
-DIVMOD_SRC = #./sdk/div_mod.S
-DIVMOD_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(DIVMOD_SRC:%.S=%.o)))
-
-SRC =
-OBJS = $(addprefix $(BUILD_DIR)/, $(SRC:%.c=%.o))
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 	$(CP) -O binary $< $@
 
-$(BUILD_DIR)/$(TARGET): $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(OBJS)
+$(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ)
 	bash toolchain/rust2c.sh
 	$(LD) $(LDFLAGS) -o $@ rust/target/thumbv6m-none-eabi/release/deps/*.o $(CPPOBJS) $(OBJS) $(DRIVERS_OBJS) $(COMMON_OBJS) $(VENDORS_OBJS) $(SDK_COMMON_OBJS) $(STARTUP_OBJ) $(DIVMOD_OBJ) $(LIB)
-
-# Drivers.
-$(BUILD_DIR)/drivers/%.o: ./sdk/proj/drivers/%.c
-	mkdir -p $(BUILD_DIR)/drivers
-	$(CC) -c $(CCFLAGS) -o $@ $<
-
-$(BUILD_DIR)/drivers/%.o: ./sdk/proj/mcu/%.c
-	mkdir -p $(BUILD_DIR)/drivers
-	$(CC) -c $(CCFLAGS) -o $@ $<
-
-# SDK common stuff.
-$(BUILD_DIR)/sdk-common/%.o: ./sdk/proj/common/%.c
-	mkdir -p $(BUILD_DIR)/sdk-common
-	$(CC) -c $(CCFLAGS) -o $@ $<
-
-# Vendor stuff.
-$(BUILD_DIR)/vendor/common/%.o: ./sdk/vendor/common/%.c
-	mkdir -p $(BUILD_DIR)/vendor/common
-	$(CC) -c $(CCFLAGS) -o $@ $<
 
 # Startup.
 $(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
@@ -65,18 +30,8 @@ $(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
 	mkdir -p $(BUILD_DIR)/asm
 	$(CC) -c $(CCFLAGS) $< -o $@
 
-# div_mod.
-$(BUILD_DIR)/asm/div_mod.o : $(DIVMOD_SRC)
-	mkdir -p $(BUILD_DIR)/asm
-	$(CC) -c $(CCFLAGS) $< -o $@
-
-# App sources.
-$(BUILD_DIR)/%.o: %.c
-	mkdir -p $(BUILD_DIR)/src
-	$(CC) -c $(CCFLAGS) -o $@ $<
-
 .PHONE: all
-all: $(DRIVERS_OBJS) $(STARTUP_OBJ)
+all: $(STARTUP_OBJ)
 	@echo $(DRIVERS_OBJ)
 
 .PHONY: clean

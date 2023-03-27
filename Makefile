@@ -1,7 +1,6 @@
 
 TARGET=lightblemesh
 
-CBE = /home/lewis/Projects/llvm-cbe/build/tools/llvm-cbe/llvm-cbe
 CC = ./toolchain/tc32/bin/tc32-elf-gcc
 LD = ./toolchain/tc32/bin/tc32-elf-ld
 CP = ./toolchain/tc32/bin/tc32-elf-objcopy

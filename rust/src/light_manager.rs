@@ -166,9 +166,9 @@ impl LightManager {
 
             // Make sure we do a final light update
             self.light_adjust_rgb_hw(
-                self.current_light_state.cw.to_num(),
-                self.current_light_state.ww.to_num(),
-                self.current_light_state.brightness.to_num()
+                self.current_light_state.cw,
+                self.current_light_state.ww,
+                self.current_light_state.brightness
             );
 
             // Nothing more to do
@@ -182,26 +182,26 @@ impl LightManager {
                 time,
                 self.old_light_state.cw,
                 self.new_light_state.cw - self.old_light_state.cw
-            ).to_num();
+            );
 
         self.current_light_state.ww =
             self.ease_in_out(
                 time,
                 self.old_light_state.ww,
                 self.new_light_state.ww - self.old_light_state.ww
-            ).to_num();
+            );
 
         self.current_light_state.brightness =
             self.ease_in_out(
                 time,
                 self.old_light_state.brightness,
                 self.new_light_state.brightness - self.old_light_state.brightness
-            ).to_num();
+            );
 
         self.light_adjust_rgb_hw(
-            self.current_light_state.cw.to_num(),
-            self.current_light_state.ww.to_num(),
-            self.current_light_state.brightness.to_num()
+            self.current_light_state.cw,
+            self.current_light_state.ww,
+            self.current_light_state.brightness
         );
     }
 

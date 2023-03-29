@@ -22,6 +22,7 @@ use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv
 use fixed::types::I16F16;
 use crate::sdk::app_att_light::get_fwRevision_value;
 use crate::sdk::drivers::flash::flash_read_page;
+use crate::uart_manager::get_pkt_user_cmd;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -442,6 +443,12 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             ww = value;
         }
 
+        if params[8] & 0x4 != 0 {
+            // Temperature (independent CW/WW)
+            cw = ((params[3] as u16) << 8 | params[2] as u16) / 2;
+            ww = ((params[5] as u16) << 8 | params[4] as u16) / 2;
+        }
+
         if app().light_manager.is_light_off() {
             app().light_manager.begin_transition(cw, ww, 0);
         } else {
@@ -527,6 +534,19 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
         }
     }
     irq_restore(r);
+
+    let destination = 0xffff;
+
+    light_slave_tx_command(&pkt.val[0..13], destination);
+
+    // if *get_security_enable()
+    // {
+    //     get_pkt_user_cmd()._type |= BIT!(7);
+    //     unsafe {
+    //         _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
+    //         _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
+    //     }
+    // }
 
     return err;
 }

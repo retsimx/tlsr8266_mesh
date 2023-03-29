@@ -2,18 +2,10 @@
 
 set -e
 
-CXX=/opt/llvm10/bin/clang
-CBE=/home/lewis/Projects/llvm-cbe/build/tools/llvm-cbe/llvm-cbe
-CC=./toolchain/tc32/bin/tc32-elf-gcc
-LD=./toolchain/tc32/bin/tc32-elf-ld
-CP=./toolchain/tc32/bin/tc32-elf-objcopy
 AS=./toolchain/tc32/bin/tc32-elf-as
 LLC=/home/lewis/Projects/llvm/build/bin/llc
 
-CCFLAGS="-O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -ffunction-sections -fdata-sections -w"
-
 cd rust
-#find ./ -name "" -exec rm -rf {} \;
 
 cargo build --color=always --release
 

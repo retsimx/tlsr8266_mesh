@@ -107,7 +107,7 @@ static appearance: u16 = GAP_APPEARE_UNKNOWN;
 static periConnParamChar: u8 = CHAR_PROP_READ;
 
 static fwRevisionChar: u8 = CHAR_PROP_READ;
-pub_mut!(fwRevision_value, [u8; 16], [0; 16]);
+pub_mut!(fwRevision_value, [u8; 4], [1, 2, 3, 4]);
 
 static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();
@@ -186,7 +186,7 @@ static spp_otaname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"OTA\0
 static spp_pairname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Pair\0") };
 static spp_devicename: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"DevName\0") };
 
-unsafe fn meshStatusWrite(pw: *const u8) -> u32 {
+unsafe extern "C" fn meshStatusWrite(pw: *const u8) -> u32 {
     if !*get_pair_login_ok() {
         return 1;
     }
@@ -337,7 +337,7 @@ pub_mut!(
         // device info
         attrdefu!(9, 2, 2, 2, primaryServiceUUID, devInfoUUID),
         attrdefu!(0, 2, 1, 1, characterUUID, fwRevisionChar),
-        attrdef!(0, 2, 12, 12, fwRevision_charUUID, fwRevision_value),
+        attrdef!(0, 2, 4, 4, fwRevision_charUUID, fwRevision_value),
         attrdefu!(0, 2, 1, 1, characterUUID, manuNameStringChar),
         attrdef!(
             0,

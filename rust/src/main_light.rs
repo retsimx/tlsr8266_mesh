@@ -13,13 +13,14 @@ use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, k
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::irq_i::{irq_disable};
 use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
 use crate::sdk::pm::usb_dp_pullup_en;
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use fixed::types::I16F16;
+use heapless::Deque;
 use crate::sdk::app_att_light::get_fwRevision_value;
 use crate::sdk::drivers::flash::flash_read_page;
 use crate::uart_manager::get_pkt_user_cmd;
@@ -250,6 +251,8 @@ fn light_user_func() {
     app().mesh_manager.mesh_pair_proc_effect();
 }
 
+static mut NOTIFY_QUEUE: Deque<[u8; 13], 2> = Deque::new();
+
 pub fn main_loop() {
     if _is_receive_ota_window() {
         return;
@@ -258,6 +261,24 @@ pub fn main_loop() {
     light_user_func();
     _rf_link_slave_proc();
     proc_led();
+
+    unsafe {
+        while !NOTIFY_QUEUE.is_empty() {
+            let data = critical_section::with(|_| {
+                NOTIFY_QUEUE.pop_front().unwrap()
+            });
+
+            let destination = 0xffff;
+            light_slave_tx_command(&data, destination);
+
+            if *get_security_enable()
+            {
+                get_pkt_user_cmd()._type |= BIT!(7);
+                _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
+                _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
+            }
+        }
+    }
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
@@ -502,9 +523,7 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
     _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
 }
 
-fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
-    let mut err = -1;
-
+fn light_notify(p: &[u8], p_src: &[u8]) {
     let mut pkt: rf_packet_att_value_t = rf_packet_att_value_t {
         sno: [0; 3],
         src: [0; 2],
@@ -522,33 +541,13 @@ fn light_notify(p: &[u8], p_src: &[u8]) -> i32 {
 
     rf_link_response_callback(&mut pkt, &pkt);
 
-    get_pkt_light_notify().value[10..10 + 10].copy_from_slice(&pkt.val[0..10]);
-
-    get_pkt_light_notify().value[3] = p_src[0];
-    get_pkt_light_notify().value[4] = p_src[1];
-
-    let r = irq_disable();
-    if _is_add_packet_buf_ready() {
-        if !_rf_link_add_tx_packet(get_pkt_light_notify_addr() as *const u8) {
-            err = 0;
+    unsafe {
+        let mut data: [u8; 13] = [0; 13];
+        data.copy_from_slice(&pkt.val[0..13]);
+        if !NOTIFY_QUEUE.is_full() {
+            NOTIFY_QUEUE.push_back(data).unwrap();
         }
     }
-    irq_restore(r);
-
-    let destination = 0xffff;
-
-    light_slave_tx_command(&pkt.val[0..13], destination);
-
-    // if *get_security_enable()
-    // {
-    //     get_pkt_user_cmd()._type |= BIT!(7);
-    //     unsafe {
-    //         _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
-    //         _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
-    //     }
-    // }
-
-    return err;
 }
 
 #[no_mangle] // required by light_ll
@@ -576,13 +575,6 @@ pub extern "C" fn irq_timer1() {
 // Counts any clock_time overflows
 static mut CLOCK_TIME_UPPER: u32 = 0;
 static mut LAST_CLOCK_TIME: u32 = 0;
-
-pub fn init_clock64() {
-    unsafe {
-        CLOCK_TIME_UPPER = 0;
-        LAST_CLOCK_TIME = clock_time();
-    }
-}
 
 unsafe fn check_clock_overflow() -> u32 {
     critical_section::with(|_| {

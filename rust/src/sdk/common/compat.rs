@@ -8,6 +8,7 @@ use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
 use crate::{app, blinken};
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
+use crate::sdk::light::_light_sw_reboot;
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::uart_manager::UartMsg;
 
@@ -125,7 +126,11 @@ pub fn panic(info: &PanicInfo) -> ! {
     write!(stream, "{}", info).ok();
     stream.send();
 
-    loop {
+    for _ in 0..3 {
         blinken();
     }
+
+    _light_sw_reboot();
+
+    loop {}
 }

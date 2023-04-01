@@ -4,6 +4,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
 use crate::blinken;
+use crate::sdk::mcu::watchdog::wd_clear;
 
 extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
@@ -70,10 +71,9 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
 #[panic_handler]
 #[no_mangle]
 pub fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
+    irq_disable();
 
-#[no_mangle]
-fn abort() {
-    loop {}
+    loop {
+        blinken();
+    }
 }

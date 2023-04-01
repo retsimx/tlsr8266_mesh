@@ -21,8 +21,6 @@ use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use fixed::types::I16F16;
 use heapless::Deque;
-use crate::sdk::app_att_light::get_fwRevision_value;
-use crate::sdk::drivers::flash::flash_read_page;
 use crate::uart_manager::get_pkt_user_cmd;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
@@ -96,15 +94,6 @@ fn light_init_default() {
             16
         });
     }
-
-    // get fw version @flash 0x02,0x03,0x04,0x05
-    flash_read_page(0x02, 4, get_fwRevision_value().as_mut_ptr());
-
-    //add the user_data after the adv_pri_data
-    let user_const_data: [u8; 6] = [0x05, 0x02, 0x19, 0x00, 0x69, 0x69];
-    get_user_data()[0..user_const_data.len()].clone_from_slice(&user_const_data);
-
-    set_user_data_len(0); // disable add the userdata after the adv_pridata
 
     _light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
@@ -443,38 +432,7 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
         }
     } else if op == LGT_CMD_SET_LIGHT {
-        let state = app().light_manager.get_current_light_state();
-
-        let mut brightness = app().light_manager.get_brightness();
-        let mut cw = state.cw.to_num();
-        let mut ww = state.ww.to_num();
-
-        if params[8] & 0x1 != 0 {
-            // Brightness
-            brightness = ((params[1] as u16) << 8 | params[0] as u16) / 2;
-
-            app().light_manager.set_brightness(brightness);
-        }
-
-        if params[8] & 0x2 != 0 {
-            // Temperature
-            let value = ((params[3] as u16) << 8 | params[2] as u16) / 2;
-
-            cw = MAX_LUM_BRIGHTNESS_VALUE - value;
-            ww = value;
-        }
-
-        if params[8] & 0x4 != 0 {
-            // Temperature (independent CW/WW)
-            cw = ((params[3] as u16) << 8 | params[2] as u16) / 2;
-            ww = ((params[5] as u16) << 8 | params[4] as u16) / 2;
-        }
-
-        if app().light_manager.is_light_off() {
-            app().light_manager.begin_transition(cw, ww, 0);
-        } else {
-            app().light_manager.begin_transition(cw, ww, brightness);
-        }
+        app().light_manager.send_message(LGT_CMD_SET_LIGHT, params);
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());

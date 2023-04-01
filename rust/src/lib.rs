@@ -22,6 +22,7 @@ mod vendor_light;
 mod embassy;
 mod light_manager;
 mod uart_manager;
+pub mod version;
 
 static mut APP: App = App::default();
 

@@ -2,7 +2,7 @@ use core::cmp::{max, min};
 use core::mem::size_of;
 use core::ptr::addr_of;
 use embassy_executor::Spawner;
-use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
+use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
 use crate::{app};
@@ -88,6 +88,39 @@ impl LightManager {
         });
     }
 
+    fn handle_transition(&mut self, params: &[u8; 16]) {
+        let mut brightness = self.get_brightness();
+        let mut cw = self.current_light_state.cw.to_num();
+        let mut ww = self.current_light_state.ww.to_num();
+
+        if params[8] & 0x1 != 0 {
+            // Brightness
+            brightness = ((params[1] as u16) << 8 | params[0] as u16) / 2;
+
+            self.set_brightness(brightness);
+        }
+
+        if params[8] & 0x2 != 0 {
+            // Temperature
+            let value = ((params[3] as u16) << 8 | params[2] as u16) / 2;
+
+            cw = MAX_LUM_BRIGHTNESS_VALUE - value;
+            ww = value;
+        }
+
+        if params[8] & 0x4 != 0 {
+            // Temperature (independent CW/WW)
+            cw = ((params[3] as u16) << 8 | params[2] as u16) / 2;
+            ww = ((params[5] as u16) << 8 | params[4] as u16) / 2;
+        }
+
+        if self.is_light_off() {
+            self.begin_transition(cw, ww, 0);
+        } else {
+            self.begin_transition(cw, ww, brightness);
+        }
+    }
+
     pub fn send_message(&mut self, cmd: u8, params: [u8; 16]) {
         if !self.channel.is_full() {
             critical_section::with(|_| {
@@ -107,9 +140,8 @@ impl LightManager {
             });
 
             match msg.cmd {
-                LGT_CMD_LIGHT_ONOFF => {
-                    self.handle_on_off(msg.params[0])
-                }
+                LGT_CMD_LIGHT_ONOFF => self.handle_on_off(msg.params[0]),
+                LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
                 _ => {}
             }
         }

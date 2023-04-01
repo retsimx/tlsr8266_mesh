@@ -186,8 +186,7 @@ impl TryFrom<u32> for KickoutReason {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn kick_out(par: KickoutReason) {
+pub fn kick_out(par: KickoutReason) {
     factory_reset();
 
     if par == KickoutReason::OutOfMesh {

@@ -146,9 +146,6 @@ pub_mut!(rf_slave_ota_timeout_s, u16);
 
 pub_mut!(tick_per_us, u32);
 
-pub_mut!(user_data, [u8; 16]);
-pub_mut!(user_data_len, u8);
-
 pub_mut!(gateway_en, u8);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());

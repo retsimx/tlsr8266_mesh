@@ -9,6 +9,7 @@ use core::ffi::CStr;
 use core::mem::transmute;
 use core::ptr::{addr_of, null};
 use crate::{pub_mut, pub_static};
+use crate::version::BUILD_VERSION;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -107,7 +108,14 @@ static appearance: u16 = GAP_APPEARE_UNKNOWN;
 static periConnParamChar: u8 = CHAR_PROP_READ;
 
 static fwRevisionChar: u8 = CHAR_PROP_READ;
-pub_mut!(fwRevision_value, [u8; 4], [1, 2, 3, 4]);
+pub_mut!(fwRevision_value, [u8; 4],
+    [
+        (BUILD_VERSION & 0xff) as u8,
+        ((BUILD_VERSION << 8) & 0xff) as u8,
+        ((BUILD_VERSION << 16) & 0xff) as u8,
+        ((BUILD_VERSION << 24) & 0xff) as u8
+    ]
+);
 
 static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();
@@ -186,7 +194,7 @@ static spp_otaname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"OTA\0
 static spp_pairname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Pair\0") };
 static spp_devicename: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"DevName\0") };
 
-unsafe extern "C" fn meshStatusWrite(pw: *const u8) -> u32 {
+unsafe extern "C" fn mesh_status_write(pw: *const u8) -> u32 {
     if !*get_pair_login_ok() {
         return 1;
     }
@@ -375,7 +383,7 @@ pub_mut!(
             1,
             TelinkSppDataServer2ClientUUID,
             SppDataServer2ClientData,
-            meshStatusWrite,
+            mesh_status_write,
             0
         ), //value
         attrdef!(

@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::mem::size_of;
 use core::ptr::addr_of;
-use crate::{BIT, blinken};
+use crate::{app, BIT, blinken};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_input_en, gpio_set_output_en};
@@ -170,6 +170,25 @@ impl UartDriver {
             wd_clear();
 
             yield_now().await;
+        }
+
+        self.uart_set_tx_busy_flag();
+        self.txdata_buf = *msg;
+
+        write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
+
+        // STARTTX;
+        write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX as u8); //trigger dma
+
+        return true;
+    }
+
+    pub fn uart_send(&mut self, msg: &uart_data_t) -> bool {
+        let t_timeout = clock_time();
+        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
+            wd_clear();
+
+            app().uart_manager.check_irq();
         }
 
         self.uart_set_tx_busy_flag();

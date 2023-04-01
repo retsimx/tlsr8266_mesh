@@ -15,11 +15,12 @@ use crate::sdk::mcu::watchdog::wd_clear;
 
 pub_mut!(pkt_user_cmd, rf_packet_att_cmd_t);
 
-enum UartMsg {
+pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
     LightCtrl = 0x02,       // Sent by the client to control the mesh
     LightOnline = 0x03,     // Sent by us to notify when a light goes on/offline or turns on/off
     MeshMessage = 0x04,     // Sent by us to notify when a mesh message is sent
+    PanicMessage = 0x05,    // Sent by us to provide details of a panic
     Ack = 0xff
 }
 

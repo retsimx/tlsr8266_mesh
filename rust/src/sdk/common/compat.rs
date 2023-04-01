@@ -1,10 +1,15 @@
+use core::cmp::min;
+use core::{fmt, slice};
+use core::fmt::Write;
 use crate::sdk::mcu::analog::analog_write;
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
-use crate::blinken;
+use crate::{app, blinken};
+use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::uart_manager::UartMsg;
 
 extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
@@ -68,10 +73,57 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
     return size;
 }
 
+/// A byte stream to the host (e.g., host's stdout or stderr).
+#[derive(Clone, Copy)]
+pub struct HostStream {
+    pub index: usize,
+    pub out_buffer: [u8; 256]
+}
+
+impl HostStream {
+    /// Attempts to write an entire `buffer` into this sink
+    pub fn write_all(&mut self, buffer: &[u8]) -> Result<(), ()> {
+        self.out_buffer[self.index..self.index + buffer.len()].copy_from_slice(buffer);
+        self.index += buffer.len();
+        Ok(())
+    }
+
+    pub fn send(&self) {
+        let mut buffer = self.out_buffer.as_slice();
+        while !buffer.is_empty() {
+            let len = min(UART_DATA_LEN - 3, buffer.len());
+
+            let mut msg = uart_data_t {
+                len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
+            };
+
+            msg.data[2] = UartMsg::PanicMessage as u8;
+            for i in 0..len {
+                msg.data[3 + i] = buffer[i];
+            }
+
+            app().uart_manager.driver.uart_send(&msg);
+
+            buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
+        }
+    }
+}
+
+impl fmt::Write for HostStream {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+    }
+}
+
 #[panic_handler]
 #[no_mangle]
-pub fn panic(_info: &PanicInfo) -> ! {
+pub fn panic(info: &PanicInfo) -> ! {
     irq_disable();
+
+    let mut stream = HostStream { index: 0, out_buffer: [0; 256] };
+
+    write!(stream, "{}", info).ok();
+    stream.send();
 
     loop {
         blinken();

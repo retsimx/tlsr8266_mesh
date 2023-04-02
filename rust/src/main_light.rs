@@ -264,7 +264,7 @@ pub fn main_loop() {
             {
                 get_pkt_user_cmd()._type |= BIT!(7);
                 _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
-                _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
+                _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 8);
             }
         }
     }

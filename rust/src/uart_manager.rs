@@ -247,11 +247,6 @@ impl UartManager {
                 set_p_cb_rx_from_mesh(Some(light_mesh_rx_cb));
             }
 
-            if !self.ack_msg(&msg).await {
-                // Message was an ack message, nothing more to do
-                continue;
-            }
-
             // Light ctrl
             if msg.data[2] == UartMsg::LightCtrl as u8 {
                 // p_cmd : cmd[3]+para[10]
@@ -267,34 +262,13 @@ impl UartManager {
                         _mesh_send_command(addr_of!(pkt_user_cmd) as *const u8, 0xff, 0);
                     }
                 }
-
-                // let s: heapless::String<43> = heapless::String::from("msuc: sent");
-                // // let s = ultoa(result as u32, s, 16);
-                //
-                // let mut data = uart_data_t {
-                //     len: UART_DATA_LEN as u32,
-                //     data: [0; UART_DATA_LEN]
-                // };
-                //
-                // data.data[0..s.len()].copy_from_slice(&s.as_bytes()[0..s.len()]);
-                //
-                // self.driver.uart_send_async(&data).await;
             }
 
-            // self.driver.txdata_user = msg;
-            // self.driver.uart_send_async().await;
-
-            // let s: heapless::String<43> = heapless::String::from("Data! Time: ");
-            // let s = ultoa(clock_time(), s, 10);
-            //
-            // let mut data = uart_data_t {
-            //     len: s.len() as u32,
-            //     data: [0; UART_DATA_LEN]
-            // };
-            //
-            // data.data[0..s.len()].copy_from_slice(&s.as_bytes()[0..s.len()]);
-            //
-            // self.driver.uart_send_async(&data).await;
+            // Finally ack the message once we've handled it
+            if !self.ack_msg(&msg).await {
+                // Message was an ack message, nothing more to do
+                continue;
+            }
         }
     }
 }

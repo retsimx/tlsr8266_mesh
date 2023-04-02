@@ -149,6 +149,11 @@ impl LightManager {
 
     pub fn begin_transition(&mut self, g: u16, b: u16, brightness: u16) {
         critical_section::with(|_| {
+            // Check if the cw or ww are changing and update the transition time so we save in a bit
+            if self.current_light_state.cw != g || self.current_light_state.ww != b {
+                self.last_transition_time = clock_time();
+            }
+
             self.old_light_state = self.current_light_state;
             self.old_light_state.timestamp = Instant::now();
 
@@ -159,13 +164,11 @@ impl LightManager {
                 timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
             };
 
-            self.last_transition_time = clock_time();
-
             // Enable timer1
             write_reg_tmr1_tick(0);
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
 
-            // Run a single transition to avoid anything bugging out
+            // Run a single transition now to avoid anything bugging out
             self.transition_step();
         });
     }
@@ -208,7 +211,7 @@ impl LightManager {
         }
 
         // We're still transitioning. Run the calculations
-        let time = I16F16::from_num((self.current_light_state.timestamp - self.old_light_state.timestamp).as_ticks() * (u16::MAX / 2) as u64 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks());
+        let time = I16F16::from_num((self.current_light_state.timestamp - self.old_light_state.timestamp).as_ticks() * MAX_LUM_BRIGHTNESS_VALUE as u64 / (self.new_light_state.timestamp - self.old_light_state.timestamp).as_ticks());
         self.current_light_state.cw =
             self.ease_in_out(
                 time,
@@ -321,6 +324,12 @@ impl LightManager {
     }
 
     pub fn set_brightness(&mut self, brightness: u16) {
+        // If we're changing the brightness for real (not as part of a transition), then we should
+        // save this new brightness in a bit
+        if self.brightness != brightness {
+            self.last_transition_time = clock_time();
+        }
+
         self.brightness = brightness
     }
 

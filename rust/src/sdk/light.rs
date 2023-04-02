@@ -164,7 +164,7 @@ pub const PMW_MAX_TICK_1: u16 = PMW_MAX_TICK_BASE * PMW_MAX_TICK_MULTI;
 // must less or equal than (255*256)
 pub const PMW_MAX_TICK: u16 = PMW_MAX_TICK_1;
 
-pub const BRIDGE_MAX_CNT: u32 = 0;
+pub const BRIDGE_MAX_CNT: u32 = 8;
 pub const IRQ_TIMER1_ENABLE: bool = true;
 
 pub const ONLINE_STATUS_TIMEOUT: u32 = 3000;

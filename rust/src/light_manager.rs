@@ -95,14 +95,14 @@ impl LightManager {
 
         if params[8] & 0x1 != 0 {
             // Brightness
-            brightness = ((params[1] as u16) << 8 | params[0] as u16) / 2;
+            brightness = (params[1] as u16) << 8 | params[0] as u16;
 
             self.set_brightness(brightness);
         }
 
         if params[8] & 0x2 != 0 {
             // Temperature
-            let value = ((params[3] as u16) << 8 | params[2] as u16) / 2;
+            let value = (params[3] as u16) << 8 | params[2] as u16;
 
             cw = MAX_LUM_BRIGHTNESS_VALUE - value;
             ww = value;
@@ -110,8 +110,8 @@ impl LightManager {
 
         if params[8] & 0x4 != 0 {
             // Temperature (independent CW/WW)
-            cw = ((params[3] as u16) << 8 | params[2] as u16) / 2;
-            ww = ((params[5] as u16) << 8 | params[4] as u16) / 2;
+            cw = (params[3] as u16) << 8 | params[2] as u16;
+            ww = (params[5] as u16) << 8 | params[4] as u16;
         }
 
         if self.is_light_off() {
@@ -147,10 +147,10 @@ impl LightManager {
         }
     }
 
-    pub fn begin_transition(&mut self, g: u16, b: u16, brightness: u16) {
+    pub fn begin_transition(&mut self, cw: u16, ww: u16, brightness: u16) {
         critical_section::with(|_| {
             // Check if the cw or ww are changing and update the transition time so we save in a bit
-            if self.current_light_state.cw != g || self.current_light_state.ww != b {
+            if self.current_light_state.cw != cw || self.current_light_state.ww != ww {
                 self.last_transition_time = clock_time();
             }
 
@@ -158,8 +158,8 @@ impl LightManager {
             self.old_light_state.timestamp = Instant::now();
 
             self.new_light_state = LightState {
-                cw: I16F16::from_num(g),
-                ww: I16F16::from_num(b),
+                cw: I16F16::from_num(cw),
+                ww: I16F16::from_num(ww),
                 brightness: I16F16::from_num(brightness),
                 timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
             };
@@ -371,7 +371,7 @@ impl LightManager {
     }
 
     pub fn light_onoff_hw(&mut self, on: bool) {
-        let state = app().light_manager.get_current_light_state();
+        let state = self.current_light_state;
         self.begin_transition(state.cw.to_num(), state.ww.to_num(), match on { true => self.brightness, false => 0 });
     }
 
@@ -384,21 +384,28 @@ impl LightManager {
         // packet
         let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 
-        let brightness = if app().light_manager.is_light_off() {
+        let brightness = if self.is_light_off() {
             0
         } else {
-            max(app().light_manager.get_brightness(), 1)
+            max(self.brightness, 1)
         };
 
-        // let state = app().light_manager.get_current_light_state();
+        let state = self.current_light_state;
 
-        st_val_par[0] = (brightness & 0xff) as u8;
-        st_val_par[1] = ((brightness >> 8) & 0xff) as u8;
-        // st_val_par[2] = (state.g & 0xff) as u8;
-        // st_val_par[3] = ((state.g >> 8) & 0xff) as u8;
-        // st_val_par[4] = (state.b & 0xff) as u8;
-        // st_val_par[5] = ((state.b >> 8) & 0xff) as u8;
+        let data = [
+            (brightness & 0xff) as u8,
+            ((brightness >> 8) & 0xff) as u8,
+            (state.cw.to_num::<u16>() & 0xff) as u8,
+            ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8,
+            (state.ww.to_num::<u16>() & 0xff) as u8,
+            ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8
+        ];
 
-        _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
+        data.iter().enumerate().for_each(|(i, v)| {
+            st_val_par[0] = i as u8;
+            st_val_par[1] = *v;
+
+            _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
+        });
     }
 }

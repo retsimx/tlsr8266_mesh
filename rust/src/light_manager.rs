@@ -1,4 +1,4 @@
-use core::cmp::{max, min};
+use core::cmp::{min};
 use core::mem::size_of;
 use core::ptr::addr_of;
 use embassy_executor::Spawner;
@@ -286,9 +286,9 @@ impl LightManager {
 
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
             if LIGHT_SAVE_VALID_FLAG == lum_save.save_flag {
-                self.brightness = lum_save.brightness;
-                self.current_light_state.cw = I16F16::from_num(lum_save.cw);
-                self.current_light_state.ww = I16F16::from_num(lum_save.ww);
+                self.brightness = min(lum_save.brightness, MAX_LUM_BRIGHTNESS_VALUE);
+                self.current_light_state.cw = I16F16::from_num(min(lum_save.cw, MAX_LUM_BRIGHTNESS_VALUE));
+                self.current_light_state.ww = I16F16::from_num(min(lum_save.ww, MAX_LUM_BRIGHTNESS_VALUE));
             } else if lum_save.save_flag == 0xFF {
                 break;
             }
@@ -384,28 +384,15 @@ impl LightManager {
         // packet
         let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 
-        let brightness = if self.is_light_off() {
+        let on = if self.is_light_off() {
             0
         } else {
-            max(self.brightness, 1)
+            1
         };
 
-        let state = self.current_light_state;
+        st_val_par[0] = on;
+        st_val_par[1] = 0xff;
 
-        let data = [
-            (brightness & 0xff) as u8,
-            ((brightness >> 8) & 0xff) as u8,
-            (state.cw.to_num::<u16>() & 0xff) as u8,
-            ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8,
-            (state.ww.to_num::<u16>() & 0xff) as u8,
-            ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8
-        ];
-
-        data.iter().enumerate().for_each(|(i, v)| {
-            st_val_par[0] = i as u8;
-            st_val_par[1] = *v;
-
-            _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
-        });
+        _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
     }
 }

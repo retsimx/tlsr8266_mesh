@@ -12,6 +12,7 @@ use core::ptr::addr_of;
 use crate::{app, BIT};
 use crate::mesh::wrappers::*;
 use crate::sdk::light::*;
+use crate::uart_manager::{get_pkt_user_cmd};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -109,6 +110,17 @@ impl MeshManager {
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
             gateway_status: GatewayStatus::GatewayStatusNormal,
+        }
+    }
+
+    pub fn send_mesh_message(&self, data: &[u8; 13], destination: u16) {
+        light_slave_tx_command(data, destination);
+
+        if *get_security_enable()
+        {
+            get_pkt_user_cmd()._type |= BIT!(7);
+            _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
+            _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
         }
     }
 
@@ -466,15 +478,14 @@ impl MeshManager {
     }
 
     pub fn mesh_node_buf_init(&self) {
-        // todo: Do we need this? It causes drama for now
-        // [mesh_node_st_t {
-        //     tick: 0,
-        //     val: mesh_node_st_val_t {
-        //         dev_adr: 0,
-        //         sn: 0,
-        //         par: [0; MESH_NODE_ST_PAR_LEN as usize],
-        //     },
-        // }; MESH_NODE_MAX_NUM as usize];
+        *get_mesh_node_st() = [mesh_node_st_t {
+            tick: 0,
+            val: mesh_node_st_val_t {
+                dev_adr: 0,
+                sn: 0,
+                par: [0; MESH_NODE_ST_PAR_LEN as usize],
+            },
+        }; MESH_NODE_MAX_NUM as usize];
 
         app().light_manager.device_status_update();
     }

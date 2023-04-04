@@ -76,6 +76,12 @@ impl App {
         // Start the uart manager
         spawner.spawn(uart_manager(spawner)).unwrap();
 
+        // Send a message to the network saying that we just booted up
+        let mut data = [0 as u8; 13];
+        data[0] = LGT_POWER_ON;
+
+        app().mesh_manager.send_mesh_message(&data, 0xffff);
+
         loop {
             wd_clear();
             main_loop();

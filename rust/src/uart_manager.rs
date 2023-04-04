@@ -58,7 +58,7 @@ async fn notification_parser() {
     let mut last_val: [[u8; 2]; MESH_NODE_MAX_NUM as usize] = [[0; 2]; MESH_NODE_MAX_NUM as usize];
     loop {
         for i in 0..MESH_NODE_MAX_NUM as usize {
-            if get_mesh_node_st()[i].tick != 0 && get_mesh_node_st()[i].val.sn != 0 {
+            if get_mesh_node_st()[i].tick != 0 {
                 if last_state[i / 8] & BIT!(i % 8) == 0 || last_val[i] != get_mesh_node_st()[i].val.par {
                     last_state[i / 8] |= BIT!(i % 8);
                     last_val[i] = get_mesh_node_st()[i].val.par;
@@ -254,6 +254,11 @@ impl UartManager {
 
                 light_slave_tx_command(&msg.data[5..5+13], destination);
 
+                let mut data = [0; 13];
+                data.copy_from_slice(&msg.data[5..5+13]);
+
+                app().mesh_manager.send_mesh_message(&data, destination);
+
                 if *get_security_enable()
                 {
                     get_pkt_user_cmd()._type |= BIT!(7);
@@ -272,13 +277,3 @@ impl UartManager {
         }
     }
 }
-
-//     let mut msg = uart_data_t {
-//         len: UART_DATA_LEN as u32,
-//         data: [0; UART_DATA_LEN]
-//     };
-//
-//     msg.data[0] = 0x02; // notify
-//     unsafe { msg.data[1..1+size_of::<rf_packet_att_value_t>()].copy_from_slice(&*slice_from_raw_parts(data as *const u8, size_of::<rf_packet_att_value_t>())); }
-//
-//     app().uart_manager.driver.uart_send(&msg);

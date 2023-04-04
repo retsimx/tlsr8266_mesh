@@ -22,7 +22,6 @@ use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv
 use fixed::types::I16F16;
 use heapless::Deque;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::uart_manager::get_pkt_user_cmd;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -258,15 +257,7 @@ pub fn main_loop() {
                 NOTIFY_QUEUE.pop_front().unwrap()
             });
 
-            let destination = 0xffff;
-            light_slave_tx_command(&data, destination);
-
-            if *get_security_enable()
-            {
-                get_pkt_user_cmd()._type |= BIT!(7);
-                _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
-                _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 8);
-            }
+            app().mesh_manager.send_mesh_message(&data, 0xffff);
         }
     }
 }
@@ -438,6 +429,10 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
         flash_erase_sector(*get_flash_adr_mac());
         flash_write_page(*get_flash_adr_mac(), mac.len() as u32, addr_of!(mac) as *const u8);
+        _light_sw_reboot();
+    } else if op == LGT_CLEAR_LUM_STATE {
+        // Clear the lum state
+        flash_erase_sector(*get_flash_adr_lum());
         _light_sw_reboot();
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();

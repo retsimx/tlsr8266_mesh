@@ -289,6 +289,8 @@ pub const LGT_CMD_SET_SCENE: u8 = 0x2e;
 pub const LGT_CMD_LOAD_SCENE: u8 = 0x2f;
 pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
+pub const LGT_POWER_ON: u8 = 0x32;
+pub const LGT_CLEAR_LUM_STATE: u8 = 0x33;
 
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;

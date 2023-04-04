@@ -433,7 +433,6 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     } else if op == LGT_CLEAR_LUM_STATE {
         // Clear the lum state
         flash_erase_sector(*get_flash_adr_lum());
-        _light_sw_reboot();
     } else if op == LGT_CMD_KICK_OUT {
         irq_disable();
         kick_out((params[0] as u32).try_into().unwrap());

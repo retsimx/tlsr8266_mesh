@@ -13,6 +13,7 @@ use crate::{app};
 use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
+use crate::sdk::common::compat::check_panic_info;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
 use crate::uart_manager::UartManager;
@@ -32,6 +33,11 @@ async fn light_manager(spawner: Spawner) {
 #[embassy_executor::task]
 async fn uart_manager(spawner: Spawner) {
     app().uart_manager.run(spawner).await;
+}
+
+#[embassy_executor::task]
+async fn panic_check(_spawner: Spawner) {
+    check_panic_info().await;
 }
 
 impl App {
@@ -81,6 +87,9 @@ impl App {
         data[0] = LGT_POWER_ON;
 
         app().mesh_manager.send_mesh_message(&data, 0xffff);
+
+        // Start the panic checker to see if there is information we need to send
+        spawner.spawn(panic_check(spawner)).unwrap();
 
         loop {
             wd_clear();

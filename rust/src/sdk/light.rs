@@ -291,6 +291,8 @@ pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
 pub const LGT_POWER_ON: u8 = 0x32;
 pub const LGT_CLEAR_LUM_STATE: u8 = 0x33;
+pub const LGT_PANIC_MSG: u8 = 0x34;
+pub const LGT_TRIGGER_PANIC: u8 = 0x35;
 
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;

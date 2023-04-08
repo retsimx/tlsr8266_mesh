@@ -1,14 +1,24 @@
 use core::arch::asm;
-use core::ptr::{addr_of, addr_of_mut};
-use crate::config::get_flash_adr_mac;
-use crate::{no_mangle_fn, pub_mut, regrw};
+use core::cmp::min;
+use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
+use core::slice;
+use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
+use crate::{blinken, no_mangle_fn, pub_mut, regrw};
 use crate::common::rf_update_conn_para;
-use crate::sdk::mcu::register::{REG_BASE_ADDR, write_reg8};
+use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
+use crate::ota::wrappers::rf_link_slave_data_ota;
+use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
-use crate::sdk::light::{_rf_link_add_tx_packet, get_tick_per_us, rf_packet_ll_data_t};
+use crate::sdk::common::crc::crc16;
+use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
+use crate::sdk::light::{_encode_password, _light_sw_reboot, _rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, _pair_load_key, rf_packet_att_cmd_t, get_slave_p_mac, _mesh_node_init, _get_fw_version};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
+use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
+use crate::sdk::rf_drv::_rf_link_slave_set_adv;
 
 const ENABLE_16MHZ_XTAL: bool = false;
 
@@ -366,6 +376,157 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
     return result;
 }
 
-pub fn rf_stop_trx () {
-	write_reg8(0x800f00, 0x80);			// stop
+pub fn rf_stop_trx() {
+    write_reg8(0x800f00, 0x80);            // stop
+}
+
+pub_mut!(light_rx_buff, [u8; 255]);
+pub_mut!(light_rx_wptr, u32);
+pub unsafe fn blc_ll_initBasicMCU()
+{
+    write_reg16(0xf0a, 700);
+
+    write_reg_dma2_addr((((light_rx_buff.as_ptr() as u32 + light_rx_wptr * 0x40) * 0x10000) >> 0x10) as u16);
+    write_reg_dma2_ctrl(0x104);
+    write_reg_dma_chn_irq_msk(0);
+
+    write_reg_irq_mask(read_reg_irq_mask() | 0x2000);
+    write_reg_system_tick_mode(read_reg_system_tick_mode() | 2);
+
+    write_reg16(0xf1c, 0);
+    write_reg_rf_irq_status(0xfffe);
+
+    write_reg_rf_irq_mask(FLD_RF_IRQ_MASK::IRQ_RX as u16 | FLD_RF_IRQ_MASK::IRQ_TX as u16);
+
+    write_reg_system_tick_irq(read_reg_system_tick() | (0x80 << 0x18));
+    write_reg_irq_src(0x80 << 0xd);
+    write_reg_irq_mask(read_reg_irq_mask() | (0x80 << 0xd));
+
+    write_reg16(0xf2c, 0xc00);
+}
+
+pub_mut!(gAttributes, *mut attribute_t);
+pub unsafe fn setSppWriteCB(func: unsafe extern "C" fn(p: *const rf_packet_ll_data_t) -> u32)
+{
+    (*gAttributes.offset(21)).w = func as *const u8;
+}
+
+pub unsafe fn setSppOtaWriteCB(func: unsafe extern "C" fn(ph: *const u8) -> bool)
+{
+    (*gAttributes.offset(24)).w = func as *const u8;
+}
+
+pub_mut!(p_st_handler, u32);
+pub_mut!(irq_mask_save, u32);
+pub_mut!(slave_link_state, u32);
+pub_mut!(slave_listen_interval, u32);
+pub_mut!(slave_connected_tick, u32);
+pub_mut!(slave_adv_enable, bool);
+pub_mut!(mac_id, [u8; 6]);
+pub_mut!(pkt_adv, rf_packet_adv_ind_module_t);
+pub_mut!(pkt_scan_rsp, rf_packet_scan_rsp_t);
+pub_mut!(pkt_light_data, rf_packet_att_cmd_t);
+pub_mut!(pkt_light_status, rf_packet_att_cmd_t);
+pub_mut!(advData, [u8; 3]);
+no_mangle_fn!(retrieve_dev_grp_address);
+
+#[no_mangle]
+extern "C" {
+    fn irq_st_adv();
+}
+
+#[no_mangle]
+extern "C" {
+    fn rf_link_slave_data_write(p: *const rf_packet_ll_data_t) -> u32;
+}
+
+pub fn rf_link_slave_init(interval: u32)
+{
+    unsafe {
+        blc_ll_initBasicMCU();
+        p_st_handler = irq_st_adv as u32;
+        slave_link_state = 0;
+        slave_listen_interval = interval * *get_tick_per_us();
+
+        slave_connected_tick = *get_tick_per_us() * 100000 + read_reg_system_tick();
+        write_reg_system_tick_irq(slave_connected_tick);
+
+        if *get_tick_per_us() == 0x10 {
+            write_reg8(0xf04, 0x5e);
+        } else {
+            write_reg8(0xf04, 0x68);
+        }
+
+        if *(*get_flash_adr_mac() as *const u32) == u32::MAX {
+            let mac: [u16; 2] = [rand(), rand()];
+            flash_write_page(*get_flash_adr_mac(), 4, mac.as_ptr() as *const u8);
+        }
+
+        let pair_addr = *(*get_flash_adr_pairing() as *const u32) + 1;
+        if pair_addr == 0 {
+            let pairing_addr = *get_flash_adr_pairing();
+            let mut buff: [u8; 16] = [0; 16];
+            buff[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
+            flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
+
+            let mut buff: [u8; 16] = [0; 16];
+            let len = min(MESH_PWD.len(), buff.len());
+            buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
+            _encode_password(buff.as_mut_ptr());
+            flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
+
+            let mut buff: [u8; 16] = [0; 16];
+            let len = min(OUT_OF_MESH.len(), buff.len());
+            buff[0..len].copy_from_slice(&OUT_OF_MESH.as_bytes()[0..len]);
+            flash_write_page(pairing_addr + 16, 16, buff.as_mut_ptr());
+
+            let mut buff: [u8; 16] = [0; 16];
+            buff[0] = PAIR_VALID_FLAG;
+            if *get_pair_config_pwd_encode_enable() != 0 {
+                buff[15] = PAIR_VALID_FLAG;
+            }
+
+            if *get_mesh_pair_enable() {
+                set_get_mac_en(true);
+                buff[1] = 1;
+            }
+            flash_write_page(pairing_addr, 16, buff.as_mut_ptr());
+            irq_disable();
+            _light_sw_reboot();
+            loop {}
+        }
+
+        flash_read_page(*get_flash_adr_mac(), 6, mac_id.as_mut_ptr());
+        set_slave_p_mac(mac_id.as_ptr());
+
+        pkt_adv.advA = mac_id;
+        pkt_scan_rsp.advA = mac_id;
+
+        _rf_link_slave_set_adv(advData.as_ptr(), 3);
+        _pair_load_key();
+
+        pkt_light_data.value[3] = *get_slave_p_mac().offset(0);
+        pkt_light_data.value[4] = *get_slave_p_mac().offset(1);
+
+        pkt_light_status.value[3] = *get_slave_p_mac().offset(0);
+        pkt_light_status.value[4] = *get_slave_p_mac().offset(1);
+
+        set_slave_adv_enable(true);
+
+        gAttributes = get_gAttributes_def().as_mut_ptr();
+        setSppWriteCB(rf_link_slave_data_write);
+        setSppOtaWriteCB(rf_link_slave_data_ota);
+
+        retrieve_dev_grp_address();
+
+        _mesh_node_init();
+
+        irq_mask_save = read_reg_irq_mask();
+
+        let mut fw_version = 0u32;
+        _get_fw_version(addr_of!(fw_version) as *const u8);
+        write_reg32(0x808004, *(*get_slave_p_mac() as *const u32));
+        write_reg32(0x808008, fw_version);
+        write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
+    }
 }

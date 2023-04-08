@@ -51,8 +51,8 @@ enum{
 	EVENT_PKT_DISCV = 6,		// connected discovery advertising event 
 	
 	EVENT_SYS_TIMER,
-	EVENT_PKT_PAIR,		// PKT 的类型，同时作为 event 类型
-	EVENT_PKT_RELAY,	// PKT 的类型，同时作为 event 类型
+	EVENT_PKT_PAIR,		// PKT 锟斤拷锟斤拷锟酵ｏ拷同时锟斤拷为 event 锟斤拷锟斤拷
+	EVENT_PKT_RELAY,	// PKT 锟斤拷锟斤拷锟酵ｏ拷同时锟斤拷为 event 锟斤拷锟斤拷
 	EVENT_PKT_DATA,
 	EVENT_PKT_DATA_RESP,
 	EVENT_PKT = 0xfe,

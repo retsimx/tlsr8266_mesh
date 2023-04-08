@@ -5,3 +5,4 @@ pub mod gpio;
 pub mod irq_i;
 pub mod register;
 pub mod watchdog;
+pub mod random;

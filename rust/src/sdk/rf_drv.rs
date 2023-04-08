@@ -6,7 +6,6 @@ no_mangle_fn!(rf_set_power_level_index, level: u32);
 no_mangle_fn!(rf_link_slave_pairing_enable, en: u32);
 no_mangle_fn!(rf_link_slave_set_buffer, p: *mut [u32; 9], n: u8);
 no_mangle_fn!(rf_link_set_max_bridge, num: u32);
-no_mangle_fn!(rf_link_slave_init, interval: u32);
 no_mangle_fn!(
     rf_link_get_op_para,
     u32,
@@ -22,6 +21,11 @@ no_mangle_fn!(rf_link_add_group, bool, group: u16);
 no_mangle_fn!(rf_link_add_dev_addr, bool, deviceaddress: u16);
 no_mangle_fn!(
     rf_link_slave_set_adv_private_data,
+    pdata: *const u8,
+    data_len: u8
+);
+no_mangle_fn!(
+    rf_link_slave_set_adv,
     pdata: *const u8,
     data_len: u8
 );

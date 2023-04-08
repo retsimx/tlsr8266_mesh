@@ -1,3 +1,4 @@
+import binascii
 import socket
 import struct
 import time
@@ -10,6 +11,13 @@ from rp2 import PIO, StateMachine, asm_pio
 
 WIFI_SSID = ""
 WIFI_PASS = ""
+
+
+try:
+    from .local import *
+except:
+    pass
+
 
 rp2.country('AU')
 rp2.PIO(0).remove_program()
@@ -24,7 +32,12 @@ wlan.config(pm=0xa11140)
 
 wlan.connect(WIFI_SSID, WIFI_PASS)
 
-RX_RATE = 2838900 * 2   # The receive speed
+# tx rates
+# 2838900 * 2 : TYBT1
+# 6202500 : E104-BT05-TB
+
+
+RX_RATE = 6202500   # The receive speed
 TX_RATE = 5000000       # The transmission speed
 
 reset_pin = Pin(16, Pin.OUT)
@@ -191,14 +204,20 @@ def reset_mcu(reset_only=False):
         if reset_only:
             return
 
-        time.sleep_ms(count)
-        count += 1
+        # time.sleep_ms(500)
 
-        write_addr(0x0602, [0x05])
-        write_addr(0x00b2, [63])
+        for i in range(10000):
+            write_addr(0x0602, [0x05])
+            write_addr(0x00b2, [63])
+
+        # now = time.ticks_ms()
+        # while time.ticks_diff(time.ticks_ms(), now) < 1000:
+        #     write_addr(0x0602, [0x05])
+        #     write_addr(0x00b2, [63])
 
         try:
             while read_addr(0x00b2, 1)[0] != 63:
+                print("Still not it", read_addr(0x00b2, 1)[0])
                 write_addr(0x00b2, [63])
                 write_addr(0x0602, [0x05])
 
@@ -213,14 +232,18 @@ print("About to reset MCU")
 # time.sleep_ms(100)
 # reset_pin.high()
 #
-# time.sleep_ms(500)
+# for i in range(1000):
+#     write_addr(0x0602, [0x05])
+#     write_addr(0x00b2, [63])
+#
+# # time.sleep_ms(500)
 #
 # while True:
 #     write_addr(0x0602, [0x05])
-#     write_addr(0x00b2, [7])
+#     write_addr(0x00b2, [63])
 #
 #     errors = 0
-#     for i in range(1000):
+#     for i in range(1):
 #         value = b'\0'
 #         try:
 #             value = read_addr(0x007e, 2)
@@ -229,21 +252,21 @@ print("About to reset MCU")
 #         except:
 #             errors += 1
 #
-#     print(binascii.hexlify(value), UART_BAUD, errors)
+#     print(binascii.hexlify(value), RX_RATE, errors)
 #
 #     if not errors:
 #         break
 #
 #     sm = StateMachine(
 #         1,
-#         uart_rx_mini,
-#         freq=UART_BAUD,
+#         rx_pio,
+#         freq=RX_RATE,
 #         in_base=input_pin  # For WAIT, IN
 #     )
 #
-#     UART_BAUD += 1000
+#     RX_RATE += 2000
 #
-# start_baud = UART_BAUD
+# start_baud = RX_RATE
 # print("Found start baud", start_baud)
 #
 # while True:
@@ -257,24 +280,24 @@ print("About to reset MCU")
 #         except:
 #             errors += 1
 #
-#     print(binascii.hexlify(read_addr(0x007e, 2)), UART_BAUD, errors)
+#     print(binascii.hexlify(read_addr(0x007e, 2)), RX_RATE, errors)
 #
 #     if errors:
 #         break
 #
 #     sm = StateMachine(
 #         1,
-#         uart_rx_mini,
-#         freq=UART_BAUD,
+#         rx_pio,
+#         freq=RX_RATE,
 #         in_base=input_pin  # For WAIT, IN
 #     )
 #
-#     UART_BAUD += 1000
+#     RX_RATE += 1000
 #
 # print("Found")
 # print("Start baud", start_baud)
-# print("End baud", UART_BAUD)
-# print("Recommended baud", int((start_baud+UART_BAUD)/2))
+# print("End baud", RX_RATE)
+# print("Recommended baud", int((start_baud+RX_RATE)/2))
 #
 # while True:
 #     time.sleep(10)

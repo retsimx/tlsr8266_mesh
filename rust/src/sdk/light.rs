@@ -401,6 +401,16 @@ pub enum RecoverStatus {
 }
 
 #[repr(C, packed)]
+pub struct rf_packet_adv_ind_module_t {
+	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+
+	pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+	pub rf_len: u8,				//LEN(6)_RFU(2)
+	pub advA: [u8; 6],			//address
+	pub data: [u8; 31]			//0-31 byte
+}
+
+#[repr(C, packed)]
 pub struct ll_adv_private_t {
     pub ManufactureID: u16,
     // must vendor id to follow spec

@@ -1,4 +1,4 @@
-use crate::{app, blinken};
+use crate::{app};
 use core::cmp::{min};
 use core::convert::TryInto;
 use core::mem::size_of;
@@ -21,6 +21,7 @@ use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use fixed::types::I16F16;
 use heapless::Deque;
+use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_init;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
@@ -156,7 +157,7 @@ pub fn user_init() {
     //retrieve lumen value
     app().light_manager.light_lum_retrieve();
 
-    _rf_link_slave_init(40000);
+    rf_link_slave_init(40000);
 
     factory_reset_handle();
 

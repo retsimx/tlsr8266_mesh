@@ -6,6 +6,11 @@ import time
 HOST = ""  # The server's hostname or IP address
 PORT = 8000  # The port used by the server
 
+try:
+    from .local import *
+except:
+    pass
+
 
 def write_addr(addr, data):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

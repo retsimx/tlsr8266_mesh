@@ -1,5 +1,6 @@
 use core::mem::size_of;
 use core::ptr::{addr_of};
+use core::slice;
 use embassy_executor::Spawner;
 use heapless::Deque;
 use crate::{app, BIT, pub_mut};
@@ -26,6 +27,15 @@ pub enum UartMsg {
 
 // app_cmd_value_t
 fn light_mesh_rx_cb(data: *const u8) {
+    // Compute the CRC of important bits. This is from start of app_cmd_value_t.dst (5) to end of app_cmd_value_t.par (20)
+    let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
+
+    // Check if this message is one we sent
+    if app().uart_manager.sent.iter().any(|c| {c == msg}) {
+        // We did, nothing more to do here
+        return;
+    }
+
     let mut msg: uart_data_t = uart_data_t {
         len: UART_DATA_LEN as u32,
         data: [0; UART_DATA_LEN]
@@ -100,7 +110,8 @@ pub struct UartManager {
     send_channel: Deque<uart_data_t, 5>,
     ack_counter: u8,
     last_ack: u8,
-    sender_started: bool
+    sender_started: bool,
+    sent: Deque<[u8; 15], 10>
 }
 
 impl UartManager {
@@ -111,7 +122,8 @@ impl UartManager {
             send_channel: Deque::new(),
             ack_counter: 0,
             last_ack: 0,
-            sender_started: false
+            sender_started: false,
+            sent: Deque::new()
         }
     }
 
@@ -190,6 +202,14 @@ impl UartManager {
                 self.send_channel.pop_front().unwrap()
             });
 
+            // Record the message
+            if self.sent.is_full() {
+                self.sent.pop_front();
+            }
+
+            let mymsg = unsafe {slice::from_raw_parts((addr_of!(msg.data) as u32 + 7) as *const u8, 20-5)};
+            self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+
             // Set the counter
             self.ack_counter += 1;
             msg.data[0] = self.ack_counter;
@@ -257,6 +277,15 @@ impl UartManager {
                 let mut data = [0; 13];
                 data.copy_from_slice(&msg.data[5..5+13]);
 
+                // Record the message
+                if self.sent.is_full() {
+                    self.sent.pop_front();
+                }
+
+                let mymsg = unsafe {slice::from_raw_parts((addr_of!(get_pkt_user_cmd().value) as u32 + 5) as *const u8, 20-5)};
+                self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+
+                // Send the message in to the mesh
                 app().mesh_manager.send_mesh_message(&data, destination);
 
                 if *get_security_enable()

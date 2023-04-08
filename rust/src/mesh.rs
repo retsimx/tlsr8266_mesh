@@ -21,7 +21,8 @@ pub const MESH_PAIR_TIMEOUT: u32 = 10;
 //unit: ms
 pub const MESH_PAIR_NOTIFY_TIMEOUT: u32 = 2500;
 
-pub const MESH_NODE_ST_VAL_LEN: u8 = 4; // MIN: 4,   MAX: 10
+pub const MESH_NODE_ST_VAL_LEN: u8 = 4;
+// MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -37,39 +38,69 @@ enum MeshPairState {
     MeshPairDefaultMesh,
 }
 
+impl TryFrom<u8> for MeshPairState {
+    type Error = ();
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            x if x == MeshPairState::MeshPairName1 as u8 => Ok(MeshPairState::MeshPairName1),
+            x if x == MeshPairState::MeshPairName2 as u8 => Ok(MeshPairState::MeshPairName2),
+            x if x == MeshPairState::MeshPairPwd1 as u8 => Ok(MeshPairState::MeshPairPwd1),
+            x if x == MeshPairState::MeshPairPwd2 as u8 => Ok(MeshPairState::MeshPairPwd2),
+            x if x == MeshPairState::MeshPairLtk1 as u8 => Ok(MeshPairState::MeshPairLtk1),
+            x if x == MeshPairState::MeshPairLtk2 as u8 => Ok(MeshPairState::MeshPairLtk2),
+            x if x == MeshPairState::MeshPairEffectDelay as u8 => Ok(MeshPairState::MeshPairEffectDelay),
+            x if x == MeshPairState::MeshPairEffect as u8 => Ok(MeshPairState::MeshPairEffect),
+            x if x == MeshPairState::MeshPairDefaultMesh as u8 => Ok(MeshPairState::MeshPairDefaultMesh),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(PartialEq)]
 #[allow(dead_code)]
 pub enum GatewayStatus {
-    GatewayStatusNormal = 0, /* Normal gateway role */
-    GatewayStatusNodeRole,   /* As node role, when pushed button */
+    GatewayStatusNormal = 0,
+    /* Normal gateway role */
+    GatewayStatusNodeRole,
+    /* As node role, when pushed button */
 
-    GatewayStatusTempDefaltMesh, /* In default mesh temporary */
+    GatewayStatusTempDefaltMesh,
+    /* In default mesh temporary */
     GatewayStatusSwitchToDefaultMesh,
-    GatewayStatusScanUnprovDev,       /* Scanning unpair device status */
-    GatewayStatusCfgUnproDev,         /* Only provision device */
-    GatewayStatusCfgCurNetwork,       /* Change current network's information */
-    GatewayStatusAddConfiguredDevice, /* Add configured device */
+    GatewayStatusScanUnprovDev,
+    /* Scanning unpair device status */
+    GatewayStatusCfgUnproDev,
+    /* Only provision device */
+    GatewayStatusCfgCurNetwork,
+    /* Change current network's information */
+    GatewayStatusAddConfiguredDevice,
+    /* Add configured device */
 }
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct mesh_node_st_val_t {
-    pub dev_adr: u8,                              // don't change include type
-    pub sn: u8,                                   // don't change include type
+    pub dev_adr: u8,
+    // don't change include type
+    pub sn: u8,
+    // don't change include type
     pub par: [u8; MESH_NODE_ST_PAR_LEN as usize], //lumen-rsv,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct mesh_node_st_t {
-    pub tick: u16, // don't change include type
+    pub tick: u16,
+    // don't change include type
     pub val: mesh_node_st_val_t,
 }
 
 pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
-    default_mesh_effect_delay_ref: u32, /* When receive change to default mesh command, shall delay at least 500ms */
+    default_mesh_effect_delay_ref: u32,
+    /* When receive change to default mesh command, shall delay at least 500ms */
     mesh_pair_start_notify_time: u32,
     mesh_pair_retry_cnt: u8,
     mesh_pair_notify_rsp_mask: [u8; 32],
@@ -93,7 +124,8 @@ impl MeshManager {
         Self {
             mesh_pair_start_time: 0,
             default_mesh_time: 0,
-            default_mesh_effect_delay_ref: 0, /* When receive change to default mesh command, shall delay at least 500ms */
+            default_mesh_effect_delay_ref: 0,
+            /* When receive change to default mesh command, shall delay at least 500ms */
             mesh_pair_start_notify_time: 0,
             mesh_pair_retry_cnt: 0,
             mesh_pair_notify_rsp_mask: [0; 32],
@@ -133,10 +165,10 @@ impl MeshManager {
     pub fn mesh_pair_proc_effect(&mut self) {
         if self.effect_new_mesh != 0
             || (self.effect_new_mesh_delay_time != 0
-                && (clock_time_exceed(
-                    self.effect_new_mesh_delay_time,
-                    self.mesh_pair_cmd_interval * 1000,
-                )))
+            && (clock_time_exceed(
+            self.effect_new_mesh_delay_time,
+            self.mesh_pair_cmd_interval * 1000,
+        )))
         {
             self.save_effect_new_mesh();
             self.effect_new_mesh = 0;
@@ -168,31 +200,33 @@ impl MeshManager {
         if self.default_mesh_time_ref != 0 {
             self.default_mesh_time_ref = clock_time() | 1;
         }
-        let cmd = params[0];
-        if cmd == MeshPairState::MeshPairName1 as u8 {
-            self.mesh_pair_start_time = clock_time() | 1;
-            self.new_mesh_name[0..8].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairName2 as u8 {
-            self.new_mesh_name[8..16].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairPwd1 as u8 {
-            self.new_mesh_pwd[0..8].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairPwd2 as u8 {
-            self.new_mesh_pwd[8..16].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairLtk1 as u8 {
-            self.new_mesh_ltk[0..8].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairLtk2 as u8 {
-            self.new_mesh_ltk[8..16].copy_from_slice(&params[1..9]);
-        } else if cmd == MeshPairState::MeshPairEffectDelay as u8 {
-            self.effect_new_mesh_delay_time = clock_time() | 1;
-            if self.default_mesh_time_ref != 0 {
-                /* Keep default_mesh_time_ref non-zero */
-                self.default_mesh_time = self.mesh_pair_cmd_interval * 2;
+        let cmd = MeshPairState::try_from(params[0]);
+        if cmd.is_err() {
+            return;
+        }
+
+        match cmd.unwrap() {
+            MeshPairState::MeshPairName1 => {
+                self.mesh_pair_start_time = clock_time() | 1;
+                self.new_mesh_name[0..8].copy_from_slice(&params[1..9]);
             }
-        } else if cmd == MeshPairState::MeshPairEffect as u8 {
-            self.effect_new_mesh = 1;
-        } else if cmd == MeshPairState::MeshPairDefaultMesh as u8 {
-            self.default_mesh_effect_delay_ref = clock_time() | 1;
-            self.default_mesh_time = params[1] as u32 * 1000;
+            MeshPairState::MeshPairName2 => self.new_mesh_name[8..16].copy_from_slice(&params[1..9]),
+            MeshPairState::MeshPairPwd1 => self.new_mesh_pwd[0..8].copy_from_slice(&params[1..9]),
+            MeshPairState::MeshPairPwd2 => self.new_mesh_pwd[8..16].copy_from_slice(&params[1..9]),
+            MeshPairState::MeshPairLtk1 => self.new_mesh_ltk[0..8].copy_from_slice(&params[1..9]),
+            MeshPairState::MeshPairLtk2 => self.new_mesh_ltk[8..16].copy_from_slice(&params[1..9]),
+            MeshPairState::MeshPairEffectDelay => {
+                self.effect_new_mesh_delay_time = clock_time() | 1;
+                if self.default_mesh_time_ref != 0 {
+                    /* Keep default_mesh_time_ref non-zero */
+                    self.default_mesh_time = self.mesh_pair_cmd_interval * 2;
+                }
+            }
+            MeshPairState::MeshPairEffect => self.effect_new_mesh = 1,
+            MeshPairState::MeshPairDefaultMesh => {
+                self.default_mesh_effect_delay_ref = clock_time() | 1;
+                self.default_mesh_time = params[1] as u32 * 1000;
+            }
         }
     }
 
@@ -341,9 +375,9 @@ impl MeshManager {
 
         if self.default_mesh_effect_delay_ref != 0
             && clock_time_exceed(
-                self.default_mesh_effect_delay_ref,
-                MESH_PAIR_CMD_INTERVAL * 1000,
-            )
+            self.default_mesh_effect_delay_ref,
+            MESH_PAIR_CMD_INTERVAL * 1000,
+        )
         {
             self.default_mesh_effect_delay_ref = 0;
 
@@ -367,9 +401,9 @@ impl MeshManager {
         }
         if self.mesh_pair_start_time != 0
             && clock_time_exceed(
-                self.mesh_pair_start_time,
-                self.mesh_pair_timeout * 1000 * 1000,
-            )
+            self.mesh_pair_start_time,
+            self.mesh_pair_timeout * 1000 * 1000,
+        )
         {
             //mesh pair time out
             _pair_load_key();
@@ -398,39 +432,47 @@ impl MeshManager {
             if *get_pair_setting_flag() == PairState::PairSetMeshTxStart {
                 op_para[0] = LGT_CMD_MESH_PAIR;
                 op_para[3] = self.mesh_pair_state as u8;
-                if self.mesh_pair_state == MeshPairState::MeshPairName1 {
-                    // send mesh name [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_nn()[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairName2;
-                } else if self.mesh_pair_state == MeshPairState::MeshPairName2 {
-                    // send mesh name [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_nn()[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairPwd1;
-                } else if self.mesh_pair_state == MeshPairState::MeshPairPwd1 {
-                    // send mesh pwd [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_pass()[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairPwd2;
-                } else if self.mesh_pair_state == MeshPairState::MeshPairPwd2 {
-                    // send mesh pwd [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_pass()[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairLtk1;
-                } else if self.mesh_pair_state == MeshPairState::MeshPairLtk1 {
-                    // send mesh ltk [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_ltk_mesh()[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairLtk2;
-                } else if self.mesh_pair_state == MeshPairState::MeshPairLtk2 {
-                    // send mesh ltk [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&get_pair_ltk_mesh()[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    set_pair_setting_flag(PairState::PairSetMeshTxDone);
-                } else {
-                    self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    self.mesh_pair_start_notify_time = 0;
-                    self.mesh_pair_retry_cnt = 0;
-                    self.mesh_pair_start_time = 0;
-                    self.mesh_pair_notify_rsp_mask = [0; 32];
-                    set_pair_setting_flag(PairState::PairSetted);
-                    return;
+                match self.mesh_pair_state {
+                    MeshPairState::MeshPairName1 => {
+                        // send mesh name [0-7]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_nn()[0..8]);
+                        self.mesh_pair_state = MeshPairState::MeshPairName2;
+                    }
+                    MeshPairState::MeshPairName2 => {
+                        // send mesh name [8-15]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_nn()[8..16]);
+                        self.mesh_pair_state = MeshPairState::MeshPairPwd1;
+                    }
+                    MeshPairState::MeshPairPwd1 => {
+                        // send mesh pwd [0-7]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_pass()[0..8]);
+                        self.mesh_pair_state = MeshPairState::MeshPairPwd2;
+                    }
+                    MeshPairState::MeshPairPwd2 => {
+                        // send mesh pwd [8-15]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_pass()[8..16]);
+                        self.mesh_pair_state = MeshPairState::MeshPairLtk1;
+                    }
+                    MeshPairState::MeshPairLtk1 => {
+                        // send mesh ltk [0-7]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_ltk_mesh()[0..8]);
+                        self.mesh_pair_state = MeshPairState::MeshPairLtk2;
+                    }
+                    MeshPairState::MeshPairLtk2 => {
+                        // send mesh ltk [8-15]
+                        op_para[4..4 + 8].copy_from_slice(&get_pair_ltk_mesh()[8..16]);
+                        self.mesh_pair_state = MeshPairState::MeshPairName1;
+                        set_pair_setting_flag(PairState::PairSetMeshTxDone);
+                    }
+                    _ => {
+                        self.mesh_pair_state = MeshPairState::MeshPairName1;
+                        self.mesh_pair_start_notify_time = 0;
+                        self.mesh_pair_retry_cnt = 0;
+                        self.mesh_pair_start_time = 0;
+                        self.mesh_pair_notify_rsp_mask = [0; 32];
+                        set_pair_setting_flag(PairState::PairSetted);
+                        return;
+                    }
                 }
             } else if *get_pair_setting_flag() == PairState::PairSetMeshTxDone {
                 // get mesh nodes' confirm value

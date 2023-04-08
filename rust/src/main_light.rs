@@ -1,4 +1,4 @@
-use crate::{app};
+use crate::{app, blinken};
 use core::cmp::{min};
 use core::convert::TryInto;
 use core::mem::size_of;
@@ -188,10 +188,10 @@ fn proc_led() {
 
     if clock_time() - *get_led_tick()
         >= (if *get_led_is_on() != 0 {
-            *get_led_ton()
-        } else {
-            *get_led_toff()
-        })
+        *get_led_ton()
+    } else {
+        *get_led_toff()
+    })
     {
         set_led_tick(clock_time());
         let led_off = (*get_led_is_on() != 0 || *get_led_ton() == 0) && *get_led_toff() != 0;
@@ -288,87 +288,94 @@ extern "C" fn rf_link_response_callback(
     ppp.val[18] = *get_max_relay_num();
 
     let mut idx = 0;
-    if ppp.val[15] == GET_STATUS {
-        ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
+    match ppp.val[15] {
+        GET_STATUS => {
+            ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 
-        let state = app().light_manager.get_current_light_state();
-        ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
-        ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
-        ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
-        ppp.val[6] = ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8;
-        ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
-        ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
-    } else if ppp.val[15] == GET_GROUP1 {
-        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
-        for i in 0..MAX_GROUP_NUM as usize {
-            ppp.val[i + 3] = 0xFF;
-            if get_group_address()[i] != 0 {
-                ppp.val[idx + 3] = get_group_address()[i] as u8;
-                idx += 1;
+            let state = app().light_manager.get_current_light_state();
+            ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
+            ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
+            ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
+            ppp.val[6] = ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8;
+            ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
+            ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
+        }
+        GET_GROUP1 => {
+            ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
+            for i in 0..MAX_GROUP_NUM as usize {
+                ppp.val[i + 3] = 0xFF;
+                if get_group_address()[i] != 0 {
+                    ppp.val[idx + 3] = get_group_address()[i] as u8;
+                    idx += 1;
+                }
             }
         }
-    } else if ppp.val[15] == GET_GROUP2 {
-        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
-        for i in 0..MAX_GROUP_NUM as usize {
-            ppp.val[i + 3] = 0xFF;
-            if get_group_address()[i / 2] != 0 {
-                ppp.val[idx + 3] = if (i % 2) != 0 {
-                    (get_group_address()[i / 2] >> 8) as u8
-                } else {
-                    get_group_address()[i / 2] as u8
-                };
-                idx += 1;
+        GET_GROUP2 => {
+            ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
+            for i in 0..MAX_GROUP_NUM as usize {
+                ppp.val[i + 3] = 0xFF;
+                if get_group_address()[i / 2] != 0 {
+                    ppp.val[idx + 3] = if (i % 2) != 0 {
+                        (get_group_address()[i / 2] >> 8) as u8
+                    } else {
+                        get_group_address()[i / 2] as u8
+                    };
+                    idx += 1;
+                }
             }
         }
-    } else if ppp.val[15] == GET_GROUP3 {
-        ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
-        for i in 0..MAX_GROUP_NUM as usize {
-            ppp.val[i + 3] = 0xFF;
-            if get_group_address()[4 + i / 2] != 0 {
-                ppp.val[idx + 3] = if (i % 2) != 0 {
-                    (get_group_address()[4 + i / 2] >> 8) as u8
-                } else {
-                    get_group_address()[4 + i / 2] as u8
-                };
-                idx += 1;
+        GET_GROUP3 => {
+            ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
+            for i in 0..MAX_GROUP_NUM as usize {
+                ppp.val[i + 3] = 0xFF;
+                if get_group_address()[4 + i / 2] != 0 {
+                    ppp.val[idx + 3] = if (i % 2) != 0 {
+                        (get_group_address()[4 + i / 2] >> 8) as u8
+                    } else {
+                        get_group_address()[4 + i / 2] as u8
+                    };
+                    idx += 1;
+                }
             }
         }
-    } else if ppp.val[15] == GET_DEV_ADDR {
-        ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
-        return dev_addr_with_mac_rsp(&mut ppp.val);
-    } else if ppp.val[15] == GET_USER_NOTIFY {
-        /*user can get parameters from APP.
-        params[0] is relay times.
-        params[1 -- 9] is parameters from APP if haved been set by user.
-
-        dst_unicast == 1 means destination address is unicast address.
-        */
-        if dst_unicast {
-            // params[0 -- 9] is valid
-        } else {
-            // only params[0 -- 4] is valid
+        GET_DEV_ADDR => {
+            ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
+            return dev_addr_with_mac_rsp(&mut ppp.val);
         }
+        GET_USER_NOTIFY => {
+            /*user can get parameters from APP.
+            params[0] is relay times.
+            params[1 -- 9] is parameters from APP if haved been set by user.
 
-        ppp.val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
-        for i in 0..8 {
-            //params[2]
-            ppp.val[5 + i] = i as u8;
-        }
-        ppp.val[3] = (*get_device_address() & 0xFF) as u8;
-        ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
-    } else if ppp.val[15] == GET_MESH_OTA {
-        ppp.val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
-        if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
+            dst_unicast == 1 means destination address is unicast address.
+            */
+            if dst_unicast {
+                // params[0 -- 9] is valid
+            } else {
+                // only params[0 -- 4] is valid
+            }
+
+            ppp.val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
             for i in 0..8 {
-                ppp.val[5 + i] = app().mesh_manager.get_mesh_pair_checksum_fn(i as u8);
+                //params[2]
+                ppp.val[5 + i] = i as u8;
             }
             ppp.val[3] = (*get_device_address() & 0xFF) as u8;
             ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
-            return true;
         }
-        return _mesh_ota_slave_set_response(ppp.val[3..].as_mut_ptr(), params[1]);
-    } else {
-        return false;
+        GET_MESH_OTA => {
+            ppp.val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
+            if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
+                for i in 0..8 {
+                    ppp.val[5 + i] = app().mesh_manager.get_mesh_pair_checksum_fn(i as u8);
+                }
+                ppp.val[3] = (*get_device_address() & 0xFF) as u8;
+                ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+                return true;
+            }
+            return _mesh_ota_slave_set_response(ppp.val[3..].as_mut_ptr(), params[1]);
+        }
+        _ => return false
     }
 
     return true;
@@ -398,72 +405,84 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         return;
     }
 
-    // let vendor_id = (op_cmd[2] as u16) << 8 | op_cmd[1] as u16;
+    // Verify that the vendor id is correct. This can catch unexpected corrupt messages
+    let vendor_id = (op_cmd[2] as u16) << 8 | op_cmd[1] as u16;
+    if vendor_id != VENDOR_ID {
+        return;
+    }
+
     let op = op_cmd[0] & 0x3F;
 
     _mesh_ota_timeout_handle(op, params.as_ptr());
 
-    if op == LGT_CMD_LIGHT_ONOFF {
-        app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params);
-    } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-        let val = params[1] as u16 | ((params[2] as u16) << 8);
-        if params[0] == LIGHT_DEL_GRP_PARAM {
-            if _rf_link_del_group(val) {
-                cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-            }
-        } else if params[0] == LIGHT_ADD_GRP_PARAM {
-            if _rf_link_add_group(val) {
-                cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-            }
-        }
-    } else if op == LGT_CMD_CONFIG_DEV_ADDR {
-        let val = params[0] as u16 | ((params[1] as u16) << 8);
-        if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
-            if _rf_link_add_dev_addr(val) {
-                app().mesh_manager.mesh_pair_proc_get_mac_flag();
+    match op {
+        LGT_CMD_LIGHT_ONOFF => app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params),
+        LGT_CMD_LIGHT_CONFIG_GRP => {
+            let val = params[1] as u16 | ((params[2] as u16) << 8);
+            match params[0] {
+                LIGHT_DEL_GRP_PARAM => {
+                    if _rf_link_del_group(val) {
+                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+                    }
+                }
+                LIGHT_ADD_GRP_PARAM => {
+                    if _rf_link_add_group(val) {
+                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+                    }
+                }
+                _ => ()
             }
         }
-    } else if op == LGT_CMD_SET_LIGHT {
-        app().light_manager.send_message(LGT_CMD_SET_LIGHT, params);
-    } else if op == LGT_CMD_SET_MAC_ADDR {
-        let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
-        flash_erase_sector(*get_flash_adr_mac());
-        flash_write_page(*get_flash_adr_mac(), mac.len() as u32, addr_of!(mac) as *const u8);
-        _light_sw_reboot();
-    } else if op == LGT_CLEAR_LUM_STATE {
+        LGT_CMD_CONFIG_DEV_ADDR => {
+            let val = params[0] as u16 | ((params[1] as u16) << 8);
+            if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
+                if _rf_link_add_dev_addr(val) {
+                    app().mesh_manager.mesh_pair_proc_get_mac_flag();
+                }
+            }
+        }
+        LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
+        LGT_CMD_SET_MAC_ADDR => {
+            let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
+            flash_erase_sector(*get_flash_adr_mac());
+            flash_write_page(*get_flash_adr_mac(), mac.len() as u32, addr_of!(mac) as *const u8);
+            _light_sw_reboot();
+        }
+        LGT_CLEAR_LUM_STATE => flash_erase_sector(*get_flash_adr_lum()),
         // Clear the lum state
-        flash_erase_sector(*get_flash_adr_lum());
-    } else if op == LGT_TRIGGER_PANIC {
-        panic!("She's dead jim")
-    } else if op == LGT_CMD_KICK_OUT {
-        irq_disable();
-        kick_out((params[0] as u32).try_into().unwrap());
-        _light_sw_reboot();
-    } else if op == LGT_CMD_NOTIFY_MESH {
-        light_notify(&pp.val[3..3 + 10], &pp.src);
-    } else if op == LGT_CMD_MESH_OTA_DATA {
-        let idx = (params[0] as u16) | ((params[1] as u16) << 8);
-        if !_is_master_ota_st() {
-            // no update firmware for itself
-            if CMD_START_MESH_OTA == idx {
-                app().ota_manager.mesh_ota_master_start_firmware_from_own();
-                //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-            } else if CMD_STOP_MESH_OTA == idx {
-                if _is_mesh_ota_slave_running() {
-                    // reboot to initial flash: should be delay to relay command.
-                    _mesh_ota_slave_reboot_delay(); // reboot after 320ms
+        LGT_TRIGGER_PANIC => panic!("She's dead jim"),
+        LGT_CMD_KICK_OUT => {
+            irq_disable();
+            kick_out((params[0] as u32).try_into().unwrap());
+            _light_sw_reboot();
+        }
+        LGT_CMD_NOTIFY_MESH => light_notify(&pp.val[3..3 + 10], &pp.src),
+        LGT_CMD_MESH_OTA_DATA => {
+            let idx = (params[0] as u16) | ((params[1] as u16) << 8);
+            if !_is_master_ota_st() {
+                // no update firmware for itself
+                match idx {
+                    CMD_START_MESH_OTA => {
+                        app().ota_manager.mesh_ota_master_start_firmware_from_own();
+                        //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+                    }
+                    CMD_STOP_MESH_OTA => {
+                        if _is_mesh_ota_slave_running() {
+                            // reboot to initial flash: should be delay to relay command.
+                            _mesh_ota_slave_reboot_delay(); // reboot after 320ms
+                        }
+                    }
+                    _ => { _mesh_ota_slave_save_data(params.as_ptr()); }
                 }
             } else {
-                _mesh_ota_slave_save_data(params.as_ptr());
-            }
-        } else {
-            if CMD_STOP_MESH_OTA == idx {
-                _mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
-                //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
+                if CMD_STOP_MESH_OTA == idx {
+                    _mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
+                    //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
+                }
             }
         }
-    } else if op == LGT_CMD_MESH_PAIR {
-        app().mesh_manager.mesh_pair_cb(&params);
+        LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),
+        _ => ()
     }
 }
 
@@ -512,18 +531,20 @@ fn light_notify(p: &[u8], p_src: &[u8]) {
 
 #[no_mangle] // required by light_ll
 pub extern "C" fn rf_link_light_event_callback(status: u8) {
-    if status == LGT_CMD_SET_MESH_INFO {
-        _mesh_node_init();
-        app().light_manager.device_status_update();
-        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-    } else if status == LGT_CMD_SET_DEV_ADDR {
-        _mesh_node_init();
-        app().light_manager.device_status_update();
-        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-    } else if status == LGT_CMD_DEL_PAIR {
-        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-    } else if status == LGT_CMD_MESH_PAIR_TIMEOUT {
-        cfg_led_event(LED_EVENT_FLASH_2HZ_2S);
+    match status {
+        LGT_CMD_SET_MESH_INFO => {
+            _mesh_node_init();
+            app().light_manager.device_status_update();
+            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+        },
+        LGT_CMD_SET_DEV_ADDR => {
+            _mesh_node_init();
+            app().light_manager.device_status_update();
+            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+        },
+        LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
+        LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
+        _ => ()
     }
 }
 

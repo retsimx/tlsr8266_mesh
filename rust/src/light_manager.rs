@@ -16,6 +16,7 @@ use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
 use fixed::types::{I16F16, U16F16};
+use const_format::formatcp;
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -45,9 +46,9 @@ struct LumSaveT {
 impl LightState {
     pub const fn default() -> Self {
         Self {
-            cw: I16F16::lit("0x7fff"),
-            ww: I16F16::lit("0"),
-            brightness: I16F16::lit("0"),
+            cw: I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE)),
+            ww: I16F16::lit(formatcp!("{}", 0u16)),
+            brightness: I16F16::lit(formatcp!("{}", 0u16)),
             timestamp: Instant::from_ticks(0)
         }
     }
@@ -89,7 +90,7 @@ impl LightManager {
     }
 
     fn handle_transition(&mut self, params: &[u8; 16]) {
-        let mut brightness = self.get_brightness();
+        let mut brightness = self.brightness;
         let mut cw = self.current_light_state.cw.to_num();
         let mut ww = self.current_light_state.ww.to_num();
 
@@ -97,7 +98,12 @@ impl LightManager {
             // Brightness
             brightness = (params[1] as u16) << 8 | params[0] as u16;
 
-            self.set_brightness(brightness);
+            // If we're really changing the brightness, then we should save it soon
+            if self.brightness != brightness {
+                self.last_transition_time = clock_time();
+            }
+
+            self.brightness = brightness
         }
 
         if params[8] & 0x2 != 0 {
@@ -174,8 +180,8 @@ impl LightManager {
     }
 
     pub fn ease_in_out(&self, t: I16F16, b: I16F16, c: I16F16) -> I16F16 {
-        static TWO: I16F16 = I16F16::lit("2");
-        static D: I16F16 = I16F16::lit("0x7fff");
+        static TWO: I16F16 = I16F16::lit(formatcp!("{}", 2u16));
+        static D: I16F16 = I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE));
 
         let t = t / (D / TWO);
         if t < 1 {
@@ -285,12 +291,16 @@ impl LightManager {
             self.light_lum_addr = *get_flash_adr_lum() + i as u32;
 
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
-            if LIGHT_SAVE_VALID_FLAG == lum_save.save_flag {
-                self.brightness = min(lum_save.brightness, MAX_LUM_BRIGHTNESS_VALUE);
-                self.current_light_state.cw = I16F16::from_num(min(lum_save.cw, MAX_LUM_BRIGHTNESS_VALUE));
-                self.current_light_state.ww = I16F16::from_num(min(lum_save.ww, MAX_LUM_BRIGHTNESS_VALUE));
-            } else if lum_save.save_flag == 0xFF {
-                break;
+            match lum_save.save_flag {
+                LIGHT_SAVE_VALID_FLAG => {
+                    self.brightness = min(lum_save.brightness, MAX_LUM_BRIGHTNESS_VALUE);
+                    self.current_light_state.cw = I16F16::from_num(min(lum_save.cw, MAX_LUM_BRIGHTNESS_VALUE));
+                    self.current_light_state.ww = I16F16::from_num(min(lum_save.ww, MAX_LUM_BRIGHTNESS_VALUE));
+                },
+                0xFF => {
+                    break;
+                },
+                _ => ()
             }
 
             i += size_of::<LumSaveT>() as u16
@@ -321,20 +331,6 @@ impl LightManager {
         }
 
         &mut self.current_light_state
-    }
-
-    pub fn set_brightness(&mut self, brightness: u16) {
-        // If we're changing the brightness for real (not as part of a transition), then we should
-        // save this new brightness in a bit
-        if self.brightness != brightness {
-            self.last_transition_time = clock_time();
-        }
-
-        self.brightness = brightness
-    }
-
-    pub fn get_brightness(&self) -> u16 {
-        self.brightness
     }
 
     pub fn calculate_lumen_map(&self, val: I16F16) -> u32 {

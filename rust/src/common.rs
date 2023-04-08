@@ -127,21 +127,25 @@ pub extern "C" fn rf_update_conn_para(p: *const u8) -> u8 {
 
     if equal && (((*pp)._type & 0b11) == 2) {
         //l2cap data pkt, start pkt
-        if (*pp).result == 0x0000 {
-            set_conn_update_cnt(0);
-            set_conn_update_successed(1);
-        } else if (*pp).result == 0x0001 {
-            if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
+        match (*pp).result {
+            0x0000 => {
                 set_conn_update_cnt(0);
-            } else {
-                _setup_ble_parameter_start(
-                    1,
-                    CONN_PARA_DATA[*get_conn_update_cnt() as usize][0],
-                    CONN_PARA_DATA[*get_conn_update_cnt() as usize][1],
-                    CONN_PARA_DATA[*get_conn_update_cnt() as usize][2],
-                );
-                set_conn_update_cnt(*get_conn_update_cnt() + 1);
-            }
+                set_conn_update_successed(1);
+            },
+            0x0001 => {
+                if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
+                    set_conn_update_cnt(0);
+                } else {
+                    _setup_ble_parameter_start(
+                        1,
+                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][0],
+                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][1],
+                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][2],
+                    );
+                    set_conn_update_cnt(*get_conn_update_cnt() + 1);
+                }
+            },
+            _ => ()
         }
     }
 

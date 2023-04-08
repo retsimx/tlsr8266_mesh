@@ -20,7 +20,8 @@ pub struct OtaManager {
     ota_pkt_cnt: u16,
     ota_rcv_last_idx: u16,
     fw_check_val: u32,
-    need_check_type: u8, //=1:crc val sum
+    need_check_type: u8,
+    //=1:crc val sum
     ota_pkt_total: u16,
     slave_ota_data_cache_idx: u8,
     pub rf_slave_ota_finished_time: u32,
@@ -66,7 +67,7 @@ impl OtaManager {
         irq_disable();
 
         #[allow(invalid_value)]
-        let mut buff: [u8; 256] = unsafe { MaybeUninit::uninit().assume_init() };
+            let mut buff: [u8; 256] = unsafe { MaybeUninit::uninit().assume_init() };
 
         flash_read_page(*get_flash_adr_light_new_fw(), PAGE_SIZE, buff.as_mut_ptr());
         let n = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
@@ -174,7 +175,7 @@ impl OtaManager {
 
             if crc16(&p.dat[0..(n_data_len + 2) as usize])
                 == p.dat[(n_data_len + 2) as usize] as u16
-                    | (p.dat[(n_data_len + 3) as usize] as u16) << 8
+                | (p.dat[(n_data_len + 3) as usize] as u16) << 8
             {
                 set_rf_slave_ota_timeout_s(*get_rf_slave_ota_timeout_def_s()); // refresh timeout
 
@@ -235,9 +236,9 @@ impl OtaManager {
                         } else if cur_idx == self.ota_pkt_total - 1 && self.need_check_type == 1 {
                             if self.fw_check_val
                                 != ((p.dat[2] as u32)
-                                    | (((p.dat[3] as u32) << 8) & 0xFF00)
-                                    | (((p.dat[4] as u32) << 16) & 0xFF0000)
-                                    | (((p.dat[5] as u32) << 24) & 0xFF000000))
+                                | (((p.dat[3] as u32) << 8) & 0xFF00)
+                                | (((p.dat[4] as u32) << 16) & 0xFF0000)
+                                | (((p.dat[5] as u32) << 24) & 0xFF000000))
                             {
                                 set_cur_ota_flash_addr(0);
                                 self.ota_pkt_cnt = 0;
@@ -354,15 +355,17 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_ota_finish_led_and_reboot(&self, st: OtaState) {
-        if OtaState::ERROR == st {
-            self.erase_ota_data();
-            self.rf_led_ota_error();
-        } else if OtaState::OK == st {
-            //rf_ota_save_data(0);
-            self.rf_ota_set_flag();
-            self.rf_led_ota_ok();
-        } else if OtaState::MASTER_OTA_REBOOT_ONLY == st {
-            // just reboot
+        match st {
+            OtaState::ERROR => {
+                self.erase_ota_data();
+                self.rf_led_ota_error();
+            }
+            OtaState::OK => {
+                //rf_ota_save_data(0);
+                self.rf_ota_set_flag();
+                self.rf_led_ota_ok();
+            }
+            _ => ()
         }
         irq_disable();
         _light_sw_reboot();
@@ -397,7 +400,7 @@ impl OtaManager {
 
             if !*get_rf_slave_ota_terminate_flag()
                 && (clock_time() - self.rf_slave_ota_finished_time)
-                    > 2000 * 1000 * *get_tick_per_us()
+                > 2000 * 1000 * *get_tick_per_us()
             {
                 set_rf_slave_ota_terminate_flag(true); // for ios: no last read command
             }
@@ -414,12 +417,10 @@ impl OtaManager {
     }
 
     pub fn mesh_ota_led_cb(&self, _type: MeshOtaLed) {
-        if MeshOtaLed::OK == _type {
-            self.rf_led_ota_ok();
-        } else if MeshOtaLed::ERROR == _type {
-            self.rf_led_ota_error();
-        } else if MeshOtaLed::STOP == _type {
-            self.rf_led_ota_error();
+        match _type {
+            MeshOtaLed::OK => self.rf_led_ota_ok(),
+            MeshOtaLed::ERROR => self.rf_led_ota_error(),
+            MeshOtaLed::STOP => self.rf_led_ota_error()
         }
     }
 

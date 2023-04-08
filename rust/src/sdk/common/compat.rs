@@ -65,12 +65,11 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
         let cvld: u8 = ccmd & TCMD_UNDER_WR;
         ccmd &= TCMD_MASK;
         if cvld != 0 {
-            if ccmd == TCMD_WRITE {
-                write_reg8(cadr, cdat);
-            } else if ccmd == TCMD_WAREG {
-                analog_write(cadr as u8, cdat);
-            } else if ccmd == TCMD_WAIT {
-                sleep_us((ptr.adr as u32) * 256 + cdat as u32);
+            match ccmd {
+                TCMD_WRITE => write_reg8(cadr, cdat),
+                TCMD_WAREG => analog_write(cadr as u8, cdat),
+                TCMD_WAIT => sleep_us((ptr.adr as u32) * 256 + cdat as u32),
+                _ => ()
             }
         }
         l += 1;

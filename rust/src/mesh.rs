@@ -10,6 +10,7 @@ use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use crate::sdk::rf_drv::rf_set_ble_access_code;
 use core::ptr::addr_of;
 use crate::{app, BIT};
+use crate::common::{mesh_node_init, pair_load_key};
 use crate::mesh::wrappers::*;
 use crate::sdk::light::*;
 use crate::uart_manager::{get_pkt_user_cmd};
@@ -188,7 +189,7 @@ impl MeshManager {
         if *get_mesh_pair_enable() {
             let mut data: [u8; 1] = [0];
             flash_write_page(
-                *get_flash_adr_pairing() + *get_adr_flash_cfg_idx() + 1,
+                (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + 1) as u32,
                 1,
                 data.as_mut_ptr(),
             );
@@ -292,10 +293,10 @@ impl MeshManager {
             self.mesh_pair_complete_notify();
             sleep_us(1000);
             /* Switch to normal mesh */
-            _pair_load_key();
+            pair_load_key();
             self.default_mesh_time_ref = 0;
 
-            _mesh_node_init();
+            mesh_node_init();
             app().light_manager.device_status_update();
             self.safe_effect_new_mesh_finish();
             return;
@@ -382,7 +383,7 @@ impl MeshManager {
             self.default_mesh_effect_delay_ref = 0;
 
             if self.default_mesh_time == 0x00 {
-                _pair_load_key();
+                pair_load_key();
                 self.default_mesh_time_ref = 0;
             } else {
                 self.switch_to_default_mesh((self.default_mesh_time / 1000) as u8);
@@ -395,7 +396,7 @@ impl MeshManager {
             if self.default_mesh_time == 255000 {
                 self.default_mesh_time_ref = clock_time() | 1;
             } else {
-                _pair_load_key();
+                pair_load_key();
                 self.default_mesh_time_ref = 0;
             }
         }
@@ -406,7 +407,7 @@ impl MeshManager {
         )
         {
             //mesh pair time out
-            _pair_load_key();
+            pair_load_key();
             set_pair_setting_flag(PairState::PairSetted);
             rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
             return;

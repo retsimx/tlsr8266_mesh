@@ -4,7 +4,7 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::{blinken, no_mangle_fn, pub_mut, regrw};
-use crate::common::rf_update_conn_para;
+use crate::common::{mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::wrappers::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
@@ -12,7 +12,7 @@ use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rnd
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::{_rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, _pair_load_key, rf_packet_att_cmd_t, get_slave_p_mac, _mesh_node_init, _get_fw_version};
+use crate::sdk::light::{_rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, rf_packet_att_cmd_t, get_slave_p_mac, _get_fw_version};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::crypto::encode_password;
@@ -20,7 +20,6 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
-use crate::sdk::rf_drv::_rf_link_slave_set_adv;
 
 const ENABLE_16MHZ_XTAL: bool = false;
 
@@ -430,7 +429,8 @@ pub_mut!(pkt_scan_rsp, rf_packet_scan_rsp_t);
 pub_mut!(pkt_light_data, rf_packet_att_cmd_t);
 pub_mut!(pkt_light_status, rf_packet_att_cmd_t);
 pub_mut!(advData, [u8; 3]);
-no_mangle_fn!(retrieve_dev_grp_address);
+pub_mut!(user_data_len, u8);
+pub_mut!(user_data, [u8; 16]);
 
 #[no_mangle]
 extern "C" {
@@ -440,6 +440,13 @@ extern "C" {
 #[no_mangle]
 extern "C" {
     fn rf_link_slave_data_write(p: *const rf_packet_ll_data_t) -> u32;
+}
+
+fn rf_link_slave_set_adv(adv_data_ptr: &[u8])
+{
+    get_pkt_adv().data[0..adv_data_ptr.len()].copy_from_slice(&adv_data_ptr[0..adv_data_ptr.len()]);
+    get_pkt_adv().dma_len = adv_data_ptr.len() as u32 + 8;
+    get_pkt_adv().rf_len = adv_data_ptr.len() as u8 + 6;
 }
 
 pub fn rf_link_slave_init(interval: u32)
@@ -504,8 +511,8 @@ pub fn rf_link_slave_init(interval: u32)
         pkt_adv.advA = mac_id;
         pkt_scan_rsp.advA = mac_id;
 
-        _rf_link_slave_set_adv(advData.as_ptr(), 3);
-        _pair_load_key();
+        rf_link_slave_set_adv(&advData);
+        pair_load_key();
 
         pkt_light_data.value[3] = *get_slave_p_mac().offset(0);
         pkt_light_data.value[4] = *get_slave_p_mac().offset(1);
@@ -521,7 +528,7 @@ pub fn rf_link_slave_init(interval: u32)
 
         retrieve_dev_grp_address();
 
-        _mesh_node_init();
+        mesh_node_init();
 
         irq_mask_save = read_reg_irq_mask();
 

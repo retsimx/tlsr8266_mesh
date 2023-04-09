@@ -6,8 +6,9 @@ import time
 HOST = ""  # The server's hostname or IP address
 PORT = 8000  # The port used by the server
 
+
 try:
-    from .local import *
+    from local import *
 except:
     pass
 

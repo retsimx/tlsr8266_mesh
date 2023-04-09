@@ -14,7 +14,7 @@ WIFI_PASS = ""
 
 
 try:
-    from .local import *
+    from local import *
 except:
     pass
 
@@ -37,7 +37,7 @@ wlan.connect(WIFI_SSID, WIFI_PASS)
 # 6202500 : E104-BT05-TB
 
 
-RX_RATE = 6202500   # The receive speed
+RX_RATE = 2838900 * 2   # The receive speed
 TX_RATE = 5000000       # The transmission speed
 
 reset_pin = Pin(16, Pin.OUT)

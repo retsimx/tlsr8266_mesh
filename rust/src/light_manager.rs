@@ -17,7 +17,6 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
 use fixed::types::{I16F16, U16F16};
 use const_format::formatcp;
-use crate::sdk::pm::light_sw_reboot;
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;

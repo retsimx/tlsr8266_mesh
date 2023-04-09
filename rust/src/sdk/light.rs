@@ -37,8 +37,6 @@ no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32)
 no_mangle_fn!(pairRead, u32, p: *const u8);
 no_mangle_fn!(pairWrite, u32, p: *const u8);
 no_mangle_fn!(pair_save_key);
-no_mangle_fn!(pair_load_key);
-no_mangle_fn!(decode_password, pd: *mut u8);
 no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
 
 no_mangle_fn!(is_master_sending_ota_st, bool);
@@ -70,7 +68,6 @@ no_mangle_fn!(
     len: u8
 );
 no_mangle_fn!(mesh_send_user_command, u32);
-no_mangle_fn!(mesh_node_init);
 no_mangle_fn!(mesh_report_status_enable, mask: u8);
 no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
 
@@ -110,13 +107,16 @@ pub_mut!(pair_login_ok, bool);
 pub_mut!(slave_first_connected_tick, u32);
 
 pub_mut!(device_address, u16);
+pub_mut!(device_node_sn, u8);
+pub_mut!(dev_grp_next_pos, u16, 0);
 pub_mut!(max_relay_num, u8);
 
 pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]);
 
 pub_mut!(slave_p_mac, *const u8);
 
-pub_mut!(adr_flash_cfg_idx, u32);
+pub_mut!(adr_flash_cfg_idx, i32);
+pub_mut!(sw_no_pair, bool);
 
 pub_mut!(slave_link_connected, bool);
 
@@ -400,12 +400,12 @@ pub enum RecoverStatus {
 
 #[repr(C, packed)]
 pub struct rf_packet_adv_ind_module_t {
-	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+	pub dma_len: u32,       // 0    //won't be a fixed number as previous, should adjust with the mouse package number
 
-	pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
-	pub rf_len: u8,				//LEN(6)_RFU(2)
-	pub advA: [u8; 6],			//address
-	pub data: [u8; 31]			//0-31 byte
+	pub _type: u8,			// 4	//RA(1)_TA(1)_RFU(2)_TYPE(4)
+	pub rf_len: u8,			// 5	//LEN(6)_RFU(2)
+	pub advA: [u8; 6],		// 6	//address
+	pub data: [u8; 31]		// 12	//0-31 byte
 }
 
 #[repr(C, packed)]
@@ -832,6 +832,7 @@ pub_mut!(
 
 pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
 pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
+pub_mut!(dev_address_next_pos, u16, 0);
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

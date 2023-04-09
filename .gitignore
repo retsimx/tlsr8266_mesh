@@ -3,3 +3,5 @@ _build
 .gradle
 venv
 rust/target/
+local.py
+__pycache__

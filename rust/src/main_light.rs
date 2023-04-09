@@ -534,12 +534,12 @@ fn light_notify(p: &[u8], p_src: &[u8]) {
 pub extern "C" fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
-            _mesh_node_init();
+            mesh_node_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         },
         LGT_CMD_SET_DEV_ADDR => {
-            _mesh_node_init();
+            mesh_node_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         },

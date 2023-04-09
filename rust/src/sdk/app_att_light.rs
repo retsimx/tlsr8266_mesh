@@ -111,9 +111,9 @@ static fwRevisionChar: u8 = CHAR_PROP_READ;
 pub_mut!(fwRevision_value, [u8; 4],
     [
         (BUILD_VERSION & 0xff) as u8,
-        ((BUILD_VERSION << 8) & 0xff) as u8,
-        ((BUILD_VERSION << 16) & 0xff) as u8,
-        ((BUILD_VERSION << 24) & 0xff) as u8
+        ((BUILD_VERSION >> 8) & 0xff) as u8,
+        ((BUILD_VERSION >> 16) & 0xff) as u8,
+        ((BUILD_VERSION >> 24) & 0xff) as u8
     ]
 );
 

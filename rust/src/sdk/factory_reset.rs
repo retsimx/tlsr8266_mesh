@@ -11,7 +11,7 @@ use core::convert::TryFrom;
 use core::ptr::{addr_of, copy_nonoverlapping};
 use crate::BIT;
 use crate::{app, pub_mut};
-use crate::sdk::mcu::crypto::encode_password;
+use crate::sdk::mcu::crypto::{encode_password};
 use crate::sdk::pm::light_sw_reboot;
 
 pub_mut!(pair_config_pwd_encode_enable, u8);

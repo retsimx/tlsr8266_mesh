@@ -1,9 +1,10 @@
 use crate::config::VENDOR_ID;
 use crate::pub_mut_no_move;
 use crate::sdk::light::{get_slave_p_mac, ll_adv_private_t, ll_adv_rsp_private_t};
-use crate::sdk::rf_drv::_rf_link_slave_set_adv_private_data;
 use core::mem::size_of;
 use core::ptr::addr_of;
+use core::slice;
+use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
 
 pub_mut_no_move!(
     adv_pri_data,
@@ -32,9 +33,13 @@ pub_mut_no_move!(
 pub fn vendor_set_adv_data() {
     // config adv data
     get_adv_pri_data().MacAddress = unsafe { *(*get_slave_p_mac() as *const u32) };
-    _rf_link_slave_set_adv_private_data(
-        get_adv_pri_data_addr() as *const u8,
-        size_of::<ll_adv_private_t>() as u8,
+    rf_link_slave_set_adv_private_data(
+        unsafe {
+            slice::from_raw_parts(
+                get_adv_pri_data_addr() as *const u8,
+                size_of::<ll_adv_private_t>() as usize,
+            )
+        }
     );
 
     // Light mode CCT = 0x02

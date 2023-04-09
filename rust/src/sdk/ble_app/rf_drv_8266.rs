@@ -12,7 +12,7 @@ use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rnd
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::{_rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, rf_packet_att_cmd_t, get_slave_p_mac, _get_fw_version};
+use crate::sdk::light::{get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, rf_packet_att_cmd_t, get_slave_p_mac};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::crypto::encode_password;
@@ -20,6 +20,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
+use crate::version::BUILD_VERSION;
 
 const ENABLE_16MHZ_XTAL: bool = false;
 
@@ -532,10 +533,8 @@ pub fn rf_link_slave_init(interval: u32)
 
         irq_mask_save = read_reg_irq_mask();
 
-        let mut fw_version = 0u32;
-        _get_fw_version(addr_of!(fw_version) as *const u8);
         write_reg32(0x808004, *(*get_slave_p_mac() as *const u32));
-        write_reg32(0x808008, fw_version);
+        write_reg32(0x808008, BUILD_VERSION);
         write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
     }
 }

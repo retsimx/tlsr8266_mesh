@@ -15,6 +15,7 @@ use core::mem::{size_of_val, MaybeUninit};
 use core::ptr::addr_of;
 use crate::main_light::get_buff_response;
 use crate::sdk::light::*;
+use crate::sdk::pm::light_sw_reboot;
 
 pub struct OtaManager {
     ota_pkt_cnt: u16,
@@ -368,7 +369,7 @@ impl OtaManager {
             _ => ()
         }
         irq_disable();
-        _light_sw_reboot();
+        light_sw_reboot();
     }
 
     fn rf_slave_ota_finished_flag_set(&mut self, reset_flag: OtaState) {

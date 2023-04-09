@@ -1,8 +1,7 @@
 use crate::config::*;
-use crate::{app, pub_mut};
+use crate::{pub_mut};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
-use crate::sdk::mcu::analog::analog_write;
 use core::ptr::addr_of;
 use core::slice;
 use crate::mesh::wrappers::get_get_mac_en;
@@ -49,22 +48,6 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
         }
         return true;
     };
-}
-
-// recover status before software reboot
-#[no_mangle] // required by light_ll
-extern "C" fn light_sw_reboot_callback() {
-    if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {
-        // rf_slave_ota_busy means mesh ota master busy also.
-        analog_write(
-            REGA_LIGHT_OFF,
-            if app().light_manager.is_light_off() {
-                RecoverStatus::LightOff as u8
-            } else {
-                0
-            },
-        );
-    }
 }
 
 // adr:0=flag 16=name 32=pwd 48=ltk

@@ -15,7 +15,7 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US,
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::{irq_disable};
 use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
-use crate::sdk::pm::usb_dp_pullup_en;
+use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
@@ -447,7 +447,7 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
             flash_erase_sector(*get_flash_adr_mac());
             flash_write_page(*get_flash_adr_mac(), mac.len() as u32, addr_of!(mac) as *const u8);
-            _light_sw_reboot();
+            light_sw_reboot();
         }
         LGT_CLEAR_LUM_STATE => flash_erase_sector(*get_flash_adr_lum()),
         // Clear the lum state
@@ -455,7 +455,7 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         LGT_CMD_KICK_OUT => {
             irq_disable();
             kick_out((params[0] as u32).try_into().unwrap());
-            _light_sw_reboot();
+            light_sw_reboot();
         }
         LGT_CMD_NOTIFY_MESH => light_notify(&pp.val[3..3 + 10], &pp.src),
         LGT_CMD_MESH_OTA_DATA => {

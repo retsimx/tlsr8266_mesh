@@ -557,7 +557,7 @@ regrw_copy!(reg_dma_rf_tx_ctrl, reg_dma3_ctrl, u16);
 
 regrw!(reg_aes_ctrl, 0x540, u8);
 regrw!(reg_aes_data, 0x548, u32);
-// #define reg_aes_key(key_id)     reg_aes_key##key_id
+regrw_idx!(reg_aes_key, 0x550, u8);
 regrw!(reg_aes_key0, 0x550, u8);
 regrw!(reg_aes_key1, 0x551, u8);
 regrw!(reg_aes_key2, 0x552, u8);

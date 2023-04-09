@@ -3,7 +3,7 @@ use crate::config::{
 };
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::light::{_encode_password, _light_sw_reboot, get_pair_config_mesh_ltk};
+use crate::sdk::light::{get_pair_config_mesh_ltk};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use core::cmp::min;
@@ -11,6 +11,8 @@ use core::convert::TryFrom;
 use core::ptr::{addr_of, copy_nonoverlapping};
 use crate::BIT;
 use crate::{app, pub_mut};
+use crate::sdk::mcu::crypto::encode_password;
+use crate::sdk::pm::light_sw_reboot;
 
 pub_mut!(pair_config_pwd_encode_enable, u8);
 
@@ -121,7 +123,7 @@ pub fn factory_reset_handle() {
         irq_disable();
         factory_reset();
         app().ota_manager.rf_led_ota_ok();
-        _light_sw_reboot();
+        light_sw_reboot();
     } else {
         increase_reset_cnt();
     }
@@ -198,7 +200,7 @@ pub fn kick_out(par: KickoutReason) {
         let mut buff: [u8; 16] = [0; 16];
         let len = min(MESH_PWD.len(), buff.len());
         buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-        _encode_password(buff.as_mut_ptr());
+        encode_password(buff.as_mut_slice());
         flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];

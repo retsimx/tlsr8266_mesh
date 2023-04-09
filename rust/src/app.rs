@@ -7,7 +7,7 @@ use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::sdk::pm::cpu_wakeup_init;
+use crate::sdk::pm::{cpu_wakeup_init};
 use embassy_executor::Spawner;
 use crate::{app};
 use crate::embassy::yield_now::yield_now;

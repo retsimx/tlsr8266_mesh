@@ -1,6 +1,11 @@
+use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::BIT;
+use crate::{app, BIT, blinken, pub_mut};
+use crate::common::REGA_LIGHT_OFF;
+use crate::sdk::light::{_is_mesh_ota_slave_running, get_rf_slave_ota_busy, get_tick_per_us, RecoverStatus};
+use crate::sdk::mcu::irq_i::irq_disable;
+use crate::sdk::mcu::register::{raga_gpio_wkup_pol, read_reg_clk_sel, read_reg_fhs_sel, read_reg_system_tick, read_reg_system_tick_ctrl, read_reg_system_tick_mode, write_reg32, write_reg8, write_reg_clk_sel, write_reg_fhs_sel, write_reg_pwdn_ctrl, write_reg_system_tick_ctrl, write_reg_system_tick_mode, write_reg_system_wakeup_tick, write_reg_wakeup_en};
 
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read(0x00);
@@ -191,7 +196,6 @@ pub enum PM_WAKEUP {
 // deepsleep mode must use this function for resume 1.8V analog register
 extern "C" {
     pub fn cpu_set_gpio_wakeup(pin: u32, pol: u32, en: u32);
-    pub fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, wakeup_tick: u32) -> u32;
     pub fn cpu_sleep_wakeup_long_time_deep(wakeup_src: u32, deep_time_ms: u32) -> u32;
 }
 //
@@ -309,4 +313,242 @@ const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
 
 pub fn cpu_wakeup_init() {
     LoadTblCmdSet(tbl_cpu_wakeup_init.as_ptr(), 0x13);
+}
+
+// recover status before software reboot
+#[no_mangle]
+extern "C" fn light_sw_reboot_callback() {
+    if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {
+        // rf_slave_ota_busy means mesh ota master busy also.
+        analog_write(
+            REGA_LIGHT_OFF,
+            if app().light_manager.is_light_off() {
+                RecoverStatus::LightOff as u8
+            } else {
+                0
+            },
+        );
+    }
+}
+
+fn suspend_start()
+{
+    write_reg8(0xd, 0);
+    write_reg8(0xc, 0xb9);
+
+    let mut cnt = 0;
+    unsafe {
+        while read_volatile(addr_of_mut!(cnt)) < 0x2 {
+            write_volatile(addr_of_mut!(cnt), cnt);
+        }
+    }
+
+    write_reg8(0xd, 1);
+    write_reg_pwdn_ctrl(0x81);
+
+    let mut cnt = 0;
+    unsafe {
+        while read_volatile(addr_of_mut!(cnt)) < 0x30 {
+            write_volatile(addr_of_mut!(cnt), cnt);
+        }
+    }
+
+    write_reg8(0xd, 0);
+    write_reg8(0xc, 0xab);
+
+    let mut cnt = 0;
+    unsafe {
+        while read_volatile(addr_of_mut!(cnt)) < 0x2 {
+            write_volatile(addr_of_mut!(cnt), cnt);
+        }
+    }
+
+    write_reg8(0xd, 1);
+}
+
+fn sleep_start()
+{
+    write_reg_pwdn_ctrl(0x81);
+
+    let mut cnt = 0;
+    unsafe {
+        while read_volatile(addr_of_mut!(cnt)) < 0x30 {
+            write_volatile(addr_of_mut!(cnt), cnt);
+        }
+    }
+}
+
+static mut deep_long_time_flag: u8 = 0;
+
+pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
+{
+    critical_section::with(|_| {
+        let mut reboot= wakeup_src & 0x40 != 0;
+
+        if deep_long_time_flag == 0 {
+            if deepsleep == 0 {
+                reboot = true;
+                if wakeup_src & 0x40 != 0 {
+                    let tick = wakeup_tick - read_reg_system_tick();
+                    if tick < 0 {
+                        return (analog_read(raga_gpio_wkup_pol) & 0xf) as u32;
+                    }
+                    if tick < *get_tick_per_us() * 3000 {
+                        let mut now = read_reg_system_tick();
+                        analog_write(raga_gpio_wkup_pol, 0xf);
+                        let mut result;
+                        loop {
+                            result = analog_read(raga_gpio_wkup_pol) & 0xf;
+                            let tmp = read_reg_system_tick();
+                            if tick <= tmp - now {
+                                return result as u32;
+                            }
+                            if result == 0 {
+                                break;
+                            }
+                        }
+                        return result as u32;
+                    }
+                }
+            }
+        } else if deepsleep == 0 {
+            reboot = true;
+        }
+
+        let mut anavals: [u8; 6] = [0; 6];
+        anavals[0] = analog_read(0x26);
+        if wakeup_src & 0x100 == 0 {
+            let mut anaval = 0x27;
+            loop {
+                anavals[anaval as usize - 0x26] = analog_read(anaval);
+                analog_write(anaval, 0);
+                anaval += 1;
+                if anaval >= 0x2c {
+                    break;
+                }
+            };
+            analog_write(0x26, wakeup_src as u8);
+        } else {
+            analog_write(0x26, (anavals[0] & 0xf) | wakeup_src as u8);
+        }
+
+        let ana_1 = analog_read(1);
+        let ana_5 = analog_read(5);
+        let mut ana_2c = analog_read(0x2c);
+        let ana_80 = analog_read(0x80);
+        let ana_81 = analog_read(0x81);
+
+        write_reg_wakeup_en(0);
+        if ((wakeup_src << 0x1a) as i32) < 0 {
+            write_reg_wakeup_en(8);
+        }
+
+        analog_write(raga_gpio_wkup_pol, 0xf);
+
+        if !reboot {
+            write_reg_system_tick_mode(0x20);
+            ana_2c = ana_2c | 1;
+        } else {
+            ana_2c = ana_2c & 0xfe;
+            if deep_long_time_flag == 0 {
+                if deepsleep == 0 {
+                    wakeup_tick = (wakeup_tick as i32 + (*get_tick_per_us() as i32 * 2500)) as u32;
+                }
+                write_reg_system_wakeup_tick(wakeup_tick);
+                write_reg_system_tick_ctrl(2);
+
+                while read_reg_system_tick_ctrl() & 2 != 0 {}
+            } else {
+                let tmp = (analog_read(0x40) as u32 | (analog_read(0x41) as u32) << 8 | (analog_read(0x42) as u32) << 16 | (analog_read(0x43) as u32) << 24);
+
+                write_reg_system_tick_mode(read_reg_system_tick_mode() | 8);
+                write_reg_system_tick_mode(read_reg_system_tick_mode() | 4);
+
+                write_reg32(0x754, wakeup_tick + tmp);
+
+                write_reg_system_tick_ctrl(read_reg_system_tick_ctrl() | 8);
+
+                while read_reg_system_tick_ctrl() & 8 != 0 {}
+            }
+        }
+
+        let fhs_sel = read_reg_fhs_sel();
+        let clk_sel = read_reg_clk_sel();
+        write_reg_clk_sel(0);
+
+        if deepsleep == 0 {
+            analog_write(0x2c, ana_2c | 0x5e);
+            analog_write(1, ana_1 | 8);
+            analog_write(0x81, 0xc0);
+            analog_write(0x80, 0xa1);
+
+            write_reg_fhs_sel(1);
+            write_reg_clk_sel(0x3f);
+
+            suspend_start();
+
+            write_reg_clk_sel(0);
+            write_reg_fhs_sel(fhs_sel);
+        } else {
+            analog_write(0x3f, analog_read(0x3f) | 0x40);
+            analog_write(0x2c, ana_2c | 0xfd);
+            analog_write(1, ana_1 | 8);
+            analog_write(0x81, 0xc0);
+            analog_write(0x80, 0xa1);
+
+            sleep_start();
+        }
+
+        analog_write(1, ana_1);
+        analog_write(0x2c, ana_2c);
+        analog_write(5, ana_5);
+        analog_write(0x80, ana_80);
+        analog_write(0x81, ana_81);
+
+        if wakeup_src & 0x100 == 0 {
+            let mut anaval = 0x26;
+            loop {
+                analog_write(anaval, anavals[anaval as usize - 0x26]);
+                anaval += 1;
+                if anaval >= 0x2c {
+                    break;
+                }
+            };
+        }
+
+        write_reg_clk_sel(clk_sel);
+
+        if reboot {
+            write_reg_system_tick_ctrl(1);
+            while read_reg_system_tick_ctrl() & 2 != 0 {}
+        }
+
+        write_reg_system_tick_mode(0x92);
+        write_reg_system_tick_ctrl(1);
+        let result = analog_read(raga_gpio_wkup_pol) as i32;
+        if wakeup_src & 0x40 != 0 && result << 0x1e < 0 {
+            while read_reg_system_tick() as i32 - wakeup_tick as i32 > 0x40000000 {}
+        }
+
+        return result as u32;
+    })
+}
+
+fn light_sw_reboot_ll()
+{
+    // In the original code it calls this to reset, but I can't get this function working.
+    // unsafe { cpu_sleep_wakeup(1, 0x40, ((*get_tick_per_us()) * 10000) + read_reg_system_tick()); }
+
+    // Instead, let's just reset the MCU as described in the docs
+    write_reg_pwdn_ctrl(0x20);
+
+    loop {}
+}
+
+pub fn light_sw_reboot()
+{
+    irq_disable();
+    light_sw_reboot_callback();
+    light_sw_reboot_ll();
+    return;
 }

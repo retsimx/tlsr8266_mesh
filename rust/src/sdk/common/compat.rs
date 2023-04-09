@@ -12,8 +12,9 @@ use crate::config::{get_flash_adr_panic_info, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
-use crate::sdk::light::{_light_sw_reboot, LGT_PANIC_MSG};
+use crate::sdk::light::{LGT_PANIC_MSG};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::sdk::pm::light_sw_reboot;
 use crate::uart_manager::UartMsg;
 
 extern "C" {
@@ -213,7 +214,7 @@ pub fn panic(info: &PanicInfo) -> ! {
     stream.send();
     write_panic_info(&stream);
 
-    _light_sw_reboot();
+    light_sw_reboot();
 
     loop {}
 }

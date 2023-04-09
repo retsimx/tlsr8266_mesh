@@ -12,12 +12,14 @@ use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rnd
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::{_encode_password, _light_sw_reboot, _rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, _pair_load_key, rf_packet_att_cmd_t, get_slave_p_mac, _mesh_node_init, _get_fw_version};
+use crate::sdk::light::{_rf_link_add_tx_packet, get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, _pair_load_key, rf_packet_att_cmd_t, get_slave_p_mac, _mesh_node_init, _get_fw_version};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
+use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
+use crate::sdk::pm::light_sw_reboot;
 use crate::sdk::rf_drv::_rf_link_slave_set_adv;
 
 const ENABLE_16MHZ_XTAL: bool = false;
@@ -472,7 +474,7 @@ pub fn rf_link_slave_init(interval: u32)
             let mut buff: [u8; 16] = [0; 16];
             let len = min(MESH_PWD.len(), buff.len());
             buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-            _encode_password(buff.as_mut_ptr());
+            encode_password(buff.as_mut_slice());
             flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
             let mut buff: [u8; 16] = [0; 16];
@@ -482,7 +484,7 @@ pub fn rf_link_slave_init(interval: u32)
 
             let mut buff: [u8; 16] = [0; 16];
             buff[0] = PAIR_VALID_FLAG;
-            if *get_pair_config_pwd_encode_enable() != 0 {
+            if *get_pair_config_pwd_encode_enable() != false {
                 buff[15] = PAIR_VALID_FLAG;
             }
 
@@ -492,7 +494,7 @@ pub fn rf_link_slave_init(interval: u32)
             }
             flash_write_page(pairing_addr, 16, buff.as_mut_ptr());
             irq_disable();
-            _light_sw_reboot();
+            light_sw_reboot();
             loop {}
         }
 

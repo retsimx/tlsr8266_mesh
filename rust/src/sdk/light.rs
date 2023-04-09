@@ -30,7 +30,6 @@ no_mangle_fn!(is_add_packet_buf_ready, bool);
 no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8); // return value: 1 success,  0 faile)d
 no_mangle_fn!(rf_link_slave_read_status_stop);
 no_mangle_fn!(rf_link_data_callback, p: *const u8);
-no_mangle_fn!(light_sw_reboot);
 no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
 no_mangle_fn!(rf_link_slave_data_write_no_dec, u32, p: *const rf_packet_ll_data_t);
 no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32);
@@ -39,7 +38,6 @@ no_mangle_fn!(pairRead, u32, p: *const u8);
 no_mangle_fn!(pairWrite, u32, p: *const u8);
 no_mangle_fn!(pair_save_key);
 no_mangle_fn!(pair_load_key);
-no_mangle_fn!(encode_password, pd: *mut u8);
 no_mangle_fn!(decode_password, pd: *mut u8);
 no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
 
@@ -633,7 +631,7 @@ no_mangle_fn_def!(gpio_risc2_user_handle);
 // Shit required for linking
 /////////////// password encode sk initial  ///////////////////////////////////////////////////
 pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
-pub_mut!(pair_config_pwd_encode_enable, u8, 1);
+pub_mut!(pair_config_pwd_encode_enable, bool, true);
 pub_mut!(auth_code, [u8; 4], [0x01, 0x02, 0x03, 0x04]);
 pub_mut!(auth_code_en, u8, 0);
 pub_mut!(tx_packet_bridge_random_en, u8, 0);

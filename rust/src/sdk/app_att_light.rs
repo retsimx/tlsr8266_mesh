@@ -8,6 +8,7 @@ use core::convert::AsRef;
 use core::ffi::CStr;
 use core::mem::transmute;
 use core::ptr::{addr_of, null};
+use core::slice;
 use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
 
@@ -175,7 +176,7 @@ static SppDataClient2ServerProp: u8 =
 static SppDataOtaProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE_WITHOUT_RSP;
 static SppDataOtaData: [u8; 20] = [0xe0; 20];
 
-static SppDataServer2ClientData: [u8; 4] = [0; 4];
+static mut SppDataServer2ClientData: [u8; 4] = [0; 4];
 static status_ccc: [u8; 2] = [0x01, 0x00];
 
 // Spp data for OTA characteristic variables
@@ -199,12 +200,12 @@ unsafe extern "C" fn mesh_status_write(pw: *const u8) -> u32 {
         return 1;
     }
 
-    let p: *const rf_packet_att_write_t = pw as *const rf_packet_att_write_t;
-    *transmute::<&[u8; 4], *mut u8>(&SppDataServer2ClientData) = (*p).value;
+    let p = pw as *const rf_packet_att_write_t;
+    SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
     if (*p).l2capLen > (3 + 1) {
-        _mesh_report_status_enable_mask(&(*p).value, (*p).l2capLen - 3);
+        _mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
     } else {
-        _mesh_report_status_enable((*p).value);
+        _mesh_report_status_enable((*p).value[0]);
     }
     return 1;
 }

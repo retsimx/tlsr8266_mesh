@@ -12,6 +12,7 @@ use core::ptr::addr_of;
 use crate::{app, BIT};
 use crate::common::{mesh_node_init, pair_load_key};
 use crate::mesh::wrappers::*;
+use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::light::*;
 use crate::uart_manager::{get_pkt_user_cmd};
 
@@ -152,7 +153,7 @@ impl MeshManager {
         if *get_security_enable()
         {
             get_pkt_user_cmd()._type |= BIT!(7);
-            _pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const u8);
+            pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const rf_packet_ll_app_t);
             _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
         }
     }
@@ -314,7 +315,7 @@ impl MeshManager {
 
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
-        _pair_save_key();
+        pair_save_key();
         rf_set_ble_access_code(get_pair_ac_addr() as *const u8); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
@@ -539,6 +540,8 @@ pub mod wrappers {
     use crate::sdk::light::*;
     use core::mem::size_of;
     use crate::{app, pub_mut};
+    use crate::sdk::mcu::crypto::aes_att_encryption;
+    use crate::vendor_light::get_adv_rsp_pri_data_addr;
 
     // BEGIN SHIT LIGHT_LL HAX
     pub_mut!(
@@ -587,5 +590,39 @@ pub mod wrappers {
     #[no_mangle] // required by light_ll
     extern "C" fn light_slave_tx_command_callback(p: *const u8) {
         _rf_link_data_callback(p);
+    }
+
+    #[no_mangle]
+    extern "C" fn get_pair_mic(keyin: *const u32, macin: *const u16) -> u32
+    {
+        let mut dest = [0u32; 4];
+        let mut key = [0u32; 4];
+        let mut src = [0u32; 4];
+
+        unsafe { key[0] = *keyin; }
+        key[1] = 0;
+        key[2] = 0x4c544c41;
+        key[3] = 0x37313032;
+
+        unsafe { src[0] = *macin.offset(0) as u32 | (*macin.offset(1) as u32) << 16; }
+        unsafe { src[1] = *macin.offset(2) as u32; }
+
+        aes_att_encryption(key.as_ptr() as *const u8, src.as_ptr() as *const u8, dest.as_mut_ptr() as *mut u8);
+        return dest[0];
+    }
+
+    #[no_mangle]
+    extern "C" fn set_pair_mic() {
+        if *get_auth_code_en() != false {
+            let mic = [get_pair_mic(get_auth_code_addr() as *const u32, *get_slave_p_mac() as *const u16), 0];
+            unsafe { mic.as_ptr().copy_to((get_adv_rsp_pri_data_addr() as u32 + 0x17) as *mut u32, 2); }
+        }
+    }
+
+    #[no_mangle]
+    extern "C" fn mesh_security_enable(enable: bool)
+    {
+        set_security_enable(enable);
+        set_pair_mic();
     }
 }

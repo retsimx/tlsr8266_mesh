@@ -48,7 +48,7 @@ pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK)
 
 pub_mut!(buff_response, [[u32; 9]; 48], [[0; 9]; 48]);
 pub_mut!(adv_data, [u8; 3]);
-pub_mut!(max_mesh_name_len, u8);
+pub_mut!(max_mesh_name_len, u8, 16);
 
 pub_mut!(led_event_pending, u32, 0);
 

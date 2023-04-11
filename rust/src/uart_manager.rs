@@ -8,9 +8,10 @@ use crate::embassy::yield_now::yield_now;
 use crate::main_light::light_slave_tx_command;
 use crate::mesh::mesh_node_st_val_t;
 use crate::mesh::wrappers::get_mesh_node_st;
+use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet_mesh;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{_mesh_send_command, _pair_enc_packet_mesh, app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM, rf_packet_att_cmd_t, set_p_cb_rx_from_mesh};
+use crate::sdk::light::{_mesh_send_command, app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM, rf_packet_att_cmd_t, rf_packet_ll_app_t, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
@@ -292,7 +293,7 @@ impl UartManager {
                 {
                     get_pkt_user_cmd()._type |= BIT!(7);
                     unsafe {
-                        _pair_enc_packet_mesh(addr_of!(pkt_user_cmd) as *const u8);
+                        pair_enc_packet_mesh(addr_of!(pkt_user_cmd) as *const rf_packet_ll_app_t);
                         _mesh_send_command(addr_of!(pkt_user_cmd) as *const u8, 0xff, 0);
                     }
                 }

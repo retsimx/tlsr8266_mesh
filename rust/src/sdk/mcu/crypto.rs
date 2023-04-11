@@ -80,3 +80,161 @@ pub fn decode_password(password: &mut [u8])
         }
     }
 }
+
+pub unsafe fn aes_att_decryption_packet(key: &[u8], ivm: &[u8], src: &[u8], packet_data: *mut u8, packet_len: u8) -> bool
+{
+    let mut ivs = [0u8; 16];
+    ivs[1..9].copy_from_slice(&ivm[0..8]);
+
+    if packet_len == 0 {
+        ivs = [packet_len; 16];
+        ivs[0..8].copy_from_slice(&ivm[0..8]);
+
+        aes_att_encryption(key.as_ptr(), ivs.as_ptr(), ivs.as_mut_ptr());
+    } else {
+        let mut index = 0;
+        let mut decoded = [0u8; 16];
+        loop {
+            let mut breakit = false;
+            while index & 0xf != 0 {
+                *packet_data.offset(index) = *packet_data.offset(index) ^ decoded[(index & 0xf) as usize];
+                index = index + 1;
+                if packet_len <= index as u8 {
+                    breakit = true;
+                    break;
+                };
+            }
+
+            if breakit {
+                break;
+            }
+
+            aes_att_encryption(key.as_ptr(), ivs.as_ptr(), decoded.as_mut_ptr());
+            ivs[0] += 1;
+            *packet_data.offset(index) = *packet_data.offset(index) ^ decoded[0];
+            index = index + 1;
+
+            if index as u8 >= packet_len {
+                break;
+            }
+        }
+
+        ivs = [0; 16];
+        ivs[0..8].copy_from_slice(&ivm[0..8]);
+        ivs[8] = packet_len;
+
+        aes_att_encryption(key.as_ptr(), ivs.as_ptr(), ivs.as_mut_ptr());
+        index = 0;
+        loop {
+            let mut breakit = false;
+            loop {
+                ivs[(index & 0xf) as usize] = *packet_data.offset(index) ^ ivs[(index & 0xf) as usize];
+
+                if index & 0xf != 0xf && packet_len - 1 != index as u8 {
+                    break;
+                }
+                aes_att_encryption(key.as_ptr(), ivs.as_ptr(), ivs.as_mut_ptr());
+                index = index + 1;
+                if packet_len <= index as u8 {
+                    breakit = true;
+                    break;
+                }
+            }
+            if breakit {
+                break;
+            }
+
+            index = index + 1;
+            if index as u8 >= packet_len {
+                break;
+            }
+        }
+    }
+
+    let mut result = true;
+    if src.len() != 0 {
+        result = false;
+        if src[0] == ivs[0] {
+            let mut index = 0;
+            loop {
+                index = index + 1;
+                if src.len() <= index {
+                    return true;
+                }
+
+                if src[index] != ivs[index] {
+                    break;
+                }
+            }
+            result = false;
+        }
+    }
+    return result;
+}
+
+pub unsafe fn aes_att_encryption_packet(key: &[u8], ivm: &[u8], src: &mut [u8], packet_data: *mut u8, packet_len: u8) -> bool
+{
+    let mut encoded = [0u8; 16];
+    encoded[0..8].copy_from_slice(&ivm[0..8]);
+    encoded[8] = packet_len;
+
+    aes_att_encryption(key.as_ptr(), encoded.as_ptr(), encoded.as_mut_ptr());
+
+    if packet_len != 0 {
+        let mut index = 0;
+        loop {
+            let mut breakit = false;
+            loop {
+                encoded[index & 0xf] = *packet_data.offset(index as isize) ^ encoded[index & 0xf];
+                if index & 0xf != 0xf && packet_len - 1 != index as u8 {
+                    break;
+                }
+
+                aes_att_encryption(key.as_ptr(), encoded.as_ptr(), encoded.as_mut_ptr());
+                index = index + 1;
+                if packet_len <= index as u8 {
+                    breakit = true;
+                    break;
+                }
+            }
+            if breakit {
+                break;
+            }
+
+            index = index + 1;
+            if index as u8 >= packet_len {
+                break;
+            }
+        }
+    }
+
+    let mut index = 0;
+    if src.len() != 0 {
+        loop {
+            src[index] = encoded[index];
+            index = index + 1;
+            if index >= src.len() {
+                break;
+            }
+        }
+    }
+    encoded = [0; 16];
+    encoded[1..9].copy_from_slice(&ivm[0..8]);
+
+    if packet_len != 0 {
+        index = 0;
+        let mut result = [0u8; 16];
+        loop {
+            if index & 0xf == 0 {
+                aes_att_encryption(key.as_ptr(), encoded.as_ptr(), result.as_mut_ptr());
+                encoded[0] += 1;
+            }
+            *packet_data.offset(index as isize) = *packet_data.offset(index as isize) ^ result[index & 0xf];
+            index = index + 1;
+            if index as u8 >= packet_len {
+                break;
+            }
+        }
+    }
+    return true;
+}

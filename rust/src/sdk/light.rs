@@ -2,6 +2,7 @@
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use core::mem;
 use core::mem::{size_of, size_of_val, MaybeUninit};
+use core::ptr::null;
 use crate::{no_mangle_fn, no_mangle_fn_def};
 use crate::{pub_mut, BIT};
 use crate::mesh::mesh_node_st_val_t;
@@ -36,7 +37,6 @@ no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32)
 
 no_mangle_fn!(pairRead, u32, p: *const u8);
 no_mangle_fn!(pairWrite, u32, p: *const u8);
-no_mangle_fn!(pair_save_key);
 no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
 
 no_mangle_fn!(is_master_sending_ota_st, bool);
@@ -88,8 +88,7 @@ no_mangle_fn!(
 );
 
 no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
-no_mangle_fn!(pair_enc_packet_mesh, u32, ps: *const u8);
-no_mangle_fn!(pair_dec_packet_mesh, u32, ps: *const u8);
+
 
 pub_mut!(pair_config_valid_flag, u8);
 pub_mut!(pair_config_mesh_name, [u8; 17]);
@@ -98,12 +97,15 @@ pub_mut!(pair_config_mesh_ltk, [u8; 17]);
 
 pub_mut!(p_adv_pri_data, *const ll_adv_private_t);
 pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t);
-pub_mut!(adv_private_data_len, u8);
+pub_mut!(adv_private_data_len, u8, 0);
 
 pub_mut!(online_status_timeout, u32);
 
-pub_mut!(security_enable, bool);
-pub_mut!(pair_login_ok, bool);
+pub_mut!(security_enable, bool, false);
+pub_mut!(not_need_login, bool, false);
+pub_mut!(pair_login_ok, bool, false);
+pub_mut!(pair_sk, [u8; 16], [0; 16]);
+pub_mut!(pair_sk_copy, [u8; 16], [0; 16]);
 pub_mut!(slave_first_connected_tick, u32);
 
 pub_mut!(device_address, u16);
@@ -115,7 +117,7 @@ pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]);
 
 pub_mut!(slave_p_mac, *const u8);
 
-pub_mut!(adr_flash_cfg_idx, i32);
+pub_mut!(adr_flash_cfg_idx, i32, 0);
 pub_mut!(sw_no_pair, bool);
 
 pub_mut!(slave_link_connected, bool);
@@ -125,12 +127,13 @@ pub_mut!(pkt_light_notify, rf_packet_att_cmd_t);
 pub_mut!(slave_read_status_busy, bool);
 pub_mut!(rf_slave_ota_busy, bool);
 
-pub_mut!(pair_setting_flag, PairState);
-pub_mut!(pair_nn, [u8; 16]);
-pub_mut!(pair_pass, [u8; 16]);
-pub_mut!(pair_ltk, [u8; 16]);
-pub_mut!(pair_ltk_mesh, [u8; 16]);
-pub_mut!(pair_ac, u32);
+pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
+pub_mut!(pair_nn, [u8; 16], [0; 16]);
+pub_mut!(pair_pass, [u8; 16], [0; 16]);
+pub_mut!(pair_ltk, [u8; 16], [0; 16]);
+pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
+pub_mut!(pair_ltk_org, [u8; 16], [0; 16]);
+pub_mut!(pair_ac, u32, 0);
 
 pub_mut!(cur_ota_flash_addr, u32);
 pub_mut!(mesh_ota_master_100_flag, u8);
@@ -141,12 +144,17 @@ pub_mut!(mesh_node_max, u8);
 
 pub_mut!(rf_slave_ota_timeout_def_s, u16);
 pub_mut!(rf_slave_ota_timeout_s, u16);
+pub_mut!(set_mesh_info_expired_flag, bool, false);
+pub_mut!(set_mesh_info_time, u32, 0);
 
 pub_mut!(tick_per_us, u32);
 
-pub_mut!(gateway_en, u8);
+pub_mut!(gateway_en, bool);
+pub_mut!(gateway_security, bool);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
+pub_mut!(pair_ivm, [u8; 8], [0; 8]);
+pub_mut!(enc_disable, bool);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);
@@ -354,10 +362,10 @@ pub enum LightOpType {
 #[allow(dead_code)]
 pub enum PairState {
     PairSetted = 0,
-    PairSetting,
-    PairSetMeshTxStart,
-    PairSetMeshTxDone, // send notify req, get mesh nodes' ac
-    PairSetMeshRxDone, // received all mesh nodes' ac, send cmd to switch to new mesh
+    PairSetting = 1,
+    PairSetMeshTxStart = 2,
+    PairSetMeshTxDone = 3, // send notify req, get mesh nodes' ac
+    PairSetMeshRxDone = 4, // received all mesh nodes' ac, send cmd to switch to new mesh
 }
 
 #[derive(PartialEq)]
@@ -461,12 +469,12 @@ pub struct rf_packet_ll_data_t {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct app_cmd_value_t {
-   pub sno: [u8; 3],    // 0
-   pub src: [u8; 2],    // 3
-   pub dst: [u8; 2],    // 5
-   pub op: u8,          // 7
-   pub vendor_id: u16,  // 8
-   pub par: [u8; 10],   // 10
+   pub sno: [u8; 3],    // 0    13
+   pub src: [u8; 2],    // 3    16
+   pub dst: [u8; 2],    // 5    18
+   pub op: u8,          // 7    20
+   pub vendor_id: u16,  // 8    21
+   pub par: [u8; 10],   // 10   23
 }
 
 #[repr(C, packed)]
@@ -528,7 +536,7 @@ pub struct rf_pkt_l2cap_sig_connParaUpRsp_t {
 
 #[repr(C, packed)]
 pub struct rf_packet_att_write_t {
-    dma_len: u32,
+    pub dma_len: u32,
     pub rtype: u8,
     pub rf_len: u8,
     pub l2capLen: u16,
@@ -536,7 +544,7 @@ pub struct rf_packet_att_write_t {
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
-    pub value: u8, //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+    pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
 #[repr(C, packed)]
@@ -633,8 +641,36 @@ no_mangle_fn_def!(gpio_risc2_user_handle);
 pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
 pub_mut!(pair_config_pwd_encode_enable, bool, true);
 pub_mut!(auth_code, [u8; 4], [0x01, 0x02, 0x03, 0x04]);
-pub_mut!(auth_code_en, u8, 0);
+pub_mut!(auth_code_en, bool, false);
 pub_mut!(tx_packet_bridge_random_en, u8, 0);
+pub_mut!(ble_pair_st, u8, 0);
+pub_mut!(pair_enc_enable, bool, false);
+pub_mut!(pair_ivs, [u8; 8], [0; 8]);
+pub_mut!(pair_work, [u8; 16], [0; 16]);
+pub_mut!(pairRead_pending, bool, false);
+pub_mut!(pkt_read_rsp, rf_packet_ll_app_t, rf_packet_ll_app_t {
+    dma_len: 0,
+	_type: 0,
+	rf_len: 0,
+	l2capLen: 0,
+	chanId: 0,
+	opcode: 0,
+	handle: 0,
+	handle1: 0,
+	app_cmd_v: app_cmd_value_t {
+           sno: [0; 3],
+           src: [0; 2],
+           dst: [0; 2],
+           op: 0,
+           vendor_id: 0,
+           par: [0; 10],
+    },
+	rsv: [0; 10],
+});
+
+pub_mut!(rands_fix_flag, bool, false);
+pub_mut!(pair_rands, [u8; 8], [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]);
+pub_mut!(pair_randm, [u8; 8], [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]);
 
 /////////////// adv par define ///////////////////////////////////////////////////
 pub_mut!(adv_interval2listen_interval, u16, 4);
@@ -784,7 +820,7 @@ pub_mut!(mesh_ota_third_fw_flag, u8, 0);
 #[no_mangle]
 extern "C" fn mesh_ota_set_start_par_user(p: *const mesh_ota_pkt_start_command_t) {}
 
-pub_mut!(p_cb_pair_failed, u32, 0);
+pub_mut!(p_cb_pair_failed, Option<fn()>, None);
 pub_mut!(p_cb_ble_slave_disconnect, u32, 0);
 
 no_mangle_fn_def!(rf_link_slave_connect_callback);

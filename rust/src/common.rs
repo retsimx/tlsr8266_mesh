@@ -60,7 +60,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 // p:data
 // n:length
 #[no_mangle] // required by light_ll
-extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
+pub extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     flash_write_page(
         (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + adr as i32) as u32,
         n,
@@ -235,6 +235,7 @@ pub fn pair_flash_config_init() -> bool
     return result;
 }
 
+#[no_mangle]
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 {
     let mut destbuf = [0u32; 4];
@@ -310,6 +311,7 @@ pub fn pair_update_key()
     }
 }
 
+#[no_mangle]
 pub fn pair_load_key()
 {
     pair_flash_config_init();

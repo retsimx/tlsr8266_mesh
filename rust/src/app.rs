@@ -1,22 +1,23 @@
-use crate::config::MESH_PWD_ENCODE_SK;
+use embassy_executor::Spawner;
+
+use crate::{app, uprintln};
+use crate::config::{MESH_PWD_ENCODE_SK};
+use crate::embassy::yield_now::yield_now;
+use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
-use crate::sdk::mcu::clock::{clock_init};
-use crate::sdk::mcu::dma::dma_init;
-use crate::sdk::mcu::gpio::gpio_init;
-use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
-use crate::sdk::mcu::watchdog::wd_clear;
-use crate::sdk::pm::{cpu_wakeup_init};
-use embassy_executor::Spawner;
-use crate::{app};
-use crate::embassy::yield_now::yield_now;
-use crate::light_manager::LightManager;
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::common::compat::check_panic_info;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
+use crate::sdk::mcu::clock::clock_init;
+use crate::sdk::mcu::dma::dma_init;
+use crate::sdk::mcu::gpio::gpio_init;
+use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
+use crate::sdk::mcu::watchdog::wd_clear;
 use crate::uart_manager::UartManager;
+use crate::version::BUILD_VERSION;
 
 pub struct App {
     pub ota_manager: OtaManager,
@@ -51,28 +52,32 @@ impl App {
     }
 
     pub fn init(&mut self) {
-        // Init various subsystems
-        cpu_wakeup_init();
-
         // Copy the password in to the pair config
         for i in 0..MESH_PWD_ENCODE_SK.len() {
             get_pair_config_pwd_encode_sk()[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
         }
 
-        clock_init();
-        dma_init();
-        gpio_init();
-        irq_init();
         unsafe { rf_drv_init(true); }
-
-        // Get uart ready to go
-        self.uart_manager.init();
 
         // Run our initialisation
         user_init();
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
+        // Initialise various subsystems needed by uart
+        clock_init();
+        dma_init();
+        gpio_init();
+        irq_init();
+
+        // Get uart ready to go early
+        self.uart_manager.init();
+
+        uprintln!("Booting FW version {}", BUILD_VERSION);
+
+        // Configure the rest of the system
+        self.init();
+
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 

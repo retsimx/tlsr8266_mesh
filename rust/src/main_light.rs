@@ -1,28 +1,30 @@
-use crate::{app};
-use core::cmp::{min};
+use core::cmp::min;
 use core::convert::TryInto;
 use core::mem::size_of;
-use core::ptr::{addr_of};
-use crate::{pub_mut, BIT};
+use core::ptr::addr_of;
 
+use fixed::types::I16F16;
+use heapless::Deque;
+
+use crate::{app};
+use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
+use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
+use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_init;
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, CLOCK_SYS_CLOCK_1S};
-use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
-use crate::sdk::mcu::irq_i::{irq_disable};
-use crate::sdk::mcu::register::{read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR, write_reg_tmr0_tick, write_reg_tmr0_capt, write_reg_tmr1_capt};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
+use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
+use crate::sdk::mcu::irq_i::irq_disable;
+use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
-use fixed::types::I16F16;
-use heapless::Deque;
-use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_init;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -98,8 +100,6 @@ fn light_init_default() {
 
     _light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
-    set_pair_config_valid_flag(PAIR_VALID_FLAG);
-
     get_pair_config_mesh_name().iter_mut().for_each(|m| *m = 0);
     let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);
     get_pair_config_mesh_name()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
@@ -164,7 +164,7 @@ pub fn user_init() {
     vendor_set_adv_data();
 
     app().light_manager.device_status_update();
-    _mesh_security_enable(true);
+    mesh_security_enable(true);
 
     _register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
@@ -422,12 +422,12 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
                 LIGHT_DEL_GRP_PARAM => {
-                    if _rf_link_del_group(val) {
+                    if rf_link_del_group(val) {
                         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
                 LIGHT_ADD_GRP_PARAM => {
-                    if _rf_link_add_group(val) {
+                    if rf_link_add_group(val) {
                         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
@@ -437,7 +437,7 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
             if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
-                if _rf_link_add_dev_addr(val) {
+                if rf_link_add_dev_addr(val) {
                     app().mesh_manager.mesh_pair_proc_get_mac_flag();
                 }
             }
@@ -537,12 +537,12 @@ pub extern "C" fn rf_link_light_event_callback(status: u8) {
             mesh_node_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-        },
+        }
         LGT_CMD_SET_DEV_ADDR => {
             mesh_node_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-        },
+        }
         LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
         LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
         _ => ()

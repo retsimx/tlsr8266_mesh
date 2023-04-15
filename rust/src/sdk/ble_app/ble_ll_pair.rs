@@ -1,10 +1,12 @@
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
+
+use crate::{blinken, no_mangle_fn, uprintln, uprintln_fast};
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
+use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
 use crate::mesh::wrappers::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
-use crate::no_mangle_fn;
-use crate::sdk::light::{get_ble_pair_st, get_adr_flash_cfg_idx, get_enc_disable, get_gateway_en, get_gateway_security, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_ltk, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_setting_flag, get_pair_sk, get_security_enable, get_sw_no_pair, PairState, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, get_slave_p_mac, get_pairRead_pending, set_pairRead_pending, get_pair_login_ok, get_pkt_read_rsp, get_pair_rands, get_pair_work, get_rands_fix_flag, get_pair_randm, get_pair_sk_copy, LGT_CMD_DEL_PAIR, get_p_cb_pair_failed, rf_packet_att_write_t, set_pair_setting_flag, get_set_mesh_info_time, get_set_mesh_info_expired_flag, get_pair_ltk_mesh, set_pair_login_ok};
+use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_gateway_en, get_gateway_security, get_p_cb_pair_failed, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 
@@ -12,7 +14,7 @@ use crate::sdk::mcu::register::read_reg_system_tick;
 pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
     let mut result = true;
     if *get_security_enable() != false && (*get_gateway_en() == false || *get_gateway_security() != false) {
-        get_pair_ivm()[5..5 + 3].copy_from_slice((*ps).app_cmd_v.sno.as_slice());
+        (*get_pair_ivm())[5..5 + 3].copy_from_slice((*ps).app_cmd_v.sno.as_slice());
 
         result = aes_att_decryption_packet(
             get_pair_sk().as_slice(),
@@ -33,7 +35,7 @@ pub unsafe extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
             let tick = read_reg_system_tick();
             (*ps).app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
 
-            get_pair_ivs()[3..3 + 5].copy_from_slice(slice::from_raw_parts(addr_of!((*ps).app_cmd_v.sno) as *const u8, 5));
+            (*get_pair_ivs())[3..3 + 5].copy_from_slice(slice::from_raw_parts(addr_of!((*ps).app_cmd_v.sno) as *const u8, 5));
 
             aes_att_encryption_packet(
                 get_pair_sk(),
@@ -69,19 +71,19 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> 
     }
 
     if *get_sw_no_pair() == false {
-        ltk.copy_from_slice(&*get_pair_ltk().as_slice());
+        ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
     } else {
         let mut breakit = false;
         if *get_mesh_pair_enable() == true {
             if *get_pair_setting_flag() != PairState::PairSetted || (*ps).app_cmd_v.op & 0x3f == 9 {
-                ltk.copy_from_slice(&*get_pair_ltk_org().as_slice());
+                ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
                 breakit = true;
             }
         }
         if !breakit {
             let mut index = 0;
             loop {
-                ltk[index] = get_pair_nn()[index] ^ get_pair_pass()[index] ^ get_pair_ltk()[index];
+                ltk[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
                 index = index + 1;
 
                 if index == 0x10 {
@@ -91,7 +93,7 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> 
         }
     }
     let mut result;
-    if (*ps).chanId as i16 == -1 {
+    if (*ps).chanId as u16 == 0xffff {
         result = aes_att_decryption_packet(
             ltk.as_slice(),
             slice::from_raw_parts((ps as u32 + 5) as *const u8, 8),
@@ -120,11 +122,11 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
         let mut result = *get_enc_disable();
         if result == false && *get_security_enable() != false {
             if *get_sw_no_pair() == false {
-                ltk.copy_from_slice(&*get_pair_ltk().as_slice());
+                ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
             } else if *get_mesh_pair_enable() == false || (*get_pair_setting_flag() == PairState::PairSetted && (*ps).app_cmd_v.op & 0x3f != 9) {
                 let mut index = 0;
                 loop {
-                    ltk[index] = get_pair_nn()[index] ^ get_pair_pass()[index] ^ get_pair_ltk()[index];
+                    ltk[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
                     index = index + 1;
 
                     if index == 0x10 {
@@ -132,11 +134,11 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
                     }
                 }
             } else {
-                ltk.copy_from_slice(&*get_pair_ltk_org().as_slice());
+                ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
             }
 
             let mut result;
-            if (*ps).chanId as i16 == -1 {
+            if (*ps).chanId as u16 == 0xffff {
                 result = aes_att_encryption_packet(
                     ltk.as_slice(),
                     slice::from_raw_parts((ps as u32 + 5) as *const u8, 8),
@@ -179,18 +181,17 @@ pub extern "C" fn pair_save_key()
     }
 
     if *get_mesh_pair_enable() != false {
-        pass[0] = if *get_get_mac_en() { 1 } else { 0 };
-        pass[1] = if *get_pair_config_valid_flag() == 1 { 1 } else { 0 };
+        pass[1] = if *get_get_mac_en() { 1 } else { 0 };
     }
 
     pair_flash_save_config(0, pass.as_ptr(), pass.len() as u32);
-    pair_flash_save_config(0x10, get_pair_nn().as_ptr(), get_pair_nn().len() as u32);
+    pair_flash_save_config(0x10, (*get_pair_nn()).as_ptr(), get_pair_nn().len() as u32);
 
-    pass.copy_from_slice(get_pair_pass());
+    pass.copy_from_slice(&get_pair_pass()[0..16]);
     encode_password(pass.as_mut_slice());
 
     pair_flash_save_config(0x20, pass.as_ptr(), pass.len() as u32);
-    pair_flash_save_config(0x30, get_pair_ltk().as_ptr(), get_pair_ltk().len() as u32);
+    pair_flash_save_config(0x30, (*get_pair_ltk()).as_ptr(), get_pair_ltk().len() as u32);
 
     pair_update_key();
 }
@@ -200,11 +201,12 @@ pub extern "C" fn pairInit()
 {
     set_ble_pair_st(0);
     set_pair_enc_enable(false);
-    unsafe { get_pair_ivm()[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
-    unsafe { get_pair_ivs()[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
+    unsafe { (*get_pair_ivm())[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
+    unsafe { (*get_pair_ivs())[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
 }
 
 no_mangle_fn!(rf_link_delete_pair);
+
 #[no_mangle]
 pub extern "C" fn pair_par_init()
 {
@@ -216,9 +218,8 @@ pub extern "C" fn pair_par_init()
 }
 
 #[no_mangle]
-pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
+pub extern "C" fn pairProc() -> *const rf_packet_att_readRsp_t
 {
-    *get_security_enable() = *get_security_enable();
     let pair_st = *get_ble_pair_st();
     if *get_pairRead_pending() == false {
         return null_mut();
@@ -226,13 +227,14 @@ pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
     set_pairRead_pending(false);
 
     if *get_ble_pair_st() == 2 {
+        uprintln_fast!("pairProc: ble_pair_st = {:#02x}", *get_ble_pair_st());
         if *get_security_enable() == false && *get_pair_login_ok() == false {
             pair_par_init();
             set_pair_enc_enable(false);
             return null_mut();
         }
         get_pkt_read_rsp().l2capLen = 10;
-        unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().handle1), 8).copy_from_slice(get_pair_rands()); }
+        get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(get_pair_rands());
         set_ble_pair_st(0xc);
     } else if *get_ble_pair_st() == 0x7 {
         if *get_security_enable() == false && *get_pair_login_ok() == false {
@@ -243,16 +245,17 @@ pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
         get_pkt_read_rsp().l2capLen = 0x12;
         let mut index = 0;
         loop {
-            get_pair_work()[index] = get_pair_nn()[index] ^ get_pair_pass()[index] ^ get_pair_ltk()[index];
+            (*get_pair_work())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
             index = index + 1;
             if index == 0x10 {
                 break;
             }
         }
+
         if *get_security_enable() == false {
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().handle1), 0x10).copy_from_slice(get_pair_work()); }
+            get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(&get_pair_work()[0..10]);
         } else {
-            aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), addr_of_mut!(get_pkt_read_rsp().handle1));
+            aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), addr_of_mut!(get_pkt_read_rsp().value[1]));
         }
         set_ble_pair_st(0xf);
     } else if *get_ble_pair_st() == 0xd {
@@ -260,13 +263,13 @@ pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
             get_pkt_read_rsp().l2capLen = 0x12;
             let mut index = 0;
             loop {
-                get_pair_work()[index] = get_pair_pass()[index] ^ get_pair_nn()[index];
+                (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
                 index = index + 1;
                 if index == 0x10 {
                     break;
                 }
             }
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().handle1), 0x10).copy_from_slice(get_pair_work()); }
+            get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(&get_pair_work()[0..0x10]);
 
             set_ble_pair_st(0xf);
             set_pair_enc_enable(false);
@@ -276,61 +279,64 @@ pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
                 unsafe { *(get_pair_rands().as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
                 aes_att_encryption(get_pair_randm().as_ptr(), get_pair_rands().as_ptr(), get_pair_sk().as_mut_ptr());
             } else {
-                get_pair_sk()[0..8].copy_from_slice(&get_pair_rands()[0..8]);
+                (*get_pair_sk())[0..8].copy_from_slice(&(*get_pair_rands())[0..8]);
             }
-            get_pair_rands()[0..8].copy_from_slice(&get_pair_sk()[0..8]);
+            (*get_pair_rands())[0..8].copy_from_slice(&(*get_pair_sk())[0..8]);
 
             let mut index = 0;
-            get_pair_sk()[8..16].fill(0);
+            (*get_pair_sk())[8..16].fill(0);
 
             loop {
-                get_pair_work()[index] = get_pair_pass()[index] ^ get_pair_nn()[index];
+                (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
                 index = index + 1;
                 if index == 0x10 {
                     break;
                 }
             }
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().handle1), 8).copy_from_slice(get_pair_rands()); }
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().app_cmd_v.op), 8).copy_from_slice(&get_pair_work()[0..8]); }
+            get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&get_pair_rands()[0..8]);
+            get_pkt_read_rsp().value[9..9 + 4].copy_from_slice(&get_pair_work()[0..4]);
+            get_pkt_read_rsp().value[13..13 + 4].copy_from_slice(&get_pair_work()[4..8]);
 
             let mut index = 0;
             loop {
-                get_pair_work()[index] = get_pair_pass()[index] ^ get_pair_nn()[index];
+                (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
                 index = index + 1;
-                if index == 10 {
+                if index == 0x10 {
                     break;
                 }
             }
-            get_pair_sk()[0..8].copy_from_slice(get_pair_randm());
-            get_pair_sk()[8..16].copy_from_slice(get_pair_rands());
+            (*get_pair_sk())[0..8].copy_from_slice(&get_pair_randm()[0..8]);
+            (*get_pair_sk())[8..16].copy_from_slice(&get_pair_rands()[0..8]);
 
             aes_att_encryption(get_pair_work().as_ptr(), get_pair_sk().as_ptr(), get_pair_sk().as_mut_ptr());
             set_ble_pair_st(0xf);
             set_pair_enc_enable(true);
         }
     } else if *get_ble_pair_st() == 0x9 {
+        uprintln_fast!("pairProc: ble_pair_st = {:#02x}", *get_ble_pair_st());
         get_pkt_read_rsp().l2capLen = 0x12;
         if *get_security_enable() == false {
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(get_pkt_read_rsp().handle1), 0x10).copy_from_slice(get_pair_ltk()); }
+            get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(get_pair_ltk());
         } else {
-            get_pair_work()[0..8].copy_from_slice(get_pair_randm());
+            (*get_pair_work())[0..8].copy_from_slice(get_pair_randm());
 
-            get_pair_work()[8..16].fill(0);
+            (*get_pair_work())[8..16].fill(0);
 
             let mut index = 0;
             loop {
-                get_pair_sk()[index] = get_pair_nn()[index] ^ get_pair_pass()[index] ^ get_pair_work()[index];
+                (*get_pair_sk())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_work())[index];
                 index = index + 1;
                 if index == 0x10 {
                     break;
                 }
             }
-            aes_att_encryption(get_pair_sk().as_ptr(), get_pair_ltk().as_ptr(), addr_of_mut!(get_pkt_read_rsp().handle1));
+            aes_att_encryption(get_pair_sk().as_ptr(), get_pair_ltk().as_ptr(), get_pkt_read_rsp().value[1..1 + 0x10].as_mut_ptr());
             set_ble_pair_st(0xf);
             get_pair_sk().copy_from_slice(get_pair_sk_copy());
         }
     } else if *get_ble_pair_st() == 0xb {
+        uprintln_fast!("pairProc: ble_pair_st = {:#02x}", *get_ble_pair_st());
         get_pkt_read_rsp().l2capLen = 2;
         set_ble_pair_st(0);
         if *get_mesh_pair_enable() != false {
@@ -344,23 +350,23 @@ pub extern "C" fn pairProc() -> *mut rf_packet_ll_app_t
         get_pkt_read_rsp().dma_len = 8;
         get_pkt_read_rsp().rf_len = 0x6;
 
-        get_pkt_read_rsp().handle = pair_st;
+        get_pkt_read_rsp().value[0] = pair_st;
         return get_pkt_read_rsp();
     }
 
     get_pkt_read_rsp().rf_len = get_pkt_read_rsp().l2capLen as u8 + 0x4;
     get_pkt_read_rsp().dma_len = get_pkt_read_rsp().l2capLen as u32 + 6;
 
-    get_pkt_read_rsp().handle = pair_st;
+    get_pkt_read_rsp().value[0] = pair_st;
     return get_pkt_read_rsp();
 }
 
 #[no_mangle]
 pub extern "C" fn pair_set_key(key: *const u8)
 {
-    get_pair_nn()[0..*get_max_mesh_name_len() as usize].copy_from_slice(unsafe { slice::from_raw_parts(key, *get_max_mesh_name_len() as usize) });
-    get_pair_pass().copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
-    get_pair_ltk().copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x20), 0x10) });
+    (*get_pair_nn())[0..*get_max_mesh_name_len() as usize].copy_from_slice(unsafe { slice::from_raw_parts(key, *get_max_mesh_name_len() as usize) });
+    (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
+    (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x20), 0x10) });
 
     pair_update_key();
 }
@@ -376,21 +382,22 @@ pub extern "C" fn pairRead() -> bool
 #[no_mangle]
 pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
 {
-    let sno0 = (*data).value[0] as i8;
+    let opcode = (*data).value[0] as i8;
     let src = addr_of!((*data).value[1]) as *const u8;
 
-    if sno0 == 1 {
-        get_pair_randm().copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
+    if opcode == 1 {
+        uprintln_fast!("pairWrite: opcode = {}", opcode);
+        (*get_pair_randm()).copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
 
         set_ble_pair_st(2);
         return true;
     }
 
-    if sno0 == 4 {
+    if opcode == 4 {
         if *get_sw_no_pair() && *get_mesh_pair_enable() {
             let mut index = 0;
             loop {
-                get_pair_ltk_org()[index] = get_pair_nn()[index] ^ get_pair_pass()[index] ^ get_pair_ltk()[index];
+                (*get_pair_ltk_org())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
                 index = index + 1;
                 if index == 0x10 {
                     break;
@@ -399,16 +406,16 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
         }
         if *get_security_enable() == false {
             if *get_pair_login_ok() != false && *get_ble_pair_st() == 0xf {
-                get_pair_nn().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                 set_pair_setting_flag(PairState::PairSetting);
                 set_ble_pair_st(5);
                 return true;
             }
         } else if *get_ble_pair_st() == 0xf && (*get_set_mesh_info_time() == 0 || *get_set_mesh_info_expired_flag() == false) {
-            get_pair_work().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+            (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
 
             aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_nn().as_mut_ptr());
-            let mut name_len = match get_pair_nn().iter().position(|&r| r == 0) {
+            let mut name_len = match get_pair_nn().iter().position(|r| *r == 0) {
                 Some(v) => v,
                 None => get_pair_nn().len()
             } as u8;
@@ -424,11 +431,11 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
         set_pair_enc_enable(false);
         return true;
     }
-    if sno0 != 5 {
-        if sno0 == 6 {
+    if opcode != 5 {
+        if opcode == 6 {
             if *get_security_enable() {
                 if *get_ble_pair_st() == 6 {
-                    get_pair_work().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                    (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                     set_ble_pair_st(7);
                     if *get_mesh_pair_enable() != false && 0x14 < (*data).l2capLen && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
                         aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_ltk_mesh().as_mut_ptr());
@@ -442,13 +449,14 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
                     return true;
                 }
             } else if *get_pair_login_ok() && *get_ble_pair_st() == 6 {
+                (*get_pair_ltk()).fill(0);
                 set_ble_pair_st(7);
                 if *get_mesh_pair_enable() && 0x14 < (*data).l2capLen && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
-                    get_pair_ltk_mesh().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                    (*get_pair_ltk_mesh()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                     set_pair_setting_flag(PairState::PairSetMeshTxStart);
                     return true;
                 }
-                get_pair_ltk().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                 pair_save_key();
                 set_pair_setting_flag(PairState::PairSetted);
                 rf_link_light_event_callback(0xc5);
@@ -460,19 +468,12 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
             return true;
         }
 
-        let iVar2 = if sno0 - 0xc != 0 {
-            // carry = true
-            !(sno0 - 0xc) + (sno0 - 0xc) + 1
-        } else {
-            !(sno0 - 0xc) + (sno0 - 0xc)
-        };
-
-        let mut index = if sno0 - 8 != 0 { 0 } else { u8::MAX };
-        let iVar2 = if sno0 - 0xc != 0 { 0 } else { u8::MAX };
+        let mut index = if opcode - 8 != 0 { 0 } else { u8::MAX };
+        let iVar2 = if opcode - 0xc != 0 { 0 } else { u8::MAX };
         if iVar2 == 0 {
             if index == 0 {
-                if sno0 != 10 {
-                    if sno0 == 0xe {
+                if opcode != 10 {
+                    if opcode == 0xe {
                         set_pair_enc_enable(false);
                         set_ble_pair_st(0);
                         return true;
@@ -483,32 +484,32 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
                 index = 0;
             }
         } else if index != 0 {
-            get_pair_sk_copy().copy_from_slice(get_pair_sk());
+            (*get_pair_sk_copy()).copy_from_slice(&(*get_pair_sk())[0..16]);
         }
 
-        get_pair_randm().copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
-        get_pair_sk()[0..8].copy_from_slice(get_pair_randm());
-        get_pair_sk()[8..16].fill(0);
+        (*get_pair_randm()).copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
+        (*get_pair_sk())[0..8].copy_from_slice(&(*get_pair_randm())[0..8]);
+        (*get_pair_sk())[8..16].fill(0);
 
         set_pair_enc_enable(false);
 
         let mut index = 0;
         loop {
-            get_pair_work()[index] = get_pair_pass()[index] ^ get_pair_nn()[index];
+            (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
             index = index + 1;
             if index == 0x10 {
                 break;
             }
         }
         if *get_security_enable() == false {
-            index = if get_pair_work() == unsafe { slice::from_raw_parts(src, 0x10) } { usize::MAX } else { 0 };
+            index = if &(*get_pair_work())[0..16] == unsafe { slice::from_raw_parts(src, 0x10) } { usize::MAX } else { 0 };
         } else {
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
-            index = if get_pair_work() == unsafe { slice::from_raw_parts(addr_of!((*data).value[9]), 8) } { usize::MAX } else { 0 };
+            index = if &(*get_pair_work())[0..8] == unsafe { slice::from_raw_parts(addr_of!((*data).value[9]), 8) } { usize::MAX } else { 0 };
         }
         if iVar2 != 0 || *get_pair_login_ok() != false {
             if index != 0 {
-                if sno0 == 8 {
+                if opcode == 8 {
                     set_ble_pair_st(9);
                     return true;
                 }
@@ -533,7 +534,7 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
             set_pair_enc_enable(false);
             return true;
         }
-        get_pair_work().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+        (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
         aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_pass().as_mut_ptr());
     } else {
         if !*get_pair_login_ok() || *get_ble_pair_st() != 5 {
@@ -542,11 +543,11 @@ pub unsafe extern "C" fn pairWrite(data: *const rf_packet_att_write_t) -> bool
             return true;
         }
 
-        get_pair_pass().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+        (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
     }
 
     set_ble_pair_st(6);
-    if (if get_pair_nn() == get_pair_pass() { usize::MAX } else { 0 }) != 0 {
+    if (if &(*get_pair_nn())[0..16] == &(*get_pair_pass())[0..16] { usize::MAX } else { 0 }) == 0 {
         set_ble_pair_st(6);
         return true;
     }

@@ -11,7 +11,7 @@ LDFLAGS = --gc-sections -T ./sdk/boot.link
 
 LIB = ./sdk/proj_lib/ext/bqb_rf.o \
 	./sdk/proj_lib/ext/mesh_md5.o ./sdk/proj_lib/ext/ble_ll_att.o ./sdk/proj_lib/ext/ble_ll_smp_master.o \
-	./sdk/proj_lib/ext/pm_8266.o ./sdk/proj_lib/ext/ble_ll_attribute.o \
+	./sdk/proj_lib/ext/pm_8266.o ./sdk/proj_lib/ext/ble_ll_attribute.o ./sdk/proj_lib/ext/shared_mem.o \
 	./sdk/proj_lib/ext/bqb_bsp.o ./sdk/proj_lib/ext/internal_test.o ./sdk/proj_lib/ext/rf_drv_8266.o \
 	./sdk/proj_lib/ext/ble_ll_master.o ./sdk/proj_lib/ext/bqb_pm.o ./sdk/proj_lib/ext/light_ll.o \
 	./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a

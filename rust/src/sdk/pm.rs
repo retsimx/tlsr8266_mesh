@@ -1,7 +1,7 @@
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::{app, BIT, blinken, pub_mut};
+use crate::{app, BIT, pub_mut};
 use crate::common::REGA_LIGHT_OFF;
 use crate::sdk::light::{_is_mesh_ota_slave_running, get_rf_slave_ota_busy, get_tick_per_us, RecoverStatus};
 use crate::sdk::mcu::irq_i::irq_disable;

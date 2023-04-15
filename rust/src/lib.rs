@@ -10,6 +10,7 @@ use crate::embassy::executor::Executor;
 use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::watchdog::wd_clear;
 use fixed::types::I16F16;
+use crate::sdk::pm::cpu_wakeup_init;
 
 mod app;
 mod common;
@@ -87,8 +88,8 @@ pub extern "C" fn main_entrypoint() {
     // Must happen first
     OtaManager::handle_ota_update();
 
-    // Configure the system
-    app().init();
+    // Get the CPU configured
+    cpu_wakeup_init();
 
     // Run the application
     let mut executor = Executor::new();

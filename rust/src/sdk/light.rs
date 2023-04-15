@@ -5,11 +5,11 @@ use core::mem::{size_of, size_of_val, MaybeUninit};
 use core::ptr::null;
 use crate::{no_mangle_fn, no_mangle_fn_def};
 use crate::{pub_mut, BIT};
+use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
 no_mangle_fn!(light_set_tick_per_us, tick: u32);
 
-no_mangle_fn!(mesh_security_enable, en: bool);
 no_mangle_fn!(mesh_get_fw_version);
 
 no_mangle_fn!(register_mesh_ota_master_ui, p: fn(*const u8));
@@ -34,10 +34,6 @@ no_mangle_fn!(rf_link_data_callback, p: *const u8);
 no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
 no_mangle_fn!(rf_link_slave_data_write_no_dec, u32, p: *const rf_packet_ll_data_t);
 no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32);
-
-no_mangle_fn!(pairRead, u32, p: *const u8);
-no_mangle_fn!(pairWrite, u32, p: *const u8);
-no_mangle_fn!(access_code, u32, p_name: *const u8, p_pw: *const u8);
 
 no_mangle_fn!(is_master_sending_ota_st, bool);
 no_mangle_fn!(
@@ -89,7 +85,6 @@ no_mangle_fn!(
 
 no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
 
-
 pub_mut!(pair_config_valid_flag, u8);
 pub_mut!(pair_config_mesh_name, [u8; 17]);
 pub_mut!(pair_config_mesh_pwd, [u8; 17]);
@@ -128,12 +123,13 @@ pub_mut!(slave_read_status_busy, bool);
 pub_mut!(rf_slave_ota_busy, bool);
 
 pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
+pub_mut!(pair_ac, u32, 0);
+
 pub_mut!(pair_nn, [u8; 16], [0; 16]);
 pub_mut!(pair_pass, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_org, [u8; 16], [0; 16]);
-pub_mut!(pair_ac, u32, 0);
 
 pub_mut!(cur_ota_flash_addr, u32);
 pub_mut!(mesh_ota_master_100_flag, u8);
@@ -153,7 +149,7 @@ pub_mut!(gateway_en, bool);
 pub_mut!(gateway_security, bool);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
-pub_mut!(pair_ivm, [u8; 8], [0; 8]);
+pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 pub_mut!(enc_disable, bool);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
@@ -426,15 +422,15 @@ pub struct ll_adv_private_t {
 
 #[repr(C, packed)]
 pub struct ll_adv_rsp_private_t {
-    pub ManufactureID: u16,
+    pub ManufactureID: u16,             // 0
     // must vendor id to follow spec
-    pub MeshProductUUID: u16,
-    pub MacAddress: u32,
+    pub MeshProductUUID: u16,           // 2
+    pub MacAddress: u32,                // 4
     // low 4 byte
-    pub ProductUUID: u16,
-    pub status: u8,
-    pub DeviceAddress: u16,
-    pub rsv: [u8; 16],
+    pub ProductUUID: u16,               // 8
+    pub status: u8,                     // 10
+    pub DeviceAddress: u16,             // 11
+    pub rsv: [u8; 16],                  // 13
 }
 
 #[repr(C, packed)]
@@ -490,6 +486,18 @@ pub struct rf_packet_ll_app_t {
 	pub handle1: u8,    // 12
 	pub app_cmd_v: app_cmd_value_t, // 13
 	pub rsv: [u8; 10],
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct rf_packet_att_readRsp_t {
+	pub dma_len: u32,   // 0        //won't be a fixed number as previous, should adjust with the mouse package number
+	pub _type: u8,	    // 4		//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+	pub rf_len: u8,		// 5		//LEN(5)_RFU(3)
+	pub l2capLen: u16,  // 6
+	pub chanId: u16,    // 8
+	pub opcode: u8,     // 10
+	pub value: [u8; 22] // 11
 }
 
 #[repr(C, packed)]
@@ -648,24 +656,14 @@ pub_mut!(pair_enc_enable, bool, false);
 pub_mut!(pair_ivs, [u8; 8], [0; 8]);
 pub_mut!(pair_work, [u8; 16], [0; 16]);
 pub_mut!(pairRead_pending, bool, false);
-pub_mut!(pkt_read_rsp, rf_packet_ll_app_t, rf_packet_ll_app_t {
-    dma_len: 0,
-	_type: 0,
-	rf_len: 0,
-	l2capLen: 0,
-	chanId: 0,
-	opcode: 0,
-	handle: 0,
-	handle1: 0,
-	app_cmd_v: app_cmd_value_t {
-           sno: [0; 3],
-           src: [0; 2],
-           dst: [0; 2],
-           op: 0,
-           vendor_id: 0,
-           par: [0; 10],
-    },
-	rsv: [0; 10],
+pub_mut!(pkt_read_rsp, rf_packet_att_readRsp_t, rf_packet_att_readRsp_t {
+    dma_len: 0x1d,
+	_type: 2,
+	rf_len: 0x1b,
+	l2capLen: 0x17,
+	chanId: 0x4,
+	opcode: 0xb,
+	value: [0; 22]
 });
 
 pub_mut!(rands_fix_flag, bool, false);

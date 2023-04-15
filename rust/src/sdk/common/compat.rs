@@ -7,7 +7,8 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
 use core::ptr::{addr_of, addr_of_mut};
-use crate::{app, blinken};
+use heapless::String;
+use crate::{app};
 use crate::config::{get_flash_adr_panic_info, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
@@ -36,6 +37,34 @@ fn bcmp(s1: *const u8, s2: *const u8, count: usize) -> i32 {
     unsafe {
         return memcmp(s1, s2, count);
     }
+}
+
+#[macro_export]
+macro_rules! uprintln {
+    ( $($arg:tt)* ) => {
+        {
+            use core::fmt::Write;
+            use crate::sdk::common::compat::UartStream;
+
+            let mut stream = UartStream::new();
+            core::writeln!(stream, $($arg)*).unwrap();
+            stream.send(false, true);
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! uprintln_fast {
+    ( $($arg:tt)* ) => {
+        {
+            use core::fmt::Write;
+            use crate::sdk::common::compat::UartStream;
+
+            let mut stream = UartStream::new();
+            core::writeln!(stream, $($arg)*).unwrap();
+            stream.send(false, false);
+        }
+    };
 }
 
 pub const TCMD_UNDER_RD: u8 = 0x80;
@@ -80,12 +109,15 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
 
 /// A byte stream to the host (e.g., host's stdout or stderr).
 #[derive(Clone, Copy)]
-pub struct HostStream {
+pub struct UartStream {
     pub length: usize,
     pub out_buffer: [u8; 256]
 }
 
-impl HostStream {
+impl UartStream {
+    pub const fn new() -> UartStream {
+        UartStream { length: 0, out_buffer: [0; 256] }
+    }
     /// Attempts to write an entire `buffer` into this sink
     pub fn write_all(&mut self, buffer: &[u8]) -> Result<(), ()> {
         self.out_buffer[self.length..self.length + buffer.len()].copy_from_slice(buffer);
@@ -93,7 +125,7 @@ impl HostStream {
         Ok(())
     }
 
-    pub fn send(&self) {
+    pub fn send(&self, is_panic: bool, doasync: bool) {
         let mut buffer = unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) };
         while !buffer.is_empty() {
             let len = min(UART_DATA_LEN - 3, buffer.len());
@@ -102,25 +134,29 @@ impl HostStream {
                 len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
             };
 
-            msg.data[2] = UartMsg::PanicMessage as u8;
+            msg.data[2] = if is_panic {UartMsg::PanicMessage} else {UartMsg::PrintMessage} as u8;
             for i in 0..len {
                 msg.data[3 + i] = buffer[i];
             }
 
-            app().uart_manager.driver.uart_send(&msg);
+            if doasync {
+                app().uart_manager.send_message(&msg);
+            } else {
+                app().uart_manager.driver.uart_send(&msg);
+            }
 
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
         }
     }
 }
 
-impl Write for HostStream {
+impl Write for UartStream {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 
-fn write_panic_info(info: &HostStream) {
+fn write_panic_info(info: &UartStream) {
     let panic_addr = *get_flash_adr_panic_info();
 
     // Clear the panic info sector for writing just in case
@@ -208,10 +244,10 @@ pub async fn check_panic_info() {
 pub fn panic(info: &PanicInfo) -> ! {
     irq_disable();
 
-    let mut stream = HostStream { length: 0, out_buffer: [0; 256] };
+    let mut stream = UartStream { length: 0, out_buffer: [0; 256] };
 
     write!(stream, "{}", info).ok();
-    stream.send();
+    stream.send(true, false);
     write_panic_info(&stream);
 
     light_sw_reboot();

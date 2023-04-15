@@ -10,7 +10,7 @@ use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use crate::sdk::rf_drv::rf_set_ble_access_code;
 use core::ptr::addr_of;
 use crate::{app, BIT};
-use crate::common::{mesh_node_init, pair_load_key};
+use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::mesh::wrappers::*;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::light::*;
@@ -194,7 +194,6 @@ impl MeshManager {
                 1,
                 data.as_mut_ptr(),
             );
-            set_get_mac_en(if data[0] == 1 { true } else { false });
         }
     }
 
@@ -339,9 +338,9 @@ impl MeshManager {
         self.default_mesh_time = delay_s as u32 * 1000;
 
         /* Only change AC and LTK */
-        set_pair_ac(_access_code(
-            get_pair_config_mesh_name().as_ptr(),
-            get_pair_config_mesh_pwd().as_ptr(),
+        set_pair_ac(access_code(
+            get_pair_config_mesh_name(),
+            get_pair_config_mesh_pwd(),
         ));
         get_pair_ltk()[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
     }
@@ -620,7 +619,7 @@ pub mod wrappers {
     }
 
     #[no_mangle]
-    extern "C" fn mesh_security_enable(enable: bool)
+    pub extern "C" fn mesh_security_enable(enable: bool)
     {
         set_security_enable(enable);
         set_pair_mic();

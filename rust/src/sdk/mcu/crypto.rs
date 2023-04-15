@@ -51,13 +51,15 @@ pub fn aes_ll_swap(data: *mut u8)
     }
 }
 
-pub fn aes_att_encryption(key: *const u8, source: *const u8, dest: *mut u8)
+#[no_mangle]
+pub extern "C" fn aes_att_encryption(key: *const u8, source: *const u8, dest: *mut u8)
 {
     aes_ll_encryption(key, source, dest, 0);
     aes_ll_swap(dest);
 }
 
-pub fn aes_att_decryption(key: *const u8, source: *const u8, dest: *mut u8)
+#[no_mangle]
+pub extern "C" fn aes_att_decryption(key: *const u8, source: *const u8, dest: *mut u8)
 {
     aes_ll_encryption(key, source, dest, 1);
     aes_ll_swap(dest);

@@ -3,7 +3,7 @@ use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::{blinken, no_mangle_fn, pub_mut, regrw};
+use crate::{no_mangle_fn, pub_mut, regrw};
 use crate::common::{mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::wrappers::rf_link_slave_data_ota;

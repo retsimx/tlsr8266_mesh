@@ -23,6 +23,7 @@ pub enum UartMsg {
     LightOnline = 0x03,     // Sent by us to notify when a light goes on/offline or turns on/off
     MeshMessage = 0x04,     // Sent by us to notify when a mesh message is sent
     PanicMessage = 0x05,    // Sent by us to provide details of a panic
+    PrintMessage = 0x06,    // Sent by us to provide print output
     Ack = 0xff
 }
 

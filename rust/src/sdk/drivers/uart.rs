@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::mem::size_of;
 use core::ptr::addr_of;
-use crate::{app, BIT, blinken};
+use crate::{app, BIT};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_input_en, gpio_set_output_en};

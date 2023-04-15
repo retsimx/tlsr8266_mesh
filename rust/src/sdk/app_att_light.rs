@@ -11,6 +11,7 @@ use core::ptr::{addr_of, null};
 use core::slice;
 use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
+use crate::sdk::ble_app::ble_ll_pair::{pairRead, pairWrite};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -430,8 +431,8 @@ pub_mut!(
             16,
             TelinkSppDataPairUUID,
             SppDataPairData,
-            _pairWrite,
-            _pairRead
+            pairWrite,
+            pairRead
         ), //value
         attrdef!(
             0,

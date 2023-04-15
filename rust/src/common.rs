@@ -59,7 +59,6 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
-#[no_mangle] // required by light_ll
 pub extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     flash_write_page(
         (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + adr as i32) as u32,
@@ -159,7 +158,7 @@ pub fn retrieve_dev_grp_address()
         if grp_addr == 0 {
             set_dev_address_next_pos(addr_next_pos);
         } else {
-            if -1 < (grp_addr as i32) << 16 {
+            if grp_addr & !dev_mask == 0 {
                 set_device_address(grp_addr & dev_mask);
                 addr_next_pos = grp_next_pos;
                 set_dev_grp_next_pos(addr_next_pos);
@@ -170,14 +169,14 @@ pub fn retrieve_dev_grp_address()
                 set_dev_grp_next_pos(grp_next_pos);
             }
         }
-        grp_addr_ptr = grp_addr_ptr + 1;
+        grp_addr_ptr = grp_addr_ptr + 2;
         if grp_next_pos == 0x1000 {
             break;
         }
     }
     if *get_device_address() == 0 {
         unsafe {
-            set_device_address(*(*get_slave_p_mac() as *const u16));
+            set_device_address(*get_slave_p_mac().offset(0) as u16);
             if *get_slave_p_mac().offset(0) == 0 {
                 set_device_address(1);
             }
@@ -198,7 +197,7 @@ pub fn pair_flash_clean()
     let mut flash_dat_swap: [u8; 64] = [0; 64];
     let flash_dat_swap_len = flash_dat_swap.len();
 
-    if *get_adr_flash_cfg_idx() > 0xeff {
+    if *get_adr_flash_cfg_idx() >= 0xeff {
         let src_addr = (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx()) as *const u8;
         unsafe { flash_dat_swap.copy_from_slice(slice::from_raw_parts(src_addr, flash_dat_swap_len)); }
 
@@ -292,8 +291,8 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key()
 {
-    set_pair_ac(access_code(get_pair_nn().as_slice(), get_pair_pass().as_slice()));
-    let mut name_len = match get_pair_nn().iter().position(|&r| r == 0) {
+    set_pair_ac(access_code(&(*get_pair_nn())[0..16], &(*get_pair_pass())[0..16]));
+    let mut name_len = match (*get_pair_nn()).iter().position(|r| *r == 0) {
         Some(v) => v,
         None => get_pair_nn().len()
     } as u8;
@@ -301,10 +300,11 @@ pub fn pair_update_key()
     if *get_max_mesh_name_len() < name_len {
         name_len = *get_max_mesh_name_len();
     }
-    rf_link_slave_set_adv_mesh_name(&get_pair_nn()[0..name_len as usize]);
+
+    rf_link_slave_set_adv_mesh_name(&(*get_pair_nn())[0..name_len as usize]);
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(*get_p_adv_pri_data() as *const u8, *get_adv_private_data_len() as usize) });
     if *get_adv_uuid_flag() != 0 {
-        rf_link_slave_set_adv_uuid_data(get_adv_uuid().as_slice());
+        rf_link_slave_set_adv_uuid_data(&(*get_adv_uuid())[0..4]);
     }
     if *get_pair_nn() != get_pair_config_mesh_name()[0..16] || *get_pair_pass() != get_pair_config_mesh_pwd()[0..16]{
         set_mesh_node_ignore_addr(false);
@@ -312,7 +312,7 @@ pub fn pair_update_key()
 }
 
 #[no_mangle]
-pub fn pair_load_key()
+pub extern "C" fn pair_load_key()
 {
     pair_flash_config_init();
 
@@ -323,8 +323,8 @@ pub fn pair_load_key()
         get_pair_pass().iter_mut().for_each(|v| { *v = 0 });
         get_pair_ltk().iter_mut().for_each(|v| { *v = 0 });
 
-        get_pair_nn().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, *get_max_mesh_name_len() as usize) });
-        get_pair_pass().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
+        (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, *get_max_mesh_name_len() as usize) });
+        (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
 
         if *get_mesh_pair_enable() == true {
             set_get_mac_en(unsafe { *(pairing_addr as *const bool).offset(0x1) });
@@ -332,10 +332,11 @@ pub fn pair_load_key()
 
         let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
         if pair_config_flag == *get_pair_config_valid_flag() {
-            decode_password(get_pair_pass().as_mut_slice());
+            decode_password((*get_pair_pass()).as_mut_slice());
         }
 
-        get_pair_ltk().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
+        (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
+
         pair_update_key();
     }
 }

@@ -380,7 +380,8 @@ fn sleep_start()
 
 static mut deep_long_time_flag: u8 = 0;
 
-pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
+#[no_mangle]
+pub unsafe extern "C" fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
 {
     critical_section::with(|_| {
         let mut reboot= wakeup_src & 0x40 != 0;

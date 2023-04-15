@@ -1,50 +1,81 @@
-import socket
-import struct
 import argparse
+import struct
 import time
 
-HOST = ""  # The server's hostname or IP address
-PORT = 8000  # The port used by the server
+import serial
+
+serial_connection = None
 
 
-try:
-    from local import *
-except:
-    pass
+def send(data):
+    serial_connection.write(b"\x05A\x01")
+    if serial_connection.read(2) != b"R\x01":
+        raise Exception("Couldn't enter raw paste REPL, perhaps reset the rpi")
+
+    window_size_increment = struct.unpack("H", serial_connection.read(2))[0]
+
+    while len(data):
+        segment = data[0:max(window_size_increment, len(data))]
+        data = data[len(segment):]
+        serial_connection.write(segment.encode())
+
+        if len(data):
+            time.sleep(0.1)
+            if serial_connection.read(1) != b"\x01":
+                raise Exception("Couldn't transmit entire data? This is unusual")
+
+        else:
+            serial_connection.write(b"\x04")
+
+    while serial_connection.read(1) != b"\x04":
+        pass
+
+    result = b''
+    while True:
+        c = serial_connection.read(1)
+        if c == b'\x04':
+            break
+
+        result += c
+
+    exc = b''
+    while True:
+        c = serial_connection.read(1)
+        if c == b'\x04':
+            break
+
+        exc += c
+
+    if serial_connection.read(1) != b">":
+        raise Exception("Didn't exit raw paste repl correctly. Don't know why.")
+
+    return result, exc
 
 
 def write_addr(addr, data):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 0) + struct.pack('H', addr) + bytearray(data)
-        s.sendall(data)
-        assert s.recv(4096)[0] == 1
+    result, exc = send(f"print(repr(write_addr({addr}, {repr(list(data))})))")
+    assert not len(exc)
 
 
-def read_addr(addr, len):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 1) + struct.pack('H', addr) + struct.pack('H', len)
-        s.sendall(data)
-        result = s.recv(4096)
-        return result
+def read_addr(addr, length):
+    result, exc = send(f"print(repr(read_addr({addr}, {length})))")
+    assert not len(exc)
+
+    result = list(eval(result.decode().strip()))
+    return result
 
 
-def read_flash(addr, len):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 2) + struct.pack('I', addr) + struct.pack('H', len)
-        s.sendall(data)
-        result = s.recv(4096)
-        return result
+def read_flash(addr, length):
+    result, exc = send(f"print(repr(read_flash({addr}, {length})))")
+    assert not len(exc)
+
+    result = list(eval(result.decode().strip()))
+    return result
 
 
 def write_flash(addr, data):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 3) + struct.pack('I', addr) + bytearray(data)
-        s.sendall(data)
-        assert s.recv(4096)[0] == 1
+    result, exc = send(f"print(repr(write_flash({addr}, {repr(list(data))})))")
+    assert not len(exc)
 
 
 RAM_SIZE = 0x010000
@@ -189,7 +220,7 @@ def write_flash_main(args):
 
     print(f'Writing flash from {args.filename}...')
 
-    CHUNK_SIZE = 256 * 3
+    CHUNK_SIZE = 1024*4
     with open(args.filename, 'rb') as f:
         contents = f.read()
         size = len(contents)
@@ -226,23 +257,34 @@ def cpu_run_main(args):
 
 
 def cpu_reset_main(args):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 4)
-        s.sendall(data)
+    send("reset_mcu(True)")
 
 
 def flashing_reset_main(args):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        data = struct.pack('B', 5)
-        s.sendall(data)
+    send("reset_mcu(False)")
+
+
+def write_remote(device):
+    global serial_connection
+    serial_connection = serial.Serial(device, 114200, timeout=1)
+
+    serial_connection.read_all()
+    serial_connection.write(b"\x01")
+    time.sleep(0.1)
+    serial_connection.read_all()
+
+    with open('remote.py', 'r') as f:
+        print(send(f.read()))
 
 
 def main():
     args_parser = argparse.ArgumentParser(description='TLSR')
     args_parser.add_argument(
         '--debug', action="store_true", help="Enabled debugging information.")
+    args_parser.add_argument(
+        '--device', help="Path to Raspberry Pi Pico Serial Device", default="/dev/ttyACM0")
+    args_parser.add_argument(
+        '--xtal-speed', help="Remote device external crystal speed in MHz", default="12")
     subparsers = args_parser.add_subparsers(dest="cmd", required=True)
 
     dump_flash_parser = subparsers.add_parser('dump_flash')
@@ -269,10 +311,12 @@ def main():
     cpu_reset_parser = subparsers.add_parser('cpu_reset', help="Resets the entire CPU via the reset pin.")
     cpu_reset_parser.set_defaults(func=cpu_reset_main)
 
-    flashing_reset_parser = subparsers.add_parser('flashing_reset', help="Resets the entire CPU via the reset pin, renegotiates the SWire interface, then pauses the CPU ready for flashing. (Default at Pico power on)")
+    flashing_reset_parser = subparsers.add_parser('flashing_reset', help="Resets the entire CPU via the reset pin, renegotiates the SWire interface, then pauses the CPU ready for flashing.")
     flashing_reset_parser.set_defaults(func=flashing_reset_main)
 
     args = args_parser.parse_args()
+
+    write_remote(args.device)
 
     args.func(args)
 

@@ -184,7 +184,7 @@ static status_ccc: [u8; 2] = [0x01, 0x00];
 static SppDataPairProp: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE;
 static SppDataPairData: [u8; 20] = [0xe0; 20];
 
-pub_mut!(send_to_master, [u8; 16]);
+pub_mut!(send_to_master, [u8; 16], [0; 16]);
 
 static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master };
 

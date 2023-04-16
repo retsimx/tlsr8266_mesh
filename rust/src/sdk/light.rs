@@ -402,7 +402,7 @@ pub enum RecoverStatus {
     // LOW_BATT_LOOP_FLG           = BIT(3),    // 0 means check by user_init, 1 means by main loop
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_adv_ind_module_t {
 	pub dma_len: u32,       // 0    //won't be a fixed number as previous, should adjust with the mouse package number
 
@@ -412,7 +412,7 @@ pub struct rf_packet_adv_ind_module_t {
 	pub data: [u8; 31]		// 12	//0-31 byte
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct ll_adv_private_t {
     pub ManufactureID: u16,
     // must vendor id to follow spec
@@ -420,7 +420,7 @@ pub struct ll_adv_private_t {
     pub MacAddress: u32, // low 4 byte
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct ll_adv_rsp_private_t {
     pub ManufactureID: u16,             // 0
     // must vendor id to follow spec
@@ -433,7 +433,7 @@ pub struct ll_adv_rsp_private_t {
     pub rsv: [u8; 16],                  // 13
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_att_value_t {
     pub sno: [u8; 3],
     pub src: [u8; 2],
@@ -443,7 +443,7 @@ pub struct rf_packet_att_value_t {
                        // get status rsp: mac-app[0]=ttc  mac-app[1]=hop-count
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_ll_data_t {
 	pub dma_len: u32,   // 0         //won't be a fixed number as previous, should adjust with the mouse package number
 	pub _type: u8,		// 4		//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
@@ -473,7 +473,7 @@ pub struct app_cmd_value_t {
    pub par: [u8; 10],   // 10   23
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 #[derive(Clone, Copy)]
 pub struct rf_packet_ll_app_t {
 	pub dma_len: u32,   // 0
@@ -488,7 +488,7 @@ pub struct rf_packet_ll_app_t {
 	pub rsv: [u8; 10],
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 #[derive(Clone, Copy)]
 pub struct rf_packet_att_readRsp_t {
 	pub dma_len: u32,   // 0        //won't be a fixed number as previous, should adjust with the mouse package number
@@ -500,7 +500,7 @@ pub struct rf_packet_att_readRsp_t {
 	pub value: [u8; 22] // 11
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_ll_init_t {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4): connect request PDU
@@ -519,7 +519,7 @@ pub struct rf_packet_ll_init_t {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct ll_packet_l2cap_data_t {
     pub l2capLen: u16,
     pub chanId: u16,
@@ -529,7 +529,7 @@ pub struct ll_packet_l2cap_data_t {
     pub value: [u8; 30],
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_pkt_l2cap_sig_connParaUpRsp_t {
     pub dma_len: u32,
     pub _type: u8,
@@ -542,7 +542,7 @@ pub struct rf_pkt_l2cap_sig_connParaUpRsp_t {
     pub result: u16,
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_att_write_t {
     pub dma_len: u32,
     pub rtype: u8,
@@ -555,7 +555,7 @@ pub struct rf_packet_att_write_t {
     pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 #[derive(Clone, Copy)]
 pub struct rf_packet_att_cmd_t {
     pub dma_len: u32,   // 0
@@ -569,7 +569,7 @@ pub struct rf_packet_att_cmd_t {
     pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_att_data_t {
     pub dma_len: u32, //won't be a fixed number as previous, should adjust with the mouse package number
 
@@ -590,6 +590,108 @@ pub struct rf_packet_att_data_t {
     pub dat: [u8; 23],
 }
 
+#[repr(C, align(4))]
+pub struct rf_packet_att_mtu_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+    pub rf_len: u8,				//LEN(5)_RFU(3)
+    pub	l2capLen: u16,
+    pub	chanId: u16,
+    pub opcode: u8,
+    pub mtu: [u8; 2]
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_att_errRsp_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub _type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+    pub rf_len: u8,				//LEN(5)_RFU(3)
+    pub l2capLen: u16,
+    pub chanId: u16,
+    pub opcode: u8,
+    pub errOpcode: u8,
+    pub errHandle: u16,
+    pub errReason: u8
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_ll_data_rsp_t {
+	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+
+	pub _type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+	pub rf_len: u8,				//LEN(5)_RFU(3)
+
+	pub l2cap: u16,				//0x17
+	pub chanid: u16,				//0x04,
+
+	pub att: u8,				//0x12 for master; 0x1b for slave// as ttl when relay
+	pub hl: u8,				// assigned by master
+	pub hh: u8,				//
+	pub init: u8,
+	pub dat: [u8; 14]
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_l2cap_head_t {
+	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+	pub	_type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+	pub rf_len: u8,				//LEN(6)_RFU(2)
+	pub	l2capLen: u16,
+	pub	chanId: u16
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_version_ind_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+    pub rf_len: u8,				//LEN(6)_RFU(2)
+    pub opcode: u8,
+    pub mainVer: u8,
+    pub vendor: u16,
+    pub subVer: u16
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_feature_rsp_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+    pub rf_len: u8,				//LEN(6)_RFU(2)
+    pub opcode: u8,
+    pub data: [u8; 8]
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_ctrl_unknown_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
+    pub rf_len: u8,				//LEN(6)_RFU(2)
+    pub opcode: u8,
+    pub data: [u8; 1]
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_ll_write_rsp_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+
+    pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+    pub rf_len: u8,				//LEN(5)_RFU(3)
+
+    pub	l2cap: u16,				//0x17
+    pub	chanid: u16,				//0x04,
+
+    pub	op: u16
+}
+
+#[repr(C, align(4))]
+pub struct rf_packet_att_writeRsp_t {
+    pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
+    pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
+    pub rf_len: u8,				//LEN(5)_RFU(3)
+    pub	l2capLen: u16,
+    pub	chanId: u16,
+    pub opcode: u8
+}
+
 #[repr(C, packed)]
 pub struct mesh_ota_dev_info_t {
     pub dev_mode: u16,
@@ -597,14 +699,14 @@ pub struct mesh_ota_dev_info_t {
     pub rsv: [u8; 4],
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct mesh_ota_pkt_start_command_t {
     pub version: [u8; 4],
     pub dev_info: mesh_ota_dev_info_t,
 } // don't modify element in it
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct status_record_t {
     adr: [u8; 1],
     // don't modify, use internal
@@ -612,7 +714,7 @@ pub struct status_record_t {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rc_pkt_buf_t {
     pub op: u8,
     pub sno: [u8; 3],
@@ -621,7 +723,7 @@ pub struct rc_pkt_buf_t {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct rf_packet_scan_rsp_t {
 	pub dma_len: u32,       // 0     //won't be a fixed number as previous, should adjust with the mouse package number
 

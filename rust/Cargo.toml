@@ -19,3 +19,8 @@ heapless = "0.7"
 critical-section = { version = "1.1", features = ["restore-state-u8"]}
 fixed = "1.23"
 const_format = "0.2.30"
+num-derive = "0.3"
+
+[dependencies.num-traits]
+version = "0.2"
+default-features = false

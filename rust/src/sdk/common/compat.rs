@@ -39,16 +39,23 @@ fn bcmp(s1: *const u8, s2: *const u8, count: usize) -> i32 {
     }
 }
 
+pub static mut uartstream: UartStream<128> = UartStream::new();
+
 #[macro_export]
 macro_rules! uprintln {
     ( $($arg:tt)* ) => {
         {
             use core::fmt::Write;
-            use crate::sdk::common::compat::UartStream;
+            use crate::sdk::common::compat::uartstream;
 
-            let mut stream = UartStream::new();
-            core::writeln!(stream, $($arg)*).unwrap();
-            stream.send(false, true);
+            critical_section::with(|_| {
+                #[allow(unused_unsafe)]
+                unsafe {
+                    uartstream.length = 0;
+                    core::writeln!(uartstream, $($arg)*).unwrap();
+                    uartstream.send(false, true);
+                }
+            });
         }
     };
 }
@@ -58,11 +65,16 @@ macro_rules! uprintln_fast {
     ( $($arg:tt)* ) => {
         {
             use core::fmt::Write;
-            use crate::sdk::common::compat::UartStream;
+            use crate::sdk::common::compat::uartstream;
 
-            let mut stream = UartStream::new();
-            core::writeln!(stream, $($arg)*).unwrap();
-            stream.send(false, false);
+            critical_section::with(|_| {
+                #[allow(unused_unsafe)]
+                unsafe {
+                    uartstream.length = 0;
+                    core::writeln!(uartstream, $($arg)*).unwrap();
+                    uartstream.send(false, false);
+                }
+            });
         }
     };
 }
@@ -76,7 +88,7 @@ pub const TCMD_WRITE: u8 = 0x3;
 pub const TCMD_WAIT: u8 = 0x7;
 pub const TCMD_WAREG: u8 = 0x8;
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct TBLCMDSET {
     pub adr: u16,
     pub dat: u8,
@@ -109,15 +121,16 @@ pub fn LoadTblCmdSet(pt: *const TBLCMDSET, size: u32) -> u32 {
 
 /// A byte stream to the host (e.g., host's stdout or stderr).
 #[derive(Clone, Copy)]
-pub struct UartStream {
+pub struct UartStream<const size: usize> {
     pub length: usize,
-    pub out_buffer: [u8; 256]
+    pub out_buffer: [u8; size]
 }
 
-impl UartStream {
-    pub const fn new() -> UartStream {
-        UartStream { length: 0, out_buffer: [0; 256] }
+impl<const size: usize> UartStream<size> {
+    pub const fn new() -> UartStream<size> {
+        UartStream::<size> { length: 0, out_buffer: [0; size] }
     }
+
     /// Attempts to write an entire `buffer` into this sink
     pub fn write_all(&mut self, buffer: &[u8]) -> Result<(), ()> {
         self.out_buffer[self.length..self.length + buffer.len()].copy_from_slice(buffer);
@@ -150,13 +163,13 @@ impl UartStream {
     }
 }
 
-impl Write for UartStream {
+impl<const size: usize> Write for UartStream<size> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 
-fn write_panic_info(info: &UartStream) {
+fn write_panic_info<const size: usize>(info: &UartStream<size>) {
     let panic_addr = *get_flash_adr_panic_info();
 
     // Clear the panic info sector for writing just in case
@@ -244,7 +257,7 @@ pub async fn check_panic_info() {
 pub fn panic(info: &PanicInfo) -> ! {
     irq_disable();
 
-    let mut stream = UartStream { length: 0, out_buffer: [0; 256] };
+    let mut stream = UartStream::<256>::new();
 
     write!(stream, "{}", info).ok();
     stream.send(true, false);

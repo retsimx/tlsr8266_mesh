@@ -9,10 +9,7 @@ CCFLAGS = -O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-stru
 
 LDFLAGS = --gc-sections -T ./sdk/boot.link
 
-LIB = ./sdk/proj_lib/ext/ble_ll_smp_master.o \
-	./sdk/proj_lib/ext/ble_ll_attribute.o ./sdk/proj_lib/ext/shared_mem.o \
-	./sdk/proj_lib/ext/rf_drv_8266.o \
-	./sdk/proj_lib/ext/ble_ll_master.o ./sdk/proj_lib/ext/light_ll.o \
+LIB = ./sdk/proj_lib/ext/shared_mem.o ./sdk/proj_lib/ext/rf_drv_8266.o ./sdk/proj_lib/ext/light_ll.o \
 	./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a
 
 BUILD_DIR = _build

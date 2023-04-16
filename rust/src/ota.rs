@@ -492,19 +492,23 @@ impl OtaManager {
 
 pub mod wrappers {
     use crate::app;
-    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MeshOtaLed};
+    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MeshOtaLed, rf_packet_att_write_t};
     use core::mem::size_of;
     use core::slice;
 
     // Stuff consumed by light_ll
     #[no_mangle]
-    pub extern "C" fn rf_link_slave_data_ota(ph: *const u8) -> bool {
+    pub extern "C" fn rf_link_slave_data_ota(data: *const rf_packet_att_write_t) -> bool {
         let len = size_of::<rf_packet_att_data_t>() / size_of::<u32>();
-        let data: &[u32] = unsafe { slice::from_raw_parts(ph as *const u32, len) };
+        let data: &[u32] = unsafe { slice::from_raw_parts(data as *const u32, len) };
 
         app().ota_manager.rf_link_slave_data_ota(data);
 
         return true;
+    }
+
+    pub fn my_rf_link_slave_data_ota(data: *const rf_packet_att_write_t) -> bool {
+        return rf_link_slave_data_ota(data);
     }
 
     #[no_mangle] // required by light_ll

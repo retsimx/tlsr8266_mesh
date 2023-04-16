@@ -15,7 +15,7 @@ use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_init;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
-use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out};
+use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
@@ -454,7 +454,12 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         LGT_TRIGGER_PANIC => panic!("She's dead jim"),
         LGT_CMD_KICK_OUT => {
             irq_disable();
-            kick_out((params[0] as u32).try_into().unwrap());
+            let res = (params[0] as u32).try_into();
+            if res.is_ok() {
+                kick_out(res.unwrap());
+            } else {
+                kick_out(KickoutReason::OutOfMesh);
+            }
             light_sw_reboot();
         }
         LGT_CMD_NOTIFY_MESH => light_notify(&pp.val[3..3 + 10], &pp.src),

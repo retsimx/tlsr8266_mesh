@@ -7,7 +7,7 @@ use crate::sdk::service::{
 use core::convert::AsRef;
 use core::ffi::CStr;
 use core::mem::transmute;
-use core::ptr::{addr_of, null};
+use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
@@ -128,7 +128,7 @@ static modelId_value: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"mod
 static hwRevisionChar: u8 = CHAR_PROP_READ;
 static hwRevision_value: u32 = 0x22222222;
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 struct gap_periConnectParams_t {
     /** Minimum value for the connection event (interval. 0x0006 - 0x0C80 * 1.25 ms) */
     pub intervalMin: u16,
@@ -196,31 +196,31 @@ static spp_otaname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"OTA\0
 static spp_pairname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Pair\0") };
 static spp_devicename: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"DevName\0") };
 
-unsafe extern "C" fn mesh_status_write(pw: *const u8) -> u32 {
+fn mesh_status_write(p: *const rf_packet_att_write_t) -> bool {
     if !*get_pair_login_ok() {
-        return 1;
+        return true;
     }
-
-    let p = pw as *const rf_packet_att_write_t;
-    SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
-    if (*p).l2capLen > (3 + 1) {
-        _mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
-    } else {
-        _mesh_report_status_enable((*p).value[0]);
+    unsafe {
+        SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
+        if (*p).l2capLen > (3 + 1) {
+            _mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
+        } else {
+            _mesh_report_status_enable((*p).value[0]);
+        }
     }
-    return 1;
+    return true;
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct attribute_t {
     pub attNum: u8,
     pub uuidLen: u8,
     pub attrLen: u8,
     pub attrMaxLen: u8,
     pub uuid: *const u8,
-    pub pAttrValue: *const u8,
-    pub w: *const u8,
-    pub r: *const u8,
+    pub pAttrValue: *mut u8,
+    pub w: Option<fn(data: *const rf_packet_att_write_t) -> bool>,
+    pub r: Option<fn(data: *const rf_packet_att_write_t) -> bool>,
 }
 
 #[macro_export]
@@ -232,9 +232,9 @@ macro_rules! attrdef {
             attrLen: $attrLen as u8,
             attrMaxLen: $attrMaxLen as u8,
             uuid: unsafe { addr_of!($uuid) as *const u8 },
-            pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 },
-            w: $w as *const u8,
-            r: $r as *const u8,
+            pAttrValue: unsafe { $pAttrValue.as_ptr() as *mut u8 },
+            w: $w,
+            r: $r,
         }
     };
 
@@ -245,9 +245,9 @@ macro_rules! attrdef {
             attrLen: $attrLen as u8,
             attrMaxLen: $attrMaxLen as u8,
             uuid: unsafe { addr_of!($uuid) as *const u8 },
-            pAttrValue: unsafe { $pAttrValue.as_ptr() as *const u8 },
-            w: null(),
-            r: null(),
+            pAttrValue: unsafe { $pAttrValue.as_ptr() as *mut u8 },
+            w: None,
+            r: None,
         }
     };
 
@@ -258,9 +258,9 @@ macro_rules! attrdef {
             attrLen: $attrLen,
             attrMaxLen: $attrMaxLen,
             uuid: null(),
-            pAttrValue: null(),
-            w: null(),
-            r: null(),
+            pAttrValue: null_mut(),
+            w: None,
+            r: None,
         }
     };
 }
@@ -274,9 +274,9 @@ macro_rules! attrdefu {
             attrLen: $attrLen as u8,
             attrMaxLen: $attrMaxLen as u8,
             uuid: addr_of!($uuid) as *const u8,
-            pAttrValue: addr_of!($pAttrValue) as *const u8,
-            w: $w as *const u8,
-            r: $r as *const u8,
+            pAttrValue: addr_of!($pAttrValue) as *mut u8,
+            w: $w,
+            r: $r,
         }
     };
 
@@ -287,9 +287,9 @@ macro_rules! attrdefu {
             attrLen: $attrLen as u8,
             attrMaxLen: $attrMaxLen as u8,
             uuid: addr_of!($uuid) as *const u8,
-            pAttrValue: addr_of!($pAttrValue) as *const u8,
-            w: null(),
-            r: null(),
+            pAttrValue: addr_of!($pAttrValue) as *mut u8,
+            w: None,
+            r: None,
         }
     };
 
@@ -300,9 +300,9 @@ macro_rules! attrdefu {
             attrLen: $attrLen,
             attrMaxLen: $attrMaxLen,
             uuid: null(),
-            pAttrValue: null(),
-            w: null(),
-            r: null(),
+            pAttrValue: null_mut(),
+            w: None,
+            r: None,
         }
     };
 }
@@ -385,8 +385,8 @@ pub_mut!(
             1,
             TelinkSppDataServer2ClientUUID,
             SppDataServer2ClientData,
-            mesh_status_write,
-            0
+            Some(mesh_status_write),
+            None
         ), //value
         attrdef!(
             0,
@@ -431,8 +431,8 @@ pub_mut!(
             16,
             TelinkSppDataPairUUID,
             SppDataPairData,
-            pairWrite,
-            pairRead
+            Some(pairWrite),
+            Some(pairRead)
         ), //value
         attrdef!(
             0,

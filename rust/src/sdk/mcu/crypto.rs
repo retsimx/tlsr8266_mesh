@@ -1,5 +1,6 @@
+use core::cmp::min;
 use core::slice;
-use crate::{no_mangle_fn, pub_mut};
+use crate::{no_mangle_fn, pub_mut, uprintln, uprintln_fast};
 use crate::sdk::light::{get_pair_config_pwd_encode_enable, get_pair_config_pwd_encode_sk};
 use crate::sdk::mcu::register::{read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key};
 
@@ -51,15 +52,13 @@ pub fn aes_ll_swap(data: *mut u8)
     }
 }
 
-#[no_mangle]
-pub extern "C" fn aes_att_encryption(key: *const u8, source: *const u8, dest: *mut u8)
+pub fn aes_att_encryption(key: *const u8, source: *const u8, dest: *mut u8)
 {
     aes_ll_encryption(key, source, dest, 0);
     aes_ll_swap(dest);
 }
 
-#[no_mangle]
-pub extern "C" fn aes_att_decryption(key: *const u8, source: *const u8, dest: *mut u8)
+pub fn aes_att_decryption(key: *const u8, source: *const u8, dest: *mut u8)
 {
     aes_ll_encryption(key, source, dest, 1);
     aes_ll_swap(dest);
@@ -89,8 +88,10 @@ pub unsafe fn aes_att_decryption_packet(key: &[u8], ivm: &[u8], src: &[u8], pack
     ivs[1..9].copy_from_slice(&ivm[0..8]);
 
     if packet_len == 0 {
-        ivs = [packet_len; 16];
+        ivs = [0; 16];
         ivs[0..8].copy_from_slice(&ivm[0..8]);
+        ivs[8] = packet_len;
+        ivs[12] = packet_len;
 
         aes_att_encryption(key.as_ptr(), ivs.as_ptr(), ivs.as_mut_ptr());
     } else {
@@ -153,25 +154,11 @@ pub unsafe fn aes_att_decryption_packet(key: &[u8], ivm: &[u8], src: &[u8], pack
         }
     }
 
-    let mut result = true;
     if src.len() != 0 {
-        result = false;
-        if src[0] == ivs[0] {
-            let mut index = 0;
-            loop {
-                index = index + 1;
-                if src.len() <= index {
-                    return true;
-                }
-
-                if src[index] != ivs[index] {
-                    break;
-                }
-            }
-            result = false;
-        }
+        return src[0..src.len()] == ivs[0..src.len()];
     }
-    return result;
+
+    return true;
 }
 
 pub unsafe fn aes_att_encryption_packet(key: &[u8], ivm: &[u8], src: &mut [u8], packet_data: *mut u8, packet_len: u8) -> bool
@@ -210,21 +197,15 @@ pub unsafe fn aes_att_encryption_packet(key: &[u8], ivm: &[u8], src: &mut [u8], 
         }
     }
 
-    let mut index = 0;
     if src.len() != 0 {
-        loop {
-            src[index] = encoded[index];
-            index = index + 1;
-            if index >= src.len() {
-                break;
-            }
-        }
+        let len = src.len();
+        src[0..len].copy_from_slice(&encoded[0..len]);
     }
     encoded = [0; 16];
     encoded[1..9].copy_from_slice(&ivm[0..8]);
 
     if packet_len != 0 {
-        index = 0;
+        let mut index = 0;
         let mut result = [0u8; 16];
         loop {
             if index & 0xf == 0 {

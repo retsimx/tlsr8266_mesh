@@ -35,7 +35,7 @@ pub struct LightState {
     timestamp: Instant
 }
 
-#[repr(C, packed)]
+#[repr(C, align(4))]
 struct LumSaveT {
     save_flag: u8,
     brightness: u16,

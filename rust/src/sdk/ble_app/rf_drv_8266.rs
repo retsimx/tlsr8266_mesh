@@ -3,13 +3,13 @@ use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::{no_mangle_fn, pub_mut, regrw};
+use crate::{BIT, blinken, no_mangle_fn, pub_mut, pub_static, regrw};
 use crate::common::{mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::wrappers::my_rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
-use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -25,11 +25,17 @@ use crate::version::BUILD_VERSION;
 
 const ENABLE_16MHZ_XTAL: bool = false;
 
-pub_mut!(rf_tp_base, u32);
-pub_mut!(rf_tp_gain, u32);
-pub_mut!(rf_tx_mode, u8);
-pub_mut!(rfhw_tx_power, u8);
+const RF_FAST_MODE: bool = true;
+const RF_TRX_MODE: u8 = 0x80;
+const RF_TRX_OFF: u8 = 0x45;
 
+pub_mut!(rf_tp_base, u32, 0x1D);
+pub_mut!(rf_tp_gain, u32, 0xC);
+pub_mut!(rf_tx_mode, u8, 0);
+pub_mut!(rfhw_tx_power, u8, 0x40);
+pub_mut!(FtoRX, bool, false);
+
+static tbl_agc: [u32; 7] = [0x30333231, 0x182C3C38, 0xC0C1C, 0x0, 0x1B150F0A, 0x322E2721, 0x3E38];
 
 const tbl_rf_ini: [TBLCMDSET; 61] = [
     TBLCMDSET {
@@ -341,8 +347,6 @@ const tbl_rf_ini: [TBLCMDSET; 61] = [
     }
 ];
 
-pub_mut!(tbl_agc, [u32; 6]);
-
 pub unsafe fn rf_drv_init(enable: bool) -> u8
 {
     // This function is not complete
@@ -357,8 +361,10 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
         } else {
             LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
         }
+
+        // todo: Should this be 0..7? There's an extra couple of bytes of data in the 7th int
         for i in 0..6 {
-            write_reg_rf_rx_gain_agc((*get_tbl_agc())[i], (i << 2) as u32)
+            write_reg_rf_rx_gain_agc(tbl_agc[i], (i << 2) as u32)
         }
 
         if *(*get_flash_adr_mac() as *const u8).offset(0x11) != 0xff {
@@ -412,6 +418,7 @@ pub unsafe fn setSppWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool
 {
     (*gAttributes.offset(21)).w = Some(func);
 }
+
 pub unsafe fn setSppOtaWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool)
 {
     (*gAttributes.offset(24)).w = Some(func);
@@ -540,4 +547,202 @@ pub fn rf_link_slave_init(interval: u32)
         write_reg32(0x808008, BUILD_VERSION);
         write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
     }
+}
+
+struct tbl_rf_power_t {
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+}
+
+static TBL_RF_POWER: [tbl_rf_power_t; 12] = [
+    tbl_rf_power_t {
+        a: 0x25,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x0a,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x06,
+        b: 0x74,
+        c: 0x43,
+        d: 0x61
+        },
+    tbl_rf_power_t {
+        a: 0x06,
+        b: 0x64,
+        c: 0xc2,
+        d: 0x61
+        },
+    tbl_rf_power_t {
+        a: 0x06,
+        b: 0x64,
+        c: 0xc1,
+        d: 0x61
+        },
+    tbl_rf_power_t {
+        a: 0x05,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x03,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x02,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x01,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x00,
+        b: 0x7c,
+        c: 0x67,
+        d: 0x67
+        },
+    tbl_rf_power_t {
+        a: 0x00,
+        b: 0x64,
+        c: 0x43,
+        d: 0x61
+        },
+    tbl_rf_power_t {
+        a: 0x00,
+        b: 0x64,
+        c: 0xcb,
+        d: 0x61
+    }
+];
+
+pub fn rf_set_power_level_index(index: u32)
+{
+    let mut tbl_index = 0x2c;
+    if index + 1 < 0xd {
+        tbl_index = index << 2;
+    }
+
+    let tbl_index = tbl_index as usize;
+
+    unsafe {
+        analog_write(0xa2, TBL_RF_POWER[tbl_index].a);
+        analog_write(4, TBL_RF_POWER[tbl_index].b);
+        analog_write(0xa7, TBL_RF_POWER[tbl_index].c);
+        analog_write(0x8d, TBL_RF_POWER[tbl_index].d);
+    }
+}
+
+#[no_mangle]
+extern "C" fn rf_set_rxmode()
+{
+    write_reg8 (0x800428, RF_TRX_MODE | BIT!(0));	    // rx enable
+    write_reg8 (0x800f02, RF_TRX_OFF | BIT!(5));		// RX enable
+}
+
+#[no_mangle]
+extern "C" fn rf_set_tx_rx_off()
+{
+	write_reg8 (0x800f16, 0x29);
+	write_reg8 (0x800428, RF_TRX_MODE);	// rx disable
+	write_reg8 (0x800f02, RF_TRX_OFF);	    // reset tx/rx state machine
+}
+
+#[no_mangle]
+extern "C" fn rf_set_ble_channel(mut chn: u8){
+    write_reg8(0x40d, chn);
+
+    let mut gain = 0;
+    let mut intgn = 0u16;
+	if chn < 11 {
+        gain = (chn + 2) * 2;
+        intgn = gain as u16 + 2400;
+    }
+    else if chn < 37 {
+        gain = (chn + 3) * 2;
+        intgn = gain as u16 + 2400;
+    }
+    else if chn == 37 {
+        gain = 2;
+        intgn = 2402;
+    }
+    else if chn == 38 {
+        gain = 0x1a;
+        intgn = 2426;
+    }
+    else if chn == 39 {
+        gain = 0x50;
+        intgn = 2480;
+    }
+    else if chn < 51 {
+        gain = chn * 2;
+        intgn = gain as u16 + 2400;
+    }
+    else {
+        if chn > 61 {
+            gain = 0x50;
+            intgn = 2480;
+        }
+        else {
+            gain = (chn - 61) * 2;
+            intgn = gain as u16 + 2400;
+        }
+    }
+
+    analog_write(6, 0);
+
+	/////////////////// turn on LDO and baseband PLL ////////////////
+	write_reg8 (0x800f16, 0x29);
+
+	write_reg8 (0x800428, RF_TRX_MODE);	    // rx disable
+	write_reg8 (0x800f02, RF_TRX_OFF);	// reset tx/rx state machine
+
+	//auto tx
+	write_reg16 (0x8004d6, intgn);	// {intg_N}
+	// write_reg32 (0x8004d0, (fre - 2) * 58254 + 1125);	// {intg_N, frac}
+
+	rf_set_tp_gain (gain);
+}
+
+fn rf_set_tp_gain(gain: u8)
+{
+    unsafe { analog_write(0x93, rf_tp_base as u8 - ((gain as u32 * rf_tp_gain + 0x80) >> 8) as u8); }
+}
+
+#[no_mangle]
+extern "C" fn rf_start_stx2rx (addr: u32, tick: u32)
+{
+	//write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
+	write_reg32(0x800f18, tick);						        // Setting schedule trigger time
+    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
+	write_reg8 (0x800f00, 0x87);						        // Set mode
+	write_reg16 (0x80050c, addr as u16);
+
+    unsafe { FtoRX = true; }
+}
+
+#[no_mangle]
+extern "C" fn rf_start_brx (addr: u32, tick: u32)
+{
+    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
+    write_reg32(0x800f28, 0xffffffff);					        // ?
+    write_reg32(0x800f18, tick);						        // Setting schedule trigger time
+    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
+    write_reg8 (0x800f00, 0x82);						        // Set mode
+    write_reg16 (0x80050c, addr as u16);
 }

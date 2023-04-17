@@ -12,7 +12,7 @@ use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
-use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_init;
+use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason};
@@ -124,7 +124,7 @@ fn light_init_default() {
     set_p_adv_rsp_data(get_adv_rsp_pri_data());
 
     _rf_link_slave_pairing_enable(1);
-    _rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
+    rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
     _rf_link_slave_set_buffer(get_buff_response().as_mut_ptr(), 48);
     _rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 

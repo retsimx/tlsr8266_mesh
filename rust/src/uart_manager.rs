@@ -15,7 +15,18 @@ use crate::sdk::light::{_mesh_send_command, app_cmd_value_t, get_security_enable
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-pub_mut!(pkt_user_cmd, rf_packet_att_cmd_t);
+pub_mut!(pkt_user_cmd, rf_packet_att_cmd_t); //
+// , rf_packet_att_cmd_t {
+//     dma_len: 0x27,
+//     _type: 2,
+//     rf_len: 0x25,
+//     l2capLen: 0xCCDD,
+//     chanId: 0,
+//     opcode: 0,
+//     handle: 0,
+//     handle1: 0,
+//     value: [0; 30]
+// });
 
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message

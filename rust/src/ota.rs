@@ -135,7 +135,7 @@ impl OtaManager {
     pub fn mesh_ota_master_100_flag_check(&self) {
         let val = analog_read(REGA_LIGHT_OFF);
         if val & RecoverStatus::MeshOtaMaster100 as u8 != 0 {
-            set_mesh_ota_master_100_flag(1);
+            set_mesh_ota_master_100_flag(true);
             analog_write(
                 REGA_LIGHT_OFF,
                 val & !(RecoverStatus::MeshOtaMaster100 as u8),

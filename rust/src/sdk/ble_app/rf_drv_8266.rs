@@ -389,7 +389,7 @@ pub fn rf_stop_trx() {
     write_reg8(0x800f00, 0x80);            // stop
 }
 
-pub_mut!(light_rx_wptr, u32);
+pub_mut!(light_rx_wptr, u32); //, 0);
 pub unsafe fn blc_ll_initBasicMCU()
 {
     write_reg16(0xf0a, 700);
@@ -424,20 +424,57 @@ pub unsafe fn setSppOtaWriteCB(func: fn(data: *const rf_packet_att_write_t) -> b
     (*gAttributes.offset(24)).w = Some(func);
 }
 
-pub_mut!(p_st_handler, u32);
-pub_mut!(irq_mask_save, u32);
-pub_mut!(slave_link_state, u32);
-pub_mut!(slave_listen_interval, u32);
-pub_mut!(slave_connected_tick, u32);
-pub_mut!(slave_adv_enable, bool);
-pub_mut!(mac_id, [u8; 6]);
+pub_mut!(p_st_handler, u32); //, 0);
+pub_mut!(irq_mask_save, u32); //, 0);
+pub_mut!(slave_link_state, u32); //, 0);
+pub_mut!(slave_listen_interval, u32); //, 0);
+pub_mut!(slave_connected_tick, u32); //, 0);
+pub_mut!(slave_adv_enable, bool); //, false);
+pub_mut!(slave_connection_enable, bool); //, false);
+pub_mut!(mac_id, [u8; 6]); //, [0; 6]);
 pub_mut!(pkt_adv, rf_packet_adv_ind_module_t);
+//, rf_packet_adv_ind_module_t {
+//     dma_len: 0x27,
+//     _type: 0,
+//     rf_len: 0x25,
+//     advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+//     data: [0; 31]
+// });
 pub_mut!(pkt_scan_rsp, rf_packet_scan_rsp_t);
+//, rf_packet_scan_rsp_t {
+//     dma_len: 0x27,
+//     _type: 0x4,
+//     rf_len: 0x25,
+//     advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+//     data: [0; 31]
+// });
 pub_mut!(pkt_light_data, rf_packet_att_cmd_t);
+//, rf_packet_att_cmd_t {
+//     dma_len: 0x27,
+//     _type: 2,
+//     rf_len: 0x25,
+//     l2capLen: 0xCCDD,
+//     chanId: 0,
+//     opcode: 0,
+//     handle: 0,
+//     handle1: 0,
+//     value: [0; 30]
+// });
 pub_mut!(pkt_light_status, rf_packet_att_cmd_t);
-pub_mut!(advData, [u8; 3]);
-pub_mut!(user_data_len, u8);
-pub_mut!(user_data, [u8; 16]);
+//, rf_packet_att_cmd_t {
+//     dma_len: 0x27,
+//     _type: 2,
+//     rf_len: 0x25,
+//     l2capLen: 0x21,
+//     chanId: 0,
+//     opcode: 0,
+//     handle: 0,
+//     handle1: 0,
+//     value: [0; 30]
+// });
+pub_mut!(advData, [u8; 3]); //, [2, 1, 5]);
+pub_mut!(user_data_len, u8, 0);
+pub_mut!(user_data, [u8; 16], [0; 16]);
 
 #[no_mangle]
 extern "C" {

@@ -340,3 +340,65 @@ macro_rules! no_mangle_fn {
         }
     };
 }
+
+// #![feature(
+// const_fn,
+// const_fn_union,
+// untagged_unions,
+// const_raw_ptr_deref
+// )]
+
+pub const unsafe fn transmute<From, To>(from: From) -> To {
+    union Transmute<From, To> {
+        from: core::mem::ManuallyDrop<From>,
+        to: core::mem::ManuallyDrop<To>,
+    }
+
+    core::mem::ManuallyDrop::into_inner(Transmute { from: core::mem::ManuallyDrop::new(from) }.to)
+}
+
+pub const unsafe fn concat<First, Second, Out>(a: &[u8], b: &[u8]) -> Out
+    where
+        First: Copy,
+        Second: Copy,
+        Out: Copy,
+{
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct Both<A, B>(A, B);
+
+    let arr: Both<First, Second> = Both(
+        *transmute::<_, *const First>(a.as_ptr()),
+        *transmute::<_, *const Second>(b.as_ptr()),
+    );
+
+    transmute(arr)
+}
+
+#[macro_export]
+macro_rules! const_concat {
+    () => {
+        ""
+    };
+    ($a:expr) => {
+        $a
+    };
+    ($a:expr, $b:expr) => {{
+        let bytes: [u8; 16] = unsafe {
+            crate::sdk::common::macros::concat::<
+                [u8; $a.len()],
+                [u8; $b.len()],
+                [u8; $a.len() + $b.len()],
+            >($a, $b)
+        };
+
+        unsafe { crate::sdk::common::macros::transmute::<_, [u8; 16]>(bytes) }
+    }};
+    ($a:expr, $($rest:expr),*) => {{
+        const TAIL: &str = const_concat!($($rest),*);
+        const_concat!($a, TAIL)
+    }};
+    ($a:expr, $($rest:expr),*,) => {
+        const_concat!($a, $($rest),*)
+    };
+}

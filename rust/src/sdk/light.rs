@@ -2,28 +2,15 @@
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use core::mem;
 use core::mem::{size_of, size_of_val, MaybeUninit};
-use core::ptr::null;
-use crate::{no_mangle_fn, no_mangle_fn_def};
+use core::ptr::{null, null_mut};
+use crate::{no_mangle_fn, no_mangle_fn_def, const_concat};
 use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-no_mangle_fn!(light_set_tick_per_us, tick: u32);
-
 no_mangle_fn!(mesh_get_fw_version);
 
 no_mangle_fn!(register_mesh_ota_master_ui, p: fn(*const u8));
-
-no_mangle_fn!(
-    setSppUUID,
-    p_service_uuid: *const u8,
-    p_data_s2c_uuid: *const u8,
-    p_data_c2s_uuid: *const u8,
-    p_data_ota_uuid: *const u8,
-    p_data_pair_uuid: *const u8
-);
-
-no_mangle_fn!(vendor_id_init, vendor_id: u16);
 
 no_mangle_fn!(is_receive_ota_window, bool);
 no_mangle_fn!(rf_link_slave_proc);
@@ -85,16 +72,17 @@ no_mangle_fn!(
 
 no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
 
-pub_mut!(pair_config_valid_flag, u8);
-pub_mut!(pair_config_mesh_name, [u8; 17]);
-pub_mut!(pair_config_mesh_pwd, [u8; 17]);
-pub_mut!(pair_config_mesh_ltk, [u8; 17]);
+pub_mut!(pair_config_valid_flag, u8); //, 0xFA);
+// todo, these might be busted entirely
+pub_mut!(pair_config_mesh_name, [u8; 16]); //, const_concat!(b"telink_mesh1", &[0, 0, 0, 0]));
+pub_mut!(pair_config_mesh_pwd, [u8; 16]); //, const_concat!(b"123", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+pub_mut!(pair_config_mesh_ltk, [u8; 16]); //, [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf]);
 
-pub_mut!(p_adv_pri_data, *const ll_adv_private_t);
-pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t);
+pub_mut!(p_adv_pri_data, *const ll_adv_private_t); //, null());
+pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t); //, null_mut());
 pub_mut!(adv_private_data_len, u8, 0);
 
-pub_mut!(online_status_timeout, u32);
+pub_mut!(online_status_timeout, u32); //, 0xBB8);
 
 pub_mut!(security_enable, bool, false);
 pub_mut!(not_need_login, bool, false);
@@ -103,24 +91,22 @@ pub_mut!(pair_sk, [u8; 16], [0; 16]);
 pub_mut!(pair_sk_copy, [u8; 16], [0; 16]);
 pub_mut!(slave_first_connected_tick, u32);
 
-pub_mut!(device_address, u16);
+pub_mut!(device_address, u16); //, 0);
 pub_mut!(device_node_sn, u8);
 pub_mut!(dev_grp_next_pos, u16, 0);
 pub_mut!(max_relay_num, u8);
 
-pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]);
+pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]); //, [0; MAX_GROUP_NUM as usize]);
 
-pub_mut!(slave_p_mac, *const u8);
+pub_mut!(slave_p_mac, *const u8, null());
 
 pub_mut!(adr_flash_cfg_idx, i32, 0);
-pub_mut!(sw_no_pair, bool);
+pub_mut!(sw_no_pair, bool); //, false);
 
-pub_mut!(slave_link_connected, bool);
+pub_mut!(slave_link_connected, bool); //, false);
 
-pub_mut!(pkt_light_notify, rf_packet_att_cmd_t);
-
-pub_mut!(slave_read_status_busy, bool);
-pub_mut!(rf_slave_ota_busy, bool);
+pub_mut!(slave_read_status_busy, bool); //, false);
+pub_mut!(rf_slave_ota_busy, bool); //, false);
 
 pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
 pub_mut!(pair_ac, u32, 0);
@@ -132,25 +118,25 @@ pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_org, [u8; 16], [0; 16]);
 
 pub_mut!(cur_ota_flash_addr, u32);
-pub_mut!(mesh_ota_master_100_flag, u8);
-pub_mut!(rf_slave_ota_finished_flag, OtaState);
+pub_mut!(mesh_ota_master_100_flag, bool); //, false);
+pub_mut!(rf_slave_ota_finished_flag, OtaState); //, OtaState::CONTINUE);
 pub_mut!(rf_slave_ota_terminate_flag, bool);
 pub_mut!(app_ota_hci_type, APP_OTA_HCI_TYPE);
-pub_mut!(mesh_node_max, u8);
+pub_mut!(mesh_node_max, u8, 0);
 
 pub_mut!(rf_slave_ota_timeout_def_s, u16);
 pub_mut!(rf_slave_ota_timeout_s, u16);
 pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 
-pub_mut!(tick_per_us, u32);
+pub_mut!(tick_per_us, u32); //, 0x20);
 
 pub_mut!(gateway_en, bool);
 pub_mut!(gateway_security, bool);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
-pub_mut!(enc_disable, bool);
+pub_mut!(enc_disable, bool); //, false);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);

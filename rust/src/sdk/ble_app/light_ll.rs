@@ -1,14 +1,16 @@
 use core::mem::size_of;
 use core::ops::Deref;
-use core::ptr::{addr_of, slice_from_raw_parts};
+use core::ptr::{addr_of, null, null_mut, slice_from_raw_parts};
 use crate::{no_mangle_fn, pub_mut};
 use crate::common::rf_update_conn_para;
 use crate::main_light::{irq_timer0, irq_timer1};
-use crate::sdk::ble_app::rf_drv_8266::rf_stop_trx;
-use crate::sdk::light::{_rf_link_add_tx_packet, _rf_link_slave_connect, _rf_link_slave_data, get_device_address_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_slave_p_mac, get_tick_per_us, ll_adv_rsp_private_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_slave_link_connected};
+use crate::sdk::ble_app::rf_drv_8266::{rf_stop_trx, set_slave_adv_enable, set_slave_connection_enable};
+use crate::sdk::light::{rf_packet_att_cmd_t, _rf_link_add_tx_packet, _rf_link_slave_connect, _rf_link_slave_data, get_device_address_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_slave_p_mac, get_tick_per_us, ll_adv_rsp_private_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_slave_link_connected, set_tick_per_us};
 use crate::sdk::mcu::clock::clock_time;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_RF_IRQ_MASK, read_reg_irq_src, read_reg_rf_irq_status, read_reg_rf_rx_status, read_reg_system_tick_irq, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma3_addr, write_reg_irq_src, write_reg_rf_irq_status, write_reg_system_tick_irq};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
+
+
 no_mangle_fn!(rf_link_timing_adjust, time: u32);
 pub_mut!(slave_timing_update, u32);
 pub_mut!(slave_instant_next, u16);
@@ -21,6 +23,36 @@ pub_mut!(ble_conn_interval, u32);
 pub_mut!(ble_conn_offset, u32);
 pub_mut!(slave_ll_rsp, u32);
 pub_mut!(add_tx_packet_rsp_failed, u32, 0);
+pub_mut!(T_scan_rsp_intvl, u32); //, 0x92);
+pub_mut!(p_slave_status_buffer, *mut [u32; 9]); //, null_mut());
+pub_mut!(slave_status_buffer_num, u8); //, 0);
+pub_mut!(bridge_max_cnt, u32); //, 8);
+pub_mut!(g_vendor_id, u16); //, 0x211);
+
+pub_mut!(pkt_light_notify, rf_packet_att_cmd_t);
+//, rf_packet_att_cmd_t {
+//     dma_len: 0x1D,
+//     _type: 2,
+//     rf_len: 0x1B,
+//     l2capLen: 0x17,
+//     chanId: 4,
+//     opcode: 0x1B,
+//     handle: 0x12,
+//     handle1: 0,
+//     value: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xea, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+// });
+pub_mut!(pkt_light_report, rf_packet_att_cmd_t);
+//, rf_packet_att_cmd_t {
+//     dma_len: 0x1D,
+//     _type: 2,
+//     rf_len: 0x1B,
+//     l2capLen: 0x17,
+//     chanId: 4,
+//     opcode: 0x1B,
+//     handle: 0x12,
+//     handle1: 0,
+//     value: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+// });
 
 no_mangle_fn!(l2cap_att_handler, u32, packet: *const rf_packet_ll_data_t);
 
@@ -268,3 +300,46 @@ pub unsafe fn irq_light_slave_handler() {
 //
 // // irq_light_slave_rx
 
+pub fn light_set_tick_per_us(ticks: u32)
+{
+    set_tick_per_us(ticks);
+    if ticks == 0x10 {
+        set_T_scan_rsp_intvl(0);
+    } else if ticks == 0x20 || ticks != 0x30 {
+        set_T_scan_rsp_intvl(0x92);
+    } else {
+        set_T_scan_rsp_intvl(0x93);
+    }
+}
+
+pub fn rf_link_slave_pairing_enable(enable: bool)
+{
+    set_slave_connection_enable(enable);
+    set_slave_adv_enable(enable);
+}
+
+pub fn rf_link_slave_set_buffer(addr: *mut [u32; 9], len: u8)
+{
+    set_p_slave_status_buffer(addr);
+    if addr == null_mut() {
+        set_slave_status_buffer_num(0);
+    } else {
+        set_slave_status_buffer_num(len);
+    }
+}
+
+pub fn rf_link_set_max_bridge(count: u32)
+{
+    set_bridge_max_cnt(count);
+}
+
+pub fn vendor_id_init(vendor_id: u16)
+{
+    (*get_pkt_light_report()).value[8] = vendor_id as u8;
+    (*get_pkt_light_notify()).value[8] = vendor_id as u8;
+
+    (*get_pkt_light_report()).value[9] = (vendor_id >> 8) as u8;
+    (*get_pkt_light_notify()).value[9] = (vendor_id >> 8) as u8;
+
+    set_g_vendor_id(vendor_id);
+}

@@ -11,7 +11,8 @@ use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
-use crate::sdk::ble_app::light_ll::irq_light_slave_handler;
+use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
+use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, light_set_tick_per_us, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -98,7 +99,7 @@ fn light_init_default() {
         });
     }
 
-    _light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
+    light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
     get_pair_config_mesh_name().iter_mut().for_each(|m| *m = 0);
     let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);
@@ -111,7 +112,7 @@ fn light_init_default() {
     get_pair_config_mesh_ltk().iter_mut().for_each(|m| *m = 0);
     get_pair_config_mesh_ltk()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
-    _setSppUUID(
+    setSppUUID(
         TELINK_SPP_UUID_SERVICE.as_ptr(),
         TELINK_SPP_DATA_SERVER2CLIENT.as_ptr(),
         TELINK_SPP_DATA_CLIENT2SERVER.as_ptr(),
@@ -123,12 +124,12 @@ fn light_init_default() {
     set_adv_private_data_len(size_of::<ll_adv_private_t>() as u8);
     set_p_adv_rsp_data(get_adv_rsp_pri_data());
 
-    _rf_link_slave_pairing_enable(1);
+    rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
-    _rf_link_slave_set_buffer(get_buff_response().as_mut_ptr(), 48);
-    _rf_link_set_max_bridge(BRIDGE_MAX_CNT);
+    rf_link_slave_set_buffer(get_buff_response().as_mut_ptr(), 48);
+    rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 
-    _vendor_id_init(VENDOR_ID);
+    vendor_id_init(VENDOR_ID);
 
     usb_dp_pullup_en(true);
 

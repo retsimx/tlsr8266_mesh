@@ -541,12 +541,13 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
     };
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn setSppUUID(service_uuid: *const u8, server2client_uuid: *const u8, client2service_uuid: *const u8, ota_uuid: *const u8, pair_uuid: *const u8)
+pub fn setSppUUID(service_uuid: *const u8, server2client_uuid: *const u8, client2service_uuid: *const u8, ota_uuid: *const u8, pair_uuid: *const u8)
 {
-    (*get_TelinkSppServiceUUID()).copy_from_slice(slice::from_raw_parts(service_uuid, 0x10));
-    (*get_TelinkSppDataServer2ClientUUID()).copy_from_slice(slice::from_raw_parts(server2client_uuid, 0x10));
-    (*get_TelinkSppDataClient2ServiceUUID()).copy_from_slice(slice::from_raw_parts(client2service_uuid, 0x10));
-    (*get_TelinkSppDataOtaUUID()).copy_from_slice(slice::from_raw_parts(ota_uuid, 0x10));
-    (*get_TelinkSppDataPairUUID()).copy_from_slice(slice::from_raw_parts(pair_uuid, 0x10));
+    unsafe {
+        (*get_TelinkSppServiceUUID()).copy_from_slice(slice::from_raw_parts(service_uuid, 0x10));
+        (*get_TelinkSppDataServer2ClientUUID()).copy_from_slice(slice::from_raw_parts(server2client_uuid, 0x10));
+        (*get_TelinkSppDataClient2ServiceUUID()).copy_from_slice(slice::from_raw_parts(client2service_uuid, 0x10));
+        (*get_TelinkSppDataOtaUUID()).copy_from_slice(slice::from_raw_parts(ota_uuid, 0x10));
+        (*get_TelinkSppDataPairUUID()).copy_from_slice(slice::from_raw_parts(pair_uuid, 0x10));
+    }
 }

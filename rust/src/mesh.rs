@@ -81,7 +81,7 @@ pub enum GatewayStatus {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct mesh_node_st_val_t {
     pub dev_adr: u8,
     // don't change include type
@@ -91,7 +91,7 @@ pub struct mesh_node_st_val_t {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct mesh_node_st_t {
     pub tick: u16,
     // don't change include type

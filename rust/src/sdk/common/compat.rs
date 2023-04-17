@@ -88,7 +88,7 @@ pub const TCMD_WRITE: u8 = 0x3;
 pub const TCMD_WAIT: u8 = 0x7;
 pub const TCMD_WAREG: u8 = 0x8;
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct TBLCMDSET {
     pub adr: u16,
     pub dat: u8,

@@ -412,7 +412,7 @@ pub struct rf_packet_adv_ind_module_t {
 	pub data: [u8; 31]		// 12	//0-31 byte
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct ll_adv_private_t {
     pub ManufactureID: u16,
     // must vendor id to follow spec
@@ -420,7 +420,7 @@ pub struct ll_adv_private_t {
     pub MacAddress: u32, // low 4 byte
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct ll_adv_rsp_private_t {
     pub ManufactureID: u16,             // 0
     // must vendor id to follow spec
@@ -433,7 +433,7 @@ pub struct ll_adv_rsp_private_t {
     pub rsv: [u8; 16],                  // 13
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct rf_packet_att_value_t {
     pub sno: [u8; 3],
     pub src: [u8; 2],
@@ -699,14 +699,14 @@ pub struct mesh_ota_dev_info_t {
     pub rsv: [u8; 4],
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct mesh_ota_pkt_start_command_t {
     pub version: [u8; 4],
     pub dev_info: mesh_ota_dev_info_t,
 } // don't modify element in it
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct status_record_t {
     adr: [u8; 1],
     // don't modify, use internal
@@ -714,7 +714,7 @@ pub struct status_record_t {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct rc_pkt_buf_t {
     pub op: u8,
     pub sno: [u8; 3],

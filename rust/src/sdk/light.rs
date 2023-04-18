@@ -10,8 +10,6 @@ use crate::mesh::mesh_node_st_val_t;
 
 no_mangle_fn!(mesh_get_fw_version);
 
-no_mangle_fn!(register_mesh_ota_master_ui, p: fn(*const u8));
-
 no_mangle_fn!(is_receive_ota_window, bool);
 no_mangle_fn!(rf_link_slave_proc);
 no_mangle_fn!(is_add_packet_buf_ready, bool);
@@ -57,9 +55,6 @@ no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
 no_mangle_fn!(get_fw_version, ver: *const u8);
 
 no_mangle_fn!(irq_light_slave_handler);
-
-// param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv);
-no_mangle_fn!(ll_device_status_update, st_val_par: *const u8, len: u8);
 
 no_mangle_fn!(
     setup_ble_parameter_start,
@@ -130,6 +125,7 @@ pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 
 pub_mut!(tick_per_us, u32); //, 0x20);
+pub_mut!(loop_interval_us, u16); //, 0x2710);
 
 pub_mut!(gateway_en, bool);
 pub_mut!(gateway_security, bool);
@@ -143,6 +139,11 @@ pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, ne
 
 pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
 pub_mut!(p_vendor_mesh_node_rcv_rsp, Option<fn(p: *const rf_packet_att_value_t)>);
+
+pub_mut!(sync_time_enable, bool); //, false);
+pub_mut!(synced_flag, bool); //, false);
+pub_mut!(mesh_ota_master_ui_sending, Option<fn(*const u8)>); //, Option::None);
+
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
@@ -937,7 +938,7 @@ pub_mut!(
     u16,
     size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
 );
-pub_mut!(SW_Low_Power, u8, 0);
+pub_mut!(SW_Low_Power, bool, false);
 pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
 pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
 const RC_PKT_BUF_MAX: u8 = 2;

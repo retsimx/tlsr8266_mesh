@@ -1,15 +1,16 @@
 use core::mem::size_of;
-use core::ops::Deref;
 use core::ptr::{addr_of, null, null_mut, slice_from_raw_parts};
-use crate::{no_mangle_fn, pub_mut};
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::{blinken, no_mangle_fn, pub_mut};
 use crate::common::rf_update_conn_para;
 use crate::main_light::{irq_timer0, irq_timer1};
-use crate::sdk::ble_app::rf_drv_8266::{rf_stop_trx, set_slave_adv_enable, set_slave_connection_enable};
-use crate::sdk::light::{rf_packet_att_cmd_t, _rf_link_add_tx_packet, _rf_link_slave_connect, _rf_link_slave_data, get_device_address_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_slave_p_mac, get_tick_per_us, ll_adv_rsp_private_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_slave_link_connected, set_tick_per_us};
+use crate::mesh::wrappers::{get_mesh_node_mask, get_mesh_node_st};
+use crate::sdk::ble_app::rf_drv_8266::{get_slave_link_state, rf_stop_trx, set_slave_adv_enable, set_slave_connection_enable};
+use crate::sdk::light::{_rf_link_add_tx_packet, _rf_link_slave_connect, _rf_link_slave_data, get_device_address_addr, get_gateway_en, get_loop_interval_us, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_slave_p_mac, get_SW_Low_Power, get_sync_time_enable, get_synced_flag, get_tick_per_us, ll_adv_rsp_private_t, rf_packet_att_cmd_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_mesh_ota_master_ui_sending, set_slave_link_connected, set_tick_per_us};
 use crate::sdk::mcu::clock::clock_time;
-use crate::sdk::mcu::register::{FLD_IRQ, FLD_RF_IRQ_MASK, read_reg_irq_src, read_reg_rf_irq_status, read_reg_rf_rx_status, read_reg_system_tick_irq, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma3_addr, write_reg_irq_src, write_reg_rf_irq_status, write_reg_system_tick_irq};
+use crate::sdk::mcu::register::{FLD_IRQ, FLD_RF_IRQ_MASK, read_reg_irq_src, read_reg_rf_irq_status, read_reg_rf_rx_status, read_reg_system_tick, read_reg_system_tick_irq, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma3_addr, write_reg_irq_src, write_reg_rf_irq_status, write_reg_system_tick_irq};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
-
 
 no_mangle_fn!(rf_link_timing_adjust, time: u32);
 pub_mut!(slave_timing_update, u32);
@@ -342,4 +343,50 @@ pub fn vendor_id_init(vendor_id: u16)
     (*get_pkt_light_notify()).value[9] = (vendor_id >> 8) as u8;
 
     set_g_vendor_id(vendor_id);
+}
+
+// param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv);
+pub fn ll_device_status_update(val_par: &[u8])
+{
+    (*get_mesh_node_st())[0].val.par.copy_from_slice(val_par);
+    if *get_sync_time_enable() != false {
+        if *get_synced_flag() == false {
+            (*get_mesh_node_st())[0].val.par[0] = (*get_mesh_node_st())[0].val.par[0] | 0x7f;
+        } else {
+            (*get_mesh_node_st())[0].val.par[0] = (*get_mesh_node_st())[0].val.par[0] & 0x7f;
+        }
+    }
+    (*get_mesh_node_mask())[0] = (*get_mesh_node_mask())[0] | 1;
+    (*get_mesh_node_st())[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
+}
+
+pub fn register_mesh_ota_master_ui(cb: fn(*const u8))
+{
+    set_mesh_ota_master_ui_sending(Some(cb));
+}
+
+pub fn is_receive_ota_window() -> bool
+{
+    static TICK_LOOP: AtomicU32 = AtomicU32::new(0);
+
+    if *get_SW_Low_Power() == false {
+        if *get_loop_interval_us() != 0 {
+            if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= *get_loop_interval_us() as u32 * *get_tick_per_us() {
+                return true;
+            }
+            TICK_LOOP.store(read_reg_system_tick(), Ordering::Relaxed);
+        }
+        if *get_slave_link_state() == 1 && *get_tick_per_us() == 0x10 {
+            return true;
+        }
+    }
+
+    let mut result = false;
+    if *get_rf_slave_ota_busy() != false {
+        if *get_slave_link_state() == 7 {
+            result = *get_gateway_en() == false && 6 < *get_slave_link_state();
+        }
+    }
+
+    return result;
 }

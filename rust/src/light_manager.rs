@@ -2,7 +2,7 @@ use core::cmp::{min};
 use core::mem::size_of;
 use core::ptr::addr_of;
 use embassy_executor::Spawner;
-use crate::sdk::light::{_ll_device_status_update, LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
+use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
 use crate::{app};
@@ -17,6 +17,7 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
 use fixed::types::{I16F16, U16F16};
 use const_format::formatcp;
+use crate::sdk::ble_app::light_ll::ll_device_status_update;
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -389,6 +390,6 @@ impl LightManager {
         st_val_par[0] = on;
         st_val_par[1] = 0xff;
 
-        _ll_device_status_update(st_val_par.as_ptr(), st_val_par.len() as u8);
+        ll_device_status_update(&st_val_par);
     }
 }

@@ -31,7 +31,7 @@ pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
 pub unsafe extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
 {
     unsafe {
-        if *get_security_enable() != false && (*ps).chanId == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
+        if *get_security_enable() && (*ps).chanId == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
             let tick = read_reg_system_tick();
             (*ps).app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
 
@@ -144,25 +144,25 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
                 }
 
                 if (*ps).chanId == 0xffff {
-                    result = aes_att_encryption_packet(
+                    aes_att_encryption_packet(
                         ltk.as_slice(),
                         slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
                         slice::from_raw_parts_mut((ps as u32 + 0x29) as *mut u8, 2),
                         addr_of!((*ps).app_cmd_v.sno) as *mut u8,
                         0x1c,
                     );
+
+                    result = true;
                 } else {
-                    result = aes_att_encryption_packet(
+                    aes_att_encryption_packet(
                         ltk.as_slice(),
                         slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
                         slice::from_raw_parts_mut((addr_of!((*ps).app_cmd_v.sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
-                        addr_of!((*ps).app_cmd_v.sno) as *mut u8,
+                        addr_of!((*ps).app_cmd_v.op) as *mut u8,
                         (*ps).rf_len - 0x12,
                     );
 
-                    if !result {
-                        uprintln!("Result {}", result);
-                    }
+                    result = true;
                 }
             }
         }

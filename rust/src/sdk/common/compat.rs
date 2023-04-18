@@ -7,6 +7,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
 use core::ptr::{addr_of, addr_of_mut};
+use critical_section::RawRestoreState;
 use heapless::String;
 use crate::{app};
 use crate::config::{get_flash_adr_panic_info, PANIC_VALID_FLAG};
@@ -22,14 +23,17 @@ extern "C" {
     fn memcmp(s1: *const u8, s2: *const u8, count: usize) -> i32;
 }
 
-#[no_mangle]
-fn _critical_section_1_0_acquire() -> u8 {
-    irq_disable()
-}
+struct TlsrCriticalSection;
+critical_section::set_impl!(TlsrCriticalSection);
 
-#[no_mangle]
-fn _critical_section_1_0_release(state: u8) {
-    unsafe { irq_restore(state); }
+unsafe impl critical_section::Impl for TlsrCriticalSection {
+    unsafe fn acquire() -> RawRestoreState {
+        irq_disable()
+    }
+
+    unsafe fn release(state: RawRestoreState) {
+        irq_restore(state)
+    }
 }
 
 #[no_mangle] // required by light_ll

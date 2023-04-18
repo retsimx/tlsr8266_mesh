@@ -12,7 +12,7 @@ use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, light_set_tick_per_us, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, register_mesh_ota_master_ui, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -167,7 +167,7 @@ pub fn user_init() {
     app().light_manager.device_status_update();
     mesh_security_enable(true);
 
-    _register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
+    register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
 
 fn proc_led() {
@@ -245,7 +245,7 @@ fn light_user_func() {
 static mut NOTIFY_QUEUE: Deque<[u8; 13], 2> = Deque::new();
 
 pub fn main_loop() {
-    if _is_receive_ota_window() {
+    if !is_receive_ota_window() {
         return;
     }
 

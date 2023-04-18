@@ -56,15 +56,6 @@ no_mangle_fn!(get_fw_version, ver: *const u8);
 
 no_mangle_fn!(irq_light_slave_handler);
 
-no_mangle_fn!(
-    setup_ble_parameter_start,
-    u32,
-    delay: u16,
-    interval_min: u16,
-    interval_max: u16,
-    timeout: u16
-);
-
 no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
 
 pub_mut!(pair_config_valid_flag, u8); //, 0xFA);
@@ -956,6 +947,17 @@ pub_mut!(
 pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
 pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
 pub_mut!(dev_address_next_pos, u16, 0);
+
+pub_mut!(need_update_connect_para, bool); //, false);
+pub_mut!(update_connect_para_delay_ms, u32); //, 0x3e8);
+
+pub_mut!(update_interval_user_max, u16); //, 0);
+pub_mut!(update_interval_user_min, u16); //, 0);
+pub_mut!(update_ble_par_success_flag, bool); //, false);
+pub_mut!(update_timeout_user, u16); //, 0);
+pub_mut!(interval_th, u8); //, 0x10);
+pub_mut!(update_interval_flag, u16); //, 0);
+pub_mut!(update_interval_time, u32); //, 0);
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

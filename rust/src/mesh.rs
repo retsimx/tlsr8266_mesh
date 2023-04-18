@@ -370,7 +370,7 @@ impl MeshManager {
         return cnt;
     }
 
-    fn mesh_pair_proc(&mut self) {
+    pub fn mesh_pair_proc(&mut self) {
         let mut dst_addr = 0xFFFF;
         let mut op_para: [u8; 16] = [0; 16];
 

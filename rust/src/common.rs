@@ -5,6 +5,7 @@ use crate::{app, pub_mut};
 use crate::config::*;
 use crate::main_light::get_max_mesh_name_len;
 use crate::mesh::wrappers::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en};
+use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
@@ -88,9 +89,9 @@ pub extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     timeout <= 6second
 */
 #[no_mangle] // required by light_ll
-extern "C" fn update_ble_parameter_cb() {
+pub extern "C" fn update_ble_parameter_cb() {
     if *get_conn_update_successed() == 0 {
-        _setup_ble_parameter_start(
+        setup_ble_parameter_start(
             1,
             CONN_PARA_DATA[0][0],
             CONN_PARA_DATA[0][1],
@@ -124,7 +125,7 @@ pub extern "C" fn rf_update_conn_para(p: *const u8) -> u8 {
                 if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
                     set_conn_update_cnt(0);
                 } else {
-                    _setup_ble_parameter_start(
+                    setup_ble_parameter_start(
                         1,
                         CONN_PARA_DATA[*get_conn_update_cnt() as usize][0],
                         CONN_PARA_DATA[*get_conn_update_cnt() as usize][1],

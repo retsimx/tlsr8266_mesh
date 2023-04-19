@@ -28,7 +28,7 @@ pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
+pub extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
 {
     unsafe {
         if *get_security_enable() && (*ps).chanId == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {

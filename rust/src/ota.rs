@@ -14,6 +14,7 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::{size_of_val, MaybeUninit};
 use core::ptr::addr_of;
 use crate::main_light::get_buff_response;
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet};
 use crate::sdk::light::*;
 use crate::sdk::pm::light_sw_reboot;
 
@@ -386,9 +387,9 @@ impl OtaManager {
         if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
             let mut reboot_flag = false;
             if 0 == self.terminate_cnt && *get_rf_slave_ota_terminate_flag() {
-                if _is_add_packet_buf_ready() {
+                if is_add_packet_buf_ready() {
                     self.terminate_cnt = 6;
-                    _rf_link_add_tx_packet(pkt_terminate.as_ptr());
+                    rf_link_add_tx_packet(pkt_terminate.as_ptr() as *const rf_packet_att_cmd_t);
                 }
             }
 

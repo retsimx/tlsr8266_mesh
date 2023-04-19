@@ -8,11 +8,6 @@ use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-no_mangle_fn!(mesh_get_fw_version);
-
-no_mangle_fn!(is_receive_ota_window, bool);
-no_mangle_fn!(is_add_packet_buf_ready, bool);
-no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8); // return value: 1 success,  0 faile)d
 no_mangle_fn!(rf_link_slave_read_status_stop);
 no_mangle_fn!(rf_link_data_callback, p: *const u8);
 no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
@@ -993,6 +988,10 @@ pub_mut!(app_cmd_time, u32); //, 0);
 pub_mut!(mesh_user_cmd_idx, u8); //, 0);
 pub_mut!(slave_tx_cmd_time, u32); //, 0);
 pub_mut!(lpn_retransmit_cnt, u8); //, 0);
+pub_mut!(gateway_tx_wptr, u8); //, 0);
+pub_mut!(gateway_tx_rptr, u8); //, 0);
+pub_mut!(blt_tx_wptr, u8); //, 0);
+pub_mut!(mesh_notify_enc_enable, u8); //, 0);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);

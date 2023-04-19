@@ -12,7 +12,7 @@ use crate::{app, BIT};
 use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::mesh::wrappers::*;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
-use crate::sdk::ble_app::light_ll::mesh_send_command;
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
@@ -262,8 +262,8 @@ impl MeshManager {
             pkt_notify.value[10..10 + p.len()].copy_from_slice(&p[0..p.len()]);
 
             let r = irq_disable();
-            if _is_add_packet_buf_ready() {
-                if _rf_link_add_tx_packet(addr_of!(pkt_notify) as *const u8) {
+            if is_add_packet_buf_ready() {
+                if rf_link_add_tx_packet(addr_of!(pkt_notify)) {
                     err = 0;
                 }
             }

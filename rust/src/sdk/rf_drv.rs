@@ -34,18 +34,6 @@ pub enum RF_POWER {
     RF_POWER_OFF = 16,
 }
 
-pub fn rf_set_ble_access_code(p: *const u8) {
-    unsafe {
-        write_reg32(
-            0x800408,
-            *p.offset(3) as u32
-                | (*p.offset(2) as u32) << 8
-                | (*p.offset(1) as u32) << 16
-                | (*p.offset(0) as u32) << 24,
-        );
-    }
-}
-
 pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
 {
     let mut iVar1 = 0;

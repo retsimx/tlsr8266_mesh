@@ -174,14 +174,14 @@ typedef struct{
 	u8	hop;				//sca(3)_hop(5)
 }rf_packet_ll_broadcast_t;
 
-typedef struct{
-	u32 dma_len;
-	u8	type;
-	u8  rf_len;
-	u16	l2capLen;
-	u16	chanId;
-	u16 src_tx;
-	u8 handle1; // for flag
+typedef struct {
+    u32 dma_len;
+    u8 type;
+    u8 rf_len;
+    u16 l2capLen;
+    u16 chanId;
+    u16 src_tx;
+    u8 handle1; // for flag
     u8 sno[3];
     u16 src_adr;
     u16 dst_adr;
@@ -192,7 +192,7 @@ typedef struct{
     u8 ttl;
     u8 internal_par2[4];
     u8 no_use[5];  // size must 48, when is set to be rf tx address.
-}mesh_pkt_t;
+} mesh_pkt_t;
 
 //rf_packet_att_write_t
 typedef struct{

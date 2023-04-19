@@ -48,15 +48,12 @@ no_mangle_fn!(
     p: *const u8,
     len: u8
 );
-no_mangle_fn!(mesh_send_user_command, u32);
 no_mangle_fn!(mesh_report_status_enable, mask: u8);
 no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
 
 no_mangle_fn!(get_fw_version, ver: *const u8);
 
 no_mangle_fn!(irq_light_slave_handler);
-
-no_mangle_fn!(mesh_send_command, p: *const u8, chn_idx: u32, retransmit_cnt: u32);
 
 pub_mut!(pair_config_valid_flag, u8); //, 0xFA);
 // todo, these might be busted entirely
@@ -126,6 +123,7 @@ pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 pub_mut!(enc_disable, bool); //, false);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
+// todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);
 
 pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
@@ -568,6 +566,28 @@ pub struct rf_packet_att_data_t {
     pub dat: [u8; 23],
 }
 
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct mesh_pkt_t {
+	pub dma_len: u32,
+	pub _type: u8,
+	pub rf_len: u8,
+	pub l2capLen: u16,
+	pub chanId: u16,
+	pub src_tx: u16,
+	pub handle1: u8, // for flag
+    pub sno: [u8; 3],
+    pub src_adr: u16,
+    pub dst_adr: u16,
+    pub op: u8,
+    pub vendor_id: u16,
+    pub par: [u8; 10],
+    pub internal_par1: [u8; 5],
+    pub ttl: u8,
+    pub internal_par2: [u8; 4],
+    pub no_use: [u8; 4]  // size must 48, when is set to be rf tx address.
+}
+
 #[repr(C, align(4))]
 pub struct rf_packet_att_mtu_t {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
@@ -730,7 +750,6 @@ pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
 pub_mut!(pair_config_pwd_encode_enable, bool, true);
 pub_mut!(auth_code, [u8; 4], [0x01, 0x02, 0x03, 0x04]);
 pub_mut!(auth_code_en, bool, false);
-pub_mut!(tx_packet_bridge_random_en, u8, 0);
 pub_mut!(ble_pair_st, u8, 0);
 pub_mut!(pair_enc_enable, bool, false);
 pub_mut!(pair_ivs, [u8; 8], [0; 8]);
@@ -864,7 +883,7 @@ pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
 pub_mut!(passive_en, u8, 0);
 
 #[no_mangle]
-extern "C" fn get_command_type(p_att_value: *const u8) -> CMD_TYPE {
+pub extern "C" fn get_command_type() -> CMD_TYPE {
     return CMD_TYPE::NORMAL;
 }
 
@@ -958,6 +977,36 @@ pub_mut!(update_timeout_user, u16); //, 0);
 pub_mut!(interval_th, u8); //, 0x10);
 pub_mut!(update_interval_flag, u16); //, 0);
 pub_mut!(update_interval_time, u32); //, 0);
+pub_mut!(tx_packet_bridge_random_en, bool, false);
+pub_mut!(tx_packet_bridge_delay_us, u32); //, 0);
+pub_mut!(tx_packet_bridge_tick, u32); //, 0);
+pub_mut!(online_status_comp, u8); //, 3);
+pub_mut!(slave_data_valid, u32); //, 0); // todo: Should be bool?
+pub_mut!(sw_flag, bool); //, false);
+pub_mut!(mesh_send_online_status_flag, bool); //, true);
+pub_mut!(send_self_online_status_cycle, u8); //, 0);
+pub_mut!(mesh_node_cur, u8); //, 1);
+pub_mut!(switch_rf_tx_once_time, u32); //, 0);
+pub_mut!(t_bridge_cmd, u32); //, 0);
+pub_mut!(st_brige_no, u32); //, 0);
+pub_mut!(slave_sno_sending, u32); //, 0);
+pub_mut!(app_cmd_time, u32); //, 0);
+pub_mut!(mesh_user_cmd_idx, u8); //, 0);
+pub_mut!(slave_tx_cmd_time, u32); //, 0);
+pub_mut!(lpn_retransmit_cnt, u8); //, 0);
+
+// todo: This is not the correct type for this. Figure this out sometime
+pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);
+//, rf_packet_adv_ind_module_t {
+//     dma_len: 0x27,
+//     _type: 2,
+//     rf_len: 0x25,
+//     advA: [0x21, 0x00, 0xff, 0xff, 0x00, 0x00],
+//     data: [0; 31]
+// });
+
+pub_mut!(pkt_mesh, mesh_pkt_t); // All fields are 0
+pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t); // All fields are 0
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

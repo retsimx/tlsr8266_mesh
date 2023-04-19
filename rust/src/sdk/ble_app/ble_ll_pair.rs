@@ -6,7 +6,7 @@ use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_
 use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
 use crate::mesh::wrappers::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
-use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_gateway_en, get_gateway_security, get_p_cb_pair_failed, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
+use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_gateway_en, get_gateway_security, get_p_cb_pair_failed, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, mesh_pkt_t, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool {
+pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     let mut ltk = [0u8; 16];
 
     if *get_security_enable() == false {
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> 
     } else {
         let mut breakit = false;
         if *get_mesh_pair_enable() == true {
-            if *get_pair_setting_flag() != PairState::PairSetted || (*ps).app_cmd_v.op & 0x3f == 9 {
+            if *get_pair_setting_flag() != PairState::PairSetted || (*ps).op & 0x3f == 9 {
                 ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
                 breakit = true;
             }
@@ -96,17 +96,17 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> 
     if (*ps).chanId as u16 == 0xffff {
         result = aes_att_decryption_packet(
             ltk.as_slice(),
-            slice::from_raw_parts((ps as u32 + 5) as *const u8, 8),
-            slice::from_raw_parts((ps as u32 + 0x29) as *const u8, 2),
-            (ps as u32 + 0xd) as *mut u8,
+            slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
+            slice::from_raw_parts(addr_of!((*ps).internal_par2[1]) as *const u8, 2),
+            addr_of!((*ps).sno) as *mut u8,
             0x1c,
         );
     } else {
         result = aes_att_decryption_packet(
             ltk.as_slice(),
-            slice::from_raw_parts((ps as u32 + 0xc) as *const u8, 8),
-            slice::from_raw_parts((ps as u32 + rf_len as u32 + 2) as *const u8, 4),
-            (ps as u32 + 0x14) as *mut u8,
+            slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
+            slice::from_raw_parts((addr_of!((*ps).sno) as u32 + (rf_len as u32 - 0xb)) as *const u8, 4),
+            addr_of!((*ps).op) as *mut u8,
             rf_len - 0x12,
         );
     }
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const rf_packet_ll_app_t) -> 
 }
 
 #[no_mangle]
-pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
+pub extern "C" fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
 {
     let mut result = true;
 
@@ -126,7 +126,7 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
             result = false;
             if *get_security_enable() {
                 if *get_sw_no_pair() {
-                    if *get_mesh_pair_enable() && (*get_pair_setting_flag() != PairState::PairSetted || (*ps).app_cmd_v.op & 0x3f == 9) {
+                    if *get_mesh_pair_enable() && (*get_pair_setting_flag() != PairState::PairSetted || (*ps).op & 0x3f == 9) {
                         ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
                     } else {
                         let mut index = 0;
@@ -147,8 +147,8 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
                     aes_att_encryption_packet(
                         ltk.as_slice(),
                         slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
-                        slice::from_raw_parts_mut((ps as u32 + 0x29) as *mut u8, 2),
-                        addr_of!((*ps).app_cmd_v.sno) as *mut u8,
+                        slice::from_raw_parts_mut(addr_of!((*ps).internal_par2[1]) as *mut u8, 2),
+                        addr_of!((*ps).sno) as *mut u8,
                         0x1c,
                     );
 
@@ -157,8 +157,8 @@ pub extern "C" fn pair_enc_packet_mesh(ps: *const rf_packet_ll_app_t) -> bool
                     aes_att_encryption_packet(
                         ltk.as_slice(),
                         slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
-                        slice::from_raw_parts_mut((addr_of!((*ps).app_cmd_v.sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
-                        addr_of!((*ps).app_cmd_v.op) as *mut u8,
+                        slice::from_raw_parts_mut((addr_of!((*ps).sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
+                        addr_of!((*ps).op) as *mut u8,
                         (*ps).rf_len - 0x12,
                     );
 

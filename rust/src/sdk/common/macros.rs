@@ -20,10 +20,10 @@ macro_rules! pub_mut {
             }
 
             #[allow(dead_code)]
-            pub fn [<get_ $name _addr>]() -> *const $typ {
+            pub fn [<get_ $name _addr>]() -> *mut $typ {
                 unsafe {
-                    use core::ptr::addr_of;
-                    return addr_of!($name);
+                    use core::ptr::addr_of_mut;
+                    return addr_of_mut!($name);
                 }
             }
         }
@@ -50,10 +50,10 @@ macro_rules! pub_mut {
             }
 
             #[allow(dead_code)]
-            pub fn [<get_ $name _addr>]() -> *const $typ {
+            pub fn [<get_ $name _addr>]() -> *mut $typ {
                 unsafe {
-                    use core::ptr::addr_of;
-                    return addr_of!($name);
+                    use core::ptr::addr_of_mut;
+                    return addr_of_mut!($name);
                 }
             }
         }
@@ -130,10 +130,10 @@ macro_rules! pub_mut_no_move {
             }
 
             #[allow(dead_code)]
-            pub fn [<get_ $name _addr>]() -> *const $typ {
+            pub fn [<get_ $name _addr>]() -> *mut $typ {
                 unsafe {
-                    use core::ptr::addr_of;
-                    return addr_of!($name);
+                    use core::ptr::addr_of_mut;
+                    return addr_of_mut!($name);
                 }
             }
         }

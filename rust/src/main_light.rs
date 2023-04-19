@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::convert::TryInto;
 use core::mem::size_of;
-use core::ptr::addr_of;
+use core::ptr::{addr_of, addr_of_mut};
 
 use fixed::types::I16F16;
 use heapless::Deque;

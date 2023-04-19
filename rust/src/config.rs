@@ -1,7 +1,6 @@
 use core::ffi::CStr;
 use crate::pub_mut;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
-use core::ptr::addr_of;
 // General stuff
 
 // 0~max_mesh_name_len bytes  (strlen(adv_data) + strlen(MESH_NAME) + sizeof(ll_adv_private_t))<=31

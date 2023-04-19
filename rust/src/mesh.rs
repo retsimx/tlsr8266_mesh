@@ -7,14 +7,15 @@ use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
-use crate::sdk::rf_drv::rf_set_ble_access_code;
 use core::ptr::addr_of;
 use crate::{app, BIT};
 use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::mesh::wrappers::*;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
+use crate::sdk::ble_app::light_ll::mesh_send_command;
+use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
-use crate::uart_manager::{get_pkt_user_cmd};
+use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -153,8 +154,8 @@ impl MeshManager {
         if *get_security_enable()
         {
             get_pkt_user_cmd()._type |= BIT!(7);
-            pair_enc_packet_mesh(addr_of!(*get_pkt_user_cmd()) as *const rf_packet_ll_app_t);
-            _mesh_send_command(addr_of!(*get_pkt_user_cmd()) as *const u8, 0xff, 0);
+            pair_enc_packet_mesh(get_pkt_user_cmd_addr() as *mut mesh_pkt_t);
+            mesh_send_command(get_pkt_user_cmd_addr(), 0xff, 0);
         }
     }
 
@@ -315,7 +316,7 @@ impl MeshManager {
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
         pair_save_key();
-        rf_set_ble_access_code(get_pair_ac_addr() as *const u8); // use new access code at once.
+        rf_set_ble_access_code(*get_pair_ac()); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
         write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16); // clear current rx in buffer

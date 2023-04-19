@@ -223,6 +223,8 @@ pub enum FHS_SEL {
     //	SEL_16M_OSC = 3,
 }
 
+regrw!(reg_mcu_wakeup_mask, 0x78, u32);
+
 //////  analog controls 0xb8 ///////
 regrw!(reg_ana_ctrl32, 0xb8, u32);
 regrw!(reg_ana_addr_data, 0xb8, u16);

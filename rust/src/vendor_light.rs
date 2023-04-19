@@ -2,7 +2,6 @@ use crate::config::VENDOR_ID;
 use crate::pub_mut_no_move;
 use crate::sdk::light::{get_slave_p_mac, ll_adv_private_t, ll_adv_rsp_private_t};
 use core::mem::size_of;
-use core::ptr::addr_of;
 use core::slice;
 use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
 

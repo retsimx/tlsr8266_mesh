@@ -432,6 +432,14 @@ pub_mut!(slave_connected_tick, u32); //, 0);
 pub_mut!(slave_adv_enable, bool); //, false);
 pub_mut!(slave_connection_enable, bool); //, false);
 pub_mut!(mac_id, [u8; 6]); //, [0; 6]);
+pub_mut!(pkt_ibeacon, rf_packet_adv_ind_module_t);
+//, rf_packet_adv_ind_module_t {
+//     dma_len: 0x27,
+//     _type: 0,
+//     rf_len: 0x25,
+//     advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+//     data: [0; 31]
+// });
 pub_mut!(pkt_adv, rf_packet_adv_ind_module_t);
 //, rf_packet_adv_ind_module_t {
 //     dma_len: 0x27,
@@ -686,14 +694,14 @@ pub fn rf_set_power_level_index(index: u32)
 }
 
 #[no_mangle]
-extern "C" fn rf_set_rxmode()
+pub extern "C" fn rf_set_rxmode()
 {
     write_reg8 (0x800428, RF_TRX_MODE | BIT!(0));	    // rx enable
     write_reg8 (0x800f02, RF_TRX_OFF | BIT!(5));		// RX enable
 }
 
 #[no_mangle]
-extern "C" fn rf_set_tx_rx_off()
+pub extern "C" fn rf_set_tx_rx_off()
 {
 	write_reg8 (0x800f16, 0x29);
 	write_reg8 (0x800428, RF_TRX_MODE);	// rx disable
@@ -701,7 +709,7 @@ extern "C" fn rf_set_tx_rx_off()
 }
 
 #[no_mangle]
-extern "C" fn rf_set_ble_channel(mut chn: u8){
+pub extern "C" fn rf_set_ble_channel(mut chn: u8){
     write_reg8(0x40d, chn);
 
     let mut gain = 0;
@@ -762,7 +770,7 @@ fn rf_set_tp_gain(gain: u8)
 }
 
 #[no_mangle]
-extern "C" fn rf_start_stx2rx (addr: u32, tick: u32)
+pub extern "C" fn rf_start_stx2rx (addr: u32, tick: u32)
 {
 	//write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
 	write_reg32(0x800f18, tick);						        // Setting schedule trigger time
@@ -774,7 +782,17 @@ extern "C" fn rf_start_stx2rx (addr: u32, tick: u32)
 }
 
 #[no_mangle]
-extern "C" fn rf_start_brx (addr: u32, tick: u32)
+pub extern "C" fn rf_start_srx2tx (addr: u32, tick: u32)
+{
+    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
+    write_reg32(0x800f18, tick);						        // Setting schedule trigger time
+    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
+    write_reg8 (0x800f00, 0x85);						        // Set mode
+    write_reg16 (0x80050c, addr as u16);
+}
+
+#[no_mangle]
+pub extern "C" fn rf_start_brx (addr: u32, tick: u32)
 {
     //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f28, 0xffffffff);					        // ?
@@ -782,4 +800,29 @@ extern "C" fn rf_start_brx (addr: u32, tick: u32)
     write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
     write_reg8 (0x800f00, 0x82);						        // Set mode
     write_reg16 (0x80050c, addr as u16);
+}
+
+#[no_mangle]
+pub extern "C" fn rf_start_beacon (addr: u32, tick: u32)
+{
+    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
+    write_reg32(0x800f18, tick);						        // Setting schedule trigger time
+    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
+    write_reg8 (0x800f00, 0x84);						        // Set mode
+    write_reg16 (0x80050c, addr as u16);
+}
+
+pub fn rf_set_ble_crc_adv()
+{
+	write_reg32 (0x80044c, 0x555555);
+}
+
+pub fn rf_set_ble_access_code (ac: u32)
+{
+	write_reg32 (0x800408, ((ac >> 24) & 0xff) | ((ac >> 16) & 0xff) << 8 | ((ac >> 8) & 0xff) << 16 | (ac & 0xff) << 24);
+}
+
+pub fn rf_set_ble_access_code_adv ()
+{
+	write_reg32 (0x800408, 0xd6be898e);
 }

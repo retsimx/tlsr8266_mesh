@@ -5,13 +5,15 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use crate::{app, blinken, no_mangle_fn, pub_mut};
 use crate::common::{get_conn_update_cnt, get_conn_update_successed, get_sys_chn_adv, get_sys_chn_listen, rf_update_conn_para, set_conn_update_cnt, update_ble_parameter_cb};
+use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{irq_timer0, irq_timer1};
 use crate::mesh::wrappers::{get_mesh_node_mask, get_mesh_node_st, get_mesh_node_st_val_len};
 use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, set_att_service_discover_tick};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet, pair_enc_packet_mesh};
 use crate::sdk::ble_app::rf_drv_8266::{get_pkt_ibeacon_addr, get_pkt_light_data, get_slave_link_state, get_slave_listen_interval, rf_set_ble_access_code, rf_set_ble_access_code_adv, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_beacon, rf_start_srx2tx, rf_start_stx2rx, rf_stop_trx, set_slave_adv_enable, set_slave_connection_enable};
 use crate::sdk::ble_app::shared_mem::get_blt_tx_fifo;
-use crate::sdk::light::{get_app_cmd_time, get_beacon_with_mesh_adv, get_command_type, get_device_address, get_device_address_addr, get_device_node_sn, get_gateway_en, get_gateway_tx_wptr, get_gateway_tx_rptr, get_iBeaconInterval, get_interval_th, get_loop_interval_us, get_lpn_retransmit_cnt, get_mesh_chn_amount, get_mesh_node_cur, get_mesh_node_max, get_mesh_send_online_status_flag, get_mesh_user_cmd_idx, get_need_update_connect_para, get_online_status_comp, get_online_status_interval2listen_interval, get_online_status_timeout, get_p_mesh_node_status_callback, get_pair_ac, get_passive_en, get_pkt_light_adv_status, get_pkt_light_adv_status_addr, get_pkt_mesh, get_pkt_mesh_addr, get_pkt_mesh_user_cmd_buf, get_pkt_mesh_user_cmd_buf_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_security_enable, get_send_self_online_status_cycle, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_data_valid, get_slave_p_mac, get_slave_read_status_busy, get_slave_tx_cmd_time, get_st_brige_no, get_sw_flag, get_SW_Low_Power, get_sw_no_pair, get_switch_rf_tx_once_time, get_sync_time_enable, get_synced_flag, get_t_bridge_cmd, get_tick_per_us, get_tx_packet_bridge_delay_us, get_tx_packet_bridge_random_en, get_tx_packet_bridge_tick, get_update_connect_para_delay_ms, get_update_interval_user_max, get_update_interval_user_min, ll_adv_rsp_private_t, mesh_pkt_t, rf_packet_adv_ind_module_t, rf_packet_att_cmd_t, rf_packet_ll_app_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_device_node_sn, set_lpn_retransmit_cnt, set_mesh_node_cur, set_mesh_ota_master_ui_sending, set_mesh_user_cmd_idx, set_need_update_connect_para, set_set_mesh_info_expired_flag, set_slave_data_valid, set_slave_link_connected, set_slave_sno_sending, set_tick_per_us, set_tx_packet_bridge_delay_us, set_tx_packet_bridge_tick, set_update_ble_par_success_flag, set_update_interval_flag, set_update_interval_time, set_update_interval_user_max, set_update_interval_user_min, set_update_timeout_user, status_record_t, set_gateway_tx_wptr, get_gateway_security, get_blt_tx_wptr, set_blt_tx_wptr, get_mesh_notify_enc_enable};
+use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
+use crate::sdk::light::{get_app_cmd_time, get_beacon_with_mesh_adv, get_command_type, get_device_address, get_device_address_addr, get_device_node_sn, get_gateway_en, get_gateway_tx_wptr, get_gateway_tx_rptr, get_iBeaconInterval, get_interval_th, get_loop_interval_us, get_lpn_retransmit_cnt, get_mesh_chn_amount, get_mesh_node_cur, get_mesh_node_max, get_mesh_send_online_status_flag, get_mesh_user_cmd_idx, get_need_update_connect_para, get_online_status_comp, get_online_status_interval2listen_interval, get_online_status_timeout, get_p_mesh_node_status_callback, get_pair_ac, get_passive_en, get_pkt_light_adv_status, get_pkt_light_adv_status_addr, get_pkt_mesh, get_pkt_mesh_addr, get_pkt_mesh_user_cmd_buf, get_pkt_mesh_user_cmd_buf_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_security_enable, get_send_self_online_status_cycle, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_data_valid, get_slave_p_mac, get_slave_read_status_busy, get_slave_tx_cmd_time, get_st_brige_no, get_sw_flag, get_SW_Low_Power, get_sw_no_pair, get_switch_rf_tx_once_time, get_sync_time_enable, get_synced_flag, get_t_bridge_cmd, get_tick_per_us, get_tx_packet_bridge_delay_us, get_tx_packet_bridge_random_en, get_tx_packet_bridge_tick, get_update_connect_para_delay_ms, get_update_interval_user_max, get_update_interval_user_min, ll_adv_rsp_private_t, mesh_pkt_t, rf_packet_adv_ind_module_t, rf_packet_att_cmd_t, rf_packet_ll_app_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_device_node_sn, set_lpn_retransmit_cnt, set_mesh_node_cur, set_mesh_ota_master_ui_sending, set_mesh_user_cmd_idx, set_need_update_connect_para, set_set_mesh_info_expired_flag, set_slave_data_valid, set_slave_link_connected, set_slave_sno_sending, set_tick_per_us, set_tx_packet_bridge_delay_us, set_tx_packet_bridge_tick, set_update_ble_par_success_flag, set_update_interval_flag, set_update_interval_time, set_update_interval_user_max, set_update_interval_user_min, set_update_timeout_user, status_record_t, set_gateway_tx_wptr, get_gateway_security, get_blt_tx_wptr, set_blt_tx_wptr, get_mesh_notify_enc_enable, set_slave_status_buffer_wptr, set_slave_status_buffer_rptr, set_slave_stat_sno, set_slave_read_status_busy, set_slave_read_status_unicast_flag, OtaState, get_cur_ota_flash_addr, set_cur_ota_flash_addr, get_mesh_ota_master_st};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_RF_IRQ_MASK, read_reg_dma_tx_rptr, read_reg_dma_tx_wptr, read_reg_irq_src, read_reg_mcu_wakeup_mask, read_reg_rf_irq_status, read_reg_rf_rx_status, read_reg_system_tick, read_reg_system_tick_irq, read_reg_tmr_ctrl8, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma3_addr, write_reg_dma_tx_fifo, write_reg_irq_src, write_reg_mcu_wakeup_mask, write_reg_pwdn_ctrl, write_reg_rf_irq_status, write_reg_system_tick_irq, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl8, write_reg_tmr_sta};
 use crate::uart_manager::get_pkt_user_cmd;
@@ -364,11 +366,6 @@ pub fn ll_device_status_update(val_par: &[u8])
     }
     (*get_mesh_node_mask())[0] = (*get_mesh_node_mask())[0] | 1;
     (*get_mesh_node_st())[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
-}
-
-pub fn register_mesh_ota_master_ui(cb: fn(*const u8))
-{
-    set_mesh_ota_master_ui_sending(Some(cb));
 }
 
 pub fn is_receive_ota_window() -> bool
@@ -990,4 +987,45 @@ pub fn rf_link_add_tx_packet(packet: *const rf_packet_att_cmd_t) -> bool
         }
         return false;
     }
+}
+
+fn rf_link_slave_read_status_par_init()
+{
+    set_slave_status_buffer_wptr(0);
+    set_slave_status_buffer_rptr(0);
+    set_slave_stat_sno([0; 3]);
+}
+
+pub fn rf_link_slave_read_status_stop()
+{
+    set_slave_read_status_busy(false);
+    set_slave_read_status_unicast_flag(0);
+    set_slave_data_valid(0);
+    rf_link_slave_read_status_par_init();
+}
+
+pub fn rf_ota_save_data(data: *const u8) -> OtaState
+{
+    let addr = *get_cur_ota_flash_addr() + *get_flash_adr_light_new_fw();
+    flash_write_page(addr, 0x10, data);
+
+    let mut tmp = [0u8; 0x10];
+    flash_read_page(addr, 0x10, tmp.as_mut_ptr());
+
+    if unsafe { slice::from_raw_parts(data, 0x10) } == tmp {
+        set_cur_ota_flash_addr(*get_cur_ota_flash_addr() + 0x10);
+        return OtaState::CONTINUE;
+    } else {
+        return OtaState::ERROR;
+    }
+}
+
+pub fn is_master_sending_ota_st() -> bool
+{
+  return (*get_mesh_ota_master_st())[20] > 1;
+}
+
+pub fn register_mesh_ota_master_ui(cb: fn(*const u8))
+{
+    set_mesh_ota_master_ui_sending(Some(cb));
 }

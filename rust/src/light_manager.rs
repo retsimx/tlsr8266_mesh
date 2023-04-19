@@ -5,7 +5,6 @@ use embassy_executor::Spawner;
 use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
-use crate::{app};
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_SECTOR_SIZE, get_flash_adr_lum, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::embassy::yield_now::yield_now;
@@ -306,8 +305,6 @@ impl LightManager {
 
             i += size_of::<LumSaveT>() as u16
         }
-
-        app().ota_manager.mesh_ota_master_100_flag_check();
 
         let val = analog_read(REGA_LIGHT_OFF);
         if val & RecoverStatus::LightOff as u8 != 0 {

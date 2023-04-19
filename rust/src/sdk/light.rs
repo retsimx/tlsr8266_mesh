@@ -8,32 +8,7 @@ use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-no_mangle_fn!(rf_link_slave_read_status_stop);
-no_mangle_fn!(rf_link_data_callback, p: *const u8);
-no_mangle_fn!(rf_ota_save_data, OtaState, data: *const u8);
-no_mangle_fn!(rf_link_slave_data_write_no_dec, u32, p: *const rf_packet_ll_data_t);
-no_mangle_fn!(rf_link_slave_connect, u32, p: *const rf_packet_ll_init_t, t: u32);
-
-no_mangle_fn!(is_master_sending_ota_st, bool);
-no_mangle_fn!(
-    mesh_ota_slave_set_response,
-    bool,
-    params: *mut u8,
-    rtype: u8
-);
-no_mangle_fn!(mesh_ota_timeout_handle, op: u8, params: *const u8);
-no_mangle_fn!(
-    mesh_ota_master_start,
-    adr: *const u8,
-    len: u32,
-    p_dev_info: *const mesh_ota_dev_info_t
-);
 no_mangle_fn!(is_master_ota_st, bool);
-no_mangle_fn!(is_mesh_ota_slave_running, bool);
-no_mangle_fn!(mesh_ota_slave_reboot_delay);
-no_mangle_fn!(mesh_ota_slave_save_data, bool, params: *const u8);
-no_mangle_fn!(mesh_ota_master_cancle, reset_flag: u8, complete: bool);
-no_mangle_fn!(mesh_ota_master_start_firmware_from_backup);
 no_mangle_fn!(
     mesh_push_user_command,
     bool,
@@ -856,8 +831,6 @@ pub_mut!(
     CFG_SECTOR_ADR_CALIBRATION_CODE
 );
 
-no_mangle_fn_def!(mesh_ota_start_unprotect_flash);
-
 // common shit needed to link
 #[no_mangle]
 extern "C" fn forced_single_cmd_in_ble_interval_handle(ph: *const u8) {}
@@ -992,6 +965,11 @@ pub_mut!(gateway_tx_wptr, u8); //, 0);
 pub_mut!(gateway_tx_rptr, u8); //, 0);
 pub_mut!(blt_tx_wptr, u8); //, 0);
 pub_mut!(mesh_notify_enc_enable, u8); //, 0);
+pub_mut!(slave_status_buffer_wptr, u8); //, 0);
+pub_mut!(slave_status_buffer_rptr, u8); //, 0);
+pub_mut!(slave_stat_sno, [u8; 3]); //, [0; 3]);
+pub_mut!(slave_read_status_unicast_flag, u8); //, 0);
+pub_mut!(mesh_ota_master_st, [u8; 29]); //, [0; 29]);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);

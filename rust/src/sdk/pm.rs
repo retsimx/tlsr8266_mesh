@@ -3,7 +3,7 @@ use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::{app, BIT, pub_mut};
 use crate::common::REGA_LIGHT_OFF;
-use crate::sdk::light::{_is_mesh_ota_slave_running, get_rf_slave_ota_busy, get_tick_per_us, RecoverStatus};
+use crate::sdk::light::{get_rf_slave_ota_busy, get_tick_per_us, RecoverStatus};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{raga_gpio_wkup_pol, read_reg_clk_sel, read_reg_fhs_sel, read_reg_system_tick, read_reg_system_tick_ctrl, read_reg_system_tick_mode, write_reg32, write_reg8, write_reg_clk_sel, write_reg_fhs_sel, write_reg_pwdn_ctrl, write_reg_system_tick_ctrl, write_reg_system_tick_mode, write_reg_system_wakeup_tick, write_reg_wakeup_en};
 
@@ -318,7 +318,7 @@ pub fn cpu_wakeup_init() {
 // recover status before software reboot
 #[no_mangle]
 extern "C" fn light_sw_reboot_callback() {
-    if *get_rf_slave_ota_busy() || _is_mesh_ota_slave_running() {
+    if *get_rf_slave_ota_busy() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,

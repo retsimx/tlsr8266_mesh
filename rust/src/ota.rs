@@ -1,9 +1,7 @@
-use crate::common::REGA_LIGHT_OFF;
 use crate::config::{get_flash_adr_light_new_fw, OTA_LED};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
@@ -14,7 +12,7 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::{size_of_val, MaybeUninit};
 use core::ptr::addr_of;
 use crate::main_light::get_buff_response;
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet};
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, is_master_sending_ota_st, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
 use crate::sdk::light::*;
 use crate::sdk::pm::light_sw_reboot;
 
@@ -133,31 +131,20 @@ impl OtaManager {
         }
     }
 
-    pub fn mesh_ota_master_100_flag_check(&self) {
-        let val = analog_read(REGA_LIGHT_OFF);
-        if val & RecoverStatus::MeshOtaMaster100 as u8 != 0 {
-            set_mesh_ota_master_100_flag(true);
-            analog_write(
-                REGA_LIGHT_OFF,
-                val & !(RecoverStatus::MeshOtaMaster100 as u8),
-            );
-        }
-    }
-
     pub fn rf_link_slave_data_ota(&mut self, data: &[u32]) {
         if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
             return;
         }
 
         if !*get_rf_slave_ota_busy() {
-            if !*get_pair_login_ok() || _is_master_sending_ota_st() || _is_mesh_ota_slave_running()
+            if !*get_pair_login_ok() || is_master_sending_ota_st()
             {
                 return;
             }
 
             set_rf_slave_ota_busy(true);
             if *get_slave_read_status_busy() {
-                _rf_link_slave_read_status_stop();
+                rf_link_slave_read_status_stop();
             }
         }
 
@@ -209,7 +196,7 @@ impl OtaManager {
                                     | (p.dat[(n_data_len + 3) as usize] as u16) << 8)
                                     as u32;
                             }
-                            reset_flag = _rf_ota_save_data(p.dat[2..].as_ptr());
+                            reset_flag = rf_ota_save_data(p.dat[2..].as_ptr());
                         }
                     } else if cur_idx == self.ota_rcv_last_idx + 1 {
                         // ota fw check
@@ -254,7 +241,7 @@ impl OtaManager {
                                 // !is_valid_fw_len()
                                 reset_flag = OtaState::ERROR;
                             } else {
-                                reset_flag = _rf_ota_save_data(&p.dat[2]);
+                                reset_flag = rf_ota_save_data(&p.dat[2]);
                             }
                         }
                     } else {
@@ -277,15 +264,7 @@ impl OtaManager {
 
             if reset_flag != OtaState::CONTINUE {
                 if *get_rf_slave_ota_finished_flag() == OtaState::CONTINUE {
-                    if (APP_OTA_HCI_TYPE::MESH == *get_app_ota_hci_type())
-                        && (reset_flag == OtaState::OK)
-                    {
-                        _mesh_ota_master_start_firmware_from_backup();
-                        set_rf_slave_ota_timeout_s(0); // stop gatt ota timeout check
-                        set_rf_slave_ota_busy(false); // must
-                    } else {
-                        self.rf_slave_ota_finished_flag_set(reset_flag);
-                    }
+                    self.rf_slave_ota_finished_flag_set(reset_flag);
                 }
 
                 break;
@@ -440,52 +419,6 @@ impl OtaManager {
         return fw_len;
     }
 
-    fn mesh_ota_master_start_firmware(
-        &self,
-        p_dev_info: *const mesh_ota_dev_info_t,
-        new_fw_adr: u32,
-    ) {
-        let fw_len = self.get_fw_len(new_fw_adr);
-        if self.is_valid_fw_len(fw_len) {
-            _mesh_ota_master_start(new_fw_adr as *const u8, fw_len, p_dev_info);
-        }
-    }
-
-    pub fn mesh_ota_master_start_firmware_from_own(&self) {
-        let adr_fw = 0;
-        let fw_len = self.get_fw_len(adr_fw);
-        if self.is_valid_fw_len(fw_len) {
-            let dev_info: mesh_ota_dev_info_t = mesh_ota_dev_info_t {
-                dev_mode: 0x02, // LIGHT_MODE
-                no_check_dev_mode_flag_rsv: 0,
-                rsv: [0; 4],
-            };
-            _mesh_ota_master_start(adr_fw as *const u8, fw_len, addr_of!(dev_info));
-        }
-    }
-
-    fn mesh_ota_slave_need_ota(&self, params: *const u8) -> bool {
-        let mut ret = true;
-        let p = unsafe { &*(params.offset(2) as *const mesh_ota_pkt_start_command_t) };
-
-        if 0x02 == p.dev_info.dev_mode {
-            // LIGHT_MODE
-            let mut ver_myself: [u8; 4] = [0; 4];
-            _get_fw_version(ver_myself.as_mut_ptr());
-            if p.version[1] < ver_myself[1] {
-                ret = false;
-            } else if p.version[1] == ver_myself[1] {
-                if p.version[3] <= ver_myself[3] {
-                    ret = false;
-                }
-            }
-        } else {
-            ret = false;
-        }
-
-        return ret;
-    }
-
     fn is_light_mode_match_check_fw(&self, _: *const u8) -> bool {
         return true;
     }
@@ -493,7 +426,7 @@ impl OtaManager {
 
 pub mod wrappers {
     use crate::app;
-    use crate::sdk::light::{mesh_ota_dev_info_t, rf_packet_att_data_t, OtaState, MeshOtaLed, rf_packet_att_write_t};
+    use crate::sdk::light::{rf_packet_att_data_t, OtaState, MeshOtaLed, rf_packet_att_write_t};
     use core::mem::size_of;
     use core::slice;
 
@@ -571,15 +504,12 @@ pub mod wrappers {
     }
 
     #[no_mangle] // required by light_ll
-    extern "C" fn mesh_ota_master_start_firmware(p_dev_info: *const mesh_ota_dev_info_t, new_fw_adr: u32) {
-        app()
-            .ota_manager
-            .mesh_ota_master_start_firmware(p_dev_info, new_fw_adr);
+    extern "C" fn mesh_ota_master_start_firmware(_: *const u8, _: u32) {
     }
 
     #[no_mangle] // required by light_ll
-    extern "C" fn mesh_ota_slave_need_ota(params: *const u8) -> bool {
-        return app().ota_manager.mesh_ota_slave_need_ota(params);
+    extern "C" fn mesh_ota_slave_need_ota(_: *const u8) -> bool {
+        return false;
     }
 
     #[no_mangle] // required by light_ll

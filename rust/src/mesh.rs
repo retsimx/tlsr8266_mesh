@@ -540,6 +540,7 @@ pub mod wrappers {
     use crate::sdk::light::*;
     use core::mem::size_of;
     use crate::{app, pub_mut};
+    use crate::main_light::rf_link_data_callback;
     use crate::sdk::mcu::crypto::aes_att_encryption;
     use crate::vendor_light::get_adv_rsp_pri_data_addr;
 
@@ -589,7 +590,7 @@ pub mod wrappers {
 
     #[no_mangle] // required by light_ll
     extern "C" fn light_slave_tx_command_callback(p: *const u8) {
-        _rf_link_data_callback(p);
+        rf_link_data_callback(p as *const ll_packet_l2cap_data_t);
     }
 
     #[no_mangle]

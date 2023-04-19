@@ -365,18 +365,6 @@ extern "C" fn rf_link_response_callback(
             ppp.val[3] = (*get_device_address() & 0xFF) as u8;
             ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
         }
-        GET_MESH_OTA => {
-            ppp.val[0] = LGT_CMD_MESH_OTA_READ_RSP | 0xc0;
-            if params[1] == PAR_READ_MESH_PAIR_CONFIRM {
-                for i in 0..8 {
-                    ppp.val[5 + i] = app().mesh_manager.get_mesh_pair_checksum_fn(i as u8);
-                }
-                ppp.val[3] = (*get_device_address() & 0xFF) as u8;
-                ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
-                return true;
-            }
-            return _mesh_ota_slave_set_response(ppp.val[3..].as_mut_ptr(), params[1]);
-        }
         _ => return false
     }
 
@@ -414,8 +402,6 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     }
 
     let op = op_cmd[0] & 0x3F;
-
-    _mesh_ota_timeout_handle(op, params.as_ptr());
 
     match op {
         LGT_CMD_LIGHT_ONOFF => app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params),
@@ -464,30 +450,6 @@ pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             light_sw_reboot();
         }
         LGT_CMD_NOTIFY_MESH => light_notify(&pp.val[3..3 + 10], &pp.src),
-        LGT_CMD_MESH_OTA_DATA => {
-            let idx = (params[0] as u16) | ((params[1] as u16) << 8);
-            if !_is_master_ota_st() {
-                // no update firmware for itself
-                match idx {
-                    CMD_START_MESH_OTA => {
-                        app().ota_manager.mesh_ota_master_start_firmware_from_own();
-                        //cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-                    }
-                    CMD_STOP_MESH_OTA => {
-                        if _is_mesh_ota_slave_running() {
-                            // reboot to initial flash: should be delay to relay command.
-                            _mesh_ota_slave_reboot_delay(); // reboot after 320ms
-                        }
-                    }
-                    _ => { _mesh_ota_slave_save_data(params.as_ptr()); }
-                }
-            } else {
-                if CMD_STOP_MESH_OTA == idx {
-                    _mesh_ota_master_cancle(OtaState::MASTER_OTA_REBOOT_ONLY as u8, false);
-                    //cfg_led_event(LED_EVENT_FLASH_4HZ_3T);
-                }
-            }
-        }
         LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),
         _ => ()
     }

@@ -11,7 +11,6 @@ use crate::mesh::mesh_node_st_val_t;
 no_mangle_fn!(mesh_get_fw_version);
 
 no_mangle_fn!(is_receive_ota_window, bool);
-no_mangle_fn!(rf_link_slave_proc);
 no_mangle_fn!(is_add_packet_buf_ready, bool);
 no_mangle_fn!(rf_link_add_tx_packet, bool, p: *const u8); // return value: 1 success,  0 faile)d
 no_mangle_fn!(rf_link_slave_read_status_stop);
@@ -987,8 +986,8 @@ pub_mut!(mesh_send_online_status_flag, bool); //, true);
 pub_mut!(send_self_online_status_cycle, u8); //, 0);
 pub_mut!(mesh_node_cur, u8); //, 1);
 pub_mut!(switch_rf_tx_once_time, u32); //, 0);
-pub_mut!(t_bridge_cmd, u32); //, 0);
-pub_mut!(st_brige_no, u32); //, 0);
+pub_mut!(t_bridge_cmd, u32, 0);
+pub_mut!(st_brige_no, u32, 0);
 pub_mut!(slave_sno_sending, u32); //, 0);
 pub_mut!(app_cmd_time, u32); //, 0);
 pub_mut!(mesh_user_cmd_idx, u8); //, 0);
@@ -1006,7 +1005,25 @@ pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);
 // });
 
 pub_mut!(pkt_mesh, mesh_pkt_t); // All fields are 0
-pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t); // All fields are 0
+pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
+    dma_len: 0,
+    _type: 0,
+    rf_len: 0,
+    l2capLen: 0,
+    chanId: 0,
+    src_tx: 0,
+    handle1: 0,
+    sno: [0; 3],
+    src_adr: 0,
+    dst_adr: 0,
+    op: 0,
+    vendor_id: 0,
+    par: [0; 10],
+    internal_par1: [0; 5],
+    ttl: 0,
+    internal_par2: [0; 4],
+    no_use: [0; 4]
+});
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

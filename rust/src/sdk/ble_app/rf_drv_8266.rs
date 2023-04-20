@@ -8,6 +8,7 @@ use crate::common::{mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::wrappers::my_rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
+use crate::sdk::ble_app::light_ll::set_p_st_handler;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
@@ -424,7 +425,6 @@ pub unsafe fn setSppOtaWriteCB(func: fn(data: *const rf_packet_att_write_t) -> b
     (*gAttributes.offset(24)).w = Some(func);
 }
 
-pub_mut!(p_st_handler, u32); //, 0);
 pub_mut!(irq_mask_save, u32); //, 0);
 pub_mut!(slave_link_state, u32); //, 0);
 pub_mut!(slave_listen_interval, u32); //, 0);
@@ -509,7 +509,7 @@ pub fn rf_link_slave_init(interval: u32)
 {
     unsafe {
         blc_ll_initBasicMCU();
-        p_st_handler = irq_st_adv as u32;
+        set_p_st_handler(Some(irq_st_adv));
         slave_link_state = 0;
         slave_listen_interval = interval * *get_tick_per_us();
 
@@ -810,6 +810,17 @@ pub extern "C" fn rf_start_beacon (addr: u32, tick: u32)
     write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
     write_reg8 (0x800f00, 0x84);						        // Set mode
     write_reg16 (0x80050c, addr as u16);
+}
+
+pub fn rf_reset_sn()
+{
+	write_reg8  (0x800f01, 0x3f);
+	write_reg8  (0x800f01, 0x00);
+}
+
+pub fn rf_set_ble_crc(crc: &[u8])
+{
+	write_reg32 (0x80044c, crc[0] as u32 | ((crc[1] as u32) << 8) | ((crc[2] as u32) << 16));
 }
 
 pub fn rf_set_ble_crc_adv()

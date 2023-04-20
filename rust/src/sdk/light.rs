@@ -967,6 +967,16 @@ pub_mut!(slave_stat_sno, [u8; 3]); //, [0; 3]);
 pub_mut!(slave_read_status_unicast_flag, u8); //, 0);
 pub_mut!(mesh_ota_master_st, [u8; 29]); //, [0; 29]);
 pub_mut!(mesh_node_report_enable, bool); //, false);
+pub_mut!(slave_timing_adjust_enable, u32); //, 0); // Should be bool?
+pub_mut!(slave_tick_brx, u32); //, 0);
+pub_mut!(slave_pairing_master_tick, u32); //, 0);
+pub_mut!(slave_window_offset, u32); //, 0);
+pub_mut!(slave_conn_delay, u32); //, 0);
+pub_mut!(slave_link_sno, u32); //, 0);
+pub_mut!(ADV_Suspend, u32); //, 0);
+pub_mut!(slave_instant, u16); //, 0);
+pub_mut!(slave_status_tick, u8); //, 0);
+pub_mut!(slave_n6, u8); //, 0);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);
@@ -998,6 +1008,23 @@ pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
     internal_par2: [0; 4],
     no_use: [0; 4]
 });
+pub_mut!(pkt_init, rf_packet_ll_init_t);
+// , rf_packet_ll_init_t {
+//     dma_len: 0,
+//     _type: 0,
+//     rf_len: 0,
+//     scanA: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+//     advA: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+//     aa: [0xaa, 0x55, 0x55, 0xaa],
+//     crcinit: [0x55, 0x55, 0x55],
+//     wsize: 2,
+//     woffset: 0x1f,
+//     interval: 0x20,
+//     latency: 0,
+//     timeout: 0x48
+//     chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+//     hop: 0xac
+// });
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

@@ -392,7 +392,7 @@ pub enum FLD_RX_RND_MODE {
 }
 regrw!(reg_rnd_number, 0x448, u16);
 
-regrw!(reg_bb_max_tick, 0x44c, u16);
+regrw!(reg_rf_crc, 0x44c, u32);
 regrw!(reg_rf_rtt, 0x454, u32);
 pub enum FLD_RF_RTT {
     CAL = BIT_RNG!(0, 7),

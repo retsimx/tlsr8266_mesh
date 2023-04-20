@@ -1,3 +1,4 @@
+use core::ptr::addr_of;
 use core::slice;
 
 use crate::{app, pub_mut};
@@ -104,8 +105,8 @@ pub extern "C" fn update_ble_parameter_cb() {
 }
 
 #[no_mangle] // required by light_ll
-pub extern "C" fn rf_update_conn_para(p: *const u8) -> u8 {
-    let pp = unsafe { &*(p as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
+pub extern "C" fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
+    let pp = unsafe { &*(addr_of!(*p) as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
     for i in 0..9 {

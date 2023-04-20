@@ -555,7 +555,6 @@ pub fn clock_time64() -> u64 {
 }
 
 #[no_mangle] // required by light_ll
-#[allow(non_snake_case)]
 #[link_section = ".ram_code"]
 extern "C" fn irq_handler() {
     unsafe { irq_light_slave_handler(); }

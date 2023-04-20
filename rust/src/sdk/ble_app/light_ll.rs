@@ -8,12 +8,12 @@ use crate::common::{get_conn_update_cnt, get_conn_update_successed, get_mesh_nod
 use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{irq_timer0, irq_timer1};
 use crate::mesh::wrappers::{get_mesh_node_mask, get_mesh_node_st, get_mesh_node_st_val_len, light_slave_tx_command_callback};
-use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, set_att_service_discover_tick};
+use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, l2cap_att_handler, set_att_service_discover_tick};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet, pair_enc_packet_mesh, pair_save_key, pair_set_key};
-use crate::sdk::ble_app::rf_drv_8266::{get_light_rx_wptr, get_pkt_ibeacon_addr, get_pkt_light_data, get_pkt_scan_rsp, get_pkt_scan_rsp_addr, get_slave_link_state, get_slave_listen_interval, rf_set_ble_access_code, rf_set_ble_access_code_adv, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_beacon, rf_start_srx2tx, rf_start_stx2rx, rf_stop_trx, set_FtoRX, set_light_rx_wptr, set_slave_adv_enable, set_slave_connected_tick, set_slave_connection_enable};
+use crate::sdk::ble_app::rf_drv_8266::{get_FtoRX, get_light_rx_wptr, get_pkt_ibeacon_addr, get_pkt_light_data, get_pkt_scan_rsp, get_pkt_scan_rsp_addr, get_slave_link_state, get_slave_listen_interval, rf_set_ble_access_code, rf_set_ble_access_code_adv, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_beacon, rf_start_srx2tx, rf_start_stx2rx, rf_stop_trx, set_FtoRX, set_light_rx_wptr, set_slave_adv_enable, set_slave_connected_tick, set_slave_connection_enable};
 use crate::sdk::ble_app::shared_mem::{get_blt_tx_fifo, get_light_rx_buff};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::{get_app_cmd_time, get_beacon_with_mesh_adv, get_command_type, get_device_address, get_device_address_addr, get_device_node_sn, get_gateway_en, get_gateway_tx_wptr, get_gateway_tx_rptr, get_iBeaconInterval, get_interval_th, get_loop_interval_us, get_lpn_retransmit_cnt, get_mesh_chn_amount, get_mesh_node_cur, get_mesh_node_max, get_mesh_send_online_status_flag, get_mesh_user_cmd_idx, get_need_update_connect_para, get_online_status_comp, get_online_status_interval2listen_interval, get_online_status_timeout, get_p_mesh_node_status_callback, get_pair_ac, get_passive_en, get_pkt_light_adv_status, get_pkt_light_adv_status_addr, get_pkt_mesh, get_pkt_mesh_addr, get_pkt_mesh_user_cmd_buf, get_pkt_mesh_user_cmd_buf_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_security_enable, get_send_self_online_status_cycle, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_data_valid, get_slave_p_mac, get_slave_read_status_busy, get_slave_tx_cmd_time, get_st_brige_no, get_sw_flag, get_SW_Low_Power, get_sw_no_pair, get_switch_rf_tx_once_time, get_sync_time_enable, get_synced_flag, get_t_bridge_cmd, get_tick_per_us, get_tx_packet_bridge_delay_us, get_tx_packet_bridge_random_en, get_tx_packet_bridge_tick, get_update_connect_para_delay_ms, get_update_interval_user_max, get_update_interval_user_min, ll_adv_rsp_private_t, mesh_pkt_t, rf_packet_adv_ind_module_t, rf_packet_att_cmd_t, rf_packet_ll_app_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_device_node_sn, set_lpn_retransmit_cnt, set_mesh_node_cur, set_mesh_ota_master_ui_sending, set_mesh_user_cmd_idx, set_need_update_connect_para, set_set_mesh_info_expired_flag, set_slave_data_valid, set_slave_link_connected, set_slave_sno_sending, set_tick_per_us, set_tx_packet_bridge_delay_us, set_tx_packet_bridge_tick, set_update_ble_par_success_flag, set_update_interval_flag, set_update_interval_time, set_update_interval_user_max, set_update_interval_user_min, set_update_timeout_user, status_record_t, set_gateway_tx_wptr, get_gateway_security, get_blt_tx_wptr, set_blt_tx_wptr, get_mesh_notify_enc_enable, set_slave_status_buffer_wptr, set_slave_status_buffer_rptr, set_slave_stat_sno, set_slave_read_status_busy, set_slave_read_status_unicast_flag, OtaState, get_cur_ota_flash_addr, set_cur_ota_flash_addr, get_mesh_ota_master_st, get_max_relay_num, app_cmd_value_t, DEVICE_ADDR_MASK_DEFAULT, get_group_address, get_device_address_mask, set_slave_tx_cmd_time, ll_packet_l2cap_data_t, set_mesh_node_report_enable, get_mesh_node_report_enable, get_pair_config_mesh_name, get_pair_config_mesh_pwd, get_not_need_login, set_pair_login_ok};
+use crate::sdk::light::{rf_packet_l2cap_head_t, get_app_cmd_time, get_beacon_with_mesh_adv, get_command_type, get_device_address, get_device_address_addr, get_device_node_sn, get_gateway_en, get_gateway_tx_wptr, get_gateway_tx_rptr, get_iBeaconInterval, get_interval_th, get_loop_interval_us, get_lpn_retransmit_cnt, get_mesh_chn_amount, get_mesh_node_cur, get_mesh_node_max, get_mesh_send_online_status_flag, get_mesh_user_cmd_idx, get_need_update_connect_para, get_online_status_comp, get_online_status_interval2listen_interval, get_online_status_timeout, get_p_mesh_node_status_callback, get_pair_ac, get_passive_en, get_pkt_light_adv_status, get_pkt_light_adv_status_addr, get_pkt_mesh, get_pkt_mesh_addr, get_pkt_mesh_user_cmd_buf, get_pkt_mesh_user_cmd_buf_addr, get_rf_slave_ota_busy, get_rf_slave_ota_busy_mesh_en, get_security_enable, get_send_self_online_status_cycle, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_data_valid, get_slave_p_mac, get_slave_read_status_busy, get_slave_tx_cmd_time, get_st_brige_no, get_sw_flag, get_SW_Low_Power, get_sw_no_pair, get_switch_rf_tx_once_time, get_sync_time_enable, get_synced_flag, get_t_bridge_cmd, get_tick_per_us, get_tx_packet_bridge_delay_us, get_tx_packet_bridge_random_en, get_tx_packet_bridge_tick, get_update_connect_para_delay_ms, get_update_interval_user_max, get_update_interval_user_min, ll_adv_rsp_private_t, mesh_pkt_t, rf_packet_adv_ind_module_t, rf_packet_att_cmd_t, rf_packet_ll_app_t, rf_packet_ll_data_t, rf_packet_ll_init_t, rf_packet_scan_rsp_t, set_device_node_sn, set_lpn_retransmit_cnt, set_mesh_node_cur, set_mesh_ota_master_ui_sending, set_mesh_user_cmd_idx, set_need_update_connect_para, set_set_mesh_info_expired_flag, set_slave_data_valid, set_slave_link_connected, set_slave_sno_sending, set_tick_per_us, set_tx_packet_bridge_delay_us, set_tx_packet_bridge_tick, set_update_ble_par_success_flag, set_update_interval_flag, set_update_interval_time, set_update_interval_user_max, set_update_interval_user_min, set_update_timeout_user, status_record_t, set_gateway_tx_wptr, get_gateway_security, get_blt_tx_wptr, set_blt_tx_wptr, get_mesh_notify_enc_enable, set_slave_status_buffer_wptr, set_slave_status_buffer_rptr, set_slave_stat_sno, set_slave_read_status_busy, set_slave_read_status_unicast_flag, OtaState, get_cur_ota_flash_addr, set_cur_ota_flash_addr, get_mesh_ota_master_st, get_max_relay_num, app_cmd_value_t, DEVICE_ADDR_MASK_DEFAULT, get_group_address, get_device_address_mask, set_slave_tx_cmd_time, ll_packet_l2cap_data_t, set_mesh_node_report_enable, get_mesh_node_report_enable, get_pair_config_mesh_name, get_pair_config_mesh_pwd, get_not_need_login, set_pair_login_ok};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_RF_IRQ_MASK, read_reg_dma_tx_rptr, read_reg_dma_tx_wptr, read_reg_irq_src, read_reg_mcu_wakeup_mask, read_reg_rf_irq_status, read_reg_rf_rx_status, read_reg_system_tick, read_reg_system_tick_irq, read_reg_tmr_ctrl8, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma3_addr, write_reg_dma_tx_fifo, write_reg_irq_src, write_reg_mcu_wakeup_mask, write_reg_pwdn_ctrl, write_reg_rf_irq_status, write_reg_system_tick_irq, write_reg_tmr1_capt, write_reg_tmr1_tick, write_reg_tmr_ctrl8, write_reg_tmr_sta};
 use crate::uart_manager::get_pkt_user_cmd;
@@ -28,7 +28,7 @@ pub_mut!(slave_window_size_update, u32);
 pub_mut!(ble_conn_timeout, u32);
 pub_mut!(ble_conn_interval, u32);
 pub_mut!(ble_conn_offset, u32);
-pub_mut!(slave_ll_rsp, u32);
+pub_mut!(slave_ll_rsp, *const rf_packet_l2cap_head_t);
 pub_mut!(add_tx_packet_rsp_failed, u32, 0);
 pub_mut!(T_scan_rsp_intvl, u32); //, 0x92);
 pub_mut!(p_slave_status_buffer, *mut [u32; 9]); //, null_mut());
@@ -61,60 +61,57 @@ pub_mut!(pkt_light_report, rf_packet_att_cmd_t);
 //     value: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 // });
 
-// #[no_mangle]
-// pub unsafe fn rf_link_slave_data(packet: *const rf_packet_ll_data_t, time: u32) -> bool {
-//     let rf_len: u8 = (*packet).rf_len;
-//     let chanid: u16 = (*packet).chanid;
-//
-//     if ((*packet)._type as i32 * 0x1000000) as i32 >= -1 {
-//         if ((*packet)._type & 3) == 2 {
-//             if 6 < chanid {
-//                 return false;
-//             }
-//         }
-//
-//         if chanid == 5 {
-//             rf_update_conn_para(packet as *const u8);
-//         }
-//
-//         _rf_link_timing_adjust(time);
-//         if rf_len < 6 {
-//             if rf_len == 0 {
-//                 return false;
-//             }
-//         } else {
-//             if (*packet)._type & 3 == 3 && (*packet).l2cap_low == 1 {
-//                 set_slave_timing_update(1);
-//                 set_slave_instant_next((((*packet).sno as u16) << 8) | (*packet).hh as u16);
-//                 for i in 0..5 {
-//                     (*(get_slave_chn_map_addr() as *mut [u8; 5]))[i] = *(packet as *const u8).offset(7 + i as isize);
-//                 }
-//                 return true;
-//             }
-//
-//             if rf_len == 0xc && (*packet)._type & 3 == 3 && (*packet).l2cap_low == 0 {
-//                 set_slave_interval_old(*get_slave_link_interval());
-//                 set_slave_instant_next((*packet).group);
-//                 set_slave_window_size_update(((*packet).l2cap_high as u32 * 1250 + 1300) * *get_tick_per_us());
-//                 set_slave_timing_update(2);
-//                 set_ble_conn_timeout((*packet).nid as u32 * 10000);
-//                 set_ble_conn_interval(*get_tick_per_us() * 1250 * (*packet).att as u32);
-//                 set_ble_conn_offset((*packet).chanid as u32 * *get_tick_per_us() * 1250);
-//                 return false;
-//             }
-//         }
-//         set_slave_ll_rsp(_l2cap_att_handler(packet));
-//         let addSuccess = _rf_link_add_tx_packet(*get_slave_ll_rsp() as *const u8);
-//         if *get_slave_ll_rsp() != 0x0 && !addSuccess {
-//             add_tx_packet_rsp_failed += 1;
-//         }
-//         return false;
-//     }
-//
-//     return false;
-// }
+pub unsafe fn rf_link_slave_data(packet: &rf_packet_ll_data_t, time: u32) -> bool {
+    let rf_len: u8 = packet.rf_len;
+    let chanid: u16 = packet.chanid;
 
-no_mangle_fn!(irq_light_slave_tx);
+    if (packet._type as i32 * 0x1000000) as i32 >= -1 {
+        if (packet._type & 3) == 2 {
+            if 6 < chanid {
+                return false;
+            }
+        }
+
+        if chanid == 5 {
+            rf_update_conn_para(packet);
+        }
+
+        rf_link_timing_adjust(time);
+        if rf_len < 6 {
+            if rf_len == 0 {
+                return false;
+            }
+        } else {
+            if packet._type & 3 == 3 && packet.l2cap_low == 1 {
+                set_slave_timing_update(1);
+                set_slave_instant_next(((packet.sno as u16) << 8) | packet.hh as u16);
+                (*get_slave_chn_map()).iter_mut().enumerate().for_each(|(i, v)| {
+                    *v = *(addr_of!(packet.l2cap_high) as *const u8).offset(i as isize);
+                });
+
+                return true;
+            }
+
+            if rf_len == 0xc && packet._type & 3 == 3 && packet.l2cap_low == 0 {
+                set_slave_interval_old(*get_slave_link_interval());
+                set_slave_instant_next(packet.group);
+                set_slave_window_size_update((packet.l2cap_high as u32 * 1250 + 1300) * *get_tick_per_us());
+                set_slave_timing_update(2);
+                set_ble_conn_interval(*get_tick_per_us() * 1250 * (*addr_of!(packet.att) as *const u16) as u32);
+                set_ble_conn_offset(packet.chanid as u32 * *get_tick_per_us() * 1250);
+                set_ble_conn_timeout(packet.nid as u32 * 10000);
+                return false;
+            }
+        }
+        set_slave_ll_rsp(l2cap_att_handler(addr_of!(*packet) as *const ll_packet_l2cap_data_t));
+        if *get_slave_ll_rsp() != null() && !rf_link_add_tx_packet(*get_slave_ll_rsp() as *const rf_packet_att_cmd_t) {
+            set_add_tx_packet_rsp_failed(*get_add_tx_packet_rsp_failed() + 1);
+        }
+        return false;
+    }
+
+    return false;
+}
 
 pub_mut!(p_st_handler, Option<fn()>);
 
@@ -170,13 +167,21 @@ pub_mut!(slave_timing_update2_ok_time, u32); //, 0);
 // static pkt_empty: [u8; 6] = [02, 00, 00, 00, 01, 00];
 pub_mut!(pkt_empty, [u8; 6]);
 
+#[link_section = ".ram_code"]
+fn irq_light_slave_tx()
+{
+  write_reg_rf_irq_status(2);
+  if *get_FtoRX() {
+    set_FtoRX(false);
+  }
+  return;
+}
+
 no_mangle_fn!(rf_link_rc_data, packet: *const u32);
-no_mangle_fn!(rf_link_slave_data, packet: *const rf_packet_ll_data_t, time: u32);
 no_mangle_fn!(rf_link_slave_connect, bool, packet: *const rf_packet_ll_init_t, time: u32);
 no_mangle_fn!(rf_link_timing_adjust, time: u32);
 
 #[link_section = ".ram_code"]
-#[inline(never)]
 unsafe fn irq_light_slave_rx()
 {
     static t_rx_last: AtomicU32 = AtomicU32::new(0);
@@ -313,11 +318,12 @@ unsafe fn irq_light_slave_rx()
             if *get_disconnect_flag() == false {
                 set_slave_connected_tick(read_reg_system_tick());
                 set_slave_link_connected(true);
-                rf_link_slave_data(packet as *const rf_packet_ll_data_t, rx_time);
+                rf_link_slave_data(&*(packet as *const rf_packet_ll_data_t), rx_time);
             }
         }
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {
+                // todo: What the fuck?
                 if 0x40000001 > *get_slave_timing_update2_ok_time() - read_reg_system_tick() {
                     entry.dma_len = 1;
                     return;
@@ -325,6 +331,7 @@ unsafe fn irq_light_slave_rx()
                 set_slave_timing_update2_flag(0);
             }
             set_slave_window_size(0);
+            // todo: Maybe this - needs to be a +
             set_slave_next_connect_tick(*get_slave_link_interval() - *get_tick_per_us() * 1250 + rx_time);
         }
         entry.dma_len = 1;

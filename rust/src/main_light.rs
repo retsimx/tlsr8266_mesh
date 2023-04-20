@@ -12,7 +12,7 @@ use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -377,18 +377,18 @@ extern "C" fn rf_link_response_callback(
 pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
-    let op_cmd_len: u8 = 0;
+    let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
-    let params_len: u8 = 0;
+    let mut params_len: u8 = 0;
     let p = unsafe { &*p };
     let pp = unsafe { &*(p.value.as_ptr() as *const rf_packet_att_value_t) };
-    _rf_link_get_op_para(
+    rf_link_get_op_para(
         p,
-        op_cmd.as_mut_ptr(),
-        &op_cmd_len,
-        params.as_mut_ptr(),
-        &params_len,
-        1,
+        &mut op_cmd,
+        &mut op_cmd_len,
+        &mut params,
+        &mut params_len,
+        true,
     );
 
     if op_cmd_len != LightOpType::op_type_3 as u8 {

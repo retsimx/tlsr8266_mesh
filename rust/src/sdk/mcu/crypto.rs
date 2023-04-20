@@ -1,6 +1,6 @@
 use core::cmp::min;
 use core::slice;
-use crate::{no_mangle_fn, pub_mut, uprintln, uprintln_fast};
+use crate::{pub_mut, uprintln, uprintln_fast};
 use crate::sdk::light::{get_pair_config_pwd_encode_enable, get_pair_config_pwd_encode_sk};
 use crate::sdk::mcu::register::{read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key};
 

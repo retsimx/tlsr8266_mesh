@@ -3,7 +3,7 @@ use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::{BIT, blinken, no_mangle_fn, pub_mut, pub_static, regrw};
+use crate::{BIT, blinken, pub_mut, pub_static, regrw};
 use crate::common::{mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::wrappers::my_rf_link_slave_data_ota;
@@ -394,7 +394,7 @@ pub unsafe fn blc_ll_initBasicMCU()
 {
     write_reg16(0xf0a, 700);
 
-    write_reg_dma2_addr(((((*get_light_rx_buff()).as_ptr() as u32 + light_rx_wptr * 0x40) * 0x10000) >> 0x10) as u16);
+    write_reg_dma2_addr(addr_of!((*get_light_rx_buff())[*get_light_rx_wptr() as usize]) as u16);
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);
 

@@ -3,7 +3,7 @@ use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use core::mem;
 use core::mem::{size_of, size_of_val, MaybeUninit};
 use core::ptr::{null, null_mut};
-use crate::{no_mangle_fn, no_mangle_fn_def, const_concat};
+use crate::{no_mangle_fn_def, const_concat};
 use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
@@ -685,12 +685,24 @@ pub struct rf_packet_scan_rsp_t {
 
 }
 
+#[repr(C, align(4))]
+pub struct light_rx_buff_t {
+    pub dma_len: u8,        // 0
+    pub unk1: [u8; 3],      // 1
+    pub rssi: u8,           // 4
+    pub unk2: [u8; 3],      // 5
+    pub rx_time: u32,       // 8
+    pub sno: [u8; 3],       // 12
+    pub unk3: [u8; 5],      // 15
+    pub mac: [u8; 4],       // 20
+    pub unk4: [u8; 40]      // 24
+}
+
 #[inline(always)]
 pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
     return p_addr[1] & 0x80 == 0;
 }
 
-no_mangle_fn!(rf_link_slave_data, u32, p: *const rf_packet_ll_data_t, t: u32);
 // required callback fns
 no_mangle_fn_def!(gpio_irq_user_handle);
 no_mangle_fn_def!(gpio_risc0_user_handle);

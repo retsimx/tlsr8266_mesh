@@ -2,22 +2,11 @@ use core::ptr::addr_of;
 use crate::common::{get_set_uuid_flag, set_set_uuid_flag};
 use crate::config::get_flash_adr_dev_grp_adr;
 use crate::main_light::rf_link_light_event_callback;
-use crate::{no_mangle_fn, uprintln, uprintln_fast};
+use crate::{uprintln, uprintln_fast};
 use crate::sdk::ble_app::rf_drv_8266::{get_pkt_adv, get_user_data, get_user_data_len};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::{get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_device_address_mask, get_group_address, ll_packet_l2cap_data_t, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
 use crate::sdk::mcu::register::write_reg32;
-
-no_mangle_fn!(
-    rf_link_get_op_para,
-    u32,
-    p: *const ll_packet_l2cap_data_t,
-    op: *mut u8,
-    op_len: &u8,
-    para: *mut u8,
-    para_len: &u8,
-    mesh_flag: u8
-);
 
 pub enum RF_POWER {
     RF_POWER_8dBm = 0,

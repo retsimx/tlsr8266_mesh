@@ -12,7 +12,7 @@ use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, register_mesh_ota_master_ui, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -468,7 +468,7 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    _mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
+    mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
 }
 
 fn light_notify(p: &[u8], p_src: &[u8]) {

@@ -16,17 +16,24 @@ use crate::sdk::light::{app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM,
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-pub_mut!(pkt_user_cmd, rf_packet_att_cmd_t); //
+pub_mut!(pkt_user_cmd, mesh_pkt_t); //
 // , rf_packet_att_cmd_t {
 //     dma_len: 0x27,
 //     _type: 2,
 //     rf_len: 0x25,
 //     l2capLen: 0xCCDD,
 //     chanId: 0,
-//     opcode: 0,
-//     handle: 0,
+//     src_tx: 0,
 //     handle1: 0,
-//     value: [0; 30]
+//     sno: [0; 3],
+//     src_adr: 0,
+//     dst_adr: 0,
+//     op: 0,
+//     vendor_id: 0,
+//     par: [0; 10],
+//     internal_par1: [0; 5],
+//     ttl: 0,
+//     internal_par2: [0; 4]
 // });
 
 pub enum UartMsg {
@@ -296,7 +303,7 @@ impl UartManager {
                     self.sent.pop_front();
                 }
 
-                let mymsg = unsafe {slice::from_raw_parts((addr_of!(get_pkt_user_cmd().value) as u32 + 5) as *const u8, 20-5)};
+                let mymsg = unsafe {slice::from_raw_parts(addr_of!(get_pkt_user_cmd().dst_adr) as *const u8, 15)};
                 self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
 
                 // Send the message in to the mesh
@@ -306,7 +313,7 @@ impl UartManager {
                 {
                     get_pkt_user_cmd()._type |= BIT!(7);
                     pair_enc_packet_mesh(get_pkt_user_cmd_addr() as *mut mesh_pkt_t);
-                    mesh_send_command(get_pkt_user_cmd_addr(), 0xff, 0);
+                    mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0xff, 0);
                 }
             }
 

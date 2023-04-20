@@ -154,8 +154,8 @@ impl MeshManager {
         if *get_security_enable()
         {
             get_pkt_user_cmd()._type |= BIT!(7);
-            pair_enc_packet_mesh(get_pkt_user_cmd_addr() as *mut mesh_pkt_t);
-            mesh_send_command(get_pkt_user_cmd_addr(), 0xff, 0);
+            pair_enc_packet_mesh(get_pkt_user_cmd_addr());
+            mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0xff, 0);
         }
     }
 
@@ -589,8 +589,8 @@ pub mod wrappers {
     }
 
     #[no_mangle] // required by light_ll
-    extern "C" fn light_slave_tx_command_callback(p: *const u8) {
-        rf_link_data_callback(p as *const ll_packet_l2cap_data_t);
+    pub extern "C" fn light_slave_tx_command_callback(p: *const ll_packet_l2cap_data_t) {
+        rf_link_data_callback(p);
     }
 
     #[no_mangle]

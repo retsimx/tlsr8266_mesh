@@ -19,7 +19,7 @@ pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
         result = aes_att_decryption_packet(
             get_pair_sk(),
             get_pair_ivm(),
-            &(*ps).app_cmd_v.src,
+            slice::from_raw_parts(addr_of!((*ps).app_cmd_v.src) as *const u8, 2),
             addr_of!((*ps).app_cmd_v.dst) as *mut u8,
             ((*ps).l2capLen as u8) - 8,
         );

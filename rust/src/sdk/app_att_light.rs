@@ -12,6 +12,7 @@ use core::slice;
 use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
 use crate::sdk::ble_app::ble_ll_pair::{pairRead, pairWrite};
+use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -203,9 +204,9 @@ fn mesh_status_write(p: *const rf_packet_att_write_t) -> bool {
     unsafe {
         SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
         if (*p).l2capLen > (3 + 1) {
-            _mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
+            mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
         } else {
-            _mesh_report_status_enable((*p).value[0]);
+            mesh_report_status_enable(if (*p).value[0] != 0 {true} else {false});
         }
     }
     return true;

@@ -8,22 +8,6 @@ use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-no_mangle_fn!(is_master_ota_st, bool);
-no_mangle_fn!(
-    mesh_push_user_command,
-    bool,
-    sno: u32,
-    dst: u16,
-    p: *const u8,
-    len: u8
-);
-no_mangle_fn!(mesh_report_status_enable, mask: u8);
-no_mangle_fn!(mesh_report_status_enable_mask, val: *const u8, len: u16);
-
-no_mangle_fn!(get_fw_version, ver: *const u8);
-
-no_mangle_fn!(irq_light_slave_handler);
-
 pub_mut!(pair_config_valid_flag, u8); //, 0xFA);
 // todo, these might be busted entirely
 pub_mut!(pair_config_mesh_name, [u8; 16]); //, const_concat!(b"telink_mesh1", &[0, 0, 0, 0]));
@@ -411,8 +395,8 @@ pub struct rf_packet_ll_data_t {
 #[derive(Clone, Copy)]
 pub struct app_cmd_value_t {
    pub sno: [u8; 3],    // 0    13
-   pub src: [u8; 2],    // 3    16
-   pub dst: [u8; 2],    // 5    18
+   pub src: u16,    // 3    16
+   pub dst: u16,    // 5    18
    pub op: u8,          // 7    20
    pub vendor_id: u16,  // 8    21
    pub par: [u8; 10],   // 10   23
@@ -538,23 +522,23 @@ pub struct rf_packet_att_data_t {
 #[derive(Clone, Copy)]
 #[repr(C, align(4))]
 pub struct mesh_pkt_t {
-	pub dma_len: u32,
-	pub _type: u8,
-	pub rf_len: u8,
-	pub l2capLen: u16,
-	pub chanId: u16,
-	pub src_tx: u16,
-	pub handle1: u8, // for flag
-    pub sno: [u8; 3],
-    pub src_adr: u16,
-    pub dst_adr: u16,
-    pub op: u8,
-    pub vendor_id: u16,
-    pub par: [u8; 10],
-    pub internal_par1: [u8; 5],
-    pub ttl: u8,
-    pub internal_par2: [u8; 4],
-    pub no_use: [u8; 4]  // size must 48, when is set to be rf tx address.
+	pub dma_len: u32,           // 0
+	pub _type: u8,              // 4
+	pub rf_len: u8,             // 5
+	pub l2capLen: u16,          // 6
+	pub chanId: u16,            // 8
+	pub src_tx: u16,            // 10
+	pub handle1: u8,            // 12 for flag
+    pub sno: [u8; 3],           // 13
+    pub src_adr: u16,           // 16
+    pub dst_adr: u16,           // 18
+    pub op: u8,                 // 20
+    pub vendor_id: u16,         // 21
+    pub par: [u8; 10],          // 23
+    pub internal_par1: [u8; 5], // 33
+    pub ttl: u8,                // 38
+    pub internal_par2: [u8; 4], // 39
+    pub no_use: [u8; 4]         // 43 size must 48, when is set to be rf tx address.
 }
 
 #[repr(C, align(4))]
@@ -970,6 +954,7 @@ pub_mut!(slave_status_buffer_rptr, u8); //, 0);
 pub_mut!(slave_stat_sno, [u8; 3]); //, [0; 3]);
 pub_mut!(slave_read_status_unicast_flag, u8); //, 0);
 pub_mut!(mesh_ota_master_st, [u8; 29]); //, [0; 29]);
+pub_mut!(mesh_node_report_enable, bool); //, false);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);

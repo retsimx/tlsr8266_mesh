@@ -486,7 +486,8 @@ pub_mut!(user_data, [u8; 16], [0; 16]);
 
 #[no_mangle]
 extern "C" {
-    fn irq_st_adv();
+    pub fn irq_st_adv();
+    pub fn irq_st_response();
 }
 
 #[no_mangle]

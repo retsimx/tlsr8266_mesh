@@ -41,7 +41,7 @@ pub_mut!(sw_no_pair, bool); //, false);
 
 pub_mut!(slave_link_connected, bool); //, false);
 
-pub_mut!(slave_read_status_busy, bool); //, false);
+pub_mut!(slave_read_status_busy, u8); //, 0);
 pub_mut!(rf_slave_ota_busy, bool); //, false);
 
 pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
@@ -75,7 +75,7 @@ pub_mut!(fp_gateway_rx_proc, fn());
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 pub_mut!(enc_disable, bool); //, false);
 
-pub_mut!(p_cb_rx_from_mesh, Option<fn(p: *const u8)>, Option::None);
+pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);
 
@@ -317,6 +317,7 @@ pub enum MeshOtaLed {
     STOP,
 }
 
+#[derive(PartialEq)]
 pub enum CMD_TYPE {
     NORMAL = 0,
     PASSIVE_DEV = 1,
@@ -669,7 +670,7 @@ pub struct status_record_t {
 pub struct rc_pkt_buf_t {
     pub op: u8,
     pub sno: [u8; 3],
-    pub notify_ok_flag: u8,
+    pub notify_ok_flag: bool,
     pub sno2: [u8; 2], // for passive
 }
 
@@ -854,8 +855,6 @@ pub extern "C" fn get_command_type() -> CMD_TYPE {
 #[no_mangle]
 extern "C" fn set_command_type2alt(p_att_value: *const u8) {}
 
-pub_mut!(cb_mesh_node_filter, u32, 0);
-
 #[no_mangle]
 extern "C" fn proc_sig_mesh_to_telink_mesh() -> u8 {
     return 0;
@@ -921,7 +920,7 @@ pub_mut!(
     [rc_pkt_buf_t {
         op: 0,
         sno: [0; 3],
-        notify_ok_flag: 0,
+        notify_ok_flag: false,
         sno2: [0; 2],
     }; RC_PKT_BUF_MAX as usize]
 );
@@ -952,6 +951,7 @@ pub_mut!(mesh_node_cur, u8); //, 1);
 pub_mut!(switch_rf_tx_once_time, u32); //, 0);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
+// todo: Maybe should be [u8; 3]?
 pub_mut!(slave_sno_sending, u32); //, 0);
 pub_mut!(app_cmd_time, u32); //, 0);
 pub_mut!(mesh_user_cmd_idx, u8); //, 0);
@@ -972,11 +972,21 @@ pub_mut!(slave_tick_brx, u32); //, 0);
 pub_mut!(slave_pairing_master_tick, u32); //, 0);
 pub_mut!(slave_window_offset, u32); //, 0);
 pub_mut!(slave_conn_delay, u32); //, 0);
+// todo: Maybe should be [u8; 3]?
 pub_mut!(slave_link_sno, u32); //, 0);
 pub_mut!(ADV_Suspend, u32); //, 0);
+pub_mut!(slave_pairing_state, u32); //, 0);
 pub_mut!(slave_instant, u16); //, 0);
 pub_mut!(slave_status_tick, u8); //, 0);
 pub_mut!(slave_n6, u8); //, 0);
+pub_mut!(slave_link_cmd, u8); //, 0);
+pub_mut!(req_cmd_in_adv_type, u8); //, 2);
+pub_mut!(rcv_pkt_ttc, u8); //, 0);
+pub_mut!(org_ttl, u8, 0);
+pub_mut!(pkt_need_relay, bool); //, true);
+pub_mut!(slave_read_status_response, bool); //, false);
+pub_mut!(mesh_ota_slave_st, [u8; 25]); //, [0; 25]);
+pub_mut!(slave_sno, [u8; 4]); //, [0; 4]);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);

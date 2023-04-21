@@ -268,7 +268,7 @@ pub fn main_loop() {
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
 #[no_mangle] // required by light_ll
-extern "C" fn rf_link_response_callback(
+pub extern "C" fn rf_link_response_callback(
     ppp: *mut rf_packet_att_value_t,
     p_req: *const rf_packet_att_value_t,
 ) -> bool {

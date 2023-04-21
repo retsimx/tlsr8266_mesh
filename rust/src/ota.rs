@@ -143,7 +143,7 @@ impl OtaManager {
             }
 
             set_rf_slave_ota_busy(true);
-            if *get_slave_read_status_busy() {
+            if *get_slave_read_status_busy() != 0 {
                 rf_link_slave_read_status_stop();
             }
         }

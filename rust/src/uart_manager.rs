@@ -47,7 +47,8 @@ pub enum UartMsg {
 }
 
 // app_cmd_value_t
-fn light_mesh_rx_cb(data: *const u8) {
+fn light_mesh_rx_cb(data: &app_cmd_value_t) {
+    let data = addr_of!(*data) as *const u8;
     // Compute the CRC of important bits. This is from start of app_cmd_value_t.dst (5) to end of app_cmd_value_t.par (20)
     let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
 

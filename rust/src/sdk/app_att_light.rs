@@ -187,7 +187,7 @@ static SppDataPairData: [u8; 20] = [0xe0; 20];
 
 pub_mut!(send_to_master, [u8; 16], [0; 16]);
 
-static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master };
+static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master.0 };
 
 static userdesc_UUID: u16 = GATT_UUID_CHAR_USER_DESC;
 
@@ -316,7 +316,7 @@ pub_mut!(
     gAttributes_def,
     [attribute_t; 29],
     [
-        attrdef!((unsafe { gAttributes_def.len() - 1 }) as u8, 0, 0, 0),
+        attrdef!((unsafe { gAttributes_def.0.len() - 1 }) as u8, 0, 0, 0),
         // gatt
         attrdefu!(6, 2, 2, 2, primaryServiceUUID, gapServiceUUID),
         attrdefu!(0, 2, 1, 1, characterUUID, devNameCharacter),
@@ -348,7 +348,7 @@ pub_mut!(
         // device info
         attrdefu!(9, 2, 2, 2, primaryServiceUUID, devInfoUUID),
         attrdefu!(0, 2, 1, 1, characterUUID, fwRevisionChar),
-        attrdef!(0, 2, 4, 4, fwRevision_charUUID, fwRevision_value),
+        attrdef!(0, 2, 4, 4, fwRevision_charUUID, fwRevision_value.0),
         attrdefu!(0, 2, 1, 1, characterUUID, manuNameStringChar),
         attrdef!(
             0,
@@ -377,7 +377,7 @@ pub_mut!(
             hwRevision_value
         ),
         // spp u//0x10
-        attrdef!(13, 2, 16, 16, primaryServiceUUID, TelinkSppServiceUUID),
+        attrdef!(13, 2, 16, 16, primaryServiceUUID, TelinkSppServiceUUID.0),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataServer2ClientProp), //prop
         attrdef!(
             0,

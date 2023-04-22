@@ -62,7 +62,7 @@ fn reset_cnt_get_idx() {
     let pf = *get_flash_adr_reset_cnt() as *const u8;
     set_adr_reset_cnt_idx(0);
     while *get_adr_reset_cnt_idx() < 4096 {
-        let restcnt_bit = unsafe { *pf.offset(adr_reset_cnt_idx as isize) };
+        let restcnt_bit = unsafe { *pf.offset(adr_reset_cnt_idx.0 as isize) };
         if restcnt_bit != RESET_CNT_RECOUNT_FLAG
         //end
         {

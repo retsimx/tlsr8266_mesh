@@ -354,9 +354,9 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
     let state = irq_disable();
     let result = analog_read(rega_deepsleep_flag) & 0x40;
 
-    rf_tx_mode = 0;
+    set_rf_tx_mode(0);
     if enable {
-        rfhw_tx_power = 0x40; // FR_TX_PA_MAX_POWER
+        set_rfhw_tx_power(0x40); // FR_TX_PA_MAX_POWER
         if ENABLE_16MHZ_XTAL {
             LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
         } else {
@@ -370,12 +370,12 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
 
         if *(*get_flash_adr_mac() as *const u8).offset(0x11) != 0xff {
             let u_var5 = *(*get_flash_adr_mac() as *const u8).offset(0x11) as u32;
-            rf_tp_base = u_var5;
-            rf_tp_gain = ((u_var5 - 0x19) << 8) / 80;
+            set_rf_tp_base(u_var5);
+            set_rf_tp_gain(((u_var5 - 0x19) << 8) / 80);
         }
         if *(*get_flash_adr_mac() as *const u8).offset(0x12) != 0xff {
-            let u_var5 = rf_tp_base - *(*get_flash_adr_mac() as *const u8).offset(0x12) as u32;
-            rf_tp_gain = (u_var5 << 8) / 80;
+            let u_var5 = *get_rf_tp_base() - *(*get_flash_adr_mac() as *const u8).offset(0x12) as u32;
+            set_rf_tp_gain((u_var5 << 8) / 80);
         }
     } else {
         analog_write(6, 0);  // power off sar
@@ -417,12 +417,12 @@ pub unsafe fn blc_ll_initBasicMCU()
 pub_mut!(gAttributes, *mut attribute_t, null_mut());
 pub unsafe fn setSppWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool)
 {
-    (*gAttributes.offset(21)).w = Some(func);
+    (*gAttributes.0.offset(21)).w = Some(func);
 }
 
 pub unsafe fn setSppOtaWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool)
 {
-    (*gAttributes.offset(24)).w = Some(func);
+    (*gAttributes.0.offset(24)).w = Some(func);
 }
 
 pub_mut!(irq_mask_save, u32); //, 0);
@@ -579,7 +579,7 @@ pub fn rf_link_slave_init(interval: u32)
 
         set_slave_adv_enable(true);
 
-        gAttributes = get_gAttributes_def().as_mut_ptr();
+        gAttributes.0 = get_gAttributes_def().as_mut_ptr();
         setSppWriteCB(my_rf_link_slave_data_write);
         setSppOtaWriteCB(my_rf_link_slave_data_ota);
 
@@ -767,7 +767,7 @@ pub extern "C" fn rf_set_ble_channel(mut chn: u8){
 
 fn rf_set_tp_gain(gain: u8)
 {
-    unsafe { analog_write(0x93, rf_tp_base as u8 - ((gain as u32 * rf_tp_gain + 0x80) >> 8) as u8); }
+    unsafe { analog_write(0x93, *get_rf_tp_base() as u8 - ((gain as u32 * *get_rf_tp_gain() + 0x80) >> 8) as u8); }
 }
 
 #[no_mangle]
@@ -779,7 +779,7 @@ pub extern "C" fn rf_start_stx2rx (addr: u32, tick: u32)
 	write_reg8 (0x800f00, 0x87);						        // Set mode
 	write_reg16 (0x80050c, addr as u16);
 
-    unsafe { FtoRX = true; }
+    set_FtoRX(true);
 }
 
 #[no_mangle]

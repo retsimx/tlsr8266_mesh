@@ -543,6 +543,7 @@ pub fn pairWrite(data: *const rf_packet_att_write_t) -> bool
         }
         (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
         aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_pass().as_mut_ptr());
+
     } else {
         if !*get_pair_login_ok() || *get_ble_pair_st() != 5 {
             pair_par_init();

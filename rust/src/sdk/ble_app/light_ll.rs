@@ -75,19 +75,6 @@ fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &app_cmd_value_t) -> bool
     return false;
 }
 
-fn is_exist_but_sno2_differ(opcode: u8, cmd_pkt: &app_cmd_value_t) -> bool
-{
-    // Note: par[8], par[9] of passive command have been used internal for sno2.
-
-    for idx in 0..*get_mesh_cmd_cache_num() as usize {
-        if (*get_rc_pkt_buf())[idx].op == opcode && (*get_rc_pkt_buf())[idx].sno == cmd_pkt.sno && (*get_rc_pkt_buf())[idx].sno2 != cmd_pkt.par[8..10] {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 fn rf_link_is_notify_rsp(opcode: u8) -> bool
 {
     if opcode == 0x14 || opcode == 0x1b || opcode == 0x16 || opcode == 0x15 || opcode == 1 || opcode == 0x27 || opcode == 0x21 || opcode == 0x29 {
@@ -115,15 +102,6 @@ fn rc_pkt_buf_push(opcode: u8, cmd_pkt: &app_cmd_value_t)
     return;
 }
 
-fn rc_pkt_buf_push_update_sno2(opcode: u8, cmd_pkt: &app_cmd_value_t)
-{
-    (*get_rc_pkt_buf()).iter_mut().filter(
-        |v| { v.op == opcode && v.sno == cmd_pkt.sno }
-    ).for_each(
-        |v| { v.sno2.copy_from_slice(&cmd_pkt.par[8..10]) }
-    );
-}
-
 fn req_cmd_is_notify_ok(opcode: u8, cmd_pkt: &app_cmd_value_t) -> bool
 {
     for idx in 0..*get_mesh_cmd_cache_num() as usize {
@@ -146,7 +124,7 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &app_cmd_value_t)
 
 fn copy_par_User_All(params_len: u32, ptr: *const u8)
 {
-    (*get_pkt_light_status()).value[10..10+params_len as usize].copy_from_slice(
+    (*get_pkt_light_status()).value[10..10 + params_len as usize].copy_from_slice(
         unsafe {
             slice::from_raw_parts(ptr, params_len as usize)
         }
@@ -157,354 +135,349 @@ no_mangle_fn!(rf_link_slave_add_status_ll, packet: *const mesh_pkt_t);
 
 fn rf_link_slave_add_status(packet: *const mesh_pkt_t)
 {
-  critical_section::with(|_| {
-    _rf_link_slave_add_status_ll(packet);
-  });
+    critical_section::with(|_| {
+        _rf_link_slave_add_status_ll(packet);
+    });
 }
 
 no_mangle_fn!(mesh_node_update_status, bool, pkt: *const rf_packet_att_value_t, len: u32);
 
+// pub_mut!(cb_mesh_node_filter, u32, 0);
+// no_mangle_fn!(rf_link_rc_data, bool, packet: &mut mesh_pkt_t);
 fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
-  if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
-    if *get_sw_no_pair() == false {
-      return false;
+    if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
+        if *get_sw_no_pair() == false {
+            return false;
+        }
+        if packet.rf_len != 0x24 {
+            return false;
+        }
+        if packet.l2capLen != 0x20 {
+            return false;
+        }
+        if packet.chanId != 0xff04 {
+            return false;
+        }
+        set_enc_disable(true);
     }
-    if packet.rf_len != 0x24 {
-      return false;
+
+    if *get_slave_link_connected() {
+        if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 1000) as i32 {
+            set_enc_disable(false);
+            return false;
+        }
     }
-    if packet.l2capLen != 0x20 {
-      return false;
-    }
-    if packet.chanId != 0xff04 {
-      return false;
-    }
-    set_enc_disable(true);
-  }
 
-  if *get_slave_link_connected() {
-    if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - *get_tick_per_us() * 1000 {
-      set_enc_disable(false);
-      return false;
-    }
-  }
-
-  if unsafe { !pair_dec_packet_mesh(packet) } {
-    set_enc_disable(false);
-    return false;
-  }
-
-  if packet._type & 3 != 2 {
-    set_enc_disable(false);
-    return false;
-  }
-
-  if packet.chanId == 0xeeff {
-    set_enc_disable(false);
-    return false;
-  }
-
-  if packet.chanId == 0xffff {
-    if *get_mesh_node_st_val_len() == 4 {
-      if packet.internal_par1[3] != 0xa5 || packet.internal_par1[4] != 0xa5 {
+    if unsafe { !pair_dec_packet_mesh(packet) } {
         set_enc_disable(false);
         return false;
-      }
     }
 
-    // todo: ttl? Probably packet is not the right type in this check
-    if packet.ttl != 0xa5 {
-      set_enc_disable(false);
-      return false;
+    if packet._type & 3 != 2 {
+        set_enc_disable(false);
+        return false;
     }
 
-    if packet.internal_par2[0] != 0xa5 {
-      set_enc_disable(false);
-      return false;
+    if packet.chanId == 0xeeff {
+        set_enc_disable(false);
+        return false;
     }
 
-    _mesh_node_update_status(addr_of!(packet.sno) as *const rf_packet_att_value_t,0x1a / *get_mesh_node_st_val_len() as u32);
-    set_enc_disable(false);
-    return false;
-  }
-
-  if *get_max_relay_num() + 6 < packet.internal_par1[4] {
-    set_enc_disable(false);
-    return false;
-  }
-
-  let mut op_cmd: [u8; 8] = [0; 8];
-  let mut op_cmd_len: u8 = 0;
-  let mut params: [u8; 16] = [0; 16];
-  let mut params_len: u8 = 0;
-  let mut uVar23 = 1;
-  let l2cap_data = unsafe { &*(addr_of_mut!(packet.l2capLen) as *const ll_packet_l2cap_data_t) };
-  if !rf_link_get_op_para(l2cap_data, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
-    set_enc_disable(false);
-    return false;
-  }
-
-  let mut op = 0;
-  if op_cmd_len == 3 {
-    op = op_cmd[0] & 0x3f;
-  }
-
-  let cmd_pkt = unsafe { &*(addr_of_mut!(packet.sno) as *const app_cmd_value_t) };
-  let match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
-  let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
-  let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
-  if (*get_p_cb_rx_from_mesh()).is_some() && (match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
-  {
-    (*get_p_cb_rx_from_mesh()).unwrap()(cmd_pkt);
-  }
-
-  let src_device_addr_match = packet.src_adr == *get_device_address();
-
-  let mut iVar12 = false;
-  if packet.dst_adr == *get_device_address() {
-    iVar12 = true;
-    if *get_slave_link_connected() == false {
-      let uVar20 = *get_req_cmd_in_adv_type();
-      if uVar20 != 1 {
-        iVar12 = false;
-        if 1 < (*get_mesh_ota_master_st())[20] {
-          // todo: Might need to be !=
-          iVar12 = uVar20 - 2 == 0;
+    if packet.chanId == 0xffff {
+        if *get_mesh_node_st_val_len() == 4 {
+            if packet.internal_par1[3] != 0xa5 || packet.internal_par1[4] != 0xa5 {
+                set_enc_disable(false);
+                return false;
+            }
         }
-      }
+
+        // todo: ttl? Probably packet is not the right type in this check
+        if packet.ttl != 0xa5 || packet.internal_par2[0] != 0xa5 {
+            set_enc_disable(false);
+            return false;
+        }
+
+        _mesh_node_update_status(addr_of!(packet.sno) as *const rf_packet_att_value_t, 0x1a / *get_mesh_node_st_val_len() as u32);
+        set_enc_disable(false);
+        return false;
     }
-  }
+
+    if *get_max_relay_num() + 6 < packet.internal_par1[4] {
+        set_enc_disable(false);
+        return false;
+    }
+
+    let mut op_cmd: [u8; 8] = [0; 8];
+    let mut op_cmd_len: u8 = 0;
+    let mut params: [u8; 16] = [0; 16];
+    let mut params_len: u8 = 0;
+    let l2cap_data = unsafe { &*(addr_of_mut!(packet.l2capLen) as *const ll_packet_l2cap_data_t) };
+    if !rf_link_get_op_para(l2cap_data, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
+        set_enc_disable(false);
+        return false;
+    }
+
+    let mut op = 0;
+    if op_cmd_len == 3 {
+        op = op_cmd[0] & 0x3f;
+    }
+
+    let cmd_pkt = unsafe { &*(addr_of_mut!(packet.sno) as *const app_cmd_value_t) };
+    let match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
+    let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
+    let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
+    if (*get_p_cb_rx_from_mesh()).is_some() && (match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
+    {
+        (*get_p_cb_rx_from_mesh()).unwrap()(cmd_pkt);
+    }
+
+    let src_device_addr_match = packet.src_adr == *get_device_address();
+
+    let mut iVar12 = false;
+    if packet.dst_adr == *get_device_address() {
+        iVar12 = true;
+        if *get_slave_link_connected() == false {
+            let uVar20 = *get_req_cmd_in_adv_type();
+            if uVar20 != 1 {
+                iVar12 = false;
+                if 1 < (*get_mesh_ota_master_st())[20] {
+                    // todo: Might need to be !=
+                    iVar12 = uVar20 - 2 == 0;
+                }
+            }
+        }
+    }
 
     let iStack_6c;
     let (mut result1, mut result2) = (false, false);
-  if rf_link_is_notify_rsp(op) && iVar12 {
-    if op != 8 || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
-      if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
+    if rf_link_is_notify_rsp(op) && iVar12 {
+        if op != 8 || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
+            if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
+                set_enc_disable(false);
+                return false;
+            }
+        }
+        rf_link_slave_add_status(packet);
         set_enc_disable(false);
         return false;
-      }
-    }
-    rf_link_slave_add_status(packet);
-    set_enc_disable(false);
-    return false;
-  }
-  else {
-    if src_device_addr_match && !*get_mesh_node_ignore_addr() {
-      if op != 0x20 || dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
-        set_enc_disable(false);
-        return false;
-      }
-    }
-    set_slave_pairing_state(0);
-
-    set_rcv_pkt_ttc(packet.par[9]);
-
-    (result1, result2) = rf_link_match_group_mac(cmd_pkt);
-
-    iStack_6c = (match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
-
-    if result1 != false || result2 != false {
-      if iStack_6c {
-        rc_pkt_buf_push(op, cmd_pkt);
-        rf_link_data_callback(l2cap_data);
-      }
-    }
-
-    if rf_link_is_notify_req(op) {
-      set_slave_read_status_response(true);
-      if result1 == false {
-        // todo: May need to be !result2
-        set_slave_read_status_response(result2);
-      }
-      let bVar8 = req_cmd_is_notify_ok(op, cmd_pkt);
-      if bVar8 {
-        set_slave_read_status_response(false);
-        if op == 7 && (*get_mesh_ota_slave_st())[21] == 7 && (*get_mesh_ota_slave_st())[18] != 0 {
-          (*get_mesh_ota_slave_st())[19] = 0x20;
+    } else {
+        if src_device_addr_match && !*get_mesh_node_ignore_addr() {
+            if op != 0x20 || dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
+                set_enc_disable(false);
+                return false;
+            }
         }
-      } else if (packet.dst_adr >> 8) & 0x80 != 0 {
-        for i in 0..5 {
-          if packet.par[i + 4] == *get_device_address() as u8 {
-            req_cmd_set_notify_ok_flag(op, cmd_pkt);
-            set_slave_read_status_response(false);
-            break;
-          }
+        set_slave_pairing_state(0);
+
+        set_rcv_pkt_ttc(packet.par[9]);
+
+        (result1, result2) = rf_link_match_group_mac(cmd_pkt);
+
+        iStack_6c = (match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
+
+        if result1 != false || result2 != false {
+            if iStack_6c {
+                rc_pkt_buf_push(op, cmd_pkt);
+                rf_link_data_callback(l2cap_data);
+            }
         }
-      }
+
+        if rf_link_is_notify_req(op) {
+            set_slave_read_status_response(true);
+            if result1 == false {
+                // todo: May need to be !result2
+                set_slave_read_status_response(result2);
+            }
+            let bVar8 = req_cmd_is_notify_ok(op, cmd_pkt);
+            if bVar8 {
+                set_slave_read_status_response(false);
+                if op == 7 && (*get_mesh_ota_slave_st())[21] == 7 && (*get_mesh_ota_slave_st())[18] != 0 {
+                    (*get_mesh_ota_slave_st())[19] = 0x20;
+                }
+            } else if (packet.dst_adr >> 8) & 0x80 != 0 {
+                for i in 0..5 {
+                    if packet.par[i + 4] == *get_device_address() as u8 {
+                        req_cmd_set_notify_ok_flag(op, cmd_pkt);
+                        set_slave_read_status_response(false);
+                        break;
+                    }
+                }
+            }
+        }
     }
-  }
-  let bVar2 = packet.internal_par1[4];
-  let uVar3 = packet.l2capLen;
-  let iVar7 = uVar3 + 6;
+    let bVar2 = packet.internal_par1[4];
+    let uVar3 = packet.l2capLen;
+    let iVar7 = uVar3 + 6;
 
-  packet.dma_len = (iVar7 as u32) & 0xffffff;
-  packet.rf_len = uVar3 as u8 + 4;
+    packet.dma_len = (iVar7 as u32) & 0xffffff;
+    packet.rf_len = uVar3 as u8 + 4;
 
-  let mut bVar1 = bVar2;
+    let mut bVar1 = bVar2;
 
-  if match_slave_sno || *get_slave_link_cmd() != op {
-    packet.src_tx = *get_device_address();
-    (*get_slave_sno())[0..3].copy_from_slice(&cmd_pkt.sno);
+    if match_slave_sno || *get_slave_link_cmd() != op {
+        packet.src_tx = *get_device_address();
+        (*get_slave_sno())[0..3].copy_from_slice(&cmd_pkt.sno);
 
-    set_slave_link_cmd(op);
-  } else {
-    bVar1 = *get_org_ttl();
-  }
+        set_slave_link_cmd(op);
+    } else {
+        bVar1 = *get_org_ttl();
+    }
 
     set_org_ttl(bVar1);
 
-  let uVar10 = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 0xf;
-  let iVar7 = uVar10 * 500;
-  if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
-    (*get_pkt_light_status()).value[0..3].copy_from_slice(&cmd_pkt.sno[0..3]);
-    packet.src_tx = *get_device_address();
+    let uVar10 = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 0xf;
+    let iVar7 = uVar10 * 500;
+    if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
+        (*get_pkt_light_status()).value[0..3].copy_from_slice(&cmd_pkt.sno[0..3]);
+        packet.src_tx = *get_device_address();
 
-    if op == 0x1a {
-      (*get_pkt_light_status()).value[22] = 0;
-      if iStack_6c {
-        (*get_pkt_light_status()).value[20] = packet.par[9];
-        (*get_pkt_light_status()).value[25] = packet.internal_par1[4];
-        if *get_max_relay_num() < packet.internal_par1[4] {
-          (*get_pkt_light_status()).value[21] = 0;
-        } else {
-          (*get_pkt_light_status()).value[21] = *get_max_relay_num() - packet.internal_par1[4];
-        }
-      }
-    } else if op == 0x1d {
-      (*get_pkt_light_status()).value[22] = packet.internal_par1[1];
-    } else if op == 0x17 {
-      (*get_pkt_light_status()).value[22] = 1;
-    } else if op == 0x20 {
-      (*get_pkt_light_status()).value[22] = 4;
-    } else if op == 0x26 {
-      (*get_pkt_light_status()).value[22] = 5;
-    } else if op == 0x28 {
-      (*get_pkt_light_status()).value[22] = 6;
-    } else if op == 0x2a {
-      (*get_pkt_light_status()).value[22] = 7;
-    } else if op == 7 {
-      (*get_pkt_light_status()).value[22] = 9;
-    } else if op == 0 {
-      (*get_pkt_light_status()).value[22] = 8;
-    }
-    unsafe { copy_par_User_All(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
-    if (match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0) && (op != 0x26) || params[1] != 0) {
-        (*get_pkt_light_status()).value[3..3+2].copy_from_slice( unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
-
-        let mut rStack_64: rf_packet_att_value_t = rf_packet_att_value_t {
-            sno: [0; 3],
-            src: [0; 2],
-            dst: [0; 2],
-            val: [0; 23],
-        };
-
-        unsafe {
-            slice::from_raw_parts_mut(addr_of_mut!(rStack_64) as *mut u8, size_of::<rf_packet_att_value_t>()).copy_from_slice(
-                slice::from_raw_parts(
-                    addr_of!(*cmd_pkt) as *const u8,
-                    size_of::<rf_packet_att_value_t>()
-                )
-            )
-        }
-
-      if !rf_link_response_callback(addr_of_mut!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_64) {
-        if *get_SW_Low_Power() == false {
-          if *get_slave_link_connected() == false {
-            write_reg_irq_src(0x100000);
-              let iVar12 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
-            let mut puVar9 = 0x3e80 + iVar12 + iVar7;
-            let bVar1 = packet.internal_par1[2];
-            if 0x1d < bVar1 {
-              let mut uVar11 = (((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500 >> 10) + packet.internal_par1[3] as u32;
-              if 0xff < uVar11 {
-                uVar11 = 0xff;
-              }
-              let uVar11 = bVar1 as u32 - uVar11;
-              if uVar11 < 0x32 {
-                puVar9 = uVar11 * 1000;
-                if result2 == false {
-                  if result1 != false && *get_max_relay_num() - packet.internal_par1[4] < 3 {
-                    puVar9 = puVar9 + iVar12 + iVar7;
-                  }
+        if op == 0x1a {
+            (*get_pkt_light_status()).value[22] = 0;
+            if iStack_6c {
+                (*get_pkt_light_status()).value[20] = packet.par[9];
+                (*get_pkt_light_status()).value[25] = packet.internal_par1[4];
+                if *get_max_relay_num() < packet.internal_par1[4] {
+                    (*get_pkt_light_status()).value[21] = 0;
                 } else {
-                  puVar9 = puVar9 + 2000;
+                    (*get_pkt_light_status()).value[21] = *get_max_relay_num() - packet.internal_par1[4];
                 }
-              }
             }
-            write_reg_system_tick_irq(puVar9 * *get_tick_per_us() + read_reg_system_tick());
-            set_p_st_handler(Some(irq_st_response));
-          } else {
-            rf_set_tx_rx_off();
-            sleep_us(100);
-            rf_set_ble_access_code(*get_pair_ac());
-              rf_set_ble_crc_adv();
-            for chn in *get_sys_chn_listen()
-            {
-              if *get_slave_link_connected() != false {
-                if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
-                    rf_stop_trx();
-                  set_enc_disable(false);
-                  return false;
+        } else if op == 0x1d {
+            (*get_pkt_light_status()).value[22] = packet.internal_par1[1];
+        } else if op == 0x17 {
+            (*get_pkt_light_status()).value[22] = 1;
+        } else if op == 0x20 {
+            (*get_pkt_light_status()).value[22] = 4;
+        } else if op == 0x26 {
+            (*get_pkt_light_status()).value[22] = 5;
+        } else if op == 0x28 {
+            (*get_pkt_light_status()).value[22] = 6;
+        } else if op == 0x2a {
+            (*get_pkt_light_status()).value[22] = 7;
+        } else if op == 7 {
+            (*get_pkt_light_status()).value[22] = 9;
+        } else if op == 0 {
+            (*get_pkt_light_status()).value[22] = 8;
+        }
+        unsafe { copy_par_User_All(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
+        if (match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0) && (op != 0x26) || params[1] != 0) {
+            (*get_pkt_light_status()).value[3..3 + 2].copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
+
+            let mut rStack_64: rf_packet_att_value_t = rf_packet_att_value_t {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0; 23],
+            };
+
+            unsafe {
+                slice::from_raw_parts_mut(addr_of_mut!(rStack_64) as *mut u8, size_of::<rf_packet_att_value_t>()).copy_from_slice(
+                    slice::from_raw_parts(
+                        addr_of!(*cmd_pkt) as *const u8,
+                        size_of::<rf_packet_att_value_t>(),
+                    )
+                )
+            }
+
+            if !rf_link_response_callback(addr_of_mut!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_64) {
+                if *get_SW_Low_Power() == false {
+                    if *get_slave_link_connected() == false {
+                        write_reg_irq_src(0x100000);
+                        let iVar12 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
+                        let mut puVar9 = 0x3e80 + iVar12 + iVar7;
+                        let bVar1 = packet.internal_par1[2];
+                        if 0x1d < bVar1 {
+                            let mut uVar11 = (((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500 >> 10) + packet.internal_par1[3] as u32;
+                            if 0xff < uVar11 {
+                                uVar11 = 0xff;
+                            }
+                            let uVar11 = bVar1 as u32 - uVar11;
+                            if uVar11 < 0x32 {
+                                puVar9 = uVar11 * 1000;
+                                if result2 == false {
+                                    if result1 != false && *get_max_relay_num() - packet.internal_par1[4] < 3 {
+                                        puVar9 = puVar9 + iVar12 + iVar7;
+                                    }
+                                } else {
+                                    puVar9 = puVar9 + 2000;
+                                }
+                            }
+                        }
+                        write_reg_system_tick_irq(puVar9 * *get_tick_per_us() + read_reg_system_tick());
+                        set_p_st_handler(Some(irq_st_response));
+                    } else {
+                        rf_set_tx_rx_off();
+                        sleep_us(100);
+                        rf_set_ble_access_code(*get_pair_ac());
+                        rf_set_ble_crc_adv();
+                        for chn in *get_sys_chn_listen()
+                        {
+                            if *get_slave_link_connected() != false {
+                                if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
+                                    rf_stop_trx();
+                                    set_enc_disable(false);
+                                    return false;
+                                }
+                            }
+                            rf_set_ble_channel(chn);
+                            (*get_pkt_light_status())._type |= 0x7f;
+                            rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                            sleep_us(600);
+                        }
+                    }
+                } else {
+                    set_SW_Low_Power_rsp_flag(1);
                 }
-              }
-              rf_set_ble_channel(chn);
-                (*get_pkt_light_status())._type |= 0x7f;
-              rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
-              sleep_us(600);
             }
-          }
-        } else {
-          set_SW_Low_Power_rsp_flag(1);
         }
-      }
     }
-  }
 
-  if *get_pkt_need_relay() && *get_SW_Low_Power() == false && bVar2 != 0 && *get_org_ttl() == bVar2
-  {
-    rf_set_tx_rx_off();
-    sleep_us(100);
-    rf_set_ble_access_code(*get_pair_ac());
-      rf_set_ble_crc_adv();
-    if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
-      packet.internal_par1[4] = bVar2 - 1;
-    }
-    if result2 == false {
-      let mut iVar7 = 100;
-      if *get_slave_link_connected() == false {
-        iVar7 = uVar10 * 500 - 8000;
-      }
-        sleep_us(iVar7);
+    if *get_pkt_need_relay() && *get_SW_Low_Power() == false && bVar2 != 0 && *get_org_ttl() == bVar2
+    {
+        rf_set_tx_rx_off();
+        sleep_us(100);
+        rf_set_ble_access_code(*get_pair_ac());
+        rf_set_ble_crc_adv();
+        if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
+            packet.internal_par1[4] = bVar2 - 1;
+        }
+        if result2 == false {
+            let mut iVar7 = 100;
+            if *get_slave_link_connected() == false {
+                iVar7 = uVar10 * 500 - 8000;
+            }
+            sleep_us(iVar7);
 
-      op = packet.internal_par1[3];
-      let tmp = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 3;
-      for uVar11 in tmp..tmp+4 {
-        if *get_slave_link_connected() != false {
-            if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
-              rf_stop_trx();
-              set_enc_disable(false);
-              return false;
-          }
+            op = packet.internal_par1[3];
+            let tmp = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 3;
+            for uVar11 in tmp..tmp + 4 {
+                if *get_slave_link_connected() != false {
+                    if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
+                        rf_stop_trx();
+                        set_enc_disable(false);
+                        return false;
+                    }
+                }
+                rf_set_ble_channel((*get_sys_chn_listen())[uVar11 as usize & 3]);
+                packet._type |= 0x7f;
+                if op != 0x1b {
+                    rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc() as u32, addr_of_mut!(packet.par[9]));
+                }
+                if rf_link_is_notify_req(op) {
+                    let mut uVar8 = ((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us() + 500 >> 10) + op as u32;
+                    if 0xff < uVar8 {
+                        uVar8 = 0xff;
+                    }
+                    packet.internal_par1[3] = uVar8 as u8;
+                }
+                rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }, *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                sleep_us(600);
+            }
         }
-        rf_set_ble_channel((*get_sys_chn_listen())[uVar11 as usize & 3]);
-        packet._type |= 0x7f;
-        if op != 0x1b {
-          rf_link_proc_ttc(*get_rcv_pkt_time(),*get_rcv_pkt_ttc() as u32,addr_of_mut!(packet.par[9]));
-        }
-        if rf_link_is_notify_req(op) {
-          let mut uVar8 = ((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us() + 500 >> 10) + op as u32;
-          if 0xff < uVar8 {
-            uVar8 = 0xff;
-          }
-          packet.internal_par1[3] = uVar8 as u8;
-        }
-        rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) },*get_tick_per_us() * 0x1e + read_reg_system_tick());
-        sleep_us(600);
-      }
+        rf_set_rxmode();
     }
-    rf_set_rxmode();
-  }
-  set_enc_disable(false);
-  return true;
+    set_enc_disable(false);
+    return true;
 }
 
 pub unsafe fn rf_link_slave_data(packet: &rf_packet_ll_data_t, time: u32) -> bool {
@@ -690,11 +663,11 @@ fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
             unsafe {
                 slice::from_raw_parts_mut(
                     addr_of_mut!((*get_pkt_init()).scanA) as *mut u8,
-                    0x22,
+                    0x22
                 ).copy_from_slice(
                     slice::from_raw_parts(
                         addr_of!(packet.scanA) as *const u8,
-                        0x22,
+                        0x22
                     )
                 )
             };

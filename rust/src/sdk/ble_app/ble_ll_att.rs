@@ -1,5 +1,5 @@
 use core::slice;
-use crate::{pub_mut, uprintln, uprintln_fast};
+use crate::{pub_mut, uprintln};
 
 pub_mut!(ble_ll_channelNum, u32, 0);
 pub_mut!(ble_ll_lastUnmappedCh, u32, 0);

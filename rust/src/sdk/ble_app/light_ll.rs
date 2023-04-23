@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slic
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use crate::{app, no_mangle_fn, pub_mut};
+use crate::{app, blinken, no_mangle_fn, pub_mut};
 use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_mesh_node_ignore_addr, get_sys_chn_adv, get_sys_chn_listen, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
 use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{irq_timer0, irq_timer1, rf_link_data_callback, rf_link_response_callback};
@@ -144,6 +144,7 @@ no_mangle_fn!(mesh_node_update_status, bool, pkt: *const rf_packet_att_value_t, 
 
 // pub_mut!(cb_mesh_node_filter, u32, 0);
 // no_mangle_fn!(rf_link_rc_data, bool, packet: &mut mesh_pkt_t);
+#[inline(never)]
 fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
         if *get_sw_no_pair() == false {
@@ -379,7 +380,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                 )
             }
 
-            if !rf_link_response_callback(addr_of_mut!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_64) {
+            if rf_link_response_callback(addr_of_mut!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_64) {
                 if *get_SW_Low_Power() == false {
                     if *get_slave_link_connected() == false {
                         write_reg_irq_src(0x100000);
@@ -464,7 +465,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc() as u32, addr_of_mut!(packet.par[9]));
                 }
                 if rf_link_is_notify_req(op) {
-                    let mut uVar8 = ((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us() + 500 >> 10) + op as u32;
+                    let mut uVar8 = (((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us() + 500) >> 10) + op as u32;
                     if 0xff < uVar8 {
                         uVar8 = 0xff;
                     }

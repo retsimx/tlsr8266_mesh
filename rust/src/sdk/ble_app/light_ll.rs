@@ -144,7 +144,6 @@ no_mangle_fn!(mesh_node_update_status, bool, pkt: *const rf_packet_att_value_t, 
 
 // pub_mut!(cb_mesh_node_filter, u32, 0);
 // no_mangle_fn!(rf_link_rc_data, bool, packet: &mut mesh_pkt_t);
-#[inline(never)]
 fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
         if *get_sw_no_pair() == false {
@@ -445,7 +444,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         if result2 == false {
             let mut iVar7 = 100;
             if *get_slave_link_connected() == false {
-                iVar7 = uVar10 * 500 - 8000;
+                iVar7 = 8000 - uVar10 * 500;
             }
             sleep_us(iVar7);
 
@@ -465,7 +464,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc() as u32, addr_of_mut!(packet.par[9]));
                 }
                 if rf_link_is_notify_req(op) {
-                    let mut uVar8 = (((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us() + 500) >> 10) + op as u32;
+                    let mut uVar8 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + op as u32;
                     if 0xff < uVar8 {
                         uVar8 = 0xff;
                     }

@@ -49,7 +49,17 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
 pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
-pub_mut!(buff_response, [[u32; 9]; 48], [[0; 9]; 48]);
+pub_mut!(buff_response, [rf_packet_att_data_t; 48], [rf_packet_att_data_t {
+    dma_len: 0,
+    _type: 0,
+    rf_len: 0,
+    l2cap: 0,
+    chanid: 0,
+    att: 0,
+    hl: 0,
+    hh: 0,
+    dat: [0; 23]
+}; 48]);
 pub_mut!(adv_data, [u8; 3]);
 pub_mut!(max_mesh_name_len, u8, 16);
 
@@ -126,7 +136,7 @@ fn light_init_default() {
 
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
-    rf_link_slave_set_buffer(get_buff_response().as_mut_ptr(), 48);
+    rf_link_slave_set_buffer(get_buff_response().as_mut_slice());
     rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 
     vendor_id_init(VENDOR_ID);

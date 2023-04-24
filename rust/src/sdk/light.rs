@@ -68,7 +68,6 @@ pub_mut!(set_mesh_info_time, u32, 0);
 pub_mut!(tick_per_us, u32); //, 0x20);
 pub_mut!(loop_interval_us, u16); //, 0x2710);
 
-pub_mut!(gateway_en, bool);
 pub_mut!(gateway_security, bool);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
@@ -500,6 +499,7 @@ pub struct rf_packet_att_cmd_t {
 }
 
 #[repr(C, align(4))]
+#[derive(Clone, Copy)]
 pub struct rf_packet_att_data_t {
     pub dma_len: u32, //won't be a fixed number as previous, should adjust with the mouse package number
 
@@ -660,9 +660,9 @@ pub struct mesh_ota_pkt_start_command_t {
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct status_record_t {
-    adr: [u8; 1],
+    pub adr: [u8; 1],
     // don't modify, use internal
-    alarm_id: u8, // don't modify, use internal
+    pub alarm_id: u8, // don't modify, use internal
 }
 
 #[derive(Clone, Copy)]
@@ -987,6 +987,8 @@ pub_mut!(pkt_need_relay, bool); //, true);
 pub_mut!(slave_read_status_response, bool); //, false);
 pub_mut!(mesh_ota_slave_st, [u8; 25]); //, [0; 25]);
 pub_mut!(slave_sno, [u8; 4]); //, [0; 4]);
+pub_mut!(slave_status_record_idx, u16); //, 0);
+pub_mut!(notify_req_mask_idx, u8); //, 0);
 
 // todo: This is not the correct type for this. Figure this out sometime
 pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);

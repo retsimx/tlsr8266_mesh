@@ -131,7 +131,7 @@ impl OtaManager {
         }
     }
 
-    pub fn rf_link_slave_data_ota(&mut self, data: &[u32]) {
+    pub fn rf_link_slave_data_ota(&mut self, data: &rf_packet_att_data_t) {
         if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
             return;
         }
@@ -148,8 +148,7 @@ impl OtaManager {
             }
         }
 
-        get_buff_response()[(self.slave_ota_data_cache_idx % 16) as usize][0..data.len()]
-            .copy_from_slice(&data[0..]);
+        get_buff_response()[(self.slave_ota_data_cache_idx % 16) as usize] = *data;
 
         self.slave_ota_data_cache_idx += 1;
     }
@@ -157,9 +156,7 @@ impl OtaManager {
     pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
         let mut reset_flag = OtaState::CONTINUE;
         for i in 0..self.slave_ota_data_cache_idx {
-            let p = unsafe {
-                &*(get_buff_response()[i as usize].as_mut_ptr() as *const rf_packet_att_data_t)
-            };
+            let p = &get_buff_response()[i as usize];
             let n_data_len = p.l2cap - 7;
 
             if crc16(&p.dat[0..(n_data_len + 2) as usize])
@@ -427,22 +424,17 @@ impl OtaManager {
 pub mod wrappers {
     use crate::app;
     use crate::sdk::light::{rf_packet_att_data_t, OtaState, MeshOtaLed, rf_packet_att_write_t};
-    use core::mem::size_of;
-    use core::slice;
 
     // Stuff consumed by light_ll
     #[no_mangle]
-    pub extern "C" fn rf_link_slave_data_ota(data: *const rf_packet_att_write_t) -> bool {
-        let len = size_of::<rf_packet_att_data_t>() / size_of::<u32>();
-        let data: &[u32] = unsafe { slice::from_raw_parts(data as *const u32, len) };
-
-        app().ota_manager.rf_link_slave_data_ota(data);
+    pub extern "C" fn rf_link_slave_data_ota(data: *const rf_packet_att_data_t) -> bool {
+        app().ota_manager.rf_link_slave_data_ota(unsafe { &*data });
 
         return true;
     }
 
     pub fn my_rf_link_slave_data_ota(data: *const rf_packet_att_write_t) -> bool {
-        return rf_link_slave_data_ota(data);
+        return rf_link_slave_data_ota(data as *const rf_packet_att_data_t);
     }
 
     #[no_mangle] // required by light_ll

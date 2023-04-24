@@ -142,8 +142,6 @@ fn rf_link_slave_add_status(packet: *const mesh_pkt_t)
 
 no_mangle_fn!(mesh_node_update_status, bool, pkt: *const rf_packet_att_value_t, len: u32);
 
-// pub_mut!(cb_mesh_node_filter, u32, 0);
-// no_mangle_fn!(rf_link_rc_data, bool, packet: &mut mesh_pkt_t);
 fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
         if *get_sw_no_pair() == false {
@@ -223,10 +221,10 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     }
 
     let cmd_pkt = unsafe { &*(addr_of_mut!(packet.sno) as *const app_cmd_value_t) };
-    let match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
+    let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
     let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
-    if (*get_p_cb_rx_from_mesh()).is_some() && (match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
+    if (*get_p_cb_rx_from_mesh()).is_some() && (no_match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
     {
         (*get_p_cb_rx_from_mesh()).unwrap()(cmd_pkt);
     }
@@ -262,7 +260,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         return false;
     } else {
         if src_device_addr_match && !*get_mesh_node_ignore_addr() {
-            if op != 0x20 || dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
+            if op != 0x20 || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
                 set_enc_disable(false);
                 return false;
             }
@@ -273,7 +271,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
 
         (result1, result2) = rf_link_match_group_mac(cmd_pkt);
 
-        iStack_6c = (match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
+        iStack_6c = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
         if result1 != false || result2 != false {
             if iStack_6c {
@@ -285,7 +283,6 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         if rf_link_is_notify_req(op) {
             set_slave_read_status_response(true);
             if result1 == false {
-                // todo: May need to be !result2
                 set_slave_read_status_response(result2);
             }
             let bVar8 = req_cmd_is_notify_ok(op, cmd_pkt);
@@ -314,7 +311,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
 
     let mut bVar1 = bVar2;
 
-    if match_slave_sno || *get_slave_link_cmd() != op {
+    if no_match_slave_sno || *get_slave_link_cmd() != op {
         packet.src_tx = *get_device_address();
         (*get_slave_sno())[0..3].copy_from_slice(&cmd_pkt.sno);
 
@@ -330,7 +327,6 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
         (*get_pkt_light_status()).value[0..3].copy_from_slice(&cmd_pkt.sno[0..3]);
         packet.src_tx = *get_device_address();
-
         if op == 0x1a {
             (*get_pkt_light_status()).value[22] = 0;
             if iStack_6c {
@@ -360,7 +356,7 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             (*get_pkt_light_status()).value[22] = 8;
         }
         unsafe { copy_par_User_All(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
-        if (match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0) && (op != 0x26) || params[1] != 0) {
+        if (no_match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0 && op != 0x26) || params[1] != 0) {
             (*get_pkt_light_status()).value[3..3 + 2].copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
 
             let mut rStack_64: rf_packet_att_value_t = rf_packet_att_value_t {
@@ -371,23 +367,23 @@ fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             };
 
             unsafe {
-                slice::from_raw_parts_mut(addr_of_mut!(rStack_64) as *mut u8, size_of::<rf_packet_att_value_t>()).copy_from_slice(
+                slice::from_raw_parts_mut(addr_of_mut!(rStack_64) as *mut u8, 0x1e).copy_from_slice(
                     slice::from_raw_parts(
                         addr_of!(*cmd_pkt) as *const u8,
-                        size_of::<rf_packet_att_value_t>(),
+                        0x1e,
                     )
                 )
             }
 
-            if rf_link_response_callback(addr_of_mut!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_64) {
+            if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut rf_packet_att_value_t, &rStack_64) {
                 if *get_SW_Low_Power() == false {
                     if *get_slave_link_connected() == false {
                         write_reg_irq_src(0x100000);
                         let iVar12 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
-                        let mut puVar9 = 0x3e80 + iVar12 + iVar7;
+                        let mut puVar9 = 16000 + iVar12 + iVar7;
                         let bVar1 = packet.internal_par1[2];
                         if 0x1d < bVar1 {
-                            let mut uVar11 = (((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500 >> 10) + packet.internal_par1[3] as u32;
+                            let mut uVar11 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[3] as u32;
                             if 0xff < uVar11 {
                                 uVar11 = 0xff;
                             }
@@ -1312,11 +1308,11 @@ fn rf_start_stx_mesh(packet: &rf_packet_att_cmd_t, sched_tick: u32)
     (*get_pkt_mesh()).src_tx = *get_device_address();
     (*get_pkt_mesh()).handle1 = 0;
 
-    if (packet._type as i8) < 0 {
+    if packet._type & 0x80 != 0 {
         pair_enc_packet_mesh(get_pkt_mesh());
     }
 
-    rf_start_srx2tx(get_pkt_mesh_addr() as u32, read_reg_system_tick());
+    rf_start_srx2tx(get_pkt_mesh_addr() as u32, sched_tick);
 }
 
 fn app_bridge_cmd_handle(bridge_cmd_time: u32)

@@ -8,41 +8,41 @@ use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-pub_mut!(pair_config_valid_flag, u8); //, 0xFA);
+pub_mut!(pair_config_valid_flag, u8, 0xFA);
 // todo, these might be busted entirely
-pub_mut!(pair_config_mesh_name, [u8; 16]); //, const_concat!(b"telink_mesh1", &[0, 0, 0, 0]));
-pub_mut!(pair_config_mesh_pwd, [u8; 16]); //, const_concat!(b"123", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-pub_mut!(pair_config_mesh_ltk, [u8; 16]); //, [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf]);
+pub_mut!(pair_config_mesh_name, [u8; 16], const_concat!(b"telink_mesh1", &[0, 0, 0, 0]));
+pub_mut!(pair_config_mesh_pwd, [u8; 16], const_concat!(b"123", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+pub_mut!(pair_config_mesh_ltk, [u8; 16], [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf]);
 
-pub_mut!(p_adv_pri_data, *const ll_adv_private_t); //, null());
-pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t); //, null_mut());
+pub_mut!(p_adv_pri_data, *const ll_adv_private_t, null());
+pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t, null_mut());
 pub_mut!(adv_private_data_len, u8, 0);
 
-pub_mut!(online_status_timeout, u32); //, 0xBB8);
+pub_mut!(online_status_timeout, u32, 0xBB8);
 
 pub_mut!(security_enable, bool, false);
 pub_mut!(not_need_login, bool, false);
 pub_mut!(pair_login_ok, bool, false);
 pub_mut!(pair_sk, [u8; 16], [0; 16]);
 pub_mut!(pair_sk_copy, [u8; 16], [0; 16]);
-pub_mut!(slave_first_connected_tick, u32);
+pub_mut!(slave_first_connected_tick, u32, 0);
 
-pub_mut!(device_address, u16); //, 0);
-pub_mut!(device_node_sn, u8);
+pub_mut!(device_address, u16, 0);
+pub_mut!(device_node_sn, u8, 1);
 pub_mut!(dev_grp_next_pos, u16, 0);
-pub_mut!(max_relay_num, u8);
+pub_mut!(max_relay_num, u8, 3);
 
-pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize]); //, [0; MAX_GROUP_NUM as usize]);
+pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize], [0; MAX_GROUP_NUM as usize]);
 
 pub_mut!(slave_p_mac, *const u8, null());
 
 pub_mut!(adr_flash_cfg_idx, i32, 0);
-pub_mut!(sw_no_pair, bool); //, false);
+pub_mut!(sw_no_pair, bool, false);
 
-pub_mut!(slave_link_connected, bool); //, false);
+pub_mut!(slave_link_connected, bool, false);
 
-pub_mut!(slave_read_status_busy, u8); //, 0);
-pub_mut!(rf_slave_ota_busy, bool); //, false);
+pub_mut!(slave_read_status_busy, u8, 0);
+pub_mut!(rf_slave_ota_busy, bool, false);
 
 pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
 pub_mut!(pair_ac, u32, 0);
@@ -53,37 +53,37 @@ pub_mut!(pair_ltk, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_org, [u8; 16], [0; 16]);
 
-pub_mut!(cur_ota_flash_addr, u32);
-pub_mut!(mesh_ota_master_100_flag, bool); //, false);
-pub_mut!(rf_slave_ota_finished_flag, OtaState); //, OtaState::CONTINUE);
-pub_mut!(rf_slave_ota_terminate_flag, bool);
+pub_mut!(cur_ota_flash_addr, u32, 0);
+pub_mut!(mesh_ota_master_100_flag, bool, false);
+pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::CONTINUE);
+pub_mut!(rf_slave_ota_terminate_flag, bool, false);
 pub_mut!(app_ota_hci_type, APP_OTA_HCI_TYPE);
 pub_mut!(mesh_node_max, u8, 0);
 
-pub_mut!(rf_slave_ota_timeout_def_s, u16);
-pub_mut!(rf_slave_ota_timeout_s, u16);
+pub_mut!(rf_slave_ota_timeout_def_s, u16, 0x1e);
+pub_mut!(rf_slave_ota_timeout_s, u16, 0x1e);
 pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 
-pub_mut!(tick_per_us, u32); //, 0x20);
-pub_mut!(loop_interval_us, u16); //, 0x2710);
+pub_mut!(tick_per_us, u32, 0x20);
+pub_mut!(loop_interval_us, u16, 0x2710);
 
 pub_mut!(gateway_security, bool);
 pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
 pub_mut!(fp_gateway_rx_proc, fn());
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
-pub_mut!(enc_disable, bool); //, false);
+pub_mut!(enc_disable, bool, false);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool
-pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>);
+pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
 
 pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
 pub_mut!(p_vendor_mesh_node_rcv_rsp, Option<fn(p: *const rf_packet_att_value_t)>);
 
-pub_mut!(sync_time_enable, bool); //, false);
-pub_mut!(synced_flag, bool); //, false);
-pub_mut!(mesh_ota_master_ui_sending, Option<fn(*const u8)>); //, Option::None);
+pub_mut!(sync_time_enable, bool, false);
+pub_mut!(synced_flag, bool, false);
+pub_mut!(mesh_ota_master_ui_sending, Option<fn(*const u8)>, Option::None);
 
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
@@ -686,6 +686,7 @@ pub struct rf_packet_scan_rsp_t {
 
 }
 
+#[derive(Clone, Copy)]
 #[repr(C, align(4))]
 pub struct light_rx_buff_t {
     pub dma_len: u8,        // 0
@@ -911,7 +912,7 @@ pub_mut!(
     size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
 );
 pub_mut!(SW_Low_Power, bool, false);
-pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
+// pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
 pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
 const RC_PKT_BUF_MAX: u8 = 2;
 pub_mut!(
@@ -929,78 +930,101 @@ pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
 pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
 pub_mut!(dev_address_next_pos, u16, 0);
 
-pub_mut!(need_update_connect_para, bool); //, false);
-pub_mut!(update_connect_para_delay_ms, u32); //, 0x3e8);
+pub_mut!(need_update_connect_para, bool, false);
+pub_mut!(update_connect_para_delay_ms, u32, 0x3e8);
 
-pub_mut!(update_interval_user_max, u16); //, 0);
-pub_mut!(update_interval_user_min, u16); //, 0);
-pub_mut!(update_ble_par_success_flag, bool); //, false);
-pub_mut!(update_timeout_user, u16); //, 0);
-pub_mut!(interval_th, u8); //, 0x10);
-pub_mut!(update_interval_flag, u16); //, 0);
-pub_mut!(update_interval_time, u32); //, 0);
+pub_mut!(update_interval_user_max, u16, 0);
+pub_mut!(update_interval_user_min, u16, 0);
+pub_mut!(update_ble_par_success_flag, bool, false);
+pub_mut!(update_timeout_user, u16, 0);
+pub_mut!(interval_th, u8, 0x10);
+pub_mut!(update_interval_flag, u16, 0);
+pub_mut!(update_interval_time, u32, 0);
 pub_mut!(tx_packet_bridge_random_en, bool, false);
-pub_mut!(tx_packet_bridge_delay_us, u32); //, 0);
-pub_mut!(tx_packet_bridge_tick, u32); //, 0);
-pub_mut!(online_status_comp, u8); //, 3);
-pub_mut!(slave_data_valid, u32); //, 0); // todo: Should be bool?
-pub_mut!(sw_flag, bool); //, false);
-pub_mut!(mesh_send_online_status_flag, bool); //, true);
-pub_mut!(send_self_online_status_cycle, u8); //, 0);
-pub_mut!(mesh_node_cur, u8); //, 1);
-pub_mut!(switch_rf_tx_once_time, u32); //, 0);
+pub_mut!(tx_packet_bridge_delay_us, u32, 0);
+pub_mut!(tx_packet_bridge_tick, u32, 0);
+pub_mut!(online_status_comp, u8, 3);
+pub_mut!(slave_data_valid, u32, 0); // todo: Should be bool?
+pub_mut!(sw_flag, bool, false);
+pub_mut!(mesh_send_online_status_flag, bool, true);
+pub_mut!(send_self_online_status_cycle, u8, 0);
+pub_mut!(mesh_node_cur, u8, 1);
+pub_mut!(switch_rf_tx_once_time, u32, 0);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
 // todo: Maybe should be [u8; 3]?
-pub_mut!(slave_sno_sending, u32); //, 0);
-pub_mut!(app_cmd_time, u32); //, 0);
-pub_mut!(mesh_user_cmd_idx, u8); //, 0);
-pub_mut!(slave_tx_cmd_time, u32); //, 0);
-pub_mut!(lpn_retransmit_cnt, u8); //, 0);
-pub_mut!(gateway_tx_wptr, u8); //, 0);
-pub_mut!(gateway_tx_rptr, u8); //, 0);
-pub_mut!(blt_tx_wptr, u8); //, 0);
-pub_mut!(mesh_notify_enc_enable, u8); //, 0);
-pub_mut!(slave_status_buffer_wptr, u8); //, 0);
-pub_mut!(slave_status_buffer_rptr, u8); //, 0);
-pub_mut!(slave_stat_sno, [u8; 3]); //, [0; 3]);
-pub_mut!(slave_read_status_unicast_flag, u8); //, 0);
-pub_mut!(mesh_ota_master_st, [u8; 29]); //, [0; 29]);
-pub_mut!(mesh_node_report_enable, bool); //, false);
-pub_mut!(slave_timing_adjust_enable, u32); //, 0); // Should be bool?
-pub_mut!(slave_tick_brx, u32); //, 0);
-pub_mut!(slave_pairing_master_tick, u32); //, 0);
-pub_mut!(slave_window_offset, u32); //, 0);
-pub_mut!(slave_conn_delay, u32); //, 0);
+pub_mut!(slave_sno_sending, u32, 0);
+pub_mut!(app_cmd_time, u32, 0);
+pub_mut!(mesh_user_cmd_idx, u8, 0);
+pub_mut!(slave_tx_cmd_time, u32, 0);
+pub_mut!(lpn_retransmit_cnt, u8, 0);
+pub_mut!(gateway_tx_wptr, u8, 0);
+pub_mut!(gateway_tx_rptr, u8, 0);
+pub_mut!(blt_tx_wptr, u8, 0);
+pub_mut!(mesh_notify_enc_enable, u8, 0);
+pub_mut!(slave_status_buffer_wptr, u8, 0);
+pub_mut!(slave_status_buffer_rptr, u8, 0);
+pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);
+pub_mut!(slave_read_status_unicast_flag, u8, 0);
+pub_mut!(mesh_ota_master_st, [u8; 29], [0; 29]);
+pub_mut!(mesh_node_report_enable, bool, false);
+pub_mut!(slave_timing_adjust_enable, u32, 0); // Should be bool?
+pub_mut!(slave_tick_brx, u32, 0);
+pub_mut!(slave_pairing_master_tick, u32, 0);
+pub_mut!(slave_window_offset, u32, 0);
+pub_mut!(slave_conn_delay, u32, 0);
 // todo: Maybe should be [u8; 3]?
-pub_mut!(slave_link_sno, u32); //, 0);
-pub_mut!(ADV_Suspend, u32); //, 0);
-pub_mut!(slave_pairing_state, u32); //, 0);
-pub_mut!(slave_instant, u16); //, 0);
-pub_mut!(slave_status_tick, u8); //, 0);
-pub_mut!(slave_n6, u8); //, 0);
-pub_mut!(slave_link_cmd, u8); //, 0);
-pub_mut!(req_cmd_in_adv_type, u8); //, 2);
-pub_mut!(rcv_pkt_ttc, u8); //, 0);
+pub_mut!(slave_link_sno, u32, 0);
+pub_mut!(ADV_Suspend, u32, 0);
+pub_mut!(slave_pairing_state, u32, 0);
+pub_mut!(slave_instant, u16, 0);
+pub_mut!(slave_status_tick, u8, 0);
+pub_mut!(slave_n6, u8, 0);
+pub_mut!(slave_link_cmd, u8, 0);
+pub_mut!(req_cmd_in_adv_type, u8, 2);
+pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
-pub_mut!(pkt_need_relay, bool); //, true);
-pub_mut!(slave_read_status_response, bool); //, false);
-pub_mut!(mesh_ota_slave_st, [u8; 25]); //, [0; 25]);
-pub_mut!(slave_sno, [u8; 4]); //, [0; 4]);
-pub_mut!(slave_status_record_idx, u16); //, 0);
-pub_mut!(notify_req_mask_idx, u8); //, 0);
+pub_mut!(pkt_need_relay, bool, true);
+pub_mut!(slave_read_status_response, bool, false);
+pub_mut!(mesh_ota_slave_st, [u8; 25], [0; 25]);
+pub_mut!(slave_sno, [u8; 4], [0; 4]);
+pub_mut!(slave_status_record_idx, u16, 0);
+pub_mut!(notify_req_mask_idx, u8, 0);
+pub_mut!(adv_flag, u8, 1);
+pub_mut!(send_adv_flag, u8, 1);
+pub_mut!(online_st_flag, u8, 1);
+pub_mut!(slave_read_status_busy_time, u32, 0);
+pub_mut!(slave_read_status_busy_timeout, u32, 25000);
+pub_mut!(st_listen_no, u32, 0);
 
 // todo: This is not the correct type for this. Figure this out sometime
-pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t);
-//, rf_packet_adv_ind_module_t {
-//     dma_len: 0x27,
-//     _type: 2,
-//     rf_len: 0x25,
-//     advA: [0x21, 0x00, 0xff, 0xff, 0x00, 0x00],
-//     data: [0; 31]
-// });
+pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t, rf_packet_adv_ind_module_t {
+    dma_len: 0x27,
+    _type: 2,
+    rf_len: 0x25,
+    advA: [0x21, 0x00, 0xff, 0xff, 0x00, 0x00],
+    data: [0; 31]
+});
 
-pub_mut!(pkt_mesh, mesh_pkt_t); // All fields are 0
+pub_mut!(pkt_mesh, mesh_pkt_t, mesh_pkt_t {
+    dma_len: 0,
+    _type: 0,
+    rf_len: 0,
+    l2capLen: 0,
+    chanId: 0,
+    src_tx: 0,
+    handle1: 0,
+    sno: [0; 3],
+    src_adr: 0,
+    dst_adr: 0,
+    op: 0,
+    vendor_id: 0,
+    par: [0; 10],
+    internal_par1: [0; 5],
+    ttl: 0,
+    internal_par2: [0; 4],
+    no_use: [0; 4]
+});
 pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
     dma_len: 0,
     _type: 0,
@@ -1020,23 +1044,22 @@ pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
     internal_par2: [0; 4],
     no_use: [0; 4]
 });
-pub_mut!(pkt_init, rf_packet_ll_init_t);
-// , rf_packet_ll_init_t {
-//     dma_len: 0,
-//     _type: 0,
-//     rf_len: 0,
-//     scanA: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
-//     advA: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
-//     aa: [0xaa, 0x55, 0x55, 0xaa],
-//     crcinit: [0x55, 0x55, 0x55],
-//     wsize: 2,
-//     woffset: 0x1f,
-//     interval: 0x20,
-//     latency: 0,
-//     timeout: 0x48
-//     chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
-//     hop: 0xac
-// });
+pub_mut!(pkt_init, rf_packet_ll_init_t, rf_packet_ll_init_t {
+    dma_len: 0,
+    _type: 0,
+    rf_len: 0,
+    scanA: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+    advA: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+    aa: [0xaa, 0x55, 0x55, 0xaa],
+    crcinit: [0x55, 0x55, 0x55],
+    wsize: 2,
+    woffset: 0x1f,
+    interval: 0x20,
+    latency: 0,
+    timeout: 0x48,
+    chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+    hop: 0xac
+});
 
 #[no_mangle]
 extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

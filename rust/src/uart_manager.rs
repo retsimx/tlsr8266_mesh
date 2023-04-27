@@ -16,25 +16,25 @@ use crate::sdk::light::{app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM,
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-pub_mut!(pkt_user_cmd, mesh_pkt_t); //
-// , rf_packet_att_cmd_t {
-//     dma_len: 0x27,
-//     _type: 2,
-//     rf_len: 0x25,
-//     l2capLen: 0xCCDD,
-//     chanId: 0,
-//     src_tx: 0,
-//     handle1: 0,
-//     sno: [0; 3],
-//     src_adr: 0,
-//     dst_adr: 0,
-//     op: 0,
-//     vendor_id: 0,
-//     par: [0; 10],
-//     internal_par1: [0; 5],
-//     ttl: 0,
-//     internal_par2: [0; 4]
-// });
+pub_mut!(pkt_user_cmd, mesh_pkt_t, mesh_pkt_t {
+    dma_len: 0x27,
+    _type: 2,
+    rf_len: 0x25,
+    l2capLen: 0xCCDD,
+    chanId: 0,
+    src_tx: 0,
+    handle1: 0,
+    sno: [0; 3],
+    src_adr: 0,
+    dst_adr: 0,
+    op: 0,
+    vendor_id: 0,
+    par: [0; 10],
+    internal_par1: [0; 5],
+    ttl: 0,
+    internal_par2: [0; 4],
+    no_use: [0; 4]
+});
 
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message

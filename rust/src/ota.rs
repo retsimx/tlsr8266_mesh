@@ -354,7 +354,7 @@ impl OtaManager {
         self.rf_slave_ota_finished_time = clock_time();
     }
 
-    fn rf_link_slave_ota_finish_handle(&mut self) // poll when ota busy in bridge
+    pub(crate) fn rf_link_slave_ota_finish_handle(&mut self) // poll when ota busy in bridge
     {
         self.rf_link_slave_data_ota_save();
 

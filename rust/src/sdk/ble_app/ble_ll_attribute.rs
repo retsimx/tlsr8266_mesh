@@ -70,8 +70,8 @@ pub_mut!(pkt_writeRsp, rf_packet_att_writeRsp_t, rf_packet_att_writeRsp_t{
     chanId: 0x04,
     opcode: 0x13
 });
-pub_mut!(att_service_discover_tick, u32);
-pub_mut!(slave_link_time_out, u32);
+pub_mut!(att_service_discover_tick, u32, 0);
+pub_mut!(slave_link_time_out, u32, 0);
 pub_mut!(__RAM_START_ADDR, u32);
 
 #[derive(FromPrimitive)]

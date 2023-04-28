@@ -657,12 +657,14 @@ pub unsafe fn irq_light_slave_handler() {
     }
 }
 
+#[inline(never)]
 fn irq_timer1() {
     app().light_manager.transition_step();
 }
 
 // This timer is configured to run once per second to check if the internal clock has overflowed.
 // this is a workaround in case there are no 'clock_time64' calls between overflows
+#[inline(never)]
 fn irq_timer0() {
     unsafe { check_clock_overflow(); }
 }

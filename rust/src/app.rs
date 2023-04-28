@@ -1,6 +1,6 @@
 use embassy_executor::Spawner;
 
-use crate::{app, blinken, uprintln};
+use crate::{app, uprintln};
 use crate::config::{MESH_PWD_ENCODE_SK};
 use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;

@@ -258,7 +258,7 @@ fn rf_link_slave_notify_req_mask(adr: u8)
     }
 }
 
-
+#[inline(never)]
 fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
 {
     let mut result = false;
@@ -336,6 +336,7 @@ pub fn rf_link_slave_add_status(packet: &mesh_pkt_t)
     });
 }
 
+#[inline(never)]
 pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
         if *get_sw_no_pair() == false {
@@ -667,6 +668,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     return true;
 }
 
+#[inline(never)]
 pub unsafe fn rf_link_slave_data(packet: &rf_packet_ll_data_t, time: u32) -> bool {
     let rf_len: u8 = packet.rf_len;
     let chanid: u16 = packet.chanid;
@@ -746,6 +748,7 @@ fn check_par_con(packet: &rf_packet_ll_init_t) -> bool
     return true;
 }
 
+#[inline(never)]
 pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
 {
     set_conn_update_successed(0);

@@ -1,5 +1,5 @@
 use core::ptr::{addr_of_mut, read_volatile, write_volatile};
-use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
+use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::{app, BIT, pub_mut};
 use crate::common::REGA_LIGHT_OFF;
@@ -193,11 +193,6 @@ pub enum PM_WAKEUP {
 // return 1;
 // }
 
-// deepsleep mode must use this function for resume 1.8V analog register
-extern "C" {
-    pub fn cpu_set_gpio_wakeup(pin: u32, pol: u32, en: u32);
-    pub fn cpu_sleep_wakeup_long_time_deep(wakeup_src: u32, deep_time_ms: u32) -> u32;
-}
 //
 // extern const u16 wakeup_src_pin[];
 //
@@ -312,12 +307,11 @@ const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
 ];
 
 pub fn cpu_wakeup_init() {
-    LoadTblCmdSet(tbl_cpu_wakeup_init.as_ptr(), 0x13);
+    load_tbl_cmd_set(tbl_cpu_wakeup_init.as_ptr(), 0x13);
 }
 
 // recover status before software reboot
-#[no_mangle]
-extern "C" fn light_sw_reboot_callback() {
+fn light_sw_reboot_callback() {
     if *get_rf_slave_ota_busy() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
@@ -331,6 +325,7 @@ extern "C" fn light_sw_reboot_callback() {
     }
 }
 
+#[link_section = ".ram_code"]
 fn suspend_start()
 {
     write_reg8(0xd, 0);
@@ -366,6 +361,7 @@ fn suspend_start()
     write_reg8(0xd, 1);
 }
 
+#[link_section = ".ram_code"]
 fn sleep_start()
 {
     write_reg_pwdn_ctrl(0x81);
@@ -380,8 +376,7 @@ fn sleep_start()
 
 static mut deep_long_time_flag: u8 = 0;
 
-#[no_mangle]
-pub unsafe extern "C" fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
+pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
 {
     critical_section::with(|_| {
         let mut reboot= wakeup_src & 0x40 != 0;
@@ -535,6 +530,7 @@ pub unsafe extern "C" fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut w
     })
 }
 
+#[link_section = ".ram_code"]
 fn light_sw_reboot_ll()
 {
     // In the original code it calls this to reset, but I can't get this function working.

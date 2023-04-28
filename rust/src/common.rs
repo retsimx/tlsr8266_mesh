@@ -31,8 +31,7 @@ pub_mut!(sys_chn_adv, [u8; 3], SYS_CHN_ADV_MESH);
 
 pub const REGA_LIGHT_OFF: u8 = 0x3a;
 
-#[no_mangle] // Required by light_ll
-pub extern "C" fn dev_addr_with_mac_flag(params: *const u8) -> bool {
+pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
     return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
 }
 
@@ -63,7 +62,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
-pub extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
+pub fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     flash_write_page(
         (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + adr as i32) as u32,
         n,
@@ -91,8 +90,7 @@ pub extern "C" fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     interval_min + 20 ms <= interval_max <= 2second
     timeout <= 6second
 */
-#[no_mangle] // required by light_ll
-pub extern "C" fn update_ble_parameter_cb() {
+pub fn update_ble_parameter_cb() {
     if *get_conn_update_successed() == 0 {
         setup_ble_parameter_start(
             1,
@@ -104,8 +102,7 @@ pub extern "C" fn update_ble_parameter_cb() {
     }
 }
 
-#[no_mangle] // required by light_ll
-pub extern "C" fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
+pub fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
     let pp = unsafe { &*(addr_of!(*p) as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
@@ -238,7 +235,6 @@ pub fn pair_flash_config_init() -> bool
     return result;
 }
 
-#[no_mangle]
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 {
     let mut destbuf = [0u32; 4];
@@ -315,8 +311,7 @@ pub fn pair_update_key()
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pair_load_key()
+pub fn pair_load_key()
 {
     pair_flash_config_init();
 

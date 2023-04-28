@@ -3,7 +3,7 @@ use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use core::mem;
 use core::mem::{size_of, size_of_val, MaybeUninit};
 use core::ptr::{null, null_mut};
-use crate::{no_mangle_fn_def, const_concat};
+use crate::{const_concat};
 use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
@@ -57,7 +57,6 @@ pub_mut!(cur_ota_flash_addr, u32, 0);
 pub_mut!(mesh_ota_master_100_flag, bool, false);
 pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::CONTINUE);
 pub_mut!(rf_slave_ota_terminate_flag, bool, false);
-pub_mut!(app_ota_hci_type, APP_OTA_HCI_TYPE);
 pub_mut!(mesh_node_max, u8, 0);
 
 pub_mut!(rf_slave_ota_timeout_def_s, u16, 0x1e);
@@ -68,18 +67,12 @@ pub_mut!(set_mesh_info_time, u32, 0);
 pub_mut!(tick_per_us, u32, 0x20);
 pub_mut!(loop_interval_us, u16, 0x2710);
 
-pub_mut!(gateway_security, bool);
-pub_mut!(fp_gateway_tx_proc, fn(p: *const u8));
-pub_mut!(fp_gateway_rx_proc, fn());
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 pub_mut!(enc_disable, bool, false);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
-
-pub_mut!(p_vendor_mesh_node_status_report, Option<fn(p: *const u8)>);
-pub_mut!(p_vendor_mesh_node_rcv_rsp, Option<fn(p: *const rf_packet_att_value_t)>);
 
 pub_mut!(sync_time_enable, bool, false);
 pub_mut!(synced_flag, bool, false);
@@ -705,12 +698,6 @@ pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
     return p_addr[1] & 0x80 == 0;
 }
 
-// required callback fns
-no_mangle_fn_def!(gpio_irq_user_handle);
-no_mangle_fn_def!(gpio_risc0_user_handle);
-no_mangle_fn_def!(gpio_risc1_user_handle);
-no_mangle_fn_def!(gpio_risc2_user_handle);
-
 // Shit required for linking
 /////////////// password encode sk initial  ///////////////////////////////////////////////////
 pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
@@ -751,74 +738,6 @@ pub_mut!(mesh_chn_amount, u8, 4); //amount of sys_chn_listen
 // Scene shit needed to link
 pub_mut!(pkt_mesh_scene_rsp, [u8; 1], [0]);
 
-#[no_mangle]
-extern "C" fn is_scene_poll_notify_busy() -> u32 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn is_new_scene(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
-    return 0;
-}
-
-// Alarm shit needed to link
-#[no_mangle]
-pub_mut!(pkt_mesh_alarm_rsp, [u8; 1], [0]);
-
-#[no_mangle]
-extern "C" fn is_alarm_poll_notify_busy() -> u32 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn is_new_alarm(p_buf: *const rf_packet_att_value_t, p: *const rf_packet_att_value_t) -> u32 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn memcopy_rtc_hhmmss(out: u32) {}
-
-#[no_mangle]
-extern "C" fn is_need_sync_time() -> bool {
-    return false;
-}
-
-#[no_mangle]
-extern "C" fn rtc_set_time(rtc_set: u32) -> i32 {
-    return -1;
-}
-
-no_mangle_fn_def!(alarm_event_check);
-no_mangle_fn_def!(mesh_send_alarm_time);
-
-// dual mode shit needed to link
-#[no_mangle]
-extern "C" fn dual_mode_rx_sig_beacon_proc(p: *const u8, t: u32) -> u32 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn get_gatt_adv_cnt() -> u8 {
-    return 3;
-}
-
-no_mangle_fn_def!(dual_mode_channel_ac_set_with_check_TLK);
-no_mangle_fn_def!(dual_mode_check_and_select_disconnect_cb);
-
-#[no_mangle]
-extern "C" fn get_sig_mesh_adv() -> u32 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn dual_mode_channel_ac_proc(connect_st: u32) {}
-
-#[no_mangle]
-extern "C" fn tlk_mesh_access_code_backup(ac: u32) {}
-
-#[no_mangle]
-extern "C" fn dual_mode_select(sdk_rf_mode: u32) {}
-
 // flash mesh extend shit needed to link
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
 // don't change
@@ -829,74 +748,15 @@ pub_mut!(
     CFG_SECTOR_ADR_CALIBRATION_CODE
 );
 
-// common shit needed to link
-#[no_mangle]
-extern "C" fn forced_single_cmd_in_ble_interval_handle(ph: *const u8) {}
-
-no_mangle_fn_def!(mesh_node_keep_alive_other);
-
-#[no_mangle]
-extern "C" fn rx_mesh_adv_message_cb(p: *const u8, mac_match: u32) {}
-
-no_mangle_fn_def!(sensor_enter_deep_cb);
-
-pub_mut!(sensor_enable, u8, 0);
-pub_mut!(sensor_last_adv_sleep_time_us, u16, 1200);
-// us
 pub_mut!(adv_uuid_flag, u8, 0);
 pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
 pub_mut!(passive_en, u8, 0);
-
-#[no_mangle]
-pub extern "C" fn get_command_type() -> CMD_TYPE {
-    return CMD_TYPE::NORMAL;
-}
-
-// Note: par[8], par[9] of passive command have been used internal for sno2.
-#[no_mangle]
-extern "C" fn set_command_type2alt(p_att_value: *const u8) {}
-
-#[no_mangle]
-extern "C" fn proc_sig_mesh_to_telink_mesh() -> u8 {
-    return 0;
-}
-
-#[no_mangle]
-extern "C" fn cb_set_sub_addr_tx_cmd(src: *const u8, sub_adr: u16) {}
-
-#[no_mangle]
-extern "C" fn rssi_online_status_pkt_cb(p_node_st: *const u8, rssi: u8, online_again: u32) {}
-
-#[no_mangle]
-extern "C" fn is_bridge_task_busy() -> bool {
-    return false;
-}
-
-#[no_mangle]
-extern "C" fn mesh_ota_third_complete_cb(calibrate_flag: u32) {}
-
-pub_mut!(mesh_ota_third_fw_flag, u8, 0);
-
-#[no_mangle]
-extern "C" fn mesh_ota_set_start_par_user(p: *const mesh_ota_pkt_start_command_t) {}
-
-pub_mut!(p_cb_pair_failed, Option<fn()>, None);
-pub_mut!(p_cb_ble_slave_disconnect, u32, 0);
-
-no_mangle_fn_def!(rf_link_slave_connect_callback);
 
 pub_mut!(work_sleep_en, u8, 0);
 pub_mut!(start2adv, u32, 0);
 //us
 pub_mut!(iBeaconInterval, u8, 0);
 pub_mut!(beacon_with_mesh_adv, u8, 0);
-
-// 0 means only send beacon adv pkt;  1 means send both of beacon pkt and mesh adv pkt
-#[no_mangle]
-extern "C" fn pa_txrx(val: u8) {}
-
-#[no_mangle]
-extern "C" fn pa_init(tx_pin_level: u8, rx_pin_level: u8) {}
 
 pub_mut!(
     slave_status_record,
@@ -975,7 +835,6 @@ pub_mut!(slave_window_offset, u32, 0);
 pub_mut!(slave_conn_delay, u32, 0);
 // todo: Maybe should be [u8; 3]?
 pub_mut!(slave_link_sno, u32, 0);
-pub_mut!(ADV_Suspend, u32, 0);
 pub_mut!(slave_pairing_state, u32, 0);
 pub_mut!(slave_instant, u16, 0);
 pub_mut!(slave_status_tick, u8, 0);
@@ -1045,9 +904,9 @@ pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
     no_use: [0; 4]
 });
 pub_mut!(pkt_init, rf_packet_ll_init_t, rf_packet_ll_init_t {
-    dma_len: 0,
-    _type: 0,
-    rf_len: 0,
+    dma_len: 0x24,
+    _type: 0x5,
+    rf_len: 0x22,
     scanA: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
     advA: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
     aa: [0xaa, 0x55, 0x55, 0xaa],
@@ -1060,6 +919,3 @@ pub_mut!(pkt_init, rf_packet_ll_init_t, rf_packet_ll_init_t {
     chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
     hop: 0xac
 });
-
-#[no_mangle]
-extern "C" fn fn_rx_push_to_cache(p: *const u8) {}

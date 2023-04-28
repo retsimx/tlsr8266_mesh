@@ -7,12 +7,11 @@ use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
 use crate::mesh::wrappers::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
-use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_gateway_security, get_p_cb_pair_failed, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, mesh_pkt_t, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
+use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, mesh_pkt_t, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 
-#[no_mangle]
-pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
+pub unsafe fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
     let mut result = true;
     if *get_security_enable() != false {
         (*get_pair_ivm())[5..5 + 3].copy_from_slice(&(*ps).app_cmd_v.sno);
@@ -28,8 +27,7 @@ pub unsafe extern "C" fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
     return result;
 }
 
-#[no_mangle]
-pub extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
+pub fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
 {
     unsafe {
         if *get_security_enable() && (*ps).chanId == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
@@ -50,8 +48,7 @@ pub extern "C" fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
     return true;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
+pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     let mut ltk = [0u8; 16];
 
     if *get_security_enable() == false {
@@ -114,8 +111,7 @@ pub unsafe extern "C" fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     return result;
 }
 
-#[no_mangle]
-pub extern "C" fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
+pub fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
 {
     let mut result = true;
 
@@ -181,8 +177,7 @@ pub fn pair_flash_save_config(addr: u32, data: *const u8, length: u32)
     save_pair_info(addr, data, length);
 }
 
-#[no_mangle]
-pub extern "C" fn pair_save_key()
+pub fn pair_save_key()
 {
     let mut pass = [0u8; 16];
 
@@ -208,8 +203,7 @@ pub extern "C" fn pair_save_key()
     pair_update_key();
 }
 
-#[no_mangle]
-pub extern "C" fn pairInit()
+pub fn pair_init()
 {
     set_ble_pair_st(0);
     set_pair_enc_enable(false);
@@ -217,18 +211,13 @@ pub extern "C" fn pairInit()
     unsafe { (*get_pair_ivs())[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
 }
 
-#[no_mangle]
-pub extern "C" fn pair_par_init()
+pub fn pair_par_init()
 {
     set_ble_pair_st(0xe);
     pair_load_key();
-    if *get_p_cb_pair_failed() != None {
-        (*get_p_cb_pair_failed()).unwrap()();
-    }
 }
 
-#[no_mangle]
-pub extern "C" fn pairProc() -> *const rf_packet_att_readRsp_t
+pub fn pair_proc() -> *const rf_packet_att_readRsp_t
 {
     let pair_st = *get_ble_pair_st();
     if *get_pairRead_pending() == false {
@@ -367,8 +356,7 @@ pub extern "C" fn pairProc() -> *const rf_packet_att_readRsp_t
     return get_pkt_read_rsp();
 }
 
-#[no_mangle]
-pub extern "C" fn pair_set_key(key: *const u8)
+pub fn pair_set_key(key: *const u8)
 {
     (*get_pair_nn())[0..*get_max_mesh_name_len() as usize].copy_from_slice(unsafe { slice::from_raw_parts(key, *get_max_mesh_name_len() as usize) });
     (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
@@ -377,14 +365,14 @@ pub extern "C" fn pair_set_key(key: *const u8)
     pair_update_key();
 }
 
-pub fn pairRead(_data: *const rf_packet_att_write_t) -> bool
+pub fn pair_read(_data: *const rf_packet_att_write_t) -> bool
 {
     set_pairRead_pending(true);
 
     true
 }
 
-pub fn pairWrite(data: *const rf_packet_att_write_t) -> bool
+pub fn pair_write(data: *const rf_packet_att_write_t) -> bool
 {
     let opcode = unsafe { (*data).value[0] as i8 };
     let src = unsafe { addr_of!((*data).value[1]) as *const u8 };

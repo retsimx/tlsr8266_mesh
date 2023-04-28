@@ -1,3 +1,4 @@
+use core::mem::size_of;
 use crate::config::{get_flash_adr_pairing, VENDOR_ID};
 use crate::main_light::{
     light_slave_tx_command,
@@ -263,7 +264,7 @@ impl MeshManager {
 
             let r = irq_disable();
             if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(addr_of!(pkt_notify)) {
+                if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<rf_packet_att_cmd_t>()) {
                     err = 0;
                 }
             }
@@ -571,30 +572,17 @@ pub mod wrappers {
         }; MESH_NODE_MAX_NUM as usize]
     );
 
-    #[no_mangle] // Required by light_ll rf_link_slave_add_status_ll
-    pub extern "C" fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
+    pub fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
         let p = &(unsafe { *p });
 
         return app().mesh_manager.mesh_pair_notify_refresh(p);
     }
 
-    #[no_mangle] // required by light_ll
-    extern "C" fn mesh_pair_proc() {
-        app().mesh_manager.mesh_pair_proc();
-    }
-
-    #[no_mangle] // required by light_ll
-    extern "C" fn mesh_node_buf_init() {
-        app().mesh_manager.mesh_node_buf_init();
-    }
-
-    #[no_mangle] // required by light_ll
-    pub extern "C" fn light_slave_tx_command_callback(p: *const ll_packet_l2cap_data_t) {
+    pub fn light_slave_tx_command_callback(p: *const ll_packet_l2cap_data_t) {
         rf_link_data_callback(p);
     }
 
-    #[no_mangle]
-    extern "C" fn get_pair_mic(keyin: *const u32, macin: *const u16) -> u32
+    fn get_pair_mic(keyin: *const u32, macin: *const u16) -> u32
     {
         let mut dest = [0u32; 4];
         let mut key = [0u32; 4];
@@ -612,16 +600,14 @@ pub mod wrappers {
         return dest[0];
     }
 
-    #[no_mangle]
-    extern "C" fn set_pair_mic() {
+    fn set_pair_mic() {
         if *get_auth_code_en() != false {
             let mic = [get_pair_mic(get_auth_code_addr() as *const u32, *get_slave_p_mac() as *const u16), 0];
             unsafe { mic.as_ptr().copy_to((get_adv_rsp_pri_data_addr() as u32 + 0x17) as *mut u32, 2); }
         }
     }
 
-    #[no_mangle]
-    pub extern "C" fn mesh_security_enable(enable: bool)
+    pub fn mesh_security_enable(enable: bool)
     {
         set_security_enable(enable);
         set_pair_mic();

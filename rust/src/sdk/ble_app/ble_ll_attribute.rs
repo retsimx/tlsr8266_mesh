@@ -1,5 +1,6 @@
+use core::mem::size_of_val;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut};
-use crate::{blinken, pub_mut};
+use crate::{blinken, pub_mut, uprintln};
 use crate::sdk::ble_app::rf_drv_8266::get_gAttributes;
 use crate::sdk::light::{ll_packet_l2cap_data_t, rf_packet_l2cap_head_t, rf_packet_version_ind_t, rf_packet_feature_rsp_t, rf_packet_ctrl_unknown_t, rf_packet_att_mtu_t, rf_packet_att_errRsp_t, rf_packet_att_readRsp_t, rf_packet_att_write_t, get_rf_slave_ota_finished_flag, set_rf_slave_ota_terminate_flag, OtaState, rf_packet_att_writeRsp_t};
 use crate::sdk::mcu::register::read_reg_system_tick;
@@ -9,7 +10,6 @@ use crate::sdk::app_att_light::{attribute_t, get_send_to_master, get_TelinkSppDa
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 
-pub_mut!(ble_conn_terminate, u8, 0);
 pub_mut!(pkt_version_ind, rf_packet_version_ind_t, rf_packet_version_ind_t {
     dma_len: 8,
     _type: 3,
@@ -72,7 +72,9 @@ pub_mut!(pkt_writeRsp, rf_packet_att_writeRsp_t, rf_packet_att_writeRsp_t{
 });
 pub_mut!(att_service_discover_tick, u32, 0);
 pub_mut!(slave_link_time_out, u32, 0);
-pub_mut!(__RAM_START_ADDR, u32);
+extern "C" {
+    pub static __RAM_START_ADDR: u32;
+}
 
 #[derive(FromPrimitive)]
 pub enum GattOp {
@@ -130,11 +132,10 @@ pub unsafe fn l2cap_att_search(mut handle_start: u16, handle_end: u16, uuid: &[u
     return None;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t) -> *const rf_packet_l2cap_head_t
+pub unsafe fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t) -> (*const rf_packet_l2cap_head_t, usize)
 {
     if *get_gAttributes() == null_mut() {
-        return null();
+        return (null(), 0);
     }
 
     if (*packet).opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8 {
@@ -142,28 +143,28 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
         if handle == 0xc {
             (*get_pkt_version_ind()).rf_len = 6;
             set_att_service_discover_tick(read_reg_system_tick() | 1);
-            return get_pkt_version_ind_addr() as *const rf_packet_l2cap_head_t;
+            return (get_pkt_version_ind_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_version_ind_addr()));
         }
         if handle != 8 {
             if handle == 2 {
                 set_slave_link_time_out(1000000);
-                return null();
+                return (null(), 0);
             }
             (*get_rf_pkt_unknown_response()).data[0] = handle;
-            return get_rf_pkt_unknown_response_addr() as *const rf_packet_l2cap_head_t;
+            return (get_rf_pkt_unknown_response_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_pkt_unknown_response()));
         }
         (*get_pkt_feature_rsp()).rf_len = 9;
         set_att_service_discover_tick(read_reg_system_tick() | 1);
-        return get_pkt_feature_rsp_addr() as *const rf_packet_l2cap_head_t;
+        return (get_pkt_feature_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_feature_rsp()));
     }
 
     if *(addr_of!((*packet).value[1]) as *const u16) != 4 {
-        return null();
+        return (null(), 0);
     }
 
     return match FromPrimitive::from_u8((*packet).value[3]) {
         Some(GattOp::AttOpExchangeMtuReq) => {
-            return get_pkt_mtu_rsp_addr() as *const rf_packet_l2cap_head_t;
+            return (get_pkt_mtu_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_mtu_rsp()));
         },
         Some(GattOp::AttOpFindInfoReq) => {
             set_att_service_discover_tick(read_reg_system_tick() | 1);
@@ -192,7 +193,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                         (*get_rf_packet_att_rsp()).chanId = 4;
                         (*get_rf_packet_att_rsp()).opcode = 5;
                         (*get_rf_packet_att_rsp()).value[0] = handle;
-                        return get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t;
+                        return (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()));
                     }
                     (*get_rf_packet_att_rsp()).value[counter as usize + 1] = start_handle;
                     (*get_rf_packet_att_rsp()).value[counter as usize + 2] = 0;
@@ -220,13 +221,13 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                         (*get_rf_packet_att_rsp()).chanId = 4;
                         (*get_rf_packet_att_rsp()).opcode = 5;
                         (*get_rf_packet_att_rsp()).value[0] = handle;
-                        return get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t;
+                        return (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()));
                     }
                 }
             }
             (*get_pkt_errRsp()).errOpcode = 4;
             (*get_pkt_errRsp()).errHandle = start_handle as u16;
-            get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t
+            (get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_errRsp()))
         },
         Some(GattOp::AttOpFindByTypeValueReq) => {
             set_att_service_discover_tick(read_reg_system_tick() | 1);
@@ -264,7 +265,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 (*get_pkt_errRsp()).errOpcode = 6;
                 (*get_pkt_errRsp()).errHandle = start_handle as u16;
 
-                get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t
+                (get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_errRsp()))
             } else {
                 let iVar8 = counter * 2;
                 (*get_rf_packet_att_rsp()).dma_len = iVar8 as u32 + 7;
@@ -274,7 +275,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 (*get_rf_packet_att_rsp()).chanId = 4;
                 (*get_rf_packet_att_rsp()).opcode = 7;
 
-                get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t
+                (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()))
             }
         },
         Some(GattOp::AttOpReadByTypeReq) => {
@@ -296,7 +297,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 } else {
                     let found_attr = handle.unwrap().0;
                     if (*found_attr).uuidLen != bVar11 {
-                        return null();
+                        return (null(), 0);
                     }
                     found_handle = handle.unwrap().1;
                     (*get_rf_packet_att_rsp()).value[1] = found_handle as u8;
@@ -318,7 +319,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                     } else {
                         let found_attr = handle.unwrap().0;
                         if (*found_attr).uuidLen != bVar11 {
-                            return null();
+                            return (null(), 0);
                         }
                         found_handle = handle.unwrap().1;
                         (*get_rf_packet_att_rsp()).value[1] = found_handle as u8;
@@ -372,7 +373,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
             if tick == 0 {
                 (*get_pkt_errRsp()).errOpcode = 8;
                 (*get_pkt_errRsp()).errHandle = found_handle as u16;
-                return get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t;
+                return (get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_errRsp()));
             } else {
                 (*get_rf_packet_att_rsp()).dma_len = tick as u32 + 8;
                 (*get_rf_packet_att_rsp())._type = 2;
@@ -381,16 +382,16 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 (*get_rf_packet_att_rsp()).chanId = 4;
                 (*get_rf_packet_att_rsp()).opcode = 9;
 
-                get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t
+                (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()))
             }
         },
         Some(GattOp::AttOpReadReq) => {
             let tick = (*packet).value[4] as u32;
             if (*packet).value[5] != 0 {
-                return null();
+                return (null(), 0);
             }
             if (*(*get_gAttributes())).attNum < tick as u8 {
-                return null();
+                return (null(), 0);
             }
             if (*(*get_gAttributes()).offset(tick as isize)).r.is_none() {
                 slice::from_raw_parts_mut(
@@ -414,12 +415,12 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 (*get_rf_packet_att_rsp()).l2capLen = (*(*get_gAttributes()).offset(tick as isize)).attrLen as u16 + 1;
                 (*get_rf_packet_att_rsp()).chanId = 4;
                 (*get_rf_packet_att_rsp()).opcode = 0xb;
-                return get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t;
+                return (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()));
             }
 
             (*(*get_gAttributes()).offset(tick as isize)).r.unwrap()(packet as *const rf_packet_att_write_t);
             // return get_rf_pkt_unknown_response_addr() as *const rf_packet_l2cap_head_t;
-            null()
+            (null(), 0)
         },
         Some(GattOp::AttOpReadByGroupTypeReq) => {
             set_att_service_discover_tick(read_reg_system_tick() | 1);
@@ -475,7 +476,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
             if dest_ptr == 0 {
                 (*get_pkt_errRsp()).errOpcode = 0x10;
                 (*get_pkt_errRsp()).errHandle = (*packet).value[4] as u16;
-                get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t
+                (get_pkt_errRsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_errRsp()))
             } else {
                 (*get_rf_packet_att_rsp()).dma_len = (dest_ptr as u32 + 4) * 2;
                 (*get_rf_packet_att_rsp())._type = 2;
@@ -485,20 +486,20 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 (*get_rf_packet_att_rsp()).opcode = 0x11;
                 (*get_rf_packet_att_rsp()).value[0] = counter as u8 + 4;
 
-                get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t
+                (get_rf_packet_att_rsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_rf_packet_att_rsp()))
             }
         },
         Some(GattOp::AttOpWriteReq) | Some(GattOp::AttOpWriteCmd) => {
             let tick = (*packet).value[4];
             if *((*(*get_gAttributes()).offset(tick as isize)).uuid as *const u16) != 0x2902 {
                 if tick < 2 {
-                    return null();
+                    return (null(), 0);
                 }
                 if *(*(*get_gAttributes()).offset(tick as isize - 1)).pAttrValue & 0xc == 0 {
-                    return null();
+                    return (null(), 0);
                 }
             }
-            let mut result = null();
+            let mut result = (null(), 0);
             if (*packet).value[5] != 0 {
                 return result;
             }
@@ -506,7 +507,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
                 return result;
             }
             if (*packet).value[3] == 0x12 {
-                result = get_pkt_writeRsp_addr() as *const rf_packet_l2cap_head_t;
+                result = (get_pkt_writeRsp_addr() as *const rf_packet_l2cap_head_t, size_of_val(&*get_pkt_writeRsp()));
             }
             if (*(*get_gAttributes()).offset(tick as isize)).w.is_none() {
                 if *(addr_of!((*packet).handle1) as *const u16) < 3 {
@@ -537,7 +538,7 @@ pub unsafe extern "C" fn l2cap_att_handler(packet: *const ll_packet_l2cap_data_t
 
             result
         },
-        _ => null(),
+        _ => (null(), 0),
     };
 }
 

@@ -7,16 +7,17 @@ use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
 use crate::common::{dev_addr_with_mac_flag, get_mesh_node_ignore_addr, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
-use crate::ota::wrappers::my_rf_link_slave_data_ota;
+use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{copy_par_User_All, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, irq_st_adv, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::light_ll::{copy_par_User_All, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
-use crate::sdk::common::compat::{LoadTblCmdSet, TBLCMDSET};
+use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::{get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable, get_tick_per_us, rf_packet_ll_data_t, set_slave_p_mac, rf_packet_adv_ind_module_t, rf_packet_scan_rsp_t, rf_packet_att_cmd_t, get_slave_p_mac, rf_packet_att_write_t, get_pair_login_ok, rf_packet_ll_app_t, get_slave_sno, ll_packet_l2cap_data_t, app_cmd_value_t, get_device_address, set_app_cmd_time, get_max_relay_num, set_slave_link_cmd, get_slave_sno_sending_addr, get_slave_read_status_busy, set_slave_data_valid, get_slave_stat_sno_addr, get_slave_sno_addr, rf_packet_att_value_t, mesh_pkt_t, set_slave_read_status_busy_time, set_slave_read_status_busy, set_slave_read_status_unicast_flag, get_slave_read_status_unicast_flag, get_slave_status_tick, set_slave_status_record_idx, get_slave_status_record_size, get_slave_status_record_addr, get_slave_status_record, status_record_t, set_notify_req_mask_idx};
+use crate::sdk::light::{*};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::crypto::encode_password;
@@ -360,9 +361,9 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
     if enable {
         set_rfhw_tx_power(0x40); // FR_TX_PA_MAX_POWER
         if ENABLE_16MHZ_XTAL {
-            LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
+            load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
         } else {
-            LoadTblCmdSet(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
+            load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
         }
 
         // todo: Should this be 0..7? There's an extra couple of bytes of data in the 7th int
@@ -393,7 +394,7 @@ pub fn rf_stop_trx() {
 }
 
 pub_mut!(light_rx_wptr, u32, 0);
-pub unsafe fn blc_ll_initBasicMCU()
+pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
 
@@ -417,12 +418,12 @@ pub unsafe fn blc_ll_initBasicMCU()
 }
 
 pub_mut!(gAttributes, *mut attribute_t, null_mut());
-pub unsafe fn setSppWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool)
+pub unsafe fn set_spp_write_cb(func: fn(data: *const rf_packet_att_write_t) -> bool)
 {
     (*gAttributes.0.offset(21)).w = Some(func);
 }
 
-pub unsafe fn setSppOtaWriteCB(func: fn(data: *const rf_packet_att_write_t) -> bool)
+pub unsafe fn set_spp_ota_write_cb(func: fn(data: *const rf_packet_att_write_t) -> bool)
 {
     (*gAttributes.0.offset(24)).w = Some(func);
 }
@@ -477,7 +478,7 @@ pub_mut!(pkt_light_status, rf_packet_att_cmd_t, rf_packet_att_cmd_t {
     handle1: 0,
     value: [0; 30]
 });
-pub_mut!(advData, [u8; 3], [2, 1, 5]);
+pub_mut!(adv_data, [u8; 3], [2, 1, 5]);
 pub_mut!(user_data_len, u8, 0);
 pub_mut!(user_data, [u8; 16], [0; 16]);
 
@@ -583,7 +584,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     let (result1, result2) = rf_link_match_group_mac(sno.as_ptr() as *const app_cmd_value_t);
     let op;
     let mut op_valid;
-    let mut uVar4;
+    let mut tmp;
     if op_cmd_len == 3 {
         op = op_cmd[0] & 0x3f;
         // todo: Might need to be ==
@@ -591,40 +592,40 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
         if op_valid != false {
             op_valid = true;
             if params[1] != 0 {
-                uVar4 = data.value[6] as u32;
+                tmp = data.value[6] as u32;
             } else {
-                uVar4 = data.value[6] as u32;
-                if ((uVar4 * 0x1000000) as i32) < 0 {
+                tmp = data.value[6] as u32;
+                if ((tmp * 0x1000000) as i32) < 0 {
                     return false;
                 }
             }
         };
-        uVar4 = data.value[6] as u32;
+        tmp = data.value[6] as u32;
     } else {
         op = 0;
         op_valid = true;
         if params[1] != 0 {
-            uVar4 = data.value[6] as u32;
+            tmp = data.value[6] as u32;
         } else {
-            uVar4 = data.value[6] as u32;
-            if ((uVar4 * 0x1000000) as i32) < 0 {
+            tmp = data.value[6] as u32;
+            if ((tmp * 0x1000000) as i32) < 0 {
                 return false;
             }
         }
     }
-    if op == 0x20 && ((uVar4 * 0x1000000) as i32) < 0 {
+    if op == 0x20 && ((tmp * 0x1000000) as i32) < 0 {
         if params[0] != 0xff {
             return false;
         }
         if params[1] != 0xff {
             return false;
         }
-        uVar4 = uVar4 << 8 | data.value[5] as u32;
+        tmp = tmp << 8 | data.value[5] as u32;
     } else {
-        uVar4 = uVar4 << 8 | data.value[5] as u32;
-        if ((!uVar4 << 0x10) as i32) < 0 && op == 0x10 {
-            if uVar4 == 0 {
-                uVar4 = *get_device_address() as u32;
+        tmp = tmp << 8 | data.value[5] as u32;
+        if ((!tmp << 0x10) as i32) < 0 && op == 0x10 {
+            if tmp == 0 {
+                tmp = *get_device_address() as u32;
             }
             uprintln!("stub: mesh_node_check_force_notify")
             // mesh_node_check_force_notify(uVar4, params[0]);
@@ -693,7 +694,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     (*get_pkt_light_status()).value[25] = *get_max_relay_num();
     (*get_pkt_light_data()).value[23] = (*get_slave_link_interval() / (*get_tick_per_us() * 1000)) as u8;
     let skip_reset = false;
-    if result2 == false || (uVar4 != 0 && op == 0x20 && dev_addr_with_mac_flag(params.as_ptr()) != false) || *get_mesh_node_ignore_addr() != false {
+    if result2 == false || (tmp != 0 && op == 0x20 && dev_addr_with_mac_flag(params.as_ptr()) != false) || *get_mesh_node_ignore_addr() != false {
         if op == 0x1d || op == 0x1a || op_valid != false || op == 0x2a || op == 0x28 || op == 7 {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
             if op == 0x1d {
@@ -800,7 +801,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
         unsafe { *(addr_of!((*get_pkt_light_status()).value[3]) as *mut u16) = *get_device_address() };
 
-        let rStack_60 = rf_packet_att_value_t {
+        let tmp_pkt = rf_packet_att_value_t {
             sno: [0; 3],
             src: [0; 2],
             dst: [0; 2],
@@ -809,16 +810,16 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
         unsafe {
             slice::from_raw_parts_mut(
-                addr_of!(rStack_60) as *mut u8,
+                addr_of!(tmp_pkt) as *mut u8,
                 0x1e,
             ).copy_from_slice(sno);
         }
 
         unsafe {
-            *(addr_of!(rStack_60.src) as *mut u16) = *get_device_address();
+            *(addr_of!(tmp_pkt.src) as *mut u16) = *get_device_address();
         }
 
-        if rf_link_response_callback(addr_of!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &rStack_60) != false {
+        if rf_link_response_callback(addr_of!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &tmp_pkt) != false {
             rf_link_slave_add_status(unsafe { &*(get_pkt_light_status_addr() as *const mesh_pkt_t) });
         }
     }
@@ -844,7 +845,7 @@ fn rf_link_slave_set_adv(adv_data_ptr: &[u8])
 pub fn rf_link_slave_init(interval: u32)
 {
     unsafe {
-        blc_ll_initBasicMCU();
+        blc_ll_init_basic_mcu();
         set_p_st_handler(Some(irq_st_adv));
         set_slave_link_state(0);
         set_slave_listen_interval(interval * *get_tick_per_us());
@@ -903,7 +904,7 @@ pub fn rf_link_slave_init(interval: u32)
         (*get_pkt_adv()).advA = *get_mac_id();
         (*get_pkt_scan_rsp()).advA = *get_mac_id();
 
-        rf_link_slave_set_adv(get_advData());
+        rf_link_slave_set_adv(get_adv_data());
         pair_load_key();
 
         (*get_pkt_light_data()).value[3] = *get_slave_p_mac().offset(0);
@@ -915,8 +916,8 @@ pub fn rf_link_slave_init(interval: u32)
         set_slave_adv_enable(true);
 
         set_gAttributes(get_gAttributes_def().as_mut_ptr());
-        setSppWriteCB(rf_link_slave_data_write);
-        setSppOtaWriteCB(my_rf_link_slave_data_ota);
+        set_spp_write_cb(rf_link_slave_data_write);
+        set_spp_ota_write_cb(rf_link_slave_data_ota);
 
         retrieve_dev_grp_address();
 
@@ -1029,23 +1030,21 @@ pub fn rf_set_power_level_index(index: u32)
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rf_set_rxmode()
+pub fn rf_set_rxmode()
 {
     write_reg8(0x800428, RF_TRX_MODE | BIT!(0));        // rx enable
     write_reg8(0x800f02, RF_TRX_OFF | BIT!(5));        // RX enable
 }
 
-#[no_mangle]
-pub extern "C" fn rf_set_tx_rx_off()
+pub fn rf_set_tx_rx_off()
 {
     write_reg8(0x800f16, 0x29);
     write_reg8(0x800428, RF_TRX_MODE);    // rx disable
     write_reg8(0x800f02, RF_TRX_OFF);        // reset tx/rx state machine
 }
 
-#[no_mangle]
-pub extern "C" fn rf_set_ble_channel(mut chn: u8) {
+#[link_section = ".ram_code"]
+pub fn rf_set_ble_channel(mut chn: u8) {
     write_reg8(0x40d, chn);
 
     let mut gain = 0;
@@ -1098,8 +1097,7 @@ fn rf_set_tp_gain(gain: u8)
     unsafe { analog_write(0x93, *get_rf_tp_base() as u8 - ((gain as u32 * *get_rf_tp_gain() + 0x80) >> 8) as u8); }
 }
 
-#[no_mangle]
-pub extern "C" fn rf_start_stx2rx(addr: u32, tick: u32)
+pub fn rf_start_stx2rx(addr: u32, tick: u32)
 {
     //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f18, tick);                                // Setting schedule trigger time
@@ -1110,8 +1108,7 @@ pub extern "C" fn rf_start_stx2rx(addr: u32, tick: u32)
     set_FtoRX(true);
 }
 
-#[no_mangle]
-pub extern "C" fn rf_start_srx2tx(addr: u32, tick: u32)
+pub fn rf_start_srx2tx(addr: u32, tick: u32)
 {
     //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f18, tick);                                // Setting schedule trigger time
@@ -1120,8 +1117,7 @@ pub extern "C" fn rf_start_srx2tx(addr: u32, tick: u32)
     write_reg16(0x80050c, addr as u16);
 }
 
-#[no_mangle]
-pub extern "C" fn rf_start_brx(addr: u32, tick: u32)
+pub fn rf_start_brx(addr: u32, tick: u32)
 {
     //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f28, 0xffffffff);                            // ?
@@ -1131,8 +1127,7 @@ pub extern "C" fn rf_start_brx(addr: u32, tick: u32)
     write_reg16(0x80050c, addr as u16);
 }
 
-#[no_mangle]
-pub extern "C" fn rf_start_beacon(addr: u32, tick: u32)
+pub fn rf_start_beacon(addr: u32, tick: u32)
 {
     //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f18, tick);                                // Setting schedule trigger time

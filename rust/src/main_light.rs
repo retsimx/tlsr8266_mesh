@@ -12,8 +12,8 @@ use crate::common::*;
 use crate::config::*;
 use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{irq_light_slave_handler, is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
-use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
+use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason};
@@ -60,7 +60,6 @@ pub_mut!(buff_response, [rf_packet_att_data_t; 48], [rf_packet_att_data_t {
     hh: 0,
     dat: [0; 23]
 }; 48]);
-pub_mut!(adv_data, [u8; 3]);
 pub_mut!(max_mesh_name_len, u8, 16);
 
 pub_mut!(led_event_pending, u32, 0);
@@ -277,8 +276,7 @@ pub fn main_loop() {
 /*@brief: This function is called in IRQ state, use IRQ stack.
 **@param: ppp: is pointer to response
 **@param: p_req: is pointer to request command*/
-#[no_mangle] // required by light_ll
-pub extern "C" fn rf_link_response_callback(
+pub fn rf_link_response_callback(
     ppp: *mut rf_packet_att_value_t,
     p_req: *const rf_packet_att_value_t,
 ) -> bool {
@@ -383,8 +381,7 @@ pub extern "C" fn rf_link_response_callback(
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
 */
-#[no_mangle] // required by light_ll
-pub extern "C" fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
+pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
     let mut op_cmd: [u8; 8] = [0; 8];
     let mut op_cmd_len: u8 = 0;
@@ -508,8 +505,7 @@ fn light_notify(p: &[u8], p_src: &[u8]) {
     }
 }
 
-#[no_mangle] // required by light_ll
-pub extern "C" fn rf_link_light_event_callback(status: u8) {
+pub fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
             mesh_node_init();
@@ -525,49 +521,4 @@ pub extern "C" fn rf_link_light_event_callback(status: u8) {
         LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
         _ => ()
     }
-}
-
-#[no_mangle]
-pub extern "C" fn irq_timer1() {
-    app().light_manager.transition_step();
-}
-
-// Counts any clock_time overflows
-static mut CLOCK_TIME_UPPER: u32 = 0;
-static mut LAST_CLOCK_TIME: u32 = 0;
-
-unsafe fn check_clock_overflow() -> u32 {
-    critical_section::with(|_| {
-        let time = clock_time();
-        if time < LAST_CLOCK_TIME {
-            // Overflow has occurred
-            CLOCK_TIME_UPPER += 1;
-        }
-
-        LAST_CLOCK_TIME = time;
-
-        time
-    })
-}
-
-// This timer is configured to run once per second to check if the internal clock has overflowed.
-// this is a workaround in case there are no 'clock_time64' calls between overflows
-#[no_mangle]
-pub extern "C" fn irq_timer0() {
-    unsafe { check_clock_overflow(); }
-}
-
-pub fn clock_time64() -> u64 {
-    unsafe {
-        let time = check_clock_overflow();
-        return (CLOCK_TIME_UPPER as u64) << 32 | time as u64;
-    }
-}
-
-#[no_mangle] // required by light_ll
-#[link_section = ".ram_code"]
-extern "C" fn irq_handler() {
-    unsafe { irq_light_slave_handler(); }
-
-    app().uart_manager.check_irq();
 }

@@ -111,6 +111,12 @@ with open(inputfile + ".tc32", 'w') as outputfile:
             last_section_name = '.data'
             last_section_extra = ""
 
+        if '.bss' == line.strip():
+            line = "\t@ " + line
+            section_seen = False
+            last_section_name = '.bss'
+            last_section_extra = ""
+
         if '.fnend' in line:
             section_seen = False
 
@@ -123,6 +129,11 @@ with open(inputfile + ".tc32", 'w') as outputfile:
             if ".comm" in lines[index+2]:
                 section_seen = False
                 last_section_name = '.data'
+                last_section_extra = ""
+
+            if ".bss" in lines[index+1]:
+                section_seen = False
+                last_section_name = '.bss'
                 last_section_extra = ""
 
             if '.section' in lines[index+1]:

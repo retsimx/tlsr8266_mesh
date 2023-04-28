@@ -3,7 +3,7 @@ use crate::config::{
 };
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::light::{get_pair_config_mesh_ltk};
+use crate::sdk::light::{get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use core::cmp::min;
@@ -13,8 +13,6 @@ use crate::BIT;
 use crate::{app, pub_mut};
 use crate::sdk::mcu::crypto::{encode_password};
 use crate::sdk::pm::light_sw_reboot;
-
-pub_mut!(pair_config_pwd_encode_enable, u8);
 
 const SERIALS_CNT: u8 = 5; // must less than 7
 const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
@@ -210,7 +208,7 @@ pub fn kick_out(par: KickoutReason) {
 
         let mut buff: [u8; 16] = [0; 16];
         buff[0] = PAIR_VALID_FLAG;
-        if *get_pair_config_pwd_encode_enable() != 0 {
+        if *get_pair_config_pwd_encode_enable() != false {
             buff[15] = PAIR_VALID_FLAG;
         }
 

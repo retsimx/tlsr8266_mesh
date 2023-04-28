@@ -1,11 +1,11 @@
 use crate::config::VENDOR_ID;
-use crate::pub_mut_no_move;
+use crate::{pub_mut};
 use crate::sdk::light::{get_slave_p_mac, ll_adv_private_t, ll_adv_rsp_private_t};
 use core::mem::size_of;
 use core::slice;
 use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
 
-pub_mut_no_move!(
+pub_mut!(
     adv_pri_data,
     ll_adv_private_t,
     ll_adv_private_t {
@@ -15,7 +15,7 @@ pub_mut_no_move!(
     }
 );
 
-pub_mut_no_move!(
+pub_mut!(
     adv_rsp_pri_data,
     ll_adv_rsp_private_t,
     ll_adv_rsp_private_t {

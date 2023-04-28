@@ -11,7 +11,7 @@ use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
-use crate::sdk::ble_app::ble_ll_pair::{pairRead, pairWrite};
+use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
 use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
@@ -323,10 +323,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            ble_g_devName.len(),
-            ble_g_devName.len(),
+            ble_g_devName.0.len(),
+            ble_g_devName.0.len(),
             devNameUUID,
-            ble_g_devName
+            ble_g_devName.0
         ),
         attrdef!(
             0,
@@ -432,8 +432,8 @@ pub_mut!(
             16,
             TelinkSppDataPairUUID,
             SppDataPairData,
-            Some(pairWrite),
-            Some(pairRead)
+            Some(pair_write),
+            Some(pair_read)
         ), //value
         attrdef!(
             0,

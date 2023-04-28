@@ -49,6 +49,7 @@ fn set_pw2(on: bool) {
     gpio_write(PWM_B as u32, if on {1} else {0});
 }
 
+#[no_mangle]
 pub fn blinken_testboard() {
     for idx in 0..6 {
         if idx % 2 == 0 {
@@ -84,6 +85,7 @@ pub fn blinken() {
     app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
 }
 
+// no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]
 pub extern "C" fn main_entrypoint() {
     // Must happen first

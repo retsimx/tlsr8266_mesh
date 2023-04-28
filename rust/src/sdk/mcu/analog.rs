@@ -10,9 +10,8 @@ pub fn analog_wait() {
 }
 
 #[inline(never)]
-#[no_mangle] // required by light_ll
 #[link_section = ".ram_code"]
-pub extern "C" fn analog_read(addr: u8) -> u8 {
+pub fn analog_read(addr: u8) -> u8 {
     let r = irq_disable();
 
     write_reg_ana_addr(addr);
@@ -28,9 +27,8 @@ pub extern "C" fn analog_read(addr: u8) -> u8 {
 }
 
 #[inline(never)]
-#[no_mangle]
 #[link_section = ".ram_code"]
-pub extern "C" fn analog_write(addr: u8, v: u8) {
+pub fn analog_write(addr: u8, v: u8) {
     let r = irq_disable();
 
     write_reg_ana_addr(addr);

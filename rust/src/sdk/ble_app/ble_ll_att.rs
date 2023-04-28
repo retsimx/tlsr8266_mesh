@@ -5,8 +5,7 @@ pub_mut!(ble_ll_channelNum, u32, 0);
 pub_mut!(ble_ll_lastUnmappedCh, u32, 0);
 pub_mut!(ble_ll_channelTable, [u8; 40], [0; 40]);
 
-#[no_mangle]
-pub extern "C" fn ble_ll_channelTable_calc(mut channel: *const u8, reset: bool)
+pub fn ble_ll_channel_table_calc(mut channel: *const u8, reset: bool)
 {
     set_ble_ll_channelNum(0);
     if reset {
@@ -23,8 +22,7 @@ pub extern "C" fn ble_ll_channelTable_calc(mut channel: *const u8, reset: bool)
     }
 }
 
-#[no_mangle]
-pub extern "C" fn ble_ll_conn_getNextChannel(channel_map: *const u8, hop: u8) -> u32
+pub fn ble_ll_conn_get_next_channel(channel_map: *const u8, hop: u8) -> u32
 {
     let mut index = (*get_ble_ll_lastUnmappedCh() as u8 + hop) % 0x25;
     set_ble_ll_lastUnmappedCh(index as u32);

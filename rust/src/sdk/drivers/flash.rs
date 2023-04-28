@@ -246,8 +246,7 @@ fn flash_mspi_write_ram(
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
 #[inline(always)]
-#[no_mangle] // required by light_ll
-pub extern "C" fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
+pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
     flash_mspi_read_ram(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
 }
 
@@ -270,8 +269,7 @@ pub extern "C" fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
 #[inline(always)]
-#[no_mangle] // required by light_ll
-pub extern "C" fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
+pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
     let mut ns = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
     let mut nw = 0;
 
@@ -303,8 +301,7 @@ pub extern "C" fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const 
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
 #[inline(always)]
-#[no_mangle] // required by light_ll
-pub extern "C" fn flash_erase_sector(addr: u32) {
+pub fn flash_erase_sector(addr: u32) {
     wd_clear();
 
     flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, 1, null_mut(), 0);

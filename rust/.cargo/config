@@ -2,6 +2,6 @@
 rustflags = ["--emit=llvm-ir"]
 target = "thumbv6m-none-eabi"
 
-[unstable]
-build-std = ["core"]
-build-std-features = []
+#[unstable]
+#build-std = ["core"]
+#build-std-features = []

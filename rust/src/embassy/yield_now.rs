@@ -11,20 +11,6 @@ use core::task::{Context, Poll};
 /// See also [`task::spawn_blocking`].
 ///
 /// [`task::spawn_blocking`]: fn.spawn_blocking.html
-///
-/// # Examples
-///
-/// Basic usage:
-///
-/// ```
-/// # async_std::task::block_on(async {
-/// #
-/// use async_std::task;
-///
-/// task::yield_now().await;
-/// #
-/// # })
-/// ```
 
 #[inline]
 pub async fn yield_now() {

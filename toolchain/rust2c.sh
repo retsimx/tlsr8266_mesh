@@ -7,7 +7,7 @@ LLC=/home/lewis/Projects/llvm/build/bin/llc
 
 cd rust
 
-cargo build --color=always --release
+cargo build --color=always --release -Z build-std=core
 
 for i in target/thumbv6m-none-eabi/release/deps/*.ll; do
   bname="${i%.*}"

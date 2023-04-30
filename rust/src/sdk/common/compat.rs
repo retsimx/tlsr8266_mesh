@@ -243,7 +243,7 @@ pub async fn check_panic_info() {
     flash_erase_sector(panic_addr);
 }
 
-
+#[cfg(not(test))]
 #[panic_handler]
 #[no_mangle]
 pub fn panic(info: &PanicInfo) -> ! {

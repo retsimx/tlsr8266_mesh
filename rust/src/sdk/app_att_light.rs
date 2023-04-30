@@ -5,7 +5,6 @@ use crate::sdk::service::{
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
 use core::convert::AsRef;
-use core::ffi::CStr;
 use core::mem::transmute;
 use core::ptr::{addr_of, null, null_mut};
 use core::slice;
@@ -124,7 +123,7 @@ static manuNameStringChar: u8 = CHAR_PROP_READ;
 static manuNameString_value: &[u8] = MESH_NAME.as_bytes();
 
 static modelIdChar: u8 = CHAR_PROP_READ;
-static modelId_value: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"model id 123\0") };
+static modelId_value: &[u8] = b"model id 123";
 
 static hwRevisionChar: u8 = CHAR_PROP_READ;
 static hwRevision_value: u32 = 0x22222222;
@@ -149,7 +148,7 @@ const periConnParameters: gap_periConnectParams_t = gap_periConnectParams_t {
 };
 
 // note !!!DEVICE_NAME max 13 bytes
-pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME.to_bytes());
+pub_static!(ble_g_devName, &'static [u8], DEVICE_NAME);
 
 //////////////////////// SPP /////////////////////////////////////////////////////
 // These must be pub_mut
@@ -191,11 +190,11 @@ static SppDataClient2ServerData: &[u8; 16] = unsafe { &send_to_master.0 };
 
 static userdesc_UUID: u16 = GATT_UUID_CHAR_USER_DESC;
 
-static spp_Statusname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Status\0") };
-static spp_Commandname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Command\0") };
-static spp_otaname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"OTA\0") };
-static spp_pairname: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Pair\0") };
-static spp_devicename: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"DevName\0") };
+static spp_Statusname: &[u8] = b"Status";
+static spp_Commandname: &[u8] = b"Command";
+static spp_otaname: &[u8] = b"OTA";
+static spp_pairname: &[u8] = b"Pair";
+static spp_devicename: &[u8] = b"DevName";
 
 fn mesh_status_write(p: *const rf_packet_att_write_t) -> bool {
     if !*get_pair_login_ok() {
@@ -331,10 +330,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_devicename.to_bytes().len(),
-            spp_devicename.to_bytes().len(),
+            spp_devicename.len(),
+            spp_devicename.len(),
             userdesc_UUID,
-            spp_devicename.to_bytes()
+            spp_devicename
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, appearanceCharacter),
         attrdefu!(
@@ -362,10 +361,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            modelId_value.to_bytes().len(),
-            modelId_value.to_bytes().len(),
+            modelId_value.len(),
+            modelId_value.len(),
             modelId_charUUID,
-            modelId_value.to_bytes()
+            modelId_value
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, hwRevisionChar),
         attrdefu!(
@@ -409,20 +408,20 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_Commandname.to_bytes().len(),
-            spp_Commandname.to_bytes().len(),
+            spp_Commandname.len(),
+            spp_Commandname.len(),
             userdesc_UUID,
-            spp_Commandname.to_bytes()
+            spp_Commandname
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataOtaProp), //prop
         attrdef!(0, 16, 16, 16, TelinkSppDataOtaUUID, SppDataOtaData), //value
         attrdef!(
             0,
             2,
-            spp_otaname.to_bytes().len(),
-            spp_otaname.to_bytes().len(),
+            spp_otaname.len(),
+            spp_otaname.len(),
             userdesc_UUID,
-            spp_otaname.to_bytes()
+            spp_otaname
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataPairProp), //prop
         attrdef!(
@@ -438,10 +437,10 @@ pub_mut!(
         attrdef!(
             0,
             2,
-            spp_pairname.to_bytes().len(),
-            spp_pairname.to_bytes().len(),
+            spp_pairname.len(),
+            spp_pairname.len(),
             userdesc_UUID,
-            spp_pairname.to_bytes()
+            spp_pairname
         ),
     ]
 );

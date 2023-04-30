@@ -1,4 +1,3 @@
-use core::ffi::CStr;
 use crate::pub_mut;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
 // General stuff
@@ -14,7 +13,7 @@ pub const MESH_LTK: [u8; 16] = [
     0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
 ];
 
-pub const DEVICE_NAME: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"Telink tLight\0") };
+pub const DEVICE_NAME: &[u8] = b"Telink tLight";
 
 pub const OUT_OF_MESH: &str = "out_of_mesh";
 

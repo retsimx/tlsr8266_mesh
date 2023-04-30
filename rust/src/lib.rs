@@ -1,6 +1,4 @@
 #![feature(type_alias_impl_trait)]
-#![feature(const_cstr_methods)]
-#![feature(once_cell)]
 #![no_std]
 
 use embassy_executor::Spawner;

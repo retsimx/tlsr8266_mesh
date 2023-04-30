@@ -13,7 +13,7 @@ use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
 use crate::sdk::ble_app::light_ll::{copy_par_User_All, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
-use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode};
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
 use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -390,7 +390,7 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
 }
 
 pub fn rf_stop_trx() {
-    write_reg8(0x800f00, 0x80);            // stop
+    write_reg_rf_mode_control(0x80);            // stop
 }
 
 pub_mut!(light_rx_wptr, u32, 0);
@@ -1038,7 +1038,7 @@ pub fn rf_set_rxmode()
 
 pub fn rf_set_tx_rx_off()
 {
-    write_reg8(0x800f16, 0x29);
+    write_reg_rf_mode(0x29);
     write_reg8(0x800428, RF_TRX_MODE);    // rx disable
     write_reg8(0x800f02, RF_TRX_OFF);        // reset tx/rx state machine
 }
@@ -1080,7 +1080,7 @@ pub fn rf_set_ble_channel(mut chn: u8) {
     analog_write(6, 0);
 
     /////////////////// turn on LDO and baseband PLL ////////////////
-    write_reg8(0x800f16, 0x29);
+    write_reg_rf_mode(0x29);
 
     write_reg8(0x800428, RF_TRX_MODE);        // rx disable
     write_reg8(0x800f02, RF_TRX_OFF);    // reset tx/rx state machine
@@ -1099,65 +1099,146 @@ fn rf_set_tp_gain(gain: u8)
 
 pub fn rf_start_stx2rx(addr: u32, tick: u32)
 {
-    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
-    write_reg32(0x800f18, tick);                                // Setting schedule trigger time
-    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
-    write_reg8(0x800f00, 0x87);                                // Set mode
-    write_reg16(0x80050c, addr as u16);
+    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
+    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
+    write_reg_rf_mode_control(0x87);                                // Set mode
+    write_reg_dma3_addr(addr as u16);
 
     set_FtoRX(true);
 }
 
 pub fn rf_start_srx2tx(addr: u32, tick: u32)
 {
-    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
-    write_reg32(0x800f18, tick);                                // Setting schedule trigger time
-    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
-    write_reg8(0x800f00, 0x85);                                // Set mode
-    write_reg16(0x80050c, addr as u16);
+    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
+    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
+    write_reg_rf_mode_control(0x85);                                // Set mode
+    write_reg_dma3_addr(addr as u16);
 }
 
 pub fn rf_start_brx(addr: u32, tick: u32)
 {
-    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
     write_reg32(0x800f28, 0xffffffff);                            // ?
-    write_reg32(0x800f18, tick);                                // Setting schedule trigger time
-    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
-    write_reg8(0x800f00, 0x82);                                // Set mode
-    write_reg16(0x80050c, addr as u16);
+    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
+    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
+    write_reg_rf_mode_control(0x82);                                // Set mode
+    write_reg_dma3_addr(addr as u16);
 }
 
 pub fn rf_start_beacon(addr: u32, tick: u32)
 {
-    //write_reg32 (0x800f04, 0);						                // tx wail & settle time: 0
-    write_reg32(0x800f18, tick);                                // Setting schedule trigger time
-    write_reg8(0x800f16, read_reg8(0x800f16) | 0x04);    // Enable cmd_schedule mode
-    write_reg8(0x800f00, 0x84);                                // Set mode
-    write_reg16(0x80050c, addr as u16);
+    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
+    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
+    write_reg_rf_mode_control(0x84);                                // Set mode
+    write_reg_dma3_addr(addr as u16);
 }
 
 pub fn rf_reset_sn()
 {
-    write_reg8(0x800f01, 0x3f);
-    write_reg8(0x800f01, 0x00);
+    write_reg_rf_sn(0x3f);
+    write_reg_rf_sn(0x00);
 }
 
 pub fn rf_set_ble_crc(crc: &[u8])
 {
-    write_reg32(0x80044c, crc[0] as u32 | ((crc[1] as u32) << 8) | ((crc[2] as u32) << 16));
+    write_reg_rf_crc(crc[0] as u32 | ((crc[1] as u32) << 8) | ((crc[2] as u32) << 16));
 }
 
 pub fn rf_set_ble_crc_adv()
 {
-    write_reg32(0x80044c, 0x555555);
+    write_reg_rf_crc(0x555555);
 }
 
 pub fn rf_set_ble_access_code(ac: u32)
 {
-    write_reg32(0x800408, ((ac >> 24) & 0xff) | ((ac >> 16) & 0xff) << 8 | ((ac >> 8) & 0xff) << 16 | (ac & 0xff) << 24);
+    write_reg_rf_access_code(ac.swap_bytes());
 }
 
 pub fn rf_set_ble_access_code_adv()
 {
-    write_reg32(0x800408, 0xd6be898e);
+    write_reg_rf_access_code(0xd6be898e);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sdk::ble_app::rf_drv_8266::*;
+    use crate::sdk::mcu::register::{read_reg32, read_reg_dma3_addr, read_reg_rf_access_code, read_reg_rf_crc, read_reg_rf_mode_control, read_reg_rf_sched_tick, read_reg_rf_sn};
+
+    #[test]
+    fn test_rf_set_ble_access_code_adv() {
+        rf_set_ble_access_code_adv();
+        assert_eq!(read_reg_rf_access_code(), 0xd6be898e);
+    }
+
+    #[test]
+    fn test_rf_set_ble_access_code() {
+        // Should swap the order of the bytes
+        rf_set_ble_access_code(0x12345678);
+        assert_eq!(read_reg_rf_access_code(), 0x78563412);
+
+        rf_set_ble_access_code(read_reg_rf_access_code());
+        assert_eq!(read_reg_rf_access_code(), 0x12345678);
+    }
+
+    #[test]
+    fn test_rf_set_ble_crc_adv() {
+        rf_set_ble_crc_adv();
+
+        assert_eq!(read_reg_rf_crc(), 0x555555);
+    }
+
+    #[test]
+    fn test_rf_set_ble_crc() {
+        // todo: Is this really true?
+        rf_set_ble_crc(&[0x12, 0x34, 0x56]);
+
+        assert_eq!(read_reg_rf_crc(), 0x563412);
+    }
+
+    #[test]
+    fn test_rf_reset_sn() {
+        rf_reset_sn();
+
+        assert_eq!(read_reg_rf_sn(), 0);
+    }
+
+    #[test]
+    fn test_rf_start_beacon() {
+        rf_start_beacon(0x12345678, 0x87654321);
+
+        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+        assert_eq!(read_reg_rf_mode(), 4);
+        assert_eq!(read_reg_rf_mode_control(), 0x84);
+        assert_eq!(read_reg_dma3_addr(), 0x5678);
+    }
+
+    #[test]
+    fn test_rf_start_brx() {
+        rf_start_brx(0x12345678, 0x87654321);
+
+        assert_eq!(read_reg32(0xf28), 0xffffffff);
+        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+        assert_eq!(read_reg_rf_mode(), 4);
+        assert_eq!(read_reg_rf_mode_control(), 0x82);
+        assert_eq!(read_reg_dma3_addr(), 0x5678);
+    }
+
+    #[test]
+    fn test_rf_start_srx2tx() {
+        rf_start_srx2tx(0x12345678, 0x87654321);
+
+        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+        assert_eq!(read_reg_rf_mode(), 4);
+        assert_eq!(read_reg_rf_mode_control(), 0x85);
+        assert_eq!(read_reg_dma3_addr(), 0x5678);
+    }
+
+    #[test]
+    fn test_rf_start_stx2rx() {
+        rf_start_stx2rx(0x12345678, 0x87654321);
+
+        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+        assert_eq!(read_reg_rf_mode(), 4);
+        assert_eq!(read_reg_rf_mode_control(), 0x87);
+        assert_eq!(read_reg_dma3_addr(), 0x5678);
+    }
 }

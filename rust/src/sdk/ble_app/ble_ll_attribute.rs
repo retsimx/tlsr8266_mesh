@@ -72,9 +72,13 @@ pub_mut!(pkt_writeRsp, rf_packet_att_writeRsp_t, rf_packet_att_writeRsp_t{
 });
 pub_mut!(att_service_discover_tick, u32, 0);
 pub_mut!(slave_link_time_out, u32, 0);
+#[cfg(not(test))]
 extern "C" {
     pub static __RAM_START_ADDR: u32;
 }
+
+#[cfg(test)]
+pub static mut __RAM_START_ADDR: u32 = 0;
 
 #[derive(FromPrimitive)]
 pub enum GattOp {

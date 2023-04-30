@@ -1,8 +1,12 @@
 use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
 extern crate core;
 extern crate paste;
+use core::ptr::addr_of;
 
 pub const REG_BASE_ADDR: u32 = 0x800000;
+
+#[cfg(test)]
+static mut reg_space: [u8; 0x8000] = [0u8; 0x8000];
 
 #[macro_export]
 macro_rules! regrw_idx {
@@ -10,13 +14,17 @@ macro_rules! regrw_idx {
         paste::paste! {
             pub fn [<read_ $x>](i: u32) -> $s {
                 unsafe {
-                    return core::ptr::read_volatile(((REG_BASE_ADDR + $a) + i) as *mut $s)
+                    #[cfg(test)]
+                    return core::ptr::read_volatile(((addr_of!(reg_space) as u32 + $a) + i) as *mut $s);
+                    return core::ptr::read_volatile(((REG_BASE_ADDR + $a) + i) as *mut $s);
                 }
             }
 
             pub fn [<write_ $x>](value: $s, i: u32) {
                 unsafe {
-                    core::ptr::write_volatile(((REG_BASE_ADDR + $a) + i) as *mut $s, value)
+                    #[cfg(test)]
+                    return core::ptr::write_volatile(((addr_of!(reg_space) as u32 + $a) + i) as *mut $s, value);
+                    core::ptr::write_volatile(((REG_BASE_ADDR + $a) + i) as *mut $s, value);
                 }
             }
         }
@@ -29,13 +37,17 @@ macro_rules! regrw {
         paste::paste! {
             pub fn [<read_ $x>]() -> $s {
                 unsafe {
-                    return core::ptr::read_volatile((REG_BASE_ADDR + $a) as *mut $s)
+                    #[cfg(test)]
+                    return core::ptr::read_volatile((addr_of!(reg_space) as u32 + $a) as *mut $s);
+                    return core::ptr::read_volatile((REG_BASE_ADDR + $a) as *mut $s);
                 }
             }
 
             pub fn [<write_ $x>](value: $s) {
                 unsafe {
-                    core::ptr::write_volatile((REG_BASE_ADDR + $a) as *mut $s, value)
+                    #[cfg(test)]
+                    return core::ptr::write_volatile((addr_of!(reg_space) as u32 + $a) as *mut $s, value);
+                    core::ptr::write_volatile((REG_BASE_ADDR + $a) as *mut $s, value);
                 }
             }
         }
@@ -260,6 +272,7 @@ pub enum FLD_RF_TX_MODE {
     TX_1M2M_FEC_EN = BIT!(12),
     TX_1M2M_INTL_EN = BIT!(13), // interleaving
 }
+regrw!(reg_rf_access_code, 0x408, u32);
 regrw!(reg_rf_tx_buf_sta, 0x41c, u32);
 
 regrw!(reg_rf_rx_sense_thr, 0x422, u8);
@@ -353,6 +366,8 @@ pub enum FLD_RF_RX_STATUS {
     TX_INTR = BIT!(7),
 }
 
+regrw!(reg_rf_crc, 0x44c, u32);
+
 regrw!(reg_rf_irq_mask, 0xf1c, u16);
 regrw!(reg_rf_irq_status, 0xf20, u16);
 
@@ -392,7 +407,6 @@ pub enum FLD_RX_RND_MODE {
 }
 regrw!(reg_rnd_number, 0x448, u16);
 
-regrw!(reg_rf_crc, 0x44c, u32);
 regrw!(reg_rf_rtt, 0x454, u32);
 pub enum FLD_RF_RTT {
     CAL = BIT_RNG!(0, 7),
@@ -850,27 +864,45 @@ regrw_idx!(reg_pwm_pulse_num, 0x7ac, u16); // i == 0, 1
 regrw!(reg_pwm_irq_mask, 0x7b0, u8);
 regrw!(reg_pwm_irq_sta, 0x7b1, u8);
 
+regrw!(reg_rf_mode_control, 0xf00, u8);
+regrw!(reg_rf_sn, 0xf01, u8);
+regrw!(reg_rf_tx_wail_settle_time, 0xf04, u32);
+regrw!(reg_rf_mode, 0xf16, u8);
+regrw!(reg_rf_sched_tick, 0xf18, u32);
+
 pub fn write_reg8(addr: u32, v: u8) {
+    #[cfg(test)]
+    return unsafe { core::ptr::write_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u8, v) };
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u8, v) }
 }
 
 pub fn write_reg16(addr: u32, v: u16) {
+    #[cfg(test)]
+    return unsafe { core::ptr::write_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u16, v) };
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u16, v) }
 }
 
 pub fn write_reg32(addr: u32, v: u32) {
+    #[cfg(test)]
+    return unsafe { core::ptr::write_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u32, v) };
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
 }
 
 pub fn read_reg8(addr: u32) -> u8 {
-    unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u8) }
+    #[cfg(test)]
+    return unsafe { core::ptr::read_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u8) };
+    return unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u8) };
 }
 
 pub fn read_reg16(addr: u32) -> u16 {
+    #[cfg(test)]
+    return unsafe { core::ptr::read_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u16) };
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u16) }
 }
 
 pub fn read_reg32(addr: u32) -> u32 {
+    #[cfg(test)]
+    return unsafe { core::ptr::read_volatile((((addr | REG_BASE_ADDR) - REG_BASE_ADDR) + addr_of!(reg_space) as u32) as *mut u32) };
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u32) }
 }
 

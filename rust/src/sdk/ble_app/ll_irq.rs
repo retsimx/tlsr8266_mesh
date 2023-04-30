@@ -426,8 +426,8 @@ pub fn irq_st_ble_rx()
     // rf_set_ble_access_code(unsafe { *(addr_of!((*get_pkt_init()).aa) as *const u32) });
     // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
 
-    write_reg32 (0x800408, (((*get_pkt_init()).aa[2] as u32) << 8) | (((*get_pkt_init()).aa[1] as u32) << 0x10) | ((*get_pkt_init()).aa[3] as u32) | (((*get_pkt_init()).aa[0] as u32) << 0x18));
-    write_reg32 (0x80044c, (((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
+    write_reg_rf_access_code((((*get_pkt_init()).aa[2] as u32) << 8) | (((*get_pkt_init()).aa[1] as u32) << 0x10) | ((*get_pkt_init()).aa[3] as u32) | (((*get_pkt_init()).aa[0] as u32) << 0x18));
+    write_reg_rf_crc((((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
 
     set_slave_next_connect_tick(*get_slave_link_interval() + read_reg_system_tick_irq());
     if *get_rf_slave_ota_busy() == false {
@@ -515,8 +515,8 @@ unsafe fn irq_light_slave_rx()
                     entry.mac[2] == *(*get_slave_p_mac()).offset(2) &&
                     entry.mac[3] == *(*get_slave_p_mac()).offset(3) {
                     rf_stop_trx();
-                    write_reg32(0x800f18, rx_time + *get_T_scan_rsp_intvl() * *get_tick_per_us());
-                    write_reg8(0x800f00, 0x85);                        // single TX
+                    write_reg_rf_sched_tick(rx_time + *get_T_scan_rsp_intvl() * *get_tick_per_us());
+                    write_reg_rf_mode_control(0x85);                        // single TX
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
                     (*get_adv_rsp_pri_data()).DeviceAddress = *get_device_address_addr();

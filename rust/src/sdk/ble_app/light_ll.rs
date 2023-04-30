@@ -802,7 +802,7 @@ pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
             ble_ll_channel_table_calc((*get_pkt_init()).chm.as_ptr(), true);
 
             // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
-            write_reg32 (0x80044c, (((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
+            write_reg_rf_crc((((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
             rf_reset_sn();
 
             set_slave_instant(0);

@@ -4,7 +4,7 @@ use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use crate::{app, blinken, pub_mut, uprintln, uprintln_fast};
-use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_mesh_node_ignore_addr, get_sys_chn_adv, get_sys_chn_listen, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
+use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_sys_chn_adv, get_sys_chn_listen, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
 use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::mesh_node_st_val_t;
@@ -454,7 +454,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         set_enc_disable(false);
         return false;
     } else {
-        if src_device_addr_match && !*get_mesh_node_ignore_addr() {
+        if src_device_addr_match {
             if op != 0x20 || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
                 set_enc_disable(false);
                 return false;
@@ -599,6 +599,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                 } else {
                     rf_set_tx_rx_off();
                     sleep_us(100);
+                    uprintln!("pairac a");
                     rf_set_ble_access_code(*get_pair_ac());
                     rf_set_ble_crc_adv();
                     for chn in *get_sys_chn_listen()
@@ -624,6 +625,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     {
         rf_set_tx_rx_off();
         sleep_us(100);
+        uprintln!("pairac d");
         rf_set_ble_access_code(*get_pair_ac());
         rf_set_ble_crc_adv();
         if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
@@ -1271,10 +1273,12 @@ pub fn rf_start_stx_mesh(packet: &rf_packet_att_cmd_t, sched_tick: u32)
 pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
 {
     if *get_slave_data_valid() != 0 {
+        uprintln!("About to send slv pkt");
         set_slave_data_valid(*get_slave_data_valid() - 1);
         if *get_slave_data_valid() == 0 {
             set_slave_sno_sending(0);
         } else if *get_slave_read_status_busy() == 0 || *get_slave_data_valid() as i32 > -1 {
+            uprintln!("Sending slv pkt");
             for chn in 0..4 {
                 rf_set_ble_channel((*get_sys_chn_listen())[chn]);
                 (*get_pkt_light_data())._type |= 0x7f;
@@ -1440,7 +1444,7 @@ pub fn rf_link_add_tx_packet(packet: *const rf_packet_att_cmd_t, size: usize) ->
 
     if widx < 4 {
         if widx == 0 {
-            write_reg_dma_tx_fifo(get_pkt_empty_addr() as u16);
+            write_reg_dma_tx_fifo((*get_pkt_empty()).as_ptr() as u16);
         }
 
         let idx = (*get_blt_tx_wptr() as usize & 7) * 0x28;
@@ -1599,8 +1603,9 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                 let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const app_cmd_value_t);
                 set_slave_tx_cmd_time(read_reg_system_tick());
                 if group_match || device_match {
+                    uprintln!("Need to check this");
                     light_slave_tx_command_callback(addr_of!((*get_pkt_user_cmd()).l2capLen) as *const ll_packet_l2cap_data_t);
-                    if device_match && *get_mesh_node_ignore_addr() == false {
+                    if device_match {
                         set_mesh_user_cmd_idx(0);
                     }
                 }

@@ -6,7 +6,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use fixed::types::I16F16;
 use heapless::Deque;
 
-use crate::{app};
+use crate::{app, blinken};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
@@ -429,6 +429,7 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
+            blinken();
             let val = params[0] as u16 | ((params[1] as u16) << 8);
             if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
                 if rf_link_add_dev_addr(val) {

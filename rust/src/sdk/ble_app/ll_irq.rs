@@ -23,9 +23,8 @@ fn slave_timing_update_handle()
     if *get_slave_timing_update() == 1 {
         if *get_slave_instant_next() == *get_slave_instant() {
             set_slave_timing_update(0);
-            ble_ll_channel_table_calc((*get_slave_chn_map()).as_mut_ptr(), false);
+            ble_ll_channel_table_calc((*get_slave_chn_map()).as_ptr(), false);
             (*get_pkt_init()).chm = *get_slave_chn_map();
-            uprintln!("Chn map set");
         }
     } else if *get_slave_timing_update() == 2 && *get_slave_instant_next() == *get_slave_instant() {
         set_slave_timing_update(0);
@@ -39,7 +38,6 @@ fn slave_timing_update_handle()
         }
         set_update_ble_par_success_flag(true);
         set_slave_next_connect_tick(*get_slave_timing_update2_ok_time());
-        uprintln!("Next connect tick set");
     }
 }
 
@@ -158,7 +156,6 @@ pub fn irq_st_listen()
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());
     if *get_adv_flag() != 0 {
         write_reg_system_tick_irq(*get_tick_per_us() * 7000 + read_reg_system_tick());
-        uprintln!("irq_st_adv a");
         set_p_st_handler(Some(irq_st_adv));
         return;
     }
@@ -168,7 +165,7 @@ pub fn irq_st_listen()
         set_adv_flag(if *get_st_listen_no() % *get_adv_interval2listen_interval() as u32 == 0 { 0 } else { 1 });
         set_online_st_flag(if *get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 == 0 { 0 } else { 1 });
         if *get_adv_flag() != 0 {
-            write_reg_system_tick_irq((((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) as u32 & 0x7fff) * *get_tick_per_us() + read_reg_system_tick_irq()));
+            write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * *get_tick_per_us() + read_reg_system_tick_irq()));
             set_p_st_handler(Some(irq_st_adv));
             return;
         }
@@ -273,7 +270,6 @@ pub fn irq_st_bridge()
     }
 
     if *get_slave_link_time_out() * *get_tick_per_us() < read_reg_system_tick() - *get_slave_connected_tick() {
-        uprintln!("Disconnected {}", prev);
         if *get_rf_slave_ota_busy() != false {
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::ERROR);
         }
@@ -316,7 +312,6 @@ pub fn irq_st_bridge()
 
     if *get_slave_read_status_busy() != 0 {
         if *get_slave_read_status_busy_timeout() * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
-            uprintln!("Stop");
             rf_link_slave_read_status_stop();
         }
     }
@@ -386,7 +381,6 @@ pub fn irq_st_bridge()
     mesh_node_flush_status();
     if ((read_reg_dma_tx_wptr() - read_reg_dma_tx_rptr()) & 7) < 3 {
         if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / *get_mesh_node_st_val_len() as usize) != 0 {
-            uprintln!("F");
             rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of_val(&*get_pkt_light_report()));
         }
     }
@@ -403,7 +397,6 @@ pub fn irq_st_bridge()
             break;
         }
 
-        uprintln!("D");
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
         slave_timing_update_handle();
         ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
@@ -448,7 +441,7 @@ pub fn irq_st_ble_rx()
     set_p_st_handler(Some(irq_st_bridge));
     set_slave_tick_brx(*get_tick_per_us() * 100 + read_reg_system_tick());
     set_slave_timing_adjust_enable(1);
-    rf_start_brx(get_pkt_empty_addr() as u32, *get_slave_tick_brx());
+    rf_start_brx((*get_pkt_empty()).as_ptr() as u32, *get_slave_tick_brx());
 
     sleep_us(2);
     slave_timing_update_handle();
@@ -491,7 +484,7 @@ unsafe fn irq_light_slave_rx()
     if dma_len == 1 {
         if T_RX_LAST.load(Ordering::Relaxed) == rx_time {
             rf_stop_trx();
-            rf_start_stx2rx(get_pkt_empty_addr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
+            rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
             return;
         }
     } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) & 0x51 == 0x40 {
@@ -604,7 +597,6 @@ unsafe fn irq_light_slave_rx()
             if *get_slave_timing_update2_flag() != 0 {
                 // todo: What the fuck?
                 if 0x40000001 > *get_slave_timing_update2_ok_time() - read_reg_system_tick() {
-                    uprintln!("stu2 ?");
                     entry.dma_len = 1;
                     return;
                 }
@@ -612,7 +604,7 @@ unsafe fn irq_light_slave_rx()
             }
             set_slave_window_size(0);
 
-            set_slave_next_connect_tick(*get_slave_link_interval() - *get_tick_per_us() * 1250 + rx_time);
+            set_slave_next_connect_tick(rx_time + *get_slave_link_interval() - *get_tick_per_us() * 1250);
         }
         entry.dma_len = 1;
         return;

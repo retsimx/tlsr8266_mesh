@@ -4,7 +4,7 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
-use crate::common::{dev_addr_with_mac_flag, get_mesh_node_ignore_addr, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
+use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
@@ -656,6 +656,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     set_app_cmd_time(read_reg_system_tick());
     (*get_pkt_light_data()).value[25] = *get_max_relay_num();
     if result2 != false || result1 != false {
+        let t = get_pkt_light_data_addr() as *const ll_packet_l2cap_data_t;
         rf_link_data_callback(get_pkt_light_data_addr() as *const ll_packet_l2cap_data_t);
     }
     (*get_slave_sno())[0..3].copy_from_slice(&sno[0..3]);
@@ -693,8 +694,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     (*get_pkt_light_status()).value[21] = 0;
     (*get_pkt_light_status()).value[25] = *get_max_relay_num();
     (*get_pkt_light_data()).value[23] = (*get_slave_link_interval() / (*get_tick_per_us() * 1000)) as u8;
-    let skip_reset = false;
-    if result2 == false || (tmp != 0 && op == 0x20 && dev_addr_with_mac_flag(params.as_ptr()) != false) || *get_mesh_node_ignore_addr() != false {
+    if result2 == false || (tmp != 0 && op == 0x20 && dev_addr_with_mac_flag(params.as_ptr()) != false) {
         if op == 0x1d || op == 0x1a || op_valid != false || op == 0x2a || op == 0x28 || op == 7 {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
             if op == 0x1d {

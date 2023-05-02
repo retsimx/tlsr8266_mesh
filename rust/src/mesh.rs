@@ -9,7 +9,7 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use core::ptr::addr_of;
-use crate::{app, BIT};
+use crate::{app, BIT, uprintln};
 use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::mesh::wrappers::*;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
@@ -317,6 +317,7 @@ impl MeshManager {
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
         pair_save_key();
+        uprintln!("pairac b");
         rf_set_ble_access_code(*get_pair_ac()); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
@@ -340,6 +341,7 @@ impl MeshManager {
         self.default_mesh_time = delay_s as u32 * 1000;
 
         /* Only change AC and LTK */
+        uprintln!("pairac c");
         set_pair_ac(access_code(
             get_pair_config_mesh_name(),
             get_pair_config_mesh_pwd(),

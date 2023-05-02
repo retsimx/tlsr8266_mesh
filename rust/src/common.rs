@@ -14,7 +14,6 @@ use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_
 pub_mut!(conn_update_successed, u8, 0);
 pub_mut!(conn_update_cnt, u8, 0);
 pub_mut!(set_uuid_flag, bool, false);
-pub_mut!(mesh_node_ignore_addr, bool, false);
 
 const UPDATE_CONN_PARA_CNT: u8 = 4;
 const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [
@@ -305,9 +304,6 @@ pub fn pair_update_key()
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(*get_p_adv_pri_data() as *const u8, *get_adv_private_data_len() as usize) });
     if *get_adv_uuid_flag() != 0 {
         rf_link_slave_set_adv_uuid_data(&(*get_adv_uuid())[0..4]);
-    }
-    if *get_pair_nn() != get_pair_config_mesh_name()[0..16] || *get_pair_pass() != get_pair_config_mesh_pwd()[0..16]{
-        set_mesh_node_ignore_addr(false);
     }
 }
 

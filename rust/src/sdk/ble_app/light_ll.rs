@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slic
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use crate::{app, blinken, pub_mut, uprintln, uprintln_fast};
+use crate::{app, blinken, pub_mut, uprintln};
 use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_sys_chn_adv, get_sys_chn_listen, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
 use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -973,17 +973,6 @@ fn set_mesh_info_time_handle()
     }
 }
 
-fn tx_packet_bridge_poll()
-{
-    if *get_tx_packet_bridge_random_en() {
-        if *get_tx_packet_bridge_tick() != 0 && *get_slave_link_state() == 5 && *get_tick_per_us() * *get_tx_packet_bridge_delay_us() < read_reg_system_tick() - *get_tx_packet_bridge_tick() {
-            set_tx_packet_bridge_delay_us(0);
-            set_tx_packet_bridge_tick(0);
-            tx_packet_bridge();
-        }
-    }
-}
-
 pub fn mesh_node_flush_status()
 {
     static TICK_NODE_REPORT: AtomicU32 = AtomicU32::new(0);
@@ -1417,15 +1406,10 @@ pub fn tx_packet_bridge()
         if *get_slave_data_valid() == 0 && !*get_sw_flag() {
             mesh_send_user_command();
         }
-        if *get_tx_packet_bridge_random_en() {
-            uprintln!("back_to_rxmode_bridge();");
-            back_to_rxmode_bridge();
-        }
     });
 }
 
 pub fn rf_link_slave_proc() {
-    tx_packet_bridge_poll();
     set_mesh_info_time_handle();
     app().mesh_manager.mesh_pair_proc();
     update_connect_para();
@@ -1447,7 +1431,7 @@ pub fn rf_link_add_tx_packet(packet: *const rf_packet_att_cmd_t, size: usize) ->
             write_reg_dma_tx_fifo((*get_pkt_empty()).as_ptr() as u16);
         }
 
-        let idx = (*get_blt_tx_wptr() as usize & 7) * 0x28;
+        let idx = (*get_blt_tx_wptr() as usize & 7) * 48;
         let mut dest = &mut (*get_blt_tx_fifo())[idx..idx + size];
 
         dest.copy_from_slice(

@@ -800,7 +800,6 @@ pub_mut!(update_timeout_user, u16, 0);
 pub_mut!(interval_th, u8, 0x10);
 pub_mut!(update_interval_flag, u16, 0);
 pub_mut!(update_interval_time, u32, 0);
-pub_mut!(tx_packet_bridge_random_en, bool, false);
 pub_mut!(tx_packet_bridge_delay_us, u32, 0);
 pub_mut!(tx_packet_bridge_tick, u32, 0);
 pub_mut!(online_status_comp, u8, 3);

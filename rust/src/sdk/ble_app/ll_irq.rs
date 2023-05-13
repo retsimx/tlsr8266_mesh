@@ -257,10 +257,9 @@ pub fn irq_st_bridge()
 {
     static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
 
-    let prev = *get_slave_link_state();
     set_slave_link_state(5);
     set_st_brige_no(*get_st_brige_no() + 1);
-    write_reg8(0x80050f, 0);
+    write_reg8(0x50f, 0);
     rf_stop_trx();
 
     if *get_tick_per_us() == 0x10 {
@@ -310,19 +309,19 @@ pub fn irq_st_bridge()
         return;
     }
 
-    if *get_slave_read_status_busy() != 0 {
-        if *get_slave_read_status_busy_timeout() * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
-            rf_link_slave_read_status_stop();
-        }
+    if *get_slave_read_status_busy() != 0  && *get_slave_read_status_busy_timeout() * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
+        rf_link_slave_read_status_stop();
     }
-    if *get_rf_slave_ota_busy() != false {
+
+    if *get_rf_slave_ota_busy() {
         app().ota_manager.rf_link_slave_ota_finish_handle();
 
         if *get_tick_per_us() * 1000000 < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed) {
             RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
-            if *get_rf_slave_ota_timeout_s() != 0 {
-                set_rf_slave_ota_timeout_s(*get_rf_slave_ota_timeout_s() - 1);
-                if *get_rf_slave_ota_timeout_s() == 0
+            let sot = *get_rf_slave_ota_timeout_s();
+            if sot != 0 {
+                set_rf_slave_ota_timeout_s(sot - 1);
+                if sot - 1 == 0
                 {
                     app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::ERROR);
                 }
@@ -334,32 +333,33 @@ pub fn irq_st_bridge()
             return;
         }
     }
+
     set_t_bridge_cmd(*get_tick_per_us() * 200 + read_reg_system_tick());
+
     if *get_tick_per_us() * 10000 < *get_slave_link_interval() && (*get_slave_interval_old() == 0 || *get_slave_instant_next() != *get_slave_instant()) {
-        if *get_tx_packet_bridge_random_en() == false || *get_slave_link_interval() < *get_tick_per_us() * 0x4e20 {
-            tx_packet_bridge();
-        } else {
-            set_tx_packet_bridge_delay_us(((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0xf) * 800);
-            set_tx_packet_bridge_tick(read_reg_system_tick() | 1);
-        }
+        tx_packet_bridge();
     }
+
     if *get_slave_read_status_busy() != 0 {
         rf_link_slave_read_status_update();
     }
-    if *get_update_interval_flag() != 0 {
-        set_update_interval_flag(*get_update_interval_flag() - 1);
-        if *get_update_interval_flag() == 0 && *get_update_interval_time() != 0 {
-            let mut pkt = [
-                0x1120005,
-                0xc1002,
+
+    let intflag = *get_update_interval_flag();
+    if intflag != 0 {
+        if intflag - 1 == 0 && *get_update_interval_time() != 0 {
+            let mut pkt: [u32; 6] = [
                 0x12,
-                0x27,
+                0xc1002,
+                0x1120005,
                 0x270008,
-                0x200
+                0x27,
+                0xc8
             ];
 
             if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
+                uprintln!("maybe fixme here");
                 pkt[5] = *get_update_timeout_user() as u32;
+                // todo: These might need to be flipped?
                 pkt[3] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
                 pkt[4] = *get_update_interval_user_max() as u32 | 0x270000;
             }
@@ -372,36 +372,39 @@ pub fn irq_st_bridge()
             }
         }
     }
-    if ((read_reg_dma_tx_wptr() - read_reg_dma_tx_rptr()) & 7) < 3 {
+    if is_add_packet_buf_ready() {
         let pair_proc_result = pair_proc();
         if pair_proc_result != null() {
             rf_link_add_tx_packet(pair_proc_result as *const rf_packet_att_cmd_t, size_of::<rf_packet_att_readRsp_t>());
         }
     }
     mesh_node_flush_status();
-    if ((read_reg_dma_tx_wptr() - read_reg_dma_tx_rptr()) & 7) < 3 {
+    if is_add_packet_buf_ready() {
         if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / *get_mesh_node_st_val_len() as usize) != 0 {
-            rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of_val(&*get_pkt_light_report()));
+            rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<rf_packet_att_cmd_t>());
         }
     }
+
     back_to_rxmode_bridge();
-    let mut current_connect_tick = (*get_slave_next_connect_tick() - *get_tick_per_us() * 500) - read_reg_system_tick();
+
+    let mut uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
     loop {
         if *get_slave_interval_old() != 0 && *get_slave_instant_next() == *get_slave_instant() {
-            uprintln!("Possible fixme");
-            current_connect_tick &= if 0x3fffffff < current_connect_tick { *get_slave_instant() as u32 } else { 0 };
+            uprintln!("maybe fixme 2");
+            uVar5 &= if 0x3fffffff < uVar5 { *get_slave_instant() as u32 } else { 0 };
             set_slave_interval_old(0);
         }
 
-        if current_connect_tick <= *get_slave_link_interval() {
+        if uVar5 <= *get_slave_link_interval() {
             break;
         }
 
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
         slave_timing_update_handle();
         ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
-        current_connect_tick = (*get_slave_next_connect_tick() - *get_tick_per_us() * 500) - read_reg_system_tick();
+        uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
     }
+
     write_reg_system_tick_irq(*get_slave_next_connect_tick());
     set_p_st_handler(Some(irq_st_ble_rx));
 }

@@ -12,4 +12,4 @@ pub_mut!(light_rx_buff, [light_rx_buff_t; 4], [light_rx_buff_t{
     mac: [0; 4],
     unk4: [0; 40]
 }; 4]);
-pub_mut!(blt_tx_fifo, [u8; 320], [0; 320]);
+pub_mut!(blt_tx_fifo, [u8; 48*8], [0; 48*8]);

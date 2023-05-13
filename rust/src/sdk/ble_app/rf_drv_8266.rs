@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::cmp::min;
+use core::mem::transmute;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
@@ -564,16 +565,17 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
         return false;
     }
 
-    let sno = &data.value;
-    if sno[0..3] == (*get_slave_sno())[0..3] {
+    let sno = &data.value[0..3];
+    if sno == *get_slave_sno() {
         return true;
     }
-    let mut op_cmd: [u8; 8] = [0; 8];
+
+    let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
     rf_link_get_op_para(
-        unsafe { &(*(addr_of!(*data) as *const ll_packet_l2cap_data_t)) },
+        unsafe { addr_of!(data.l2capLen) as *const ll_packet_l2cap_data_t },
         &mut op_cmd,
         &mut op_cmd_len,
         &mut params,
@@ -587,6 +589,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     let mut tmp;
     if op_cmd_len == 3 {
         op = op_cmd[0] & 0x3f;
+        uprintln!("check here 2");
         // todo: Might need to be ==
         op_valid = op - 26 != 0;
         if op_valid != false {
@@ -636,11 +639,11 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
     unsafe {
         slice::from_raw_parts_mut(
-            get_pkt_light_data_addr() as *mut u8,
+            addr_of!((*get_pkt_light_data()).l2capLen) as *mut u8,
             params_len as usize + 0x11,
         ).copy_from_slice(
             slice::from_raw_parts(
-                addr_of!(*data) as *const u8,
+                addr_of!(data.l2capLen) as *const u8,
                 params_len as usize + 0x11,
             )
         )
@@ -655,20 +658,14 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     unsafe { *(addr_of!((*get_pkt_light_data()).value[3]) as *mut u16) = *get_device_address() };
     set_app_cmd_time(read_reg_system_tick());
     (*get_pkt_light_data()).value[25] = *get_max_relay_num();
+
     if result2 != false || result1 != false {
-        let t = get_pkt_light_data_addr() as *const ll_packet_l2cap_data_t;
-        rf_link_data_callback(get_pkt_light_data_addr() as *const ll_packet_l2cap_data_t);
+        rf_link_data_callback(addr_of!((*get_pkt_light_data()).l2capLen) as *const ll_packet_l2cap_data_t);
     }
-    (*get_slave_sno())[0..3].copy_from_slice(&sno[0..3]);
+    get_slave_sno().copy_from_slice(sno);
 
     set_slave_link_cmd(op);
-    unsafe {
-        slice::from_raw_parts_mut(
-            get_slave_sno_sending_addr() as *mut u8,
-            3).copy_from_slice(
-            &sno[0..3]
-        )
-    }
+    get_slave_sno_sending().copy_from_slice(sno);
 
     if rf_link_is_notify_req(op) == false {
         if *get_slave_read_status_busy() != 0 {
@@ -678,6 +675,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
             if op == 6 {
                 set_slave_data_valid(0x21);
                 if (data.value[0xb] as u16 * 0x100 + data.value[10] as u16) < 0xff00 {
+                    uprintln!("check here 4");
                     // todo: 9 may need to be 5 instead
                     set_slave_data_valid(9);
                 }
@@ -780,24 +778,12 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     }
     (*get_pkt_light_status()).value[22] = (*get_pkt_light_data()).value[22];
     rf_link_slave_read_status_start();
-    unsafe {
-        slice::from_raw_parts_mut(
-            get_slave_stat_sno_addr() as *mut u8,
-            3).copy_from_slice(
-            &sno[0..3]
-        )
-    }
+
+    get_slave_stat_sno().copy_from_slice(sno);
 
     if result2 != false || result1 != false {
         copy_par_User_All(params_len as u32, (*get_pkt_light_data()).value[10..].as_mut_ptr());
-        unsafe {
-            (*get_pkt_light_status()).value[0..3].copy_from_slice(
-                slice::from_raw_parts(
-                    get_slave_sno_addr() as *const u8,
-                    3,
-                )
-            )
-        }
+        (*get_pkt_light_status()).value[0..3].copy_from_slice(&*get_slave_sno());
 
         unsafe { *(addr_of!((*get_pkt_light_status()).value[3]) as *mut u16) = *get_device_address() };
 
@@ -812,7 +798,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
             slice::from_raw_parts_mut(
                 addr_of!(tmp_pkt) as *mut u8,
                 0x1e,
-            ).copy_from_slice(sno);
+            ).copy_from_slice(&data.value);
         }
 
         unsafe {

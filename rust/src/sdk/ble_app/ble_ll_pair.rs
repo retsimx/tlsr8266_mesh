@@ -238,6 +238,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
         if *get_security_enable() == false && *get_pair_login_ok() == false {
             pair_par_init();
             set_pair_enc_enable(false);
+            uprintln!("Pair proc 1");
             return null_mut();
         }
         get_pkt_read_rsp().l2capLen = 0x12;
@@ -255,6 +256,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
         } else {
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), addr_of_mut!(get_pkt_read_rsp().value[1]));
         }
+        uprintln!("Pair proc 0xf");
         set_ble_pair_st(0xf);
     } else if *get_ble_pair_st() == 0xd {
         if *get_security_enable() == false {

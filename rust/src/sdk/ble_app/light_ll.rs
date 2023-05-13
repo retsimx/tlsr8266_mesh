@@ -94,8 +94,13 @@ fn mesh_node_update_status(pkt: &mut rf_packet_att_value_t, len: u32) -> u32
                         let res = (*get_mesh_node_st()).iter().position(|st| {
                             st.val.dev_adr == src.sno[0]
                         });
-                        uVar8 = res.unwrap_or(*get_mesh_node_max_num() as usize);
-                        puVar9 = addr_of_mut!((*get_mesh_node_st())[uVar8]);
+                        if res.is_some() {
+                            uVar8 = res.unwrap();
+                            puVar9 = addr_of_mut!((*get_mesh_node_st())[uVar8]);
+                        } else {
+                            uVar8 = res.unwrap_or(*get_mesh_node_max_num() as usize);
+                            puVar9 = addr_of_mut!((*get_mesh_node_st())[uVar8 - 1]);
+                        }
                     }
                 }
                 if *get_mesh_node_max_num() as usize == uVar8 {
@@ -139,7 +144,7 @@ fn mesh_node_update_status(pkt: &mut rf_packet_att_value_t, len: u32) -> u32
                     if *get_send_self_online_status_cycle() == 0 {
                         uVar6 = 1500000;
                     } else {
-                        uVar6 = (*get_online_status_timeout() * 1000) >> 1;
+                        uVar6 = (ONLINE_STATUS_TIMEOUT * 1000) >> 1;
                     }
 
                     uStack_44 = uVar8 as u32;
@@ -355,7 +360,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     }
 
     if *get_slave_link_connected() {
-        if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 1000) as i32 {
+        if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 1000) {
             set_enc_disable(false);
             return false;
         }
@@ -400,7 +405,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         return false;
     }
 
-    let mut op_cmd: [u8; 8] = [0; 8];
+    let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
@@ -434,6 +439,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             if uVar20 != 1 {
                 iVar12 = false;
                 if 1 < (*get_mesh_ota_master_st())[20] {
+                    uprintln!("check here 1");
                     // todo: Might need to be !=
                     iVar12 = uVar20 - 2 == 0;
                 }
@@ -625,7 +631,6 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     {
         rf_set_tx_rx_off();
         sleep_us(100);
-        uprintln!("pairac d");
         rf_set_ble_access_code(*get_pair_ac());
         rf_set_ble_crc_adv();
         if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
@@ -642,7 +647,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             let tmp = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 3;
             for uVar11 in tmp..tmp + 4 {
                 if *get_slave_link_connected() != false {
-                    if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
+                    if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                         rf_stop_trx();
                         set_enc_disable(false);
                         return false;
@@ -769,7 +774,7 @@ pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
             }
 
             set_light_conn_sn_master(0x80);
-            set_slave_link_sno(0xfffffffe);
+            set_slave_link_sno([0xfe, 0xff, 0xff]);
             set_slave_connected_tick(read_reg_system_tick());
             if *get_security_enable() != false {
                 set_slave_first_connected_tick(*get_slave_connected_tick());
@@ -977,14 +982,13 @@ pub fn mesh_node_flush_status()
 {
     static TICK_NODE_REPORT: AtomicU32 = AtomicU32::new(0);
 
-    // todo: wtf?
-    if read_reg_system_tick() - TICK_NODE_REPORT.load(Ordering::Relaxed) + *get_tick_per_us() * (-500000 as i32 as u32) < 0x40000001 {
+    if ((read_reg_system_tick() - TICK_NODE_REPORT.load(Ordering::Relaxed)) as i32) - ((*get_tick_per_us() * 500000) as i32) > 0 {
         TICK_NODE_REPORT.store(read_reg_system_tick(), Ordering::Relaxed);
         let tick = read_reg_system_tick();
         if *get_mesh_node_max() > 1 {
             for count in 1..*get_mesh_node_max() as usize {
                 let p_node_st = &mut (*get_mesh_node_st())[count];
-                if (*p_node_st).tick != 0 && *get_tick_per_us() * *get_online_status_timeout() * 1000 >> 0x10 < (tick >> 0x10 | 1) - (*p_node_st).tick as u32 {
+                if (*p_node_st).tick != 0 && (*get_tick_per_us() * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - (*p_node_st).tick as u32 {
                     (*p_node_st).tick = 0;
 
                     (*get_mesh_node_mask())[count >> 5] = 1 << (count & 0x1f) | (*get_mesh_node_mask())[count >> 5];
@@ -997,7 +1001,6 @@ pub fn mesh_node_flush_status()
             }
         }
     }
-    return;
 }
 
 fn mesh_node_keep_alive()
@@ -1097,21 +1100,17 @@ pub fn mesh_send_command(packet: *const rf_packet_att_cmd_t, channel_index: u32,
     rf_set_ble_crc_adv();
 
     if retransmit_count != 0xffffffff {
-        for transmit_count in 0..retransmit_count {
+        for transmit_count in 0..retransmit_count+1 {
             if *get_mesh_chn_amount() != 0 {
                 let mut chn_idx = channel_index;
                 let mut chn_cnt = 0;
-                if (channel_index == 0xff) {
+                if channel_index == 0xff {
                     chn_idx = 0;
                 }
                 loop {
                     rf_set_ble_channel((*get_sys_chn_listen())[chn_idx as usize & 3]);
                     rf_start_srx2tx(packet as u32, read_reg_system_tick() + *get_tick_per_us() * 0x1e);
-                    if *get_switch_rf_tx_once_time() == 0 {
-                        sleep_us(600);
-                    } else {
-                        blt_stall_mcu(*get_switch_rf_tx_once_time() * *get_tick_per_us());
-                    }
+                    sleep_us(600);
                     if channel_index != 0xff {
                         if transmit_count < retransmit_count {
                             sleep_us(200);
@@ -1137,7 +1136,7 @@ pub fn mesh_send_online_status()
     if *get_mesh_send_online_status_flag() {
         mesh_node_flush_status();
 
-        mesh_node_adv_status(&mut (*get_pkt_light_adv_status()).data[1..1 + 26]);
+        mesh_node_adv_status(&mut (*get_pkt_light_adv_status()).data[1..]);
 
         ADV_ST_SN.store(ADV_ST_SN.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         unsafe {
@@ -1171,7 +1170,7 @@ pub fn mesh_send_online_status()
         }
 
         if *get_security_enable() {
-            rStack_40._type = rStack_40._type | 0x7f;
+            rStack_40._type |= 0x7f;
             pair_enc_packet_mesh(addr_of_mut!(rStack_40) as *mut mesh_pkt_t);
         }
 
@@ -1265,7 +1264,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
         uprintln!("About to send slv pkt");
         set_slave_data_valid(*get_slave_data_valid() - 1);
         if *get_slave_data_valid() == 0 {
-            set_slave_sno_sending(0);
+            set_slave_sno_sending([0, 0, 0]);
         } else if *get_slave_read_status_busy() == 0 || *get_slave_data_valid() as i32 > -1 {
             uprintln!("Sending slv pkt");
             for chn in 0..4 {
@@ -1328,9 +1327,6 @@ pub fn mesh_send_user_command() -> u8
                 }
                 rf_set_ble_channel((*get_sys_chn_listen())[uVar9 & 3]);
                 rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, *get_tick_per_us() * 0x1e + read_reg_system_tick());
-                if *get_switch_rf_tx_once_time() != 0 {
-                    break;
-                }
 
                 uVar9 = uVar9 + 1;
                 iVar8 = ((*get_lpn_retransmit_cnt()) + 1) * 4;
@@ -1344,7 +1340,6 @@ pub fn mesh_send_user_command() -> u8
                 break;
             }
 
-            blt_stall_mcu(*get_tick_per_us() * *get_switch_rf_tx_once_time());
             uVar9 = uVar9 + 1;
             iVar8 = ((*get_lpn_retransmit_cnt()) + 1) * 4;
 
@@ -1650,11 +1645,11 @@ pub fn rf_link_delete_pair()
     }
 }
 
-pub fn rf_link_get_op_para(packet: &ll_packet_l2cap_data_t, p_op: &mut [u8], p_op_len: &mut u8, p_para: &mut [u8], p_para_len: &mut u8, mesh_flag: bool) -> bool
+pub fn rf_link_get_op_para(packet: *const ll_packet_l2cap_data_t, p_op: &mut [u8], p_op_len: &mut u8, p_para: &mut [u8], p_para_len: &mut u8, mesh_flag: bool) -> bool
 {
     unsafe {
-        if ((packet.value[7] as u32 * 0x1000000) as i32) < 0 {
-            if packet.value[7] >> 6 == 3 {
+        if (((*packet).value[7] as u32 * 0x1000000) as i32) < 0 {
+            if (*packet).value[7] >> 6 == 3 {
                 *p_op_len = 3;
             } else {
                 *p_op_len = 2;
@@ -1662,8 +1657,8 @@ pub fn rf_link_get_op_para(packet: &ll_packet_l2cap_data_t, p_op: &mut [u8], p_o
         } else {
             *p_op_len = 1;
         }
-        p_op[0..*p_op_len as usize].copy_from_slice(&packet.value[7..7 + *p_op_len as usize]);
-        let mut pkt_len = packet.l2capLen - 10;
+        p_op[0..*p_op_len as usize].copy_from_slice(&(*packet).value[7..7 + *p_op_len as usize]);
+        let mut pkt_len = (*packet).l2capLen - 10;
         let pkt_len_delta;
         let max_param_len;
         if p_op[0] & 0x3f == 6 {
@@ -1683,7 +1678,7 @@ pub fn rf_link_get_op_para(packet: &ll_packet_l2cap_data_t, p_op: &mut [u8], p_o
         *p_para_len = pkt_len as u8;
 
         if pkt_len <= max_param_len {
-            p_para[0..pkt_len as usize].copy_from_slice(&packet.value[7 + *p_op_len as usize..7 + *p_op_len as usize + pkt_len as usize]);
+            p_para[0..pkt_len as usize].copy_from_slice(&(*packet).value[7 + *p_op_len as usize..7 + *p_op_len as usize + pkt_len as usize]);
         } else {
             *p_para_len = 0;
         }

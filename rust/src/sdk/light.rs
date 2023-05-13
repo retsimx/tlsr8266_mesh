@@ -18,8 +18,6 @@ pub_mut!(p_adv_pri_data, *const ll_adv_private_t, null());
 pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t, null_mut());
 pub_mut!(adv_private_data_len, u8, 0);
 
-pub_mut!(online_status_timeout, u32, 0xBB8);
-
 pub_mut!(security_enable, bool, false);
 pub_mut!(not_need_login, bool, false);
 pub_mut!(pair_login_ok, bool, false);
@@ -465,6 +463,7 @@ pub struct rf_pkt_l2cap_sig_connParaUpRsp_t {
 }
 
 #[repr(C, align(4))]
+#[derive(Clone, Copy)]
 pub struct rf_packet_att_write_t {
     pub dma_len: u32,
     pub rtype: u8,
@@ -808,11 +807,9 @@ pub_mut!(sw_flag, bool, false);
 pub_mut!(mesh_send_online_status_flag, bool, true);
 pub_mut!(send_self_online_status_cycle, u8, 0);
 pub_mut!(mesh_node_cur, u8, 1);
-pub_mut!(switch_rf_tx_once_time, u32, 0);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
-// todo: Maybe should be [u8; 3]?
-pub_mut!(slave_sno_sending, u32, 0);
+pub_mut!(slave_sno_sending, [u8; 3], [0; 3]);
 pub_mut!(app_cmd_time, u32, 0);
 pub_mut!(mesh_user_cmd_idx, u8, 0);
 pub_mut!(slave_tx_cmd_time, u32, 0);
@@ -832,8 +829,7 @@ pub_mut!(slave_tick_brx, u32, 0);
 pub_mut!(slave_pairing_master_tick, u32, 0);
 pub_mut!(slave_window_offset, u32, 0);
 pub_mut!(slave_conn_delay, u32, 0);
-// todo: Maybe should be [u8; 3]?
-pub_mut!(slave_link_sno, u32, 0);
+pub_mut!(slave_link_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_pairing_state, u32, 0);
 pub_mut!(slave_instant, u16, 0);
 pub_mut!(slave_status_tick, u8, 0);
@@ -845,7 +841,7 @@ pub_mut!(org_ttl, u8, 0);
 pub_mut!(pkt_need_relay, bool, true);
 pub_mut!(slave_read_status_response, bool, false);
 pub_mut!(mesh_ota_slave_st, [u8; 25], [0; 25]);
-pub_mut!(slave_sno, [u8; 4], [0; 4]);
+pub_mut!(slave_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_status_record_idx, u16, 0);
 pub_mut!(notify_req_mask_idx, u8, 0);
 pub_mut!(adv_flag, u8, 1);

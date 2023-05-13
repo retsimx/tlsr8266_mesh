@@ -357,7 +357,6 @@ pub fn irq_st_bridge()
             ];
 
             if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
-                uprintln!("maybe fixme here");
                 pkt[5] = *get_update_timeout_user() as u32;
                 // todo: These might need to be flipped?
                 pkt[3] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;

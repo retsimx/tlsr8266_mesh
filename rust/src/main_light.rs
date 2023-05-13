@@ -6,7 +6,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use fixed::types::I16F16;
 use heapless::Deque;
 
-use crate::{app, blinken};
+use crate::{app, blinken, uprintln, uprintln_fast};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
@@ -143,8 +143,6 @@ fn light_init_default() {
     usb_dp_pullup_en(true);
 
     light_hw_timer1_config();
-
-    set_online_status_timeout(ONLINE_STATUS_TIMEOUT);
 
     app().mesh_manager.mesh_pair_init();
 }
@@ -383,7 +381,7 @@ pub fn rf_link_response_callback(
 */
 pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t
-    let mut op_cmd: [u8; 8] = [0; 8];
+    let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
@@ -429,8 +427,8 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
-            blinken();
             let val = params[0] as u16 | ((params[1] as u16) << 8);
+            uprintln!("Setting dev addr {}", val);
             if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
                 if rf_link_add_dev_addr(val) {
                     app().mesh_manager.mesh_pair_proc_get_mac_flag();

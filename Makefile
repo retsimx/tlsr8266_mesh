@@ -13,7 +13,7 @@ LIB = ./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a
 
 BUILD_DIR = _build
 
-STARTUP_SRC = ./sdk/proj/mcu_spec/cstartup_8266.S
+STARTUP_SRC = ./sdk/cstartup_8266.S
 STARTUP_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(STARTUP_SRC:%.S=%.o)))
 
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)

@@ -5,3 +5,4 @@ venv
 rust/target/
 local.py
 __pycache__
+.env

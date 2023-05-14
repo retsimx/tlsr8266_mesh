@@ -528,7 +528,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                 if *get_slave_link_connected() == false {
                     write_reg_irq_src(0x100000);
                     let iVar12 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
-                    let mut puVar9 = 16000 + iVar12 + iVar7;
+                    let mut relay_delay = 16000 + iVar12 + iVar7;
                     let bVar1 = packet.internal_par1[2];
                     if 0x1d < bVar1 {
                         let mut uVar11 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[3] as u32;
@@ -537,19 +537,20 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                         }
                         let uVar11 = bVar1 as u32 - uVar11;
                         if uVar11 < 0x32 {
-                            puVar9 = uVar11 * 1000;
+                            relay_delay = uVar11 * 1000;
                             if result2 == false {
                                 if result1 != false && *get_max_relay_num() - packet.internal_par1[4] < 3 {
-                                    puVar9 = puVar9 + iVar12 + iVar7;
+                                    relay_delay = relay_delay + iVar12 + iVar7;
                                 }
                             } else {
-                                puVar9 = puVar9 + 2000;
+                                relay_delay = relay_delay + 2000;
                             }
                         }
                     }
-                    write_reg_system_tick_irq(puVar9 * *get_tick_per_us() + read_reg_system_tick());
+                    write_reg_system_tick_irq(relay_delay * *get_tick_per_us() + read_reg_system_tick());
                     set_p_st_handler(Some(irq_st_response));
                 } else {
+                    uprintln!("rf_link_response_callback 2");
                     rf_set_tx_rx_off();
                     sleep_us(100);
                     uprintln!("pairac a");
@@ -565,7 +566,9 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                             }
                         }
                         rf_set_ble_channel(chn);
-                        (*get_pkt_light_status())._type |= 0x7f;
+                        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+                        // todo: as a normal encrypted packet (bit 7 set)
+                        (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
                         rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
                         sleep_us(600);
                     }
@@ -601,7 +604,9 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     }
                 }
                 rf_set_ble_channel((*get_sys_chn_listen())[uVar11 as usize & 3]);
-                packet._type |= 0x7f;
+                // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+                // todo: as a normal encrypted packet (bit 7 set)
+                packet._type |= BIT!(7); // 0x7f;
                 if op != 0x1b {
                     rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc() as u32, addr_of_mut!(packet.par[9]));
                 }
@@ -1216,7 +1221,9 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
             uprintln!("Sending slv pkt");
             for chn in 0..4 {
                 rf_set_ble_channel((*get_sys_chn_listen())[chn]);
-                (*get_pkt_light_data())._type |= 0x7f;
+                // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+                // todo: as a normal encrypted packet (bit 7 set)
+                (*get_pkt_light_data())._type |= BIT!(7); // 0x7f;
                 rf_link_proc_ttc(*get_app_cmd_time(), 0, addr_of_mut!((*get_pkt_light_data()).value[0x14]));
                 if rf_link_is_notify_req((*get_pkt_light_data()).value[7] & 0x3f) {
                     let mut uVar3 = (((read_reg_system_tick() - bridge_cmd_time) / *get_tick_per_us()) + 500) >> 10;
@@ -1237,7 +1244,9 @@ fn mesh_user_command_pkt_enc2buf()
     if !*get_security_enable() || (*get_sw_no_pair() && (*get_pkt_user_cmd()).dma_len == 0x26) {
         get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
     } else {
-        (*get_pkt_user_cmd())._type |= 0x7f;
+        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+        // todo: as a normal encrypted packet (bit 7 set)
+        (*get_pkt_user_cmd())._type |= BIT!(7); // 0x7f;
         get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
         pair_enc_packet_mesh(get_pkt_mesh_user_cmd_buf_addr());
     }

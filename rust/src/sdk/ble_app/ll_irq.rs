@@ -9,7 +9,7 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::{app, uprintln};
+use crate::{app, BIT, uprintln};
 use crate::embassy::time_driver::check_clock_overflow;
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
@@ -134,8 +134,10 @@ pub fn irq_st_response()
     let tmp = (unsafe { **get_slave_p_mac() as u32 } ^ read_reg_system_tick()) & 3;
     for uVar4 in tmp..tmp + 4 {
         rf_set_ble_channel((*get_sys_chn_listen())[uVar4 as usize & 3]);
-        (*get_pkt_light_status())._type |= 0x7f;
-        rf_start_stx_mesh(&(*get_pkt_light_status()), *get_tick_per_us() * 0x1e + read_reg_system_tick());
+        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+        // todo: as a normal encrypted packet (bit 7 set)
+        (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
+        rf_start_stx_mesh(&get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
         sleep_us(700);
     }
     write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());

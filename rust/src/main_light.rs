@@ -6,7 +6,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use fixed::types::I16F16;
 use heapless::Deque;
 
-use crate::{app};
+use crate::{app, uprintln};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;

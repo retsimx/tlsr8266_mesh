@@ -3,7 +3,7 @@
 set -e
 
 AS=./toolchain/tc32/bin/tc32-elf-as
-LLC=../../llvm/build/bin/llc
+LLC=../../../llvm/build/bin/llc
 
 cd rust
 

@@ -11,7 +11,7 @@ use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{copy_par_User_All, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
@@ -782,7 +782,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     get_slave_stat_sno().copy_from_slice(sno);
 
     if result2 != false || result1 != false {
-        copy_par_User_All(params_len as u32, (*get_pkt_light_data()).value[10..].as_mut_ptr());
+        copy_par_user_all(params_len as u32, (*get_pkt_light_data()).value[10..].as_mut_ptr());
         (*get_pkt_light_status()).value[0..3].copy_from_slice(&*get_slave_sno());
 
         unsafe { *(addr_of!((*get_pkt_light_status()).value[3]) as *mut u16) = *get_device_address() };

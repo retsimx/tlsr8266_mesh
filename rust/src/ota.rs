@@ -13,7 +13,7 @@ use core::mem::{size_of_val, MaybeUninit};
 use core::ptr::addr_of;
 use crate::app;
 use crate::main_light::get_buff_response;
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, is_master_sending_ota_st, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
 use crate::sdk::light::*;
 use crate::sdk::pm::light_sw_reboot;
 
@@ -138,7 +138,7 @@ impl OtaManager {
         }
 
         if !*get_rf_slave_ota_busy() {
-            if !*get_pair_login_ok() || is_master_sending_ota_st()
+            if !*get_pair_login_ok()
             {
                 return;
             }

@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slic
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use crate::{app, blinken, pub_mut, uprintln};
+use crate::{app, BIT, blinken, pub_mut, uprintln, uprintln_fast};
 use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_sys_chn_adv, get_sys_chn_listen, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
 use crate::config::get_flash_adr_light_new_fw;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -71,116 +71,74 @@ pub_mut!(pkt_light_report, rf_packet_att_cmd_t, rf_packet_att_cmd_t {
     value: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 });
 
-fn mesh_node_update_status(pkt: &mut rf_packet_att_value_t, len: u32) -> u32
+fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
 {
-    let uVar1 = read_reg_system_tick();
-    if 0 < len * *get_mesh_node_st_val_len() as u32 && pkt.sno[0] != 0 {
-        let mut iVar10 = 0;
-        let mut uStack_44 = 0xfffffffe;
-        let bStack_30 = (uVar1 >> 0x10) | 1;
-        let uStack_2c = (uVar1 >> 0x18);
-        let mut src = pkt;
-        loop {
-            if *get_device_address() as u8 != src.sno[0] {
-                let uVar6 = *get_mesh_node_max();
-                let mut uVar8 = 1;
-                let mut puVar9;
-                if uVar6 < 2 {
-                    puVar9 = addr_of_mut!((*get_mesh_node_st())[0]);
+    let mut src_index = 0;
+    let mut result = 0xfffffffe;
+    let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
+    while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
+        if *get_device_address() as u8 != pkt[src_index].dev_adr {
+            let mesh_node_max = *get_mesh_node_max();
+            let mut current_index = 1;
+            let mut mesh_node_st = &mut (*get_mesh_node_st())[current_index];
+            if mesh_node_max >= 2 {
+                if mesh_node_st.val.dev_adr != pkt[src_index].dev_adr {
+                    for tidx in 1..(*get_mesh_node_st()).len() {
+                        current_index = tidx;
+                        mesh_node_st = &mut (*get_mesh_node_st())[current_index];
+
+                        if mesh_node_max <= tidx as u8 || pkt[src_index].dev_adr == mesh_node_st.val.dev_adr {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if *get_mesh_node_max_num() as usize == current_index {
+                return 1;
+            }
+
+            if mesh_node_max as usize == current_index {
+                set_mesh_node_max(*get_mesh_node_max() + 1);
+
+                mesh_node_st.val = pkt[src_index];
+                mesh_node_st.tick = tick;
+
+                (*get_mesh_node_mask())[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
+
+                result = mesh_node_max as u32;
+                if (*get_p_mesh_node_status_callback()).is_some() {
+                    (*get_p_mesh_node_status_callback()).unwrap()(&mesh_node_st.val.clone(), 1);
+                }
+            } else if current_index < mesh_node_max as usize {
+                let sn_difference = pkt[src_index].sn - mesh_node_st.val.sn;
+                let par_match = pkt[src_index].par == mesh_node_st.val.par;
+
+                let timeout;
+                if *get_send_self_online_status_cycle() == 0 {
+                    timeout = 1500000;
                 } else {
-                    puVar9 = addr_of_mut!((*get_mesh_node_st())[0]);
-                    uVar8 = 1;
-                    if (*get_mesh_node_st()).first().unwrap().val.dev_adr != src.sno[0] {
-                        let res = (*get_mesh_node_st()).iter().position(|st| {
-                            st.val.dev_adr == src.sno[0]
-                        });
-                        if res.is_some() {
-                            uVar8 = res.unwrap();
-                            puVar9 = addr_of_mut!((*get_mesh_node_st())[uVar8]);
-                        } else {
-                            uVar8 = res.unwrap_or(*get_mesh_node_max_num() as usize);
-                            puVar9 = addr_of_mut!((*get_mesh_node_st())[uVar8 - 1]);
+                    timeout = (ONLINE_STATUS_TIMEOUT * 1000) >> 1;
+                }
+
+                result = current_index as u32;
+                if sn_difference - 2 < 0x3f || sn_difference != 0 && mesh_node_st.tick == 0 || (((timeout * *get_tick_per_us()) >> 0x10) as u16) < tick - mesh_node_st.tick {
+                    mesh_node_st.val = pkt[src_index];
+
+                    if !par_match || mesh_node_st.tick == 0 {
+                        (*get_mesh_node_mask())[current_index as usize >> 5] |= 1 << (current_index & 0x1f);
+
+                        if (*get_p_mesh_node_status_callback()).is_some() {
+                            (*get_p_mesh_node_status_callback()).unwrap()(&mesh_node_st.val.clone(), 1);
                         }
                     }
+
+                    mesh_node_st.tick = tick;
                 }
-                if *get_mesh_node_max_num() as usize == uVar8 {
-                    return 1;
-                }
-                if uVar6 as usize == uVar8 {
-                    set_mesh_node_max(*get_mesh_node_max() + 1);
-                    unsafe {
-                        slice::from_raw_parts_mut(
-                            addr_of!((*get_mesh_node_st())[uVar8].val) as *mut u8,
-                            *get_mesh_node_st_val_len() as usize,
-                        ).copy_from_slice(
-                            slice::from_raw_parts(
-                                addr_of!(src.sno) as *const u8,
-                                *get_mesh_node_st_val_len() as usize,
-                            )
-                        );
-                    }
-                    unsafe {
-                        (*puVar9).tick = bStack_30 as u16 | uStack_2c as u16;
-                    }
-
-                    (*get_mesh_node_mask())[uVar6 as usize >> 5] = (*get_mesh_node_mask())[uVar6 as usize >> 5] | 1 << (uVar6 & 0x1f);
-                    uStack_44 = uVar6 as u32;
-                    if (*get_p_mesh_node_status_callback()).is_some() {
-                        (*get_p_mesh_node_status_callback()).unwrap()(unsafe { &(*puVar9).val.clone() }, 1);
-                    }
-                } else if uVar8 < uVar6 as usize {
-                    let cVar5 = src.sno[1] - unsafe { (*puVar9).val.sn };
-                    let uVar4 = unsafe {
-                        slice::from_raw_parts_mut(
-                            addr_of_mut!(src.sno[2]),
-                            *get_mesh_node_st_par_len() as usize,
-                        ) == slice::from_raw_parts(
-                            (*puVar9).val.par.as_ptr(),
-                            *get_mesh_node_st_par_len() as usize,
-                        )
-                    };
-
-                    let uVar6;
-                    if *get_send_self_online_status_cycle() == 0 {
-                        uVar6 = 1500000;
-                    } else {
-                        uVar6 = (ONLINE_STATUS_TIMEOUT * 1000) >> 1;
-                    }
-
-                    uStack_44 = uVar8 as u32;
-                    if cVar5 - 2 < 0x3f || cVar5 != 0 && unsafe { (*puVar9).tick } == 0 || (uVar6 * *get_tick_per_us()) >> 0x10 < ((uVar1 >> 0x10) | 1) - unsafe { (*puVar9).tick as u32 } {
-                        unsafe {
-                            slice::from_raw_parts_mut(
-                                addr_of_mut!((*puVar9).val.dev_adr),
-                                *get_mesh_node_st_val_len() as usize,
-                            ).copy_from_slice(
-                                slice::from_raw_parts(
-                                    src.sno.as_ptr(),
-                                    *get_mesh_node_st_val_len() as usize,
-                                )
-                            )
-                        }
-
-                        if !uVar4 || unsafe { (*puVar9).tick } == 0 {
-                            (*get_mesh_node_mask())[uVar8 as usize >> 5] = (*get_mesh_node_mask())[uVar8 as usize >> 5] | 1 << (uVar8 & 0x1f);
-                            if (*get_p_mesh_node_status_callback()).is_some() {
-                                (*get_p_mesh_node_status_callback()).unwrap()(unsafe { &(*puVar9).val.clone() }, 1);
-                            }
-                        }
-                        unsafe { (*puVar9).tick = bStack_30 as u16 | uStack_2c as u16; }
-                    }
-                }
-            }
-            let uVar4 = *get_mesh_node_st_val_len() as u32;
-            iVar10 += uVar4;
-            if len * uVar4 - iVar10 == 0 || len * uVar4 < iVar10 {
-                return uStack_44;
-            }
-            src = unsafe { &mut *((addr_of_mut!(*src) as u32 + uVar4) as *mut rf_packet_att_value_t) };
-            if src.sno[0] == 0 {
-                break;
             }
         }
+
+        src_index += 1;
     }
     return 1;
 }
@@ -238,7 +196,7 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &app_cmd_value_t)
     );
 }
 
-pub fn copy_par_User_All(params_len: u32, ptr: *const u8)
+pub fn copy_par_user_all(params_len: u32, ptr: *const u8)
 {
     (*get_pkt_light_status()).value[10..10 + params_len as usize].copy_from_slice(
         unsafe {
@@ -268,7 +226,6 @@ fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
 {
     let mut result = false;
     if mesh_pair_notify_refresh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }) != 2 {
-        let src = packet.sno;
         if *get_slave_status_record_idx() != 0 {
             for st_rec in *get_slave_status_record() {
                 if packet.src_adr as u8 == st_rec.adr[0] {
@@ -300,34 +257,34 @@ fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
                     return false;
                 }
             }
-            let prVar8 = unsafe { &mut *(*get_p_slave_status_buffer()).offset((*get_slave_status_buffer_wptr() % *get_slave_status_buffer_num()) as isize) };
+            let st_ptr = unsafe { &mut *(*get_p_slave_status_buffer()).offset((*get_slave_status_buffer_wptr() % *get_slave_status_buffer_num()) as isize) };
             set_slave_status_buffer_wptr((*get_slave_status_buffer_wptr() + 1) % *get_slave_status_buffer_num());
-            prVar8.dma_len = 0x1d;
-            prVar8._type = 2;
-            prVar8.rf_len = 0x1b;
-            prVar8.l2cap = 0x17;
-            prVar8.chanid = 4;
-            prVar8.att = 0x1b;
-            prVar8.hl = 0x12;
+            st_ptr.dma_len = 0x1d;
+            st_ptr._type = 2;
+            st_ptr.rf_len = 0x1b;
+            st_ptr.l2cap = 0x17;
+            st_ptr.chanid = 4;
+            st_ptr.att = 0x1b;
+            st_ptr.hl = 0x12;
 
-            prVar8.dat[0..0x14].copy_from_slice(
+            st_ptr.dat[0..0x14].copy_from_slice(
                 unsafe {
                     slice::from_raw_parts(addr_of!(packet.sno) as *const u8, 0x14)
                 }
             );
 
             if packet.internal_par1[1] == 0 {
-                prVar8.dat[0x12] = packet.par[9];
-                prVar8.dat[0x13] = packet.internal_par1[0];
+                st_ptr.dat[0x12] = packet.par[9];
+                st_ptr.dat[0x13] = packet.internal_par1[0];
             } else if packet.internal_par1[1] != 4 && packet.internal_par1[1] != 5 && packet.internal_par1[1] != 8 {
                 if packet.internal_par1[1] == 6 {
-                    prVar8.dat[0x11..0x11 + 3].fill(0xff);
+                    st_ptr.dat[0x11..0x11 + 3].fill(0xff);
                 } else if packet.internal_par1[1] != 7 && packet.internal_par1[1] != 9 {
-                    prVar8.dat[0x12..0x12 + 2].fill(0xff);
+                    st_ptr.dat[0x12..0x12 + 2].fill(0xff);
                 }
             }
-            prVar8.dat[3] = packet.src_adr as u8;
-            prVar8.dat[4] = (packet.src_adr >> 8) as u8;
+            st_ptr.dat[3] = packet.src_adr as u8;
+            st_ptr.dat[4] = (packet.src_adr >> 8) as u8;
             result = true;
         }
     }
@@ -395,7 +352,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             return false;
         }
 
-        mesh_node_update_status(unsafe { &mut *(addr_of_mut!(packet.sno) as *mut rf_packet_att_value_t) }, 0x1a / *get_mesh_node_st_val_len() as u32);
+        mesh_node_update_status(unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / *get_mesh_node_st_val_len() as usize) });
         set_enc_disable(false);
         return false;
     }
@@ -431,25 +388,17 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
 
     let src_device_addr_match = packet.src_adr == *get_device_address();
 
-    let mut iVar12 = false;
+    let mut should_notify = false;
     if packet.dst_adr == *get_device_address() {
-        iVar12 = true;
+        should_notify = true;
         if *get_slave_link_connected() == false {
-            let uVar20 = *get_req_cmd_in_adv_type();
-            if uVar20 != 1 {
-                iVar12 = false;
-                if 1 < (*get_mesh_ota_master_st())[20] {
-                    uprintln!("check here 1");
-                    // todo: Might need to be !=
-                    iVar12 = uVar20 - 2 == 0;
-                }
-            }
+            should_notify = false;
         }
     }
 
-    let iStack_6c;
+    let pkt_valid;
     let (mut result1, mut result2) = (false, false);
-    if rf_link_is_notify_rsp(op) && iVar12 {
+    if rf_link_is_notify_rsp(op) && should_notify {
         if op != 8 || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
             if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
                 set_enc_disable(false);
@@ -472,11 +421,10 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
 
         (result1, result2) = rf_link_match_group_mac(cmd_pkt);
 
-        iStack_6c = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
+        pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
         if result1 != false || result2 != false {
-            uprintln!("Got pkt");
-            if iStack_6c {
+            if pkt_valid {
                 rc_pkt_buf_push(op, cmd_pkt);
                 rf_link_data_callback(l2cap_data);
             }
@@ -487,8 +435,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             if result1 == false {
                 set_slave_read_status_response(result2);
             }
-            let bVar8 = req_cmd_is_notify_ok(op, cmd_pkt);
-            if bVar8 {
+            if req_cmd_is_notify_ok(op, cmd_pkt) {
                 set_slave_read_status_response(false);
                 if op == 7 && (*get_mesh_ota_slave_st())[21] == 7 && (*get_mesh_ota_slave_st())[18] != 0 {
                     (*get_mesh_ota_slave_st())[19] = 0x20;
@@ -531,7 +478,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         packet.src_tx = *get_device_address();
         if op == 0x1a {
             (*get_pkt_light_status()).value[22] = 0;
-            if iStack_6c {
+            if pkt_valid {
                 (*get_pkt_light_status()).value[20] = packet.par[9];
                 (*get_pkt_light_status()).value[25] = packet.internal_par1[4];
                 if *get_max_relay_num() < packet.internal_par1[4] {
@@ -557,7 +504,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         } else if op == 0 {
             (*get_pkt_light_status()).value[22] = 8;
         }
-        unsafe { copy_par_User_All(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
+        unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
         if (no_match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0 && op != 0x26) || params[1] != 0) {
             (*get_pkt_light_status()).value[3..3 + 2].copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
 
@@ -880,15 +827,9 @@ pub fn vendor_id_init(vendor_id: u16)
 pub fn ll_device_status_update(val_par: &[u8])
 {
     (*get_mesh_node_st())[0].val.par.copy_from_slice(val_par);
-    if *get_sync_time_enable() != false {
-        if *get_synced_flag() == false {
-            (*get_mesh_node_st())[0].val.par[0] = (*get_mesh_node_st())[0].val.par[0] | 0x7f;
-        } else {
-            (*get_mesh_node_st())[0].val.par[0] = (*get_mesh_node_st())[0].val.par[0] & 0x7f;
-        }
-    }
-    (*get_mesh_node_mask())[0] = (*get_mesh_node_mask())[0] | 1;
     (*get_mesh_node_st())[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
+
+    (*get_mesh_node_mask())[0] |= 1;
 }
 
 pub fn is_receive_ota_window() -> bool
@@ -991,7 +932,7 @@ pub fn mesh_node_flush_status()
                 if (*p_node_st).tick != 0 && (*get_tick_per_us() * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - (*p_node_st).tick as u32 {
                     (*p_node_st).tick = 0;
 
-                    (*get_mesh_node_mask())[count >> 5] = 1 << (count & 0x1f) | (*get_mesh_node_mask())[count >> 5];
+                    (*get_mesh_node_mask())[count >> 5] |= 1 << (count & 0x1f);
                     if *get_p_mesh_node_status_callback() != None {
                         let mut node_data = (*p_node_st).val.clone();
                         node_data.sn = 0;
@@ -1011,15 +952,14 @@ fn mesh_node_keep_alive()
     }
 
     (*get_mesh_node_st())[0].val.sn = *get_device_node_sn();
-    let tick = read_reg_system_tick();
-    (*get_mesh_node_st())[0].tick = (tick >> 16) as u16 | 1;
+    (*get_mesh_node_st())[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 }
 
 fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
 {
     static SEND_ONLINE_STATUS_CNT: AtomicU8 = AtomicU8::new(0xC8);
 
-    let mut uVar2;
+    let mut max_node;
 
     p_data.fill(0);
     let mut elems = p_data.len() / *get_mesh_node_st_val_len() as usize;
@@ -1027,56 +967,61 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
         elems = *get_mesh_node_max() as usize;
     }
 
-    uVar2 = elems;
+    max_node = elems;
 
     SEND_ONLINE_STATUS_CNT.store(SEND_ONLINE_STATUS_CNT.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
 
-    let mut uVar4 = 0;
+    let mut count = 0;
     if *get_send_self_online_status_cycle() <= SEND_ONLINE_STATUS_CNT.load(Ordering::Relaxed) || *get_mesh_node_max() < 0x14 {
         SEND_ONLINE_STATUS_CNT.store(0, Ordering::Relaxed);
         p_data[0..*get_mesh_node_st_val_len() as usize].copy_from_slice(
             unsafe {
                 slice::from_raw_parts(
-                    addr_of!((*get_mesh_node_st())[0].val.dev_adr),
+                    addr_of!((*get_mesh_node_st())[0].val) as *const u8,
                     *get_mesh_node_st_val_len() as usize,
                 )
             }
         );
+
         mesh_node_keep_alive();
-        uVar2 = *get_mesh_node_max() as usize;
-        uVar4 = 1;
+
+        max_node = *get_mesh_node_max() as usize;
+        count = 1;
     }
-    let mut uVar5 = uVar4;
-    if uVar4 < uVar2 {
+    let mut out_index = count;
+    let mut mesh_node_cur = 1;
+    if count < max_node {
         loop {
-            let mut uVar3 = *get_mesh_node_cur() as usize;
-            if uVar3 < uVar2 && (*get_mesh_node_st())[uVar3].tick != 0 {
-                let iVar1 = *get_mesh_node_st_val_len() as usize * uVar5;
-                uVar5 = uVar5 + 1;
-                p_data[iVar1..iVar1 + *get_mesh_node_st_val_len() as usize].copy_from_slice(
+            if mesh_node_cur < max_node && (*get_mesh_node_st())[mesh_node_cur].tick != 0 {
+                let ptr = *get_mesh_node_st_val_len() as usize * out_index;
+                out_index = out_index + 1;
+                p_data[ptr..ptr + *get_mesh_node_st_val_len() as usize].copy_from_slice(
                     unsafe {
                         slice::from_raw_parts(
-                            addr_of!((*get_mesh_node_st())[uVar3].val) as *const u8,
+                            addr_of!((*get_mesh_node_st())[mesh_node_cur].val) as *const u8,
                             *get_mesh_node_st_val_len() as usize,
                         )
                     }
                 );
-
-                uVar3 = *get_mesh_node_cur() as usize;
             }
-            set_mesh_node_cur(uVar3 as u8 + 1);
-            uVar2 = *get_mesh_node_max() as usize;
-            if uVar2 <= uVar3 + 1 & 0xff {
-                set_mesh_node_cur(1);
-            }
-            uVar4 += 1;
 
-            if uVar5 == elems || uVar4 >= uVar2 {
+            mesh_node_cur += 1;
+
+            max_node = *get_mesh_node_max() as usize;
+
+            if max_node <= mesh_node_cur {
+                mesh_node_cur = 1;
+            }
+
+            count += 1;
+
+            if out_index == elems || count >= max_node {
                 break;
             }
         }
     }
-    return uVar5 as u32;
+
+    return out_index as u32;
 }
 
 fn blt_stall_mcu(ticks: u32)
@@ -1136,22 +1081,22 @@ pub fn mesh_send_online_status()
     if *get_mesh_send_online_status_flag() {
         mesh_node_flush_status();
 
-        mesh_node_adv_status(&mut (*get_pkt_light_adv_status()).data[1..]);
+        mesh_node_adv_status(&mut (*get_pkt_light_adv_status()).value[..26]);
 
         ADV_ST_SN.store(ADV_ST_SN.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         unsafe {
             let val = ADV_ST_SN.load(Ordering::Relaxed);
-            slice::from_raw_parts_mut((addr_of_mut!((*get_pkt_light_adv_status()).advA) as *mut u8).offset(4), 3).copy_from_slice(slice::from_raw_parts(addr_of!(val) as *const u8, 3))
+            slice::from_raw_parts_mut((addr_of_mut!((*get_pkt_light_adv_status()).opcode) as *mut u8), 3).copy_from_slice(slice::from_raw_parts(addr_of!(val) as *const u8, 3))
         }
 
         if *get_mesh_node_st_val_len() == 4 {
-            (*get_pkt_light_adv_status()).data[26] = 0xa5;
-            (*get_pkt_light_adv_status()).data[25] = 0xa5;
+            (*get_pkt_light_adv_status()).value[25] = 0xa5;
+            (*get_pkt_light_adv_status()).value[24] = 0xa5;
         }
-        (*get_pkt_light_adv_status()).data[28] = 0xa5;
-        (*get_pkt_light_adv_status()).data[27] = 0xa5;
+        (*get_pkt_light_adv_status()).value[27] = 0xa5;
+        (*get_pkt_light_adv_status()).value[26] = 0xa5;
 
-        let mut rStack_40: rf_packet_att_cmd_t = rf_packet_att_cmd_t {
+        let mut tmp_pkt: rf_packet_att_cmd_t = rf_packet_att_cmd_t {
             dma_len: 0,
             _type: 0,
             rf_len: 0,
@@ -1164,17 +1109,19 @@ pub fn mesh_send_online_status()
         };
 
         unsafe {
-            slice::from_raw_parts_mut(addr_of_mut!(rStack_40) as *mut u8, size_of::<rf_packet_adv_ind_module_t>()).copy_from_slice(
-                slice::from_raw_parts(get_pkt_light_adv_status_addr() as *const u8, size_of::<rf_packet_adv_ind_module_t>())
+            slice::from_raw_parts_mut(addr_of_mut!(tmp_pkt) as *mut u8, size_of::<rf_packet_att_write_t>()).copy_from_slice(
+                slice::from_raw_parts(get_pkt_light_adv_status_addr() as *const u8, size_of::<rf_packet_att_write_t>())
             )
         }
 
         if *get_security_enable() {
-            rStack_40._type |= 0x7f;
-            pair_enc_packet_mesh(addr_of_mut!(rStack_40) as *mut mesh_pkt_t);
+            // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
+            // todo: as a normal encrypted packet (bit 7 set)
+            tmp_pkt._type |= BIT!(7); //|= 0x7f;
+            pair_enc_packet_mesh(addr_of_mut!(tmp_pkt) as *mut mesh_pkt_t);
         }
 
-        mesh_send_command(&rStack_40, 0xff, 0);
+        mesh_send_command(&tmp_pkt, 0xff, 0);
     }
 }
 
@@ -1484,11 +1431,6 @@ pub fn rf_ota_save_data(data: *const u8) -> OtaState
     }
 }
 
-pub fn is_master_sending_ota_st() -> bool
-{
-    return (*get_mesh_ota_master_st())[20] > 1;
-}
-
 pub fn register_mesh_ota_master_ui(cb: fn(*const u8))
 {
     set_mesh_ota_master_ui_sending(Some(cb));
@@ -1542,9 +1484,6 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                     set_mesh_user_cmd_idx(0x20);
                     if 0xff00 > cmd_op_para[4] as u16 * 0x100 + cmd_op_para[3] as u16 {
                         set_mesh_user_cmd_idx(4);
-                        if (*get_mesh_ota_master_st())[20] == 0x8 {
-                            set_mesh_user_cmd_idx(8);
-                        }
                     }
                 } else {
                     set_mesh_user_cmd_idx(*get_bridge_max_cnt() as u8);
@@ -1582,7 +1521,6 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                 let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const app_cmd_value_t);
                 set_slave_tx_cmd_time(read_reg_system_tick());
                 if group_match || device_match {
-                    uprintln!("Need to check this");
                     light_slave_tx_command_callback(addr_of!((*get_pkt_user_cmd()).l2capLen) as *const ll_packet_l2cap_data_t);
                     if device_match {
                         set_mesh_user_cmd_idx(0);

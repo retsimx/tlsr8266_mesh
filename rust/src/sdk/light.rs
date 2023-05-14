@@ -72,8 +72,6 @@ pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
 
-pub_mut!(sync_time_enable, bool, false);
-pub_mut!(synced_flag, bool, false);
 pub_mut!(mesh_ota_master_ui_sending, Option<fn(*const u8)>, Option::None);
 
 
@@ -806,7 +804,6 @@ pub_mut!(slave_data_valid, u32, 0); // todo: Should be bool?
 pub_mut!(sw_flag, bool, false);
 pub_mut!(mesh_send_online_status_flag, bool, true);
 pub_mut!(send_self_online_status_cycle, u8, 0);
-pub_mut!(mesh_node_cur, u8, 1);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
 pub_mut!(slave_sno_sending, [u8; 3], [0; 3]);
@@ -822,7 +819,6 @@ pub_mut!(slave_status_buffer_wptr, u8, 0);
 pub_mut!(slave_status_buffer_rptr, u8, 0);
 pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_read_status_unicast_flag, u8, 0);
-pub_mut!(mesh_ota_master_st, [u8; 29], [0; 29]);
 pub_mut!(mesh_node_report_enable, bool, false);
 pub_mut!(slave_timing_adjust_enable, u32, 0); // Should be bool?
 pub_mut!(slave_tick_brx, u32, 0);
@@ -835,7 +831,6 @@ pub_mut!(slave_instant, u16, 0);
 pub_mut!(slave_status_tick, u8, 0);
 pub_mut!(slave_n6, u8, 0);
 pub_mut!(slave_link_cmd, u8, 0);
-pub_mut!(req_cmd_in_adv_type, u8, 2);
 pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
 pub_mut!(pkt_need_relay, bool, true);
@@ -851,13 +846,16 @@ pub_mut!(slave_read_status_busy_time, u32, 0);
 pub_mut!(slave_read_status_busy_timeout, u32, 25000);
 pub_mut!(st_listen_no, u32, 0);
 
-// todo: This is not the correct type for this. Figure this out sometime
-pub_mut!(pkt_light_adv_status, rf_packet_adv_ind_module_t, rf_packet_adv_ind_module_t {
+pub_mut!(pkt_light_adv_status, rf_packet_att_write_t, rf_packet_att_write_t {
     dma_len: 0x27,
-    _type: 2,
+    rtype: 2,
     rf_len: 0x25,
-    advA: [0x21, 0x00, 0xff, 0xff, 0x00, 0x00],
-    data: [0; 31]
+    l2capLen: 0x21,
+    chanId: 0xffff,
+    opcode: 0,
+    handle: 0,
+    handle1: 0,
+    value: [0; 30]
 });
 
 pub_mut!(pkt_mesh, mesh_pkt_t, mesh_pkt_t {

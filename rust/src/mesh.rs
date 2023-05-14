@@ -174,7 +174,6 @@ impl MeshManager {
             self.mesh_pair_cmd_interval * 1000,
         )))
         {
-            uprintln!("mesh_pair_proc_effect saving");
             self.save_effect_new_mesh();
             self.effect_new_mesh = 0;
             self.effect_new_mesh_delay_time = 0;
@@ -204,10 +203,8 @@ impl MeshManager {
         if self.default_mesh_time_ref != 0 {
             self.default_mesh_time_ref = clock_time() | 1;
         }
-        uprintln!("mesh_pair_cb {}", params[0]);
         let cmd = MeshPairState::try_from(params[0]);
         if cmd.is_err() {
-            uprintln!("mesh_pair_cb err");
             return;
         }
 
@@ -295,7 +292,6 @@ impl MeshManager {
 
     fn save_effect_new_mesh(&mut self) {
         if self.default_mesh_time_ref != 0 || *get_get_mac_en() {
-            uprintln!("Switch to normal mesh? {} {}", self.default_mesh_time_ref, *get_get_mac_en());
             self.mesh_pair_complete_notify();
             sleep_us(1000);
             /* Switch to normal mesh */
@@ -309,12 +305,10 @@ impl MeshManager {
         }
 
         if self.effect_new_mesh == 0 {
-            uprintln!("Save mesh all");
             get_pair_nn()[0..16].copy_from_slice(&self.new_mesh_name[0..16]);
             get_pair_pass()[0..16].copy_from_slice(&self.new_mesh_pwd[0..16]);
             get_pair_ltk()[0..16].copy_from_slice(&self.new_mesh_ltk[0..16]);
         } else {
-            uprintln!("Save mesh ltk");
             get_pair_ltk()[0..16].copy_from_slice(&get_pair_ltk_mesh()[0..16]);
         }
 

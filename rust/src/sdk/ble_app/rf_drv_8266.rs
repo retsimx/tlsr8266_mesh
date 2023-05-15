@@ -7,7 +7,7 @@ use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_M
 use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
+use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;

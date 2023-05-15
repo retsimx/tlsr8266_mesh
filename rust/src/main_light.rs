@@ -6,11 +6,10 @@ use core::ptr::{addr_of, addr_of_mut};
 use fixed::types::I16F16;
 use heapless::Deque;
 
-use crate::{app, uprintln};
+use crate::{app};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
-use crate::mesh::wrappers::mesh_security_enable;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
 use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
@@ -172,7 +171,7 @@ pub fn user_init() {
     vendor_set_adv_data();
 
     app().light_manager.device_status_update();
-    mesh_security_enable(true);
+    app().mesh_manager.mesh_security_enable(true);
 
     register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
 }

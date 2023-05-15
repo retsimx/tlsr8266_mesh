@@ -11,9 +11,9 @@ use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::{app, BIT, uprintln};
 use crate::embassy::time_driver::check_clock_overflow;
+use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
-use crate::mesh::wrappers::{*};
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
@@ -80,9 +80,9 @@ fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
 {
     let mut result = 0;
     if *get_mesh_node_report_enable() {
-        params[0..*get_mesh_node_st_val_len() as usize * len as usize].fill(0);
+        params[0..MESH_NODE_ST_VAL_LEN as usize * len as usize].fill(0);
 
-        if (*get_mesh_node_max_num() + 0x1f) >> 5 != 0 {
+        if (MESH_NODE_MAX_NUM + 0x1f) >> 5 != 0 {
             get_mesh_node_mask().iter_mut().enumerate().for_each(|(idx, v)| {
                 if result == len {
                     return;
@@ -91,23 +91,23 @@ fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
                 if *v != 0 {
                     for iVar1 in 0..32 {
                         let mut current_index = iVar1 + idx * 32;
-                        if current_index > *get_mesh_node_max_num() as usize {
+                        if current_index > MESH_NODE_MAX_NUM as usize {
                             break;
                         }
 
                         if (*v & 1 << iVar1) != 0 {
                             *v = *v & !(1 << iVar1);
-                            params[*get_mesh_node_st_val_len() as usize * result..*get_mesh_node_st_val_len() as usize * result + *get_mesh_node_st_val_len() as usize].copy_from_slice(
+                            params[MESH_NODE_ST_VAL_LEN as usize * result..MESH_NODE_ST_VAL_LEN as usize * result + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
                                 unsafe {
                                     slice::from_raw_parts(
                                         addr_of!((*get_mesh_node_st())[current_index].val) as *const u8,
-                                        *get_mesh_node_st_val_len() as usize,
+                                        MESH_NODE_ST_VAL_LEN as usize,
                                     )
                                 }
                             );
 
                             if (*get_mesh_node_st())[current_index].tick == 0 {
-                                params[*get_mesh_node_st_val_len() as usize * result + 1] = 0;
+                                params[MESH_NODE_ST_VAL_LEN as usize * result + 1] = 0;
                             }
 
                             result += 1;
@@ -381,7 +381,7 @@ pub fn irq_st_bridge()
     }
     mesh_node_flush_status();
     if is_add_packet_buf_ready() {
-        if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / *get_mesh_node_st_val_len() as usize) != 0 {
+        if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
             rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<rf_packet_att_cmd_t>());
         }
     }

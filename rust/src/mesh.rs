@@ -1,22 +1,20 @@
 use core::mem::size_of;
 use crate::config::{get_flash_adr_pairing, VENDOR_ID};
-use crate::main_light::{
-    light_slave_tx_command,
-    rf_link_light_event_callback,
-};
+use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use core::ptr::addr_of;
-use crate::{app, BIT, uprintln};
+use crate::{app, BIT, pub_mut, uprintln};
 use crate::common::{mesh_node_init, access_code, pair_load_key};
-use crate::mesh::wrappers::*;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
+use crate::sdk::mcu::crypto::aes_att_encryption;
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
+use crate::vendor_light::get_adv_rsp_pri_data_addr;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -99,6 +97,27 @@ pub struct mesh_node_st_t {
     // don't change include type
     pub val: mesh_node_st_val_t,
 }
+
+pub_mut!(
+    mesh_node_mask,
+    [u32; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize],
+    [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize]
+);
+
+pub_mut!(get_mac_en, bool, false);
+pub_mut!(mesh_pair_enable, bool, false);
+pub_mut!(
+    mesh_node_st,
+    [mesh_node_st_t; MESH_NODE_MAX_NUM as usize],
+    [mesh_node_st_t {
+        tick: 0,
+        val: mesh_node_st_val_t {
+            dev_adr: 0,
+            sn: 0,
+            par: [0; MESH_NODE_ST_PAR_LEN as usize],
+        }
+    }; MESH_NODE_MAX_NUM as usize]
+);
 
 pub struct MeshManager {
     mesh_pair_start_time: u32,
@@ -536,55 +555,8 @@ impl MeshManager {
 
         app().light_manager.device_status_update();
     }
-}
 
-pub mod wrappers {
-    use crate::mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
-    use crate::sdk::light::*;
-    use core::mem::size_of;
-    use crate::{app, pub_mut};
-    use crate::main_light::rf_link_data_callback;
-    use crate::sdk::mcu::crypto::aes_att_encryption;
-    use crate::vendor_light::get_adv_rsp_pri_data_addr;
-
-    // BEGIN SHIT LIGHT_LL HAX
-    pub_mut!(
-        mesh_node_mask,
-        [u32; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize],
-        [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize]
-    );
-    pub_mut!(mesh_node_max_num, u16, MESH_NODE_MAX_NUM);
-    pub_mut!(mesh_node_st_val_len, u8, MESH_NODE_ST_VAL_LEN);
-    pub_mut!(mesh_node_st_par_len, u8, MESH_NODE_ST_PAR_LEN);
-    pub_mut!(mesh_node_st_len, u8, size_of::<mesh_node_st_t>() as u8);
-    // END SHIT LIGHT_LL HAX
-
-    pub_mut!(get_mac_en, bool, false);
-    pub_mut!(mesh_pair_enable, bool, false);
-    pub_mut!(
-        mesh_node_st,
-        [mesh_node_st_t; MESH_NODE_MAX_NUM as usize],
-        [mesh_node_st_t {
-            tick: 0,
-            val: mesh_node_st_val_t {
-                dev_adr: 0,
-                sn: 0,
-                par: [0; MESH_NODE_ST_PAR_LEN as usize],
-            }
-        }; MESH_NODE_MAX_NUM as usize]
-    );
-
-    pub fn mesh_pair_notify_refresh(p: *const rf_packet_att_cmd_t) -> u8 {
-        let p = &(unsafe { *p });
-
-        return app().mesh_manager.mesh_pair_notify_refresh(p);
-    }
-
-    pub fn light_slave_tx_command_callback(p: *const ll_packet_l2cap_data_t) {
-        rf_link_data_callback(p);
-    }
-
-    fn get_pair_mic(keyin: *const u32, macin: *const u16) -> u32
+    fn get_pair_mic(&self, keyin: *const u32, macin: *const u16) -> u32
     {
         let mut dest = [0u32; 4];
         let mut key = [0u32; 4];
@@ -602,16 +574,16 @@ pub mod wrappers {
         return dest[0];
     }
 
-    fn set_pair_mic() {
+    fn set_pair_mic(&self) {
         if *get_auth_code_en() != false {
-            let mic = [get_pair_mic(get_auth_code_addr() as *const u32, *get_slave_p_mac() as *const u16), 0];
+            let mic = [self.get_pair_mic(get_auth_code_addr() as *const u32, *get_slave_p_mac() as *const u16), 0];
             unsafe { mic.as_ptr().copy_to((get_adv_rsp_pri_data_addr() as u32 + 0x17) as *mut u32, 2); }
         }
     }
 
-    pub fn mesh_security_enable(enable: bool)
+    pub fn mesh_security_enable(&self, enable: bool)
     {
         set_security_enable(enable);
-        set_pair_mic();
+        self.set_pair_mic();
     }
 }

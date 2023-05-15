@@ -1,7 +1,6 @@
 use crate::config::{
     get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
-use crate::mesh::wrappers::{get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable};
 use crate::sdk::mcu::clock::clock_time_exceed;
@@ -11,6 +10,7 @@ use core::convert::TryFrom;
 use core::ptr::{addr_of, copy_nonoverlapping};
 use crate::BIT;
 use crate::{app, pub_mut};
+use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::mcu::crypto::{encode_password};
 use crate::sdk::pm::light_sw_reboot;
 

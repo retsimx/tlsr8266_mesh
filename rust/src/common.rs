@@ -4,7 +4,7 @@ use core::slice;
 use crate::{app, pub_mut};
 use crate::config::*;
 use crate::main_light::get_max_mesh_name_len;
-use crate::mesh::wrappers::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en};
+use crate::mesh::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;

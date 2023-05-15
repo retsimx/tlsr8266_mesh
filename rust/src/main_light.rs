@@ -109,15 +109,14 @@ fn light_init_default() {
 
     light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
 
-    get_pair_config_mesh_name().iter_mut().for_each(|m| *m = 0);
+    get_pair_config_mesh_name().fill(0);
     let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);
     get_pair_config_mesh_name()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
 
-    get_pair_config_mesh_pwd().iter_mut().for_each(|m| *m = 0);
+    get_pair_config_mesh_pwd().fill(0);
     let len = min(MESH_PWD.len(), 16);
     get_pair_config_mesh_pwd()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
 
-    get_pair_config_mesh_ltk().iter_mut().for_each(|m| *m = 0);
     get_pair_config_mesh_ltk()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
     setSppUUID(

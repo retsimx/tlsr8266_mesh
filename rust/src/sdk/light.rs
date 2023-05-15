@@ -1,4 +1,3 @@
-// Stuff from the libble library
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 use core::mem;
 use core::mem::{size_of, size_of_val, MaybeUninit};
@@ -9,10 +8,10 @@ use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
 pub_mut!(pair_config_valid_flag, u8, 0xFA);
-// todo, these might be busted entirely
-pub_mut!(pair_config_mesh_name, [u8; 16], const_concat!(b"telink_mesh1", &[0, 0, 0, 0]));
-pub_mut!(pair_config_mesh_pwd, [u8; 16], const_concat!(b"123", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-pub_mut!(pair_config_mesh_ltk, [u8; 16], [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf]);
+// These are filled at startup from values in config.rs
+pub_mut!(pair_config_mesh_name, [u8; 16], [0; 16]);
+pub_mut!(pair_config_mesh_pwd, [u8; 16], [0; 16]);
+pub_mut!(pair_config_mesh_ltk, [u8; 16], [0; 16]);
 
 pub_mut!(p_adv_pri_data, *const ll_adv_private_t, null());
 pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t, null_mut());

@@ -59,27 +59,6 @@ impl TryFrom<u8> for MeshPairState {
     }
 }
 
-#[derive(PartialEq)]
-#[allow(dead_code)]
-pub enum GatewayStatus {
-    GatewayStatusNormal = 0,
-    /* Normal gateway role */
-    GatewayStatusNodeRole,
-    /* As node role, when pushed button */
-
-    GatewayStatusTempDefaltMesh,
-    /* In default mesh temporary */
-    GatewayStatusSwitchToDefaultMesh,
-    GatewayStatusScanUnprovDev,
-    /* Scanning unpair device status */
-    GatewayStatusCfgUnproDev,
-    /* Only provision device */
-    GatewayStatusCfgCurNetwork,
-    /* Change current network's information */
-    GatewayStatusAddConfiguredDevice,
-    /* Add configured device */
-}
-
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct mesh_node_st_val_t {
@@ -138,8 +117,7 @@ pub struct MeshManager {
     mesh_pair_checksum: [u8; 8],
     mesh_pair_retry_max: u8,
     mesh_pair_time: u32,
-    mesh_pair_state: MeshPairState,
-    gateway_status: GatewayStatus,
+    mesh_pair_state: MeshPairState
 }
 
 impl MeshManager {
@@ -163,8 +141,7 @@ impl MeshManager {
             mesh_pair_checksum: [0; 8],
             mesh_pair_retry_max: 3,
             mesh_pair_time: 0,
-            mesh_pair_state: MeshPairState::MeshPairName1,
-            gateway_status: GatewayStatus::GatewayStatusNormal,
+            mesh_pair_state: MeshPairState::MeshPairName1
         }
     }
 
@@ -378,15 +355,6 @@ impl MeshManager {
                         [(get_mesh_node_st()[i as usize].val.dev_adr / 8) as usize] |=
                         BIT!(get_mesh_node_st()[i as usize].val.dev_adr % 8);
                 }
-            }
-        }
-
-        if self.gateway_status == GatewayStatus::GatewayStatusCfgUnproDev
-            || self.gateway_status == GatewayStatus::GatewayStatusAddConfiguredDevice
-        {
-            /* If provisioning device to network, shall at least return two device */
-            if cnt < 2 {
-                return 2;
             }
         }
 

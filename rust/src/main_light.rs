@@ -4,7 +4,6 @@ use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut};
 
 use fixed::types::I16F16;
-use heapless::Deque;
 
 use crate::{app};
 use crate::{BIT, pub_mut};
@@ -247,8 +246,6 @@ fn light_user_func() {
     app().mesh_manager.mesh_pair_proc_effect();
 }
 
-static mut NOTIFY_QUEUE: Deque<[u8; 13], 2> = Deque::new();
-
 pub fn main_loop() {
     if !is_receive_ota_window() {
         return;
@@ -257,16 +254,6 @@ pub fn main_loop() {
     light_user_func();
     rf_link_slave_proc();
     proc_led();
-
-    unsafe {
-        while !NOTIFY_QUEUE.is_empty() {
-            let data = critical_section::with(|_| {
-                NOTIFY_QUEUE.pop_front().unwrap()
-            });
-
-            app().mesh_manager.send_mesh_message(&data, 0xffff);
-        }
-    }
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
@@ -383,10 +370,8 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
-    let p = unsafe { &*p };
-    let pp = unsafe { &*(p.value.as_ptr() as *const rf_packet_att_value_t) };
     rf_link_get_op_para(
-        p,
+        unsafe { &*p },
         &mut op_cmd,
         &mut op_cmd_len,
         &mut params,
@@ -452,7 +437,6 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             }
             light_sw_reboot();
         }
-        LGT_CMD_NOTIFY_MESH => light_notify(&pp.val[3..3 + 10], &pp.src),
         LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),
         _ => ()
     }
@@ -472,33 +456,6 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
 
     let dst = para;
     mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
-}
-
-fn light_notify(p: &[u8], p_src: &[u8]) {
-    let mut pkt: rf_packet_att_value_t = rf_packet_att_value_t {
-        sno: [0; 3],
-        src: [0; 2],
-        dst: [0; 2],
-        val: [0; 23],
-    };
-
-    pkt.src[0] = p_src[0];
-    pkt.src[1] = p_src[1];
-
-    // let valptr = get_pkt_light_notify().value.as_mut_ptr().offset(10);
-    pkt.val[3..3 + 20].copy_from_slice(&[0; 20]);
-    pkt.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
-    pkt.val[15] = p[p.len() - 1];
-
-    rf_link_response_callback(&mut pkt, &pkt);
-
-    unsafe {
-        let mut data: [u8; 13] = [0; 13];
-        data.copy_from_slice(&pkt.val[0..13]);
-        if !NOTIFY_QUEUE.is_full() {
-            NOTIFY_QUEUE.push_back(data).unwrap();
-        }
-    }
 }
 
 pub fn rf_link_light_event_callback(status: u8) {

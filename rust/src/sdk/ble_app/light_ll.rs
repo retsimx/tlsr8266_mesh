@@ -250,12 +250,12 @@ fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
         result = false;
         if (*get_slave_status_buffer_wptr() + 1) % *get_slave_status_buffer_num() != *get_slave_status_buffer_rptr() && *get_slave_status_record_idx() < MESH_NODE_MAX_NUM {
             (*get_slave_status_record())[*get_slave_status_record_idx() as usize].adr[0] = packet.src_adr as u8;
-            if packet.op & 0x3f == 0x27 {
+            if packet.op & 0x3f == LGT_CMD_ALARM_RSP {
                 (*get_slave_status_record())[*get_slave_status_record_idx() as usize].alarm_id = packet.par[0];
                 set_slave_status_record_idx(*get_slave_status_record_idx() + 1);
                 rf_link_slave_notify_req_mask(packet.src_adr as u8);
                 // mesh_ota_master_read_rsp_handle(src, false);
-            } else if packet.op & 0x3f == 1 {
+            } else if packet.op & 0x3f == LGT_CMD_SCENE_RSP {
                 (*get_slave_status_record())[*get_slave_status_record_idx() as usize].alarm_id = (packet.vendor_id >> 8) as u8;
                 set_slave_status_record_idx(*get_slave_status_record_idx() + 1);
                 rf_link_slave_notify_req_mask(packet.src_adr as u8);
@@ -264,7 +264,7 @@ fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
                 set_slave_status_record_idx(*get_slave_status_record_idx() + 1);
                 rf_link_slave_notify_req_mask(packet.src_adr as u8);
                 // mesh_ota_master_read_rsp_handle(src, false);
-                if packet.op & 0x3f == 8 && (packet.vendor_id >> 8) as u8 - 1 < 2 {
+                if packet.op & 0x3f == LGT_CMD_MESH_OTA_READ_RSP && (packet.vendor_id >> 8) as u8 - 1 < 2 {
                     return false;
                 }
             }
@@ -403,7 +403,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     let mut should_notify = false;
     if packet.dst_adr == *get_device_address() {
         should_notify = true;
-        if *get_slave_link_connected() == false {
+        if !*get_slave_link_connected() {
             should_notify = false;
         }
     }
@@ -411,7 +411,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     let pkt_valid;
     let (mut group_match, mut device_match) = (false, false);
     if rf_link_is_notify_rsp(op) && should_notify {
-        if op != 8 || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
+        if op != LGT_CMD_MESH_OTA_READ_RSP || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
             if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
                 set_enc_disable(false);
                 return false;
@@ -422,7 +422,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         return false;
     } else {
         if src_device_addr_match {
-            if op != 0x20 || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
+            if op != LGT_CMD_CONFIG_DEV_ADDR || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
                 set_enc_disable(false);
                 return false;
             }
@@ -449,9 +449,6 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             }
             if req_cmd_is_notify_ok(op, cmd_pkt) {
                 set_slave_read_status_response(false);
-                if op == 7 && (*get_mesh_ota_slave_st())[21] == 7 && (*get_mesh_ota_slave_st())[18] != 0 {
-                    (*get_mesh_ota_slave_st())[19] = 0x20;
-                }
             } else if (packet.dst_adr >> 8) & 0x80 != 0 {
                 for i in 0..5 {
                     if packet.par[i + 4] == *get_device_address() as u8 {

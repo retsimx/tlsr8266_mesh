@@ -834,7 +834,6 @@ pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
 pub_mut!(pkt_need_relay, bool, true);
 pub_mut!(slave_read_status_response, bool, false);
-pub_mut!(mesh_ota_slave_st, [u8; 25], [0; 25]);
 pub_mut!(slave_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_status_record_idx, u16, 0);
 pub_mut!(notify_req_mask_idx, u8, 0);

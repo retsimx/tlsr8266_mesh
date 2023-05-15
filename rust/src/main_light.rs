@@ -258,7 +258,9 @@ pub fn main_loop() {
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
 **@param: ppp: is pointer to response
-**@param: p_req: is pointer to request command*/
+**@param: p_req: is pointer to request command
+Called to handle messages that require a response to be returned
+*/
 pub fn rf_link_response_callback(
     ppp: *mut rf_packet_att_value_t,
     p_req: *const rf_packet_att_value_t,
@@ -363,6 +365,7 @@ pub fn rf_link_response_callback(
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
+Called to handle messages sent to us that don't require a response
 */
 pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     // p start from l2capLen of rf_packet_att_cmd_t

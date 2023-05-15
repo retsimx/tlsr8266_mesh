@@ -511,7 +511,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             (*get_pkt_light_status()).value[22] = 8;
         }
         unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
-        if (no_match_slave_sno || *get_slave_link_cmd() != op) || ((op != 0 && op != 0x26) || params[1] != 0) {
+        if (no_match_slave_sno || *get_slave_link_cmd() != op) || ((op != LGT_CMD_READ_SCENE && op != LGT_CMD_READ_ALARM) || params[1] != 0) {
             (*get_pkt_light_status()).value[3..3 + 2].copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
 
             let mut request_params: rf_packet_att_value_t = rf_packet_att_value_t {
@@ -531,13 +531,14 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             }
 
             if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut rf_packet_att_value_t, &request_params) {
+                uprintln!("Got request for response");
                 if *get_slave_link_connected() == false {
                     write_reg_irq_src(0x100000);
                     let rand_2 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
                     let mut relay_delay = 16000 + rand_2 + rand_1;
                     let max_relay = packet.internal_par1[2];
                     if 0x1d < max_relay {
-                        uprintln!("How is max_relay greater than 0x1d?");
+                        uprintln!("How is max_relay greater than 0x1d? {}", max_relay);
                         let mut uVar11 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[3] as u32;
                         if 0xff < uVar11 {
                             uVar11 = 0xff;

@@ -1,3 +1,4 @@
+use core::cmp::min;
 use core::mem::{size_of, size_of_val, transmute};
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
 use core::slice;
@@ -18,7 +19,7 @@ use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::uart_manager::get_pkt_user_cmd;
+use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 pub_mut!(slave_timing_update, u32, 0);
@@ -352,7 +353,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
 
     if packet.chanId == 0xffff {
         if MESH_NODE_ST_VAL_LEN == 4 {
-            if packet.internal_par1[3] != 0xa5 || packet.internal_par1[4] != 0xa5 {
+            if packet.internal_par1[LAST_RELAY_TIME] != 0xa5 || packet.internal_par1[CURRENT_RELAY_COUNT] != 0xa5 {
                 set_enc_disable(false);
                 return false;
             }
@@ -369,7 +370,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         return false;
     }
 
-    if *get_max_relay_num() + 6 < packet.internal_par1[4] {
+    if *get_max_relay_num() + 6 < packet.internal_par1[CURRENT_RELAY_COUNT] {
         set_enc_disable(false);
         return false;
     }
@@ -460,7 +461,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             }
         }
     }
-    let relay_count = packet.internal_par1[4];
+    let relay_count = packet.internal_par1[CURRENT_RELAY_COUNT];
 
     packet.dma_len = (packet.l2capLen as u32 + 6) & 0xffffff;
     packet.rf_len = packet.l2capLen as u8 + 4;
@@ -486,11 +487,11 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             (*get_pkt_light_status()).value[22] = 0;
             if pkt_valid {
                 (*get_pkt_light_status()).value[20] = packet.par[9];
-                (*get_pkt_light_status()).value[25] = packet.internal_par1[4];
-                if *get_max_relay_num() < packet.internal_par1[4] {
+                (*get_pkt_light_status()).value[25] = packet.internal_par1[CURRENT_RELAY_COUNT];
+                if *get_max_relay_num() < packet.internal_par1[CURRENT_RELAY_COUNT] {
                     (*get_pkt_light_status()).value[21] = 0;
                 } else {
-                    (*get_pkt_light_status()).value[21] = *get_max_relay_num() - packet.internal_par1[4];
+                    (*get_pkt_light_status()).value[21] = *get_max_relay_num() - packet.internal_par1[CURRENT_RELAY_COUNT];
                 }
             }
         } else if op == LGT_CMD_LIGHT_GRP_REQ {
@@ -531,23 +532,22 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             }
 
             if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut rf_packet_att_value_t, &request_params) {
-                uprintln!("Got request for response");
                 if *get_slave_link_connected() == false {
                     write_reg_irq_src(0x100000);
                     let rand_2 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
                     let mut relay_delay = 16000 + rand_2 + rand_1;
-                    let max_relay = packet.internal_par1[2];
+                    let max_relay = packet.internal_par1[MAX_RELAY_COUNT];
                     if 0x1d < max_relay {
                         uprintln!("How is max_relay greater than 0x1d? {}", max_relay);
-                        let mut uVar11 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[3] as u32;
-                        if 0xff < uVar11 {
-                            uVar11 = 0xff;
+                        let mut relay_time = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32;
+                        if 0xff < relay_time {
+                            relay_time = 0xff;
                         }
-                        let uVar11 = max_relay as u32 - uVar11;
-                        if uVar11 < 0x32 {
-                            relay_delay = uVar11 * 1000;
+                        let relay_time = max_relay as u32 - relay_time;
+                        if relay_time < 0x32 {
+                            relay_delay = relay_time * 1000;
                             if device_match == false {
-                                if group_match != false && *get_max_relay_num() - packet.internal_par1[4] < 3 {
+                                if group_match != false && *get_max_relay_num() - packet.internal_par1[CURRENT_RELAY_COUNT] < 3 {
                                     relay_delay = relay_delay + rand_2 + rand_1;
                                 }
                             } else {
@@ -567,7 +567,8 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     for chn in *get_sys_chn_listen()
                     {
                         if *get_slave_link_connected() != false {
-                            if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
+                            // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
+                            if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                                 rf_stop_trx();
                                 set_enc_disable(false);
                                 return false;
@@ -577,7 +578,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                         // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
                         // todo: as a normal encrypted packet (bit 7 set)
                         (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
-                        rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                        rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 30 + read_reg_system_tick());
                         sleep_us(600);
                     }
                 }
@@ -585,14 +586,14 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         }
     }
 
-    if *get_pkt_need_relay() && relay_count != 0 && *get_org_ttl() == relay_count
+    if relay_count != 0 && *get_org_ttl() == relay_count
     {
         rf_set_tx_rx_off();
         sleep_us(100);
         rf_set_ble_access_code(*get_pair_ac());
         rf_set_ble_crc_adv();
         if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
-            packet.internal_par1[4] = relay_count - 1;
+            packet.internal_par1[CURRENT_RELAY_COUNT] = relay_count - 1;
         }
         if device_match == false {
             // Relay the message if it's not for us
@@ -603,9 +604,10 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             sleep_us(delay);
 
             // Pick a random start channel
-            // todo: Can we use read_reg_rnd_number()? Is it too slow or something?
-            let tmp = (read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 3;
-            for channel_index in tmp..tmp + 4 {
+            // todo: Verify that read_reg_rnd_number() works as expected - this is a change from
+            // todo: the original code
+            let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 3;
+            for channel_index in start_chan_idx..start_chan_idx + 4 {
                 if *get_slave_link_connected() {
                     if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                         rf_stop_trx();
@@ -617,17 +619,18 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                 // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
                 // todo: as a normal encrypted packet (bit 7 set)
                 packet._type |= BIT!(7); // 0x7f;
-                if packet.internal_par1[3] != 0x1b {
-                    rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc() as u32, addr_of_mut!(packet.par[9]));
+                if op != LGT_CMD_LIGHT_STATUS {
+                    rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc(), packet);
                 }
-                if rf_link_is_notify_req(packet.internal_par1[3]) {
-                    let mut uVar8 = ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[3] as u32;
-                    if 0xff < uVar8 {
-                        uVar8 = 0xff;
-                    }
-                    packet.internal_par1[3] = uVar8 as u8;
+                if rf_link_is_notify_req(op) {
+                    let relay_time = min(
+                        ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
+                        0xff
+                    );
+
+                    packet.internal_par1[LAST_RELAY_TIME] = relay_time as u8;
                 }
-                rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }, *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }, *get_tick_per_us() * 30 + read_reg_system_tick());
                 sleep_us(600);
             }
         }
@@ -1149,49 +1152,49 @@ pub fn back_to_rxmode_bridge()
     rf_set_rxmode();
 }
 
-fn rf_link_proc_ttc(cmd_time: u32, unknown: u32, src: *mut u8)
+fn rf_link_proc_ttc(cmd_time: u32, last_ttc: u8, src: &mut mesh_pkt_t)
 {
     unsafe {
-        if *src.offset(-0xd) & 0x3f != 6 {
-            let mut uVar2 = (read_reg_system_tick() - cmd_time) / *get_tick_per_us();
-            let mut uVar4 = (unknown << 0x18) >> 0x1e;
-            let mut uVar3 = uVar2 >> 10;
-            if uVar4 != 0 {
-                uVar3 = uVar2 >> 0xc;
-                if uVar4 != 1 {
-                    uVar3 = uVar2 >> 0xe;
-                    if uVar4 != 2 {
-                        uVar3 = 1;
-                        if uVar4 == 3 {
-                            uVar3 = uVar2 >> 0x12;
+        if src.op & 0x3f != LGT_CMD_MESH_OTA_DATA {
+            let mut new_ttc_base = (read_reg_system_tick() - cmd_time) / *get_tick_per_us();
+            let mut ttc_divisor = last_ttc >> 6;
+            let mut new_ttc = new_ttc_base >> 10;
+            if ttc_divisor != 0 {
+                new_ttc = new_ttc_base >> 0xc;
+                if ttc_divisor != 1 {
+                    new_ttc = new_ttc_base >> 0xe;
+                    if ttc_divisor != 2 {
+                        new_ttc = 1;
+                        if ttc_divisor == 3 {
+                            new_ttc = new_ttc_base >> 0x12;
                         }
                     }
                 }
             }
 
-            uVar3 = uVar3 + (unknown & 0x3f);
-            while 0x3e < uVar3 {
-                if uVar4 == 0 || uVar4 == 1 {
-                    uVar3 = uVar3 >> 2;
+            new_ttc = new_ttc + ((last_ttc as u32) & 0x3f);
+            while 0x3e < new_ttc {
+                if ttc_divisor == 0 || ttc_divisor == 1 {
+                    new_ttc = new_ttc >> 2;
                 } else {
-                    if uVar4 != 2 {
-                        if uVar4 != 3 {
-                            if uVar4 < 3 {
-                                uVar4 = uVar4 + 1 & 0xff;
+                    if ttc_divisor != 2 {
+                        if ttc_divisor != 3 {
+                            if ttc_divisor < 3 {
+                                ttc_divisor = ttc_divisor + 1;
                             }
-                            *src = (uVar4 << 6 | 1) as u8;
+                            src.par[9] = (ttc_divisor << 6 | 1);
                         }
-                        uVar3 = 0x3f;
-                        *src = ((uVar3 & 0x3f) | (uVar4 << 6)) as u8;
+                        new_ttc = 0x3f;
+                        src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
                     }
-                    uVar3 = uVar3 >> 4;
+                    new_ttc = new_ttc >> 4;
                 }
-                uVar4 = uVar4 + 1 & 0xff;
+                ttc_divisor = ttc_divisor + 1;
             }
-            if uVar3 == 0 {
-                *src = (uVar4 << 6 | 1) as u8;
+            if new_ttc == 0 {
+                src.par[9] = (ttc_divisor << 6 | 1);
             } else {
-                *src = ((uVar3 & 0x3f) | (uVar4 << 6)) as u8;
+                src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
             }
         }
     }
@@ -1244,7 +1247,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
                 // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
                 // todo: as a normal encrypted packet (bit 7 set)
                 (*get_pkt_light_data())._type |= BIT!(7); // 0x7f;
-                rf_link_proc_ttc(*get_app_cmd_time(), 0, addr_of_mut!((*get_pkt_light_data()).value[0x14]));
+                rf_link_proc_ttc(*get_app_cmd_time(), 0, unsafe { &mut *(addr_of_mut!((*get_pkt_light_data()).value[7]) as *mut mesh_pkt_t) });
                 if rf_link_is_notify_req((*get_pkt_light_data()).value[7] & 0x3f) {
                     let mut uVar3 = (((read_reg_system_tick() - bridge_cmd_time) / *get_tick_per_us()) + 500) >> 10;
                     if uVar3 > 0xff {
@@ -1298,7 +1301,7 @@ pub fn mesh_send_user_command() -> u8
         loop {
             loop {
                 if !user_cmd {
-                    rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, addr_of_mut!((*get_pkt_user_cmd()).par[9]));
+                    rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, unsafe { &mut *(get_pkt_user_cmd_addr() as *mut mesh_pkt_t) });
                     mesh_user_command_pkt_enc2buf();
                 }
                 rf_set_ble_channel((*get_sys_chn_listen())[uVar9 & 3]);
@@ -1545,7 +1548,7 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                     slice::from_raw_parts_mut(addr_of_mut!((*get_pkt_user_cmd()).op), pkt_len as usize).copy_from_slice(cmd_op_para)
                 }
 
-                (*get_pkt_user_cmd()).internal_par1[2] = max_relay;
+                (*get_pkt_user_cmd()).internal_par1[MAX_RELAY_COUNT] = max_relay;
 
                 let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const app_cmd_value_t);
                 set_slave_tx_cmd_time(read_reg_system_tick());

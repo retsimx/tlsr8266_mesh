@@ -264,6 +264,10 @@ pub const MESH_NODE_MAX_NUM: u16 = 64;
 
 pub const PKT_CMD_LEN: usize = 11;
 
+pub const MAX_RELAY_COUNT: usize = 2;
+pub const LAST_RELAY_TIME: usize = 3;
+pub const CURRENT_RELAY_COUNT: usize = 4;
+
 pub enum LightOpType {
     op_type_1 = 1,
     op_type_2 = 2,
@@ -832,7 +836,6 @@ pub_mut!(slave_n6, u8, 0);
 pub_mut!(slave_link_cmd, u8, 0);
 pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
-pub_mut!(pkt_need_relay, bool, true);
 pub_mut!(slave_read_status_response, bool, false);
 pub_mut!(slave_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_status_record_idx, u16, 0);

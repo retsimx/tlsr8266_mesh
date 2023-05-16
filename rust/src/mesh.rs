@@ -1,5 +1,5 @@
 use core::mem::size_of;
-use crate::config::{get_flash_adr_pairing, VENDOR_ID};
+use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
@@ -186,7 +186,7 @@ impl MeshManager {
         if *get_mesh_pair_enable() {
             let mut data: [u8; 1] = [0];
             flash_write_page(
-                (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + 1) as u32,
+                (FLASH_ADR_PAIRING as i32 + *get_adr_flash_cfg_idx() + 1) as u32,
                 1,
                 data.as_mut_ptr(),
             );

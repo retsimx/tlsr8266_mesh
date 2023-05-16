@@ -1,11 +1,11 @@
 use core::ptr::addr_of;
 use crate::common::{get_set_uuid_flag, set_set_uuid_flag};
-use crate::config::get_flash_adr_dev_grp_adr;
 use crate::main_light::rf_link_light_event_callback;
 use crate::{uprintln};
+use crate::config::FLASH_ADR_DEV_GRP_ADR;
 use crate::sdk::ble_app::rf_drv_8266::{get_pkt_adv, get_user_data, get_user_data_len};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::sdk::light::{get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_device_address_mask, get_group_address, ll_packet_l2cap_data_t, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
+use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_group_address, ll_packet_l2cap_data_t, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
 use crate::sdk::mcu::register::write_reg32;
 
 pub enum RF_POWER {
@@ -142,9 +142,9 @@ pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
 pub fn dev_grp_flash_clean()
 {
     if 0xfff < *get_dev_grp_next_pos() || 0xfff < *get_dev_address_next_pos() {
-        flash_erase_sector(*get_flash_adr_dev_grp_adr());
-        flash_write_page(*get_flash_adr_dev_grp_adr(), 0x10, get_group_address().as_ptr() as *const u8);
-        flash_write_page(*get_flash_adr_dev_grp_adr() + 0x10, 2, get_device_address_addr() as *const u8);
+        flash_erase_sector(FLASH_ADR_DEV_GRP_ADR);
+        flash_write_page(FLASH_ADR_DEV_GRP_ADR, 0x10, get_group_address().as_ptr() as *const u8);
+        flash_write_page(FLASH_ADR_DEV_GRP_ADR + 0x10, 2, get_device_address_addr() as *const u8);
         set_dev_address_next_pos(0x12);
         set_dev_grp_next_pos(0x12);
     }
@@ -155,18 +155,18 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
 {
   let mut tmp_dev_id = dev_id;
   let mut result = false;
-  if tmp_dev_id != 0 && tmp_dev_id & !*get_device_address_mask() == 0 && *get_device_address() != tmp_dev_id {
+  if tmp_dev_id != 0 && tmp_dev_id & !DEVICE_ADDR_MASK_DEFAULT == 0 && *get_device_address() != tmp_dev_id {
     result = true;
     let write_buffer = dev_id;
     dev_grp_flash_clean();
     tmp_dev_id = *get_dev_grp_next_pos();
     if tmp_dev_id != 0 && *get_dev_address_next_pos() != 0 {
       let zero_data = 0u16;
-      flash_write_page(*get_flash_adr_dev_grp_adr() -2 + *get_dev_address_next_pos() as u32,2,addr_of!(zero_data) as *const u8);
+      flash_write_page(FLASH_ADR_DEV_GRP_ADR -2 + *get_dev_address_next_pos() as u32, 2, addr_of!(zero_data) as *const u8);
       tmp_dev_id = *get_dev_grp_next_pos();
     }
     set_device_address(write_buffer);
-    flash_write_page(tmp_dev_id as u32 + *get_flash_adr_dev_grp_adr(),2,addr_of!(write_buffer) as *const u8);
+    flash_write_page(tmp_dev_id as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(write_buffer) as *const u8);
     set_dev_grp_next_pos(*get_dev_grp_next_pos() + 2);
     set_dev_address_next_pos(*get_dev_grp_next_pos());
     rf_link_light_event_callback(0xc6);
@@ -224,9 +224,9 @@ pub fn rf_link_del_group(group_id: u16) -> bool
         loop {
             grp_next_pos = grp_next_pos - 2;
 
-            let p_group_address = (*get_flash_adr_dev_grp_adr() + grp_next_pos as u32) as *const u16;
+            let p_group_address = (FLASH_ADR_DEV_GRP_ADR + grp_next_pos as u32) as *const u16;
             unsafe {
-                if *p_group_address & !*get_device_address_mask() != 0 {
+                if *p_group_address & !DEVICE_ADDR_MASK_DEFAULT != 0 {
                     if iVar4 == 1 {
                         flash_write_page(p_group_address as u32, 2, addr_of!(zero_short) as *const u8);
                         result = true;
@@ -265,7 +265,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
                 if (*get_group_address())[index] == 0 {
                     (*get_group_address())[index] = group_id;
 
-                    flash_write_page(*get_dev_grp_next_pos() as u32 + *get_flash_adr_dev_grp_adr(), 2, addr_of!(group_id) as *const u8);
+                    flash_write_page(*get_dev_grp_next_pos() as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
                     set_dev_grp_next_pos(*get_dev_grp_next_pos() + 2);
                     return true;
                 }
@@ -285,7 +285,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
             }
         }
 
-        flash_write_page(*get_dev_grp_next_pos() as u32 + *get_flash_adr_dev_grp_adr(), 2, addr_of!(group_id) as *const u8);
+        flash_write_page(*get_dev_grp_next_pos() as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
         set_dev_grp_next_pos(*get_dev_grp_next_pos() + 2);
         return true;
     }

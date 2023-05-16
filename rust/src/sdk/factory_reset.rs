@@ -1,6 +1,4 @@
-use crate::config::{
-    get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
-};
+use crate::config::{FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{get_pair_config_mesh_ltk};
 use crate::sdk::mcu::clock::clock_time_exceed;
@@ -25,7 +23,6 @@ const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
 pub const RESET_CNT_RECOUNT_FLAG: u8 = 0;
 pub const RESET_FLAG: u8 = 0x80;
 
-pub const FLASH_ADR_RESET_CNT: u32 = 0x7A000;
 pub const FLASH_ADR_PAR_MAX: u32 = 0x80000;
 pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
 pub const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
@@ -39,14 +36,14 @@ fn reset_cnt_clean() {
     if *get_adr_reset_cnt_idx() < 3840 {
         return;
     }
-    flash_erase_sector(*get_flash_adr_reset_cnt());
+    flash_erase_sector(FLASH_ADR_RESET_CNT);
     set_adr_reset_cnt_idx(0);
 }
 
 fn write_reset_cnt(cnt: u8) {
     let data = [cnt];
     flash_write_page(
-        *get_flash_adr_reset_cnt() + *get_adr_reset_cnt_idx(),
+        FLASH_ADR_RESET_CNT + *get_adr_reset_cnt_idx(),
         1,
         data.as_ptr(),
     );
@@ -57,7 +54,7 @@ fn clear_reset_cnt() {
 }
 
 fn reset_cnt_get_idx() {
-    let pf = *get_flash_adr_reset_cnt() as *const u8;
+    let pf = FLASH_ADR_RESET_CNT as *const u8;
     set_adr_reset_cnt_idx(0);
     while *get_adr_reset_cnt_idx() < 4096 {
         let restcnt_bit = unsafe { *pf.offset(adr_reset_cnt_idx.0 as isize) };
@@ -87,7 +84,7 @@ fn get_reset_cnt_bit() -> u8 {
 
     let mut data = [0];
     flash_read_page(
-        *get_flash_adr_reset_cnt() + *get_adr_reset_cnt_idx(),
+        FLASH_ADR_RESET_CNT + *get_adr_reset_cnt_idx(),
         1,
         data.as_mut_ptr(),
     );
@@ -190,7 +187,7 @@ pub fn kick_out(par: KickoutReason) {
     factory_reset();
 
     if par == KickoutReason::OutOfMesh {
-        let pairing_addr = *get_flash_adr_pairing();
+        let pairing_addr = FLASH_ADR_PAIRING;
         let mut buff: [u8; 16] = [0; 16];
         buff[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
         flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());

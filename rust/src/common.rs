@@ -9,9 +9,9 @@ use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
-use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data, rf_link_slave_set_adv_uuid_data};
+use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
 
-pub_mut!(conn_update_successed, u8, 0);
+pub_mut!(conn_update_successed, bool, false);
 pub_mut!(conn_update_cnt, u8, 0);
 pub_mut!(set_uuid_flag, bool, false);
 
@@ -22,11 +22,10 @@ const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [
     [32, 32 + 16, 200],
     [48, 48 + 16, 200],
 ];
-const SYS_CHN_LISTEN_MESH: [u8; 4] = [2, 12, 23, 34]; //8, 30, 52, 74
-pub_mut!(sys_chn_listen, [u8; 4], SYS_CHN_LISTEN_MESH);
 
-const SYS_CHN_ADV_MESH: [u8; 3] = [0x25, 0x26, 0x27];
-pub_mut!(sys_chn_adv, [u8; 3], SYS_CHN_ADV_MESH);
+pub const SYS_CHN_LISTEN: [u8; 4] = [2, 12, 23, 34]; //8, 30, 52, 74
+
+pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
 
 pub const REGA_LIGHT_OFF: u8 = 0x3a;
 
@@ -63,7 +62,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 // n:length
 pub fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     flash_write_page(
-        (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx() + adr as i32) as u32,
+        (FLASH_ADR_PAIRING as i32 + *get_adr_flash_cfg_idx() + adr as i32) as u32,
         n,
         p,
     );
@@ -90,7 +89,7 @@ pub fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     timeout <= 6second
 */
 pub fn update_ble_parameter_cb() {
-    if *get_conn_update_successed() == 0 {
+    if !*get_conn_update_successed() {
         setup_ble_parameter_start(
             1,
             CONN_PARA_DATA[0][0],
@@ -118,7 +117,7 @@ pub fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
         match (*pp).result {
             0x0000 => {
                 set_conn_update_cnt(0);
-                set_conn_update_successed(1);
+                set_conn_update_successed(true);
             }
             0x0001 => {
                 if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
@@ -142,11 +141,11 @@ pub fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
 
 pub fn retrieve_dev_grp_address()
 {
-    let dev_mask = *get_device_address_mask();
+    let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
     let mut addr_next_pos = *get_dev_address_next_pos();
     let mut grp_next_pos = 0;
     let mut dest_addr_index = 0;
-    let mut grp_addr_ptr = *get_flash_adr_dev_grp_adr();
+    let mut grp_addr_ptr = FLASH_ADR_DEV_GRP_ADR;
     loop {
         set_dev_address_next_pos(addr_next_pos);
         set_dev_grp_next_pos(grp_next_pos);
@@ -198,11 +197,11 @@ pub fn pair_flash_clean()
     let flash_dat_swap_len = flash_dat_swap.len();
 
     if *get_adr_flash_cfg_idx() >= 0xeff {
-        let src_addr = (*get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx()) as *const u8;
+        let src_addr = (FLASH_ADR_PAIRING as i32 + *get_adr_flash_cfg_idx()) as *const u8;
         unsafe { flash_dat_swap.copy_from_slice(slice::from_raw_parts(src_addr, flash_dat_swap_len)); }
 
-        flash_erase_sector(*get_flash_adr_pairing());
-        flash_write_page(*get_flash_adr_pairing(), flash_dat_swap_len as u32, flash_dat_swap.as_ptr());
+        flash_erase_sector(FLASH_ADR_PAIRING);
+        flash_write_page(FLASH_ADR_PAIRING, flash_dat_swap_len as u32, flash_dat_swap.as_ptr());
         set_adr_flash_cfg_idx(0);
     }
 }
@@ -212,10 +211,10 @@ pub fn pair_flash_config_init() -> bool
     let result;
 
     unsafe {
-        if PAIR_CONFIG_VALID_FLAG == *(*get_flash_adr_pairing() as *const u8) {
+        if PAIR_CONFIG_VALID_FLAG == *(FLASH_ADR_PAIRING as *const u8) {
             let mut index = 0x40;
             loop {
-                if *(*get_flash_adr_pairing() as *const u8).offset(index) != *(*get_flash_adr_pairing() as *const u8) {
+                if *(FLASH_ADR_PAIRING as *const u8).offset(index) != *(FLASH_ADR_PAIRING as *const u8) {
                     break;
                 }
                 index = index + 0x40;
@@ -299,16 +298,13 @@ pub fn pair_update_key()
 
     rf_link_slave_set_adv_mesh_name(&(*get_pair_nn())[0..name_len as usize]);
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(*get_p_adv_pri_data() as *const u8, *get_adv_private_data_len() as usize) });
-    if *get_adv_uuid_flag() != 0 {
-        rf_link_slave_set_adv_uuid_data(&(*get_adv_uuid())[0..4]);
-    }
 }
 
 pub fn pair_load_key()
 {
     pair_flash_config_init();
 
-    let pairing_addr = *get_flash_adr_pairing() as i32 + *get_adr_flash_cfg_idx();
+    let pairing_addr = FLASH_ADR_PAIRING as i32 + *get_adr_flash_cfg_idx();
 
     if -1 < *get_adr_flash_cfg_idx() && pairing_addr != 0x0 {
         get_pair_nn().iter_mut().for_each(|v| { *v = 0 });

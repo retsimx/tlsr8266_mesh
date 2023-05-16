@@ -415,11 +415,11 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
         LGT_CMD_SET_MAC_ADDR => {
             let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
-            flash_erase_sector(*get_flash_adr_mac());
-            flash_write_page(*get_flash_adr_mac(), mac.len() as u32, addr_of!(mac) as *const u8);
+            flash_erase_sector(FLASH_ADR_MAC);
+            flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
             light_sw_reboot();
         }
-        LGT_CLEAR_LUM_STATE => flash_erase_sector(*get_flash_adr_lum()),
+        LGT_CLEAR_LUM_STATE => flash_erase_sector(FLASH_ADR_LUM),
         // Clear the lum state
         LGT_TRIGGER_PANIC => panic!("She's dead jim"),
         LGT_CMD_KICK_OUT => {

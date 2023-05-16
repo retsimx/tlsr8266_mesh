@@ -1,4 +1,4 @@
-use crate::config::{get_flash_adr_light_new_fw, OTA_LED};
+use crate::config::{FLASH_ADR_LIGHT_NEW_FW, OTA_LED};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
@@ -70,7 +70,7 @@ impl OtaManager {
         #[allow(invalid_value)]
             let mut buff: [u8; 256] = unsafe { MaybeUninit::uninit().assume_init() };
 
-        flash_read_page(*get_flash_adr_light_new_fw(), PAGE_SIZE, buff.as_mut_ptr());
+        flash_read_page(FLASH_ADR_LIGHT_NEW_FW, PAGE_SIZE, buff.as_mut_ptr());
         let n = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
         let mut i = 0;
         while i < n {
@@ -79,7 +79,7 @@ impl OtaManager {
             }
 
             flash_read_page(
-                *get_flash_adr_light_new_fw() + i,
+                FLASH_ADR_LIGHT_NEW_FW + i,
                 PAGE_SIZE,
                 buff.as_mut_ptr(),
             );
@@ -108,7 +108,7 @@ impl OtaManager {
         let mut buf: [u8; 4] = [0; 4];
         for i in 0..OtaManager::ERASE_SECTORS_FOR_OTA {
             flash_read_page(
-                *get_flash_adr_light_new_fw() + i * 0x1000,
+                FLASH_ADR_LIGHT_NEW_FW + i * 0x1000,
                 4,
                 buf.as_mut_ptr(),
             );
@@ -126,7 +126,7 @@ impl OtaManager {
     pub fn erase_ota_data(&self) {
         for i in 0..OtaManager::ERASE_SECTORS_FOR_OTA {
             flash_erase_sector(
-                *get_flash_adr_light_new_fw()
+                FLASH_ADR_LIGHT_NEW_FW
                     + (OtaManager::ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000,
             );
         }
@@ -274,7 +274,7 @@ impl OtaManager {
         let fw_flag_telink = START_UP_FLAG;
         let mut flag_new = 0;
         flash_read_page(
-            *get_flash_adr_light_new_fw() + 8,
+            FLASH_ADR_LIGHT_NEW_FW + 8,
             size_of_val(&flag_new) as u32,
             addr_of!(flag_new) as *mut u8,
         );
@@ -285,14 +285,14 @@ impl OtaManager {
 
         let mut flag0 = 0;
         flash_read_page(
-            *get_flash_adr_light_new_fw() + 8,
+            FLASH_ADR_LIGHT_NEW_FW + 8,
             1,
             addr_of!(flag0) as *mut u8,
         );
         if 0x4b != flag0 {
             flag0 = 0x4b;
             flash_write_page(
-                *get_flash_adr_light_new_fw() + 8,
+                FLASH_ADR_LIGHT_NEW_FW + 8,
                 1,
                 addr_of!(flag0) as *mut u8,
             ); //Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota

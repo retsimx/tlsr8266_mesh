@@ -1,4 +1,3 @@
-use crate::pub_mut;
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
 // General stuff
 
@@ -38,12 +37,12 @@ pub const OTA_LED: GPIO_PIN_TYPE = PWM_G;
 pub const FLASH_SECTOR_SIZE: u16 = 4096;
 
 // 512K flash
-pub_mut!(flash_adr_mac, u32, 0x76000);
-pub_mut!(flash_adr_pairing, u32, 0x77000);
-pub_mut!(flash_adr_lum, u32, 0x78000);
-pub_mut!(flash_adr_dev_grp_adr, u32, 0x79000);
-pub_mut!(flash_adr_reset_cnt, u32, 0x7A000);
-pub_mut!(flash_adr_panic_info, u32, 0x7B000);
+pub const FLASH_ADR_MAC: u32 = 0x76000;
+pub const FLASH_ADR_PAIRING: u32 = 0x77000;
+pub const FLASH_ADR_LUM: u32 = 0x78000;
+pub const FLASH_ADR_DEV_GRP_ADR: u32 = 0x79000;
+pub const FLASH_ADR_RESET_CNT: u32 = 0x7A000;
+pub const FLASH_ADR_PANIC_INFO: u32 = 0x7B000;
 // pub_mut!(flash_adr_scene, u32, 0x7C000);
 // pub_mut!(flash_adr_user_data, u32, 0x7D000);
-pub_mut!(flash_adr_light_new_fw, u32, 0x40000);
+pub const FLASH_ADR_LIGHT_NEW_FW: u32 = 0x40000;

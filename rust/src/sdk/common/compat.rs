@@ -10,7 +10,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use critical_section::RawRestoreState;
 use heapless::String;
 use crate::{app};
-use crate::config::{get_flash_adr_panic_info, PANIC_VALID_FLAG};
+use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
@@ -162,7 +162,7 @@ impl<const size: usize> Write for UartStream<size> {
 }
 
 fn write_panic_info<const size: usize>(info: &UartStream<size>) {
-    let panic_addr = *get_flash_adr_panic_info();
+    let panic_addr = FLASH_ADR_PANIC_INFO;
 
     // Clear the panic info sector for writing just in case
     flash_erase_sector(panic_addr);
@@ -194,7 +194,7 @@ async fn delay(ms: u32) {
 
 
 pub async fn check_panic_info() {
-    let panic_addr = *get_flash_adr_panic_info();
+    let panic_addr = FLASH_ADR_PANIC_INFO;
 
     let mut flag: u8 = 0;
     flash_read_page(panic_addr, 1, addr_of_mut!(flag));

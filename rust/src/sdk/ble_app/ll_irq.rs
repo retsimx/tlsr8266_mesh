@@ -2,7 +2,7 @@ use core::mem::{size_of, size_of_val};
 use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::common::{get_sys_chn_adv, get_sys_chn_listen, pair_load_key};
+use crate::common::{SYS_CHN_LISTEN, pair_load_key, SYS_CHN_ADV};
 use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
@@ -36,7 +36,6 @@ fn slave_timing_update_handle()
         if *get_slave_window_size_update() < *get_slave_window_size() {
             set_slave_window_size(*get_slave_window_size_update());
         }
-        set_update_ble_par_success_flag(true);
         set_slave_next_connect_tick(*get_slave_timing_update2_ok_time());
     }
 }
@@ -45,14 +44,11 @@ fn rf_set_rxmode_mesh_listen()
 {
     rf_stop_trx();
     let mut ac = *get_pair_ac();
-    if *get_slave_pairing_state() != 0 {
-        ac = 0x95d6d695;
-    }
 
     rf_set_ble_access_code(ac);
     rf_set_ble_crc_adv();
 
-    rf_set_ble_channel((*get_sys_chn_listen())[*get_st_listen_no() as usize & 3]);
+    rf_set_ble_channel(SYS_CHN_LISTEN[*get_st_listen_no() as usize & 3]);
     rf_set_rxmode();
     set_slave_link_state(4);
 }
@@ -133,7 +129,7 @@ pub fn irq_st_response()
     rf_set_ble_crc_adv();
     let tmp = (unsafe { **get_slave_p_mac() as u32 } ^ read_reg_system_tick()) & 3;
     for uVar4 in tmp..tmp + 4 {
-        rf_set_ble_channel((*get_sys_chn_listen())[uVar4 as usize & 3]);
+        rf_set_ble_channel(SYS_CHN_LISTEN[uVar4 as usize & 3]);
         // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
         // todo: as a normal encrypted packet (bit 7 set)
         (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
@@ -154,22 +150,22 @@ pub fn irq_st_listen()
 
     rf_set_rxmode_mesh_listen();
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());
-    if *get_adv_flag() != 0 {
+    if *get_adv_flag() {
         write_reg_system_tick_irq(*get_tick_per_us() * 7000 + read_reg_system_tick());
         set_p_st_handler(Some(irq_st_adv));
         return;
     }
-    if *get_online_st_flag() == 0 {
+    if !*get_online_st_flag() {
         set_st_listen_no(*get_st_listen_no() + 1);
         // todo: May need to be !=
-        set_adv_flag(if *get_st_listen_no() % *get_adv_interval2listen_interval() as u32 == 0 { 0 } else { 1 });
-        set_online_st_flag(if *get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 == 0 { 0 } else { 1 });
-        if *get_adv_flag() != 0 {
+        set_adv_flag(*get_st_listen_no() % *get_adv_interval2listen_interval() as u32 != 0);
+        set_online_st_flag(*get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 != 0);
+        if *get_adv_flag() {
             write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * *get_tick_per_us() + read_reg_system_tick_irq()));
             set_p_st_handler(Some(irq_st_adv));
             return;
         }
-        if *get_online_st_flag() == 0 {
+        if !*get_online_st_flag() {
             return;
         }
     }
@@ -194,62 +190,42 @@ pub fn irq_st_adv()
 
     set_slave_link_state(1);
 
-    if (*get_adv_flag() == 0 || get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed)) || (*get_iBeaconInterval() != 0 && *get_beacon_with_mesh_adv() == 0) {
-        set_adv_flag(0);
+    if !*get_adv_flag() || get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
+        set_adv_flag(false);
         ST_PNO.store(0, Ordering::Relaxed);
-        if *get_online_st_flag() != 0 {
+        if *get_online_st_flag() {
             write_reg_system_tick_irq(*get_tick_per_us() * 0xdac + read_reg_system_tick());
-            if *get_iBeaconInterval() == 0 || read_reg_system_tick() - LAST_IBEACON_TIME.load(Ordering::Relaxed) <= *get_iBeaconInterval() as u32 * 100000 * *get_tick_per_us()
-            {
-                if *get_tick_per_us() * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
-                    LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
-                } else {
-                    mesh_send_online_status();
-                    if *get_separate_ADVpkt() != 0 {
-                        write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
-                    }
-                }
+            if *get_tick_per_us() * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
+                LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
             } else {
-                if I_BEACON_CNT.load(Ordering::Relaxed) < 3 {
-                    rf_set_ble_access_code_adv();
-                    rf_set_ble_crc_adv();
-
-                    rf_set_ble_channel((*get_sys_chn_adv())[I_BEACON_CNT.load(Ordering::Relaxed) as usize]);
-                    write_reg_system_tick_irq(*get_tick_per_us() * 0x4b0 + read_reg_system_tick());
-                    write_reg_rf_irq_status(1);
-                    rf_start_stx2rx(get_pkt_ibeacon_addr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
-                    I_BEACON_CNT.store(I_BEACON_CNT.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
-                    return;
-                }
-                LAST_IBEACON_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
-                I_BEACON_CNT.store(0, Ordering::Relaxed);
+                mesh_send_online_status();
+                write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
             }
         } else {
             write_reg_system_tick_irq(*get_tick_per_us() * 500 + read_reg_system_tick());
         }
-        set_online_st_flag(0);
+        set_online_st_flag(false);
         set_p_st_handler(Some(irq_st_listen));
         write_reg_rf_irq_status(1);
     } else {
         rf_set_ble_access_code_adv();
         rf_set_ble_crc_adv();
 
-        rf_set_ble_channel((*get_sys_chn_adv())[ST_PNO.load(Ordering::Relaxed) as usize % 3]);
+        rf_set_ble_channel(SYS_CHN_ADV[ST_PNO.load(Ordering::Relaxed) as usize % 3]);
         write_reg_system_tick_irq(*get_tick_per_us() * 0x4b0 + read_reg_system_tick());
         write_reg_rf_irq_status(1);
-        if *get_send_adv_flag() != 0 {
-            if ST_PNO.load(Ordering::Relaxed) < 3 {
-                rf_start_stx2rx(get_pkt_adv_addr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
-            }
+
+        if ST_PNO.load(Ordering::Relaxed) < 3 {
+            rf_start_stx2rx(get_pkt_adv_addr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
         }
+
         ST_PNO.store(ST_PNO.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         if get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
             ST_PNO.store(0, Ordering::Relaxed);
-            set_adv_flag(0);
+            set_adv_flag(false);
         }
-        if *get_separate_ADVpkt() != 0 {
-            set_p_st_handler(Some(irq_st_listen));
-        }
+
+        set_p_st_handler(Some(irq_st_listen));
     }
 }
 
@@ -276,7 +252,6 @@ pub fn irq_st_bridge()
         set_p_st_handler(Some(irq_st_adv));
         write_reg_dma_tx_rptr(0x10);
         set_slave_link_connected(false);
-        set_update_ble_par_success_flag(false);
         if *get_not_need_login() == false {
             set_pair_login_ok(false);
         }
@@ -309,7 +284,7 @@ pub fn irq_st_bridge()
         return;
     }
 
-    if *get_slave_read_status_busy() != 0  && *get_slave_read_status_busy_timeout() * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
+    if *get_slave_read_status_busy() != 0  && SLAVE_READ_STATUS_BUSY_TIMEOUT * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
         rf_link_slave_read_status_stop();
     }
 
@@ -346,7 +321,7 @@ pub fn irq_st_bridge()
 
     let intflag = *get_update_interval_flag();
     if intflag != 0 {
-        if intflag - 1 == 0 && *get_update_interval_time() != 0 {
+        if intflag - 1 == 0 && *get_update_interval_time() {
             let mut pkt: [u32; 6] = [
                 0x12,
                 0xc1002,
@@ -367,7 +342,7 @@ pub fn irq_st_bridge()
                 set_update_interval_flag(2);
             } else {
                 rf_link_add_tx_packet(addr_of!(pkt) as *const rf_packet_att_cmd_t, size_of::<u32>() * pkt.len());
-                set_update_interval_time(0);
+                set_update_interval_time(false);
             }
         }
     }
@@ -442,7 +417,7 @@ pub fn irq_st_ble_rx()
     }
     set_p_st_handler(Some(irq_st_bridge));
     set_slave_tick_brx(*get_tick_per_us() * 100 + read_reg_system_tick());
-    set_slave_timing_adjust_enable(1);
+    set_slave_timing_adjust_enable(true);
     rf_start_brx((*get_pkt_empty()).as_ptr() as u32, *get_slave_tick_brx());
 
     sleep_us(2);
@@ -454,9 +429,6 @@ pub fn irq_st_ble_rx()
 fn irq_light_slave_tx()
 {
     write_reg_rf_irq_status(2);
-    if *get_FtoRX() {
-        set_FtoRX(false);
-    }
 }
 
 #[link_section = ".ram_code"]
@@ -584,8 +556,6 @@ unsafe fn irq_light_slave_rx()
 
         T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-        set_FtoRX(true);
-
         let master_sn = ((entry.sno[2] as u16) << 8) | ((entry.sno[0] >> 3) & 1) as u16;
         if *get_light_conn_sn_master() == master_sn {
             rf_link_timing_adjust(rx_time);
@@ -598,6 +568,7 @@ unsafe fn irq_light_slave_rx()
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {
                 // todo: What the fuck?
+                uprintln!("Here be dragons");
                 if 0x40000001 > *get_slave_timing_update2_ok_time() - read_reg_system_tick() {
                     entry.dma_len = 1;
                     return;

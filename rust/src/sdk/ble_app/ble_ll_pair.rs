@@ -3,7 +3,6 @@ use core::slice;
 
 use crate::{blinken, uprintln};
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
-use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
 use crate::mesh::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
@@ -234,12 +233,8 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             set_pair_enc_enable(false);
         } else {
             get_pkt_read_rsp().l2capLen = 0x12;
-            if *get_rands_fix_flag() == false {
-                unsafe { *(get_pair_rands().as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
-                aes_att_encryption(get_pair_randm().as_ptr(), get_pair_rands().as_ptr(), get_pair_sk().as_mut_ptr());
-            } else {
-                (*get_pair_sk())[0..8].copy_from_slice(&(*get_pair_rands())[0..8]);
-            }
+            unsafe { *(get_pair_rands().as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
+            aes_att_encryption(get_pair_randm().as_ptr(), get_pair_rands().as_ptr(), get_pair_sk().as_mut_ptr());
             (*get_pair_rands())[0..8].copy_from_slice(&(*get_pair_sk())[0..8]);
 
             let mut index = 0;

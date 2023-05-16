@@ -3,7 +3,7 @@ use core::cmp::min;
 use core::mem::transmute;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
-use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
+use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -38,7 +38,6 @@ pub_mut!(rf_tp_base, u32, 0x1D);
 pub_mut!(rf_tp_gain, u32, 0xC);
 pub_mut!(rf_tx_mode, u8, 0);
 pub_mut!(rfhw_tx_power, u8, 0x40);
-pub_mut!(FtoRX, bool, false);
 
 static tbl_agc: [u32; 7] = [0x30333231, 0x182C3C38, 0xC0C1C, 0x0, 0x1B150F0A, 0x322E2721, 0x3E38];
 
@@ -372,13 +371,13 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
             write_reg_rf_rx_gain_agc(tbl_agc[i], (i << 2) as u32)
         }
 
-        if *(*get_flash_adr_mac() as *const u8).offset(0x11) != 0xff {
-            let u_var5 = *(*get_flash_adr_mac() as *const u8).offset(0x11) as u32;
+        if *(FLASH_ADR_MAC as *const u8).offset(0x11) != 0xff {
+            let u_var5 = *(FLASH_ADR_MAC as *const u8).offset(0x11) as u32;
             set_rf_tp_base(u_var5);
             set_rf_tp_gain(((u_var5 - 0x19) << 8) / 80);
         }
-        if *(*get_flash_adr_mac() as *const u8).offset(0x12) != 0xff {
-            let u_var5 = *get_rf_tp_base() - *(*get_flash_adr_mac() as *const u8).offset(0x12) as u32;
+        if *(FLASH_ADR_MAC as *const u8).offset(0x12) != 0xff {
+            let u_var5 = *get_rf_tp_base() - *(FLASH_ADR_MAC as *const u8).offset(0x12) as u32;
             set_rf_tp_gain((u_var5 << 8) / 80);
         }
     } else {
@@ -436,13 +435,6 @@ pub_mut!(slave_connected_tick, u32, 0);
 pub_mut!(slave_adv_enable, bool, false);
 pub_mut!(slave_connection_enable, bool, false);
 pub_mut!(mac_id, [u8; 6], [0; 6]);
-pub_mut!(pkt_ibeacon, rf_packet_adv_ind_module_t, rf_packet_adv_ind_module_t {
-    dma_len: 0x27,
-    _type: 0,
-    rf_len: 0x25,
-    advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
-    data: [0; 31]
-});
 pub_mut!(pkt_adv, rf_packet_adv_ind_module_t, rf_packet_adv_ind_module_t {
     dma_len: 0x27,
     _type: 0,
@@ -845,14 +837,14 @@ pub fn rf_link_slave_init(interval: u32)
             write_reg8(0xf04, 0x68);
         }
 
-        if *(*get_flash_adr_mac() as *const u32) == u32::MAX {
+        if *(FLASH_ADR_MAC as *const u32) == u32::MAX {
             let mac: [u16; 2] = [rand(), rand()];
-            flash_write_page(*get_flash_adr_mac(), 4, mac.as_ptr() as *const u8);
+            flash_write_page(FLASH_ADR_MAC, 4, mac.as_ptr() as *const u8);
         }
 
-        let pair_addr = *(*get_flash_adr_pairing() as *const u32) + 1;
+        let pair_addr = *(FLASH_ADR_PAIRING as *const u32) + 1;
         if pair_addr == 0 {
-            let pairing_addr = *get_flash_adr_pairing();
+            let pairing_addr = FLASH_ADR_PAIRING;
             let mut buff: [u8; 16] = [0; 16];
             buff[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
             flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
@@ -882,7 +874,7 @@ pub fn rf_link_slave_init(interval: u32)
             loop {}
         }
 
-        flash_read_page(*get_flash_adr_mac(), 6, (*get_mac_id()).as_mut_ptr());
+        flash_read_page(FLASH_ADR_MAC, 6, (*get_mac_id()).as_mut_ptr());
         set_slave_p_mac((*get_mac_id()).as_ptr());
 
         (*get_pkt_adv()).advA = *get_mac_id();
@@ -1087,8 +1079,6 @@ pub fn rf_start_stx2rx(addr: u32, tick: u32)
     write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
     write_reg_rf_mode_control(0x87);                                // Set mode
     write_reg_dma3_addr(addr as u16);
-
-    set_FtoRX(true);
 }
 
 pub fn rf_start_srx2tx(addr: u32, tick: u32)

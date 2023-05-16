@@ -711,7 +711,6 @@ pub_mut!(pkt_read_rsp, rf_packet_att_readRsp_t, rf_packet_att_readRsp_t {
 	value: [0; 22]
 });
 
-pub_mut!(rands_fix_flag, bool, false);
 pub_mut!(pair_rands, [u8; 8], [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]);
 pub_mut!(pair_randm, [u8; 8], [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]);
 
@@ -722,13 +721,7 @@ pub_mut!(online_status_interval2listen_interval, u16, 8);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
 pub_mut!(rf_slave_ota_busy_mesh_en, u8, 0);
 
-/////////////// for passive switch ///////////////////////////////////////////////
-pub_mut!(separate_ADVpkt, u8, 0);
 //if 1 send one adv packet in each interrupt
-pub_mut!(mesh_chn_amount, u8, 4); //amount of sys_chn_listen
-
-// Scene shit needed to link
-pub_mut!(pkt_mesh_scene_rsp, [u8; 1], [0]);
 
 // flash mesh extend shit needed to link
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
@@ -739,16 +732,6 @@ pub_mut!(
     u32,
     CFG_SECTOR_ADR_CALIBRATION_CODE
 );
-
-pub_mut!(adv_uuid_flag, u8, 0);
-pub_mut!(adv_uuid, [u8; 4], [0x03, 0x02, 0xAB, 0xCD]);
-pub_mut!(passive_en, u8, 0);
-
-pub_mut!(work_sleep_en, u8, 0);
-pub_mut!(start2adv, u32, 0);
-//us
-pub_mut!(iBeaconInterval, u8, 0);
-pub_mut!(beacon_with_mesh_adv, u8, 0);
 
 pub_mut!(
     slave_status_record,
@@ -764,8 +747,7 @@ pub_mut!(
     size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
 );
 
-pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
-const RC_PKT_BUF_MAX: u8 = 2;
+pub const RC_PKT_BUF_MAX: u8 = 2;
 pub_mut!(
     rc_pkt_buf,
     [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize],
@@ -777,52 +759,36 @@ pub_mut!(
     }; RC_PKT_BUF_MAX as usize]
 );
 
-pub_mut!(mesh_cmd_cache_num, u8, RC_PKT_BUF_MAX);
-pub_mut!(device_address_mask, u16, DEVICE_ADDR_MASK_DEFAULT);
 pub_mut!(dev_address_next_pos, u16, 0);
 
 pub_mut!(need_update_connect_para, bool, false);
-pub_mut!(update_connect_para_delay_ms, u32, 0x3e8);
+pub const UPDATE_CONNECT_PARA_DELAY_MS: u32 = 1000;
 
 pub_mut!(update_interval_user_max, u16, 0);
 pub_mut!(update_interval_user_min, u16, 0);
-pub_mut!(update_ble_par_success_flag, bool, false);
 pub_mut!(update_timeout_user, u16, 0);
-pub_mut!(interval_th, u8, 0x10);
+pub const INTERVAL_THRESHOLD: u16 = 16;
 pub_mut!(update_interval_flag, u16, 0);
-pub_mut!(update_interval_time, u32, 0);
-pub_mut!(tx_packet_bridge_delay_us, u32, 0);
-pub_mut!(tx_packet_bridge_tick, u32, 0);
-pub_mut!(online_status_comp, u8, 3);
-pub_mut!(slave_data_valid, u32, 0); // todo: Should be bool?
-pub_mut!(mesh_send_online_status_flag, bool, true);
-pub_mut!(send_self_online_status_cycle, u8, 0);
+pub_mut!(update_interval_time, bool, false);
+pub const ONLINE_STATUS_COMP: u32 = 3;
+pub_mut!(slave_data_valid, u32, 0);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
 pub_mut!(slave_sno_sending, [u8; 3], [0; 3]);
 pub_mut!(app_cmd_time, u32, 0);
 pub_mut!(mesh_user_cmd_idx, u8, 0);
 pub_mut!(slave_tx_cmd_time, u32, 0);
-pub_mut!(lpn_retransmit_cnt, u8, 0);
-pub_mut!(gateway_tx_wptr, u8, 0);
-pub_mut!(gateway_tx_rptr, u8, 0);
 pub_mut!(blt_tx_wptr, u8, 0);
-pub_mut!(mesh_notify_enc_enable, u8, 0);
 pub_mut!(slave_status_buffer_wptr, u8, 0);
 pub_mut!(slave_status_buffer_rptr, u8, 0);
 pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_read_status_unicast_flag, u8, 0);
 pub_mut!(mesh_node_report_enable, bool, false);
-pub_mut!(slave_timing_adjust_enable, u32, 0); // Should be bool?
+pub_mut!(slave_timing_adjust_enable, bool, false);
 pub_mut!(slave_tick_brx, u32, 0);
-pub_mut!(slave_pairing_master_tick, u32, 0);
 pub_mut!(slave_window_offset, u32, 0);
-pub_mut!(slave_conn_delay, u32, 0);
-pub_mut!(slave_link_sno, [u8; 3], [0; 3]);
-pub_mut!(slave_pairing_state, u32, 0);
 pub_mut!(slave_instant, u16, 0);
 pub_mut!(slave_status_tick, u8, 0);
-pub_mut!(slave_n6, u8, 0);
 pub_mut!(slave_link_cmd, u8, 0);
 pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
@@ -830,11 +796,10 @@ pub_mut!(slave_read_status_response, bool, false);
 pub_mut!(slave_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_status_record_idx, u16, 0);
 pub_mut!(notify_req_mask_idx, u8, 0);
-pub_mut!(adv_flag, u8, 1);
-pub_mut!(send_adv_flag, u8, 1);
-pub_mut!(online_st_flag, u8, 1);
+pub_mut!(adv_flag, bool, true);
+pub_mut!(online_st_flag, bool, true);
 pub_mut!(slave_read_status_busy_time, u32, 0);
-pub_mut!(slave_read_status_busy_timeout, u32, 25000);
+pub const SLAVE_READ_STATUS_BUSY_TIMEOUT: u32 = 25000;
 pub_mut!(st_listen_no, u32, 0);
 
 pub_mut!(pkt_light_adv_status, rf_packet_att_write_t, rf_packet_att_write_t {

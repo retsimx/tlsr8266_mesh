@@ -6,7 +6,7 @@ use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM,
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
 use crate::common::REGA_LIGHT_OFF;
-use crate::config::{FLASH_SECTOR_SIZE, get_flash_adr_lum, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
+use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -255,14 +255,14 @@ impl LightManager {
 
     //erase flash
     fn light_lum_erase(&mut self) {
-        self.light_lum_addr = *get_flash_adr_lum();
-        flash_erase_sector(*get_flash_adr_lum());
+        self.light_lum_addr = FLASH_ADR_LUM;
+        flash_erase_sector(FLASH_ADR_LUM);
         self.light_state_save();
     }
 
     //save cur lum value, if disconnected for a while
     pub fn light_state_save(&mut self) {
-        if self.light_lum_addr >= (*get_flash_adr_lum() + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
+        if self.light_lum_addr >= (FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
         {
             self.light_lum_erase();
             return;
@@ -288,7 +288,7 @@ impl LightManager {
     pub fn light_lum_retrieve(&mut self) {
         let mut i = 0;
         while i < FLASH_SECTOR_SIZE {
-            self.light_lum_addr = *get_flash_adr_lum() + i as u32;
+            self.light_lum_addr = FLASH_ADR_LUM + i as u32;
 
             let lum_save = unsafe { &*(self.light_lum_addr as *const LumSaveT) };
             match lum_save.save_flag {

@@ -314,22 +314,11 @@ pub fn rf_link_slave_add_status(packet: &mesh_pkt_t)
 #[inline(never)]
 pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     if packet.rf_len != 0x25 || packet.l2capLen != 0x21 {
-        if *get_sw_no_pair() == false {
-            return false;
-        }
-        if packet.rf_len != 0x24 {
-            return false;
-        }
-        if packet.l2capLen != 0x20 {
-            return false;
-        }
-        if packet.chanId != 0xff04 {
-            return false;
-        }
-        set_enc_disable(true);
+        return false;
     }
 
     if *get_slave_link_connected() {
+        // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 1000) as i32 {
         if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 1000) {
             set_enc_disable(false);
             return false;
@@ -609,6 +598,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 3;
             for channel_index in start_chan_idx..start_chan_idx + 4 {
                 if *get_slave_link_connected() {
+                    // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
                     if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                         rf_stop_trx();
                         set_enc_disable(false);
@@ -854,8 +844,8 @@ pub fn is_receive_ota_window() -> bool
 {
     static TICK_LOOP: AtomicU32 = AtomicU32::new(0);
 
-    if *get_loop_interval_us() != 0 {
-        if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= *get_loop_interval_us() as u32 * *get_tick_per_us() {
+    if LOOP_INTERVAL_US != 0 {
+        if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= LOOP_INTERVAL_US as u32 * *get_tick_per_us() {
             return true;
         }
         TICK_LOOP.store(read_reg_system_tick(), Ordering::Relaxed);
@@ -1154,48 +1144,46 @@ pub fn back_to_rxmode_bridge()
 
 fn rf_link_proc_ttc(cmd_time: u32, last_ttc: u8, src: &mut mesh_pkt_t)
 {
-    unsafe {
-        if src.op & 0x3f != LGT_CMD_MESH_OTA_DATA {
-            let mut new_ttc_base = (read_reg_system_tick() - cmd_time) / *get_tick_per_us();
-            let mut ttc_divisor = last_ttc >> 6;
-            let mut new_ttc = new_ttc_base >> 10;
-            if ttc_divisor != 0 {
-                new_ttc = new_ttc_base >> 0xc;
-                if ttc_divisor != 1 {
-                    new_ttc = new_ttc_base >> 0xe;
-                    if ttc_divisor != 2 {
-                        new_ttc = 1;
-                        if ttc_divisor == 3 {
-                            new_ttc = new_ttc_base >> 0x12;
-                        }
+    if src.op & 0x3f != LGT_CMD_MESH_OTA_DATA {
+        let mut new_ttc_base = (read_reg_system_tick() - cmd_time) / *get_tick_per_us();
+        let mut ttc_divisor = last_ttc >> 6;
+        let mut new_ttc = new_ttc_base >> 10;
+        if ttc_divisor != 0 {
+            new_ttc = new_ttc_base >> 0xc;
+            if ttc_divisor != 1 {
+                new_ttc = new_ttc_base >> 0xe;
+                if ttc_divisor != 2 {
+                    new_ttc = 1;
+                    if ttc_divisor == 3 {
+                        new_ttc = new_ttc_base >> 0x12;
                     }
                 }
             }
+        }
 
-            new_ttc = new_ttc + ((last_ttc as u32) & 0x3f);
-            while 0x3e < new_ttc {
-                if ttc_divisor == 0 || ttc_divisor == 1 {
-                    new_ttc = new_ttc >> 2;
-                } else {
-                    if ttc_divisor != 2 {
-                        if ttc_divisor != 3 {
-                            if ttc_divisor < 3 {
-                                ttc_divisor = ttc_divisor + 1;
-                            }
-                            src.par[9] = (ttc_divisor << 6 | 1);
-                        }
-                        new_ttc = 0x3f;
-                        src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
-                    }
-                    new_ttc = new_ttc >> 4;
-                }
-                ttc_divisor = ttc_divisor + 1;
-            }
-            if new_ttc == 0 {
-                src.par[9] = (ttc_divisor << 6 | 1);
+        new_ttc = new_ttc + ((last_ttc as u32) & 0x3f);
+        while 0x3e < new_ttc {
+            if ttc_divisor == 0 || ttc_divisor == 1 {
+                new_ttc = new_ttc >> 2;
             } else {
-                src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
+                if ttc_divisor != 2 {
+                    if ttc_divisor != 3 {
+                        if ttc_divisor < 3 {
+                            ttc_divisor = ttc_divisor + 1;
+                        }
+                        src.par[9] = (ttc_divisor << 6 | 1);
+                    }
+                    new_ttc = 0x3f;
+                    src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
+                }
+                new_ttc = new_ttc >> 4;
             }
+            ttc_divisor = ttc_divisor + 1;
+        }
+        if new_ttc == 0 {
+            src.par[9] = (ttc_divisor << 6 | 1);
+        } else {
+            src.par[9] = (((new_ttc as u8) & 0x3f) | (ttc_divisor << 6));
         }
     }
 }
@@ -1249,11 +1237,12 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
                 (*get_pkt_light_data())._type |= BIT!(7); // 0x7f;
                 rf_link_proc_ttc(*get_app_cmd_time(), 0, unsafe { &mut *(addr_of_mut!((*get_pkt_light_data()).value[7]) as *mut mesh_pkt_t) });
                 if rf_link_is_notify_req((*get_pkt_light_data()).value[7] & 0x3f) {
-                    let mut uVar3 = (((read_reg_system_tick() - bridge_cmd_time) / *get_tick_per_us()) + 500) >> 10;
-                    if uVar3 > 0xff {
-                        uVar3 = 0xff;
-                    }
-                    (*get_pkt_light_data()).value[24] = uVar3 as u8;
+                    let mut relay_time = min(
+                        (((read_reg_system_tick() - bridge_cmd_time) / *get_tick_per_us()) + 500) >> 10,
+                        0xff
+                    );
+
+                    (*get_pkt_light_data()).value[24] = relay_time as u8;
                 }
                 rf_start_stx_mesh(&*get_pkt_light_data(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
                 sleep_us(700);
@@ -1264,7 +1253,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
 
 fn mesh_user_command_pkt_enc2buf()
 {
-    if !*get_security_enable() || (*get_sw_no_pair() && (*get_pkt_user_cmd()).dma_len == 0x26) {
+    if !*get_security_enable() {
         get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
     } else {
         // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
@@ -1377,7 +1366,7 @@ pub fn tx_packet_bridge()
         }
         app_bridge_cmd_handle(*get_t_bridge_cmd());
 
-        if *get_slave_data_valid() == 0 && !*get_sw_flag() {
+        if *get_slave_data_valid() == 0 {
             mesh_send_user_command();
         }
     });
@@ -1463,11 +1452,6 @@ pub fn rf_ota_save_data(data: *const u8) -> OtaState
     }
 }
 
-pub fn register_mesh_ota_master_ui(cb: fn(*const u8))
-{
-    set_mesh_ota_master_ui_sending(Some(cb));
-}
-
 pub fn rf_link_match_group_mac(sno: *const app_cmd_value_t) -> (bool, bool)
 {
     let mut group_match = false;
@@ -1520,15 +1504,11 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                 } else {
                     set_mesh_user_cmd_idx(*get_bridge_max_cnt() as u8);
                 }
-                if *get_sw_no_pair() && *get_sw_flag() {
-                    (*get_pkt_user_cmd()).dma_len = 0x26;
-                    (*get_pkt_user_cmd()).l2capLen = 0x20;
-                    (*get_pkt_user_cmd()).rf_len = 0x24;
-                } else {
-                    (*get_pkt_user_cmd()).dma_len = 0x27;
-                    (*get_pkt_user_cmd()).l2capLen = 0x21;
-                    (*get_pkt_user_cmd()).rf_len = 0x25;
-                }
+
+                (*get_pkt_user_cmd()).dma_len = 0x27;
+                (*get_pkt_user_cmd()).l2capLen = 0x21;
+                (*get_pkt_user_cmd()).rf_len = 0x25;
+
                 (*get_pkt_user_cmd())._type = 2;
                 (*get_pkt_user_cmd()).chanId = 0xff03;
                 (*get_pkt_user_cmd()).src_tx = *get_device_address() as u16;

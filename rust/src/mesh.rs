@@ -12,9 +12,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
-use crate::sdk::mcu::crypto::aes_att_encryption;
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
-use crate::vendor_light::get_adv_rsp_pri_data_addr;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -524,34 +522,8 @@ impl MeshManager {
         app().light_manager.device_status_update();
     }
 
-    fn get_pair_mic(&self, keyin: *const u32, macin: *const u16) -> u32
-    {
-        let mut dest = [0u32; 4];
-        let mut key = [0u32; 4];
-        let mut src = [0u32; 4];
-
-        unsafe { key[0] = *keyin; }
-        key[1] = 0;
-        key[2] = 0x4c544c41;
-        key[3] = 0x37313032;
-
-        unsafe { src[0] = *macin.offset(0) as u32 | (*macin.offset(1) as u32) << 16; }
-        unsafe { src[1] = *macin.offset(2) as u32; }
-
-        aes_att_encryption(key.as_ptr() as *const u8, src.as_ptr() as *const u8, dest.as_mut_ptr() as *mut u8);
-        return dest[0];
-    }
-
-    fn set_pair_mic(&self) {
-        if *get_auth_code_en() != false {
-            let mic = [self.get_pair_mic(get_auth_code_addr() as *const u32, *get_slave_p_mac() as *const u16), 0];
-            unsafe { mic.as_ptr().copy_to((get_adv_rsp_pri_data_addr() as u32 + 0x17) as *mut u32, 2); }
-        }
-    }
-
     pub fn mesh_security_enable(&self, enable: bool)
     {
         set_security_enable(enable);
-        self.set_pair_mic();
     }
 }

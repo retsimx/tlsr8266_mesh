@@ -2,7 +2,7 @@ use crate::config::{
     get_flash_adr_pairing, get_flash_adr_reset_cnt, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::light::{get_pair_config_mesh_ltk, get_pair_config_pwd_encode_enable};
+use crate::sdk::light::{get_pair_config_mesh_ltk};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use core::cmp::min;
@@ -208,9 +208,7 @@ pub fn kick_out(par: KickoutReason) {
 
         let mut buff: [u8; 16] = [0; 16];
         buff[0] = PAIR_VALID_FLAG;
-        if *get_pair_config_pwd_encode_enable() != false {
-            buff[15] = PAIR_VALID_FLAG;
-        }
+        buff[15] = PAIR_VALID_FLAG;
 
         if *get_mesh_pair_enable() {
             set_get_mac_en(true);

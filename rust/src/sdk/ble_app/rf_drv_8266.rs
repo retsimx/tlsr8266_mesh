@@ -870,9 +870,7 @@ pub fn rf_link_slave_init(interval: u32)
 
             let mut buff: [u8; 16] = [0; 16];
             buff[0] = PAIR_VALID_FLAG;
-            if *get_pair_config_pwd_encode_enable() != false {
-                buff[15] = PAIR_VALID_FLAG;
-            }
+            buff[15] = PAIR_VALID_FLAG;
 
             if *get_mesh_pair_enable() {
                 set_get_mac_en(true);

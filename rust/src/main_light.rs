@@ -10,7 +10,7 @@ use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, register_mesh_ota_master_ui, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -45,7 +45,7 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ: u32 = config_led_event!(8,8,0,LED_MASK);
 // pub const LED_EVENT_FLASH_4HZ_3T: u32 = config_led_event!(2,2,3,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
-pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
+// pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
 pub_mut!(buff_response, [rf_packet_att_data_t; 48], [rf_packet_att_data_t {
     dma_len: 0,
@@ -73,12 +73,6 @@ pub_mut!(led_is_on, u32, 0);
 
 fn cfg_led_event(e: u32) {
     set_led_event_pending(e);
-}
-
-fn mesh_ota_master_led(_: *const u8) {
-    if *get_led_count() == 0 && *get_led_event_pending() == 0 {
-        cfg_led_event(LED_EVENT_FLASH_0P25HZ_1T);
-    }
 }
 
 pub fn light_hw_timer1_config() {
@@ -170,8 +164,6 @@ pub fn user_init() {
 
     app().light_manager.device_status_update();
     app().mesh_manager.mesh_security_enable(true);
-
-    register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
 }
 
 fn proc_led() {

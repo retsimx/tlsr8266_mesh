@@ -150,9 +150,7 @@ pub fn irq_st_listen()
     rf_stop_trx();
 
     app_bridge_cmd_handle(read_reg_system_tick());
-    if *get_sw_flag() == false {
-        mesh_send_user_command();
-    }
+    mesh_send_user_command();
 
     rf_set_rxmode_mesh_listen();
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());

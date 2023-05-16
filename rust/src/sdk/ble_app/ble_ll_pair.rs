@@ -7,7 +7,7 @@ use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
 use crate::mesh::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
-use crate::sdk::light::{get_adr_flash_cfg_idx, get_ble_pair_st, get_enc_disable, get_pair_config_pwd_encode_enable, get_pair_config_valid_flag, get_pair_ivm, get_pair_ivs, get_pair_login_ok, get_pair_ltk, get_pair_ltk_mesh, get_pair_ltk_org, get_pair_nn, get_pair_pass, get_pair_randm, get_pair_rands, get_pair_setting_flag, get_pair_sk, get_pair_sk_copy, get_pair_work, get_pairRead_pending, get_pkt_read_rsp, get_rands_fix_flag, get_security_enable, get_set_mesh_info_expired_flag, get_set_mesh_info_time, get_slave_p_mac, get_sw_no_pair, LGT_CMD_DEL_PAIR, mesh_pkt_t, PairState, rf_packet_att_readRsp_t, rf_packet_att_write_t, rf_packet_ll_app_t, set_adr_flash_cfg_idx, set_ble_pair_st, set_pair_enc_enable, set_pair_login_ok, set_pair_setting_flag, set_pairRead_pending};
+use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 
@@ -68,28 +68,8 @@ pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
         return *get_enc_disable();
     }
 
-    if *get_sw_no_pair() == false {
-        ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
-    } else {
-        let mut breakit = false;
-        if *get_mesh_pair_enable() == true {
-            if *get_pair_setting_flag() != PairState::PairSetted || (*ps).op & 0x3f == 9 {
-                ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
-                breakit = true;
-            }
-        }
-        if !breakit {
-            let mut index = 0;
-            loop {
-                ltk[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
-                index = index + 1;
+    ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
 
-                if index == 0x10 {
-                    break;
-                }
-            }
-        }
-    }
     let mut result;
     if (*ps).chanId as u16 == 0xffff {
         result = aes_att_decryption_packet(
@@ -122,23 +102,7 @@ pub fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
         if ltk[0] == 0 {
             result = false;
             if *get_security_enable() {
-                if *get_sw_no_pair() {
-                    if *get_mesh_pair_enable() && (*get_pair_setting_flag() != PairState::PairSetted || (*ps).op & 0x3f == 9) {
-                        ltk.copy_from_slice(&(*get_pair_ltk_org())[0..16]);
-                    } else {
-                        let mut index = 0;
-                        loop {
-                            ltk[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
-                            index = index + 1;
-
-                            if index == 0x10 {
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
-                }
+                ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
 
                 if (*ps).chanId == 0xffff {
                     aes_att_encryption_packet(
@@ -181,11 +145,8 @@ pub fn pair_save_key()
 {
     let mut pass = [0u8; 16];
 
-    pass[0] = *get_pair_config_valid_flag();
-
-    if *get_pair_config_pwd_encode_enable() != false {
-        pass[15] = *get_pair_config_valid_flag();
-    }
+    pass[0] = PAIR_CONFIG_VALID_FLAG;
+    pass[15] = PAIR_CONFIG_VALID_FLAG;
 
     if *get_mesh_pair_enable() != false {
         pass[1] = if *get_get_mac_en() { 1 } else { 0 };
@@ -385,16 +346,6 @@ pub fn pair_write(data: *const rf_packet_att_write_t) -> bool
     }
 
     if opcode == 4 {
-        if *get_sw_no_pair() && *get_mesh_pair_enable() {
-            let mut index = 0;
-            loop {
-                (*get_pair_ltk_org())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
-                index = index + 1;
-                if index == 0x10 {
-                    break;
-                }
-            }
-        }
         if *get_security_enable() == false {
             if *get_pair_login_ok() != false && *get_ble_pair_st() == 0xf {
                 (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });

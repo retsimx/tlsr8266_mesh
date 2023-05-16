@@ -212,7 +212,7 @@ pub fn pair_flash_config_init() -> bool
     let result;
 
     unsafe {
-        if *get_pair_config_valid_flag() == *(*get_flash_adr_pairing() as *const u8) {
+        if PAIR_CONFIG_VALID_FLAG == *(*get_flash_adr_pairing() as *const u8) {
             let mut index = 0x40;
             loop {
                 if *(*get_flash_adr_pairing() as *const u8).offset(index) != *(*get_flash_adr_pairing() as *const u8) {
@@ -238,53 +238,50 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 {
     let mut destbuf = [0u32; 4];
 
-    if *get_sw_no_pair() == false {
-        // todo: Why is this called twice? It's called twice in the original code...
-        aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
-        aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
+    // todo: Why is this called twice? It's called twice in the original code...
+    aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
+    aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
 
-        let mut bit = destbuf[0] >> 1 ^ destbuf[0];
-        let mut bit_count = 1;
-        let mut inner_count = 0;
+    let mut bit = destbuf[0] >> 1 ^ destbuf[0];
+    let mut bit_count = 1;
+    let mut inner_count = 0;
+    loop {
+        if (bit & 1) == 0 {
+            break;
+        }
+        inner_count = inner_count + 1;
+        if 5 < inner_count {
+            destbuf[0] = destbuf[0] ^ 1 << bit_count;
+            inner_count = 0;
+        }
+        bit_count = bit_count + 1;
+        if bit_count == 0x20 {
+            break;
+        }
+    }
+
+    let mut finished = false;
+    bit = 0xaaaaaaaa;
+    loop {
+        inner_count = 0;
+        bit_count = 0;
         loop {
-            if (bit & 1) == 0 {
-                break;
-            }
-            inner_count = inner_count + 1;
-            if 5 < inner_count {
-                destbuf[0] = destbuf[0] ^ 1 << bit_count;
-                inner_count = 0;
-            }
+            inner_count = inner_count + if (1 << bit_count & bit) as u32 != 0 { 1 } else { 0 };
             bit_count = bit_count + 1;
             if bit_count == 0x20 {
                 break;
             }
         }
-
-        let mut finished = false;
-        bit = 0xaaaaaaaa;
-        loop {
-            inner_count = 0;
-            bit_count = 0;
-            loop {
-                inner_count = inner_count + if (1 << bit_count & bit) as u32 != 0 { 1 } else { 0 };
-                bit_count = bit_count + 1;
-                if bit_count == 0x20 {
-                    break;
-                }
-            }
-            if inner_count < 3 {
-                destbuf[0] = destbuf[0] ^ 0xff;
-            }
-            if finished {
-                break;
-            }
-            bit = destbuf[0] ^ 0x55555555;
-            finished = true;
+        if inner_count < 3 {
+            destbuf[0] = destbuf[0] ^ 0xff;
         }
-    } else {
-        destbuf[0] = 0xa3923752;
+        if finished {
+            break;
+        }
+        bit = destbuf[0] ^ 0x55555555;
+        finished = true;
     }
+
     return destbuf[0];
 }
 
@@ -326,7 +323,7 @@ pub fn pair_load_key()
         }
 
         let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
-        if pair_config_flag == *get_pair_config_valid_flag() {
+        if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
             decode_password((*get_pair_pass()).as_mut_slice());
         }
 

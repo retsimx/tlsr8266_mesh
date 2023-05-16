@@ -7,7 +7,8 @@ use crate::{pub_mut, BIT};
 use crate::config::PAIR_VALID_FLAG;
 use crate::mesh::mesh_node_st_val_t;
 
-pub_mut!(pair_config_valid_flag, u8, 0xFA);
+pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
+
 // These are filled at startup from values in config.rs
 pub_mut!(pair_config_mesh_name, [u8; 16], [0; 16]);
 pub_mut!(pair_config_mesh_pwd, [u8; 16], [0; 16]);
@@ -34,7 +35,6 @@ pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize], [0; MAX_GROUP_NUM as usiz
 pub_mut!(slave_p_mac, *const u8, null());
 
 pub_mut!(adr_flash_cfg_idx, i32, 0);
-pub_mut!(sw_no_pair, bool, false);
 
 pub_mut!(slave_link_connected, bool, false);
 
@@ -48,21 +48,18 @@ pub_mut!(pair_nn, [u8; 16], [0; 16]);
 pub_mut!(pair_pass, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
-pub_mut!(pair_ltk_org, [u8; 16], [0; 16]);
 
 pub_mut!(cur_ota_flash_addr, u32, 0);
-pub_mut!(mesh_ota_master_100_flag, bool, false);
 pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::CONTINUE);
 pub_mut!(rf_slave_ota_terminate_flag, bool, false);
 pub_mut!(mesh_node_max, u8, 0);
 
-pub_mut!(rf_slave_ota_timeout_def_s, u16, 0x1e);
-pub_mut!(rf_slave_ota_timeout_s, u16, 0x1e);
+pub_mut!(rf_slave_ota_timeout_s, u16, 0x30);
 pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 
 pub_mut!(tick_per_us, u32, 0x20);
-pub_mut!(loop_interval_us, u16, 0x2710);
+pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 pub_mut!(enc_disable, bool, false);
@@ -70,8 +67,6 @@ pub_mut!(enc_disable, bool, false);
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
-
-pub_mut!(mesh_ota_master_ui_sending, Option<fn(*const u8)>, Option::None);
 
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
@@ -701,9 +696,6 @@ pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
 // Shit required for linking
 /////////////// password encode sk initial  ///////////////////////////////////////////////////
 pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
-pub_mut!(pair_config_pwd_encode_enable, bool, true);
-pub_mut!(auth_code, [u8; 4], [0x01, 0x02, 0x03, 0x04]);
-pub_mut!(auth_code_en, bool, false);
 pub_mut!(ble_pair_st, u8, 0);
 pub_mut!(pair_enc_enable, bool, false);
 pub_mut!(pair_ivs, [u8; 8], [0; 8]);
@@ -771,8 +763,7 @@ pub_mut!(
     u16,
     size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
 );
-pub_mut!(SW_Low_Power, bool, false);
-// pub_mut!(SW_Low_Power_rsp_flag, u8, 0);
+
 pub_mut!(mesh_ota_only_calibrate_type1, u8, 0);
 const RC_PKT_BUF_MAX: u8 = 2;
 pub_mut!(
@@ -804,7 +795,6 @@ pub_mut!(tx_packet_bridge_delay_us, u32, 0);
 pub_mut!(tx_packet_bridge_tick, u32, 0);
 pub_mut!(online_status_comp, u8, 3);
 pub_mut!(slave_data_valid, u32, 0); // todo: Should be bool?
-pub_mut!(sw_flag, bool, false);
 pub_mut!(mesh_send_online_status_flag, bool, true);
 pub_mut!(send_self_online_status_cycle, u8, 0);
 pub_mut!(t_bridge_cmd, u32, 0);

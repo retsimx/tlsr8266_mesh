@@ -13,7 +13,7 @@ fi
 
 cd rust
 
-cargo build --color=always --release -Z build-std=core
+cargo build --color=always --release -Z build-std=core --all-features
 
 for i in target/thumbv6m-none-eabi/release/deps/*.ll; do
   bname="${i%.*}"

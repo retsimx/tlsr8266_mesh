@@ -28,8 +28,6 @@ use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
 use crate::version::BUILD_VERSION;
 
-const ENABLE_16MHZ_XTAL: bool = false;
-
 const RF_FAST_MODE: bool = true;
 const RF_TRX_MODE: u8 = 0x80;
 const RF_TRX_OFF: u8 = 0x45;
@@ -360,11 +358,12 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
     set_rf_tx_mode(0);
     if enable {
         set_rfhw_tx_power(0x40); // FR_TX_PA_MAX_POWER
-        if ENABLE_16MHZ_XTAL {
-            load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
-        } else {
-            load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
-        }
+
+        #[cfg(feature = "xtal-16mhz")]
+        load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32);
+
+        #[cfg(not(feature = "xtal-16mhz"))]
+        load_tbl_cmd_set(tbl_rf_ini.as_ptr(), tbl_rf_ini.len() as u32 - 4);
 
         // todo: Should this be 0..7? There's an extra couple of bytes of data in the 7th int
         for i in 0..6 {

@@ -43,7 +43,7 @@ __start:					@ MUST,  referenced by boot.link
 
 	.org 0x0
 	tj	__reset
-	.word	(BUILD_VERSION)
+	.word	(XTAL_16MHZ << 31 | BUILD_VERSION)
 	.org 0x8
 	.word	(0x544c4e4b)
 	.word	(0x00880120)    @(0x00880000 + _ramcode_size_div_16_align_256_)

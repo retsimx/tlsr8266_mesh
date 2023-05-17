@@ -4,7 +4,7 @@ use core::mem::transmute;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 use crate::config::{get_flash_adr_mac, get_flash_adr_pairing, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
+use crate::{BIT, pub_mut, pub_static, regrw, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};

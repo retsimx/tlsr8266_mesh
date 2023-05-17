@@ -1,6 +1,6 @@
 use core::mem::size_of_val;
 use core::ptr::{addr_of, addr_of_mut, null, null_mut};
-use crate::{blinken, pub_mut, uprintln};
+use crate::{pub_mut, uprintln};
 use crate::sdk::ble_app::rf_drv_8266::get_gAttributes;
 use crate::sdk::light::{ll_packet_l2cap_data_t, rf_packet_l2cap_head_t, rf_packet_version_ind_t, rf_packet_feature_rsp_t, rf_packet_ctrl_unknown_t, rf_packet_att_mtu_t, rf_packet_att_errRsp_t, rf_packet_att_readRsp_t, rf_packet_att_write_t, get_rf_slave_ota_finished_flag, set_rf_slave_ota_terminate_flag, OtaState, rf_packet_att_writeRsp_t};
 use crate::sdk::mcu::register::read_reg_system_tick;

@@ -16,25 +16,24 @@ use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::uart_manager::UartManager;
 use crate::version::BUILD_VERSION;
 
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
-    pub light_manager: LightManager,
-    pub uart_manager: UartManager
+    // pub light_manager: LightManager,
+    // pub uart_manager: UartManager
 }
 
-#[embassy_executor::task]
-async fn light_manager(spawner: Spawner) {
-    app().light_manager.run(spawner).await;
-}
-
-#[embassy_executor::task]
-async fn uart_manager(spawner: Spawner) {
-    app().uart_manager.run(spawner).await;
-}
+// #[embassy_executor::task]
+// async fn light_manager(spawner: Spawner) {
+//     app().light_manager.run(spawner).await;
+// }
+//
+// #[embassy_executor::task]
+// async fn uart_manager(spawner: Spawner) {
+//     app().uart_manager.run(spawner).await;
+// }
 
 #[embassy_executor::task]
 async fn panic_check(_spawner: Spawner) {
@@ -46,8 +45,8 @@ impl App {
         App {
             ota_manager: OtaManager::default(),
             mesh_manager: MeshManager::default(),
-            light_manager: LightManager::default(),
-            uart_manager: UartManager::default()
+            // light_manager: LightManager::default(),
+            // uart_manager: UartManager::default()
         }
     }
 
@@ -71,9 +70,7 @@ impl App {
         irq_init();
 
         // Get uart ready to go early
-        self.uart_manager.init();
-
-        uprintln!("Booting FW version {}", BUILD_VERSION);
+        // self.uart_manager.init();
 
         // Configure the rest of the system
         self.init();
@@ -81,11 +78,11 @@ impl App {
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
-        // Start the light manager
-        spawner.spawn(light_manager(spawner)).unwrap();
-
-        // Start the uart manager
-        spawner.spawn(uart_manager(spawner)).unwrap();
+        // // Start the light manager
+        // spawner.spawn(light_manager(spawner)).unwrap();
+        //
+        // // Start the uart manager
+        // spawner.spawn(uart_manager(spawner)).unwrap();
 
         // Send a message to the network saying that we just booted up
         let mut data = [0 as u8; 13];
@@ -101,7 +98,7 @@ impl App {
             main_loop();
 
             // Clear any uart errors if they've occurred
-            UartDriver::uart_error_clr();
+            // UartDriver::uart_error_clr();
 
             // Let other tasks run
             yield_now().await;

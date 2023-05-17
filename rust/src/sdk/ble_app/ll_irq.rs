@@ -655,7 +655,7 @@ pub unsafe fn irq_light_slave_handler() {
 
 #[inline(never)]
 fn irq_timer1() {
-    app().light_manager.transition_step();
+    // app().light_manager.transition_step();
 }
 
 // This timer is configured to run once per second to check if the internal clock has overflowed.
@@ -671,5 +671,5 @@ fn irq_timer0() {
 extern "C" fn irq_handler() {
     unsafe { irq_light_slave_handler(); }
 
-    app().uart_manager.check_irq();
+    // app().uart_manager.check_irq();
 }

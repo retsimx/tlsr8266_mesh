@@ -17,7 +17,6 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
 use crate::sdk::light::{LGT_PANIC_MSG};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::light_sw_reboot;
-use crate::uart_manager::UartMsg;
 
 struct TlsrCriticalSection;
 critical_section::set_impl!(TlsrCriticalSection);
@@ -32,23 +31,23 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
     }
 }
 
-pub static mut uartstream: UartStream<128> = UartStream::new();
+// pub static mut uartstream: UartStream<128> = UartStream::new();
 
 #[macro_export]
 macro_rules! uprintln {
     ( $($arg:tt)* ) => {
         {
-            use core::fmt::Write;
-            use crate::sdk::common::compat::uartstream;
-
-            critical_section::with(|_| {
-                #[allow(unused_unsafe)]
-                unsafe {
-                    uartstream.length = 0;
-                    core::writeln!(uartstream, $($arg)*).unwrap();
-                    uartstream.send(false, true);
-                }
-            });
+            // use core::fmt::Write;
+            // use crate::sdk::common::compat::uartstream;
+            //
+            // critical_section::with(|_| {
+            //     #[allow(unused_unsafe)]
+            //     unsafe {
+            //         uartstream.length = 0;
+            //         core::writeln!(uartstream, $($arg)*).unwrap();
+            //         uartstream.send(false, true);
+            //     }
+            // });
         }
     };
 }
@@ -57,17 +56,17 @@ macro_rules! uprintln {
 macro_rules! uprintln_fast {
     ( $($arg:tt)* ) => {
         {
-            use core::fmt::Write;
-            use crate::sdk::common::compat::uartstream;
-
-            critical_section::with(|_| {
-                #[allow(unused_unsafe)]
-                unsafe {
-                    uartstream.length = 0;
-                    core::writeln!(uartstream, $($arg)*).unwrap();
-                    uartstream.send(false, false);
-                }
-            });
+            // use core::fmt::Write;
+            // use crate::sdk::common::compat::uartstream;
+            //
+            // critical_section::with(|_| {
+            //     #[allow(unused_unsafe)]
+            //     unsafe {
+            //         uartstream.length = 0;
+            //         core::writeln!(uartstream, $($arg)*).unwrap();
+            //         uartstream.send(false, false);
+            //     }
+            // });
         }
     };
 }
@@ -112,78 +111,77 @@ pub fn load_tbl_cmd_set(pt: *const TBLCMDSET, size: u32) -> u32 {
 }
 
 /// A byte stream to the host (e.g., host's stdout or stderr).
-#[derive(Clone, Copy)]
-pub struct UartStream<const size: usize> {
-    pub length: usize,
-    pub out_buffer: [u8; size]
-}
+// #[derive(Clone, Copy)]
+// pub struct UartStream<const size: usize> {
+//     pub length: usize,
+//     pub out_buffer: [u8; size]
+// }
+//
+// impl<const size: usize> UartStream<size> {
+//     pub const fn new() -> UartStream<size> {
+//         UartStream::<size> { length: 0, out_buffer: [0; size] }
+//     }
+//
+//     /// Attempts to write an entire `buffer` into this sink
+//     pub fn write_all(&mut self, buffer: &[u8]) -> Result<(), ()> {
+//         self.out_buffer[self.length..self.length + buffer.len()].copy_from_slice(buffer);
+//         self.length += buffer.len();
+//         Ok(())
+//     }
+//
+//     pub fn send(&self, is_panic: bool, doasync: bool) {
+//         let mut buffer = unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) };
+//         while !buffer.is_empty() {
+//             let len = min(UART_DATA_LEN - 3, buffer.len());
+//
+//             let mut msg = uart_data_t {
+//                 len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
+//             };
+//
+//             msg.data[2] = if is_panic {UartMsg::PanicMessage} else {UartMsg::PrintMessage} as u8;
+//             for i in 0..len {
+//                 msg.data[3 + i] = buffer[i];
+//             }
+//
+//             if doasync {
+//                 app().uart_manager.send_message(&msg);
+//             } else {
+//                 app().uart_manager.driver.uart_send(&msg);
+//             }
+//
+//             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
+//         }
+//     }
+// }
 
-impl<const size: usize> UartStream<size> {
-    pub const fn new() -> UartStream<size> {
-        UartStream::<size> { length: 0, out_buffer: [0; size] }
-    }
+// impl<const size: usize> Write for UartStream<size> {
+//     fn write_str(&mut self, s: &str) -> fmt::Result {
+//         self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+//     }
+// }
 
-    /// Attempts to write an entire `buffer` into this sink
-    pub fn write_all(&mut self, buffer: &[u8]) -> Result<(), ()> {
-        self.out_buffer[self.length..self.length + buffer.len()].copy_from_slice(buffer);
-        self.length += buffer.len();
-        Ok(())
-    }
-
-    pub fn send(&self, is_panic: bool, doasync: bool) {
-        let mut buffer = unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) };
-        while !buffer.is_empty() {
-            let len = min(UART_DATA_LEN - 3, buffer.len());
-
-            let mut msg = uart_data_t {
-                len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
-            };
-
-            msg.data[2] = if is_panic {UartMsg::PanicMessage} else {UartMsg::PrintMessage} as u8;
-            for i in 0..len {
-                msg.data[3 + i] = buffer[i];
-            }
-
-            if doasync {
-                app().uart_manager.send_message(&msg);
-            } else {
-                app().uart_manager.driver.uart_send(&msg);
-            }
-
-            buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
-        }
-    }
-}
-
-impl<const size: usize> Write for UartStream<size> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
-    }
-}
-
-fn write_panic_info<const size: usize>(info: &UartStream<size>) {
-    let panic_addr = *get_flash_adr_panic_info();
-
-    // Clear the panic info sector for writing just in case
-    flash_erase_sector(panic_addr);
-
-    // Panic section looks as follows
-    // valid_flag: u8   + 0
-    // length: u16      + 1
-    // data: [u8; 256]  + 3
-
-    // Write the length first
-    let length = info.length as u16;
-    flash_write_page(panic_addr + 1, 2, addr_of!(length) as *const u8);
-
-    // Then write the panic message
-    flash_write_page(panic_addr + 3, length as u32, info.out_buffer.as_ptr());
-
-    // Finally write the panic valid flag last
-    let flag = PANIC_VALID_FLAG;
-    flash_write_page(panic_addr, 1, addr_of!(flag));
-}
-
+// fn write_panic_info<const size: usize>(info: &UartStream<size>) {
+//     let panic_addr = FLASH_ADR_PANIC_INFO;
+//
+//     // Clear the panic info sector for writing just in case
+//     flash_erase_sector(panic_addr);
+//
+//     // Panic section looks as follows
+//     // valid_flag: u8   + 0
+//     // length: u16      + 1
+//     // data: [u8; 256]  + 3
+//
+//     // Write the length first
+//     let length = info.length as u16;
+//     flash_write_page(panic_addr + 1, 2, addr_of!(length) as *const u8);
+//
+//     // Then write the panic message
+//     flash_write_page(panic_addr + 3, length as u32, info.out_buffer.as_ptr());
+//
+//     // Finally write the panic valid flag last
+//     let flag = PANIC_VALID_FLAG;
+//     flash_write_page(panic_addr, 1, addr_of!(flag));
+// }
 
 async fn delay(ms: u32) {
     let t_timeout = clock_time();
@@ -194,53 +192,53 @@ async fn delay(ms: u32) {
 
 
 pub async fn check_panic_info() {
-    let panic_addr = *get_flash_adr_panic_info();
-
-    let mut flag: u8 = 0;
-    flash_read_page(panic_addr, 1, addr_of_mut!(flag));
-
-    // If the panic info flag isn't set, there's nothing to do
-    if flag != PANIC_VALID_FLAG {
-        return
-    }
-
-    // There is panic info, send it in to the mesh
-
-    // Read the length
-    let mut length: u16 = 0;
-    flash_read_page(panic_addr + 1, 2, addr_of_mut!(length) as *mut u8);
-
-    // Read the message
-    let mut message: [u8; 256] = [0; 256];
-    flash_read_page(panic_addr + 3, length as u32, message.as_mut_ptr());
-
-    let mut buffer = unsafe { slice::from_raw_parts(message.as_ptr(), length as usize) };
-    while !buffer.is_empty() {
-        // Wait a moment to send the next message
-        delay(100).await;
-
-        let len = min(10, buffer.len());
-
-        let mut data = [0 as u8; 13];
-        data[0] = LGT_PANIC_MSG;
-        data[3..3+len].copy_from_slice(&buffer[0..len]);
-
-        app().mesh_manager.send_mesh_message(&data, 0xffff);
-
-        buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
-    }
-
-    // Wait a moment to send the next message
-    delay(100).await;
-
-    // Send an empty panic message to indicate the end of the message
-    let mut data = [0 as u8; 13];
-    data[0] = LGT_PANIC_MSG;
-
-    app().mesh_manager.send_mesh_message(&data, 0xffff);
-
-    // Finally clear the panic info
-    flash_erase_sector(panic_addr);
+    // let panic_addr = FLASH_ADR_PANIC_INFO;
+    //
+    // let mut flag: u8 = 0;
+    // flash_read_page(panic_addr, 1, addr_of_mut!(flag));
+    //
+    // // If the panic info flag isn't set, there's nothing to do
+    // if flag != PANIC_VALID_FLAG {
+    //     return
+    // }
+    //
+    // // There is panic info, send it in to the mesh
+    //
+    // // Read the length
+    // let mut length: u16 = 0;
+    // flash_read_page(panic_addr + 1, 2, addr_of_mut!(length) as *mut u8);
+    //
+    // // Read the message
+    // let mut message: [u8; 256] = [0; 256];
+    // flash_read_page(panic_addr + 3, length as u32, message.as_mut_ptr());
+    //
+    // let mut buffer = unsafe { slice::from_raw_parts(message.as_ptr(), length as usize) };
+    // while !buffer.is_empty() {
+    //     // Wait a moment to send the next message
+    //     delay(100).await;
+    //
+    //     let len = min(10, buffer.len());
+    //
+    //     let mut data = [0 as u8; 13];
+    //     data[0] = LGT_PANIC_MSG;
+    //     data[3..3+len].copy_from_slice(&buffer[0..len]);
+    //
+    //     app().mesh_manager.send_mesh_message(&data, 0xffff);
+    //
+    //     buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
+    // }
+    //
+    // // Wait a moment to send the next message
+    // delay(100).await;
+    //
+    // // Send an empty panic message to indicate the end of the message
+    // let mut data = [0 as u8; 13];
+    // data[0] = LGT_PANIC_MSG;
+    //
+    // app().mesh_manager.send_mesh_message(&data, 0xffff);
+    //
+    // // Finally clear the panic info
+    // flash_erase_sector(panic_addr);
 }
 
 #[cfg(not(test))]
@@ -249,11 +247,11 @@ pub async fn check_panic_info() {
 pub fn panic(info: &PanicInfo) -> ! {
     irq_disable();
 
-    let mut stream = UartStream::<256>::new();
-
-    write!(stream, "{}", info).ok();
-    stream.send(true, false);
-    write_panic_info(&stream);
+    // let mut stream = UartStream::<256>::new();
+    //
+    // write!(stream, "{}", info).ok();
+    // stream.send(true, false);
+    // write_panic_info(&stream);
 
     light_sw_reboot();
 

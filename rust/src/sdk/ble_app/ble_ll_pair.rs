@@ -1,7 +1,7 @@
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
 use core::slice;
 
-use crate::{blinken, uprintln};
+use crate::{uprintln};
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
 use crate::config::get_flash_adr_pairing;
 use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};

@@ -314,14 +314,14 @@ pub fn cpu_wakeup_init() {
 fn light_sw_reboot_callback() {
     if *get_rf_slave_ota_busy() {
         // rf_slave_ota_busy means mesh ota master busy also.
-        analog_write(
-            REGA_LIGHT_OFF,
-            if app().light_manager.is_light_off() {
-                RecoverStatus::LightOff as u8
-            } else {
-                0
-            },
-        );
+        // analog_write(
+        //     REGA_LIGHT_OFF,
+        //     // if app().light_manager.is_light_off() {
+        //     //     RecoverStatus::LightOff as u8
+        //     // } else {
+        //     //     0
+        //     // },
+        // );
     }
 }
 

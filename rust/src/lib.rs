@@ -67,21 +67,21 @@ pub fn blinken_testboard() {
     set_pw2(false);
 }
 
-pub fn blinken() {
-    for idx in 0..6 {
-        if idx % 2 == 0 {
-            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
-        } else {
-            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
-        }
-
-        for _ in 0..1000000 {
-            wd_clear();
-        }
-    }
-
-    app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
-}
+// pub fn blinken() {
+//     for idx in 0..6 {
+//         if idx % 2 == 0 {
+//             app().light_manager.light_adjust_rgb_hw(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+//         } else {
+//             app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
+//         }
+//
+//         for _ in 0..1000000 {
+//             wd_clear();
+//         }
+//     }
+//
+//     app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
+// }
 
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]

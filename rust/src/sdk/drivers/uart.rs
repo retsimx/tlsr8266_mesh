@@ -188,7 +188,7 @@ impl UartDriver {
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
             wd_clear();
 
-            app().uart_manager.check_irq();
+            // app().uart_manager.check_irq();
         }
 
         self.uart_set_tx_busy_flag();

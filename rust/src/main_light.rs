@@ -160,7 +160,7 @@ pub fn user_init() {
     gpio_set_func(PWM_B as u32, !AS_GPIO);
 
     //retrieve lumen value
-    app().light_manager.light_lum_retrieve();
+    // app().light_manager.light_lum_retrieve();
 
     rf_link_slave_init(40000);
 
@@ -168,7 +168,7 @@ pub fn user_init() {
 
     vendor_set_adv_data();
 
-    app().light_manager.device_status_update();
+    // app().light_manager.device_status_update();
     app().mesh_manager.mesh_security_enable(true);
 
     register_mesh_ota_master_ui(mesh_ota_master_led); //  mesh_ota_master_led() will be called when sending mesh ota data.
@@ -209,20 +209,20 @@ fn proc_led() {
             if *get_led_no() - 1 == *get_led_count() {
                 set_led_count(0);
                 set_led_no(0);
-                app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
+                // app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
                 return;
             }
         }
 
-        if led_off || led_on {
-            if *get_led_sel() & BIT!(0) != 0 {
-                app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
-            }
-            if *get_led_sel() & BIT!(1) != 0 {
-                app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
-            }
-            if *get_led_sel() & BIT!(5) != 0 {}
-        }
+        // if led_off || led_on {
+        //     if *get_led_sel() & BIT!(0) != 0 {
+        //         app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+        //     }
+        //     if *get_led_sel() & BIT!(1) != 0 {
+        //         app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+        //     }
+        //     if *get_led_sel() & BIT!(5) != 0 {}
+        // }
     }
 }
 
@@ -242,7 +242,7 @@ fn light_user_func() {
 
     factory_reset_cnt_check();
 
-    app().light_manager.check_light_state_save();
+    // app().light_manager.check_light_state_save();
     app().mesh_manager.mesh_pair_proc_effect();
 }
 
@@ -284,17 +284,17 @@ pub fn rf_link_response_callback(
 
     let mut idx = 0;
     match ppp.val[15] {
-        GET_STATUS => {
-            ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
-
-            let state = app().light_manager.get_current_light_state();
-            ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
-            ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
-            ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
-            ppp.val[6] = ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8;
-            ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
-            ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
-        }
+        // GET_STATUS => {
+        //     ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
+        //
+        //     let state = app().light_manager.get_current_light_state();
+        //     ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
+        //     ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
+        //     ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
+        //     ppp.val[6] = ((state.ww.to_num::<u16>() >> 8) & 0xff) as u8;
+        //     ppp.val[7] = (state.brightness.to_num::<u16>() & 0xff) as u8;
+        //     ppp.val[8] = ((state.brightness.to_num::<u16>() >> 8) & 0xff) as u8;
+        // }
         GET_GROUP1 => {
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
             for i in 0..MAX_GROUP_NUM as usize {
@@ -395,7 +395,7 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
     let op = op_cmd[0] & 0x3F;
 
     match op {
-        LGT_CMD_LIGHT_ONOFF => app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params),
+        // LGT_CMD_LIGHT_ONOFF => app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params),
         LGT_CMD_LIGHT_CONFIG_GRP => {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
@@ -420,7 +420,7 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
                 }
             }
         }
-        LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
+        // LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
         LGT_CMD_SET_MAC_ADDR => {
             let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
             flash_erase_sector(*get_flash_adr_mac());
@@ -462,19 +462,19 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
 }
 
 pub fn rf_link_light_event_callback(status: u8) {
-    match status {
-        LGT_CMD_SET_MESH_INFO => {
-            mesh_node_init();
-            app().light_manager.device_status_update();
-            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-        }
-        LGT_CMD_SET_DEV_ADDR => {
-            mesh_node_init();
-            app().light_manager.device_status_update();
-            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-        }
-        LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
-        LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
-        _ => ()
-    }
+    // match status {
+    //     LGT_CMD_SET_MESH_INFO => {
+    //         mesh_node_init();
+    //         app().light_manager.device_status_update();
+    //         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+    //     }
+    //     LGT_CMD_SET_DEV_ADDR => {
+    //         mesh_node_init();
+    //         app().light_manager.device_status_update();
+    //         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+    //     }
+    //     LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
+    //     LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
+    //     _ => ()
+    // }
 }

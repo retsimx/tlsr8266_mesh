@@ -295,7 +295,7 @@ impl MeshManager {
             self.default_mesh_time_ref = 0;
 
             mesh_node_init();
-            app().light_manager.device_status_update();
+            // app().light_manager.device_status_update();
             self.safe_effect_new_mesh_finish();
             return;
         }
@@ -521,7 +521,7 @@ impl MeshManager {
             },
         }; MESH_NODE_MAX_NUM as usize];
 
-        app().light_manager.device_status_update();
+        // app().light_manager.device_status_update();
     }
 
     fn get_pair_mic(&self, keyin: *const u32, macin: *const u16) -> u32

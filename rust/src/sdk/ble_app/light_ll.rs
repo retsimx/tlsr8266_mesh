@@ -3,9 +3,10 @@ use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slic
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-use crate::{app, BIT, blinken, pub_mut, uprintln, uprintln_fast};
-use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, get_sys_chn_adv, get_sys_chn_listen, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb};
-use crate::config::get_flash_adr_light_new_fw;
+
+use crate::{app, BIT, pub_mut, uprintln, uprintln_fast};
+use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb, get_sys_chn_listen, get_sys_chn_adv};
+use crate::config::{get_flash_adr_light_new_fw};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, get_mesh_pair_enable, MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};

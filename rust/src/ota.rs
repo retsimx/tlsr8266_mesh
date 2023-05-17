@@ -164,6 +164,8 @@ impl OtaManager {
                 == p.dat[(n_data_len + 2) as usize] as u16
                 | (p.dat[(n_data_len + 3) as usize] as u16) << 8
             {
+                set_rf_slave_ota_timeout_s(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
+
                 let cur_idx = p.dat[0] as u16 | (p.dat[1] as u16) << 8;
                 if n_data_len == 0 {
                     if (cur_idx == self.ota_rcv_last_idx + 1) && (cur_idx == self.ota_pkt_total) {

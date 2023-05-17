@@ -54,7 +54,8 @@ pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::CONTINUE);
 pub_mut!(rf_slave_ota_terminate_flag, bool, false);
 pub_mut!(mesh_node_max, u8, 0);
 
-pub_mut!(rf_slave_ota_timeout_s, u16, 0x30);
+pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
+pub_mut!(rf_slave_ota_timeout_s, u16, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
 pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 

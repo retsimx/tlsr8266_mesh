@@ -576,36 +576,36 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
     let (result1, result2) = rf_link_match_group_mac(sno.as_ptr() as *const app_cmd_value_t);
     let op;
-    let mut op_valid;
-    let mut tmp;
+    let mut op_valid = true;
+    let mut tmp = data.value[6] as u32;
     if op_cmd_len == 3 {
         op = op_cmd[0] & 0x3f;
-        uprintln!("check here 2");
+        // uprintln!("check here 2");
         // todo: Might need to be ==
-        op_valid = op - 26 != 0;
-        if op_valid != false {
-            op_valid = true;
-            if params[1] != 0 {
-                tmp = data.value[6] as u32;
-            } else {
-                tmp = data.value[6] as u32;
-                if ((tmp * 0x1000000) as i32) < 0 {
-                    return false;
-                }
-            }
-        };
-        tmp = data.value[6] as u32;
+        // op_valid = op_cmd_len > 2 | (op - 26 != 0);
+        // if op_valid != false {
+        //     op_valid = true;
+        //     if params[1] != 0 {
+        //         tmp = data.value[6] as u32;
+        //     } else {
+        //         tmp = data.value[6] as u32;
+        //         if ((tmp * 0x1000000) as i32) < 0 {
+        //             return false;
+        //         }
+        //     }
+        // };
+        // tmp = data.value[6] as u32;
     } else {
         op = 0;
         op_valid = true;
-        if params[1] != 0 {
-            tmp = data.value[6] as u32;
-        } else {
-            tmp = data.value[6] as u32;
-            if ((tmp * 0x1000000) as i32) < 0 {
-                return false;
-            }
-        }
+        // if params[1] != 0 {
+        //     tmp = data.value[6] as u32;
+        // } else {
+        //     tmp = data.value[6] as u32;
+        //     if ((tmp * 0x1000000) as i32) < 0 {
+        //         return false;
+        //     }
+        // }
     }
     if op == 0x20 && ((tmp * 0x1000000) as i32) < 0 {
         if params[0] != 0xff {
@@ -1082,8 +1082,8 @@ pub fn rf_start_stx2rx(addr: u32, tick: u32)
 
 pub fn rf_start_srx2tx(addr: u32, tick: u32)
 {
-    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
-    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
+    write_reg_rf_sched_tick(tick);                                  // Setting schedule trigger time
+    write_reg_rf_mode(read_reg_rf_mode() | 0x04);                   // Enable cmd_schedule mode
     write_reg_rf_mode_control(0x85);                                // Set mode
     write_reg_dma3_addr(addr as u16);
 }

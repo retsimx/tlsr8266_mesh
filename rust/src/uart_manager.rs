@@ -5,13 +5,10 @@ use embassy_executor::Spawner;
 use heapless::Deque;
 use crate::{app, BIT, pub_mut};
 use crate::embassy::yield_now::yield_now;
-use crate::main_light::light_slave_tx_command;
 use crate::mesh::{get_mesh_node_st, mesh_node_st_val_t};
-use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet_mesh;
-use crate::sdk::ble_app::light_ll::mesh_send_command;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{app_cmd_value_t, get_security_enable, MESH_NODE_MAX_NUM, mesh_pkt_t, rf_packet_att_cmd_t, set_p_cb_rx_from_mesh};
+use crate::sdk::light::{app_cmd_value_t, MESH_NODE_MAX_NUM, mesh_pkt_t, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
@@ -293,8 +290,6 @@ impl UartManager {
                 // p_cmd : cmd[3]+para[10]
                 let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
 
-                light_slave_tx_command(&msg.data[5..5+13], destination);
-
                 let mut data = [0; 13];
                 data.copy_from_slice(&msg.data[5..5+13]);
 
@@ -308,13 +303,6 @@ impl UartManager {
 
                 // Send the message in to the mesh
                 app().mesh_manager.send_mesh_message(&data, destination);
-
-                if *get_security_enable()
-                {
-                    get_pkt_user_cmd()._type |= BIT!(7);
-                    pair_enc_packet_mesh(get_pkt_user_cmd_addr() as *mut mesh_pkt_t);
-                    mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0xff, 0);
-                }
             }
 
             // Finally ack the message once we've handled it

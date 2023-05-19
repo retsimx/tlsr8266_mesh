@@ -50,21 +50,17 @@ pub fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
 pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     let mut ltk = [0u8; 16];
 
-    if *get_security_enable() == false {
+    if !*get_security_enable() {
         return true;
     }
 
-    if *get_enc_disable() != false {
-        return true;
-    }
-
-    if -1 < (*ps)._type as i8 {
+    if (*ps)._type & 0x80 == 0 {
         return false;
     }
 
     let rf_len = (*ps).rf_len;
     if 0x13 < rf_len - 0x12 {
-        return *get_enc_disable();
+        return false;
     }
 
     ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
@@ -97,33 +93,30 @@ pub fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
     unsafe {
         let mut ltk = [0u8; 16];
 
-        ltk[0] = if *get_enc_disable() {1} else {0};
-        if ltk[0] == 0 {
-            result = false;
-            if *get_security_enable() {
-                ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
+        result = false;
+        if *get_security_enable() {
+            ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
 
-                if (*ps).chanId == 0xffff {
-                    aes_att_encryption_packet(
-                        ltk.as_slice(),
-                        slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
-                        slice::from_raw_parts_mut(addr_of!((*ps).internal_par2[1]) as *mut u8, 2),
-                        addr_of!((*ps).sno) as *mut u8,
-                        0x1c,
-                    );
+            if (*ps).chanId == 0xffff {
+                aes_att_encryption_packet(
+                    ltk.as_slice(),
+                    slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
+                    slice::from_raw_parts_mut(addr_of!((*ps).internal_par2[1]) as *mut u8, 2),
+                    addr_of!((*ps).sno) as *mut u8,
+                    0x1c,
+                );
 
-                    result = true;
-                } else {
-                    aes_att_encryption_packet(
-                        ltk.as_slice(),
-                        slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
-                        slice::from_raw_parts_mut((addr_of!((*ps).sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
-                        addr_of!((*ps).op) as *mut u8,
-                        (*ps).rf_len - 0x12,
-                    );
+                result = true;
+            } else {
+                aes_att_encryption_packet(
+                    ltk.as_slice(),
+                    slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
+                    slice::from_raw_parts_mut((addr_of!((*ps).sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
+                    addr_of!((*ps).op) as *mut u8,
+                    (*ps).rf_len - 0x12,
+                );
 
-                    result = true;
-                }
+                result = true;
             }
         }
 

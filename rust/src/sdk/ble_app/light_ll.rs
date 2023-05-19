@@ -140,13 +140,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
 
 fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &app_cmd_value_t) -> bool
 {
-    for idx in 0..RC_PKT_BUF_MAX as usize {
-        if (*get_rc_pkt_buf())[idx].op == opcode && (*get_rc_pkt_buf())[idx].sno == cmd_pkt.sno {
-            return true;
-        }
-    }
-
-    return false;
+    get_rc_pkt_buf().iter().any(|v| v.op == opcode && v.sno == cmd_pkt.sno)
 }
 
 fn rf_link_is_notify_rsp(opcode: u8) -> bool
@@ -316,47 +310,39 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 1000) as i32 {
         if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 1000) {
             uprintln!("0x3fffffff ret false 1");
-            set_enc_disable(false);
             return false;
         }
     }
 
     if unsafe { !pair_dec_packet_mesh(packet) } {
-        set_enc_disable(false);
         return false;
     }
 
     if packet._type & 3 != 2 {
-        set_enc_disable(false);
         return false;
     }
 
     if packet.chanId == 0xeeff {
-        set_enc_disable(false);
         return false;
     }
 
     if packet.chanId == 0xffff {
         if MESH_NODE_ST_VAL_LEN == 4 {
             if packet.internal_par1[LAST_RELAY_TIME] != 0xa5 || packet.internal_par1[CURRENT_RELAY_COUNT] != 0xa5 {
-                set_enc_disable(false);
                 return false;
             }
         }
 
         // todo: ttl? Probably packet is not the right type in this check
         if packet.ttl != 0xa5 || packet.internal_par2[0] != 0xa5 {
-            set_enc_disable(false);
             return false;
         }
 
         mesh_node_update_status(unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN as usize) });
-        set_enc_disable(false);
         return false;
     }
 
     if *get_max_relay_num() + 6 < packet.internal_par1[CURRENT_RELAY_COUNT] {
-        set_enc_disable(false);
         return false;
     }
 
@@ -364,9 +350,8 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
-    let l2cap_data = unsafe { &*(addr_of_mut!(packet.l2capLen) as *const ll_packet_l2cap_data_t) };
+    let l2cap_data = unsafe { &*(addr_of!(packet.l2capLen) as *const ll_packet_l2cap_data_t) };
     if !rf_link_get_op_para(l2cap_data, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
-        set_enc_disable(false);
         return false;
     }
 
@@ -375,7 +360,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         op = op_cmd[0] & 0x3f;
     }
 
-    let cmd_pkt = unsafe { &*(addr_of_mut!(packet.sno) as *const app_cmd_value_t) };
+    let cmd_pkt = unsafe { &*(addr_of!(packet.sno) as *const app_cmd_value_t) };
     let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
     let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
@@ -394,57 +379,54 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         }
     }
 
-    let pkt_valid;
-    let (mut group_match, mut device_match) = (false, false);
     if rf_link_is_notify_rsp(op) && should_notify {
         if op != LGT_CMD_MESH_OTA_READ_RSP || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
             if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
-                set_enc_disable(false);
                 return false;
             }
         }
         rf_link_slave_add_status(packet);
-        set_enc_disable(false);
         return false;
-    } else {
-        if src_device_addr_match {
-            if op != LGT_CMD_CONFIG_DEV_ADDR || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
-                set_enc_disable(false);
-                return false;
-            }
+    }
+
+    if src_device_addr_match {
+        if op != LGT_CMD_CONFIG_DEV_ADDR || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
+            return false;
         }
+    }
 
-        set_rcv_pkt_ttc(packet.par[9]);
+    set_rcv_pkt_ttc(packet.par[9]);
 
-        (group_match, device_match) = rf_link_match_group_mac(cmd_pkt);
+    let (group_match, device_match) = rf_link_match_group_mac(cmd_pkt);
 
-        pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
+    let pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
-        if group_match != false || device_match != false {
-            if pkt_valid {
-                rc_pkt_buf_push(op, cmd_pkt);
-                rf_link_data_callback(l2cap_data);
-            }
+    if group_match != false || device_match != false {
+        if pkt_valid {
+            rc_pkt_buf_push(op, cmd_pkt);
+            rf_link_data_callback(l2cap_data);
         }
+    }
 
-        if rf_link_is_notify_req(op) {
-            set_slave_read_status_response(true);
-            if group_match == false {
-                set_slave_read_status_response(device_match);
-            }
-            if req_cmd_is_notify_ok(op, cmd_pkt) {
-                set_slave_read_status_response(false);
-            } else if (packet.dst_adr >> 8) & 0x80 != 0 {
-                for i in 0..5 {
-                    if packet.par[i + 4] == *get_device_address() as u8 {
-                        req_cmd_set_notify_ok_flag(op, cmd_pkt);
-                        set_slave_read_status_response(false);
-                        break;
-                    }
+    if rf_link_is_notify_req(op) {
+        set_slave_read_status_response(true);
+        if group_match == false {
+            // todo: This might be !device_match
+            set_slave_read_status_response(device_match);
+        }
+        if req_cmd_is_notify_ok(op, cmd_pkt) {
+            set_slave_read_status_response(false);
+        } else if packet.dst_adr & !DEVICE_ADDR_MASK_DEFAULT != 0 {
+            for i in 0..5 {
+                if packet.par[i + 4] == *get_device_address() as u8 {
+                    req_cmd_set_notify_ok_flag(op, cmd_pkt);
+                    set_slave_read_status_response(false);
+                    break;
                 }
             }
         }
     }
+
     let relay_count = packet.internal_par1[CURRENT_RELAY_COUNT];
 
     packet.dma_len = (packet.l2capLen as u32 + 6) & 0xffffff;
@@ -517,7 +499,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             }
 
             if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut rf_packet_att_value_t, &request_params) {
-                if *get_slave_link_connected() == false {
+                if !*get_slave_link_connected() {
                     write_reg_irq_src(0x100000);
                     let rand_2 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
                     let mut relay_delay = 16000 + rand_2 + rand_1;
@@ -551,19 +533,16 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     rf_set_ble_crc_adv();
                     for chn in SYS_CHN_LISTEN
                     {
-                        if *get_slave_link_connected() != false {
+                        if *get_slave_link_connected() {
                             // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
                             if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                                 uprintln!("0x3fffffff ret false 2");
                                 rf_stop_trx();
-                                set_enc_disable(false);
                                 return false;
                             }
                         }
                         rf_set_ble_channel(chn);
-                        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-                        // todo: as a normal encrypted packet (bit 7 set)
-                        (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
+                        (*get_pkt_light_status())._type |= BIT!(7);
                         rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 30 + read_reg_system_tick());
                         sleep_us(600);
                     }
@@ -599,14 +578,11 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
                         uprintln!("0x3fffffff ret false 3");
                         rf_stop_trx();
-                        set_enc_disable(false);
                         return false;
                     }
                 }
                 rf_set_ble_channel(SYS_CHN_LISTEN[channel_index as usize & 3]);
-                // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-                // todo: as a normal encrypted packet (bit 7 set)
-                packet._type |= BIT!(7); // 0x7f;
+                packet._type |= BIT!(7);
                 if op != LGT_CMD_LIGHT_STATUS {
                     rf_link_proc_ttc(*get_rcv_pkt_time(), *get_rcv_pkt_ttc(), packet);
                 }
@@ -624,7 +600,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         }
         rf_set_rxmode();
     }
-    set_enc_disable(false);
+
     return true;
 }
 
@@ -1031,36 +1007,18 @@ fn blt_stall_mcu(ticks: u32)
     });
 }
 
-pub fn mesh_send_command(packet: *const rf_packet_att_cmd_t, channel_index: u32, retransmit_count: u32)
+pub fn mesh_send_command(packet: *const rf_packet_att_cmd_t, retransmit_count: u32)
 {
     rf_set_tx_rx_off();
     rf_set_ble_access_code(*get_pair_ac());
     rf_set_ble_crc_adv();
 
     if retransmit_count != 0xffffffff {
-        for transmit_count in 0..retransmit_count+1 {
-            if SYS_CHN_LISTEN.len() != 0 {
-                let mut chn_idx = channel_index;
-                let mut chn_cnt = 0;
-                if channel_index == 0xff {
-                    chn_idx = 0;
-                }
-                loop {
-                    rf_set_ble_channel(SYS_CHN_LISTEN[chn_idx as usize & 3]);
-                    rf_start_srx2tx(packet as u32, read_reg_system_tick() + *get_tick_per_us() * 0x1e);
-                    sleep_us(600);
-                    if channel_index != 0xff {
-                        if transmit_count < retransmit_count {
-                            sleep_us(200);
-                        }
-                        break;
-                    }
-                    chn_idx = chn_cnt + 1;
-                    chn_cnt = chn_idx;
-                    if chn_idx >= SYS_CHN_LISTEN.len() as u32 {
-                        break;
-                    }
-                }
+        for _ in 0..retransmit_count+1 {
+            for chn in SYS_CHN_LISTEN {
+                rf_set_ble_channel(chn);
+                rf_start_srx2tx(packet as u32, read_reg_system_tick() + *get_tick_per_us() * 30);
+                sleep_us(600);
             }
         }
     }
@@ -1107,13 +1065,11 @@ pub fn mesh_send_online_status()
     }
 
     if *get_security_enable() {
-        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-        // todo: as a normal encrypted packet (bit 7 set)
-        tmp_pkt._type |= BIT!(7); //|= 0x7f;
+        tmp_pkt._type |= BIT!(7);
         pair_enc_packet_mesh(addr_of_mut!(tmp_pkt) as *mut mesh_pkt_t);
     }
 
-    mesh_send_command(&tmp_pkt, 0xff, 0);
+    mesh_send_command(&tmp_pkt, 0);
 }
 
 pub fn back_to_rxmode_bridge()
@@ -1197,7 +1153,7 @@ pub fn rf_start_stx_mesh(packet: &rf_packet_att_cmd_t, sched_tick: u32)
     (*get_pkt_mesh()).src_tx = *get_device_address();
     (*get_pkt_mesh()).handle1 = 0;
 
-    if packet._type & 0x80 != 0 {
+    if packet._type & BIT!(7) != 0 {
         pair_enc_packet_mesh(get_pkt_mesh());
     }
 
@@ -1207,17 +1163,13 @@ pub fn rf_start_stx_mesh(packet: &rf_packet_att_cmd_t, sched_tick: u32)
 pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
 {
     if *get_slave_data_valid() != 0 {
-        uprintln!("About to send slv pkt");
         set_slave_data_valid(*get_slave_data_valid() - 1);
         if *get_slave_data_valid() == 0 {
             set_slave_sno_sending([0, 0, 0]);
         } else if *get_slave_read_status_busy() == 0 || *get_slave_data_valid() as i32 > -1 {
-            uprintln!("Sending slv pkt");
             for chn in 0..4 {
                 rf_set_ble_channel(SYS_CHN_LISTEN[chn]);
-                // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-                // todo: as a normal encrypted packet (bit 7 set)
-                (*get_pkt_light_data())._type |= BIT!(7); // 0x7f;
+                (*get_pkt_light_data())._type |= BIT!(7);
                 rf_link_proc_ttc(*get_app_cmd_time(), 0, unsafe { &mut *(addr_of_mut!((*get_pkt_light_data()).value[7]) as *mut mesh_pkt_t) });
                 if rf_link_is_notify_req((*get_pkt_light_data()).value[7] & 0x3f) {
                     let mut relay_time = min(
@@ -1239,9 +1191,7 @@ fn mesh_user_command_pkt_enc2buf()
     if !*get_security_enable() {
         get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
     } else {
-        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-        // todo: as a normal encrypted packet (bit 7 set)
-        (*get_pkt_user_cmd())._type |= BIT!(7); // 0x7f;
+        (*get_pkt_user_cmd())._type |= BIT!(7);
         get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
         pair_enc_packet_mesh(get_pkt_mesh_user_cmd_buf_addr());
     }
@@ -1502,7 +1452,7 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                     slice::from_raw_parts_mut(addr_of_mut!((*get_pkt_user_cmd()).op), pkt_len as usize).copy_from_slice(cmd_op_para)
                 }
 
-                (*get_pkt_user_cmd()).internal_par1[MAX_RELAY_COUNT] = max_relay;
+                (*get_pkt_user_cmd()).internal_par1[CURRENT_RELAY_COUNT] = max_relay;
 
                 let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const app_cmd_value_t);
                 set_slave_tx_cmd_time(read_reg_system_tick());

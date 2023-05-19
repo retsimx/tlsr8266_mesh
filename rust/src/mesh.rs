@@ -144,14 +144,17 @@ impl MeshManager {
     }
 
     pub fn send_mesh_message(&self, data: &[u8; 13], destination: u16) {
-        light_slave_tx_command(data, destination);
+        critical_section::with(|_| {
+            light_slave_tx_command(data, destination);
 
-        if *get_security_enable()
-        {
-            get_pkt_user_cmd()._type |= BIT!(7);
-            pair_enc_packet_mesh(get_pkt_user_cmd_addr());
-            mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0xff, 0);
-        }
+            if *get_security_enable()
+            {
+                get_pkt_user_cmd()._type |= BIT!(7);
+                pair_enc_packet_mesh(get_pkt_user_cmd_addr());
+            }
+
+            mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0);
+        });
     }
 
     pub fn mesh_pair_init(&mut self) {

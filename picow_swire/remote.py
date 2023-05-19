@@ -21,7 +21,7 @@ TX_RATE = 50000000      # The transmission speed (This value is ok for both boar
 rp2.PIO(0).remove_program()
 rp2.PIO(1).remove_program()
 
-reset_pin = Pin(16, Pin.OUT)
+reset_pin = Pin(14, Pin.OUT)
 reset_pin.high()
 
 input_pin = Pin(15, Pin.IN)

@@ -63,7 +63,6 @@ pub_mut!(tick_per_us, u32, 0x20);
 pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
-pub_mut!(enc_disable, bool, false);
 
 pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
 // todo: new_node might be bool

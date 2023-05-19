@@ -130,10 +130,8 @@ pub fn irq_st_response()
     let tmp = (unsafe { **get_slave_p_mac() as u32 } ^ read_reg_system_tick()) & 3;
     for uVar4 in tmp..tmp + 4 {
         rf_set_ble_channel(SYS_CHN_LISTEN[uVar4 as usize & 3]);
-        // todo: In the original code, this is 0x7f, but it seems to only work if we treat it
-        // todo: as a normal encrypted packet (bit 7 set)
-        (*get_pkt_light_status())._type |= BIT!(7); // 0x7f;
-        rf_start_stx_mesh(&get_pkt_light_status(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
+        (*get_pkt_light_status())._type |= BIT!(7);
+        rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 30 + read_reg_system_tick());
         sleep_us(700);
     }
     write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
@@ -157,7 +155,6 @@ pub fn irq_st_listen()
     }
     if !*get_online_st_flag() {
         set_st_listen_no(*get_st_listen_no() + 1);
-        // todo: May need to be !=
         set_adv_flag(*get_st_listen_no() % *get_adv_interval2listen_interval() as u32 != 0);
         set_online_st_flag(*get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 != 0);
         if *get_adv_flag() {
@@ -466,9 +463,9 @@ unsafe fn irq_light_slave_rx()
         set_rcv_pkt_time(rx_time);
         if entry.sno[0] & 0xf == 3 {
             if *get_slave_link_state() != 1 && *get_slave_link_state() != 7 {
-                if *get_rf_slave_ota_busy() == false || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
-                    if *get_slave_link_state() - 4 < 2 {
+                    if *get_slave_link_state() < 6 {
                         rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
                     }
                     entry.dma_len = 1;
@@ -502,10 +499,10 @@ unsafe fn irq_light_slave_rx()
                     return;
                 }
 
-                if *get_rf_slave_ota_busy() == false || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    if *get_slave_link_state() - 4 < 2 {
+                    if *get_slave_link_state() < 6 {
                         rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
                     }
 
@@ -528,10 +525,10 @@ unsafe fn irq_light_slave_rx()
                     return;
                 }
 
-                if *get_rf_slave_ota_busy() == false || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    if *get_slave_link_state() - 4 < 2 {
+                    if *get_slave_link_state() < 6 {
                         rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
                     }
 
@@ -541,10 +538,10 @@ unsafe fn irq_light_slave_rx()
             }
 
             if *get_slave_link_state() != 7 {
-                if *get_rf_slave_ota_busy() == false || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    if *get_slave_link_state() - 4 < 2 {
+                    if *get_slave_link_state() < 6 {
                         rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
                     }
 
@@ -556,7 +553,7 @@ unsafe fn irq_light_slave_rx()
 
         T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-        let master_sn = ((entry.sno[2] as u16) << 8) | ((entry.sno[0] >> 3) & 1) as u16;
+        let master_sn = ((entry.sno[2] as u16) * 0x100) | ((entry.sno[0] >> 3) & 1) as u16;
         if *get_light_conn_sn_master() == master_sn {
             rf_link_timing_adjust(rx_time);
         } else {
@@ -567,8 +564,6 @@ unsafe fn irq_light_slave_rx()
         }
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {
-                // todo: What the fuck?
-                uprintln!("Here be dragons");
                 if 0x40000001 > *get_slave_timing_update2_ok_time() - read_reg_system_tick() {
                     entry.dma_len = 1;
                     return;

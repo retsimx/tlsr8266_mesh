@@ -1252,20 +1252,6 @@ pub fn mesh_send_user_command() -> u8
     *get_mesh_user_cmd_idx()
 }
 
-fn mesh_send_beacon(beacon_pkt: *const rf_packet_adv_ind_module_t)
-{
-    rf_set_tx_rx_off();
-    rf_set_ble_access_code_adv();
-    rf_set_ble_crc_adv();
-
-    for chn in SYS_CHN_ADV {
-        rf_set_ble_channel(chn);
-        rf_start_beacon(beacon_pkt as u32, *get_tick_per_us() * 0x1e + read_reg_system_tick());
-
-        sleep_us(600);
-    }
-}
-
 pub fn tx_packet_bridge()
 {
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);

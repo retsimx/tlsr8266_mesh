@@ -10,13 +10,13 @@ use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_set_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
@@ -100,7 +100,7 @@ fn light_init_default() {
         });
     }
 
-    light_set_tick_per_us(CLOCK_SYS_CLOCK_HZ / 1000000);
+    light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
 
     get_pair_config_mesh_name().fill(0);
     let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);

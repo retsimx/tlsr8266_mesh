@@ -3,7 +3,8 @@ use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::{app, BIT, pub_mut};
 use crate::common::REGA_LIGHT_OFF;
-use crate::sdk::light::{get_rf_slave_ota_busy, get_tick_per_us, RecoverStatus};
+use crate::sdk::light::{get_rf_slave_ota_busy, RecoverStatus};
+use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{raga_gpio_wkup_pol, read_reg_clk_sel, read_reg_fhs_sel, read_reg_system_tick, read_reg_system_tick_ctrl, read_reg_system_tick_mode, write_reg32, write_reg8, write_reg_clk_sel, write_reg_fhs_sel, write_reg_pwdn_ctrl, write_reg_system_tick_ctrl, write_reg_system_tick_mode, write_reg_system_wakeup_tick, write_reg_wakeup_en};
 
@@ -374,41 +375,35 @@ fn sleep_start()
     }
 }
 
-static mut deep_long_time_flag: u8 = 0;
-
 pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick: u32) -> u32
 {
     critical_section::with(|_| {
         let mut reboot= wakeup_src & 0x40 != 0;
 
-        if deep_long_time_flag == 0 {
-            if deepsleep == 0 {
-                reboot = true;
-                if wakeup_src & 0x40 != 0 {
-                    let tick = wakeup_tick - read_reg_system_tick();
-                    if tick < 0 {
-                        return (analog_read(raga_gpio_wkup_pol) & 0xf) as u32;
-                    }
-                    if tick < *get_tick_per_us() * 3000 {
-                        let mut now = read_reg_system_tick();
-                        analog_write(raga_gpio_wkup_pol, 0xf);
-                        let mut result;
-                        loop {
-                            result = analog_read(raga_gpio_wkup_pol) & 0xf;
-                            let tmp = read_reg_system_tick();
-                            if tick <= tmp - now {
-                                return result as u32;
-                            }
-                            if result == 0 {
-                                break;
-                            }
+        if deepsleep == 0 {
+            reboot = true;
+            if wakeup_src & 0x40 != 0 {
+                let tick = wakeup_tick - read_reg_system_tick();
+                if tick < 0 {
+                    return (analog_read(raga_gpio_wkup_pol) & 0xf) as u32;
+                }
+                if tick < CLOCK_SYS_CLOCK_1US * 3000 {
+                    let mut now = read_reg_system_tick();
+                    analog_write(raga_gpio_wkup_pol, 0xf);
+                    let mut result;
+                    loop {
+                        result = analog_read(raga_gpio_wkup_pol) & 0xf;
+                        let tmp = read_reg_system_tick();
+                        if tick <= tmp - now {
+                            return result as u32;
                         }
-                        return result as u32;
+                        if result == 0 {
+                            break;
+                        }
                     }
+                    return result as u32;
                 }
             }
-        } else if deepsleep == 0 {
-            reboot = true;
         }
 
         let mut anavals: [u8; 6] = [0; 6];
@@ -446,26 +441,14 @@ pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick:
             ana_2c = ana_2c | 1;
         } else {
             ana_2c = ana_2c & 0xfe;
-            if deep_long_time_flag == 0 {
-                if deepsleep == 0 {
-                    wakeup_tick = (wakeup_tick as i32 + (*get_tick_per_us() as i32 * 2500)) as u32;
-                }
-                write_reg_system_wakeup_tick(wakeup_tick);
-                write_reg_system_tick_ctrl(2);
 
-                while read_reg_system_tick_ctrl() & 2 != 0 {}
-            } else {
-                let tmp = (analog_read(0x40) as u32 | (analog_read(0x41) as u32) << 8 | (analog_read(0x42) as u32) << 16 | (analog_read(0x43) as u32) << 24);
-
-                write_reg_system_tick_mode(read_reg_system_tick_mode() | 8);
-                write_reg_system_tick_mode(read_reg_system_tick_mode() | 4);
-
-                write_reg32(0x754, wakeup_tick + tmp);
-
-                write_reg_system_tick_ctrl(read_reg_system_tick_ctrl() | 8);
-
-                while read_reg_system_tick_ctrl() & 8 != 0 {}
+            if deepsleep == 0 {
+                wakeup_tick = (wakeup_tick as i32 + (CLOCK_SYS_CLOCK_1US as i32 * 2500)) as u32;
             }
+            write_reg_system_wakeup_tick(wakeup_tick);
+            write_reg_system_tick_ctrl(2);
+
+            while read_reg_system_tick_ctrl() & 2 != 0 {}
         }
 
         let fhs_sel = read_reg_fhs_sel();
@@ -534,7 +517,7 @@ pub unsafe fn cpu_sleep_wakeup(deepsleep: u32, wakeup_src: u32, mut wakeup_tick:
 fn light_sw_reboot_ll()
 {
     // In the original code it calls this to reset, but I can't get this function working.
-    // unsafe { cpu_sleep_wakeup(1, 0x40, ((*get_tick_per_us()) * 10000) + read_reg_system_tick()); }
+    // unsafe { cpu_sleep_wakeup(1, 0x40, ((CLOCK_SYS_CLOCK_1US) * 10000) + read_reg_system_tick()); }
 
     // Instead, let's just reset the MCU as described in the docs
     write_reg_pwdn_ctrl(0x20);

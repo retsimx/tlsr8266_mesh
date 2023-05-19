@@ -7,7 +7,7 @@ use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_ser
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{clock_time, sleep_us};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::{app, BIT, uprintln};
 use crate::embassy::time_driver::check_clock_overflow;
@@ -32,7 +32,7 @@ fn slave_timing_update_handle()
         set_slave_link_interval(*get_ble_conn_interval());
         set_slave_link_time_out(*get_ble_conn_timeout());
         set_slave_timing_update2_flag(1);
-        set_slave_window_size(*get_ble_conn_interval() - *get_tick_per_us() * 0x4e2);
+        set_slave_window_size(*get_ble_conn_interval() - CLOCK_SYS_CLOCK_1US * 0x4e2);
         if *get_slave_window_size_update() < *get_slave_window_size() {
             set_slave_window_size(*get_slave_window_size_update());
         }
@@ -43,13 +43,13 @@ fn slave_timing_update_handle()
 fn rf_set_rxmode_mesh_listen()
 {
     rf_stop_trx();
-    let mut ac = *get_pair_ac();
 
-    rf_set_ble_access_code(ac);
+    rf_set_ble_access_code(*get_pair_ac());
     rf_set_ble_crc_adv();
 
     rf_set_ble_channel(SYS_CHN_LISTEN[*get_st_listen_no() as usize & 3]);
     rf_set_rxmode();
+
     set_slave_link_state(4);
 }
 
@@ -74,49 +74,64 @@ fn rf_link_slave_read_status_update()
 
 fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
 {
-    let mut result = 0;
-    if *get_mesh_node_report_enable() {
-        params[0..MESH_NODE_ST_VAL_LEN as usize * len as usize].fill(0);
+    if !*get_mesh_node_report_enable() {
+        return 0;
+    }
 
-        if (MESH_NODE_MAX_NUM + 0x1f) >> 5 != 0 {
-            get_mesh_node_mask().iter_mut().enumerate().for_each(|(idx, v)| {
-                if result == len {
-                    return;
+    let mut result = 0;
+
+    params[0..MESH_NODE_ST_VAL_LEN as usize * len as usize].fill(0);
+
+    // Iterate over each 32 bit value in the mask
+    //      For each 32 bit value, check if it's 0
+    //          If it's 0, then no lights need to be reported for this 32 bit value
+    //      Iterate over each bit in the 32 bit value and find any set bits
+    //      Report the status of the light at any set bits and clear the bit from the mask
+
+    for mask_idx in 0..get_mesh_node_mask().len() {
+        let mask_val = &mut (*get_mesh_node_mask())[mask_idx];
+        // If this mask value is not 0 then it means there are unsent status updates for this value
+        if *mask_val != 0 {
+            // Iterate over each bit in the word and test to see if the status needs to be sent
+            for bit in 0..32 {
+                // Make sure we don't exceed the maximum number of nodes
+                let mut current_index = bit + (mask_idx * 32);
+                if current_index > MESH_NODE_MAX_NUM as usize {
+                    return result;
                 }
 
-                if *v != 0 {
-                    for iVar1 in 0..32 {
-                        let mut current_index = iVar1 + idx * 32;
-                        if current_index > MESH_NODE_MAX_NUM as usize {
-                            break;
+                // If this bit is set, then report the light status
+                if *mask_val & (1 << bit) != 0 {
+                    // Clear the bit from the mask so it isn't reported again
+                    *mask_val = *mask_val & !(1 << bit);
+                    // Copy the node status value to the params
+                    let params_idx = MESH_NODE_ST_VAL_LEN as usize * result;
+                    params[params_idx..params_idx + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
+                        unsafe {
+                            slice::from_raw_parts(
+                                addr_of!((*get_mesh_node_st())[current_index].val) as *const u8,
+                                MESH_NODE_ST_VAL_LEN as usize,
+                            )
                         }
+                    );
 
-                        if (*v & 1 << iVar1) != 0 {
-                            *v = *v & !(1 << iVar1);
-                            params[MESH_NODE_ST_VAL_LEN as usize * result..MESH_NODE_ST_VAL_LEN as usize * result + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
-                                unsafe {
-                                    slice::from_raw_parts(
-                                        addr_of!((*get_mesh_node_st())[current_index].val) as *const u8,
-                                        MESH_NODE_ST_VAL_LEN as usize,
-                                    )
-                                }
-                            );
+                    // If the tick is 0 (Device offline), set the sn value to 0
+                    if (*get_mesh_node_st())[current_index].tick == 0 {
+                        params[params_idx + 1] = 0;
+                    }
 
-                            if (*get_mesh_node_st())[current_index].tick == 0 {
-                                params[MESH_NODE_ST_VAL_LEN as usize * result + 1] = 0;
-                            }
+                    // Increment the result, and if we've exhausted the params size, return
+                    // Next time this function is called it will send the next chunk of statuses
+                    result += 1;
 
-                            result += 1;
-
-                            if result == len {
-                                return;
-                            }
-                        }
+                    if result >= len {
+                        return result;
                     }
                 }
-            });
+            }
         }
     }
+
     return result;
 }
 
@@ -131,10 +146,10 @@ pub fn irq_st_response()
     for uVar4 in tmp..tmp + 4 {
         rf_set_ble_channel(SYS_CHN_LISTEN[uVar4 as usize & 3]);
         (*get_pkt_light_status())._type |= BIT!(7);
-        rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 30 + read_reg_system_tick());
+        rf_start_stx_mesh(get_pkt_light_status(), CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
         sleep_us(700);
     }
-    write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
+    write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     set_p_st_handler(Some(irq_st_listen));
 }
 
@@ -149,7 +164,7 @@ pub fn irq_st_listen()
     rf_set_rxmode_mesh_listen();
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());
     if *get_adv_flag() {
-        write_reg_system_tick_irq(*get_tick_per_us() * 7000 + read_reg_system_tick());
+        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 7000 + read_reg_system_tick());
         set_p_st_handler(Some(irq_st_adv));
         return;
     }
@@ -158,7 +173,7 @@ pub fn irq_st_listen()
         set_adv_flag(*get_st_listen_no() % *get_adv_interval2listen_interval() as u32 != 0);
         set_online_st_flag(*get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 != 0);
         if *get_adv_flag() {
-            write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * *get_tick_per_us() + read_reg_system_tick_irq()));
+            write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * CLOCK_SYS_CLOCK_1US + read_reg_system_tick_irq()));
             set_p_st_handler(Some(irq_st_adv));
             return;
         }
@@ -191,15 +206,15 @@ pub fn irq_st_adv()
         set_adv_flag(false);
         ST_PNO.store(0, Ordering::Relaxed);
         if *get_online_st_flag() {
-            write_reg_system_tick_irq(*get_tick_per_us() * 0xdac + read_reg_system_tick());
-            if *get_tick_per_us() * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xdac + read_reg_system_tick());
+            if CLOCK_SYS_CLOCK_1US * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
                 LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
             } else {
                 mesh_send_online_status();
-                write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
+                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
             }
         } else {
-            write_reg_system_tick_irq(*get_tick_per_us() * 500 + read_reg_system_tick());
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
         }
         set_online_st_flag(false);
         set_p_st_handler(Some(irq_st_listen));
@@ -209,11 +224,11 @@ pub fn irq_st_adv()
         rf_set_ble_crc_adv();
 
         rf_set_ble_channel(SYS_CHN_ADV[ST_PNO.load(Ordering::Relaxed) as usize % 3]);
-        write_reg_system_tick_irq(*get_tick_per_us() * 0x4b0 + read_reg_system_tick());
+        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0x4b0 + read_reg_system_tick());
         write_reg_rf_irq_status(1);
 
         if ST_PNO.load(Ordering::Relaxed) < 3 {
-            rf_start_stx2rx(get_pkt_adv_addr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
+            rf_start_stx2rx(get_pkt_adv_addr() as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
         }
 
         ST_PNO.store(ST_PNO.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
@@ -235,17 +250,17 @@ pub fn irq_st_bridge()
     write_reg8(0x50f, 0);
     rf_stop_trx();
 
-    if *get_tick_per_us() == 0x10 {
+    if CLOCK_SYS_CLOCK_1US == 0x10 {
         write_reg8(0xf04, 0x5e);
     } else {
         write_reg8(0xf04, 0x68);
     }
 
-    if *get_slave_link_time_out() * *get_tick_per_us() < read_reg_system_tick() - *get_slave_connected_tick() {
+    if *get_slave_link_time_out() * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - *get_slave_connected_tick() {
         if *get_rf_slave_ota_busy() != false {
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::ERROR);
         }
-        write_reg_system_tick_irq(*get_tick_per_us() * 100 + read_reg_system_tick());
+        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
         set_p_st_handler(Some(irq_st_adv));
         write_reg_dma_tx_rptr(0x10);
         set_slave_link_connected(false);
@@ -269,7 +284,7 @@ pub fn irq_st_bridge()
             pair_load_key();
             set_pair_setting_flag(PairState::PairSetted);
         }
-        if *get_tick_per_us() == 0x10 {
+        if CLOCK_SYS_CLOCK_1US == 0x10 {
             write_reg8(0xf04, 0x5e);
         } else {
             write_reg8(0xf04, 0x68);
@@ -281,14 +296,14 @@ pub fn irq_st_bridge()
         return;
     }
 
-    if *get_slave_read_status_busy() != 0  && SLAVE_READ_STATUS_BUSY_TIMEOUT * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
+    if *get_slave_read_status_busy() != 0  && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
         rf_link_slave_read_status_stop();
     }
 
     if *get_rf_slave_ota_busy() {
         app().ota_manager.rf_link_slave_ota_finish_handle();
 
-        if *get_tick_per_us() * 1000000 < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed) {
+        if CLOCK_SYS_CLOCK_1US * 1000000 < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed) {
             RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
             let sot = *get_rf_slave_ota_timeout_s();
             if sot != 0 {
@@ -306,9 +321,9 @@ pub fn irq_st_bridge()
         }
     }
 
-    set_t_bridge_cmd(*get_tick_per_us() * 200 + read_reg_system_tick());
+    set_t_bridge_cmd(CLOCK_SYS_CLOCK_1US * 200 + read_reg_system_tick());
 
-    if *get_tick_per_us() * 10000 < *get_slave_link_interval() && (*get_slave_interval_old() == 0 || *get_slave_instant_next() != *get_slave_instant()) {
+    if CLOCK_SYS_CLOCK_1US * 10000 < *get_slave_link_interval() && (*get_slave_interval_old() == 0 || *get_slave_instant_next() != *get_slave_instant()) {
         tx_packet_bridge();
     }
 
@@ -358,7 +373,7 @@ pub fn irq_st_bridge()
 
     back_to_rxmode_bridge();
 
-    let mut uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
+    let mut uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
     loop {
         if *get_slave_interval_old() != 0 && *get_slave_instant_next() == *get_slave_instant() {
             uprintln!("maybe fixme 2");
@@ -373,7 +388,7 @@ pub fn irq_st_bridge()
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
         slave_timing_update_handle();
         ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
-        uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
+        uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
     }
 
     write_reg_system_tick_irq(*get_slave_next_connect_tick());
@@ -398,8 +413,8 @@ pub fn irq_st_ble_rx()
 
     set_slave_next_connect_tick(*get_slave_link_interval() + read_reg_system_tick_irq());
     if *get_rf_slave_ota_busy() == false {
-        if *get_slave_window_size() == 0 || *get_slave_window_size() <= *get_tick_per_us() * 0xed8 {
-            write_reg_system_tick_irq(*get_tick_per_us() * 0xed8 + read_reg_system_tick());
+        if *get_slave_window_size() == 0 || *get_slave_window_size() <= CLOCK_SYS_CLOCK_1US * 0xed8 {
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());
         } else {
             write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_window_size());
         }
@@ -410,10 +425,10 @@ pub fn irq_st_ble_rx()
         } else {
             tmp = 6000;
         }
-        write_reg_system_tick_irq(tmp * *get_tick_per_us() + read_reg_system_tick());
+        write_reg_system_tick_irq(tmp * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
     }
     set_p_st_handler(Some(irq_st_bridge));
-    set_slave_tick_brx(*get_tick_per_us() * 100 + read_reg_system_tick());
+    set_slave_tick_brx(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     set_slave_timing_adjust_enable(true);
     rf_start_brx((*get_pkt_empty()).as_ptr() as u32, *get_slave_tick_brx());
 
@@ -455,7 +470,7 @@ unsafe fn irq_light_slave_rx()
     if dma_len == 1 {
         if T_RX_LAST.load(Ordering::Relaxed) == rx_time {
             rf_stop_trx();
-            rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, *get_tick_per_us() * 10 + read_reg_system_tick());
+            rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
             return;
         }
     } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) & 0x51 == 0x40 {
@@ -479,7 +494,7 @@ unsafe fn irq_light_slave_rx()
                     entry.mac[2] == *(*get_slave_p_mac()).offset(2) &&
                     entry.mac[3] == *(*get_slave_p_mac()).offset(3) {
                     rf_stop_trx();
-                    write_reg_rf_sched_tick(rx_time + *get_T_scan_rsp_intvl() * *get_tick_per_us());
+                    write_reg_rf_sched_tick(rx_time + *get_T_scan_rsp_intvl() * CLOCK_SYS_CLOCK_1US);
                     write_reg_rf_mode_control(0x85);                        // single TX
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
@@ -493,7 +508,7 @@ unsafe fn irq_light_slave_rx()
                     (*get_pkt_scan_rsp()).rf_len = 0x25;
 
                     write_reg_dma3_addr(get_pkt_scan_rsp_addr() as u16);
-                    write_reg_system_tick_irq(*get_tick_per_us() * 1000 + read_reg_system_tick_irq());
+                    write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
 
                     entry.dma_len = 1;
                     return;
@@ -572,7 +587,7 @@ unsafe fn irq_light_slave_rx()
             }
             set_slave_window_size(0);
 
-            set_slave_next_connect_tick(rx_time + *get_slave_link_interval() - *get_tick_per_us() * 1250);
+            set_slave_next_connect_tick(rx_time + *get_slave_link_interval() - CLOCK_SYS_CLOCK_1US * 1250);
         }
         entry.dma_len = 1;
         return;

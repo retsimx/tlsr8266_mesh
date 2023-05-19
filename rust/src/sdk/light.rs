@@ -59,7 +59,6 @@ pub_mut!(rf_slave_ota_timeout_s, u16, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
 pub_mut!(set_mesh_info_expired_flag, bool, false);
 pub_mut!(set_mesh_info_time, u32, 0);
 
-pub_mut!(tick_per_us, u32, 0x20);
 pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);

@@ -2,7 +2,7 @@ use core::cmp::min;
 use core::mem::{size_of, size_of_val, transmute};
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
 use core::slice;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use crate::{app, BIT, blinken, pub_mut, uprintln, uprintln_fast};
 use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, SYS_CHN_LISTEN, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb, SYS_CHN_ADV};
@@ -17,7 +17,7 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::ble_app::shared_mem::{get_blt_tx_fifo, get_light_rx_buff};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{clock_time, sleep_us};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
@@ -117,7 +117,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
                 let timeout= 1500000;
 
                 result = current_index as u32;
-                if sn_difference - 2 < 0x3f || sn_difference != 0 && mesh_node_st.tick == 0 || (((timeout * *get_tick_per_us()) >> 0x10) as u16) < tick - mesh_node_st.tick {
+                if sn_difference - 2 < 0x3f || sn_difference != 0 && mesh_node_st.tick == 0 || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - mesh_node_st.tick {
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {
@@ -221,7 +221,6 @@ fn rf_link_slave_notify_req_mask(adr: u8)
     }
 }
 
-#[inline(never)]
 fn rf_link_slave_add_status_ll(packet: &mesh_pkt_t) -> bool
 {
     let mut result = false;
@@ -307,9 +306,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
     }
 
     if *get_slave_link_connected() {
-        // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 1000) as i32 {
-        if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 1000) {
-            uprintln!("0x3fffffff ret false 1");
+        if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 1000) as i32 {
             return false;
         }
     }
@@ -507,7 +504,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     if 0x1d < max_relay {
                         uprintln!("How is max_relay greater than 0x1d? {}", max_relay);
                         let mut relay_time = min(
-                            ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
+                            ((((read_reg_system_tick() - *get_rcv_pkt_time()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
                             0xff
                         );
                         let relay_time = max_relay as u32 - relay_time;
@@ -522,7 +519,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                             }
                         }
                     }
-                    write_reg_system_tick_irq(relay_delay * *get_tick_per_us() + read_reg_system_tick());
+                    write_reg_system_tick_irq(relay_delay * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
                     set_p_st_handler(Some(irq_st_response));
                 } else {
                     uprintln!("rf_link_response_callback 2");
@@ -534,16 +531,14 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                     for chn in SYS_CHN_LISTEN
                     {
                         if *get_slave_link_connected() {
-                            // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
-                            if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
-                                uprintln!("0x3fffffff ret false 2");
+                            if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 2000) as i32 {
                                 rf_stop_trx();
                                 return false;
                             }
                         }
                         rf_set_ble_channel(chn);
                         (*get_pkt_light_status())._type |= BIT!(7);
-                        rf_start_stx_mesh(get_pkt_light_status(), *get_tick_per_us() * 30 + read_reg_system_tick());
+                        rf_start_stx_mesh(get_pkt_light_status(), CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
                         sleep_us(600);
                     }
                 }
@@ -563,7 +558,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
         if device_match == false {
             // Relay the message if it's not for us
             let mut delay = 100;
-            if *get_slave_link_connected() == false {
+            if !*get_slave_link_connected() {
                 delay = 8000 - rand_1;
             }
             sleep_us(delay);
@@ -574,9 +569,7 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
             let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 3;
             for channel_index in start_chan_idx..start_chan_idx + 4 {
                 if *get_slave_link_connected() {
-                    // todo: Might need to be if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (*get_tick_per_us() * 2000) as i32 {
-                    if 0x3fffffff < (read_reg_system_tick_irq() - read_reg_system_tick()) - (*get_tick_per_us() * 2000) {
-                        uprintln!("0x3fffffff ret false 3");
+                    if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 2000) as i32 {
                         rf_stop_trx();
                         return false;
                     }
@@ -588,13 +581,13 @@ pub fn rf_link_rc_data(packet: &mut mesh_pkt_t) -> bool {
                 }
                 if rf_link_is_notify_req(op) {
                     let relay_time = min(
-                        ((((read_reg_system_tick() - *get_rcv_pkt_time()) / *get_tick_per_us()) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
+                        ((((read_reg_system_tick() - *get_rcv_pkt_time()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
                         0xff
                     );
 
                     packet.internal_par1[LAST_RELAY_TIME] = relay_time as u8;
                 }
-                rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }, *get_tick_per_us() * 30 + read_reg_system_tick());
+                rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const rf_packet_att_cmd_t) }, CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
                 sleep_us(600);
             }
         }
@@ -639,10 +632,10 @@ pub unsafe fn rf_link_slave_data(packet: &rf_packet_ll_data_t, time: u32) -> boo
             if rf_len == 0xc && packet._type & 3 == 3 && packet.l2cap_low == 0 {
                 set_slave_interval_old(*get_slave_link_interval());
                 set_slave_instant_next(packet.group);
-                set_slave_window_size_update((packet.l2cap_high as u32 * 1250 + 1300) * *get_tick_per_us());
+                set_slave_window_size_update((packet.l2cap_high as u32 * 1250 + 1300) * CLOCK_SYS_CLOCK_1US);
                 set_slave_timing_update(2);
-                set_ble_conn_interval(*get_tick_per_us() * 1250 * (*addr_of!(packet.att) as *const u16) as u32);
-                set_ble_conn_offset(packet.chanid as u32 * *get_tick_per_us() * 1250);
+                set_ble_conn_interval(CLOCK_SYS_CLOCK_1US * 1250 * (*addr_of!(packet.att) as *const u16) as u32);
+                set_ble_conn_offset(packet.chanid as u32 * CLOCK_SYS_CLOCK_1US * 1250);
                 set_ble_conn_timeout(packet.nid as u32 * 10000);
                 return false;
             }
@@ -661,10 +654,10 @@ pub fn rf_link_timing_adjust(time: u32)
 {
     if *get_slave_timing_adjust_enable() {
         set_slave_timing_adjust_enable(false);
-        if time - *get_slave_tick_brx() < *get_tick_per_us() * 700 {
-            set_slave_next_connect_tick(*get_slave_next_connect_tick() - *get_tick_per_us() * 200);
-        } else if *get_tick_per_us() * 1100 < time - *get_slave_tick_brx() {
-            set_slave_next_connect_tick(*get_tick_per_us() * 200 + *get_slave_next_connect_tick());
+        if time - *get_slave_tick_brx() < CLOCK_SYS_CLOCK_1US * 700 {
+            set_slave_next_connect_tick(*get_slave_next_connect_tick() - CLOCK_SYS_CLOCK_1US * 200);
+        } else if CLOCK_SYS_CLOCK_1US * 1100 < time - *get_slave_tick_brx() {
+            set_slave_next_connect_tick(CLOCK_SYS_CLOCK_1US * 200 + *get_slave_next_connect_tick());
         }
     }
 }
@@ -693,13 +686,13 @@ pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
         if check_par_con(packet) == false {
             rf_stop_trx();
 
-            set_slave_window_offset(*get_tick_per_us() * 1250 * (packet.woffset as u32 + 1));
+            set_slave_window_offset(CLOCK_SYS_CLOCK_1US * 1250 * (packet.woffset as u32 + 1));
 
-            write_reg_system_tick_irq(*get_tick_per_us() * 1000 + read_reg_system_tick());
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick());
             write_reg_irq_src(0x100000);
-            write_reg_system_tick_irq(time + *get_slave_window_offset() + *get_tick_per_us() * (0 - if packet.woffset == 0 { 500 } else { 700 }));
+            write_reg_system_tick_irq(time + *get_slave_window_offset() + CLOCK_SYS_CLOCK_1US * (0 - if packet.woffset == 0 { 500 } else { 700 }));
             if 0x80000000 < read_reg_system_tick_irq() - read_reg_system_tick() {
-                write_reg_system_tick_irq(*get_tick_per_us() * 10 + read_reg_system_tick());
+                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
             }
 
             set_light_conn_sn_master(0x80);
@@ -709,10 +702,10 @@ pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
             }
 
             set_slave_status_tick(((packet.interval as u32 * 5) >> 2) as u8);
-            set_slave_link_interval(packet.interval as u32 * *get_tick_per_us() * 1250);
-            set_slave_window_size((packet.wsize as u32 * 1250 + 1100) * *get_tick_per_us());
+            set_slave_link_interval(packet.interval as u32 * CLOCK_SYS_CLOCK_1US * 1250);
+            set_slave_window_size((packet.wsize as u32 * 1250 + 1100) * CLOCK_SYS_CLOCK_1US);
 
-            let tmp = *get_slave_link_interval() - *get_tick_per_us() * 1250;
+            let tmp = *get_slave_link_interval() - CLOCK_SYS_CLOCK_1US * 1250;
             if tmp <= *get_slave_window_size() && *get_slave_window_size() - tmp != 0 {
                 set_slave_window_size(tmp);
             }
@@ -760,9 +753,8 @@ pub fn rf_link_slave_connect(packet: &rf_packet_ll_init_t, time: u32) -> bool
     return false;
 }
 
-pub fn light_set_tick_per_us(ticks: u32)
+pub fn light_check_tick_per_us(ticks: u32)
 {
-    set_tick_per_us(ticks);
     if ticks == 0x10 {
         set_T_scan_rsp_intvl(0);
     } else if ticks == 0x20 || ticks != 0x30 {
@@ -814,12 +806,12 @@ pub fn is_receive_ota_window() -> bool
     static TICK_LOOP: AtomicU32 = AtomicU32::new(0);
 
     if LOOP_INTERVAL_US != 0 {
-        if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= LOOP_INTERVAL_US as u32 * *get_tick_per_us() {
+        if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= LOOP_INTERVAL_US as u32 * CLOCK_SYS_CLOCK_1US {
             return true;
         }
         TICK_LOOP.store(read_reg_system_tick(), Ordering::Relaxed);
     }
-    if *get_slave_link_state() == 1 && *get_tick_per_us() == 0x10 {
+    if *get_slave_link_state() == 1 && CLOCK_SYS_CLOCK_1US == 0x10 {
         return true;
     }
 
@@ -877,7 +869,7 @@ fn update_connect_para()
 {
     if *get_need_update_connect_para() {
         if *get_att_service_discover_tick() != 0 {
-            if UPDATE_CONNECT_PARA_DELAY_MS * *get_tick_per_us() * 1000 < read_reg_system_tick() - *get_att_service_discover_tick() {
+            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - *get_att_service_discover_tick() {
                 update_ble_parameter_cb();
                 set_need_update_connect_para(false);
                 set_att_service_discover_tick(0);
@@ -888,7 +880,7 @@ fn update_connect_para()
 
 fn set_mesh_info_time_handle()
 {
-    if *get_set_mesh_info_time() != 0 && !*get_set_mesh_info_expired_flag() && *get_set_mesh_info_time() * *get_tick_per_us() * 1000000 < read_reg_system_tick() {
+    if *get_set_mesh_info_time() != 0 && !*get_set_mesh_info_expired_flag() && *get_set_mesh_info_time() * CLOCK_SYS_CLOCK_1US * 1000000 < read_reg_system_tick() {
         set_set_mesh_info_expired_flag(true);
     }
 }
@@ -897,22 +889,28 @@ pub fn mesh_node_flush_status()
 {
     static TICK_NODE_REPORT: AtomicU32 = AtomicU32::new(0);
 
-    if ((read_reg_system_tick() - TICK_NODE_REPORT.load(Ordering::Relaxed)) as i32) - ((*get_tick_per_us() * 500000) as i32) > 0 {
-        TICK_NODE_REPORT.store(read_reg_system_tick(), Ordering::Relaxed);
-        let tick = read_reg_system_tick();
-        if *get_mesh_node_max() > 1 {
-            for count in 1..*get_mesh_node_max() as usize {
-                let p_node_st = &mut (*get_mesh_node_st())[count];
-                if (*p_node_st).tick != 0 && (*get_tick_per_us() * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - (*p_node_st).tick as u32 {
-                    (*p_node_st).tick = 0;
+    // Only report status every 500ms
+    if !clock_time_exceed(TICK_NODE_REPORT.load(Ordering::Relaxed), 500000) {
+        return;
+    }
 
-                    (*get_mesh_node_mask())[count >> 5] |= 1 << (count & 0x1f);
-                    if *get_p_mesh_node_status_callback() != None {
-                        let mut node_data = (*p_node_st).val.clone();
-                        node_data.sn = 0;
-                        (*get_p_mesh_node_status_callback()).unwrap()(&node_data, 0);
-                    }
-                }
+    let tick = read_reg_system_tick();
+    TICK_NODE_REPORT.store(tick, Ordering::Relaxed);
+
+    // Iterate over each mesh node and check if it's timed out
+    for count in 1..*get_mesh_node_max() as usize {
+        let p_node_st = &mut (*get_mesh_node_st())[count];
+        if p_node_st.tick != 0 && (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - p_node_st.tick as u32 {
+            p_node_st.tick = 0;
+
+            // Set the bit in the mask so that the status is reported (Since the device has changed to offline now)
+            (*get_mesh_node_mask())[count >> 5] |= 1 << (count & 0x1f);
+
+            // Call the node status callback if one is set
+            if *get_p_mesh_node_status_callback() != None {
+                let mut node_data = p_node_st.val.clone();
+                node_data.sn = 0;
+                (*get_p_mesh_node_status_callback()).unwrap()(&node_data, 0);
             }
         }
     }
@@ -932,17 +930,18 @@ fn mesh_node_keep_alive()
 fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
 {
     static SEND_ONLINE_STATUS_CNT: AtomicU8 = AtomicU8::new(0xC8);
+    static MESH_NODE_CUR: AtomicUsize = AtomicUsize::new(1);
 
-    let mut max_node;
-
+    // Clear the result data
     p_data.fill(0);
+
+    // Get the max number of elements the result data can hold
     let mut elems = p_data.len() / MESH_NODE_ST_VAL_LEN as usize;
     if (*get_mesh_node_max() as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN as usize {
         elems = *get_mesh_node_max() as usize;
     }
 
-    max_node = elems;
-
+    // Copy our status in to the result data first
     p_data[0..MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
         unsafe {
             slice::from_raw_parts(
@@ -952,59 +951,38 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
         }
     );
 
+    // Update our own record to keep our status record in sync
     mesh_node_keep_alive();
 
-    max_node = *get_mesh_node_max() as usize;
+    let max_node = *get_mesh_node_max() as usize;
     let mut count = 1;
 
     let mut out_index = count;
-    let mut mesh_node_cur = 1;
-    if count < max_node {
-        loop {
-            if mesh_node_cur < max_node && (*get_mesh_node_st())[mesh_node_cur].tick != 0 {
-                let ptr = MESH_NODE_ST_VAL_LEN as usize * out_index;
-                out_index = out_index + 1;
-                p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
-                    unsafe {
-                        slice::from_raw_parts(
-                            addr_of!((*get_mesh_node_st())[mesh_node_cur].val) as *const u8,
-                            MESH_NODE_ST_VAL_LEN as usize,
-                        )
-                    }
-                );
-            }
-
-            mesh_node_cur += 1;
-
-            max_node = *get_mesh_node_max() as usize;
-
-            if max_node <= mesh_node_cur {
-                mesh_node_cur = 1;
-            }
-
-            count += 1;
-
-            if out_index == elems || count >= max_node {
-                break;
-            }
+    while out_index < elems && count < max_node {
+        let mnc = MESH_NODE_CUR.load(Ordering::Relaxed);
+        if mnc < max_node && (*get_mesh_node_st())[mnc].tick != 0 {
+            let ptr = MESH_NODE_ST_VAL_LEN as usize * out_index;
+            out_index = out_index + 1;
+            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
+                unsafe {
+                    slice::from_raw_parts(
+                        addr_of!((*get_mesh_node_st())[mnc].val) as *const u8,
+                        MESH_NODE_ST_VAL_LEN as usize,
+                    )
+                }
+            );
         }
+
+        MESH_NODE_CUR.store(mnc + 1, Ordering::Relaxed);
+
+        if max_node <= MESH_NODE_CUR.load(Ordering::Relaxed) {
+            MESH_NODE_CUR.store(1, Ordering::Relaxed);
+        }
+
+        count += 1;
     }
 
     return out_index as u32;
-}
-
-fn blt_stall_mcu(ticks: u32)
-{
-    critical_section::with(|_| {
-        write_reg_tmr1_tick(0);
-        write_reg_tmr1_capt(ticks);
-        write_reg_tmr_ctrl8(read_reg_tmr_ctrl8() | 8);
-        write_reg_mcu_wakeup_mask(read_reg_mcu_wakeup_mask() | 2);
-        write_reg_tmr_sta(2);
-        write_reg_pwdn_ctrl(0x80);
-        write_reg_tmr_sta(2);
-        write_reg_tmr_ctrl8(read_reg_tmr_ctrl8() & 0xf7);
-    });
 }
 
 pub fn mesh_send_command(packet: *const rf_packet_att_cmd_t, retransmit_count: u32)
@@ -1017,7 +995,7 @@ pub fn mesh_send_command(packet: *const rf_packet_att_cmd_t, retransmit_count: u
         for _ in 0..retransmit_count+1 {
             for chn in SYS_CHN_LISTEN {
                 rf_set_ble_channel(chn);
-                rf_start_srx2tx(packet as u32, read_reg_system_tick() + *get_tick_per_us() * 30);
+                rf_start_srx2tx(packet as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
                 sleep_us(600);
             }
         }
@@ -1084,7 +1062,7 @@ pub fn back_to_rxmode_bridge()
 fn rf_link_proc_ttc(cmd_time: u32, last_ttc: u8, src: &mut mesh_pkt_t)
 {
     if src.op & 0x3f != LGT_CMD_MESH_OTA_DATA {
-        let mut new_ttc_base = (read_reg_system_tick() - cmd_time) / *get_tick_per_us();
+        let mut new_ttc_base = (read_reg_system_tick() - cmd_time) / CLOCK_SYS_CLOCK_1US;
         let mut ttc_divisor = last_ttc >> 6;
         let mut new_ttc = new_ttc_base >> 10;
         if ttc_divisor != 0 {
@@ -1173,13 +1151,13 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
                 rf_link_proc_ttc(*get_app_cmd_time(), 0, unsafe { &mut *(addr_of_mut!((*get_pkt_light_data()).value[7]) as *mut mesh_pkt_t) });
                 if rf_link_is_notify_req((*get_pkt_light_data()).value[7] & 0x3f) {
                     let mut relay_time = min(
-                        (((read_reg_system_tick() - bridge_cmd_time) / *get_tick_per_us()) + 500) >> 10,
+                        (((read_reg_system_tick() - bridge_cmd_time) / CLOCK_SYS_CLOCK_1US) + 500) >> 10,
                         0xff
                     );
 
                     (*get_pkt_light_data()).value[24] = relay_time as u8;
                 }
-                rf_start_stx_mesh(&*get_pkt_light_data(), *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                rf_start_stx_mesh(&*get_pkt_light_data(), CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
                 sleep_us(700);
             }
         }
@@ -1227,7 +1205,7 @@ pub fn mesh_send_user_command() -> u8
                     mesh_user_command_pkt_enc2buf();
                 }
                 rf_set_ble_channel(SYS_CHN_LISTEN[uVar9 & 3]);
-                rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, *get_tick_per_us() * 0x1e + read_reg_system_tick());
+                rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
 
                 uVar9 = uVar9 + 1;
                 iVar8 = 1 * 4;
@@ -1267,9 +1245,9 @@ pub fn tx_packet_bridge()
         rf_set_ble_crc_adv();
 
         let tick = read_reg_system_tick();
-        if *get_slave_listen_interval() * *get_online_status_interval2listen_interval() as u32 - ONLINE_STATUS_COMP * *get_tick_per_us() * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
+        if *get_slave_listen_interval() * *get_online_status_interval2listen_interval() as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
             TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
-            if *get_tick_per_us() * 30000000 < tick - LAST_ALARM_TIME_BRIDGE.load(Ordering::Relaxed) {
+            if CLOCK_SYS_CLOCK_1US * 30000000 < tick - LAST_ALARM_TIME_BRIDGE.load(Ordering::Relaxed) {
                 LAST_ALARM_TIME_BRIDGE.store(tick, Ordering::Relaxed);
                 // noop
             } else {
@@ -1466,9 +1444,10 @@ pub fn mesh_report_status_enable(enable: bool)
     if enable {
         if *get_mesh_node_max() >> 5 != 0 {
             (*get_mesh_node_mask()).iter_mut().for_each(|v| { *v = 0xfffffffe });
-            if *get_mesh_node_max() & 0x1f != 0 {
-                (*get_mesh_node_mask())[*get_mesh_node_max() as usize >> 5] = (1 << (*get_mesh_node_max() & 0x1f)) - 1;
-            }
+        }
+
+        if *get_mesh_node_max() & 0x1f != 0 {
+            (*get_mesh_node_mask())[*get_mesh_node_max() as usize >> 5] = (1 << (*get_mesh_node_max() & 0x1f)) - 1;
         }
     }
 
@@ -1480,7 +1459,7 @@ pub fn mesh_report_status_enable_mask(data: *const u8, len: u16)
     set_mesh_node_report_enable(if unsafe { *data } != 0 { true } else { false });
     if *get_mesh_node_report_enable() && len > 1 {
         for index in 1..len {
-            if (*get_mesh_node_max() != 0) {
+            if *get_mesh_node_max() != 0 {
                 (*get_mesh_node_st()).iter_mut().enumerate().for_each(|(i, v)| {
                     if unsafe { *data.offset(index as isize) } == v.val.dev_adr {
                         (*get_mesh_node_mask())[i >> 5] |= 1 << (i & 0x1f);

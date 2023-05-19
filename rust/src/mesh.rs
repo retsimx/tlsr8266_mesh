@@ -259,13 +259,13 @@ impl MeshManager {
 
             pkt_notify.value[10..10 + p.len()].copy_from_slice(&p[0..p.len()]);
 
-            let r = irq_disable();
-            if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<rf_packet_att_cmd_t>()) {
-                    err = 0;
+            critical_section::with(|_| {
+                if is_add_packet_buf_ready() {
+                    if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<rf_packet_att_cmd_t>()) {
+                        err = 0;
+                    }
                 }
-            }
-            irq_restore(r);
+            });
         }
 
         return err;

@@ -2,7 +2,7 @@ use crate::config::{FLASH_ADR_LIGHT_NEW_FW, OTA_LED};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
-use crate::sdk::mcu::clock::{clock_time, sleep_us};
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{
@@ -378,13 +378,12 @@ impl OtaManager {
             }
 
             if !*get_rf_slave_ota_terminate_flag()
-                && (clock_time() - self.rf_slave_ota_finished_time)
-                > 2000 * 1000 * *get_tick_per_us()
+                && clock_time_exceed(self.rf_slave_ota_finished_time, 2000 * 1000)
             {
                 set_rf_slave_ota_terminate_flag(true); // for ios: no last read command
             }
 
-            if (clock_time() - self.rf_slave_ota_finished_time) > 4000 * 1000 * *get_tick_per_us() {
+            if clock_time_exceed(self.rf_slave_ota_finished_time, 4000 * 1000) {
                 reboot_flag = true;
             }
 

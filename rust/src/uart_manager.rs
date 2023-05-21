@@ -10,6 +10,7 @@ use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
 use crate::sdk::light::{AppCmdValue, MESH_NODE_MAX_NUM, MeshPkt, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
+use crate::sdk::mcu::register::write_reg_dma_rx_rdy0;
 use crate::sdk::mcu::watchdog::wd_clear;
 
 pub_mut!(pkt_user_cmd, MeshPkt, MeshPkt {
@@ -121,7 +122,6 @@ async fn notification_parser() {
     }
 }
 
-
 pub struct UartManager {
     pub driver: UartDriver,
     recv_channel: Deque<uart_data_t, 5>,
@@ -129,7 +129,8 @@ pub struct UartManager {
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
-    sent: Deque<[u8; 15], 10>
+    sent: Deque<[u8; 15], 10>,
+    irq_s: u8
 }
 
 impl UartManager {
@@ -141,7 +142,8 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
-            sent: Deque::new()
+            sent: Deque::new(),
+            irq_s: 0
         }
     }
 
@@ -164,15 +166,29 @@ impl UartManager {
 
     #[inline(always)]
     pub fn check_irq(&mut self) {
-        let irq_s = UartDriver::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            if !self.recv_channel.is_full() {
-                let _ = self.recv_channel.push_back(self.driver.rxdata_buf);
-            }
-        }
+        self.irq_s = UartDriver::uart_irqsource_get();
+    }
 
-        if irq_s & UARTIRQMASK::TX as u8 != 0 {
-            self.driver.uart_clr_tx_busy_flag();
+    async fn handle_uart_interrupts(&mut self) {
+        loop {
+            while self.irq_s == 0 {
+                yield_now().await;
+            }
+
+            critical_section::with(|_| {
+                if self.irq_s & UARTIRQMASK::RX as u8 != 0 {
+                    if !self.recv_channel.is_full() {
+                        let _ = self.recv_channel.push_back(self.driver.rxdata_buf);
+                    }
+                }
+
+                if self.irq_s & UARTIRQMASK::TX as u8 != 0 {
+                    self.driver.uart_clr_tx_busy_flag();
+                }
+
+                write_reg_dma_rx_rdy0(self.irq_s); // CLR irq source
+                self.irq_s = 0;
+            });
         }
     }
 
@@ -257,6 +273,13 @@ impl UartManager {
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
+        #[embassy_executor::task]
+        async fn handle_uart_interrupts_task() {
+            app().uart_manager.handle_uart_interrupts().await;
+        }
+
+        spawner.spawn(handle_uart_interrupts_task()).unwrap();
+
         loop {
             // Wait for a message
             while self.recv_channel.is_empty() {

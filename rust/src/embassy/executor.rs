@@ -14,8 +14,10 @@ impl Executor {
         Self {
             // use Signal_Work_Thread_Mode as substitute for local interrupt register
             inner: raw::Executor::new(
-                |_| {},
-                ptr::null_mut(),
+                raw::Pender::new_from_callback(
+                    |_| {},
+                    ptr::null_mut(),
+                )
             ),
             not_send: PhantomData,
         }

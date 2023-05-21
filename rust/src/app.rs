@@ -7,6 +7,7 @@ use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
+use crate::sdk::ble_app::ll_irq::{irq_timer1};
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::common::compat::check_panic_info;
 use crate::sdk::drivers::uart::UartDriver;
@@ -24,21 +25,6 @@ pub struct App {
     pub mesh_manager: MeshManager,
     pub light_manager: LightManager,
     pub uart_manager: UartManager
-}
-
-#[embassy_executor::task]
-async fn light_manager(spawner: Spawner) {
-    app().light_manager.run(spawner).await;
-}
-
-#[embassy_executor::task]
-async fn uart_manager(spawner: Spawner) {
-    app().uart_manager.run(spawner).await;
-}
-
-#[embassy_executor::task]
-async fn panic_check(_spawner: Spawner) {
-    check_panic_info().await;
 }
 
 impl App {
@@ -78,14 +64,32 @@ impl App {
         // Configure the rest of the system
         self.init();
 
+        // Start the IRQ Timer 1 task
+        #[embassy_executor::task]
+        async fn irq_timer_1_task(light_manager: &'static mut LightManager) {
+            irq_timer1(light_manager).await;
+        }
+
+        spawner.spawn(irq_timer_1_task(&mut app().light_manager)).unwrap();
+
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
         // Start the light manager
-        spawner.spawn(light_manager(spawner)).unwrap();
+        #[embassy_executor::task]
+        async fn light_manager(spawner: Spawner, light_manager: &'static mut LightManager) {
+            light_manager.run(spawner).await;
+        }
+
+        spawner.spawn(light_manager(spawner, &mut app().light_manager)).unwrap();
 
         // Start the uart manager
-        spawner.spawn(uart_manager(spawner)).unwrap();
+        #[embassy_executor::task]
+        async fn uart_manager(spawner: Spawner, uart_manager: &'static mut UartManager) {
+            uart_manager.run(spawner).await;
+        }
+
+        spawner.spawn(uart_manager(spawner, &mut app().uart_manager)).unwrap();
 
         // Send a message to the network saying that we just booted up
         let mut data = [0 as u8; 13];
@@ -94,6 +98,11 @@ impl App {
         app().mesh_manager.send_mesh_message(&data, 0xffff);
 
         // Start the panic checker to see if there is information we need to send
+        #[embassy_executor::task]
+        async fn panic_check(_spawner: Spawner) {
+            check_panic_info().await;
+        }
+
         spawner.spawn(panic_check(spawner)).unwrap();
 
         loop {

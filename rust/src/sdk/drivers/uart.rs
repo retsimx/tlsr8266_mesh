@@ -115,7 +115,7 @@ impl UartDriver {
 
         write_reg8(0x800503,0x01);//set DMA 0 mode to 0x01 for receive
         write_reg8(0x800507,0x00); //DMA1 mode to send
-        Self::uart_irqsource_get(); //clear uart irq
+        write_reg_dma_rx_rdy0(Self::uart_irqsource_get()); //clear uart irq
         if en_rx_irq {
             write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_RX as u8); //open dma1 interrupt mask
             write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN as u32); //open dma interrupt mask
@@ -140,9 +140,7 @@ impl UartDriver {
     */
     #[inline(always)]
     pub fn uart_irqsource_get() -> u8 {
-        let irq_s = read_reg_dma_rx_rdy0();
-        write_reg_dma_rx_rdy0(irq_s);//CLR irq source
-        return irq_s & UARTIRQMASK::ALL as u8;
+        read_reg_dma_rx_rdy0()
     }
 
     #[inline(always)]

@@ -9,8 +9,11 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::{app, BIT, uprintln};
+use crate::{app, BIT, pub_mut, uprintln};
+use crate::app::App;
 use crate::embassy::time_driver::check_clock_overflow;
+use crate::embassy::yield_now::yield_now;
+use crate::light_manager::LightManager;
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
@@ -437,13 +440,6 @@ pub fn irq_st_ble_rx()
 }
 
 #[link_section = ".ram_code"]
-#[inline(never)]
-fn irq_light_slave_tx()
-{
-    write_reg_rf_irq_status(2);
-}
-
-#[link_section = ".ram_code"]
 unsafe fn irq_light_slave_rx()
 {
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
@@ -603,38 +599,19 @@ unsafe fn irq_light_slave_rx()
     entry.dma_len = 1;
 }
 
-#[link_section = ".ram_code"]
-pub unsafe fn irq_light_slave_handler() {
-    let irq = read_reg_rf_irq_status();
-    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
-        irq_light_slave_rx();
-    }
+pub_mut!(irq_timer1_flag, bool, false);
 
-    if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
-        irq_light_slave_tx();
-    }
-
-    let irq_source = read_reg_irq_src();
-    if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
-        write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
-        if (*get_p_st_handler()).is_some() {
-            (*get_p_st_handler()).unwrap()();
+pub async fn irq_timer1(light_manager: &mut LightManager) {
+    loop {
+        while !*get_irq_timer1_flag() {
+            yield_now().await;
         }
-    }
 
-    if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
-        irq_timer0();
-        write_reg_irq_src(FLD_IRQ::TMR0_EN as u32);
-    }
-    if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
-        irq_timer1();
+        light_manager.transition_step();
+
+        set_irq_timer1_flag(false);
         write_reg_irq_src(FLD_IRQ::TMR1_EN as u32);
     }
-}
-
-#[inline(never)]
-fn irq_timer1() {
-    app().light_manager.transition_step();
 }
 
 // This timer is configured to run once per second to check if the internal clock has overflowed.
@@ -648,7 +625,34 @@ fn irq_timer0() {
 #[no_mangle]
 #[link_section = ".ram_code"]
 extern "C" fn irq_handler() {
-    unsafe { irq_light_slave_handler(); }
+    let irq = read_reg_rf_irq_status();
+    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
+        unsafe { irq_light_slave_rx(); }
+    }
+
+    if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
+        write_reg_rf_irq_status(2);
+    }
+
+    let irq_source = read_reg_irq_src();
+    if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
+        write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
+        if (*get_p_st_handler()).is_some() {
+            (*get_p_st_handler()).unwrap()();
+        }
+    }
 
     app().uart_manager.check_irq();
+
+    if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
+        // This timer is configured to run once per second to check if the internal clock has overflowed.
+        // this is a workaround in case there are no 'clock_time64' calls between overflows
+        // We handle this interrupt synchronously because it requires hardly any computation
+        unsafe { check_clock_overflow(); }
+        write_reg_irq_src(FLD_IRQ::TMR0_EN as u32);
+    }
+
+    if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
+        set_irq_timer1_flag(true);
+    }
 }

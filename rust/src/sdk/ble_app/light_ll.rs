@@ -114,10 +114,11 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
                 let sn_difference = pkt[src_index].sn - mesh_node_st.val.sn;
                 let par_match = pkt[src_index].par == mesh_node_st.val.par;
 
-                let timeout= 1500000;
+                // todo: Why the divided by two here?
+                let timeout= (ONLINE_STATUS_TIMEOUT * 1000) / 2;
 
                 result = current_index as u32;
-                if sn_difference - 2 < 0x3f || sn_difference != 0 && mesh_node_st.tick == 0 || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - mesh_node_st.tick {
+                if sn_difference - 2 < 0x3f || (sn_difference != 0 && (mesh_node_st.tick == 0 || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - mesh_node_st.tick)) {
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {

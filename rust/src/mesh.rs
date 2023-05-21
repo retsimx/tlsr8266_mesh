@@ -153,7 +153,7 @@ impl MeshManager {
                 pair_enc_packet_mesh(get_pkt_user_cmd_addr());
             }
 
-            mesh_send_command(get_pkt_user_cmd_addr() as *const rf_packet_att_cmd_t, 0);
+            mesh_send_command(get_pkt_user_cmd_addr() as *const PacketAttCmd, 0);
         });
     }
 
@@ -238,12 +238,12 @@ impl MeshManager {
                 return -1;
             }
 
-            let mut pkt_notify = rf_packet_att_cmd_t {
+            let mut pkt_notify = PacketAttCmd {
                 dma_len: 0x1d,  // dma_len
                 _type: 0x02,    // type
                 rf_len: 0x1b,   // rf_len
-                l2capLen: 0x17, // u16
-                chanId: 0x04,   // chanid
+                l2cap_len: 0x17, // u16
+                chan_id: 0x04,   // chanid
                 opcode: 0x1b,   // notify
                 handle: 0x12,
                 handle1: 0x00, // status handler
@@ -261,7 +261,7 @@ impl MeshManager {
 
             critical_section::with(|_| {
                 if is_add_packet_buf_ready() {
-                    if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<rf_packet_att_cmd_t>()) {
+                    if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
                         err = 0;
                     }
                 }
@@ -324,7 +324,7 @@ impl MeshManager {
         self.safe_effect_new_mesh_finish();
     }
 
-    pub fn mesh_pair_notify_refresh(&mut self, p: &rf_packet_att_cmd_t) -> u8 {
+    pub fn mesh_pair_notify_refresh(&mut self, p: &PacketAttCmd) -> u8 {
         if self.mesh_pair_checksum[0..8] == p.value[12..12 + 8] {
             // mesh pair : success one device, clear the mask flag
             self.mesh_pair_notify_rsp_mask[(p.value[10] / 8) as usize] &= !(BIT!(p.value[10] % 8));

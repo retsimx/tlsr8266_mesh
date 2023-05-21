@@ -10,7 +10,7 @@ use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_set_max_bridge, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -47,7 +47,7 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
 // pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
-pub_mut!(buff_response, [rf_packet_att_data_t; 48], [rf_packet_att_data_t {
+pub_mut!(buff_response, [PacketAttData; 48], [PacketAttData {
     dma_len: 0,
     _type: 0,
     rf_len: 0,
@@ -90,7 +90,7 @@ pub fn light_hw_timer1_config() {
 
 fn light_init_default() {
     let mut _max_mesh_name_len = 0;
-    let len = (get_adv_data().len() + size_of::<ll_adv_private_t>() + 2) as u8;
+    let len = (get_adv_data().len() + size_of::<AdvPrivate>() + 2) as u8;
     if len < 31 {
         _max_mesh_name_len = 31 - len - 2;
         set_max_mesh_name_len(if _max_mesh_name_len < 16 {
@@ -121,13 +121,12 @@ fn light_init_default() {
     );
 
     set_p_adv_pri_data(get_adv_pri_data());
-    set_adv_private_data_len(size_of::<ll_adv_private_t>() as u8);
+    set_adv_private_data_len(size_of::<AdvPrivate>() as u8);
     set_p_adv_rsp_data(get_adv_rsp_pri_data());
 
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
     rf_link_slave_set_buffer(get_buff_response().as_mut_slice());
-    rf_link_set_max_bridge(BRIDGE_MAX_CNT);
 
     vendor_id_init(VENDOR_ID);
 
@@ -254,8 +253,8 @@ pub fn main_loop() {
 Called to handle messages that require a response to be returned
 */
 pub fn rf_link_response_callback(
-    ppp: *mut rf_packet_att_value_t,
-    p_req: *const rf_packet_att_value_t,
+    ppp: *mut PacketAttValue,
+    p_req: *const PacketAttValue,
 ) -> bool {
     let ppp = unsafe { &mut (*ppp) };
     let p_req = unsafe { &(*p_req) };
@@ -359,8 +358,8 @@ pub fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 Called to handle messages sent to us that don't require a response
 */
-pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
-    // p start from l2capLen of rf_packet_att_cmd_t
+pub fn rf_link_data_callback(p: *const PacketL2capData) {
+    // p start from l2cap_len of RfPacketAttCmdT
     let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
@@ -374,7 +373,7 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
         true,
     );
 
-    if op_cmd_len != LightOpType::op_type_3 as u8 {
+    if op_cmd_len != LightOpType::OpType3 as u8 {
         return;
     }
 
@@ -419,9 +418,6 @@ pub fn rf_link_data_callback(p: *const ll_packet_l2cap_data_t) {
             flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
             light_sw_reboot();
         }
-        LGT_CLEAR_LUM_STATE => flash_erase_sector(FLASH_ADR_LUM),
-        // Clear the lum state
-        LGT_TRIGGER_PANIC => panic!("She's dead jim"),
         LGT_CMD_KICK_OUT => {
             irq_disable();
             let res = (params[0] as u32).try_into();

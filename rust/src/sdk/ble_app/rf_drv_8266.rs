@@ -11,7 +11,7 @@ use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_bridge_max_cnt, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
@@ -417,12 +417,12 @@ pub unsafe fn blc_ll_init_basic_mcu()
 }
 
 pub_mut!(gAttributes, *mut attribute_t, null_mut());
-pub unsafe fn set_spp_write_cb(func: fn(data: *const rf_packet_att_write_t) -> bool)
+pub unsafe fn set_spp_write_cb(func: fn(data: *const PacketAttWrite) -> bool)
 {
     (*gAttributes.0.offset(21)).w = Some(func);
 }
 
-pub unsafe fn set_spp_ota_write_cb(func: fn(data: *const rf_packet_att_write_t) -> bool)
+pub unsafe fn set_spp_ota_write_cb(func: fn(data: *const PacketAttWrite) -> bool)
 {
     (*gAttributes.0.offset(24)).w = Some(func);
 }
@@ -434,37 +434,37 @@ pub_mut!(slave_connected_tick, u32, 0);
 pub_mut!(slave_adv_enable, bool, false);
 pub_mut!(slave_connection_enable, bool, false);
 pub_mut!(mac_id, [u8; 6], [0; 6]);
-pub_mut!(pkt_adv, rf_packet_adv_ind_module_t, rf_packet_adv_ind_module_t {
+pub_mut!(pkt_adv, RfPacketAdvIndModuleT, RfPacketAdvIndModuleT {
     dma_len: 0x27,
     _type: 0,
     rf_len: 0x25,
-    advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+    adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
     data: [0; 31]
 });
-pub_mut!(pkt_scan_rsp, rf_packet_scan_rsp_t, rf_packet_scan_rsp_t {
+pub_mut!(pkt_scan_rsp, PacketScanRsp, PacketScanRsp {
     dma_len: 0x27,
     _type: 0x4,
     rf_len: 0x25,
-    advA: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+    adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
     data: [0; 31]
 });
-pub_mut!(pkt_light_data, rf_packet_att_cmd_t, rf_packet_att_cmd_t {
+pub_mut!(pkt_light_data, PacketAttCmd, PacketAttCmd {
     dma_len: 0x27,
     _type: 2,
     rf_len: 0x25,
-    l2capLen: 0xCCDD,
-    chanId: 0,
+    l2cap_len: 0xCCDD,
+    chan_id: 0,
     opcode: 0,
     handle: 0,
     handle1: 0,
     value: [0; 30]
 });
-pub_mut!(pkt_light_status, rf_packet_att_cmd_t, rf_packet_att_cmd_t {
+pub_mut!(pkt_light_status, PacketAttCmd, PacketAttCmd {
     dma_len: 0x27,
     _type: 2,
     rf_len: 0x25,
-    l2capLen: 0x21,
-    chanId: 0,
+    l2cap_len: 0x21,
+    chan_id: 0,
     opcode: 0,
     handle: 0,
     handle1: 0,
@@ -545,13 +545,13 @@ fn rf_link_slave_read_status_start()
 
   set_slave_status_record_idx(0);
     (*get_slave_status_record()).fill(
-        status_record_t { adr: [0; 1], alarm_id: 0 }
+        StatusRecord { adr: [0; 1], alarm_id: 0 }
     );
 
   set_notify_req_mask_idx(0);
 }
 
-fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
+fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
     if data.rf_len < 0x11 {
         return false;
     }
@@ -566,7 +566,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
     rf_link_get_op_para(
-        unsafe { addr_of!(data.l2capLen) as *const ll_packet_l2cap_data_t },
+        unsafe { addr_of!(data.l2cap_len) as *const PacketL2capData },
         &mut op_cmd,
         &mut op_cmd_len,
         &mut params,
@@ -574,7 +574,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
         false,
     );
 
-    let (group_match, device_match) = rf_link_match_group_mac(sno.as_ptr() as *const app_cmd_value_t);
+    let (group_match, device_match) = rf_link_match_group_mac(sno.as_ptr() as *const AppCmdValue);
     let op;
     let mut tmp = data.value[6] as u32;
     if op_cmd_len == 3 {
@@ -606,20 +606,20 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
     unsafe {
         slice::from_raw_parts_mut(
-            addr_of!((*get_pkt_light_data()).l2capLen) as *mut u8,
+            addr_of!((*get_pkt_light_data()).l2cap_len) as *mut u8,
             params_len as usize + 0x11,
         ).copy_from_slice(
             slice::from_raw_parts(
-                addr_of!(data.l2capLen) as *const u8,
+                addr_of!(data.l2cap_len) as *const u8,
                 params_len as usize + 0x11,
             )
         )
     }
 
-    (*get_pkt_light_data()).chanId = 0xff03;
+    (*get_pkt_light_data()).chan_id = 0xff03;
     (*get_pkt_light_data()).dma_len = 0x27;
     (*get_pkt_light_data()).rf_len = 0x25;
-    (*get_pkt_light_data()).l2capLen = 0x21;
+    (*get_pkt_light_data()).l2cap_len = 0x21;
     // todo: What type is pkt_light_data here?
     unsafe { *(addr_of!((*get_pkt_light_data()).opcode) as *mut u16) = *get_device_address() };
     unsafe { *(addr_of!((*get_pkt_light_data()).value[3]) as *mut u16) = *get_device_address() };
@@ -627,7 +627,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     (*get_pkt_light_data()).value[25] = *get_max_relay_num();
 
     if device_match != false || group_match != false {
-        rf_link_data_callback(addr_of!((*get_pkt_light_data()).l2capLen) as *const ll_packet_l2cap_data_t);
+        rf_link_data_callback(addr_of!((*get_pkt_light_data()).l2cap_len) as *const PacketL2capData);
     }
     get_slave_sno().copy_from_slice(sno);
 
@@ -639,16 +639,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
             rf_link_slave_read_status_stop();
         }
         if device_match == false && unsafe { *(addr_of!(data.value[5]) as *const u16) } != 0 {
-            if op == LGT_CMD_MESH_OTA_DATA {
-                set_slave_data_valid(0x21);
-                if (data.value[0xb] as u16 * 0x100 + data.value[10] as u16) < 0xff00 {
-                    uprintln!("check here 4");
-                    // todo: 9 may need to be 5 instead
-                    set_slave_data_valid(9);
-                }
-            } else {
-                set_slave_data_valid(*get_bridge_max_cnt() + 1);
-            }
+            set_slave_data_valid(BRIDGE_MAX_CNT + 1);
         } else {
             set_slave_data_valid(0);
         }
@@ -660,7 +651,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
     (*get_pkt_light_status()).value[25] = *get_max_relay_num();
     (*get_pkt_light_data()).value[23] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr()) != false) {
-        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ || op == LGT_CMD_GET_TIME || op == LGT_CMD_MESH_OTA_READ {
+        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ || op == LGT_CMD_MESH_OTA_READ {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
             if op == LGT_CMD_LIGHT_GRP_REQ {
                 (*get_pkt_light_data()).value[22] = params[1];
@@ -670,13 +661,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
                 if op == LGT_CMD_CONFIG_DEV_ADDR {
                     (*get_pkt_light_data()).value[22] = 4;
                 }
-                if op == LGT_CMD_READ_ALARM {
-                    (*get_pkt_light_data()).value[22] = 5;
-                } else if op == LGT_CMD_READ_SCENE {
-                    (*get_pkt_light_data()).value[22] = 8;
-                } else if op == LGT_CMD_GET_TIME {
-                    (*get_pkt_light_data()).value[22] = 6;
-                } else if op == LGT_CMD_USER_NOTIFY_REQ {
+                if op == LGT_CMD_USER_NOTIFY_REQ {
                     (*get_pkt_light_data()).value[22] = 7;
                 } else if op == LGT_CMD_MESH_OTA_READ {
                     (*get_pkt_light_data()).value[22] = 9;
@@ -694,13 +679,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
                     if op == LGT_CMD_CONFIG_DEV_ADDR {
                         (*get_pkt_light_data()).value[22] = 4;
                     }
-                    if op == LGT_CMD_READ_ALARM {
-                        (*get_pkt_light_data()).value[22] = 5;
-                    } else if op == LGT_CMD_READ_SCENE {
-                        (*get_pkt_light_data()).value[22] = 8;
-                    } else if op == LGT_CMD_GET_TIME {
-                        (*get_pkt_light_data()).value[22] = 6;
-                    } else if op == LGT_CMD_USER_NOTIFY_REQ {
+                    if op == LGT_CMD_USER_NOTIFY_REQ {
                         (*get_pkt_light_data()).value[22] = 7;
                     } else if op == LGT_CMD_MESH_OTA_READ {
                         (*get_pkt_light_data()).value[22] = 9;
@@ -709,10 +688,10 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
                     }
                 }
             }
-            set_slave_data_valid(*get_bridge_max_cnt() as u32 * 2 + 1);
+            set_slave_data_valid(BRIDGE_MAX_CNT as u32 * 2 + 1);
             (*get_pkt_light_data()).value[22] = 1;
         } else if dev_addr_with_mac_flag(params.as_ptr()) == false {
-            set_slave_data_valid(*get_bridge_max_cnt() as u32 * 2 + 1);
+            set_slave_data_valid(BRIDGE_MAX_CNT as u32 * 2 + 1);
             (*get_pkt_light_data()).value[22] = 4;
         } else {
             set_slave_data_valid(params[3] as u32 * 2 + 1);
@@ -728,13 +707,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
             if op == LGT_CMD_CONFIG_DEV_ADDR {
                 (*get_pkt_light_data()).value[22] = 4;
             }
-            if op == LGT_CMD_READ_ALARM {
-                (*get_pkt_light_data()).value[22] = 5;
-            } else if op == LGT_CMD_READ_SCENE {
-                (*get_pkt_light_data()).value[22] = 8;
-            } else if op == LGT_CMD_GET_TIME {
-                (*get_pkt_light_data()).value[22] = 6;
-            } else if op == LGT_CMD_USER_NOTIFY_REQ {
+            if op == LGT_CMD_USER_NOTIFY_REQ {
                 (*get_pkt_light_data()).value[22] = 7;
             } else if op == LGT_CMD_MESH_OTA_READ {
                 (*get_pkt_light_data()).value[22] = 9;
@@ -754,7 +727,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
 
         unsafe { *(addr_of!((*get_pkt_light_status()).value[3]) as *mut u16) = *get_device_address() };
 
-        let tmp_pkt = rf_packet_att_value_t {
+        let tmp_pkt = PacketAttValue {
             sno: [0; 3],
             src: [0; 2],
             dst: [0; 2],
@@ -772,17 +745,17 @@ fn rf_link_slave_data_write_no_dec(data: &mut rf_packet_att_write_t) -> bool {
             *(addr_of!(tmp_pkt.src) as *mut u16) = *get_device_address();
         }
 
-        if rf_link_response_callback(addr_of!((*get_pkt_light_status()).value) as *mut rf_packet_att_value_t, &tmp_pkt) != false {
-            rf_link_slave_add_status(unsafe { &*(get_pkt_light_status_addr() as *const mesh_pkt_t) });
+        if rf_link_response_callback(addr_of!((*get_pkt_light_status()).value) as *mut PacketAttValue, &tmp_pkt) != false {
+            rf_link_slave_add_status(unsafe { &*(get_pkt_light_status_addr() as *const MeshPkt) });
         }
     }
 
     return true;
 }
 
-fn rf_link_slave_data_write(data: *const rf_packet_att_write_t) -> bool {
-    if *get_pair_login_ok() && unsafe { pair_dec_packet(data as *mut rf_packet_ll_app_t) } {
-        return rf_link_slave_data_write_no_dec(unsafe { &mut *(data as *mut rf_packet_att_write_t) });
+fn rf_link_slave_data_write(data: *const PacketAttWrite) -> bool {
+    if *get_pair_login_ok() && unsafe { pair_dec_packet(data as *mut PacketLlApp) } {
+        return rf_link_slave_data_write_no_dec(unsafe { &mut *(data as *mut PacketAttWrite) });
     }
 
     return false;
@@ -848,8 +821,8 @@ pub fn rf_link_slave_init(interval: u32)
         flash_read_page(FLASH_ADR_MAC, 6, (*get_mac_id()).as_mut_ptr());
         set_slave_p_mac((*get_mac_id()).as_ptr());
 
-        (*get_pkt_adv()).advA = *get_mac_id();
-        (*get_pkt_scan_rsp()).advA = *get_mac_id();
+        (*get_pkt_adv()).adv_a = *get_mac_id();
+        (*get_pkt_scan_rsp()).adv_a = *get_mac_id();
 
         rf_link_slave_set_adv(get_adv_data());
         pair_load_key();

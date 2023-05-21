@@ -8,16 +8,16 @@ use crate::embassy::yield_now::yield_now;
 use crate::mesh::{get_mesh_node_st, mesh_node_st_val_t};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{app_cmd_value_t, MESH_NODE_MAX_NUM, mesh_pkt_t, set_p_cb_rx_from_mesh};
+use crate::sdk::light::{AppCmdValue, MESH_NODE_MAX_NUM, MeshPkt, set_p_cb_rx_from_mesh};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
-pub_mut!(pkt_user_cmd, mesh_pkt_t, mesh_pkt_t {
+pub_mut!(pkt_user_cmd, MeshPkt, MeshPkt {
     dma_len: 0x27,
     _type: 2,
     rf_len: 0x25,
-    l2capLen: 0xCCDD,
-    chanId: 0,
+    l2cap_len: 0xCCDD,
+    chan_id: 0,
     src_tx: 0,
     handle1: 0,
     sno: [0; 3],
@@ -42,10 +42,10 @@ pub enum UartMsg {
     Ack = 0xff
 }
 
-// app_cmd_value_t
-fn light_mesh_rx_cb(data: &app_cmd_value_t) {
+// AppCmdValueT
+fn light_mesh_rx_cb(data: &AppCmdValue) {
     let data = addr_of!(*data) as *const u8;
-    // Compute the CRC of important bits. This is from start of app_cmd_value_t.dst (5) to end of app_cmd_value_t.par (20)
+    // Compute the CRC of important bits. This is from start of AppCmdValueT.dst (5) to end of AppCmdValueT.par (20)
     let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
 
     // Check if this message is one we sent
@@ -60,7 +60,7 @@ fn light_mesh_rx_cb(data: &app_cmd_value_t) {
     };
 
     msg.data[2] = UartMsg::MeshMessage as u8;
-    for i in 0..size_of::<app_cmd_value_t>() {
+    for i in 0..size_of::<AppCmdValue>() {
         unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.offset(i as isize) };
     }
 

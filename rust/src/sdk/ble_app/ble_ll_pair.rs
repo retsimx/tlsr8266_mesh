@@ -10,7 +10,7 @@ use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 
-pub unsafe fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
+pub unsafe fn pair_dec_packet(ps: *mut PacketLlApp) -> bool {
     let mut result = true;
     if *get_security_enable() != false {
         (*get_pair_ivm())[5..5 + 3].copy_from_slice(&(*ps).app_cmd_v.sno);
@@ -20,16 +20,16 @@ pub unsafe fn pair_dec_packet(ps: *mut rf_packet_ll_app_t) -> bool {
             get_pair_ivm(),
             slice::from_raw_parts(addr_of!((*ps).app_cmd_v.src) as *const u8, 2),
             addr_of!((*ps).app_cmd_v.dst) as *mut u8,
-            ((*ps).l2capLen as u8) - 8,
+            ((*ps).l2cap_len as u8) - 8,
         );
     }
     return result;
 }
 
-pub fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
+pub fn pair_enc_packet(ps: *mut PacketLlApp) -> bool
 {
     unsafe {
-        if *get_security_enable() && (*ps).chanId == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
+        if *get_security_enable() && (*ps).chan_id == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
             let tick = read_reg_system_tick();
             (*ps).app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
 
@@ -40,14 +40,14 @@ pub fn pair_enc_packet(ps: *mut rf_packet_ll_app_t) -> bool
                 &(*get_pair_ivs())[0..8],
                 slice::from_raw_parts_mut(addr_of!((*ps).app_cmd_v.dst) as *mut u8, 2),
                 addr_of!((*ps).app_cmd_v.op) as *mut u8,
-                (((*ps).l2capLen & 0xff) - 10) as u8,
+                (((*ps).l2cap_len & 0xff) - 10) as u8,
             );
         }
     }
     return true;
 }
 
-pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
+pub unsafe fn pair_dec_packet_mesh(ps: *const MeshPkt) -> bool {
     let mut ltk = [0u8; 16];
 
     if !*get_security_enable() {
@@ -66,7 +66,7 @@ pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
 
     let mut result;
-    if (*ps).chanId as u16 == 0xffff {
+    if (*ps).chan_id as u16 == 0xffff {
         result = aes_att_decryption_packet(
             ltk.as_slice(),
             slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
@@ -86,7 +86,7 @@ pub unsafe fn pair_dec_packet_mesh(ps: *const mesh_pkt_t) -> bool {
     return result;
 }
 
-pub fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
+pub fn pair_enc_packet_mesh(ps: *mut MeshPkt) -> bool
 {
     let mut result = true;
 
@@ -97,7 +97,7 @@ pub fn pair_enc_packet_mesh(ps: *mut mesh_pkt_t) -> bool
         if *get_security_enable() {
             ltk.copy_from_slice(&(*get_pair_ltk())[0..16]);
 
-            if (*ps).chanId == 0xffff {
+            if (*ps).chan_id == 0xffff {
                 aes_att_encryption_packet(
                     ltk.as_slice(),
                     slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
@@ -170,7 +170,7 @@ pub fn pair_par_init()
     pair_load_key();
 }
 
-pub fn pair_proc() -> *const rf_packet_att_readRsp_t
+pub fn pair_proc() -> *const PacketAttReadRsp
 {
     let pair_st = *get_ble_pair_st();
     if *get_pairRead_pending() == false {
@@ -184,7 +184,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             set_pair_enc_enable(false);
             return null_mut();
         }
-        get_pkt_read_rsp().l2capLen = 10;
+        get_pkt_read_rsp().l2cap_len = 10;
         get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(get_pair_rands());
         set_ble_pair_st(0xc);
     } else if *get_ble_pair_st() == 0x7 {
@@ -193,7 +193,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             set_pair_enc_enable(false);
             return null_mut();
         }
-        get_pkt_read_rsp().l2capLen = 0x12;
+        get_pkt_read_rsp().l2cap_len = 0x12;
         let mut index = 0;
         loop {
             (*get_pair_work())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
@@ -211,7 +211,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
         set_ble_pair_st(0xf);
     } else if *get_ble_pair_st() == 0xd {
         if *get_security_enable() == false {
-            get_pkt_read_rsp().l2capLen = 0x12;
+            get_pkt_read_rsp().l2cap_len = 0x12;
             let mut index = 0;
             loop {
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
@@ -225,7 +225,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             set_ble_pair_st(0xf);
             set_pair_enc_enable(false);
         } else {
-            get_pkt_read_rsp().l2capLen = 0x12;
+            get_pkt_read_rsp().l2cap_len = 0x12;
             unsafe { *(get_pair_rands().as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
             aes_att_encryption(get_pair_randm().as_ptr(), get_pair_rands().as_ptr(), get_pair_sk().as_mut_ptr());
             (*get_pair_rands())[0..8].copy_from_slice(&(*get_pair_sk())[0..8]);
@@ -260,7 +260,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             set_pair_enc_enable(true);
         }
     } else if *get_ble_pair_st() == 0x9 {
-        get_pkt_read_rsp().l2capLen = 0x12;
+        get_pkt_read_rsp().l2cap_len = 0x12;
         if *get_security_enable() == false {
             get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(get_pair_ltk());
         } else {
@@ -281,7 +281,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
             get_pair_sk().copy_from_slice(get_pair_sk_copy());
         }
     } else if *get_ble_pair_st() == 0xb {
-        get_pkt_read_rsp().l2capLen = 2;
+        get_pkt_read_rsp().l2cap_len = 2;
         set_ble_pair_st(0);
         if *get_mesh_pair_enable() != false {
             set_get_mac_en(true);
@@ -289,7 +289,7 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
         rf_link_delete_pair();
         rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
     } else if *get_ble_pair_st() == 0xe {
-        get_pkt_read_rsp().l2capLen = 2;
+        get_pkt_read_rsp().l2cap_len = 2;
         set_ble_pair_st(0);
         get_pkt_read_rsp().dma_len = 8;
         get_pkt_read_rsp().rf_len = 0x6;
@@ -298,8 +298,8 @@ pub fn pair_proc() -> *const rf_packet_att_readRsp_t
         return get_pkt_read_rsp();
     }
 
-    get_pkt_read_rsp().rf_len = get_pkt_read_rsp().l2capLen as u8 + 0x4;
-    get_pkt_read_rsp().dma_len = get_pkt_read_rsp().l2capLen as u32 + 6;
+    get_pkt_read_rsp().rf_len = get_pkt_read_rsp().l2cap_len as u8 + 0x4;
+    get_pkt_read_rsp().dma_len = get_pkt_read_rsp().l2cap_len as u32 + 6;
 
     get_pkt_read_rsp().value[0] = pair_st;
     return get_pkt_read_rsp();
@@ -314,14 +314,14 @@ pub fn pair_set_key(key: *const u8)
     pair_update_key();
 }
 
-pub fn pair_read(_data: *const rf_packet_att_write_t) -> bool
+pub fn pair_read(_data: *const PacketAttWrite) -> bool
 {
     set_pairRead_pending(true);
 
     true
 }
 
-pub fn pair_write(data: *const rf_packet_att_write_t) -> bool
+pub fn pair_write(data: *const PacketAttWrite) -> bool
 {
     let opcode = unsafe { (*data).value[0] as i8 };
     let src = unsafe { addr_of!((*data).value[1]) as *const u8 };
@@ -368,7 +368,7 @@ pub fn pair_write(data: *const rf_packet_att_write_t) -> bool
                     (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                     set_ble_pair_st(7);
                     unsafe {
-                        if *get_mesh_pair_enable() != false && 0x14 < (*data).l2capLen && (*data).value[0x11] != 0 {
+                        if *get_mesh_pair_enable() != false && 0x14 < (*data).l2cap_len && (*data).value[0x11] != 0 {
                             aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_ltk_mesh().as_mut_ptr());
                             set_pair_setting_flag(PairState::PairSetMeshTxStart);
                             return true;
@@ -384,7 +384,7 @@ pub fn pair_write(data: *const rf_packet_att_write_t) -> bool
                 (*get_pair_ltk()).fill(0);
                 set_ble_pair_st(7);
                 unsafe {
-                    if *get_mesh_pair_enable() && 0x14 < (*data).l2capLen && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
+                    if *get_mesh_pair_enable() && 0x14 < (*data).l2cap_len && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
                         (*get_pair_ltk_mesh()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                         set_pair_setting_flag(PairState::PairSetMeshTxStart);
                         return true;

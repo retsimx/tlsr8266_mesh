@@ -14,8 +14,8 @@ pub_mut!(pair_config_mesh_name, [u8; 16], [0; 16]);
 pub_mut!(pair_config_mesh_pwd, [u8; 16], [0; 16]);
 pub_mut!(pair_config_mesh_ltk, [u8; 16], [0; 16]);
 
-pub_mut!(p_adv_pri_data, *const ll_adv_private_t, null());
-pub_mut!(p_adv_rsp_data, *const ll_adv_rsp_private_t, null_mut());
+pub_mut!(p_adv_pri_data, *const AdvPrivate, null());
+pub_mut!(p_adv_rsp_data, *const AdvRspPrivate, null_mut());
 pub_mut!(adv_private_data_len, u8, 0);
 
 pub_mut!(security_enable, bool, false);
@@ -50,7 +50,7 @@ pub_mut!(pair_ltk, [u8; 16], [0; 16]);
 pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
 
 pub_mut!(cur_ota_flash_addr, u32, 0);
-pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::CONTINUE);
+pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::Continue);
 pub_mut!(rf_slave_ota_terminate_flag, bool, false);
 pub_mut!(mesh_node_max, u8, 0);
 
@@ -63,7 +63,7 @@ pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 
-pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &app_cmd_value_t)>, Option::None);
+pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &AppCmdValue)>, Option::None);
 // todo: new_node might be bool
 pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
 
@@ -86,64 +86,19 @@ pub const MAX_GROUP_NUM: u8 = 8;
 
 pub const START_UP_FLAG: u32 = 0x544c4e4b;
 
-// op cmd 11xxxxxxzzzzzzzzzzzzzzzz z's=VENDOR_ID  xxxxxx=LGT_CMD_
-pub const LGT_CMD_READ_SCENE: u8 = 0x00;
-//
-pub const LGT_CMD_SCENE_RSP: u8 = 0x01;
-//
-pub const LGT_CMD_NOTIFY_MESH: u8 = 0x02;
-//use between mesh
-pub const LGT_CMD_SW_DATA: u8 = 0x03;
-pub const LGT_CMD_SW_RSP: u8 = 0x04;
-pub const LGT_CMD_TIME_SYNC: u8 = 0x05;
-//internal use
-pub const LGT_CMD_MESH_OTA_DATA: u8 = 0x06;
-//internal use
-pub const CMD_OTA_FW_VERSION: u16 = 0xff00;
-// must larger than 0xff00
-pub const CMD_OTA_START: u16 = 0xff01;
-pub const CMD_OTA_END: u16 = 0xff02;
-pub const CMD_STOP_MESH_OTA: u16 = 0xfffe;
-//app use
-pub const CMD_START_MESH_OTA: u16 = 0xffff; //app use  	// use in rf_link_data_callback()
-
-pub const LGT_CMD_MESH_OTA_READ: u8 = 0x07;
-//internal use
-pub const PAR_READ_VER: u8 = 0x00;
-//internal use
-pub const PAR_READ_END: u8 = 0x01;
-//internal use
-pub const PAR_READ_MAP: u8 = 0x02;
-//internal use
-pub const PAR_READ_CALI: u8 = 0x03;
-//internal use
-pub const PAR_READ_PROGRESS: u8 = 0x04;
-//internal use
-pub const PAR_APP_READ_ST: u8 = 0x05;
-//app use: 0 : idle; 1: slave mode; 2: master mode
-pub const PAR_APP_OTA_HCI_TYPE_SET: u8 = 0x06;
 //app use
 pub const PAR_READ_MESH_PAIR_CONFIRM: u8 = 0x0a;
+
+// op cmd 11xxxxxxzzzzzzzzzzzzzzzz z's=VENDOR_ID  xxxxxx=LGT_CMD_
+pub const LGT_CMD_NOTIFY_MESH: u8 = 0x02;
+pub const LGT_CMD_MESH_OTA_READ: u8 = 0x07;
 pub const LGT_CMD_MESH_OTA_READ_RSP: u8 = 0x08;
 //internal use
 pub const LGT_CMD_MESH_PAIR: u8 = 0x09;
 pub const LGT_CMD_MESH_CMD_NOTIFY: u8 = 0x0a;
 pub const CMD_NOTIFY_MESH_PAIR_END: u8 = 0x00;
-pub const LGT_CMD_FRIENDSHIP: u8 = 0x0b;
-pub const CMD_CTL_POLL: u8 = 0x01;
-pub const CMD_CTL_UPDATE: u8 = 0x02;
-pub const CMD_CTL_REQUEST: u8 = 0x03;
-pub const CMD_CTL_OFFER: u8 = 0x04;
-pub const CMD_CTL_GROUP_REPORT: u8 = 0x05;
-pub const CMD_CTL_GROUP_REPORT_ACK: u8 = 0x06;
 
 pub const LGT_CMD_LIGHT_ONOFF: u8 = 0x10;
-pub const LGT_CMD_LIGHT_ON: u8 = 0x10;
-pub const LGT_CMD_LIGHT_OFF: u8 = 0x11;
-//internal use
-pub const LGT_CMD_LIGHT_SET: u8 = 0x12;
-//set lumen
-pub const LGT_CMD_SWITCH_CONFIG: u8 = 0x13;
 //internal use
 pub const LGT_CMD_LIGHT_GRP_RSP1: u8 = 0x14;
 //get group rsp: 8groups low 1bytes
@@ -153,58 +108,28 @@ pub const LGT_CMD_LIGHT_GRP_RSP3: u8 = 0x16;
 //get group rsp: behind 4groups 2bytes
 pub const LGT_CMD_LIGHT_CONFIG_GRP: u8 = 0x17;
 //add or del group
-pub const LGT_CMD_LUM_UP: u8 = 0x18;
-//internal use
-pub const LGT_CMD_LUM_DOWN: u8 = 0x19;
 //internal use
 pub const LGT_CMD_LIGHT_READ_STATUS: u8 = 0x1a;
 //get status req
 pub const LGT_CMD_LIGHT_STATUS: u8 = 0x1b;
 //get status rsp
-pub const LGT_CMD_LIGHT_ONLINE: u8 = 0x1c;
-//get online status req//internal use
 pub const LGT_CMD_LIGHT_GRP_REQ: u8 = 0x1d;
 //get group req
-pub const LGT_CMD_LEFT_KEY: u8 = 0x1e;
-//internal use
-pub const LGT_CMD_RIGHT_KEY: u8 = 0x1f;
-//internal use
 pub const LGT_CMD_CONFIG_DEV_ADDR: u8 = 0x20;
 //add device address
-pub const DEV_ADDR_PAR_ADR: u8 = 0x00;
 pub const DEV_ADDR_PAR_WITH_MAC: u8 = 0x01;
 pub const LGT_CMD_DEV_ADDR_RSP: u8 = 0x21;
 //rsp
-pub const LGT_CMD_SET_RGB_VALUE: u8 = 0x22;
-//params[0]:1=R 2=G 3=B 4=RGB params[1~3]:R/G/B value 0~255  params[0]:5=CT params[1]=value 0~100%
 pub const LGT_CMD_KICK_OUT: u8 = 0x23;
-//
-pub const LGT_CMD_SET_TIME: u8 = 0x24;
-//
-pub const LGT_CMD_ALARM: u8 = 0x25;
-//
-pub const LGT_CMD_READ_ALARM: u8 = 0x26;
-//
-pub const LGT_CMD_ALARM_RSP: u8 = 0x27;
-//
-pub const LGT_CMD_GET_TIME: u8 = 0x28;
-//
-pub const LGT_CMD_TIME_RSP: u8 = 0x29;
 //
 pub const LGT_CMD_USER_NOTIFY_REQ: u8 = 0x2a;
 //
 pub const LGT_CMD_USER_NOTIFY_RSP: u8 = 0x2b;
 //
-pub const LGT_CMD_SET_SW_GRP: u8 = 0x2c;
-pub const LGT_CMD_LIGHT_RC_SET_RGB: u8 = 0x2d;
-pub const LGT_CMD_SET_SCENE: u8 = 0x2e;
-pub const LGT_CMD_LOAD_SCENE: u8 = 0x2f;
 pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
 pub const LGT_POWER_ON: u8 = 0x32;
-pub const LGT_CLEAR_LUM_STATE: u8 = 0x33;
 pub const LGT_PANIC_MSG: u8 = 0x34;
-pub const LGT_TRIGGER_PANIC: u8 = 0x35;
 
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;
@@ -215,39 +140,16 @@ pub const GET_GROUP3: u8 = 3;
 // return behind 4 group_address
 pub const GET_DEV_ADDR: u8 = 4;
 // return device address
-pub const GET_ALARM: u8 = 5;
-// return alarm info
-pub const GET_TIME: u8 = 6;
-// return time info
 pub const GET_USER_NOTIFY: u8 = 7;
 // return user notify info
-pub const GET_SCENE: u8 = 8;
-//
-pub const GET_MESH_OTA: u8 = 9; //
 
-pub const LGT_CMD_FRIEND_SHIP_OK: u8 = 0xb0;
-pub const LGT_CMD_FRIEND_SHIP_DISCONNECT: u8 = 0xb1;
-pub const LGT_CMD_PAIRING_LIGHT_OFF: u8 = 0xc1;
-pub const LGT_CMD_PAIRING_LIGHT_ON: u8 = 0xc2;
-pub const LGT_CMD_PAIRING_LIGHT_SEL: u8 = 0xc3;
-pub const LGT_CMD_PAIRING_LIGHT_CONFIRM: u8 = 0xc4;
 pub const LGT_CMD_SET_MESH_INFO: u8 = 0xc5;
 pub const LGT_CMD_SET_DEV_ADDR: u8 = 0xc6;
 pub const LGT_CMD_DEL_PAIR: u8 = 0xc7;
-pub const LGT_CMD_PAIRING_LIGHT_RESPONSE: u8 = 0xc9;
-pub const LGT_CMD_PAIRING_LIGHT_OTA_EN: u8 = 0xce;
 pub const LGT_CMD_MESH_PAIR_TIMEOUT: u8 = 0xcf;
-pub const LGT_CMD_DUAL_MODE_MESH: u8 = 0xd0;
 
 pub const LIGHT_OFF_PARAM: u8 = 0x00;
 pub const LIGHT_ON_PARAM: u8 = 0x01;
-pub const ON_OFF_NORMAL: u8 = 0x00;
-pub const ON_OFF_FROM_OTA: u8 = 0x01;
-pub const ON_OFF_FROM_PASSIVE_DEV: u8 = 0x02;
-// sent from passive device
-pub const ON_OFF_FROM_PASSIVE_DEV_ALT: u8 = 0x03; // tx command: alter from passive device command
-
-pub const LIGHT_SYNC_REST_PARAM: u8 = 0x02;
 
 pub const LIGHT_ADD_GRP_PARAM: u8 = 0x01;
 pub const LIGHT_DEL_GRP_PARAM: u8 = 0x00;
@@ -263,13 +165,12 @@ pub const LAST_RELAY_TIME: usize = 3;
 pub const CURRENT_RELAY_COUNT: usize = 4;
 
 pub enum LightOpType {
-    op_type_1 = 1,
-    op_type_2 = 2,
-    op_type_3 = 3,
+    OpType1 = 1,
+    OpType2 = 2,
+    OpType3 = 3,
 }
 
 #[derive(PartialEq, Clone, Copy)]
-#[allow(dead_code)]
 pub enum PairState {
     PairSetted = 0,
     PairSetting = 1,
@@ -278,78 +179,55 @@ pub enum PairState {
     PairSetMeshRxDone = 4, // received all mesh nodes' ac, send cmd to switch to new mesh
 }
 
-#[derive(PartialEq)]
-pub enum APP_OTA_HCI_TYPE {
-    GATT_ONLY = 0,
-    MESH = 1,
-}
-
 #[derive(PartialEq, Clone, Copy)]
 #[repr(C)]
 pub enum OtaState {
-    CONTINUE = 0,
+    Continue = 0,
     // must zero
-    OK = 1,
-    ERROR = 2,
-    MASTER_OTA_REBOOT_ONLY = 3,
-}
-
-#[derive(PartialEq)]
-#[repr(C)]
-pub enum MeshOtaLed {
-    OK,
-    ERROR,
-    STOP,
-}
-
-#[derive(PartialEq)]
-pub enum CMD_TYPE {
-    NORMAL = 0,
-    PASSIVE_DEV = 1,
-    PASSIVE_DEV_ALT = 2,
+    Ok = 1,
+    Error = 2,
+    MasterOtaRebootOnly = 3,
 }
 
 // recover status before software reboot
 pub enum RecoverStatus {
     LightOff = BIT!(0),
     MeshOtaMaster100 = BIT!(1),
-    // LowBattFlg = BIT!(2),
-    // LOW_BATT_LOOP_FLG           = BIT(3),    // 0 means check by user_init, 1 means by main loop
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_adv_ind_module_t {
+pub struct RfPacketAdvIndModuleT {
 	pub dma_len: u32,       // 0    //won't be a fixed number as previous, should adjust with the mouse package number
 
 	pub _type: u8,			// 4	//RA(1)_TA(1)_RFU(2)_TYPE(4)
 	pub rf_len: u8,			// 5	//LEN(6)_RFU(2)
-	pub advA: [u8; 6],		// 6	//address
+	pub adv_a: [u8; 6],		// 6	//adv address
 	pub data: [u8; 31]		// 12	//0-31 byte
 }
 
 #[repr(C, packed)]
-pub struct ll_adv_private_t {
-    pub ManufactureID: u16,
+pub struct AdvPrivate {
+    pub manufacture_id: u16,
     // must vendor id to follow spec
-    pub MeshProductUUID: u16,
-    pub MacAddress: u32, // low 4 byte
+    pub mesh_product_uuid: u16,
+    pub mac_address: u32, // low 4 byte
 }
 
 #[repr(C, packed)]
-pub struct ll_adv_rsp_private_t {
-    pub ManufactureID: u16,             // 0
+pub struct AdvRspPrivate {
+    pub manufacture_id: u16,             // 0
     // must vendor id to follow spec
-    pub MeshProductUUID: u16,           // 2
-    pub MacAddress: u32,                // 4
+    pub mesh_product_uuid: u16,           // 2
+    pub mac_address: u32,                // 4
     // low 4 byte
-    pub ProductUUID: u16,               // 8
+    pub product_uuid: u16,               // 8
     pub status: u8,                     // 10
-    pub DeviceAddress: u16,             // 11
+    pub device_address: u16,             // 11
     pub rsv: [u8; 16],                  // 13
 }
 
 #[repr(C, packed)]
-pub struct rf_packet_att_value_t {
+pub struct PacketAttValue {
     pub sno: [u8; 3],
     pub src: [u8; 2],
     pub dst: [u8; 2],
@@ -359,7 +237,7 @@ pub struct rf_packet_att_value_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_ll_data_t {
+pub struct PacketLlData {
 	pub dma_len: u32,   // 0         //won't be a fixed number as previous, should adjust with the mouse package number
 	pub _type: u8,		// 4		//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
 	pub rf_len: u8,		// 5		//LEN(5)_RFU(3)
@@ -379,7 +257,7 @@ pub struct rf_packet_ll_data_t {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-pub struct app_cmd_value_t {
+pub struct AppCmdValue {
    pub sno: [u8; 3],    // 0    13
    pub src: u16,    // 3    16
    pub dst: u16,    // 5    18
@@ -390,38 +268,38 @@ pub struct app_cmd_value_t {
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
-pub struct rf_packet_ll_app_t {
+pub struct PacketLlApp {
 	pub dma_len: u32,   // 0
 	pub _type: u8,      // 4
 	pub rf_len: u8,     // 5
-	pub l2capLen: u16,  // 6
-	pub chanId: u16,    // 8
+	pub l2cap_len: u16,  // 6
+	pub chan_id: u16,    // 8
 	pub opcode: u8,     // 10
 	pub handle: u8,     // 11
 	pub handle1: u8,    // 12
-	pub app_cmd_v: app_cmd_value_t, // 13
+	pub app_cmd_v: AppCmdValue, // 13
 	pub rsv: [u8; 10],
 }
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
-pub struct rf_packet_att_readRsp_t {
+pub struct PacketAttReadRsp {
 	pub dma_len: u32,   // 0        //won't be a fixed number as previous, should adjust with the mouse package number
 	pub _type: u8,	    // 4		//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
 	pub rf_len: u8,		// 5		//LEN(5)_RFU(3)
-	pub l2capLen: u16,  // 6
-	pub chanId: u16,    // 8
+	pub l2cap_len: u16,  // 6
+	pub chan_id: u16,    // 8
 	pub opcode: u8,     // 10
 	pub value: [u8; 22] // 11
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_ll_init_t {
+pub struct PacketLlInit {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4): connect request PDU
     pub rf_len: u8,				//LEN(6)_RFU(2)
-    pub scanA: [u8; 6],			//
-    pub advA: [u8; 6],			//
+    pub scan_a: [u8; 6],		// scan address
+    pub adv_a: [u8; 6],			// adv address
     pub aa: [u8; 4],			// access code
     pub crcinit: [u8; 3],
     pub wsize: u8,
@@ -435,9 +313,9 @@ pub struct rf_packet_ll_init_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, align(4))]
-pub struct ll_packet_l2cap_data_t {
-    pub l2capLen: u16,
-    pub chanId: u16,
+pub struct PacketL2capData {
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
@@ -445,26 +323,26 @@ pub struct ll_packet_l2cap_data_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_pkt_l2cap_sig_connParaUpRsp_t {
+pub struct PktL2capSigConnParaUpRsp {
     pub dma_len: u32,
     pub _type: u8,
     pub rf_len: u8,
-    pub l2capLen: u16,
-    pub chanId: u16,
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub code: u8,
     pub id: u8,
-    pub dataLen: u16,
+    pub data_len: u16,
     pub result: u16,
 }
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
-pub struct rf_packet_att_write_t {
+pub struct PacketAttWrite {
     pub dma_len: u32,
     pub rtype: u8,
     pub rf_len: u8,
-    pub l2capLen: u16,
-    pub chanId: u16,
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
@@ -473,12 +351,12 @@ pub struct rf_packet_att_write_t {
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
-pub struct rf_packet_att_cmd_t {
+pub struct PacketAttCmd {
     pub dma_len: u32,   // 0
     pub _type: u8,      // 4
     pub rf_len: u8,     // 5
-    pub l2capLen: u16,  // 6
-    pub chanId: u16,    // 8
+    pub l2cap_len: u16,  // 6
+    pub chan_id: u16,    // 8
     pub opcode: u8,     // 10
     pub handle: u8,     // 11
     pub handle1: u8,    // 12
@@ -487,7 +365,7 @@ pub struct rf_packet_att_cmd_t {
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
-pub struct rf_packet_att_data_t {
+pub struct PacketAttData {
     pub dma_len: u32, //won't be a fixed number as previous, should adjust with the mouse package number
 
     pub _type: u8,
@@ -509,12 +387,12 @@ pub struct rf_packet_att_data_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, align(4))]
-pub struct mesh_pkt_t {
+pub struct MeshPkt {
 	pub dma_len: u32,           // 0
 	pub _type: u8,              // 4
 	pub rf_len: u8,             // 5
-	pub l2capLen: u16,          // 6
-	pub chanId: u16,            // 8
+	pub l2cap_len: u16,          // 6
+	pub chan_id: u16,            // 8
 	pub src_tx: u16,            // 10
 	pub handle1: u8,            // 12 for flag
     pub sno: [u8; 3],           // 13
@@ -530,31 +408,31 @@ pub struct mesh_pkt_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_att_mtu_t {
+pub struct PacketAttMtu {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
     pub rf_len: u8,				//LEN(5)_RFU(3)
-    pub	l2capLen: u16,
-    pub	chanId: u16,
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub opcode: u8,
     pub mtu: [u8; 2]
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_att_errRsp_t {
+pub struct PacketAttErrRsp {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
     pub rf_len: u8,				//LEN(5)_RFU(3)
-    pub l2capLen: u16,
-    pub chanId: u16,
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub opcode: u8,
-    pub errOpcode: u8,
-    pub errHandle: u16,
-    pub errReason: u8
+    pub err_opcode: u8,
+    pub err_handle: u16,
+    pub err_reason: u8
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_ll_data_rsp_t {
+pub struct PacketLlDataRsp {
 	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
 
 	pub _type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
@@ -571,27 +449,27 @@ pub struct rf_packet_ll_data_rsp_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_l2cap_head_t {
+pub struct PacketL2capHead {
 	pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
 	pub	_type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
 	pub rf_len: u8,				//LEN(6)_RFU(2)
-	pub	l2capLen: u16,
-	pub	chanId: u16
+	pub l2cap_len: u16,
+	pub chan_id: u16
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_version_ind_t {
+pub struct PacketVersionInd {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
     pub rf_len: u8,				//LEN(6)_RFU(2)
     pub opcode: u8,
-    pub mainVer: u8,
+    pub main_ver: u8,
     pub vendor: u16,
-    pub subVer: u16
+    pub sub_ver: u16
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_feature_rsp_t {
+pub struct PacketFeatureRsp {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
     pub rf_len: u8,				//LEN(6)_RFU(2)
@@ -600,7 +478,7 @@ pub struct rf_packet_feature_rsp_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_ctrl_unknown_t {
+pub struct PacketCtrlUnknown {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub _type: u8,				//RA(1)_TA(1)_RFU(2)_TYPE(4)
     pub rf_len: u8,				//LEN(6)_RFU(2)
@@ -609,7 +487,7 @@ pub struct rf_packet_ctrl_unknown_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_ll_write_rsp_t {
+pub struct PacketLlWriteRsp {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
 
     pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
@@ -622,31 +500,18 @@ pub struct rf_packet_ll_write_rsp_t {
 }
 
 #[repr(C, align(4))]
-pub struct rf_packet_att_writeRsp_t {
+pub struct PacketAttWriteRsp {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
     pub	_type: u8,				//RFU(3)_MD(1)_SN(1)_NESN(1)-LLID(2)
     pub rf_len: u8,				//LEN(5)_RFU(3)
-    pub	l2capLen: u16,
-    pub	chanId: u16,
+    pub l2cap_len: u16,
+    pub chan_id: u16,
     pub opcode: u8
 }
 
-#[repr(C, packed)]
-pub struct mesh_ota_dev_info_t {
-    pub dev_mode: u16,
-    pub no_check_dev_mode_flag_rsv: u8,
-    pub rsv: [u8; 4],
-}
-
-#[repr(C, packed)]
-pub struct mesh_ota_pkt_start_command_t {
-    pub version: [u8; 4],
-    pub dev_info: mesh_ota_dev_info_t,
-} // don't modify element in it
-
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-pub struct status_record_t {
+pub struct StatusRecord {
     pub adr: [u8; 1],
     // don't modify, use internal
     pub alarm_id: u8, // don't modify, use internal
@@ -654,7 +519,7 @@ pub struct status_record_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-pub struct rc_pkt_buf_t {
+pub struct PktBuf {
     pub op: u8,
     pub sno: [u8; 3],
     pub notify_ok_flag: bool,
@@ -663,19 +528,19 @@ pub struct rc_pkt_buf_t {
 
 #[derive(Clone, Copy)]
 #[repr(C, align(4))]
-pub struct rf_packet_scan_rsp_t {
+pub struct PacketScanRsp {
 	pub dma_len: u32,       // 0     //won't be a fixed number as previous, should adjust with the mouse package number
 
 	pub _type: u8,          // 4				//RA(1)_TA(1)_RFU(2)_TYPE(4)
 	pub rf_len: u8,			// 5	//LEN(6)_RFU(2)
-	pub advA: [u8; 6],		// 6	//address
+	pub adv_a: [u8; 6],		// 6	//adv address
 	pub data: [u8; 31]		// 12	//0-31 byte
 
 }
 
 #[derive(Clone, Copy)]
 #[repr(C, align(4))]
-pub struct light_rx_buff_t {
+pub struct LightRxBuff {
     pub dma_len: u8,        // 0
     pub unk1: [u8; 3],      // 1
     pub rssi: u8,           // 4
@@ -700,12 +565,12 @@ pub_mut!(pair_enc_enable, bool, false);
 pub_mut!(pair_ivs, [u8; 8], [0; 8]);
 pub_mut!(pair_work, [u8; 16], [0; 16]);
 pub_mut!(pairRead_pending, bool, false);
-pub_mut!(pkt_read_rsp, rf_packet_att_readRsp_t, rf_packet_att_readRsp_t {
+pub_mut!(pkt_read_rsp, PacketAttReadRsp, PacketAttReadRsp {
     dma_len: 0x1d,
 	_type: 2,
 	rf_len: 0x1b,
-	l2capLen: 0x17,
-	chanId: 0x4,
+	l2cap_len: 0x17,
+	chan_id: 0x4,
 	opcode: 0xb,
 	value: [0; 22]
 });
@@ -734,8 +599,8 @@ pub_mut!(
 
 pub_mut!(
     slave_status_record,
-    [status_record_t; MESH_NODE_MAX_NUM as usize],
-    [status_record_t {
+    [StatusRecord; MESH_NODE_MAX_NUM as usize],
+    [StatusRecord {
         adr: [0],
         alarm_id: 0
     }; MESH_NODE_MAX_NUM as usize]
@@ -743,14 +608,14 @@ pub_mut!(
 pub_mut!(
     slave_status_record_size,
     u16,
-    size_of::<[status_record_t; MESH_NODE_MAX_NUM as usize]>() as u16
+    size_of::<[StatusRecord; MESH_NODE_MAX_NUM as usize]>() as u16
 );
 
 pub const RC_PKT_BUF_MAX: u8 = 2;
 pub_mut!(
     rc_pkt_buf,
-    [rc_pkt_buf_t; RC_PKT_BUF_MAX as usize],
-    [rc_pkt_buf_t {
+    [PktBuf; RC_PKT_BUF_MAX as usize],
+    [PktBuf {
         op: 0,
         sno: [0; 3],
         notify_ok_flag: false,
@@ -801,24 +666,24 @@ pub_mut!(slave_read_status_busy_time, u32, 0);
 pub const SLAVE_READ_STATUS_BUSY_TIMEOUT: u32 = 25000;
 pub_mut!(st_listen_no, u32, 0);
 
-pub_mut!(pkt_light_adv_status, rf_packet_att_write_t, rf_packet_att_write_t {
+pub_mut!(pkt_light_adv_status, PacketAttWrite, PacketAttWrite {
     dma_len: 0x27,
     rtype: 2,
     rf_len: 0x25,
-    l2capLen: 0x21,
-    chanId: 0xffff,
+    l2cap_len: 0x21,
+    chan_id: 0xffff,
     opcode: 0,
     handle: 0,
     handle1: 0,
     value: [0; 30]
 });
 
-pub_mut!(pkt_mesh, mesh_pkt_t, mesh_pkt_t {
+pub_mut!(pkt_mesh, MeshPkt, MeshPkt {
     dma_len: 0,
     _type: 0,
     rf_len: 0,
-    l2capLen: 0,
-    chanId: 0,
+    l2cap_len: 0,
+    chan_id: 0,
     src_tx: 0,
     handle1: 0,
     sno: [0; 3],
@@ -832,12 +697,12 @@ pub_mut!(pkt_mesh, mesh_pkt_t, mesh_pkt_t {
     internal_par2: [0; 4],
     no_use: [0; 4]
 });
-pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
+pub_mut!(pkt_mesh_user_cmd_buf, MeshPkt, MeshPkt {
     dma_len: 0,
     _type: 0,
     rf_len: 0,
-    l2capLen: 0,
-    chanId: 0,
+    l2cap_len: 0,
+    chan_id: 0,
     src_tx: 0,
     handle1: 0,
     sno: [0; 3],
@@ -851,12 +716,12 @@ pub_mut!(pkt_mesh_user_cmd_buf, mesh_pkt_t, mesh_pkt_t {
     internal_par2: [0; 4],
     no_use: [0; 4]
 });
-pub_mut!(pkt_init, rf_packet_ll_init_t, rf_packet_ll_init_t {
+pub_mut!(pkt_init, PacketLlInit, PacketLlInit {
     dma_len: 0x24,
     _type: 0x5,
     rf_len: 0x22,
-    scanA: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
-    advA: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+    scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+    adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
     aa: [0xaa, 0x55, 0x55, 0xaa],
     crcinit: [0x55, 0x55, 0x55],
     wsize: 2,

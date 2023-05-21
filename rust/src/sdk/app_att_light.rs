@@ -196,14 +196,14 @@ static spp_otaname: &[u8] = b"OTA";
 static spp_pairname: &[u8] = b"Pair";
 static spp_devicename: &[u8] = b"DevName";
 
-fn mesh_status_write(p: *const rf_packet_att_write_t) -> bool {
+fn mesh_status_write(p: *const PacketAttWrite) -> bool {
     if !*get_pair_login_ok() {
         return true;
     }
     unsafe {
         SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
-        if (*p).l2capLen > (3 + 1) {
-            mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2capLen - 3);
+        if (*p).l2cap_len > (3 + 1) {
+            mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2cap_len - 3);
         } else {
             mesh_report_status_enable(if (*p).value[0] != 0 {true} else {false});
         }
@@ -219,8 +219,8 @@ pub struct attribute_t {
     pub attrMaxLen: u8,
     pub uuid: *const u8,
     pub pAttrValue: *mut u8,
-    pub w: Option<fn(data: *const rf_packet_att_write_t) -> bool>,
-    pub r: Option<fn(data: *const rf_packet_att_write_t) -> bool>,
+    pub w: Option<fn(data: *const PacketAttWrite) -> bool>,
+    pub r: Option<fn(data: *const PacketAttWrite) -> bool>,
 }
 
 #[macro_export]

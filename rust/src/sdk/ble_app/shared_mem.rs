@@ -1,7 +1,7 @@
 use crate::pub_mut;
-use crate::sdk::light::light_rx_buff_t;
+use crate::sdk::light::LightRxBuff;
 
-pub_mut!(light_rx_buff, [light_rx_buff_t; 4], [light_rx_buff_t{
+pub_mut!(light_rx_buff, [LightRxBuff; 4], [LightRxBuff{
     dma_len: 0,
     unk1: [0; 3],
     rssi: 0,

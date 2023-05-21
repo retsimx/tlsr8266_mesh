@@ -59,7 +59,7 @@ fn rf_link_slave_read_status_update()
     if *get_slave_status_buffer_wptr() != rptr {
         loop {
             rptr = rptr % *get_slave_status_buffer_num();
-            if !rf_link_add_tx_packet(unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const rf_packet_att_cmd_t, size_of::<rf_packet_att_cmd_t>()) {
+            if !rf_link_add_tx_packet(unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
                 return;
             }
 
@@ -258,7 +258,7 @@ pub fn irq_st_bridge()
 
     if *get_slave_link_time_out() * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - *get_slave_connected_tick() {
         if *get_rf_slave_ota_busy() != false {
-            app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::ERROR);
+            app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
         }
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
         set_p_st_handler(Some(irq_st_adv));
@@ -310,7 +310,7 @@ pub fn irq_st_bridge()
                 set_rf_slave_ota_timeout_s(sot - 1);
                 if sot - 1 == 0
                 {
-                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::ERROR);
+                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
                 }
             }
         }
@@ -353,7 +353,7 @@ pub fn irq_st_bridge()
             if is_add_packet_buf_ready() == false {
                 set_update_interval_flag(2);
             } else {
-                rf_link_add_tx_packet(addr_of!(pkt) as *const rf_packet_att_cmd_t, size_of::<u32>() * pkt.len());
+                rf_link_add_tx_packet(addr_of!(pkt) as *const PacketAttCmd, size_of::<u32>() * pkt.len());
                 set_update_interval_time(false);
             }
         }
@@ -361,13 +361,13 @@ pub fn irq_st_bridge()
     if is_add_packet_buf_ready() {
         let pair_proc_result = pair_proc();
         if pair_proc_result != null() {
-            rf_link_add_tx_packet(pair_proc_result as *const rf_packet_att_cmd_t, size_of::<rf_packet_att_readRsp_t>());
+            rf_link_add_tx_packet(pair_proc_result as *const PacketAttCmd, size_of::<PacketAttReadRsp>());
         }
     }
     mesh_node_flush_status();
     if is_add_packet_buf_ready() {
         if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
-            rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<rf_packet_att_cmd_t>());
+            rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<PacketAttCmd>());
         }
     }
 
@@ -481,7 +481,7 @@ unsafe fn irq_light_slave_rx()
                 if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
                     if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
+                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
                     }
                     entry.dma_len = 1;
                     return;
@@ -498,11 +498,11 @@ unsafe fn irq_light_slave_rx()
                     write_reg_rf_mode_control(0x85);                        // single TX
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    (*get_adv_rsp_pri_data()).DeviceAddress = *get_device_address_addr();
+                    (*get_adv_rsp_pri_data()).device_address = *get_device_address_addr();
                     (*get_pkt_scan_rsp()).data[0] = 0x1e;
                     (*get_pkt_scan_rsp()).data[1] = 0xff;
-                    (*get_pkt_scan_rsp()).data[2..2 + size_of::<ll_adv_rsp_private_t>()].copy_from_slice(
-                        slice::from_raw_parts(get_adv_rsp_pri_data_addr() as *const u8, size_of::<ll_adv_rsp_private_t>())
+                    (*get_pkt_scan_rsp()).data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
+                        slice::from_raw_parts(get_adv_rsp_pri_data_addr() as *const u8, size_of::<AdvRspPrivate>())
                     );
                     (*get_pkt_scan_rsp()).dma_len = 0x27;
                     (*get_pkt_scan_rsp()).rf_len = 0x25;
@@ -518,7 +518,7 @@ unsafe fn irq_light_slave_rx()
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
                     if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
+                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
                     }
 
                     entry.dma_len = 1;
@@ -534,7 +534,7 @@ unsafe fn irq_light_slave_rx()
                     entry.mac[3] == *(*get_slave_p_mac()).offset(3) {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    rf_link_slave_connect(&*(packet as *const rf_packet_ll_init_t), rx_time);
+                    rf_link_slave_connect(&*(packet as *const PacketLlInit), rx_time);
 
                     entry.dma_len = 1;
                     return;
@@ -544,7 +544,7 @@ unsafe fn irq_light_slave_rx()
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
                     if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
+                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
                     }
 
                     entry.dma_len = 1;
@@ -557,7 +557,7 @@ unsafe fn irq_light_slave_rx()
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
                     if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut mesh_pkt_t));
+                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
                     }
 
                     entry.dma_len = 1;
@@ -575,7 +575,7 @@ unsafe fn irq_light_slave_rx()
             set_light_conn_sn_master(master_sn);
             set_slave_connected_tick(read_reg_system_tick());
             set_slave_link_connected(true);
-            rf_link_slave_data(&*(packet as *const rf_packet_ll_data_t), rx_time);
+            rf_link_slave_data(&*(packet as *const PacketLlData), rx_time);
         }
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {

@@ -132,8 +132,8 @@ impl OtaManager {
         }
     }
 
-    pub fn rf_link_slave_data_ota(&mut self, data: &rf_packet_att_data_t) {
-        if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
+    pub fn rf_link_slave_data_ota(&mut self, data: &PacketAttData) {
+        if *get_rf_slave_ota_finished_flag() != OtaState::Continue {
             return;
         }
 
@@ -155,7 +155,7 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
-        let mut reset_flag = OtaState::CONTINUE;
+        let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
             let p = &get_buff_response()[i as usize];
             let n_data_len = p.l2cap - 7;
@@ -170,13 +170,13 @@ impl OtaManager {
                 if n_data_len == 0 {
                     if (cur_idx == self.ota_rcv_last_idx + 1) && (cur_idx == self.ota_pkt_total) {
                         // ota ok, save, reboot
-                        reset_flag = OtaState::OK;
+                        reset_flag = OtaState::Ok;
                     } else {
                         // ota err
                         set_cur_ota_flash_addr(0);
                         self.ota_pkt_cnt = 0;
                         self.ota_rcv_last_idx = 0;
-                        reset_flag = OtaState::ERROR;
+                        reset_flag = OtaState::Error;
                     }
                 } else {
                     if cur_idx == 0 {
@@ -186,7 +186,7 @@ impl OtaManager {
                             set_cur_ota_flash_addr(0);
                             self.ota_pkt_cnt = 0;
                             self.ota_rcv_last_idx = 0;
-                            reset_flag = OtaState::ERROR;
+                            reset_flag = OtaState::Error;
                         } else {
                             self.need_check_type = get_ota_check_type(&p.dat[8]);
                             if self.need_check_type == 1 {
@@ -210,7 +210,7 @@ impl OtaManager {
                                 set_cur_ota_flash_addr(0);
                                 self.ota_pkt_cnt = 0;
                                 self.ota_rcv_last_idx = 0;
-                                reset_flag = OtaState::ERROR;
+                                reset_flag = OtaState::Error;
                             } else if self.need_check_type == 1 {
                                 self.fw_check_val += (p.dat[(n_data_len + 2) as usize] as u16
                                     | (p.dat[(n_data_len + 3) as usize] as u16) << 8)
@@ -230,14 +230,14 @@ impl OtaManager {
                                 set_cur_ota_flash_addr(0);
                                 self.ota_pkt_cnt = 0;
                                 self.ota_rcv_last_idx = 0;
-                                reset_flag = OtaState::ERROR;
+                                reset_flag = OtaState::Error;
                             }
                         }
 
-                        if reset_flag != OtaState::ERROR {
+                        if reset_flag != OtaState::Error {
                             if *get_cur_ota_flash_addr() + 16 > (OtaManager::FW_SIZE_MAX_K * 1024) {
                                 // !is_valid_fw_len()
-                                reset_flag = OtaState::ERROR;
+                                reset_flag = OtaState::Error;
                             } else {
                                 reset_flag = rf_ota_save_data(&p.dat[2]);
                             }
@@ -247,7 +247,7 @@ impl OtaManager {
                         set_cur_ota_flash_addr(0);
                         self.ota_pkt_cnt = 0;
                         self.ota_rcv_last_idx = 0;
-                        reset_flag = OtaState::ERROR;
+                        reset_flag = OtaState::Error;
                     }
 
                     self.ota_rcv_last_idx = cur_idx;
@@ -257,11 +257,11 @@ impl OtaManager {
                 set_cur_ota_flash_addr(0);
                 self.ota_pkt_cnt = 0;
                 self.ota_rcv_last_idx = 0;
-                reset_flag = OtaState::ERROR;
+                reset_flag = OtaState::Error;
             }
 
-            if reset_flag != OtaState::CONTINUE {
-                if *get_rf_slave_ota_finished_flag() == OtaState::CONTINUE {
+            if reset_flag != OtaState::Continue {
+                if *get_rf_slave_ota_finished_flag() == OtaState::Continue {
                     self.rf_slave_ota_finished_flag_set(reset_flag);
                 }
 
@@ -335,11 +335,11 @@ impl OtaManager {
 
     pub fn rf_link_slave_ota_finish_led_and_reboot(&self, st: OtaState) {
         match st {
-            OtaState::ERROR => {
+            OtaState::Error => {
                 self.erase_ota_data();
                 self.rf_led_ota_error();
             }
-            OtaState::OK => {
+            OtaState::Ok => {
                 //rf_ota_save_data(0);
                 self.rf_ota_set_flag();
                 self.rf_led_ota_ok();
@@ -361,12 +361,12 @@ impl OtaManager {
 
         let pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
 
-        if *get_rf_slave_ota_finished_flag() != OtaState::CONTINUE {
+        if *get_rf_slave_ota_finished_flag() != OtaState::Continue {
             let mut reboot_flag = false;
             if 0 == self.terminate_cnt && *get_rf_slave_ota_terminate_flag() {
                 if is_add_packet_buf_ready() {
                     self.terminate_cnt = 6;
-                    rf_link_add_tx_packet(pkt_terminate.as_ptr() as *const rf_packet_att_cmd_t, pkt_terminate.len());
+                    rf_link_add_tx_packet(pkt_terminate.as_ptr() as *const PacketAttCmd, pkt_terminate.len());
                 }
             }
 
@@ -394,14 +394,6 @@ impl OtaManager {
         }
     }
 
-    pub fn mesh_ota_led_cb(&self, _type: MeshOtaLed) {
-        match _type {
-            MeshOtaLed::OK => self.rf_led_ota_ok(),
-            MeshOtaLed::ERROR => self.rf_led_ota_error(),
-            MeshOtaLed::STOP => self.rf_led_ota_error()
-        }
-    }
-
     pub fn get_ota_erase_sectors(&self) -> u32 {
         return OtaManager::ERASE_SECTORS_FOR_OTA;
     }
@@ -420,8 +412,8 @@ pub fn get_ota_check_type(par: *const u8) -> u8 {
     return 0;
 }
 
-pub fn rf_link_slave_data_ota(data: *const rf_packet_att_write_t) -> bool {
-    app().ota_manager.rf_link_slave_data_ota(unsafe { &*(data as *const rf_packet_att_data_t) });
+pub fn rf_link_slave_data_ota(data: *const PacketAttWrite) -> bool {
+    app().ota_manager.rf_link_slave_data_ota(unsafe { &*(data as *const PacketAttData) });
 
     return true;
 }

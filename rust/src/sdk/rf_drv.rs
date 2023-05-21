@@ -5,7 +5,7 @@ use crate::{uprintln};
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
 use crate::sdk::ble_app::rf_drv_8266::{get_pkt_adv, get_user_data, get_user_data_len};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_group_address, ll_packet_l2cap_data_t, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
+use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_group_address, PacketL2capData, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
 use crate::sdk::mcu::register::write_reg32;
 
 pub enum RF_POWER {

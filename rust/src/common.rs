@@ -100,8 +100,8 @@ pub fn update_ble_parameter_cb() {
     }
 }
 
-pub fn rf_update_conn_para(p: &rf_packet_ll_data_t) -> u8 {
-    let pp = unsafe { &*(addr_of!(*p) as *const rf_pkt_l2cap_sig_connParaUpRsp_t) };
+pub fn rf_update_conn_para(p: &PacketLlData) -> u8 {
+    let pp = unsafe { &*(addr_of!(*p) as *const PktL2capSigConnParaUpRsp) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
     for i in 0..9 {

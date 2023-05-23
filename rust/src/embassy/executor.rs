@@ -50,4 +50,16 @@ impl Executor {
             }
         }
     }
+
+    pub fn init_spawner(&'static self, init: impl FnOnce(Spawner)) {
+        init(self.inner.spawner());
+    }
+
+    pub fn poll(&'static self) {
+        unsafe {
+            self.inner.poll();
+        }
+    }
+
+
 }

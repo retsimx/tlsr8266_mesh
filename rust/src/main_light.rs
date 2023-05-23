@@ -76,6 +76,9 @@ fn cfg_led_event(e: u32) {
 }
 
 pub fn light_hw_timer1_config() {
+    // Enable timer2 interrupts for controlling async irq timers
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR2_EN as u32);
+
     // Enable timer1 interrupts for controlling light transitions
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
     write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 50); // ~ 50hz

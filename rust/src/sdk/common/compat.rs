@@ -225,7 +225,7 @@ pub async fn check_panic_info() {
         data[0] = LGT_PANIC_MSG;
         data[3..3+len].copy_from_slice(&buffer[0..len]);
 
-        app().mesh_manager.send_mesh_message(&data, 0xffff);
+        app().mesh_manager.send_mesh_message(&data, 0xffff).await;
 
         buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
     }
@@ -237,7 +237,7 @@ pub async fn check_panic_info() {
     let mut data = [0 as u8; 13];
     data[0] = LGT_PANIC_MSG;
 
-    app().mesh_manager.send_mesh_message(&data, 0xffff);
+    app().mesh_manager.send_mesh_message(&data, 0xffff).await;
 
     // Finally clear the panic info
     flash_erase_sector(panic_addr);

@@ -1,6 +1,8 @@
-#![feature(type_alias_impl_trait)]
 #![no_std]
+#![feature(type_alias_impl_trait)]
+#![feature(async_closure)]
 
+use core::ptr::null_mut;
 use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
@@ -29,8 +31,10 @@ static mut APP: App = App::default();
 pub fn app() -> &'static mut App {
     return unsafe { &mut APP };
 }
+pub static mut APP_EXECUTOR: *mut Executor = null_mut();
+pub static mut INT_EXECUTOR: *mut Executor = null_mut();
 
-unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
+pub unsafe fn __make_static<T>(t: *mut T) -> &'static mut T {
     core::mem::transmute(t)
 }
 
@@ -92,9 +96,18 @@ pub extern "C" fn main_entrypoint() {
     // Get the CPU configured
     cpu_wakeup_init();
 
+    let mut app_executor = Executor::new();
+    unsafe {
+        APP_EXECUTOR = &mut app_executor;
+    }
+
+    let mut int_executor = Executor::new();
+    unsafe {
+        INT_EXECUTOR = &mut int_executor;
+    }
+
     // Run the application
-    let mut executor = Executor::new();
-    let executor = unsafe { __make_static(&mut executor) };
+    let executor = unsafe { __make_static(APP_EXECUTOR) };
     executor.run(|spawner| {
         spawner.must_spawn(run(spawner));
     });

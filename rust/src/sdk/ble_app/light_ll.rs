@@ -3,6 +3,7 @@ use core::mem::{size_of, size_of_val, transmute};
 use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use embassy_time::{Duration, Timer};
 
 use crate::{app, BIT, blinken, pub_mut, uprintln, uprintln_fast};
 use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, SYS_CHN_LISTEN, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb, SYS_CHN_ADV};
@@ -12,7 +13,7 @@ use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, get_mesh_pair_enable, ME
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
 use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, l2cap_att_handler, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_save_key, pair_set_key, pair_init, pair_proc};
-use crate::sdk::ble_app::ll_irq::{irq_st_ble_rx, irq_st_response};
+use crate::sdk::ble_app::ll_irq::{get_in_irq, get_irq_timer_micros, irq_st_ble_rx, irq_st_response, set_irq_timer_micros};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::ble_app::shared_mem::{get_blt_tx_fifo, get_light_rx_buff};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -285,7 +286,7 @@ pub fn rf_link_slave_add_status(packet: &MeshPkt)
 
 // Never inline this so that ram code functions don't grow too large
 #[inline(never)]
-pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
+pub async fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     if packet.rf_len != 0x25 || packet.l2cap_len != 0x21 {
         return false;
     }
@@ -503,7 +504,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
                 } else {
                     uprintln!("rf_link_response_callback 2");
                     rf_set_tx_rx_off();
-                    sleep_us(100);
+                    irq_delay(100).await;
                     uprintln!("pairac a");
                     rf_set_ble_access_code(*get_pair_ac());
                     rf_set_ble_crc_adv();
@@ -518,7 +519,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
                         rf_set_ble_channel(chn);
                         (*get_pkt_light_status())._type |= BIT!(7);
                         rf_start_stx_mesh(get_pkt_light_status(), CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
-                        sleep_us(600);
+                        irq_delay(600).await;
                     }
                 }
             }
@@ -528,7 +529,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     if relay_count != 0 && *get_org_ttl() == relay_count
     {
         rf_set_tx_rx_off();
-        sleep_us(100);
+        irq_delay(100).await;
         rf_set_ble_access_code(*get_pair_ac());
         rf_set_ble_crc_adv();
         if *get_slave_read_status_busy() == 0 || !rf_link_is_notify_rsp(op) {
@@ -567,7 +568,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
                     packet.internal_par1[LAST_RELAY_TIME] = relay_time as u8;
                 }
                 rf_start_stx_mesh(unsafe { &*(addr_of!(*packet) as *const PacketAttCmd) }, CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
-                sleep_us(600);
+                irq_delay(600).await;
             }
         }
         rf_set_rxmode();
@@ -959,25 +960,35 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
     return out_index as u32;
 }
 
-pub fn mesh_send_command(packet: *const PacketAttCmd, retransmit_count: u32)
+pub async fn irq_delay(micros: u32) {
+    if *get_in_irq() {
+        if (*get_irq_timer_micros()) != 0 {
+            panic!("Can't set more than one irq timer");
+        }
+
+        set_irq_timer_micros(micros);
+    }
+
+    Timer::after(Duration::from_micros(micros as u64)).await;
+}
+
+pub async fn mesh_send_command(packet: *const PacketAttCmd, retransmit_count: u32)
 {
     rf_set_tx_rx_off();
     rf_set_ble_access_code(*get_pair_ac());
     rf_set_ble_crc_adv();
 
-    if retransmit_count != 0xffffffff {
-        for _ in 0..retransmit_count+1 {
-            for chn in SYS_CHN_LISTEN {
-                rf_set_ble_channel(chn);
-                rf_start_srx2tx(packet as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
-                sleep_us(600);
-            }
+    for _ in 0..=retransmit_count {
+        for chn in SYS_CHN_LISTEN {
+            rf_set_ble_channel(chn);
+            rf_start_srx2tx(packet as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+            irq_delay(600).await;
         }
     }
 }
 
 
-pub fn mesh_send_online_status()
+pub async fn mesh_send_online_status()
 {
     static ADV_ST_SN: AtomicU32 = AtomicU32::new(0);
 
@@ -1021,7 +1032,7 @@ pub fn mesh_send_online_status()
         pair_enc_packet_mesh(addr_of_mut!(tmp_pkt) as *mut MeshPkt);
     }
 
-    mesh_send_command(&tmp_pkt, 0);
+    mesh_send_command(&tmp_pkt, 0).await;
 }
 
 pub fn back_to_rxmode_bridge()
@@ -1199,36 +1210,34 @@ pub fn mesh_send_user_command() -> u8
     *get_mesh_user_cmd_idx()
 }
 
-pub fn tx_packet_bridge()
+pub async fn tx_packet_bridge()
 {
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);
     static LAST_ALARM_TIME_BRIDGE: AtomicU32 = AtomicU32::new(0);
     static LAST_CONN_IBEACON_TIME: AtomicU32 = AtomicU32::new(0);
 
-    critical_section::with(|_| {
-        rf_set_tx_rx_off();
+    rf_set_tx_rx_off();
 
-        sleep_us(100);
+    irq_delay(100).await;
 
-        rf_set_ble_access_code(*get_pair_ac());
-        rf_set_ble_crc_adv();
+    rf_set_ble_access_code(*get_pair_ac());
+    rf_set_ble_crc_adv();
 
-        let tick = read_reg_system_tick();
-        if *get_slave_listen_interval() * *get_online_status_interval2listen_interval() as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
-            TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
-            if CLOCK_SYS_CLOCK_1US * 30000000 < tick - LAST_ALARM_TIME_BRIDGE.load(Ordering::Relaxed) {
-                LAST_ALARM_TIME_BRIDGE.store(tick, Ordering::Relaxed);
-                // noop
-            } else {
-                mesh_send_online_status();
-            }
+    let tick = read_reg_system_tick();
+    if *get_slave_listen_interval() * *get_online_status_interval2listen_interval() as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
+        TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
+        if CLOCK_SYS_CLOCK_1US * 30000000 < tick - LAST_ALARM_TIME_BRIDGE.load(Ordering::Relaxed) {
+            LAST_ALARM_TIME_BRIDGE.store(tick, Ordering::Relaxed);
+            // noop
+        } else {
+            mesh_send_online_status().await;
         }
-        app_bridge_cmd_handle(*get_t_bridge_cmd());
+    }
+    app_bridge_cmd_handle(*get_t_bridge_cmd());
 
-        if *get_slave_data_valid() == 0 {
-            mesh_send_user_command();
-        }
-    });
+    if *get_slave_data_valid() == 0 {
+        mesh_send_user_command();
+    }
 }
 
 pub fn rf_link_slave_proc() {

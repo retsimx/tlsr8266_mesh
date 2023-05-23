@@ -95,7 +95,7 @@ impl App {
         let mut data = [0 as u8; 13];
         data[0] = LGT_POWER_ON;
 
-        app().mesh_manager.send_mesh_message(&data, 0xffff);
+        app().mesh_manager.send_mesh_message(&data, 0xffff).await;
 
         // Start the panic checker to see if there is information we need to send
         #[embassy_executor::task]

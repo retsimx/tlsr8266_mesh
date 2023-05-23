@@ -325,7 +325,7 @@ impl UartManager {
                 self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
 
                 // Send the message in to the mesh
-                app().mesh_manager.send_mesh_message(&data, destination);
+                app().mesh_manager.send_mesh_message(&data, destination).await;
             }
 
             // Finally ack the message once we've handled it

@@ -2,6 +2,8 @@ use core::mem::{size_of, size_of_val};
 use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, Ordering};
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use crate::common::{SYS_CHN_LISTEN, pair_load_key, SYS_CHN_ADV};
 use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::light_ll::{*};
@@ -9,7 +11,7 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::{app, BIT, pub_mut, uprintln};
+use crate::{__make_static, app, BIT, INT_EXECUTOR, pub_mut, uprintln, uprintln_fast};
 use crate::app::App;
 use crate::embassy::time_driver::check_clock_overflow;
 use crate::embassy::yield_now::yield_now;
@@ -440,7 +442,7 @@ pub fn irq_st_ble_rx()
 }
 
 #[link_section = ".ram_code"]
-unsafe fn irq_light_slave_rx()
+async unsafe fn irq_light_slave_rx()
 {
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
 
@@ -471,17 +473,23 @@ unsafe fn irq_light_slave_rx()
         }
     } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) & 0x51 == 0x40 {
         let packet = addr_of!(entry.rx_time);
+
+        let return_fn = async move |entry: &mut LightRxBuff, packet: *const u32| {
+            if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                T_RX_LAST.store(rx_time, Ordering::Relaxed);
+
+                if *get_slave_link_state() < 6 {
+                    rf_link_rc_data(&mut *(packet as *mut MeshPkt)).await;
+                }
+
+                entry.dma_len = 1;
+            }
+        };
+
         set_rcv_pkt_time(rx_time);
         if entry.sno[0] & 0xf == 3 {
             if *get_slave_link_state() != 1 && *get_slave_link_state() != 7 {
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-                    entry.dma_len = 1;
-                    return;
-                }
+                return return_fn(entry, packet).await;
             }
             if *get_slave_link_state() == 1 {
                 // todo: Improve this check
@@ -510,16 +518,7 @@ unsafe fn irq_light_slave_rx()
                     return;
                 }
 
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
-                }
+                return return_fn(entry, packet).await;
             }
         } else {
             if entry.sno[0] & 0xf == 5 && *get_slave_link_state() == 1 {
@@ -536,29 +535,11 @@ unsafe fn irq_light_slave_rx()
                     return;
                 }
 
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
-                }
+                return return_fn(entry, packet).await;
             }
 
             if *get_slave_link_state() != 7 {
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
-                }
+                return return_fn(entry, packet).await;
             }
         }
 
@@ -621,26 +602,75 @@ fn irq_timer0() {
     unsafe { check_clock_overflow(); }
 }
 
+pub_mut!(irq_timer_micros, u32, 0);
+pub_mut!(in_irq, bool, false);
+pub_mut!(rx_task_running, bool, false);
+pub_mut!(st_handler_task_running, bool, false);
+
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]
 #[link_section = ".ram_code"]
 extern "C" fn irq_handler() {
+    set_in_irq(true);
+
     let irq = read_reg_rf_irq_status();
-    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
-        unsafe { irq_light_slave_rx(); }
-    }
 
     if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
         write_reg_rf_irq_status(2);
     }
 
     let irq_source = read_reg_irq_src();
+
+    // Clear the irq timer if we need to
+    if irq_source & FLD_IRQ::TMR2_EN as u32 != 0 {
+        write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !(FLD_TMR::TMR2_EN as u32));
+    }
+
+    let executor = unsafe { __make_static(INT_EXECUTOR) };
+
+    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
+        #[embassy_executor::task]
+        pub async fn run_rx_task() {
+            unsafe { irq_light_slave_rx().await; }
+            set_rx_task_running(false);
+        }
+
+        if !*get_rx_task_running() {
+            executor.init_spawner(|spawner| {
+                _ = spawner.spawn(run_rx_task());
+                set_rx_task_running(true);
+            });
+        }
+    }
+
+    while *get_rx_task_running() {
+        executor.poll();
+    }
+
     if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
         write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
         if (*get_p_st_handler()).is_some() {
-            (*get_p_st_handler()).unwrap()();
+            #[embassy_executor::task]
+            pub async fn run_st_handler_task() {
+                (*get_p_st_handler()).unwrap()();
+
+                set_st_handler_task_running(false);
+            }
+
+            if !*get_st_handler_task_running() {
+                executor.init_spawner(|spawner| {
+                    _ = spawner.spawn(run_st_handler_task());
+                    set_st_handler_task_running(true);
+                });
+            }
         }
     }
+
+    while *get_st_handler_task_running() {
+        executor.poll();
+    }
+
+    executor.poll();
 
     app().uart_manager.check_irq();
 
@@ -655,4 +685,15 @@ extern "C" fn irq_handler() {
     if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
         set_irq_timer1_flag(true);
     }
+
+    if *get_irq_timer_micros() != 0 {
+        // Enable timer2
+        write_reg_tmr2_tick(0);
+        write_reg_tmr2_capt(*get_irq_timer_micros());
+        write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR2_EN as u32);
+
+        set_irq_timer_micros(0);
+    }
+
+    set_in_irq(false);
 }

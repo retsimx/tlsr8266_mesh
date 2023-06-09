@@ -15,6 +15,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pa
 use crate::sdk::ble_app::ll_irq::{irq_st_ble_rx, irq_st_response};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::ble_app::shared_mem::{get_blt_tx_fifo, get_light_rx_buff};
+use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
@@ -283,8 +284,6 @@ pub fn rf_link_slave_add_status(packet: &MeshPkt)
     });
 }
 
-// Never inline this so that ram code functions don't grow too large
-#[inline(never)]
 pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     if packet.rf_len != 0x25 || packet.l2cap_len != 0x21 {
         return false;
@@ -428,7 +427,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     set_org_ttl(ttl);
 
     // todo: Use rand register?
-    let rand_1 = ((read_reg_system_tick() ^ unsafe { *(*get_slave_p_mac()) as u32 }) & 0xf) * 500;
+    let rand_1 = ((read_reg_system_tick() ^ array4_to_int(get_mac_id())) & 0xf) * 500;
     if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
         (*get_pkt_light_status()).value[0..3].copy_from_slice(&cmd_pkt.sno[0..3]);
         packet.src_tx = *get_device_address();
@@ -477,7 +476,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
             if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut PacketAttValue, &request_params) {
                 if !*get_slave_link_connected() {
                     write_reg_irq_src(0x100000);
-                    let rand_2 = ((unsafe { *(*get_slave_p_mac()) as u32 } ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
+                    let rand_2 = ((array4_to_int(get_mac_id()) ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
                     let mut relay_delay = 16000 + rand_2 + rand_1;
                     let max_relay = packet.internal_par1[MAX_RELAY_COUNT];
                     if 0x1d < max_relay {
@@ -576,8 +575,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     return true;
 }
 
-#[inline(never)]
-pub unsafe fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
+pub fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
     let rf_len: u8 = packet.rf_len;
     let chanid: u16 = packet.chanid;
 
@@ -602,7 +600,7 @@ pub unsafe fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
                 set_slave_timing_update(1);
                 set_slave_instant_next(((packet.sno as u16) << 8) | packet.hh as u16);
                 (*get_slave_chn_map()).iter_mut().enumerate().for_each(|(i, v)| {
-                    *v = *(addr_of!(packet.l2cap_high) as *const u8).offset(i as isize);
+                    *v = unsafe { *(addr_of!(packet.l2cap_high) as *const u8).offset(i as isize) };
                 });
 
                 return true;
@@ -613,14 +611,14 @@ pub unsafe fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
                 set_slave_instant_next(packet.group);
                 set_slave_window_size_update((packet.l2cap_high as u32 * 1250 + 1300) * CLOCK_SYS_CLOCK_1US);
                 set_slave_timing_update(2);
-                set_ble_conn_interval(CLOCK_SYS_CLOCK_1US * 1250 * (*addr_of!(packet.att) as *const u16) as u32);
+                set_ble_conn_interval(CLOCK_SYS_CLOCK_1US * 1250 * unsafe { (*addr_of!(packet.att) as *const u16) } as u32);
                 set_ble_conn_offset(packet.chanid as u32 * CLOCK_SYS_CLOCK_1US * 1250);
                 set_ble_conn_timeout(packet.nid as u32 * 10000);
                 return false;
             }
         }
-        let (res_pkt, len) = l2cap_att_handler(addr_of!(*packet) as *const PacketL2capData);
-        if res_pkt != null() && !rf_link_add_tx_packet(res_pkt as *const PacketAttCmd, len) {
+        let (res_pkt, len) = unsafe { l2cap_att_handler(addr_of!(*packet) as *const PacketL2capData) };
+        if res_pkt != null() && !rf_link_add_tx_packet(unsafe { res_pkt as *const PacketAttCmd }, len) {
             set_add_tx_packet_rsp_failed(*get_add_tx_packet_rsp_failed() + 1);
         }
         return false;
@@ -656,7 +654,6 @@ fn check_par_con(packet: &PacketLlInit) -> bool
     return true;
 }
 
-#[inline(never)]
 pub fn rf_link_slave_connect(packet: &PacketLlInit, time: u32) -> bool
 {
     set_conn_update_successed(false);

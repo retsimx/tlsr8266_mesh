@@ -10,6 +10,7 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
+use crate::sdk::ble_app::rf_drv_8266::get_mac_id;
 
 pub_mut!(conn_update_successed, bool, false);
 pub_mut!(conn_update_cnt, u8, 0);
@@ -37,8 +38,7 @@ pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
     par_rsp[2] = (*get_device_address() & 0xff) as u8;
     par_rsp[3] = ((*get_device_address() >> 8) & 0xff) as u8;
 
-    let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
-    par_rsp[4..10].copy_from_slice(slave_mac);
+    par_rsp[4..10].copy_from_slice(&*get_mac_id());
     return true;
 }
 
@@ -47,9 +47,8 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
         // get
         *get_get_mac_en()
     } else {
-        let slave_mac = unsafe { slice::from_raw_parts(*get_slave_p_mac(), 6) };
         for i in 0..6 {
-            if params[i] != slave_mac[i] {
+            if params[i] != (*get_mac_id())[i] {
                 return false;
             }
         }
@@ -174,11 +173,9 @@ pub fn retrieve_dev_grp_address()
         }
     }
     if *get_device_address() == 0 {
-        unsafe {
-            set_device_address(*get_slave_p_mac().offset(0) as u16);
-            if *get_slave_p_mac().offset(0) == 0 {
-                set_device_address(1);
-            }
+        set_device_address(((*get_mac_id())[0] as u16) | (((*get_mac_id())[1] as u16) << 8));
+        if (*get_mac_id())[0] == 0 {
+            set_device_address(1);
         }
     }
 }

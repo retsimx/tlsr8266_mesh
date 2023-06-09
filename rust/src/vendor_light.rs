@@ -1,9 +1,11 @@
 use crate::config::VENDOR_ID;
 use crate::{pub_mut};
-use crate::sdk::light::{get_slave_p_mac, AdvPrivate, AdvRspPrivate};
+use crate::sdk::light::{AdvPrivate, AdvRspPrivate};
 use core::mem::size_of;
 use core::slice;
+use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
+use crate::sdk::ble_app::rf_drv_8266::get_mac_id;
 
 pub_mut!(
     adv_pri_data,
@@ -31,7 +33,7 @@ pub_mut!(
 
 pub fn vendor_set_adv_data() {
     // config adv data
-    get_adv_pri_data().mac_address = unsafe { *(*get_slave_p_mac() as *const u32) };
+    get_adv_pri_data().mac_address = array4_to_int(get_mac_id());
     rf_link_slave_set_adv_private_data(
         unsafe {
             slice::from_raw_parts(
@@ -45,7 +47,7 @@ pub fn vendor_set_adv_data() {
     get_adv_rsp_pri_data().product_uuid = 0x02;
 
     // config adv rsp data
-    get_adv_rsp_pri_data().mac_address = unsafe { *(*get_slave_p_mac() as *const u32) };
+    get_adv_rsp_pri_data().mac_address = array4_to_int(get_mac_id());
 
     // set rsv to 0..16
     get_adv_rsp_pri_data()

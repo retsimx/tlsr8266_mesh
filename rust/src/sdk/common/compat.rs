@@ -259,3 +259,7 @@ pub fn panic(info: &PanicInfo) -> ! {
 
     loop {}
 }
+
+pub fn array4_to_int(data: &[u8]) -> u32 {
+    data[0] as u32 | ((data[1] as u32) << 8) | ((data[2] as u32) << 16) | ((data[3] as u32) << 24)
+}

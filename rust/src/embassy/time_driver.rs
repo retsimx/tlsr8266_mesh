@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_time::driver::{Driver, AlarmHandle};
 use crate::sdk::mcu::clock::clock_time;
 
@@ -23,26 +24,19 @@ impl Driver for MyDriver {
 }
 
 // Counts any clock_time overflows
-static mut CLOCK_TIME_UPPER: u32 = 0;
-static mut LAST_CLOCK_TIME: u32 = 0;
+pub fn clock_time64() -> u64 {
+    static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
+    static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 
-pub unsafe fn check_clock_overflow() -> u32 {
     critical_section::with(|_| {
         let time = clock_time();
-        if time < LAST_CLOCK_TIME {
+        if time < LAST_CLOCK_TIME.load(Ordering::Relaxed) {
             // Overflow has occurred
-            CLOCK_TIME_UPPER += 1;
+            CLOCK_TIME_UPPER.store(CLOCK_TIME_UPPER.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         }
 
-        LAST_CLOCK_TIME = time;
+        LAST_CLOCK_TIME.store(time, Ordering::Relaxed);
 
-        time
+        (CLOCK_TIME_UPPER.load(Ordering::Relaxed) as u64) << 32 | time as u64
     })
-}
-
-pub fn clock_time64() -> u64 {
-    unsafe {
-        let time = check_clock_overflow();
-        return (CLOCK_TIME_UPPER as u64) << 32 | time as u64;
-    }
 }

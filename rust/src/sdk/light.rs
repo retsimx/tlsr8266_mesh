@@ -32,8 +32,6 @@ pub_mut!(max_relay_num, u8, 3);
 
 pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize], [0; MAX_GROUP_NUM as usize]);
 
-pub_mut!(slave_p_mac, *const u8, null());
-
 pub_mut!(adr_flash_cfg_idx, i32, 0);
 
 pub_mut!(slave_link_connected, bool, false);

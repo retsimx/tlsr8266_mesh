@@ -10,11 +10,12 @@ use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::{app, BIT, uprintln};
-use crate::embassy::time_driver::check_clock_overflow;
+use crate::embassy::time_driver::{clock_time64};
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
+use crate::sdk::common::compat::array4_to_int;
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 fn slave_timing_update_handle()
@@ -142,7 +143,7 @@ pub fn irq_st_response()
     rf_set_ble_access_code(*get_pair_ac());
 
     rf_set_ble_crc_adv();
-    let tmp = (unsafe { **get_slave_p_mac() as u32 } ^ read_reg_system_tick()) & 3;
+    let tmp = (array4_to_int(get_mac_id()) ^ read_reg_system_tick()) & 3;
     for uVar4 in tmp..tmp + 4 {
         rf_set_ble_channel(SYS_CHN_LISTEN[uVar4 as usize & 3]);
         (*get_pkt_light_status())._type |= BIT!(7);
@@ -436,15 +437,12 @@ pub fn irq_st_ble_rx()
     slave_timing_update_handle();
 }
 
-#[link_section = ".ram_code"]
-#[inline(never)]
 fn irq_light_slave_tx()
 {
     write_reg_rf_irq_status(2);
 }
 
-#[link_section = ".ram_code"]
-unsafe fn irq_light_slave_rx()
+fn irq_light_slave_rx()
 {
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
 
@@ -473,36 +471,37 @@ unsafe fn irq_light_slave_rx()
             rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
             return;
         }
-    } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) & 0x51 == 0x40 {
+    } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40 {
+
         let packet = addr_of!(entry.rx_time);
+        let mut return_fn = || {
+            T_RX_LAST.store(rx_time, Ordering::Relaxed);
+            if *get_slave_link_state() < 6 {
+                rf_link_rc_data(unsafe { &mut *(packet as *mut MeshPkt) });
+            }
+            entry.dma_len = 1;
+            return;
+        };
+
         set_rcv_pkt_time(rx_time);
         if entry.sno[0] & 0xf == 3 {
             if *get_slave_link_state() != 1 && *get_slave_link_state() != 7 {
                 if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-                    entry.dma_len = 1;
-                    return;
+                    return return_fn();
                 }
             }
             if *get_slave_link_state() == 1 {
-                // todo: Improve this check
-                if entry.mac[0] == *(*get_slave_p_mac()).offset(0) &&
-                    entry.mac[1] == *(*get_slave_p_mac()).offset(1) &&
-                    entry.mac[2] == *(*get_slave_p_mac()).offset(2) &&
-                    entry.mac[3] == *(*get_slave_p_mac()).offset(3) {
+                if entry.mac == (*get_mac_id())[0..4] {
                     rf_stop_trx();
                     write_reg_rf_sched_tick(rx_time + *get_T_scan_rsp_intvl() * CLOCK_SYS_CLOCK_1US);
                     write_reg_rf_mode_control(0x85);                        // single TX
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    (*get_adv_rsp_pri_data()).device_address = *get_device_address_addr();
+                    (*get_adv_rsp_pri_data()).device_address = unsafe { *get_device_address_addr() };
                     (*get_pkt_scan_rsp()).data[0] = 0x1e;
                     (*get_pkt_scan_rsp()).data[1] = 0xff;
                     (*get_pkt_scan_rsp()).data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
-                        slice::from_raw_parts(get_adv_rsp_pri_data_addr() as *const u8, size_of::<AdvRspPrivate>())
+                        unsafe { slice::from_raw_parts(get_adv_rsp_pri_data_addr() as *const u8, size_of::<AdvRspPrivate>()) }
                     );
                     (*get_pkt_scan_rsp()).dma_len = 0x27;
                     (*get_pkt_scan_rsp()).rf_len = 0x25;
@@ -515,53 +514,28 @@ unsafe fn irq_light_slave_rx()
                 }
 
                 if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
+                    return return_fn();
                 }
             }
         } else {
             if entry.sno[0] & 0xf == 5 && *get_slave_link_state() == 1 {
-                // todo: improve
-                if entry.mac[0] == *(*get_slave_p_mac()).offset(0) &&
-                    entry.mac[1] == *(*get_slave_p_mac()).offset(1) &&
-                    entry.mac[2] == *(*get_slave_p_mac()).offset(2) &&
-                    entry.mac[3] == *(*get_slave_p_mac()).offset(3) {
+                if entry.mac == (*get_mac_id())[0..4] {
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    rf_link_slave_connect(&*(packet as *const PacketLlInit), rx_time);
+                    rf_link_slave_connect(unsafe { &*(packet as *const PacketLlInit) }, rx_time);
 
                     entry.dma_len = 1;
                     return;
                 }
 
                 if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
+                    return return_fn();
                 }
             }
 
             if *get_slave_link_state() != 7 {
                 if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
-                    T_RX_LAST.store(rx_time, Ordering::Relaxed);
-
-                    if *get_slave_link_state() < 6 {
-                        rf_link_rc_data(&mut *(packet as *mut MeshPkt));
-                    }
-
-                    entry.dma_len = 1;
-                    return;
+                    return return_fn();
                 }
             }
         }
@@ -575,7 +549,7 @@ unsafe fn irq_light_slave_rx()
             set_light_conn_sn_master(master_sn);
             set_slave_connected_tick(read_reg_system_tick());
             set_slave_link_connected(true);
-            rf_link_slave_data(&*(packet as *const PacketLlData), rx_time);
+            rf_link_slave_data(unsafe { &*(packet as *const PacketLlData) }, rx_time);
         }
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {
@@ -603,8 +577,9 @@ unsafe fn irq_light_slave_rx()
     entry.dma_len = 1;
 }
 
-#[link_section = ".ram_code"]
-pub unsafe fn irq_light_slave_handler() {
+// no_mangle because this is referenced as an entrypoint from the assembler bootstrap
+#[no_mangle]
+extern "C" fn irq_handler() {
     let irq = read_reg_rf_irq_status();
     if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
         irq_light_slave_rx();
@@ -622,33 +597,20 @@ pub unsafe fn irq_light_slave_handler() {
         }
     }
 
+    // This timer is configured to run once per second to check if the internal clock has overflowed.
+    // this is a workaround in case there are no 'clock_time64' calls between overflows
     if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
-        irq_timer0();
         write_reg_irq_src(FLD_IRQ::TMR0_EN as u32);
+
+        clock_time64();
     }
+
+    // This timer triggers the transition step of the light so that the transition is smooth
     if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
-        irq_timer1();
         write_reg_irq_src(FLD_IRQ::TMR1_EN as u32);
+
+        app().light_manager.transition_step();
     }
-}
-
-#[inline(never)]
-fn irq_timer1() {
-    app().light_manager.transition_step();
-}
-
-// This timer is configured to run once per second to check if the internal clock has overflowed.
-// this is a workaround in case there are no 'clock_time64' calls between overflows
-#[inline(never)]
-fn irq_timer0() {
-    unsafe { check_clock_overflow(); }
-}
-
-// no_mangle because this is referenced as an entrypoint from the assembler bootstrap
-#[no_mangle]
-#[link_section = ".ram_code"]
-extern "C" fn irq_handler() {
-    unsafe { irq_light_slave_handler(); }
 
     app().uart_manager.check_irq();
 }

@@ -9,6 +9,7 @@ use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
 use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
+use crate::sdk::ble_app::rf_drv_8266::get_mac_id;
 
 pub unsafe fn pair_dec_packet(ps: *mut PacketLlApp) -> bool {
     let mut result = true;
@@ -160,8 +161,8 @@ pub fn pair_init()
 {
     set_ble_pair_st(0);
     set_pair_enc_enable(false);
-    unsafe { (*get_pair_ivm())[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
-    unsafe { (*get_pair_ivs())[0..4].copy_from_slice(slice::from_raw_parts(*get_slave_p_mac() as *const u8, 4)); }
+    (*get_pair_ivm())[0..4].copy_from_slice(&(*get_mac_id())[0..4]);
+    (*get_pair_ivs())[0..4].copy_from_slice(&(*get_mac_id())[0..4]);
 }
 
 pub fn pair_par_init()

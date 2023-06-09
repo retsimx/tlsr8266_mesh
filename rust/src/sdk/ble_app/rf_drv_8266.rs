@@ -15,7 +15,7 @@ use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer
 use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
-use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
+use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
@@ -819,7 +819,6 @@ pub fn rf_link_slave_init(interval: u32)
         }
 
         flash_read_page(FLASH_ADR_MAC, 6, (*get_mac_id()).as_mut_ptr());
-        set_slave_p_mac((*get_mac_id()).as_ptr());
 
         (*get_pkt_adv()).adv_a = *get_mac_id();
         (*get_pkt_scan_rsp()).adv_a = *get_mac_id();
@@ -827,11 +826,11 @@ pub fn rf_link_slave_init(interval: u32)
         rf_link_slave_set_adv(get_adv_data());
         pair_load_key();
 
-        (*get_pkt_light_data()).value[3] = *get_slave_p_mac().offset(0);
-        (*get_pkt_light_data()).value[4] = *get_slave_p_mac().offset(1);
+        (*get_pkt_light_data()).value[3] = (*get_mac_id())[0];
+        (*get_pkt_light_data()).value[4] = (*get_mac_id())[1];
 
-        (*get_pkt_light_status()).value[3] = *get_slave_p_mac().offset(0);
-        (*get_pkt_light_status()).value[4] = *get_slave_p_mac().offset(1);
+        (*get_pkt_light_status()).value[3] = (*get_mac_id())[0];
+        (*get_pkt_light_status()).value[4] = (*get_mac_id())[1];
 
         set_slave_adv_enable(true);
 
@@ -845,7 +844,7 @@ pub fn rf_link_slave_init(interval: u32)
 
         set_irq_mask_save(read_reg_irq_mask());
 
-        write_reg32(0x808004, *(*get_slave_p_mac() as *const u32));
+        write_reg32(0x808004, array4_to_int(get_mac_id()));
         write_reg32(0x808008, BUILD_VERSION);
         write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
     }
@@ -963,7 +962,6 @@ pub fn rf_set_tx_rx_off()
     write_reg8(0x800f02, RF_TRX_OFF);        // reset tx/rx state machine
 }
 
-#[link_section = ".ram_code"]
 pub fn rf_set_ble_channel(mut chn: u8) {
     write_reg8(0x40d, chn);
 

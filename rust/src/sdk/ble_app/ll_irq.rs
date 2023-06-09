@@ -628,6 +628,15 @@ extern "C" fn irq_handler() {
 
     let executor = unsafe { __make_static(INT_EXECUTOR) };
 
+    executor.poll();
+
+    if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
+        write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
+        if (*get_p_st_handler()).is_some() {
+            (*get_p_st_handler()).unwrap()();
+        }
+    }
+
     if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
         #[embassy_executor::task]
         pub async fn run_rx_task() {
@@ -636,39 +645,33 @@ extern "C" fn irq_handler() {
         }
 
         if !*get_rx_task_running() {
+            set_rx_task_running(true);
             executor.init_spawner(|spawner| {
                 _ = spawner.spawn(run_rx_task());
-                set_rx_task_running(true);
             });
         }
     }
 
-    while *get_rx_task_running() {
-        executor.poll();
-    }
-
-    if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
-        write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
-        if (*get_p_st_handler()).is_some() {
-            #[embassy_executor::task]
-            pub async fn run_st_handler_task() {
-                (*get_p_st_handler()).unwrap()();
-
-                set_st_handler_task_running(false);
-            }
-
-            if !*get_st_handler_task_running() {
-                executor.init_spawner(|spawner| {
-                    _ = spawner.spawn(run_st_handler_task());
-                    set_st_handler_task_running(true);
-                });
-            }
-        }
-    }
-
-    while *get_st_handler_task_running() {
-        executor.poll();
-    }
+        // if !*get_rx_task_running() {
+        //     if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
+        //         write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
+        //         if (*get_p_st_handler()).is_some() {
+        //             #[embassy_executor::task]
+        //             pub async fn run_st_handler_task() {
+        //                 (*get_p_st_handler()).unwrap()();
+        //
+        //                 set_st_handler_task_running(false);
+        //             }
+        //
+        //             if !*get_st_handler_task_running() {
+        //                 set_st_handler_task_running(true);
+        //                 executor.init_spawner(|spawner| {
+        //                     _ = spawner.spawn(run_st_handler_task());
+        //                 });
+        //             }
+        //         }
+        //     }
+        // }
 
     executor.poll();
 

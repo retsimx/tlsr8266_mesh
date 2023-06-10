@@ -1,11 +1,11 @@
-use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
-use core::mem;
-use core::mem::{size_of, size_of_val, MaybeUninit};
+use core::mem::size_of;
 use core::ptr::{null, null_mut};
-use crate::{const_concat};
-use crate::{pub_mut, BIT};
-use crate::config::PAIR_VALID_FLAG;
+
+use heapless::Deque;
+
+use crate::{BIT, pub_mut};
 use crate::mesh::mesh_node_st_val_t;
+use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
 
@@ -60,11 +60,6 @@ pub_mut!(set_mesh_info_time, u32, 0);
 pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
-
-pub_mut!(p_cb_rx_from_mesh, Option<fn(p: &AppCmdValue)>, Option::None);
-// todo: new_node might be bool
-pub_mut!(p_mesh_node_status_callback, Option<fn(p: *const mesh_node_st_val_t, new_node: u8)>, None);
-
 
 pub const PMW_MAX_TICK_BASE: u16 = 255;
 // must 255
@@ -515,7 +510,7 @@ pub struct StatusRecord {
     pub alarm_id: u8, // don't modify, use internal
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct PktBuf {
     pub op: u8,
@@ -609,16 +604,10 @@ pub_mut!(
     size_of::<[StatusRecord; MESH_NODE_MAX_NUM as usize]>() as u16
 );
 
-pub const RC_PKT_BUF_MAX: u8 = 2;
 pub_mut!(
     rc_pkt_buf,
-    [PktBuf; RC_PKT_BUF_MAX as usize],
-    [PktBuf {
-        op: 0,
-        sno: [0; 3],
-        notify_ok_flag: false,
-        sno2: [0; 2],
-    }; RC_PKT_BUF_MAX as usize]
+    Deque<PktBuf, 5>,
+    Deque::new()
 );
 
 pub_mut!(dev_address_next_pos, u16, 0);

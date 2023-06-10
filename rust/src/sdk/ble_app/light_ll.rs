@@ -1,27 +1,26 @@
 use core::cmp::min;
-use core::mem::{size_of, size_of_val, transmute};
-use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut};
+use core::mem::{size_of, transmute};
+use core::ptr::{addr_of, addr_of_mut, null, null_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use crate::{app, BIT, blinken, pub_mut, uprintln, uprintln_fast};
-use crate::common::{dev_addr_with_mac_flag, get_conn_update_cnt, get_conn_update_successed, SYS_CHN_LISTEN, pair_load_key, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, update_ble_parameter_cb, SYS_CHN_ADV};
+use crate::{app, BIT, pub_mut, uprintln};
+use crate::common::{dev_addr_with_mac_flag, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, get_mesh_pair_enable, MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
-use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
+use crate::sdk::ble_app::ble_ll_att::ble_ll_channel_table_calc;
 use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, l2cap_att_handler, set_att_service_discover_tick, set_slave_link_time_out};
-use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_save_key, pair_set_key, pair_init, pair_proc};
+use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_init, pair_save_key, pair_set_key};
 use crate::sdk::ble_app::ll_irq::{irq_st_ble_rx, irq_st_response};
 use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::ble_app::shared_mem::{get_blt_tx_fifo, get_light_rx_buff};
+use crate::sdk::ble_app::shared_mem::get_blt_tx_fifo;
 use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
-use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
+use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr, light_mesh_rx_cb};
 
 pub_mut!(slave_timing_update, u32, 0);
 pub_mut!(slave_instant_next, u16, 0);
@@ -107,9 +106,6 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
                 (*get_mesh_node_mask())[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
 
                 result = mesh_node_max as u32;
-                if (*get_p_mesh_node_status_callback()).is_some() {
-                    (*get_p_mesh_node_status_callback()).unwrap()(&mesh_node_st.val.clone(), 1);
-                }
             } else if current_index < mesh_node_max as usize {
                 let sn_difference = pkt[src_index].sn - mesh_node_st.val.sn;
                 let par_match = pkt[src_index].par == mesh_node_st.val.par;
@@ -122,11 +118,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {
-                        (*get_mesh_node_mask())[current_index as usize >> 5] |= 1 << (current_index & 0x1f);
-
-                        if (*get_p_mesh_node_status_callback()).is_some() {
-                            (*get_p_mesh_node_status_callback()).unwrap()(&mesh_node_st.val.clone(), 1);
-                        }
+                        (*get_mesh_node_mask())[current_index >> 5] |= 1 << (current_index & 0x1f);
                     }
 
                     mesh_node_st.tick = tick;
@@ -159,35 +151,34 @@ fn rf_link_is_notify_rsp(opcode: u8) -> bool
 
 fn rc_pkt_buf_push(opcode: u8, cmd_pkt: &AppCmdValue)
 {
-    static RC_PKT_BUF_IDX: AtomicU8 = AtomicU8::new(0);
-
-    if !rf_link_is_notify_rsp(opcode) {
-        if !is_exist_in_rc_pkt_buf(opcode, cmd_pkt) {
-            let pkt_idx = RC_PKT_BUF_IDX.load(Ordering::Relaxed) as usize;
-            (*get_rc_pkt_buf())[pkt_idx].op = opcode;
-            (*get_rc_pkt_buf())[pkt_idx].sno = cmd_pkt.sno;
-            (*get_rc_pkt_buf())[pkt_idx].notify_ok_flag = false;
-            (*get_rc_pkt_buf())[pkt_idx].sno2.copy_from_slice(&cmd_pkt.par[8..10]);
-            RC_PKT_BUF_IDX.store(((pkt_idx + 1) % RC_PKT_BUF_MAX as usize) as u8, Ordering::Relaxed);
-        }
+    if rf_link_is_notify_rsp(opcode) || is_exist_in_rc_pkt_buf(opcode, cmd_pkt) {
+        return;
     }
-    return;
+
+    if get_rc_pkt_buf().is_full() {
+        get_rc_pkt_buf().pop_back();
+    }
+
+    get_rc_pkt_buf().push_front(
+        PktBuf {
+            op: opcode,
+            sno: cmd_pkt.sno,
+            notify_ok_flag: false,
+            sno2: cmd_pkt.par[8..10].try_into().unwrap(),
+        }
+    ).unwrap();
 }
 
 fn req_cmd_is_notify_ok(opcode: u8, cmd_pkt: &AppCmdValue) -> bool
 {
-    for idx in 0..RC_PKT_BUF_MAX as usize {
-        if (*get_rc_pkt_buf())[idx].op == opcode && (*get_rc_pkt_buf())[idx].sno == cmd_pkt.sno {
-            return (*get_rc_pkt_buf())[idx].notify_ok_flag;
-        }
-    }
-
-    return false;
+    get_rc_pkt_buf().iter().any(|pkt| {
+        pkt.op == opcode && pkt.sno == cmd_pkt.sno && pkt.notify_ok_flag
+    })
 }
 
 fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &AppCmdValue)
 {
-    (*get_rc_pkt_buf()).iter_mut().filter(
+    get_rc_pkt_buf().iter_mut().filter(
         |v| { v.op == opcode && v.sno == cmd_pkt.sno }
     ).for_each(
         |v| { v.notify_ok_flag = true }
@@ -295,18 +286,11 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
         }
     }
 
-    if unsafe { !pair_dec_packet_mesh(packet) } {
+    if unsafe { !pair_dec_packet_mesh(packet) } || packet._type & 3 != 2 || packet.chan_id == 0xeeff {
         return false;
     }
 
-    if packet._type & 3 != 2 {
-        return false;
-    }
-
-    if packet.chan_id == 0xeeff {
-        return false;
-    }
-
+    // Check if this is a node update packet
     if packet.chan_id == 0xffff {
         if MESH_NODE_ST_VAL_LEN == 4 {
             if packet.internal_par1[LAST_RELAY_TIME] != 0xa5 || packet.internal_par1[CURRENT_RELAY_COUNT] != 0xa5 {
@@ -323,10 +307,12 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
         return false;
     }
 
+    // Don't do anything if this packet has been relayed too many times
     if *get_max_relay_num() + 6 < packet.internal_par1[CURRENT_RELAY_COUNT] {
         return false;
     }
 
+    // Parse the opcode and parameters from the packet
     let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
@@ -336,6 +322,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
         return false;
     }
 
+    // Get the opcode
     let mut op = 0;
     if op_cmd_len == 3 {
         op = op_cmd[0] & 0x3f;
@@ -345,9 +332,10 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
     let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
-    if (*get_p_cb_rx_from_mesh()).is_some() && (no_match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
+
+    if (no_match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
     {
-        (*get_p_cb_rx_from_mesh()).unwrap()(cmd_pkt);
+        light_mesh_rx_cb(cmd_pkt);
     }
 
     let src_device_addr_match = packet.src_adr == *get_device_address();
@@ -876,13 +864,6 @@ pub fn mesh_node_flush_status()
 
             // Set the bit in the mask so that the status is reported (Since the device has changed to offline now)
             (*get_mesh_node_mask())[count >> 5] |= 1 << (count & 0x1f);
-
-            // Call the node status callback if one is set
-            if *get_p_mesh_node_status_callback() != None {
-                let mut node_data = p_node_st.val.clone();
-                node_data.sn = 0;
-                (*get_p_mesh_node_status_callback()).unwrap()(&node_data, 0);
-            }
         }
     }
 }

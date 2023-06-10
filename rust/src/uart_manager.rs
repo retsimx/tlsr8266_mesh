@@ -1,14 +1,19 @@
 use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
+
 use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use heapless::Deque;
-use crate::{app, BIT, pub_mut};
+
+use crate::{app, pub_mut};
 use crate::embassy::yield_now::yield_now;
-use crate::mesh::{get_mesh_node_st, mesh_node_st_val_t};
+use crate::mesh::MESH_NODE_ST_VAL_LEN;
+use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
+use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{AppCmdValue, MESH_NODE_MAX_NUM, MeshPkt, set_p_cb_rx_from_mesh};
+use crate::sdk::light::{AppCmdValue, MeshPkt};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
@@ -35,7 +40,7 @@ pub_mut!(pkt_user_cmd, MeshPkt, MeshPkt {
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
     LightCtrl = 0x02,       // Sent by the client to control the mesh
-    LightOnline = 0x03,     // Sent by us to notify when a light goes on/offline or turns on/off
+    LightStatus = 0x03,     // Sent by us to notify when a bulk status message is sent. Sent by the client to force a full refresh of light statuses
     MeshMessage = 0x04,     // Sent by us to notify when a mesh message is sent
     PanicMessage = 0x05,    // Sent by us to provide details of a panic
     PrintMessage = 0x06,    // Sent by us to provide print output
@@ -43,7 +48,11 @@ pub enum UartMsg {
 }
 
 // AppCmdValueT
-fn light_mesh_rx_cb(data: &AppCmdValue) {
+pub fn light_mesh_rx_cb(data: &AppCmdValue) {
+    if !app().uart_manager.started() {
+        return;
+    }
+
     let data = addr_of!(*data) as *const u8;
     // Compute the CRC of important bits. This is from start of AppCmdValueT.dst (5) to end of AppCmdValueT.par (20)
     let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
@@ -74,58 +83,31 @@ async fn uart_sender() {
 
 
 #[embassy_executor::task]
-async fn notification_parser() {
+async fn node_report_task() {
     let mut msg = uart_data_t {
         len: UART_DATA_LEN as u32,
         data: [0; UART_DATA_LEN]
     };
 
-    msg.data[2] = UartMsg::LightOnline as u8;
+    msg.data[2] = UartMsg::LightStatus as u8;
 
-    let mut last_state: [u8; MESH_NODE_MAX_NUM as usize / 8] = [0; MESH_NODE_MAX_NUM as usize / 8];
-    let mut last_val: [[u8; 2]; MESH_NODE_MAX_NUM as usize] = [[0; 2]; MESH_NODE_MAX_NUM as usize];
     loop {
-        for i in 0..MESH_NODE_MAX_NUM as usize {
-            if get_mesh_node_st()[i].tick != 0 {
-                if last_state[i / 8] & BIT!(i % 8) == 0 || last_val[i] != get_mesh_node_st()[i].val.par {
-                    last_state[i / 8] |= BIT!(i % 8);
-                    last_val[i] = get_mesh_node_st()[i].val.par;
-
-                    msg.data[3] = 1;
-                    for j in 0..size_of::<mesh_node_st_val_t>() {
-                        unsafe { *msg.data.as_mut_ptr().offset(4 + j as isize) = *(addr_of!(get_mesh_node_st()[i].val) as *const u8).offset(j as isize) };
-                    }
-
-                    while !app().uart_manager.send_message(&msg) {
-                        yield_now().await;
-                    }
-                }
-            } else {
-                if last_state[i / 8] & BIT!(i % 8) != 0 {
-                    last_state[i / 8] &= !BIT!(i % 8);
-                    last_val[i] = [0; 2];
-
-                    msg.data[3] = 0;
-                    for j in 0..size_of::<mesh_node_st_val_t>() {
-                        unsafe { *msg.data.as_mut_ptr().offset(4 + j as isize) = *(addr_of!(get_mesh_node_st()[i].val) as *const u8).offset(j as isize) };
-                    }
-
-                    while !app().uart_manager.send_message(&msg) {
-                        yield_now().await;
-                    }
-                }
+        let mut data = [0; UART_DATA_LEN-5];
+        while mesh_node_report_status(&mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) != 0 {
+            msg.data[3..UART_DATA_LEN-2].copy_from_slice(data.as_slice());
+            while !app().uart_manager.send_message(&msg) {
+                yield_now().await;
             }
-
-            yield_now().await;
         }
+
+        Timer::after(Duration::from_millis(200)).await;
     }
 }
 
-
 pub struct UartManager {
     pub driver: UartDriver,
-    recv_channel: Deque<uart_data_t, 5>,
-    send_channel: Deque<uart_data_t, 5>,
+    recv_channel: Deque<uart_data_t, 10>,
+    send_channel: Deque<uart_data_t, 10>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
@@ -143,6 +125,10 @@ impl UartManager {
             sender_started: false,
             sent: Deque::new()
         }
+    }
+
+    pub fn started(&self) -> bool {
+        self.sender_started
     }
 
     pub fn init(&mut self) {
@@ -280,9 +266,9 @@ impl UartManager {
                 self.sender_started = true;
 
                 spawner.spawn(uart_sender()).unwrap();
-                spawner.spawn(notification_parser()).unwrap();
+                spawner.spawn(node_report_task()).unwrap();
 
-                set_p_cb_rx_from_mesh(Some(light_mesh_rx_cb));
+                mesh_report_status_enable(true);
             }
 
             // Light ctrl
@@ -303,6 +289,10 @@ impl UartManager {
 
                 // Send the message in to the mesh
                 app().mesh_manager.send_mesh_message(&data, destination);
+            }
+
+            if msg.data[2] == UartMsg::LightStatus as u8 {
+                mesh_report_status_enable(true);
             }
 
             // Finally ack the message once we've handled it

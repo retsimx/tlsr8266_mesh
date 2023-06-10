@@ -68,7 +68,7 @@ fn rf_link_slave_read_status_update()
     }
 }
 
-fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
+pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
 {
     if !*get_mesh_node_report_enable() {
         return 0;
@@ -361,7 +361,7 @@ pub fn irq_st_bridge()
         }
     }
     mesh_node_flush_status();
-    if is_add_packet_buf_ready() {
+    if is_add_packet_buf_ready() && !app().uart_manager.started() {
         if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
             rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<PacketAttCmd>());
         }

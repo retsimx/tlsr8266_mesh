@@ -20,9 +20,9 @@ for i in target/thumbv6m-none-eabi/release/deps/*.ll; do
 
   echo "Doing ${bname}"
 
-  python ../toolchain/fix_ir.py $bname.ll
+  python3 ../toolchain/fix_ir.py $bname.ll
 
-  bash -c "$LLC -march=thumb -mcpu=arm9 -mattr=+soft-float,-v6 $bname.ll.ll2 && python ../toolchain/fix_asm.py $bname.ll.ll2.s && ../$AS -o $bname.o $bname.ll.ll2.s.tc32" &
+  bash -c "$LLC -march=thumb -mcpu=arm9 -mattr=+soft-float,-v6 $bname.ll.ll2 && python3 ../toolchain/fix_asm.py $bname.ll.ll2.s && ../$AS -o $bname.o $bname.ll.ll2.s.tc32" &
 done
 
 wait

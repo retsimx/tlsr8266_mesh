@@ -345,10 +345,10 @@ pub fn irq_st_bridge()
     if *get_slave_read_status_busy() != 0 {
         rf_link_slave_read_status_update();
     }
-
-    let intflag = *get_update_interval_flag();
-    if intflag != 0 {
-        if intflag - 1 == 0 && *get_update_interval_time() != 0 {
+    
+    if *get_update_interval_flag() != 0 {
+        set_update_interval_flag(*get_update_interval_flag() - 1);
+        if *get_update_interval_flag() == 0 && *get_update_interval_time() != 0 {
             let mut pkt: [u32; 6] = [
                 0x12,
                 0xc1002,

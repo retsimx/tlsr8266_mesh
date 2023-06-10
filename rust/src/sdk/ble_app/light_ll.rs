@@ -43,7 +43,16 @@ pub_mut!(slave_window_size, u32, 0);
 pub_mut!(slave_timing_update2_flag, u32, 0);
 pub_mut!(slave_next_connect_tick, u32, 0);
 pub_mut!(slave_timing_update2_ok_time, u32, 0);
-pub_mut!(p_st_handler, Option<fn()>, None);
+
+pub enum IrqHandlerStatus {
+    None,
+    Adv,
+    Bridge,
+    Rx,
+    Listen,
+    Response
+}
+pub_mut!(p_st_handler, IrqHandlerStatus, IrqHandlerStatus::None);
 
 pub_mut!(pkt_empty, [u8; 6], [02, 00, 00, 00, 01, 00]);
 
@@ -139,7 +148,6 @@ fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &AppCmdValue) -> bool
 fn rf_link_is_notify_rsp(opcode: u8) -> bool
 {
     [
-        LGT_CMD_MESH_OTA_READ_RSP,
         LGT_CMD_LIGHT_GRP_RSP1,
         LGT_CMD_LIGHT_GRP_RSP2,
         LGT_CMD_LIGHT_GRP_RSP3,
@@ -230,10 +238,6 @@ fn rf_link_slave_add_status_ll(packet: &MeshPkt) -> bool
             (*get_slave_status_record())[*get_slave_status_record_idx() as usize].adr[0] = packet.src_adr as u8;
             set_slave_status_record_idx(*get_slave_status_record_idx() + 1);
             rf_link_slave_notify_req_mask(packet.src_adr as u8);
-            // mesh_ota_master_read_rsp_handle(src, false);
-            if packet.op & 0x3f == LGT_CMD_MESH_OTA_READ_RSP && (packet.vendor_id >> 8) as u8 - 1 < 2 {
-                return false;
-            }
             let st_ptr = unsafe { &mut *(*get_p_slave_status_buffer()).offset((*get_slave_status_buffer_wptr() % *get_slave_status_buffer_num()) as isize) };
             set_slave_status_buffer_wptr((*get_slave_status_buffer_wptr() + 1) % *get_slave_status_buffer_num());
             st_ptr.dma_len = 0x1d;
@@ -333,6 +337,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
 
+    // See if we should call the message callback
     if (no_match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
     {
         light_mesh_rx_cb(cmd_pkt);
@@ -340,6 +345,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
 
     let src_device_addr_match = packet.src_adr == *get_device_address();
 
+    // If the slave link is connected (Android) and the dest address is us, then we should notify
     let mut should_notify = false;
     if packet.dst_adr == *get_device_address() {
         should_notify = true;
@@ -348,11 +354,11 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
         }
     }
 
+    // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
+    // for a response, then send this response to the slave
     if rf_link_is_notify_rsp(op) && should_notify {
-        if op != LGT_CMD_MESH_OTA_READ_RSP || *get_mesh_pair_enable() == false || *get_pair_setting_flag() == PairState::PairSetted {
-            if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
-                return false;
-            }
+        if *get_slave_read_status_busy() != op || cmd_pkt.sno != *get_slave_stat_sno() {
+            return false;
         }
         rf_link_slave_add_status(packet);
         return false;
@@ -370,6 +376,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
 
     let pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
+    // Record the packet so we don't handle it again if we receive it again
     if group_match != false || device_match != false {
         if pkt_valid {
             rc_pkt_buf_push(op, cmd_pkt);
@@ -438,8 +445,6 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
             (*get_pkt_light_status()).value[22] = 4;
         } else if op == LGT_CMD_USER_NOTIFY_REQ {
             (*get_pkt_light_status()).value[22] = 7;
-        } else if op == LGT_CMD_MESH_OTA_READ {
-            (*get_pkt_light_status()).value[22] = 9;
         }
         unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
         if (no_match_slave_sno || *get_slave_link_cmd() != op) || params[1] != 0 {
@@ -486,7 +491,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
                         }
                     }
                     write_reg_system_tick_irq(relay_delay * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
-                    set_p_st_handler(Some(irq_st_response));
+                    set_p_st_handler(IrqHandlerStatus::Response);
                 } else {
                     uprintln!("rf_link_response_callback 2");
                     rf_set_tx_rx_off();
@@ -705,7 +710,7 @@ pub fn rf_link_slave_connect(packet: &PacketLlInit, time: u32) -> bool
 
             (*get_mesh_node_mask()).fill(0);
 
-            set_p_st_handler(Some(irq_st_ble_rx));
+            set_p_st_handler(IrqHandlerStatus::Rx);
             set_need_update_connect_para(true);
             set_att_service_discover_tick(read_reg_system_tick() | 1);
 
@@ -1063,8 +1068,7 @@ pub fn rf_link_is_notify_req(value: u8) -> bool
             LGT_CMD_LIGHT_GRP_REQ,
             LGT_CMD_CONFIG_DEV_ADDR,
             LGT_CMD_LIGHT_CONFIG_GRP,
-            LGT_CMD_USER_NOTIFY_REQ,
-            LGT_CMD_MESH_OTA_READ
+            LGT_CMD_USER_NOTIFY_REQ
         ].contains(&value);
     }
 

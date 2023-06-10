@@ -468,8 +468,7 @@ impl MeshManager {
                 }
             } else if *get_pair_setting_flag() == PairState::PairSetMeshTxDone {
                 // get mesh nodes' confirm value
-                //rf_link_slave_read_status_start();
-                op_para[0] = LGT_CMD_MESH_OTA_READ;
+                op_para[0] = 0;
                 op_para[3] = 0x10; // bridge cnt
                 op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
                 set_pair_setting_flag(PairState::PairSetMeshRxDone);

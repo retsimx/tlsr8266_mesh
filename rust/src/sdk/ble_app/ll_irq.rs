@@ -146,7 +146,7 @@ pub fn irq_st_response()
         sleep_us(700);
     }
     write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-    set_p_st_handler(Some(irq_st_listen));
+    set_p_st_handler(IrqHandlerStatus::Listen);
 }
 
 pub fn irq_st_listen()
@@ -161,7 +161,7 @@ pub fn irq_st_listen()
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());
     if *get_adv_flag() {
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 7000 + read_reg_system_tick());
-        set_p_st_handler(Some(irq_st_adv));
+        set_p_st_handler(IrqHandlerStatus::Adv);
         return;
     }
     if !*get_online_st_flag() {
@@ -170,7 +170,7 @@ pub fn irq_st_listen()
         set_online_st_flag(*get_st_listen_no() % *get_online_status_interval2listen_interval() as u32 != 0);
         if *get_adv_flag() {
             write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * CLOCK_SYS_CLOCK_1US + read_reg_system_tick_irq()));
-            set_p_st_handler(Some(irq_st_adv));
+            set_p_st_handler(IrqHandlerStatus::Adv);
             return;
         }
         if !*get_online_st_flag() {
@@ -178,7 +178,7 @@ pub fn irq_st_listen()
         }
     }
 
-    set_p_st_handler(Some(irq_st_adv));
+    set_p_st_handler(IrqHandlerStatus::Adv);
 }
 
 fn get_gatt_adv_cnt() -> u32
@@ -213,7 +213,7 @@ pub fn irq_st_adv()
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
         }
         set_online_st_flag(false);
-        set_p_st_handler(Some(irq_st_listen));
+        set_p_st_handler(IrqHandlerStatus::Listen);
         write_reg_rf_irq_status(1);
     } else {
         rf_set_ble_access_code_adv();
@@ -233,7 +233,7 @@ pub fn irq_st_adv()
             set_adv_flag(false);
         }
 
-        set_p_st_handler(Some(irq_st_listen));
+        set_p_st_handler(IrqHandlerStatus::Listen);
     }
 }
 
@@ -257,7 +257,7 @@ pub fn irq_st_bridge()
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
         }
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-        set_p_st_handler(Some(irq_st_adv));
+        set_p_st_handler(IrqHandlerStatus::Adv);
         write_reg_dma_tx_rptr(0x10);
         set_slave_link_connected(false);
         if *get_not_need_login() == false {
@@ -312,7 +312,7 @@ pub fn irq_st_bridge()
         }
         if *get_rf_slave_ota_busy_mesh_en() == 0 {
             write_reg_system_tick_irq(*get_slave_next_connect_tick());
-            set_p_st_handler(Some(irq_st_ble_rx));
+            set_p_st_handler(IrqHandlerStatus::Rx);
             return;
         }
     }
@@ -388,7 +388,7 @@ pub fn irq_st_bridge()
     }
 
     write_reg_system_tick_irq(*get_slave_next_connect_tick());
-    set_p_st_handler(Some(irq_st_ble_rx));
+    set_p_st_handler(IrqHandlerStatus::Rx);
 }
 
 pub fn irq_st_ble_rx()
@@ -423,7 +423,7 @@ pub fn irq_st_ble_rx()
         }
         write_reg_system_tick_irq(tmp * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
     }
-    set_p_st_handler(Some(irq_st_bridge));
+    set_p_st_handler(IrqHandlerStatus::Bridge);
     set_slave_tick_brx(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     set_slave_timing_adjust_enable(true);
     rf_start_brx((*get_pkt_empty()).as_ptr() as u32, *get_slave_tick_brx());
@@ -587,8 +587,13 @@ extern "C" fn irq_handler() {
     let irq_source = read_reg_irq_src();
     if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
         write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
-        if (*get_p_st_handler()).is_some() {
-            (*get_p_st_handler()).unwrap()();
+        match *get_p_st_handler() {
+            IrqHandlerStatus::Adv => irq_st_adv(),
+            IrqHandlerStatus::Bridge => irq_st_bridge(),
+            IrqHandlerStatus::Rx => irq_st_ble_rx(),
+            IrqHandlerStatus::Listen => irq_st_listen(),
+            IrqHandlerStatus::Response => irq_st_response(),
+            IrqHandlerStatus::None => {}
         }
     }
 

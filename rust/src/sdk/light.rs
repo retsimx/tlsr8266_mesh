@@ -84,8 +84,6 @@ pub const PAR_READ_MESH_PAIR_CONFIRM: u8 = 0x0a;
 
 // op cmd 11xxxxxxzzzzzzzzzzzzzzzz z's=VENDOR_ID  xxxxxx=LGT_CMD_
 pub const LGT_CMD_NOTIFY_MESH: u8 = 0x02;
-pub const LGT_CMD_MESH_OTA_READ: u8 = 0x07;
-pub const LGT_CMD_MESH_OTA_READ_RSP: u8 = 0x08;
 //internal use
 pub const LGT_CMD_MESH_PAIR: u8 = 0x09;
 pub const LGT_CMD_MESH_CMD_NOTIFY: u8 = 0x0a;

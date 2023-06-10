@@ -11,7 +11,7 @@ use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
@@ -651,7 +651,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
     (*get_pkt_light_status()).value[25] = *get_max_relay_num();
     (*get_pkt_light_data()).value[23] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr()) != false) {
-        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ || op == LGT_CMD_MESH_OTA_READ {
+        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
             if op == LGT_CMD_LIGHT_GRP_REQ {
                 (*get_pkt_light_data()).value[22] = params[1];
@@ -663,8 +663,6 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
                 }
                 if op == LGT_CMD_USER_NOTIFY_REQ {
                     (*get_pkt_light_data()).value[22] = 7;
-                } else if op == LGT_CMD_MESH_OTA_READ {
-                    (*get_pkt_light_data()).value[22] = 9;
                 } else {
                     (*get_pkt_light_data()).value[22] = 0;
                 }
@@ -681,8 +679,6 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
                     }
                     if op == LGT_CMD_USER_NOTIFY_REQ {
                         (*get_pkt_light_data()).value[22] = 7;
-                    } else if op == LGT_CMD_MESH_OTA_READ {
-                        (*get_pkt_light_data()).value[22] = 9;
                     } else {
                         (*get_pkt_light_data()).value[22] = 0;
                     }
@@ -709,8 +705,6 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
             }
             if op == LGT_CMD_USER_NOTIFY_REQ {
                 (*get_pkt_light_data()).value[22] = 7;
-            } else if op == LGT_CMD_MESH_OTA_READ {
-                (*get_pkt_light_data()).value[22] = 9;
             } else {
                 (*get_pkt_light_data()).value[22] = 0;
             }
@@ -772,7 +766,7 @@ pub fn rf_link_slave_init(interval: u32)
 {
     unsafe {
         blc_ll_init_basic_mcu();
-        set_p_st_handler(Some(irq_st_adv));
+        set_p_st_handler(IrqHandlerStatus::Adv);
         set_slave_link_state(0);
         set_slave_listen_interval(interval * CLOCK_SYS_CLOCK_1US);
 

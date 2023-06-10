@@ -314,7 +314,6 @@ impl MeshManager {
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
         pair_save_key();
-        uprintln!("pairac b");
         rf_set_ble_access_code(*get_pair_ac()); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);

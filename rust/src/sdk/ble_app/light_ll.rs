@@ -1161,36 +1161,14 @@ pub fn mesh_send_user_command() -> u8
 
             mesh_user_command_pkt_enc2buf();
         }
-        let mut uVar9 = 0;
-        let mut iVar8 = 0;
-        let mut breakit = false;
-        loop {
-            loop {
-                if !user_cmd {
-                    rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, unsafe { &mut *(get_pkt_user_cmd_addr() as *mut MeshPkt) });
-                    mesh_user_command_pkt_enc2buf();
-                }
-                rf_set_ble_channel(SYS_CHN_LISTEN[uVar9 & 3]);
-                rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
 
-                uVar9 = uVar9 + 1;
-                iVar8 = 1 * 4;
-                if iVar8 as usize - uVar9 == 0 || (iVar8 as usize) < uVar9 {
-                    breakit = true;
-                    break;
-                }
+        for chn in SYS_CHN_LISTEN {
+            if !user_cmd {
+                rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, unsafe { &mut *(get_pkt_user_cmd_addr() as *mut MeshPkt) });
+                mesh_user_command_pkt_enc2buf();
             }
-
-            if breakit {
-                break;
-            }
-
-            uVar9 = uVar9 + 1;
-            iVar8 = 1 * 4;
-
-            if iVar8 as usize - uVar9 == 0 && uVar9 > iVar8 as usize {
-                break;
-            }
+            rf_set_ble_channel(chn);
+            rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
         }
     });
     *get_mesh_user_cmd_idx()

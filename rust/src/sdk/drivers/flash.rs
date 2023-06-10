@@ -273,16 +273,13 @@ pub fn flash_write_page(mut addr: u32, mut len: u32, mut buf: *const u8) {
     let mut ns = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
     let mut nw = 0;
 
-    loop {
+    while len != 0 {
         nw = if len > ns { ns } else { len };
         flash_mspi_write_ram(FLASH_CMD::WRITE_CMD, addr, 1, buf, nw);
         ns = PAGE_SIZE;
         addr += nw;
         buf = unsafe { buf.offset(nw as isize) };
         len -= nw;
-        if len == 0 {
-            break;
-        }
     }
 }
 

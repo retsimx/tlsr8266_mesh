@@ -78,8 +78,8 @@ pub fn rf_link_slave_set_adv_private_data(data: &[u8])
         iVar3 = 0;
         loop {
             let uVar6 = get_pkt_adv().data[iVar3] + 1;
-            get_pkt_adv().data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&get_pkt_adv().data[iVar3 as usize..iVar3 as usize + uVar6 as usize]);
-            if get_pkt_adv().data[iVar3 as usize + 1] == 0xff {
+            get_pkt_adv().data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&get_pkt_adv().data[iVar3..iVar3 + uVar6 as usize]);
+            if get_pkt_adv().data[iVar3 + 1] == 0xff {
                 if uVar6 == 10 {
                     break;
                 }
@@ -111,29 +111,29 @@ pub fn rf_link_slave_set_adv_private_data(data: &[u8])
 
 pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
 {
-    let mut rf_len = get_pkt_adv().rf_len;
+    let mut rf_len = get_pkt_adv().rf_len as usize;
     if uuid_data.len() as i8 <= 0x25 - rf_len as i8 {
         if *get_set_uuid_flag() == false {
             rf_len = rf_len - 9;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..rf_len as usize].copy_from_slice(&get_pkt_adv().data[3..3 + rf_len as usize]);
+            tmp_data[0..rf_len].copy_from_slice(&get_pkt_adv().data[3..3 + rf_len]);
 
             get_pkt_adv().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            get_pkt_adv().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len as usize].copy_from_slice(&tmp_data[0..rf_len as usize]);
+            get_pkt_adv().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
 
             set_set_uuid_flag(true);
             get_pkt_adv().rf_len += uuid_data.len() as u8;
             get_pkt_adv().dma_len += uuid_data.len() as u32;
         } else {
             let uuid_len = uuid_data.len() + 3;
-            rf_len = (rf_len - 6) - uuid_len as u8;
+            rf_len = (rf_len - 6) - uuid_len;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..uuid_len as usize].copy_from_slice(&get_pkt_adv().data[0..0 + uuid_len as usize]);
+            tmp_data[0..uuid_len].copy_from_slice(&get_pkt_adv().data[0..0 + uuid_len]);
 
             get_pkt_adv().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            get_pkt_adv().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len as usize].copy_from_slice(&tmp_data[0..rf_len as usize]);
+            get_pkt_adv().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
         }
     }
 }
@@ -186,7 +186,7 @@ pub fn rf_link_del_group(group_id: u16) -> bool
         let mut iVar3 = 0;
         let mut iVar1 = 0;
         let mut breakit = false;
-        loop {
+        while iVar3 != 8 {
             iVar4 = iVar1;
             while group_id == 0xffff {
                 (*get_group_address())[grp_index] = 0;
@@ -212,16 +212,12 @@ pub fn rf_link_del_group(group_id: u16) -> bool
             iVar3 = iVar3 + 1;
             grp_index += 1;
             iVar1 = iVar4;
-
-            if iVar3 == 8 {
-                break;
-            }
         }
 
         let zero_short = 0u16;
         let mut bVar2 = 0;
         result = false;
-        loop {
+        while grp_next_pos >= 0 {
             grp_next_pos = grp_next_pos - 2;
 
             let p_group_address = (FLASH_ADR_DEV_GRP_ADR + grp_next_pos as u32) as *const u16;
@@ -240,9 +236,6 @@ pub fn rf_link_del_group(group_id: u16) -> bool
                     }
                 }
             }
-            if (grp_next_pos as i16) < 0 {
-                break;
-            }
         }
     }
     return result;
@@ -257,8 +250,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
         if *get_dev_grp_next_pos() == 0 {
             (*get_group_address())[0] = group_id;
         } else {
-            let mut index = 0;
-            loop {
+            for index in 0..8 {
                 if group_id == (*get_group_address())[index] {
                     return false;
                 }
@@ -268,11 +260,6 @@ pub fn rf_link_add_group(group_id: u16) -> bool
                     flash_write_page(*get_dev_grp_next_pos() as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
                     set_dev_grp_next_pos(*get_dev_grp_next_pos() + 2);
                     return true;
-                }
-                index = index + 1;
-
-                if index == 8 {
-                    break;
                 }
             }
             unsafe {

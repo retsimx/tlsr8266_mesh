@@ -57,19 +57,14 @@ fn rf_set_rxmode_mesh_listen()
 fn rf_link_slave_read_status_update()
 {
     let mut rptr = *get_slave_status_buffer_rptr();
-    if *get_slave_status_buffer_wptr() != rptr {
-        loop {
-            rptr = rptr % *get_slave_status_buffer_num();
-            if !rf_link_add_tx_packet(unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
-                return;
-            }
-
-            rptr = ((*get_slave_status_buffer_rptr() + 1) % *get_slave_status_buffer_num()) & 0xff;
-            set_slave_status_buffer_rptr(rptr);
-            if *get_slave_status_buffer_wptr() == rptr {
-                break;
-            }
+    while *get_slave_status_buffer_wptr() != rptr {
+        rptr = rptr % *get_slave_status_buffer_num();
+        if !rf_link_add_tx_packet(unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
+            return;
         }
+
+        rptr = ((*get_slave_status_buffer_rptr() + 1) % *get_slave_status_buffer_num()) & 0xff;
+        set_slave_status_buffer_rptr(rptr);
     }
 }
 
@@ -374,11 +369,12 @@ pub fn irq_st_bridge()
 
     back_to_rxmode_bridge();
 
-    let mut uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
     loop {
+        let mut uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
         if *get_slave_interval_old() != 0 && *get_slave_instant_next() == *get_slave_instant() {
-            uprintln!("maybe fixme 2");
-            uVar5 &= if 0x3fffffff < uVar5 { *get_slave_instant() as u32 } else { 0 };
+            if 0x3fffffff >= uVar5 {
+                uVar5 = 0;
+            }
             set_slave_interval_old(0);
         }
 
@@ -389,7 +385,6 @@ pub fn irq_st_bridge()
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
         slave_timing_update_handle();
         ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
-        uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
     }
 
     write_reg_system_tick_irq(*get_slave_next_connect_tick());

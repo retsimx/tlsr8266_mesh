@@ -195,13 +195,8 @@ pub fn pair_proc() -> *const PacketAttReadRsp
             return null_mut();
         }
         get_pkt_read_rsp().l2cap_len = 0x12;
-        let mut index = 0;
-        loop {
+        for index in 0..0x10 {
             (*get_pair_work())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_ltk())[index];
-            index = index + 1;
-            if index == 0x10 {
-                break;
-            }
         }
 
         if *get_security_enable() == false {
@@ -213,13 +208,8 @@ pub fn pair_proc() -> *const PacketAttReadRsp
     } else if *get_ble_pair_st() == 0xd {
         if *get_security_enable() == false {
             get_pkt_read_rsp().l2cap_len = 0x12;
-            let mut index = 0;
-            loop {
+            for index in 0..0x10 {
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
-                index = index + 1;
-                if index == 0x10 {
-                    break;
-                }
             }
             get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(&get_pair_work()[0..0x10]);
 
@@ -231,27 +221,17 @@ pub fn pair_proc() -> *const PacketAttReadRsp
             aes_att_encryption(get_pair_randm().as_ptr(), get_pair_rands().as_ptr(), get_pair_sk().as_mut_ptr());
             (*get_pair_rands())[0..8].copy_from_slice(&(*get_pair_sk())[0..8]);
 
-            let mut index = 0;
             (*get_pair_sk())[8..16].fill(0);
 
-            loop {
+            for index in 0..0x10 {
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
-                index = index + 1;
-                if index == 0x10 {
-                    break;
-                }
             }
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
             get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&get_pair_rands()[0..8]);
             get_pkt_read_rsp().value[9..9 + 8].copy_from_slice(&get_pair_work()[0..8]);
 
-            let mut index = 0;
-            loop {
+            for index in 0..0x10 {
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
-                index = index + 1;
-                if index == 0x10 {
-                    break;
-                }
             }
             (*get_pair_sk())[0..8].copy_from_slice(&get_pair_randm()[0..8]);
             (*get_pair_sk())[8..16].copy_from_slice(&get_pair_rands()[0..8]);
@@ -269,13 +249,8 @@ pub fn pair_proc() -> *const PacketAttReadRsp
 
             (*get_pair_work())[8..16].fill(0);
 
-            let mut index = 0;
-            loop {
+            for index in 0..0x10 {
                 (*get_pair_sk())[index] = (*get_pair_nn())[index] ^ (*get_pair_pass())[index] ^ (*get_pair_work())[index];
-                index = index + 1;
-                if index == 0x10 {
-                    break;
-                }
             }
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_ltk().as_ptr(), get_pkt_read_rsp().value[1..1 + 0x10].as_mut_ptr());
             set_ble_pair_st(0xf);
@@ -428,19 +403,14 @@ pub fn pair_write(data: *const PacketAttWrite) -> bool
 
         set_pair_enc_enable(false);
 
-        let mut index = 0;
-        loop {
+        for index in 0..0x10 {
             (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
-            index = index + 1;
-            if index == 0x10 {
-                break;
-            }
         }
         if *get_security_enable() == false {
-            index = if &(*get_pair_work())[0..16] == unsafe { slice::from_raw_parts(src, 0x10) } { usize::MAX } else { 0 };
+            index = if &(*get_pair_work())[0..16] == unsafe { slice::from_raw_parts(src, 0x10) } { u8::MAX } else { 0 };
         } else {
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
-            index = if &(*get_pair_work())[0..8] == unsafe { slice::from_raw_parts(addr_of!((*data).value[9]), 8) } { usize::MAX } else { 0 };
+            index = if &(*get_pair_work())[0..8] == unsafe { slice::from_raw_parts(addr_of!((*data).value[9]), 8) } { u8::MAX } else { 0 };
         }
         if iVar2 != 0 || *get_pair_login_ok() != false {
             if index != 0 {

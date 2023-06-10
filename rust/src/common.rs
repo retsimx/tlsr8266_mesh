@@ -239,10 +239,9 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
     aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
 
     let mut bit = destbuf[0] >> 1 ^ destbuf[0];
-    let mut bit_count = 1;
     let mut inner_count = 0;
-    loop {
-        if (bit & 1) == 0 {
+    for bit_count in 1..0x20 {
+        if bit & 1 == 0 {
             break;
         }
         inner_count = inner_count + 1;
@@ -250,32 +249,21 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
             destbuf[0] = destbuf[0] ^ 1 << bit_count;
             inner_count = 0;
         }
-        bit_count = bit_count + 1;
-        if bit_count == 0x20 {
-            break;
-        }
     }
 
-    let mut finished = false;
     bit = 0xaaaaaaaa;
-    loop {
+    for _ in 0..2 {
         inner_count = 0;
-        bit_count = 0;
-        loop {
+
+        for bit_count in 0..0x20 {
             inner_count = inner_count + if (1 << bit_count & bit) as u32 != 0 { 1 } else { 0 };
-            bit_count = bit_count + 1;
-            if bit_count == 0x20 {
-                break;
-            }
         }
+
         if inner_count < 3 {
             destbuf[0] = destbuf[0] ^ 0xff;
         }
-        if finished {
-            break;
-        }
+
         bit = destbuf[0] ^ 0x55555555;
-        finished = true;
     }
 
     return destbuf[0];

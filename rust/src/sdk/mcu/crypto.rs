@@ -201,18 +201,13 @@ pub unsafe fn aes_att_encryption_packet(key: &[u8], ivm: &[u8], src: &mut [u8], 
     encoded[1..9].copy_from_slice(&ivm[0..8]);
 
     if packet_len != 0 {
-        let mut index = 0;
         let mut result = [0u8; 16];
-        loop {
+        for index in 0..packet_len as usize {
             if index & 0xf == 0 {
                 aes_att_encryption(key.as_ptr(), encoded.as_ptr(), result.as_mut_ptr());
                 encoded[0] += 1;
             }
             *packet_data.offset(index as isize) = *packet_data.offset(index as isize) ^ result[index & 0xf];
-            index = index + 1;
-            if index as u8 >= packet_len {
-                break;
-            }
         }
     }
     return true;

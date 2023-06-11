@@ -360,9 +360,8 @@ pub fn irq_st_bridge()
 
             if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
                 pkt[5] = *get_update_timeout_user() as u32;
-                // todo: These might need to be flipped?
-                pkt[3] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
-                pkt[4] = *get_update_interval_user_max() as u32 | 0x270000;
+                pkt[4] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
+                pkt[3] = *get_update_interval_user_max() as u32 | 0x270000;
             }
 
             if is_add_packet_buf_ready() == false {
@@ -388,11 +387,12 @@ pub fn irq_st_bridge()
 
     back_to_rxmode_bridge();
 
-    let mut uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
     loop {
+        let mut uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
         if *get_slave_interval_old() != 0 && *get_slave_instant_next() == *get_slave_instant() {
-            uprintln!("maybe fixme 2");
-            uVar5 &= if 0x3fffffff < uVar5 { *get_slave_instant() as u32 } else { 0 };
+            if 0x3fffffff >= uVar5 {
+                uVar5 = 0;
+            }
             set_slave_interval_old(0);
         }
 
@@ -403,7 +403,6 @@ pub fn irq_st_bridge()
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
         slave_timing_update_handle();
         ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
-        uVar5 = (*get_slave_next_connect_tick() - (*get_tick_per_us() * 500)) - read_reg_system_tick();
     }
 
     write_reg_system_tick_irq(*get_slave_next_connect_tick());

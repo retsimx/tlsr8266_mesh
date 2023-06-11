@@ -1,7 +1,7 @@
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::{app, pub_mut};
+use crate::{app, pub_mut, uprintln};
 use crate::config::*;
 use crate::main_light::get_max_mesh_name_len;
 use crate::mesh::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en};

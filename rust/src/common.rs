@@ -18,10 +18,10 @@ pub_mut!(set_uuid_flag, bool, false);
 
 const UPDATE_CONN_PARA_CNT: u8 = 4;
 const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [
-    [18, 18 + 16, 200],
-    [16, 16 + 16, 200],
-    [32, 32 + 16, 200],
-    [48, 48 + 16, 200],
+    [16, 16 + 16, 420],
+    [18, 18 + 16, 420],
+    [32, 32 + 16, 420],
+    [48, 48 + 16, 420],
 ];
 
 pub const SYS_CHN_LISTEN: [u8; 4] = [2, 12, 23, 34]; //8, 30, 52, 74
@@ -35,9 +35,6 @@ pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
 }
 
 pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
-    par_rsp[2] = (*get_device_address() & 0xff) as u8;
-    par_rsp[3] = ((*get_device_address() >> 8) & 0xff) as u8;
-
     par_rsp[4..10].copy_from_slice(&*get_mac_id());
     return true;
 }

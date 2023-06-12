@@ -44,6 +44,7 @@ pub_mut!(slave_timing_update2_flag, u32, 0);
 pub_mut!(slave_next_connect_tick, u32, 0);
 pub_mut!(slave_timing_update2_ok_time, u32, 0);
 
+#[derive(PartialEq)]
 pub enum IrqHandlerStatus {
     None,
     Adv,
@@ -336,9 +337,10 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
     let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
+    let pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
     // See if we should call the message callback
-    if (no_match_slave_sno || op != *get_slave_link_cmd()) && !pkt_exists_in_buf
+    if pkt_valid
     {
         light_mesh_rx_cb(cmd_pkt);
     }
@@ -374,8 +376,6 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
 
     let (group_match, device_match) = rf_link_match_group_mac(cmd_pkt);
 
-    let pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
-
     // Record the packet so we don't handle it again if we receive it again
     if group_match != false || device_match != false {
         if pkt_valid {
@@ -387,7 +387,6 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
     if rf_link_is_notify_req(op) {
         set_slave_read_status_response(true);
         if group_match == false {
-            // todo: This might be !device_match
             set_slave_read_status_response(device_match);
         }
         if req_cmd_is_notify_ok(op, cmd_pkt) {
@@ -423,11 +422,11 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
 
     // todo: Use rand register?
     let rand_1 = ((read_reg_system_tick() ^ array4_to_int(get_mac_id())) & 0xf) * 500;
-    if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
+    if rf_link_is_notify_req(op) && *get_slave_read_status_response() && *get_p_st_handler() != IrqHandlerStatus::Response {
         (*get_pkt_light_status()).value[0..3].copy_from_slice(&cmd_pkt.sno[0..3]);
         packet.src_tx = *get_device_address();
         if op == LGT_CMD_LIGHT_READ_STATUS {
-            (*get_pkt_light_status()).value[22] = 0;
+            (*get_pkt_light_status()).value[22] = GET_STATUS;
             if pkt_valid {
                 (*get_pkt_light_status()).value[20] = packet.par[9];
                 (*get_pkt_light_status()).value[25] = packet.internal_par1[CURRENT_RELAY_COUNT];
@@ -440,11 +439,11 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
         } else if op == LGT_CMD_LIGHT_GRP_REQ {
             (*get_pkt_light_status()).value[22] = packet.internal_par1[1];
         } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-            (*get_pkt_light_status()).value[22] = 1;
+            (*get_pkt_light_status()).value[22] = GET_GROUP1;
         } else if op == LGT_CMD_CONFIG_DEV_ADDR {
-            (*get_pkt_light_status()).value[22] = 4;
+            (*get_pkt_light_status()).value[22] = GET_DEV_ADDR;
         } else if op == LGT_CMD_USER_NOTIFY_REQ {
-            (*get_pkt_light_status()).value[22] = 7;
+            (*get_pkt_light_status()).value[22] = GET_USER_NOTIFY;
         }
         unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
         if (no_match_slave_sno || *get_slave_link_cmd() != op) || params[1] != 0 {
@@ -469,12 +468,12 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
             if rf_link_response_callback(addr_of_mut!(get_pkt_light_status().value) as *mut PacketAttValue, &request_params) {
                 if !*get_slave_link_connected() {
                     write_reg_irq_src(0x100000);
-                    let rand_2 = ((array4_to_int(get_mac_id()) ^ (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
+                    let rand_2 = (((read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 0xffff) & 0xf) * 700 + 4000;
                     let mut relay_delay = 16000 + rand_2 + rand_1;
                     let max_relay = packet.internal_par1[MAX_RELAY_COUNT];
                     if 0x1d < max_relay {
                         uprintln!("How is max_relay greater than 0x1d? {}", max_relay);
-                        let mut relay_time = min(
+                        let relay_time = min(
                             ((((read_reg_system_tick() - *get_rcv_pkt_time()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
                             0xff
                         );
@@ -493,10 +492,8 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt) -> bool {
                     write_reg_system_tick_irq(relay_delay * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
                     set_p_st_handler(IrqHandlerStatus::Response);
                 } else {
-                    uprintln!("rf_link_response_callback 2");
                     rf_set_tx_rx_off();
                     sleep_us(100);
-                    uprintln!("pairac a");
                     rf_set_ble_access_code(*get_pair_ac());
                     rf_set_ble_crc_adv();
                     for chn in SYS_CHN_LISTEN

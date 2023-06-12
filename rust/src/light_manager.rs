@@ -257,7 +257,6 @@ impl LightManager {
     fn light_lum_erase(&mut self) {
         self.light_lum_addr = FLASH_ADR_LUM;
         flash_erase_sector(FLASH_ADR_LUM);
-        self.light_state_save();
     }
 
     //save cur lum value, if disconnected for a while
@@ -265,7 +264,6 @@ impl LightManager {
         if self.light_lum_addr >= (FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
         {
             self.light_lum_erase();
-            return;
         }
 
         let lum_save = LumSaveT {

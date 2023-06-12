@@ -16,6 +16,7 @@ use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::common::compat::array4_to_int;
+use crate::uart_manager::light_mesh_rx_cb;
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 fn slave_timing_update_handle()
@@ -138,10 +139,12 @@ pub fn irq_st_response()
     rf_set_ble_access_code(*get_pair_ac());
 
     rf_set_ble_crc_adv();
-    let tmp = (array4_to_int(get_mac_id()) ^ read_reg_system_tick()) & 3;
-    for uVar4 in tmp..tmp + 4 {
-        rf_set_ble_channel(SYS_CHN_LISTEN[uVar4 as usize & 3]);
-        (*get_pkt_light_status())._type |= BIT!(7);
+    let tmp = (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 3;
+
+    (*get_pkt_light_status())._type |= BIT!(7);
+
+    for chn in tmp..tmp + 4 {
+        rf_set_ble_channel(SYS_CHN_LISTEN[chn as usize & 3]);
         rf_start_stx_mesh(get_pkt_light_status(), CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
         sleep_us(700);
     }
@@ -327,33 +330,33 @@ pub fn irq_st_bridge()
         rf_link_slave_read_status_update();
     }
 
-    let intflag = *get_update_interval_flag();
-    if intflag != 0 {
-        if intflag - 1 == 0 && *get_update_interval_time() {
-            let mut pkt: [u32; 6] = [
-                0x12,
-                0xc1002,
-                0x1120005,
-                0x270008,
-                0x27,
-                0xc8
-            ];
-
-            if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
-                pkt[5] = *get_update_timeout_user() as u32;
-                // todo: These might need to be flipped?
-                pkt[3] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
-                pkt[4] = *get_update_interval_user_max() as u32 | 0x270000;
-            }
-
-            if is_add_packet_buf_ready() == false {
-                set_update_interval_flag(2);
-            } else {
-                rf_link_add_tx_packet(addr_of!(pkt) as *const PacketAttCmd, size_of::<u32>() * pkt.len());
-                set_update_interval_time(false);
-            }
-        }
-    }
+    // if *get_update_interval_flag() != 0 {
+    //     set_update_interval_flag(*get_update_interval_flag() - 1);
+    //     if *get_update_interval_flag() == 0 && *get_update_interval_time() {
+    //         let mut pkt: [u32; 6] = [
+    //             0x12,
+    //             0xc1002,
+    //             0x1120005,
+    //             0x270008,
+    //             0x27,
+    //             0xc8
+    //         ];
+    //
+    //         if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
+    //             pkt[5] = *get_update_timeout_user() as u32;
+    //             pkt[4] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
+    //             pkt[3] = *get_update_interval_user_max() as u32 | 0x270000;
+    //         }
+    //
+    //         if is_add_packet_buf_ready() == false {
+    //             set_update_interval_flag(2);
+    //         } else {
+    //             uprintln!("Sending update con pkt");
+    //             rf_link_add_tx_packet(addr_of!(pkt) as *const PacketAttCmd, size_of::<u32>() * pkt.len());
+    //             set_update_interval_time(false);
+    //         }
+    //     }
+    // }
     if is_add_packet_buf_ready() {
         let pair_proc_result = pair_proc();
         if pair_proc_result != null() {

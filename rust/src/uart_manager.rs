@@ -13,7 +13,7 @@ use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{AppCmdValue, MeshPkt};
+use crate::sdk::light::{AppCmdValue, get_device_address, MeshPkt};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 
@@ -49,7 +49,8 @@ pub enum UartMsg {
 
 // AppCmdValueT
 pub fn light_mesh_rx_cb(data: &AppCmdValue) {
-    if !app().uart_manager.started() {
+    // Don't report messages that we sent
+    if !app().uart_manager.started() || data.src == *get_device_address() {
         return;
     }
 

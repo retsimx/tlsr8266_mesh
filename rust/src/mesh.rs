@@ -247,17 +247,15 @@ impl MeshManager {
                 opcode: 0x1b,   // notify
                 handle: 0x12,
                 handle1: 0x00, // status handler
-                value: [0; 30],
+                value: PacketAttValue {
+                    sno: [op | 0xc0, (VENDOR_ID & 0xff) as u8, (VENDOR_ID >> 8) as u8],
+                    src: [(dev_adr & 0xFF) as u8, (dev_adr >> 8) as u8],    // todo: Should this actually be dst?
+                    dst: [0; 2],
+                    val: [0; 23]
+                }
             };
 
-            pkt_notify.value[8] = (VENDOR_ID & 0xff) as u8;
-            pkt_notify.value[8] = (VENDOR_ID >> 8) as u8;
-
-            pkt_notify.value[3] = (dev_adr & 0xFF) as u8;
-            pkt_notify.value[4] = (dev_adr >> 8) as u8;
-            pkt_notify.value[7] = op | 0xc0;
-
-            pkt_notify.value[10..10 + p.len()].copy_from_slice(&p[0..p.len()]);
+            pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
             critical_section::with(|_| {
                 if is_add_packet_buf_ready() {
@@ -324,9 +322,9 @@ impl MeshManager {
     }
 
     pub fn mesh_pair_notify_refresh(&mut self, p: &PacketAttCmd) -> u8 {
-        if self.mesh_pair_checksum[0..8] == p.value[12..12 + 8] {
+        if self.mesh_pair_checksum[0..8] == p.value.val[5..5 + 8] {
             // mesh pair : success one device, clear the mask flag
-            self.mesh_pair_notify_rsp_mask[(p.value[10] / 8) as usize] &= !(BIT!(p.value[10] % 8));
+            self.mesh_pair_notify_rsp_mask[(p.value.val[3] / 8) as usize] &= !(BIT!(p.value.val[3] % 8));
         }
 
         return 1; // if return 2, then the notify rsp will not report to master.

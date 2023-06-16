@@ -1,29 +1,27 @@
-use core::arch::asm;
 use core::cmp::min;
-use core::mem::transmute;
-use core::ptr::{addr_of, addr_of_mut, null, null_mut, slice_from_raw_parts};
+use core::ptr::{addr_of, addr_of_mut, null_mut};
 use core::slice;
+
+use crate::{BIT, pub_mut, uprintln};
+use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::{BIT, blinken, pub_mut, pub_static, regrw, uprintln};
-use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address, rf_update_conn_para};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
 use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
 use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
-use crate::sdk::ble_app::ll_irq::irq_st_adv;
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
-use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg8, read_reg_irq_mask, read_reg_rnd_number, read_reg_system_tick, read_reg_system_tick_mode, REG_BASE_ADDR, write_reg16, write_reg32, write_reg8, write_reg_rf_access_code, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_system_tick, write_reg_system_tick_irq, write_reg_system_tick_mode, write_reg_rf_crc, write_reg_rf_sn, write_reg_rf_sched_tick, write_reg_rf_mode_control, write_reg_rf_mode, read_reg_rf_mode, write_reg_dma3_addr};
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
+use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::random::rand;
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_access_code, write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
 use crate::version::BUILD_VERSION;
@@ -457,7 +455,12 @@ pub_mut!(pkt_light_data, PacketAttCmd, PacketAttCmd {
     opcode: 0,
     handle: 0,
     handle1: 0,
-    value: [0; 30]
+    value: PacketAttValue {
+        sno: [0; 3],
+        src: [0; 2],
+        dst: [0; 2],
+        val: [0; 23]
+    }
 });
 pub_mut!(pkt_light_status, PacketAttCmd, PacketAttCmd {
     dma_len: 0x27,
@@ -468,7 +471,12 @@ pub_mut!(pkt_light_status, PacketAttCmd, PacketAttCmd {
     opcode: 0,
     handle: 0,
     handle1: 0,
-    value: [0; 30]
+    value: PacketAttValue {
+        sno: [0; 3],
+        src: [0; 2],
+        dst: [0; 2],
+        val: [0; 23]
+    }
 });
 pub_mut!(adv_data, [u8; 3], [2, 1, 5]);
 pub_mut!(user_data_len, u8, 0);
@@ -476,79 +484,74 @@ pub_mut!(user_data, [u8; 16], [0; 16]);
 
 fn rf_link_get_rsp_type(opcode: u8, unk: u8) -> u8
 {
-  let mut result = 0x1b;
-  if opcode != 0x1a {
-    if opcode == 0x1d {
-      result = 0x14;
-      if unk != 1 {
-          result = 0x15;
-          if unk != 2 {
-              result = 0x14;
-              if unk == 3 {
-                  result = 0x16;
-              }
-          }
-      }
-    }
-    else {
-      result = 0x14;
-      if opcode != 0x17 {
-          result = 0x21;
-        if opcode != 0x20 {
-            result = 1;
-            if opcode != 0 {
-                result = 0x27;
-                if opcode != 0x26 {
-                    result = 0x29;
-                    if opcode != 0x28 {
-                        result = 0x2b;
-                        if opcode != 0x2a {
-                            result = 8;
-                            if opcode != 7 {
-                                result = 0xff;
+    let mut result = 0x1b;
+    if opcode != 0x1a {
+        if opcode == 0x1d {
+            result = 0x14;
+            if unk != 1 {
+                result = 0x15;
+                if unk != 2 {
+                    result = 0x14;
+                    if unk == 3 {
+                        result = 0x16;
+                    }
+                }
+            }
+        } else {
+            result = 0x14;
+            if opcode != 0x17 {
+                result = 0x21;
+                if opcode != 0x20 {
+                    result = 1;
+                    if opcode != 0 {
+                        result = 0x27;
+                        if opcode != 0x26 {
+                            result = 0x29;
+                            if opcode != 0x28 {
+                                result = 0x2b;
+                                if opcode != 0x2a {
+                                    result = 8;
+                                    if opcode != 7 {
+                                        result = 0xff;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-      }
     }
-  }
-  return result;
+    return result;
 }
 
 fn rf_link_slave_read_status_start()
 {
-  set_slave_read_status_busy_time(read_reg_system_tick());
-  set_slave_read_status_busy(rf_link_get_rsp_type((*get_pkt_light_data()).value[7] & 0x3f,(*get_pkt_light_data()).value[11]));
-  set_slave_read_status_unicast_flag(!(*get_pkt_light_data()).value[6] >> 7);
-  if -1 < (!(((*get_pkt_light_data()).value[6] as u32) << 0x18)) as i32 {
-    (*get_pkt_light_data()).value[15..15+4].fill(0);
-    (*get_pkt_light_data()).value[19] = *get_slave_read_status_unicast_flag();
-  }
-  if (*get_pkt_light_data()).value[7] & 0x3f == 0x1a {
-    (*get_pkt_light_data()).value[11] = 0;
-    (*get_pkt_light_data()).value[12] = 0;
-    (*get_pkt_light_data()).value[13] = 0;
-    (*get_pkt_light_data()).value[14] = 0;
-      (*get_pkt_light_data()).value[15..15+4].fill(0);
-    (*get_pkt_light_data()).value[10] = *get_slave_status_tick();
-  }
-  rf_link_slave_read_status_par_init();
+    set_slave_read_status_busy_time(read_reg_system_tick());
+    set_slave_read_status_busy(rf_link_get_rsp_type((*get_pkt_light_data()).value.val[0] & 0x3f, (*get_pkt_light_data()).value.val[4]));
+    set_slave_read_status_unicast_flag(!(*get_pkt_light_data()).value.dst[1] >> 7);
+    if -1 < (!(((*get_pkt_light_data()).value.dst[1] as u32) << 0x18)) as i32 {
+        (*get_pkt_light_data()).value.val[8..8 + 4].fill(0);
+        (*get_pkt_light_data()).value.val[12] = *get_slave_read_status_unicast_flag();
+    }
+    if (*get_pkt_light_data()).value.val[0] & 0x3f == 0x1a {
+        (*get_pkt_light_data()).value.val[4..8 + 4].fill(0);
+        (*get_pkt_light_data()).value.val[3] = *get_slave_status_tick();
+    }
+    rf_link_slave_read_status_par_init();
     unsafe {
         slice::from_raw_parts_mut(
             *get_p_slave_status_buffer() as *mut u8,
-            *get_slave_status_buffer_num() as usize * 0x24
+            *get_slave_status_buffer_num() as usize * 0x24,
         ).fill(0)
     }
 
-  set_slave_status_record_idx(0);
+    set_slave_status_record_idx(0);
     (*get_slave_status_record()).fill(
         StatusRecord { adr: [0; 1], alarm_id: 0 }
     );
 
-  set_notify_req_mask_idx(0);
+    set_notify_req_mask_idx(0);
 }
 
 fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
@@ -601,8 +604,8 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
             // mesh_node_check_force_notify(uVar4, params[0]);
         }
     }
-    (*get_pkt_light_data()).value.fill(0);
-    (*get_pkt_light_status()).value.fill(0);
+    (*get_pkt_light_data()).value = PacketAttValue::default();
+    (*get_pkt_light_status()).value = PacketAttValue::default();
 
     unsafe {
         slice::from_raw_parts_mut(
@@ -622,9 +625,9 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
     (*get_pkt_light_data()).l2cap_len = 0x21;
     // todo: What type is pkt_light_data here?
     unsafe { *(addr_of!((*get_pkt_light_data()).opcode) as *mut u16) = *get_device_address() };
-    unsafe { *(addr_of!((*get_pkt_light_data()).value[3]) as *mut u16) = *get_device_address() };
+    unsafe { *(addr_of!((*get_pkt_light_data()).value.src) as *mut u16) = *get_device_address() };
     set_app_cmd_time(read_reg_system_tick());
-    (*get_pkt_light_data()).value[25] = *get_max_relay_num();
+    (*get_pkt_light_data()).value.val[18] = *get_max_relay_num();
 
     if device_match != false || group_match != false {
         rf_link_data_callback(addr_of!((*get_pkt_light_data()).l2cap_len) as *const PacketL2capData);
@@ -646,87 +649,82 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
         return true;
     }
 
-    (*get_pkt_light_status()).value[20] = 0;
-    (*get_pkt_light_status()).value[21] = 0;
-    (*get_pkt_light_status()).value[25] = *get_max_relay_num();
-    (*get_pkt_light_data()).value[23] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
+    (*get_pkt_light_status()).value.val[13] = 0;
+    (*get_pkt_light_status()).value.val[14] = 0;
+    (*get_pkt_light_status()).value.val[18] = *get_max_relay_num();
+    (*get_pkt_light_data()).value.val[16] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr()) != false) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
             if op == LGT_CMD_LIGHT_GRP_REQ {
-                (*get_pkt_light_data()).value[22] = params[1];
+                (*get_pkt_light_data()).value.val[15] = params[1];
             } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-                (*get_pkt_light_data()).value[22] = 1;
+                (*get_pkt_light_data()).value.val[15] = 1;
             } else {
                 if op == LGT_CMD_CONFIG_DEV_ADDR {
-                    (*get_pkt_light_data()).value[22] = 4;
+                    (*get_pkt_light_data()).value.val[15] = 4;
                 }
                 if op == LGT_CMD_USER_NOTIFY_REQ {
-                    (*get_pkt_light_data()).value[22] = 7;
+                    (*get_pkt_light_data()).value.val[15] = 7;
                 } else {
-                    (*get_pkt_light_data()).value[22] = 0;
+                    (*get_pkt_light_data()).value.val[15] = 0;
                 }
             }
         } else if op != LGT_CMD_CONFIG_DEV_ADDR {
             if op != LGT_CMD_LIGHT_CONFIG_GRP {
                 if op == LGT_CMD_LIGHT_GRP_REQ {
-                    (*get_pkt_light_data()).value[22] = params[1];
+                    (*get_pkt_light_data()).value.val[15] = params[1];
                 } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-                    (*get_pkt_light_data()).value[22] = 1;
+                    (*get_pkt_light_data()).value.val[15] = 1;
                 } else {
                     if op == LGT_CMD_CONFIG_DEV_ADDR {
-                        (*get_pkt_light_data()).value[22] = 4;
+                        (*get_pkt_light_data()).value.val[15] = 4;
                     }
                     if op == LGT_CMD_USER_NOTIFY_REQ {
-                        (*get_pkt_light_data()).value[22] = 7;
+                        (*get_pkt_light_data()).value.val[15] = 7;
                     } else {
-                        (*get_pkt_light_data()).value[22] = 0;
+                        (*get_pkt_light_data()).value.val[15] = 0;
                     }
                 }
             }
-            set_slave_data_valid(BRIDGE_MAX_CNT as u32 * 2 + 1);
-            (*get_pkt_light_data()).value[22] = 1;
+            set_slave_data_valid(BRIDGE_MAX_CNT * 2 + 1);
+            (*get_pkt_light_data()).value.val[15] = 1;
         } else if dev_addr_with_mac_flag(params.as_ptr()) == false {
-            set_slave_data_valid(BRIDGE_MAX_CNT as u32 * 2 + 1);
-            (*get_pkt_light_data()).value[22] = 4;
+            set_slave_data_valid(BRIDGE_MAX_CNT * 2 + 1);
+            (*get_pkt_light_data()).value.val[15] = 4;
         } else {
             set_slave_data_valid(params[3] as u32 * 2 + 1);
-            (*get_pkt_light_data()).value[22] = 4;
+            (*get_pkt_light_data()).value.val[15] = 4;
         }
     } else {
         set_slave_data_valid(0);
         if op == LGT_CMD_LIGHT_GRP_REQ {
-            (*get_pkt_light_data()).value[22] = params[1];
+            (*get_pkt_light_data()).value.val[15] = params[1];
         } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-            (*get_pkt_light_data()).value[22] = 1;
+            (*get_pkt_light_data()).value.val[15] = 1;
         } else {
             if op == LGT_CMD_CONFIG_DEV_ADDR {
-                (*get_pkt_light_data()).value[22] = 4;
+                (*get_pkt_light_data()).value.val[15] = 4;
             }
             if op == LGT_CMD_USER_NOTIFY_REQ {
-                (*get_pkt_light_data()).value[22] = 7;
+                (*get_pkt_light_data()).value.val[15] = 7;
             } else {
-                (*get_pkt_light_data()).value[22] = 0;
+                (*get_pkt_light_data()).value.val[15] = 0;
             }
         }
     }
-    (*get_pkt_light_status()).value[22] = (*get_pkt_light_data()).value[22];
+    (*get_pkt_light_status()).value.val[15] = (*get_pkt_light_data()).value.val[15];
     rf_link_slave_read_status_start();
 
     get_slave_stat_sno().copy_from_slice(sno);
 
     if device_match != false || group_match != false {
-        copy_par_user_all(params_len as u32, (*get_pkt_light_data()).value[10..].as_mut_ptr());
-        (*get_pkt_light_status()).value[0..3].copy_from_slice(&*get_slave_sno());
+        copy_par_user_all(params_len as u32, (*get_pkt_light_data()).value.val[3..].as_mut_ptr());
+        (*get_pkt_light_status()).value.sno = *get_slave_sno();
 
-        unsafe { *(addr_of!((*get_pkt_light_status()).value[3]) as *mut u16) = *get_device_address() };
+        unsafe { *(addr_of!((*get_pkt_light_status()).value.src) as *mut u16) = *get_device_address() };
 
-        let tmp_pkt = PacketAttValue {
-            sno: [0; 3],
-            src: [0; 2],
-            dst: [0; 2],
-            val: [0; 23],
-        };
+        let tmp_pkt: PacketAttValue = PacketAttValue::default();
 
         unsafe {
             slice::from_raw_parts_mut(
@@ -820,11 +818,11 @@ pub fn rf_link_slave_init(interval: u32)
         rf_link_slave_set_adv(get_adv_data());
         pair_load_key();
 
-        (*get_pkt_light_data()).value[3] = (*get_mac_id())[0];
-        (*get_pkt_light_data()).value[4] = (*get_mac_id())[1];
+        (*get_pkt_light_data()).value.src[0] = (*get_mac_id())[0];
+        (*get_pkt_light_data()).value.src[1] = (*get_mac_id())[1];
 
-        (*get_pkt_light_status()).value[3] = (*get_mac_id())[0];
-        (*get_pkt_light_status()).value[4] = (*get_mac_id())[1];
+        (*get_pkt_light_status()).value.src[0] = (*get_mac_id())[0];
+        (*get_pkt_light_status()).value.src[1] = (*get_mac_id())[1];
 
         set_slave_adv_enable(true);
 

@@ -1,9 +1,10 @@
+use core::mem;
 use core::mem::size_of;
 use core::ptr::{null, null_mut};
 
 use heapless::Deque;
 
-use crate::{BIT, pub_mut};
+use crate::{BIT, const_assert, pub_mut};
 use crate::mesh::mesh_node_st_val_t;
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
@@ -218,6 +219,7 @@ pub struct AdvRspPrivate {
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy, Default)]
 pub struct PacketAttValue {
     pub sno: [u8; 3],
     pub src: [u8; 2],
@@ -341,7 +343,7 @@ pub struct PacketAttWrite {
 }
 
 #[repr(C, align(4))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct PacketAttCmd {
     pub dma_len: u32,   // 0
     pub _type: u8,      // 4
@@ -351,7 +353,13 @@ pub struct PacketAttCmd {
     pub opcode: u8,     // 10
     pub handle: u8,     // 11
     pub handle1: u8,    // 12
-    pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+    pub value: PacketAttValue //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+}
+
+impl From<&MeshPkt> for &PacketAttCmd {
+    fn from(pkt: &MeshPkt) -> Self {
+        unsafe { mem::transmute(pkt) }
+    }
 }
 
 #[repr(C, align(4))]
@@ -397,6 +405,8 @@ pub struct MeshPkt {
     pub internal_par2: [u8; 4], // 39
     pub no_use: [u8; 4]         // 43 size must 48, when is set to be rf tx address.
 }
+
+const_assert!(mem::size_of::<MeshPkt>() == 48);
 
 #[repr(C, align(4))]
 pub struct PacketAttMtu {

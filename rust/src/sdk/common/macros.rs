@@ -115,3 +115,10 @@ macro_rules! const_concat {
         const_concat!($a, $($rest),*)
     };
 }
+
+#[macro_export]
+macro_rules! const_assert {
+    ($($tt:tt)*) => {
+        const _: () = assert!($($tt)*);
+    }
+}

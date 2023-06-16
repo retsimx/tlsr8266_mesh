@@ -1,22 +1,21 @@
-use core::mem::{size_of, size_of_val};
+use core::mem::size_of;
 use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::common::{SYS_CHN_LISTEN, pair_load_key, SYS_CHN_ADV};
-use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_service_discover_tick, set_slave_link_time_out};
-use crate::sdk::ble_app::light_ll::{*};
-use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, sleep_us};
-use crate::sdk::mcu::register::{*};
-use crate::{app, BIT, uprintln};
-use crate::embassy::time_driver::{clock_time64};
+
+use crate::app;
+use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
+use crate::embassy::time_driver::clock_time64;
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
+use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
+use crate::sdk::ble_app::light_ll::{*};
+use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
-use crate::sdk::common::compat::array4_to_int;
-use crate::uart_manager::light_mesh_rx_cb;
+use crate::sdk::light::{*};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
+use crate::sdk::mcu::register::{*};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 fn slave_timing_update_handle()
@@ -130,26 +129,6 @@ pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
     }
 
     return result;
-}
-
-pub fn irq_st_response()
-{
-    rf_set_tx_rx_off();
-    sleep_us(100);
-    rf_set_ble_access_code(*get_pair_ac());
-
-    rf_set_ble_crc_adv();
-    let tmp = (read_reg_rnd_number() as u32 ^ read_reg_system_tick()) & 3;
-
-    (*get_pkt_light_status())._type |= BIT!(7);
-
-    for chn in tmp..tmp + 4 {
-        rf_set_ble_channel(SYS_CHN_LISTEN[chn as usize & 3]);
-        rf_start_stx_mesh(get_pkt_light_status(), CLOCK_SYS_CLOCK_1US * 30 + read_reg_system_tick());
-        sleep_us(700);
-    }
-    write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-    set_p_st_handler(IrqHandlerStatus::Listen);
 }
 
 pub fn irq_st_listen()
@@ -295,7 +274,7 @@ pub fn irq_st_bridge()
         return;
     }
 
-    if *get_slave_read_status_busy() != 0  && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
+    if *get_slave_read_status_busy() != 0 && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - *get_slave_read_status_busy_time() {
         rf_link_slave_read_status_stop();
     }
 
@@ -330,33 +309,6 @@ pub fn irq_st_bridge()
         rf_link_slave_read_status_update();
     }
 
-    // if *get_update_interval_flag() != 0 {
-    //     set_update_interval_flag(*get_update_interval_flag() - 1);
-    //     if *get_update_interval_flag() == 0 && *get_update_interval_time() {
-    //         let mut pkt: [u32; 6] = [
-    //             0x12,
-    //             0xc1002,
-    //             0x1120005,
-    //             0x270008,
-    //             0x27,
-    //             0xc8
-    //         ];
-    //
-    //         if *get_update_interval_user_min() != 0 || *get_update_timeout_user() != 0 {
-    //             pkt[5] = *get_update_timeout_user() as u32;
-    //             pkt[4] = ((*get_update_interval_user_min() as u32) << 0x10) | 0x27;
-    //             pkt[3] = *get_update_interval_user_max() as u32 | 0x270000;
-    //         }
-    //
-    //         if is_add_packet_buf_ready() == false {
-    //             set_update_interval_flag(2);
-    //         } else {
-    //             uprintln!("Sending update con pkt");
-    //             rf_link_add_tx_packet(addr_of!(pkt) as *const PacketAttCmd, size_of::<u32>() * pkt.len());
-    //             set_update_interval_time(false);
-    //         }
-    //     }
-    // }
     if is_add_packet_buf_ready() {
         let pair_proc_result = pair_proc();
         if pair_proc_result != null() {
@@ -365,7 +317,7 @@ pub fn irq_st_bridge()
     }
     mesh_node_flush_status();
     if is_add_packet_buf_ready() && !app().uart_manager.started() {
-        if mesh_node_report_status(&mut (*get_pkt_light_report()).value[10..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
+        if mesh_node_report_status(&mut (*get_pkt_light_report()).value.val[3..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
             rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<PacketAttCmd>());
         }
     }
@@ -373,15 +325,15 @@ pub fn irq_st_bridge()
     back_to_rxmode_bridge();
 
     loop {
-        let mut uVar5 = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
+        let mut cur_interval = (*get_slave_next_connect_tick() - (CLOCK_SYS_CLOCK_1US * 500)) - read_reg_system_tick();
         if *get_slave_interval_old() != 0 && *get_slave_instant_next() == *get_slave_instant() {
-            if 0x3fffffff >= uVar5 {
-                uVar5 = 0;
+            if 0x3fffffff >= cur_interval {
+                cur_interval = 0;
             }
             set_slave_interval_old(0);
         }
 
-        if uVar5 <= *get_slave_link_interval() {
+        if cur_interval <= *get_slave_link_interval() {
             break;
         }
 
@@ -470,12 +422,11 @@ fn irq_light_slave_rx()
             return;
         }
     } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40 {
-
         let packet = addr_of!(entry.rx_time);
         let mut return_fn = || {
             T_RX_LAST.store(rx_time, Ordering::Relaxed);
             if *get_slave_link_state() < 6 {
-                rf_link_rc_data(unsafe { &mut *(packet as *mut MeshPkt) });
+                rf_link_rc_data(unsafe { *(packet as *mut MeshPkt) });
             }
             entry.dma_len = 1;
             return;
@@ -595,7 +546,6 @@ extern "C" fn irq_handler() {
             IrqHandlerStatus::Bridge => irq_st_bridge(),
             IrqHandlerStatus::Rx => irq_st_ble_rx(),
             IrqHandlerStatus::Listen => irq_st_listen(),
-            IrqHandlerStatus::Response => irq_st_response(),
             IrqHandlerStatus::None => {}
         }
     }

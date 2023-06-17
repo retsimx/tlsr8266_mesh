@@ -146,7 +146,9 @@ fn rf_link_is_notify_rsp(opcode: u8) -> bool
         LGT_CMD_LIGHT_GRP_RSP3,
         LGT_CMD_LIGHT_STATUS,
         LGT_CMD_DEV_ADDR_RSP,
-        LGT_CMD_USER_NOTIFY_RSP
+        LGT_CMD_USER_NOTIFY_RSP,
+        LGT_CMD_START_OTA_RSP,
+        LGT_CMD_OTA_DATA_RSP
     ].contains(&opcode)
 }
 
@@ -272,14 +274,14 @@ pub fn rf_link_slave_add_status(packet: &MeshPkt)
     });
 }
 
-pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
+pub fn rf_link_rc_data(mut packet: MeshPkt, needs_decode: bool) -> bool {
     if *get_slave_link_connected() {
         if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 1000) as i32 {
             return false;
         }
     }
 
-    if packet.rf_len != 0x25 || packet.l2cap_len != 0x21 || packet._type & 3 != 2 || packet.chan_id == 0xeeff || unsafe { !pair_dec_packet_mesh(&packet) } {
+    if packet.rf_len != 0x25 || packet.l2cap_len != 0x21 || packet._type & 3 != 2 || packet.chan_id == 0xeeff || (needs_decode && unsafe { !pair_dec_packet_mesh(&packet) }) {
         return false;
     }
 
@@ -323,7 +325,6 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
 
     let cmd_pkt = unsafe { &*(addr_of!(packet.sno) as *const AppCmdValue) };
     let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(get_slave_sno_addr() as *const u8, 3) };
-    let match_slave_sno_sending = cmd_pkt.sno == unsafe { slice::from_raw_parts(get_slave_sno_sending_addr() as *const u8, 3) };
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, cmd_pkt);
     let pkt_valid = (no_match_slave_sno || *get_slave_link_cmd() != op) && !pkt_exists_in_buf;
 
@@ -337,8 +338,6 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
         light_mesh_rx_cb(cmd_pkt);
     }
 
-    let src_device_addr_match = packet.src_adr == *get_device_address();
-
     // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
     // for a response, then send this response to the slave
     if rf_link_is_notify_rsp(op) && should_notify {
@@ -347,12 +346,6 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
         }
         rf_link_slave_add_status(&packet);
         return false;
-    }
-
-    if src_device_addr_match {
-        if op != LGT_CMD_CONFIG_DEV_ADDR || !dev_addr_with_mac_flag(params.as_ptr()) || match_slave_sno_sending {
-            return false;
-        }
     }
 
     set_rcv_pkt_ttc(packet.par[9]);
@@ -367,21 +360,14 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
         }
     }
 
+    // Only handle notify requests once
     if rf_link_is_notify_req(op) {
-        set_slave_read_status_response(true);
-        if group_match == false {
-            set_slave_read_status_response(device_match);
-        }
+        set_slave_read_status_response(device_match);
+
         if req_cmd_is_notify_ok(op, cmd_pkt) {
             set_slave_read_status_response(false);
-        } else if packet.dst_adr & !DEVICE_ADDR_MASK_DEFAULT != 0 {
-            for i in 0..5 {
-                if packet.par[i + 4] == *get_device_address() as u8 {
-                    req_cmd_set_notify_ok_flag(op, cmd_pkt);
-                    set_slave_read_status_response(false);
-                    break;
-                }
-            }
+        } else {
+            req_cmd_set_notify_ok_flag(op, cmd_pkt);
         }
     }
 
@@ -403,8 +389,7 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
 
     set_org_ttl(ttl);
 
-    // todo: Use rand register?
-    let rand_1 = ((read_reg_system_tick() ^ array4_to_int(get_mac_id())) & 0xf) * 500;
+    let rand_1 = ((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 0xf) * 500;
     if rf_link_is_notify_req(op) && *get_slave_read_status_response() {
         (*get_pkt_light_status()).value.sno = cmd_pkt.sno;
         packet.src_tx = *get_device_address();
@@ -427,17 +412,16 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
             (*get_pkt_light_status()).value.val[15] = GET_DEV_ADDR;
         } else if op == LGT_CMD_USER_NOTIFY_REQ {
             (*get_pkt_light_status()).value.val[15] = GET_USER_NOTIFY;
+        } else if op == LGT_CMD_START_OTA_REQ {
+            (*get_pkt_light_status()).value.val[15] = CMD_START_OTA;
+        } else if op == LGT_CMD_OTA_DATA_REQ {
+            (*get_pkt_light_status()).value.val[15] = CMD_OTA_DATA;
         }
         unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
         if (no_match_slave_sno || *get_slave_link_cmd() != op) || params[1] != 0 {
             (*get_pkt_light_status()).value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
 
-            let mut request_params: PacketAttValue = PacketAttValue {
-                sno: [0; 3],
-                src: [0; 2],
-                dst: [0; 2],
-                val: [0; 23],
-            };
+            let mut request_params: PacketAttValue = PacketAttValue::default();
 
             unsafe {
                 slice::from_raw_parts_mut(addr_of_mut!(request_params) as *mut u8, size_of::<PacketAttValue>()).copy_from_slice(
@@ -467,7 +451,7 @@ pub fn rf_link_rc_data(mut packet: MeshPkt) -> bool {
         if !*get_slave_link_connected() {
             delay = 8000 - rand_1;
         }
-        sleep_us(delay);
+        sleep_us(delay as u32);
 
         packet._type |= BIT!(7);
 
@@ -997,7 +981,9 @@ pub fn rf_link_is_notify_req(value: u8) -> bool
             LGT_CMD_LIGHT_GRP_REQ,
             LGT_CMD_CONFIG_DEV_ADDR,
             LGT_CMD_LIGHT_CONFIG_GRP,
-            LGT_CMD_USER_NOTIFY_REQ
+            LGT_CMD_USER_NOTIFY_REQ,
+            LGT_CMD_START_OTA_REQ,
+            LGT_CMD_OTA_DATA_REQ
         ].contains(&value);
     }
 
@@ -1023,7 +1009,6 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
     if *get_slave_data_valid() != 0 {
         set_slave_data_valid(*get_slave_data_valid() - 1);
         if *get_slave_data_valid() == 0 {
-            set_slave_sno_sending([0, 0, 0]);
         } else if *get_slave_read_status_busy() == 0 || *get_slave_data_valid() as i32 > -1 {
             (*get_pkt_light_data())._type |= BIT!(7);
 
@@ -1260,7 +1245,7 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
 
                 (*get_pkt_user_cmd())._type = 2;
                 (*get_pkt_user_cmd()).chan_id = 0xff03;
-                (*get_pkt_user_cmd()).src_tx = *get_device_address() as u16;
+                (*get_pkt_user_cmd()).src_tx = *get_device_address();
                 (*get_pkt_user_cmd()).handle1 = 0;
                 (*get_pkt_user_cmd()).op = 0;
                 (*get_pkt_user_cmd()).vendor_id = 0;
@@ -1282,7 +1267,7 @@ fn mesh_push_user_command_ll(sno: u32, dst: u16, cmd_op_para: *const u8, len: u8
                 let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const AppCmdValue);
                 set_slave_tx_cmd_time(read_reg_system_tick());
                 if group_match || device_match {
-                    rf_link_data_callback(addr_of!((*get_pkt_user_cmd()).l2cap_len) as *const PacketL2capData);
+                    rf_link_rc_data(*get_pkt_user_cmd(), false);
                     if device_match {
                         set_mesh_user_cmd_idx(0);
                     }

@@ -292,11 +292,10 @@ pub fn irq_st_bridge()
                 }
             }
         }
-        if *get_rf_slave_ota_busy_mesh_en() == 0 {
-            write_reg_system_tick_irq(*get_slave_next_connect_tick());
-            set_p_st_handler(IrqHandlerStatus::Rx);
-            return;
-        }
+
+        write_reg_system_tick_irq(*get_slave_next_connect_tick());
+        set_p_st_handler(IrqHandlerStatus::Rx);
+        return;
     }
 
     set_t_bridge_cmd(CLOCK_SYS_CLOCK_1US * 200 + read_reg_system_tick());
@@ -370,13 +369,7 @@ pub fn irq_st_ble_rx()
             write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_window_size());
         }
     } else {
-        let tmp;
-        if *get_rf_slave_ota_busy_mesh_en() == 0 {
-            tmp = 10000;
-        } else {
-            tmp = 6000;
-        }
-        write_reg_system_tick_irq(tmp * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
+        write_reg_system_tick_irq(10000 * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
     }
     set_p_st_handler(IrqHandlerStatus::Bridge);
     set_slave_tick_brx(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
@@ -426,7 +419,7 @@ fn irq_light_slave_rx()
         let mut return_fn = || {
             T_RX_LAST.store(rx_time, Ordering::Relaxed);
             if *get_slave_link_state() < 6 {
-                rf_link_rc_data(unsafe { *(packet as *mut MeshPkt) });
+                rf_link_rc_data(unsafe { *(packet as *mut MeshPkt) }, true);
             }
             entry.dma_len = 1;
             return;
@@ -435,7 +428,7 @@ fn irq_light_slave_rx()
         set_rcv_pkt_time(rx_time);
         if entry.sno[0] & 0xf == 3 {
             if *get_slave_link_state() != 1 && *get_slave_link_state() != 7 {
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() {
                     return return_fn();
                 }
             }
@@ -462,7 +455,7 @@ fn irq_light_slave_rx()
                     return;
                 }
 
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() {
                     return return_fn();
                 }
             }
@@ -477,13 +470,13 @@ fn irq_light_slave_rx()
                     return;
                 }
 
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() {
                     return return_fn();
                 }
             }
 
             if *get_slave_link_state() != 7 {
-                if !*get_rf_slave_ota_busy() || *get_rf_slave_ota_busy_mesh_en() != 0 {
+                if !*get_rf_slave_ota_busy() {
                     return return_fn();
                 }
             }
@@ -553,14 +546,25 @@ extern "C" fn irq_handler() {
     // This timer is configured to run once per second to check if the internal clock has overflowed.
     // this is a workaround in case there are no 'clock_time64' calls between overflows
     if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
-        write_reg_irq_src(FLD_IRQ::TMR0_EN as u32);
+        write_reg_tmr_sta(FLD_TMR_STA::TMR0 as u8);
 
         clock_time64();
+
+        if *get_rf_slave_ota_busy_mesh() {
+            let sot = *get_rf_slave_ota_timeout_s();
+            if sot != 0 {
+                set_rf_slave_ota_timeout_s(sot - 1);
+                if sot - 1 == 0
+                {
+                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+                }
+            }
+        }
     }
 
     // This timer triggers the transition step of the light so that the transition is smooth
     if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
-        write_reg_irq_src(FLD_IRQ::TMR1_EN as u32);
+        write_reg_tmr_sta(FLD_TMR_STA::TMR1 as u8);
 
         app().light_manager.transition_step();
     }

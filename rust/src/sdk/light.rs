@@ -118,6 +118,11 @@ pub const LGT_CMD_USER_NOTIFY_REQ: u8 = 0x2a;
 //
 pub const LGT_CMD_USER_NOTIFY_RSP: u8 = 0x2b;
 //
+pub const LGT_CMD_START_OTA_REQ: u8 = 0x2c;
+pub const LGT_CMD_START_OTA_RSP: u8 = 0x2d;
+pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x2e;
+pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x2f;
+
 pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
 pub const LGT_POWER_ON: u8 = 0x32;
@@ -134,6 +139,8 @@ pub const GET_DEV_ADDR: u8 = 4;
 // return device address
 pub const GET_USER_NOTIFY: u8 = 7;
 // return user notify info
+pub const CMD_START_OTA: u8 = 8;
+pub const CMD_OTA_DATA: u8 = 9;
 
 pub const LGT_CMD_SET_MESH_INFO: u8 = 0xc5;
 pub const LGT_CMD_SET_DEV_ADDR: u8 = 0xc6;
@@ -584,9 +591,7 @@ pub_mut!(adv_interval2listen_interval, u16, 4);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
 pub_mut!(online_status_interval2listen_interval, u16, 8);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-pub_mut!(rf_slave_ota_busy_mesh_en, u8, 0);
-
-//if 1 send one adv packet in each interrupt
+pub_mut!(rf_slave_ota_busy_mesh, bool, false);
 
 // flash mesh extend shit needed to link
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
@@ -633,7 +638,6 @@ pub const ONLINE_STATUS_COMP: u32 = 3;
 pub_mut!(slave_data_valid, u32, 0);
 pub_mut!(t_bridge_cmd, u32, 0);
 pub_mut!(st_brige_no, u32, 0);
-pub_mut!(slave_sno_sending, [u8; 3], [0; 3]);
 pub_mut!(app_cmd_time, u32, 0);
 pub_mut!(mesh_user_cmd_idx, u8, 0);
 pub_mut!(slave_tx_cmd_time, u32, 0);

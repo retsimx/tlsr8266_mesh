@@ -5,7 +5,7 @@ use core::ptr::{addr_of, addr_of_mut};
 
 use fixed::types::I16F16;
 
-use crate::{app};
+use crate::{app, uprintln};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
@@ -24,6 +24,7 @@ use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
+use crate::version::BUILD_VERSION;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -348,6 +349,21 @@ pub fn rf_link_response_callback(
             }
             ppp.val[3] = (*get_device_address() & 0xFF) as u8;
             ppp.val[4] = ((*get_device_address() >> 8) & 0xff) as u8;
+        },
+        CMD_START_OTA => {
+            ppp.val[0] = LGT_CMD_START_OTA_RSP | 0xc0;
+
+            ppp.val[3] = BUILD_VERSION as u8;
+            ppp.val[4] = (BUILD_VERSION >> 8) as u8;
+            ppp.val[5] = (BUILD_VERSION >> 16) as u8;
+            ppp.val[6] = (BUILD_VERSION >> 24) as u8;
+
+            set_rf_slave_ota_busy_mesh(true);
+        },
+        CMD_OTA_DATA => {
+            ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
+
+            uprintln!("OTA DATA");
         }
         _ => return false
     }

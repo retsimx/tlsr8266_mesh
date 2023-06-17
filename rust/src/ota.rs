@@ -133,7 +133,7 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota(&mut self, data: &PacketAttData) {
-        if *get_rf_slave_ota_finished_flag() != OtaState::Continue {
+        if *get_rf_slave_ota_finished_flag() != OtaState::Continue || *get_rf_slave_ota_busy_mesh() {
             return;
         }
 
@@ -355,7 +355,7 @@ impl OtaManager {
         self.rf_slave_ota_finished_time = clock_time();
     }
 
-    pub(crate) fn rf_link_slave_ota_finish_handle(&mut self) // poll when ota busy in bridge
+    pub fn rf_link_slave_ota_finish_handle(&mut self) // poll when ota busy in bridge
     {
         self.rf_link_slave_data_ota_save();
 

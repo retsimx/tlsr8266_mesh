@@ -635,7 +635,6 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
     get_slave_sno().copy_from_slice(sno);
 
     set_slave_link_cmd(op);
-    get_slave_sno_sending().copy_from_slice(sno);
 
     if !rf_link_is_notify_req(op) {
         if *get_slave_read_status_busy() != 0 {

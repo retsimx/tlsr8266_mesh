@@ -50,7 +50,7 @@ pub enum UartMsg {
 // AppCmdValueT
 pub fn light_mesh_rx_cb(data: &AppCmdValue) {
     // Don't report messages that we sent
-    if !app().uart_manager.started() || data.src == *get_device_address() {
+    if !app().uart_manager.started() || (data.src == *get_device_address() && data.dst != *get_device_address()){
         return;
     }
 

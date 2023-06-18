@@ -62,13 +62,18 @@ pub const LOOP_INTERVAL_US: u16 = 10000;
 
 pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 
+// must be 255
 pub const PMW_MAX_TICK_BASE: u16 = 255;
-// must 255
-pub const PMW_MAX_TICK_MULTI: u16 = 209;
+
 // 209: freq = 600.4Hz
-pub const PMW_MAX_TICK_1: u16 = PMW_MAX_TICK_BASE * PMW_MAX_TICK_MULTI;
+// 125: freq = 1003.9Hz
+// 41: freq = 3060.7Hz
+// More detail about why this should be above 3kHz can be found in this document:
+// https://bio-licht.org/02_resources/info_ieee-pem_2014-09_led-flickering.pdf
+pub const PMW_MAX_TICK_MULTI: u16 = 41;
+
 // must less or equal than (255*256)
-pub const PMW_MAX_TICK: u16 = PMW_MAX_TICK_1;
+pub const PMW_MAX_TICK: u16 = PMW_MAX_TICK_BASE * PMW_MAX_TICK_MULTI;
 
 pub const BRIDGE_MAX_CNT: u32 = 8;
 pub const IRQ_TIMER1_ENABLE: bool = true;

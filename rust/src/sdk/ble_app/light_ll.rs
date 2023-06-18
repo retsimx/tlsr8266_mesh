@@ -416,6 +416,8 @@ pub fn rf_link_rc_data(mut packet: MeshPkt, needs_decode: bool) -> bool {
             (*get_pkt_light_status()).value.val[15] = CMD_START_OTA;
         } else if op == LGT_CMD_OTA_DATA_REQ {
             (*get_pkt_light_status()).value.val[15] = CMD_OTA_DATA;
+        } else if op == LGT_CMD_END_OTA_REQ {
+            (*get_pkt_light_status()).value.val[15] = CMD_END_OTA;
         }
         unsafe { copy_par_user_all(params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
         if (no_match_slave_sno || *get_slave_link_cmd() != op) || params[1] != 0 {
@@ -983,7 +985,8 @@ pub fn rf_link_is_notify_req(value: u8) -> bool
             LGT_CMD_LIGHT_CONFIG_GRP,
             LGT_CMD_USER_NOTIFY_REQ,
             LGT_CMD_START_OTA_REQ,
-            LGT_CMD_OTA_DATA_REQ
+            LGT_CMD_OTA_DATA_REQ,
+            LGT_CMD_END_OTA_REQ
         ].contains(&value);
     }
 
@@ -1170,16 +1173,16 @@ pub fn rf_link_slave_read_status_stop()
     rf_link_slave_read_status_par_init();
 }
 
-pub fn rf_ota_save_data(data: *const u8) -> OtaState
+pub fn rf_ota_save_data(data: &[u8]) -> OtaState
 {
     let addr = *get_cur_ota_flash_addr() + FLASH_ADR_LIGHT_NEW_FW;
-    flash_write_page(addr, 0x10, data);
+    flash_write_page(addr, data.len() as u32, data.as_ptr());
 
     let mut tmp = [0u8; 0x10];
-    flash_read_page(addr, 0x10, tmp.as_mut_ptr());
+    flash_read_page(addr, data.len() as u32, tmp.as_mut_ptr());
 
-    if unsafe { slice::from_raw_parts(data, 0x10) } == tmp {
-        set_cur_ota_flash_addr(*get_cur_ota_flash_addr() + 0x10);
+    if data == &tmp[..data.len()] {
+        set_cur_ota_flash_addr(*get_cur_ota_flash_addr() + data.len() as u32);
         return OtaState::Continue;
     } else {
         return OtaState::Error;

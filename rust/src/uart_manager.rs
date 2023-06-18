@@ -2,11 +2,10 @@ use core::mem::size_of;
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
-use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use heapless::Deque;
 
-use crate::{app, pub_mut};
+use crate::{app, pub_mut, SPAWNER};
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
@@ -59,7 +58,7 @@ pub fn light_mesh_rx_cb(data: &AppCmdValue) {
     let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
 
     // Check if this message is one we sent
-    if app().uart_manager.sent.iter().any(|c| {c == msg}) {
+    if critical_section::with(|_| { app().uart_manager.sent.iter().any(|c| {c == msg}) }) {
         // We did, nothing more to do here
         return;
     }
@@ -107,7 +106,6 @@ async fn node_report_task() {
 
 pub struct UartManager {
     pub driver: UartDriver,
-    recv_channel: Deque<uart_data_t, 10>,
     send_channel: Deque<uart_data_t, 10>,
     ack_counter: u8,
     last_ack: u8,
@@ -119,7 +117,6 @@ impl UartManager {
     pub const fn default() -> Self {
         Self {
             driver: UartDriver::default(),
-            recv_channel: Deque::new(),
             send_channel: Deque::new(),
             ack_counter: 0,
             last_ack: 0,
@@ -153,9 +150,7 @@ impl UartManager {
     pub fn check_irq(&mut self) {
         let irq_s = UartDriver::uart_irqsource_get();
         if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            if !self.recv_channel.is_full() {
-                let _ = self.recv_channel.push_back(self.driver.rxdata_buf);
-            }
+            self.handle_rx(self.driver.rxdata_buf);
         }
 
         if irq_s & UARTIRQMASK::TX as u8 != 0 {
@@ -169,7 +164,7 @@ impl UartManager {
         msg.data[43] = ((crc >> 8) & 0xff) as u8;
     }
 
-    async fn ack_msg(&mut self, msg: &uart_data_t) -> bool {
+    fn ack_msg(&mut self, msg: &uart_data_t) -> bool {
         // If data[1] is 0xff, it means this message is an ack from the client
         if msg.data[1] == UartMsg::Ack as u8 {
             self.last_ack = msg.data[0];
@@ -191,7 +186,7 @@ impl UartManager {
         Self::compute_crc(&mut result);
 
         // Send the ack
-        self.driver.uart_send_async(&result).await;
+        self.driver.uart_send(&result);
 
         return true;
     }
@@ -207,13 +202,15 @@ impl UartManager {
                 self.send_channel.pop_front().unwrap()
             });
 
-            // Record the message
-            if self.sent.is_full() {
-                self.sent.pop_front();
-            }
-
             let mymsg = unsafe {slice::from_raw_parts((addr_of!(msg.data) as u32 + 7) as *const u8, 20-5)};
-            self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+            critical_section::with(|_| {
+                // Record the message
+                if self.sent.is_full() {
+                    self.sent.pop_front();
+                }
+
+                self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+            });
 
             // Set the counter
             self.ack_counter += 1;
@@ -224,7 +221,11 @@ impl UartManager {
 
             // Keep sending the message until we get an ack from the other side
             loop {
-                self.driver.uart_send_async(&msg).await;
+                if self.driver.tx_busy() {
+                    self.driver.uart_send_async(&msg).await;
+                } else {
+                    self.driver.uart_send(&msg);
+                }
 
                 // If 100ms passes without an ack from the other side, assume the send failed and try again
                 let t_timeout = clock_time();
@@ -243,64 +244,54 @@ impl UartManager {
         }
     }
 
-    pub async fn run(&mut self, spawner: Spawner) {
-        loop {
-            // Wait for a message
-            while self.recv_channel.is_empty() {
-                yield_now().await;
+    pub fn handle_rx(&mut self, msg: uart_data_t) {
+        // Check the crc of the packet
+        let crc = crc16(&msg.data[0..42]);
+        if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
+            // CRC is invalid, drop the packet
+            return;
+        }
+
+        // If we receive a message, then it means we need to start the uart and notification
+        // tasks
+        if !self.sender_started {
+            self.sender_started = true;
+
+            unsafe {
+                (*SPAWNER).spawn(uart_sender()).unwrap();
+                (*SPAWNER).spawn(node_report_task()).unwrap();
             }
 
-            let msg = critical_section::with(|_| {
-                self.recv_channel.pop_front().unwrap()
-            });
+            mesh_report_status_enable(true);
+        }
 
-            // Check the crc of the packet
-            let crc = crc16(&msg.data[0..42]);
-            if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
-                // CRC is invalid, drop the packet
-                continue;
-            }
+        // Light ctrl
+        if msg.data[2] == UartMsg::LightCtrl as u8 {
+            // p_cmd : cmd[3]+para[10]
+            let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
 
-            // If we receive a message, then it means we need to start the uart and notification
-            // tasks
-            if !self.sender_started {
-                self.sender_started = true;
+            let mut data = [0; 13];
+            data.copy_from_slice(&msg.data[5..5+13]);
 
-                spawner.spawn(uart_sender()).unwrap();
-                spawner.spawn(node_report_task()).unwrap();
-
-                mesh_report_status_enable(true);
-            }
-
-            // Light ctrl
-            if msg.data[2] == UartMsg::LightCtrl as u8 {
-                // p_cmd : cmd[3]+para[10]
-                let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
-
-                let mut data = [0; 13];
-                data.copy_from_slice(&msg.data[5..5+13]);
-
+            let mymsg = unsafe {slice::from_raw_parts(addr_of!(get_pkt_user_cmd().dst_adr) as *const u8, 15)};
+            critical_section::with(|_| {
                 // Record the message
                 if self.sent.is_full() {
                     self.sent.pop_front();
                 }
 
-                let mymsg = unsafe {slice::from_raw_parts(addr_of!(get_pkt_user_cmd().dst_adr) as *const u8, 15)};
                 self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+            });
 
-                // Send the message in to the mesh
-                app().mesh_manager.send_mesh_message(&data, destination);
-            }
-
-            if msg.data[2] == UartMsg::LightStatus as u8 {
-                mesh_report_status_enable(true);
-            }
-
-            // Finally ack the message once we've handled it
-            if !self.ack_msg(&msg).await {
-                // Message was an ack message, nothing more to do
-                continue;
-            }
+            // Send the message in to the mesh
+            app().mesh_manager.send_mesh_message(&data, destination);
         }
+
+        if msg.data[2] == UartMsg::LightStatus as u8 {
+            mesh_report_status_enable(true);
+        }
+
+        // Finally ack the message once we've handled it
+        self.ack_msg(&msg);
     }
 }

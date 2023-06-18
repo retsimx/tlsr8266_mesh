@@ -3,7 +3,7 @@ use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::app;
+use crate::{app, uprintln, uprintln_fast};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN};
@@ -556,7 +556,7 @@ extern "C" fn irq_handler() {
                 set_rf_slave_ota_timeout_s(sot - 1);
                 if sot - 1 == 0
                 {
-                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*get_rf_slave_ota_finished_flag());
                 }
             }
         }

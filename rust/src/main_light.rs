@@ -5,7 +5,7 @@ use core::ptr::{addr_of, addr_of_mut};
 
 use fixed::types::I16F16;
 
-use crate::{app, uprintln};
+use crate::{app};
 use crate::{BIT, pub_mut};
 use crate::common::*;
 use crate::config::*;
@@ -265,9 +265,8 @@ pub fn rf_link_response_callback(
     ppp.src[0] = (*get_device_address() & 0xff) as u8;
     ppp.src[1] = ((*get_device_address() >> 8) & 0xff) as u8;
 
-    let mut params: [u8; 10] = [0; 10];
-    params[0..10].copy_from_slice(&ppp.val[3..10 + 3]);
-    ppp.val[3..10 + 3].copy_from_slice(&[0; 10]);
+    let params = &p_req.val[3..13];
+    ppp.val[3..10 + 3].fill(0);
 
     ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
     ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
@@ -363,7 +362,18 @@ pub fn rf_link_response_callback(
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
 
-            uprintln!("OTA DATA");
+            let idx = app().ota_manager.rf_mesh_data_ota(&params, false);
+
+            ppp.val[1] = idx as u8;
+            ppp.val[2] = (idx >> 8) as u8;
+        },
+        CMD_END_OTA => {
+            ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
+
+            let idx = app().ota_manager.rf_mesh_data_ota(&params, true);
+
+            ppp.val[1] = idx as u8;
+            ppp.val[2] = (idx >> 8) as u8;
         }
         _ => return false
     }

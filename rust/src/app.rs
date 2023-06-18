@@ -32,11 +32,6 @@ async fn light_manager(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn uart_manager(spawner: Spawner) {
-    app().uart_manager.run(spawner).await;
-}
-
-#[embassy_executor::task]
 async fn panic_check(_spawner: Spawner) {
     check_panic_info().await;
 }
@@ -83,9 +78,6 @@ impl App {
 
         // Start the light manager
         spawner.spawn(light_manager(spawner)).unwrap();
-
-        // Start the uart manager
-        spawner.spawn(uart_manager(spawner)).unwrap();
 
         // Send a message to the network saying that we just booted up
         let mut data = [0 as u8; 13];

@@ -1,6 +1,7 @@
 #![feature(type_alias_impl_trait)]
 #![no_std]
 
+use core::ptr::null_mut;
 use embassy_executor::Spawner;
 use app::App;
 use ota::OtaManager;
@@ -25,6 +26,7 @@ mod uart_manager;
 pub mod version;
 
 static mut APP: App = App::default();
+static mut SPAWNER: *const Spawner = null_mut();
 
 pub fn app() -> &'static mut App {
     return unsafe { &mut APP };
@@ -96,6 +98,10 @@ pub extern "C" fn main_entrypoint() {
     let mut executor = Executor::new();
     let executor = unsafe { __make_static(&mut executor) };
     executor.run(|spawner| {
+        unsafe {
+            SPAWNER = &spawner;
+        }
+
         spawner.must_spawn(run(spawner));
     });
 }

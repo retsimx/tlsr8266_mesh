@@ -54,6 +54,10 @@ impl UartDriver {
         }
     }
 
+    pub fn tx_busy(&self) -> bool {
+        self.uart_tx_busy_flag
+    }
+
     pub fn init(&mut self) {
         gpio_set_func(GPIO_PIN_TYPE::GPIO_UTX as u32, AS_UART);
         gpio_set_func(GPIO_PIN_TYPE::GPIO_URX as u32, AS_UART);
@@ -166,9 +170,7 @@ impl UartDriver {
 
     pub async fn uart_send_async(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
-        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
-            wd_clear();
-
+        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 100*1000) {
             yield_now().await;
         }
 
@@ -185,7 +187,7 @@ impl UartDriver {
 
     pub fn uart_send(&mut self, msg: &uart_data_t) -> bool {
         let t_timeout = clock_time();
-        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 400*1000) {
+        while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 100*1000) {
             wd_clear();
 
             app().uart_manager.check_irq();

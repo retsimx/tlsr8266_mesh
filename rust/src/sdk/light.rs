@@ -113,15 +113,16 @@ pub const DEV_ADDR_PAR_WITH_MAC: u8 = 0x01;
 pub const LGT_CMD_DEV_ADDR_RSP: u8 = 0x21;
 //rsp
 pub const LGT_CMD_KICK_OUT: u8 = 0x23;
-//
+
+pub const LGT_CMD_START_OTA_REQ: u8 = 0x24;
+pub const LGT_CMD_START_OTA_RSP: u8 = 0x25;
+pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x26;
+pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x27;
+pub const LGT_CMD_END_OTA_REQ: u8 = 0x28;
+pub const LGT_CMD_END_OTA_RSP: u8 = 0x29;
+
 pub const LGT_CMD_USER_NOTIFY_REQ: u8 = 0x2a;
-//
 pub const LGT_CMD_USER_NOTIFY_RSP: u8 = 0x2b;
-//
-pub const LGT_CMD_START_OTA_REQ: u8 = 0x2c;
-pub const LGT_CMD_START_OTA_RSP: u8 = 0x2d;
-pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x2e;
-pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x2f;
 
 pub const LGT_CMD_SET_LIGHT: u8 = 0x30;
 pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
@@ -141,6 +142,7 @@ pub const GET_USER_NOTIFY: u8 = 7;
 // return user notify info
 pub const CMD_START_OTA: u8 = 8;
 pub const CMD_OTA_DATA: u8 = 9;
+pub const CMD_END_OTA: u8 = 10;
 
 pub const LGT_CMD_SET_MESH_INFO: u8 = 0xc5;
 pub const LGT_CMD_SET_DEV_ADDR: u8 = 0xc6;
@@ -370,7 +372,7 @@ impl From<&MeshPkt> for &PacketAttCmd {
 }
 
 #[repr(C, align(4))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct PacketAttData {
     pub dma_len: u32, //won't be a fixed number as previous, should adjust with the mouse package number
 

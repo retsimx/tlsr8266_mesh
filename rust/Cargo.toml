@@ -22,6 +22,9 @@ const_format = "0.2.30"
 num-derive = "0.3"
 num-traits = { version = "0.2", default-features = false }
 
+[dev-dependencies]
+mry = "0.2.6"
+
 [features]
 # If enabled, use a 16MHz crystal.
 # USE WITH CAUTION. Flashing a 12MHz (default) build on to a 16MHz board, or vice versa WILL BRICK THE CHIP unless you

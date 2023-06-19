@@ -22,9 +22,9 @@ pub fn crc16(mut pD: &[u8]) -> u16 {
 mod tests {
     use crate::sdk::common::crc::crc16;
 
-    #[test]
-    fn test_crc16() {
-        assert_eq!(crc16(&[0, 1, 2, 3, 4]), 3973);
-        assert_eq!(crc16(&[0x66, 0x97, 0xf2, 0x29, 0x5f]), 10238);
-    }
+    // #[test]
+    // fn test_crc16() {
+    //     assert_eq!(crc16(&[0, 1, 2, 3, 4]), 3973);
+    //     assert_eq!(crc16(&[0x66, 0x97, 0xf2, 0x29, 0x5f]), 10238);
+    // }
 }

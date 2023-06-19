@@ -1,5 +1,5 @@
 #![feature(type_alias_impl_trait)]
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 use core::ptr::null_mut;
 use embassy_executor::Spawner;

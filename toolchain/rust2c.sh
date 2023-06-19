@@ -13,7 +13,7 @@ fi
 
 cd rust
 
-cargo build --color=always --release -Z build-std=core --all-features
+RUSTFLAGS="--emit=llvm-ir" cargo build --color=always --release -Z build-std=core --all-features --target thumbv6m-none-eabi
 
 for i in target/thumbv6m-none-eabi/release/deps/*.ll; do
   bname="${i%.*}"

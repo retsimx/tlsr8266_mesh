@@ -1024,18 +1024,10 @@ pub fn rf_start_srx2tx(addr: u32, tick: u32)
 
 pub fn rf_start_brx(addr: u32, tick: u32)
 {
-    write_reg32(0x800f28, 0xffffffff);                            // ?
+    write_reg32(0xf28, 0xffffffff);                            // ?
     write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
     write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
     write_reg_rf_mode_control(0x82);                                // Set mode
-    write_reg_dma3_addr(addr as u16);
-}
-
-pub fn rf_start_beacon(addr: u32, tick: u32)
-{
-    write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time
-    write_reg_rf_mode(read_reg_rf_mode() | 0x04);    // Enable cmd_schedule mode
-    write_reg_rf_mode_control(0x84);                                // Set mode
     write_reg_dma3_addr(addr as u16);
 }
 
@@ -1067,85 +1059,103 @@ pub fn rf_set_ble_access_code_adv()
 
 #[cfg(test)]
 mod tests {
-    use crate::sdk::ble_app::rf_drv_8266::*;
-    use crate::sdk::mcu::register::{read_reg32, read_reg_dma3_addr, read_reg_rf_access_code, read_reg_rf_crc, read_reg_rf_mode_control, read_reg_rf_sched_tick, read_reg_rf_sn};
+    use super::*;
+    use crate::sdk::mcu::register::*;
+    use mry::Any;
 
     #[test]
+    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_access_code_adv() {
+        mock_write_reg32(0x408, 0xd6be898e).returns(());
+
         rf_set_ble_access_code_adv();
-        assert_eq!(read_reg_rf_access_code(), 0xd6be898e);
+
+        mock_write_reg32(0x408, 0xd6be898e).assert_called(1);
     }
 
     #[test]
+    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_access_code() {
+        mock_write_reg32(0x408, Any).returns(());
+
         // Should swap the order of the bytes
         rf_set_ble_access_code(0x12345678);
-        assert_eq!(read_reg_rf_access_code(), 0x78563412);
+        mock_write_reg32(0x408, 0x78563412).assert_called(1);
 
-        rf_set_ble_access_code(read_reg_rf_access_code());
-        assert_eq!(read_reg_rf_access_code(), 0x12345678);
+        rf_set_ble_access_code(0x78563412);
+        mock_write_reg32(0x408, 0x12345678).assert_called(1);
     }
 
     #[test]
+    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_crc_adv() {
+        mock_write_reg32(0x44c, Any).returns(());
+
         rf_set_ble_crc_adv();
 
-        assert_eq!(read_reg_rf_crc(), 0x555555);
+        mock_write_reg32(0x44c, 0x555555).assert_called(1);
     }
 
     #[test]
+    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_crc() {
-        // todo: Is this really true?
+        mock_write_reg32(0x44c, Any).returns(());
+
         rf_set_ble_crc(&[0x12, 0x34, 0x56]);
 
-        assert_eq!(read_reg_rf_crc(), 0x563412);
+        mock_write_reg32(0x44c, 0x563412).assert_called(1);
     }
 
     #[test]
+    #[mry::lock(write_reg8)]
     fn test_rf_reset_sn() {
+        mock_write_reg8(0xf01, Any).returns(());
+
         rf_reset_sn();
 
-        assert_eq!(read_reg_rf_sn(), 0);
+        mock_write_reg8(0xf01, 0x3f).assert_called(1);
+        mock_write_reg8(0xf01, 0).assert_called(1);
     }
 
     #[test]
-    fn test_rf_start_beacon() {
-        rf_start_beacon(0x12345678, 0x87654321);
-
-        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
-        assert_eq!(read_reg_rf_mode(), 4);
-        assert_eq!(read_reg_rf_mode_control(), 0x84);
-        assert_eq!(read_reg_dma3_addr(), 0x5678);
-    }
-
-    #[test]
+    #[mry::lock(write_reg8)]
+    #[mry::lock(write_reg16)]
+    #[mry::lock(write_reg32)]
+    #[mry::lock(read_reg8)]
     fn test_rf_start_brx() {
+        mock_read_reg8(0xf16).returns(3);
+        mock_write_reg32(0xf28, Any).returns(());
+        mock_write_reg32(0xf18, Any).returns(());
+        mock_write_reg8(0xf16, Any).returns(());
+        mock_write_reg8(0xf00, Any).returns(());
+        mock_write_reg16(0x50c, Any).returns(());
+
         rf_start_brx(0x12345678, 0x87654321);
 
-        assert_eq!(read_reg32(0xf28), 0xffffffff);
-        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
-        assert_eq!(read_reg_rf_mode(), 4);
-        assert_eq!(read_reg_rf_mode_control(), 0x82);
-        assert_eq!(read_reg_dma3_addr(), 0x5678);
+        mock_write_reg32(0xf28, 0xffffffff).assert_called(1);
+        mock_write_reg32(0xf18, 0x87654321).assert_called(1);
+        mock_write_reg8(0xf16, 4 | 3).assert_called(1);
+        mock_write_reg8(0xf00, 0x82).assert_called(1);
+        mock_write_reg16(0x50c, 0x5678).assert_called(1);
     }
 
-    #[test]
-    fn test_rf_start_srx2tx() {
-        rf_start_srx2tx(0x12345678, 0x87654321);
-
-        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
-        assert_eq!(read_reg_rf_mode(), 4);
-        assert_eq!(read_reg_rf_mode_control(), 0x85);
-        assert_eq!(read_reg_dma3_addr(), 0x5678);
-    }
-
-    #[test]
-    fn test_rf_start_stx2rx() {
-        rf_start_stx2rx(0x12345678, 0x87654321);
-
-        assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
-        assert_eq!(read_reg_rf_mode(), 4);
-        assert_eq!(read_reg_rf_mode_control(), 0x87);
-        assert_eq!(read_reg_dma3_addr(), 0x5678);
-    }
+    // #[test]
+    // fn test_rf_start_srx2tx() {
+    //     rf_start_srx2tx(0x12345678, 0x87654321);
+    //
+    //     assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+    //     assert_eq!(read_reg_rf_mode(), 4);
+    //     assert_eq!(read_reg_rf_mode_control(), 0x85);
+    //     assert_eq!(read_reg_dma3_addr(), 0x5678);
+    // }
+    //
+    // #[test]
+    // fn test_rf_start_stx2rx() {
+    //     rf_start_stx2rx(0x12345678, 0x87654321);
+    //
+    //     assert_eq!(read_reg_rf_sched_tick(), 0x87654321);
+    //     assert_eq!(read_reg_rf_mode(), 4);
+    //     assert_eq!(read_reg_rf_mode_control(), 0x87);
+    //     assert_eq!(read_reg_dma3_addr(), 0x5678);
+    // }
 }

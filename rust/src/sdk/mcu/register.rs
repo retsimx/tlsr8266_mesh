@@ -232,9 +232,9 @@ pub enum FLD_WAKEUP_SRC {
 }
 
 regrw!(reg_pwdn_ctrl, 0x6f, 8);
-pub enum FLD_PWDN_CTRL_ {
-    REBOOT = BIT!(5),
-    SLEEP = BIT!(7),
+pub enum FldPwdnCtrl {
+    Reboot = BIT!(5),
+    Sleep = BIT!(7),
 }
 
 regrw!(reg_fhs_sel, 0x70, 8);

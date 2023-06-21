@@ -1,13 +1,11 @@
-use crate::config::{FLASH_ADR_LIGHT_NEW_FW, OTA_LED};
+use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::register::{
-    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl,
-};
+use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::{size_of_val, MaybeUninit};
 use core::ptr::addr_of;
@@ -54,39 +52,46 @@ impl OtaManager {
             }
         }
 
-        // First configure the system clock
+        // First configure the system clock. This lets delays work as expected for reading/writing
+        // flash
         write_reg_rst1(0);
         write_reg_clk_en1(0xff);
         write_reg_system_tick_ctrl(0x01);
         irq_disable();
 
-        #[allow(invalid_value)]
-            let mut buff: [u8; 256] = unsafe { MaybeUninit::uninit().assume_init() };
-
+        // Read the first page of the new firmware
+        let mut buff: [u8; PAGE_SIZE as usize] = [0; PAGE_SIZE as usize];
         flash_read_page(FLASH_ADR_LIGHT_NEW_FW, PAGE_SIZE, buff.as_mut_ptr());
-        let n = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
-        let mut i = 0;
-        while i < n {
-            if (i & 0xfff) == 0 {
-                flash_erase_sector(i);
+
+        // Get the size of the binary being copied
+        let new_fw_size = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
+
+        let mut current_addr = 0;
+        while current_addr < new_fw_size {
+            // Check if we need to clear the next sector
+            if current_addr % FLASH_SECTOR_SIZE == 0 {
+                flash_erase_sector(current_addr);
             }
 
+            // Read the page at this address from the new firmware
             flash_read_page(
-                FLASH_ADR_LIGHT_NEW_FW + i,
+                FLASH_ADR_LIGHT_NEW_FW + current_addr,
                 PAGE_SIZE,
                 buff.as_mut_ptr(),
             );
-            flash_write_page(i, PAGE_SIZE, buff.as_mut_ptr());
 
-            i += PAGE_SIZE;
+            // Write the page to the real firmware
+            flash_write_page(current_addr, PAGE_SIZE, buff.as_mut_ptr());
+
+            current_addr += PAGE_SIZE;
         }
 
+        // Clear the OTA ready flag
         buff[0] = 0;
-
-        flash_write_page(OtaManager::FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr()); //clear OTA flag
+        flash_write_page(OtaManager::FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
         // Force reboot
-        write_reg_pwdn_ctrl(0x20);
+        write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot as u8);
 
         loop {}
     }

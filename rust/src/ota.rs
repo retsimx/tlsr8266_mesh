@@ -7,7 +7,7 @@ use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GP
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
-use core::mem::{size_of_val, MaybeUninit};
+use core::mem::{size_of_val};
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU16, Ordering};
 use crate::{app};
@@ -69,7 +69,7 @@ impl OtaManager {
         let mut current_addr = 0;
         while current_addr < new_fw_size {
             // Check if we need to clear the next sector
-            if current_addr % FLASH_SECTOR_SIZE == 0 {
+            if current_addr % FLASH_SECTOR_SIZE as u32 == 0 {
                 flash_erase_sector(current_addr);
             }
 

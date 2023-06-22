@@ -24,6 +24,7 @@ mod embassy;
 mod light_manager;
 mod uart_manager;
 pub mod version;
+mod state;
 
 static mut APP: App = App::default();
 static mut SPAWNER: *const Spawner = null_mut();
@@ -49,7 +50,6 @@ fn set_pw2(on: bool) {
     gpio_write(PWM_B as u32, if on {1} else {0});
 }
 
-#[no_mangle]
 pub fn blinken_testboard() {
     for idx in 0..6 {
         if idx % 2 == 0 {

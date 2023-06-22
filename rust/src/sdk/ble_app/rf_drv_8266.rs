@@ -1,3 +1,4 @@
+use core::cell::{RefCell, RefMut};
 use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, null_mut};
 use core::slice;
@@ -7,11 +8,9 @@ use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retri
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
-use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
 use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_p_slave_status_buffer, get_slave_link_interval, get_slave_status_buffer_num, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
-use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -24,6 +23,7 @@ use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_access_code, write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
+use crate::state::{IrqState, SHARED_STATE};
 use crate::version::BUILD_VERSION;
 
 const RF_FAST_MODE: bool = true;
@@ -390,12 +390,17 @@ pub fn rf_stop_trx() {
     write_reg_rf_mode_control(0x80);            // stop
 }
 
-pub_mut!(light_rx_wptr, u32, 0);
+
 pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
 
-    write_reg_dma2_addr(addr_of!((*get_light_rx_buff())[*get_light_rx_wptr() as usize]) as u16);
+    SHARED_STATE.lock(|shared_state| {
+        let shared_state = shared_state.borrow_mut();
+
+        write_reg_dma2_addr(addr_of!(shared_state.light_rx_buff[shared_state.light_rx_wptr]) as u16);
+    });
+
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);
 
@@ -415,16 +420,6 @@ pub unsafe fn blc_ll_init_basic_mcu()
 }
 
 pub_mut!(gAttributes, *mut attribute_t, null_mut());
-pub unsafe fn set_spp_write_cb(func: fn(data: *const PacketAttWrite) -> bool)
-{
-    (*gAttributes.0.offset(21)).w = Some(func);
-}
-
-pub unsafe fn set_spp_ota_write_cb(func: fn(data: *const PacketAttWrite) -> bool)
-{
-    (*gAttributes.0.offset(24)).w = Some(func);
-}
-
 pub_mut!(irq_mask_save, u32, 0);
 pub_mut!(slave_link_state, u32, 0);
 pub_mut!(slave_listen_interval, u32, 0);
@@ -744,7 +739,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut PacketAttWrite) -> bool {
     return true;
 }
 
-fn rf_link_slave_data_write(data: *const PacketAttWrite) -> bool {
+pub fn rf_link_slave_data_write(_: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool {
     if *get_pair_login_ok() && unsafe { pair_dec_packet(data as *mut PacketLlApp) } {
         return rf_link_slave_data_write_no_dec(unsafe { &mut *(data as *mut PacketAttWrite) });
     }
@@ -826,8 +821,6 @@ pub fn rf_link_slave_init(interval: u32)
         set_slave_adv_enable(true);
 
         set_gAttributes(get_gAttributes_def().as_mut_ptr());
-        set_spp_write_cb(rf_link_slave_data_write);
-        set_spp_ota_write_cb(rf_link_slave_data_ota);
 
         retrieve_dev_grp_address();
 

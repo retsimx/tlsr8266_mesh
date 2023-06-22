@@ -1,3 +1,4 @@
+use core::cell::{RefCell, RefMut};
 use crate::config::{DEVICE_NAME, MESH_NAME};
 use crate::sdk::light::*;
 use crate::sdk::service::{
@@ -12,6 +13,9 @@ use crate::{pub_mut, pub_static};
 use crate::version::BUILD_VERSION;
 use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
 use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
+use crate::state::IrqState;
+use crate::ota::rf_link_slave_data_ota;
+use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -196,7 +200,7 @@ static spp_otaname: &[u8] = b"OTA";
 static spp_pairname: &[u8] = b"Pair";
 static spp_devicename: &[u8] = b"DevName";
 
-fn mesh_status_write(p: *const PacketAttWrite) -> bool {
+fn mesh_status_write(mut irq_state: &RefCell<IrqState>, p: *const PacketAttWrite) -> bool {
     if !*get_pair_login_ok() {
         return true;
     }
@@ -219,8 +223,8 @@ pub struct attribute_t {
     pub attrMaxLen: u8,
     pub uuid: *const u8,
     pub pAttrValue: *mut u8,
-    pub w: Option<fn(data: *const PacketAttWrite) -> bool>,
-    pub r: Option<fn(data: *const PacketAttWrite) -> bool>,
+    pub w: Option<fn(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool>,
+    pub r: Option<fn(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool>,
 }
 
 #[macro_export]
@@ -403,7 +407,9 @@ pub_mut!(
             16,
             16,
             TelinkSppDataClient2ServiceUUID,
-            SppDataClient2ServerData
+            SppDataClient2ServerData,
+            Some(rf_link_slave_data_write),
+            None
         ), //value
         attrdef!(
             0,
@@ -414,7 +420,16 @@ pub_mut!(
             spp_Commandname
         ),
         attrdefu!(0, 2, 1, 1, characterUUID, SppDataOtaProp), //prop
-        attrdef!(0, 16, 16, 16, TelinkSppDataOtaUUID, SppDataOtaData), //value
+        attrdef!(
+            0,
+            16,
+            16,
+            16,
+            TelinkSppDataOtaUUID,
+            SppDataOtaData,
+            Some(rf_link_slave_data_ota),
+            None
+        ), //value
         attrdef!(
             0,
             2,

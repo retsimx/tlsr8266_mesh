@@ -1,21 +1,21 @@
-use core::cmp::min;
 use core::{fmt, slice};
+use core::cmp::min;
 use core::fmt::Write;
-use crate::sdk::mcu::analog::analog_write;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::write_reg8;
 use core::panic::PanicInfo;
 use core::ptr::{addr_of, addr_of_mut};
+
 use critical_section::RawRestoreState;
-use heapless::String;
-use crate::{app};
+
+use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
-use crate::sdk::light::{LGT_PANIC_MSG};
-use crate::sdk::mcu::watchdog::wd_clear;
+use crate::sdk::light::LGT_PANIC_MSG;
+use crate::sdk::mcu::analog::analog_write;
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::register::write_reg8;
 use crate::sdk::pm::light_sw_reboot;
 use crate::uart_manager::UartMsg;
 
@@ -245,7 +245,6 @@ pub async fn check_panic_info() {
 
 #[cfg(not(test))]
 #[panic_handler]
-#[no_mangle]
 pub fn panic(info: &PanicInfo) -> ! {
     irq_disable();
 

@@ -590,9 +590,6 @@ pub_mut!(pkt_read_rsp, PacketAttReadRsp, PacketAttReadRsp {
 	value: [0; 22]
 });
 
-pub_mut!(pair_rands, [u8; 8], [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]);
-pub_mut!(pair_randm, [u8; 8], [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]);
-
 /////////////// adv par define ///////////////////////////////////////////////////
 pub_mut!(adv_interval2listen_interval, u16, 4);
 // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
@@ -648,7 +645,6 @@ pub_mut!(st_brige_no, u32, 0);
 pub_mut!(app_cmd_time, u32, 0);
 pub_mut!(mesh_user_cmd_idx, u8, 0);
 pub_mut!(slave_tx_cmd_time, u32, 0);
-pub_mut!(blt_tx_wptr, u8, 0);
 pub_mut!(slave_status_buffer_wptr, u8, 0);
 pub_mut!(slave_status_buffer_rptr, u8, 0);
 pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);

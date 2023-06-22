@@ -1,24 +1,24 @@
+use core::cell::{RefCell, RefMut};
 use core::cmp::min;
 use core::mem::{size_of, transmute};
 use core::ptr::{addr_of, addr_of_mut, null, null_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use crate::{app, BIT, pub_mut, uprintln};
-use crate::common::{dev_addr_with_mac_flag, rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, SYS_CHN_LISTEN, update_ble_parameter_cb};
+use crate::{app, BIT, pub_mut};
+use crate::common::{rf_update_conn_para, set_conn_update_cnt, set_conn_update_successed, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, get_mesh_pair_enable, MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
+use crate::mesh::{get_mesh_node_mask, get_mesh_node_st, MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
 use crate::sdk::ble_app::ble_ll_att::ble_ll_channel_table_calc;
 use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, l2cap_att_handler, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_init, pair_save_key, pair_set_key};
 use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::ble_app::shared_mem::get_blt_tx_fifo;
-use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
+use crate::state::{IrqState, SharedState};
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr, light_mesh_rx_cb};
 
 pub_mut!(slave_timing_update, u32, 0);
@@ -496,7 +496,7 @@ pub fn rf_send_stx_mesh(pkt: &PacketAttCmd) {
     }
 }
 
-pub fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
+pub fn rf_link_slave_data(shared_state: &RefCell<SharedState>, irq_state: &RefCell<IrqState>, packet: &PacketLlData, time: u32) -> bool {
     let rf_len: u8 = packet.rf_len;
     let chanid: u16 = packet.chanid;
 
@@ -538,8 +538,8 @@ pub fn rf_link_slave_data(packet: &PacketLlData, time: u32) -> bool {
                 return false;
             }
         }
-        let (res_pkt, len) = unsafe { l2cap_att_handler(addr_of!(*packet) as *const PacketL2capData) };
-        if res_pkt != null() && !rf_link_add_tx_packet(unsafe { res_pkt as *const PacketAttCmd }, len) {
+        let (res_pkt, len) = unsafe { l2cap_att_handler(irq_state, addr_of!(*packet) as *const PacketL2capData) };
+        if res_pkt != null() && !rf_link_add_tx_packet(shared_state, unsafe { res_pkt as *const PacketAttCmd }, len) {
             set_add_tx_packet_rsp_failed(*get_add_tx_packet_rsp_failed() + 1);
         }
         return false;
@@ -1122,8 +1122,10 @@ pub fn is_add_packet_buf_ready() -> bool
     return (read_reg_dma_tx_wptr() - read_reg_dma_tx_rptr() & 7) < 3;
 }
 
-pub fn rf_link_add_tx_packet(packet: *const PacketAttCmd, size: usize) -> bool
+pub fn rf_link_add_tx_packet(mut shared_state: &RefCell<SharedState>, packet: *const PacketAttCmd, size: usize) -> bool
 {
+    let mut shared_state = shared_state.borrow_mut();
+
     let wptr = read_reg_dma_tx_wptr();
     let rptr = read_reg_dma_tx_rptr();
     let widx = (wptr - rptr) & 7;
@@ -1133,10 +1135,12 @@ pub fn rf_link_add_tx_packet(packet: *const PacketAttCmd, size: usize) -> bool
             write_reg_dma_tx_fifo((*get_pkt_empty()).as_ptr() as u16);
         }
 
-        let idx = (*get_blt_tx_wptr() as usize & 7) * 48;
-        let mut dest = &mut (*get_blt_tx_fifo())[idx..idx + size];
+        let index = shared_state.blt_tx_wptr;
+        shared_state.blt_tx_wptr = (shared_state.blt_tx_wptr + 1) % shared_state.blt_tx_fifo.len();
 
-        dest.copy_from_slice(
+        let mut dest = &mut shared_state.blt_tx_fifo[index];
+
+        dest[..size].copy_from_slice(
             unsafe {
                 slice::from_raw_parts(
                     packet as *const u8,
@@ -1145,14 +1149,13 @@ pub fn rf_link_add_tx_packet(packet: *const PacketAttCmd, size: usize) -> bool
             }
         );
 
-        if idx + size < 0x28 {
-            (*get_blt_tx_fifo())[idx + size..idx + 0x28].fill(0);
+        if size < 48 {
+            dest[size..].fill(0);
         }
 
-        set_blt_tx_wptr(*get_blt_tx_wptr() + 1);
         pair_enc_packet(unsafe { transmute(dest.as_mut_ptr()) });
 
-        write_reg_dma_tx_fifo(dest.as_mut_ptr() as u32 as u16);
+        write_reg_dma_tx_fifo(dest.as_ptr() as u32 as u16);
         return true;
     }
     return false;

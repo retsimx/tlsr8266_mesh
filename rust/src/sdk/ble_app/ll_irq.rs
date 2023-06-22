@@ -1,7 +1,8 @@
+use core::cell::{RefCell, RefMut};
 use core::mem::size_of;
 use core::ptr::{addr_of, null};
 use core::slice;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::{app, uprintln, uprintln_fast};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
@@ -12,10 +13,10 @@ use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_ser
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::ble_app::shared_mem::get_light_rx_buff;
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
 use crate::sdk::mcu::register::{*};
+use crate::state::{IRQ_STATE, IrqState, SHARED_STATE, SharedState};
 use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 fn slave_timing_update_handle()
@@ -54,12 +55,12 @@ fn rf_set_rxmode_mesh_listen()
     set_slave_link_state(4);
 }
 
-fn rf_link_slave_read_status_update()
+fn rf_link_slave_read_status_update(shared_state: &RefCell<SharedState>)
 {
     let mut rptr = *get_slave_status_buffer_rptr();
     while *get_slave_status_buffer_wptr() != rptr {
         rptr = rptr % *get_slave_status_buffer_num();
-        if !rf_link_add_tx_packet(unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
+        if !rf_link_add_tx_packet(shared_state, unsafe { get_p_slave_status_buffer().offset((rptr & 0xff) as isize) } as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
             return;
         }
 
@@ -219,7 +220,7 @@ pub fn irq_st_adv()
     }
 }
 
-pub fn irq_st_bridge()
+pub fn irq_st_bridge(mut shared_state: &RefCell<SharedState>, mut irq_state: &RefCell<IrqState>)
 {
     static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
 
@@ -279,7 +280,7 @@ pub fn irq_st_bridge()
     }
 
     if *get_rf_slave_ota_busy() {
-        app().ota_manager.rf_link_slave_ota_finish_handle();
+        app().ota_manager.rf_link_slave_ota_finish_handle(shared_state);
 
         if CLOCK_SYS_CLOCK_1US * 1000000 < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed) {
             RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
@@ -305,19 +306,19 @@ pub fn irq_st_bridge()
     }
 
     if *get_slave_read_status_busy() != 0 {
-        rf_link_slave_read_status_update();
+        rf_link_slave_read_status_update(shared_state);
     }
 
     if is_add_packet_buf_ready() {
-        let pair_proc_result = pair_proc();
+        let pair_proc_result = pair_proc(irq_state);
         if pair_proc_result != null() {
-            rf_link_add_tx_packet(pair_proc_result as *const PacketAttCmd, size_of::<PacketAttReadRsp>());
+            rf_link_add_tx_packet(shared_state, pair_proc_result as *const PacketAttCmd, size_of::<PacketAttReadRsp>());
         }
     }
     mesh_node_flush_status();
     if is_add_packet_buf_ready() && !app().uart_manager.started() {
         if mesh_node_report_status(&mut (*get_pkt_light_report()).value.val[3..], 10 / MESH_NODE_ST_VAL_LEN as usize) != 0 {
-            rf_link_add_tx_packet(get_pkt_light_report_addr(), size_of::<PacketAttCmd>());
+            rf_link_add_tx_packet(shared_state, get_pkt_light_report_addr(), size_of::<PacketAttCmd>());
         }
     }
 
@@ -385,43 +386,56 @@ fn irq_light_slave_tx()
     write_reg_rf_irq_status(2);
 }
 
-fn irq_light_slave_rx()
+fn irq_light_slave_rx(mut shared_state: &RefCell<SharedState>, mut irq_state: &RefCell<IrqState>)
 {
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
 
-    let rx_index = *get_light_rx_wptr() as usize;
-    set_light_rx_wptr((*get_light_rx_wptr() + 1) & 3);
+    let rx_index;
+    let rx_time;
+    let dma_len;
+    {
+        let mut shared_state_mut = shared_state.borrow_mut();
 
-    let entry = &mut (*get_light_rx_buff())[rx_index];
+        rx_index = shared_state_mut.light_rx_wptr;
+        shared_state_mut.light_rx_wptr = (shared_state_mut.light_rx_wptr + 1) % shared_state_mut.light_rx_buff.len();
 
-    if read_reg_rf_rx_status() == 0x0b {
-        write_reg_rf_irq_status(1);
-        return;
-    }
-
-    write_reg_dma2_addr(addr_of!((*get_light_rx_buff())[*get_light_rx_wptr() as usize & 3]) as u16);
-
-    write_reg_rf_irq_status(1);
-
-    set_light_rcv_rssi(entry.rssi);
-
-    let rx_time = entry.rx_time;
-    let dma_len = entry.dma_len;
-
-    if dma_len == 1 {
-        if T_RX_LAST.load(Ordering::Relaxed) == rx_time {
-            rf_stop_trx();
-            rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
+        if read_reg_rf_rx_status() == 0x0b {
+            write_reg_rf_irq_status(1);
             return;
         }
-    } else if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40 {
+
+        write_reg_dma2_addr(addr_of!(shared_state_mut.light_rx_buff[shared_state_mut.light_rx_wptr]) as u16);
+
+        let entry = &mut shared_state_mut.light_rx_buff[rx_index];
+
+        write_reg_rf_irq_status(1);
+
+        set_light_rcv_rssi(entry.rssi);
+
+        rx_time = entry.rx_time;
+        dma_len = entry.dma_len;
+
+        if dma_len == 1 {
+            if T_RX_LAST.load(Ordering::Relaxed) == rx_time {
+                rf_stop_trx();
+                rf_start_stx2rx((*get_pkt_empty()).as_ptr() as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
+                return;
+            }
+
+            entry.dma_len = 1;
+            return;
+        }
+    }
+
+    let entry = shared_state.borrow().light_rx_buff[rx_index];
+
+    if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && unsafe { *((addr_of!(entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40 {
         let packet = addr_of!(entry.rx_time);
         let mut return_fn = || {
             T_RX_LAST.store(rx_time, Ordering::Relaxed);
             if *get_slave_link_state() < 6 {
                 rf_link_rc_data(unsafe { *(packet as *mut MeshPkt) }, true);
             }
-            entry.dma_len = 1;
             return;
         };
 
@@ -451,7 +465,6 @@ fn irq_light_slave_rx()
                     write_reg_dma3_addr(get_pkt_scan_rsp_addr() as u16);
                     write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
 
-                    entry.dma_len = 1;
                     return;
                 }
 
@@ -466,7 +479,6 @@ fn irq_light_slave_rx()
 
                     rf_link_slave_connect(unsafe { &*(packet as *const PacketLlInit) }, rx_time);
 
-                    entry.dma_len = 1;
                     return;
                 }
 
@@ -491,12 +503,11 @@ fn irq_light_slave_rx()
             set_light_conn_sn_master(master_sn);
             set_slave_connected_tick(read_reg_system_tick());
             set_slave_link_connected(true);
-            rf_link_slave_data(unsafe { &*(packet as *const PacketLlData) }, rx_time);
+            rf_link_slave_data(shared_state, irq_state, unsafe { &*(packet as *const PacketLlData) }, rx_time);
         }
         if *get_slave_window_size() != 0 {
             if *get_slave_timing_update2_flag() != 0 {
                 if 0x40000001 > *get_slave_timing_update2_ok_time() - read_reg_system_tick() {
-                    entry.dma_len = 1;
                     return;
                 }
                 set_slave_timing_update2_flag(0);
@@ -505,7 +516,6 @@ fn irq_light_slave_rx()
 
             set_slave_next_connect_tick(rx_time + *get_slave_link_interval() - CLOCK_SYS_CLOCK_1US * 1250);
         }
-        entry.dma_len = 1;
         return;
     }
 
@@ -515,59 +525,84 @@ fn irq_light_slave_rx()
         write_reg8(0x80050f, 0);
         rf_stop_trx();
     }
+}
 
-    entry.dma_len = 1;
+static IS_IRQ_MODE: AtomicBool = AtomicBool::new(false);
+
+pub struct IrqTracker {}
+
+impl IrqTracker {
+    pub fn new() -> Self {
+        IS_IRQ_MODE.store(true, Ordering::Relaxed);
+        return IrqTracker {}
+    }
+
+    pub fn in_irq() -> bool {
+        IS_IRQ_MODE.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for IrqTracker {
+    fn drop(&mut self) {
+        IS_IRQ_MODE.store(false, Ordering::Relaxed);
+    }
 }
 
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]
 extern "C" fn irq_handler() {
-    let irq = read_reg_rf_irq_status();
-    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
-        irq_light_slave_rx();
-    }
+    let _tracker = IrqTracker::new();
 
-    if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
-        irq_light_slave_tx();
-    }
+    SHARED_STATE.lock(|shared_state| {
+        IRQ_STATE.lock(|irq_state| {
+            let irq = read_reg_rf_irq_status();
+            if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
+                irq_light_slave_rx(shared_state, irq_state);
+            }
 
-    let irq_source = read_reg_irq_src();
-    if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
-        write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
-        match *get_p_st_handler() {
-            IrqHandlerStatus::Adv => irq_st_adv(),
-            IrqHandlerStatus::Bridge => irq_st_bridge(),
-            IrqHandlerStatus::Rx => irq_st_ble_rx(),
-            IrqHandlerStatus::Listen => irq_st_listen(),
-            IrqHandlerStatus::None => {}
-        }
-    }
+            if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
+                irq_light_slave_tx();
+            }
 
-    // This timer is configured to run once per second to check if the internal clock has overflowed.
-    // this is a workaround in case there are no 'clock_time64' calls between overflows
-    if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
-        write_reg_tmr_sta(FLD_TMR_STA::TMR0 as u8);
-
-        clock_time64();
-
-        if *get_rf_slave_ota_busy_mesh() {
-            let sot = *get_rf_slave_ota_timeout_s();
-            if sot != 0 {
-                set_rf_slave_ota_timeout_s(sot - 1);
-                if sot - 1 == 0
-                {
-                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*get_rf_slave_ota_finished_flag());
+            let irq_source = read_reg_irq_src();
+            if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
+                write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
+                match *get_p_st_handler() {
+                    IrqHandlerStatus::Adv => irq_st_adv(),
+                    IrqHandlerStatus::Bridge => irq_st_bridge(shared_state, irq_state),
+                    IrqHandlerStatus::Rx => irq_st_ble_rx(),
+                    IrqHandlerStatus::Listen => irq_st_listen(),
+                    IrqHandlerStatus::None => {}
                 }
             }
-        }
-    }
 
-    // This timer triggers the transition step of the light so that the transition is smooth
-    if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
-        write_reg_tmr_sta(FLD_TMR_STA::TMR1 as u8);
+            // This timer is configured to run once per second to check if the internal clock has overflowed.
+            // this is a workaround in case there are no 'clock_time64' calls between overflows
+            if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
+                write_reg_tmr_sta(FLD_TMR_STA::TMR0 as u8);
 
-        app().light_manager.transition_step();
-    }
+                clock_time64();
 
-    app().uart_manager.check_irq();
+                if *get_rf_slave_ota_busy_mesh() {
+                    let sot = *get_rf_slave_ota_timeout_s();
+                    if sot != 0 {
+                        set_rf_slave_ota_timeout_s(sot - 1);
+                        if sot - 1 == 0
+                        {
+                            app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*get_rf_slave_ota_finished_flag());
+                        }
+                    }
+                }
+            }
+
+            // This timer triggers the transition step of the light so that the transition is smooth
+            if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
+                write_reg_tmr_sta(FLD_TMR_STA::TMR1 as u8);
+
+                app().light_manager.transition_step();
+            }
+
+            app().uart_manager.check_irq();
+        });
+    });
 }

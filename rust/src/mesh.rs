@@ -1,3 +1,4 @@
+use core::cell::RefCell;
 use core::mem::size_of;
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
@@ -12,6 +13,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
+use crate::state::SharedState;
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
@@ -163,7 +165,7 @@ impl MeshManager {
         self.mesh_pair_timeout = MESH_PAIR_TIMEOUT;
     }
 
-    pub fn mesh_pair_proc_effect(&mut self) {
+    pub fn mesh_pair_proc_effect(&mut self, shared_state: &RefCell<SharedState>) {
         if self.effect_new_mesh != 0
             || (self.effect_new_mesh_delay_time != 0
             && (clock_time_exceed(
@@ -171,7 +173,7 @@ impl MeshManager {
             self.mesh_pair_cmd_interval * 1000,
         )))
         {
-            self.save_effect_new_mesh();
+            self.save_effect_new_mesh(shared_state);
             self.effect_new_mesh = 0;
             self.effect_new_mesh_delay_time = 0;
         }
@@ -230,7 +232,7 @@ impl MeshManager {
         }
     }
 
-    fn mesh_cmd_notify(&self, op: u8, p: &[u8], dev_adr: u16) -> i32 {
+    fn mesh_cmd_notify(&self, shared_state: &RefCell<SharedState>, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
         if *get_slave_link_connected() && *get_pair_login_ok() {
             if p.len() > 10 {
@@ -257,21 +259,19 @@ impl MeshManager {
 
             pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
-            critical_section::with(|_| {
-                if is_add_packet_buf_ready() {
-                    if rf_link_add_tx_packet(addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
-                        err = 0;
-                    }
+            if is_add_packet_buf_ready() {
+                if rf_link_add_tx_packet(shared_state, addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
+                    err = 0;
                 }
-            });
+            }
         }
 
         return err;
     }
 
-    fn mesh_pair_complete_notify(&self) -> i32 {
+    fn mesh_pair_complete_notify(&self, shared_state: &RefCell<SharedState>) -> i32 {
         let par = [CMD_NOTIFY_MESH_PAIR_END];
-        return self.mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &par, *get_device_address());
+        return self.mesh_cmd_notify(shared_state, LGT_CMD_MESH_CMD_NOTIFY, &par, *get_device_address());
     }
 
     fn safe_effect_new_mesh_finish(&mut self) {
@@ -285,9 +285,9 @@ impl MeshManager {
         set_pair_setting_flag(PairState::PairSetted);
     }
 
-    fn save_effect_new_mesh(&mut self) {
+    fn save_effect_new_mesh(&mut self, shared_state: &RefCell<SharedState>) {
         if self.default_mesh_time_ref != 0 || *get_get_mac_en() {
-            self.mesh_pair_complete_notify();
+            self.mesh_pair_complete_notify(shared_state);
             sleep_us(1000);
             /* Switch to normal mesh */
             pair_load_key();
@@ -307,7 +307,7 @@ impl MeshManager {
             get_pair_ltk()[0..16].copy_from_slice(&get_pair_ltk_mesh()[0..16]);
         }
 
-        self.mesh_pair_complete_notify();
+        self.mesh_pair_complete_notify(shared_state);
 
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();

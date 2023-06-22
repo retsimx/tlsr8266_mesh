@@ -1,21 +1,24 @@
+use core::cell::RefCell;
+use core::mem::size_of_val;
+use core::ptr::addr_of;
+use core::sync::atomic::{AtomicU16, Ordering};
+
+use crate::app;
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
+use crate::main_light::get_buff_response;
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
 use crate::sdk::common::bit::ONES_32;
+use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
+use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
+use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
-use core::mem::{size_of_val};
-use core::ptr::addr_of;
-use core::sync::atomic::{AtomicU16, Ordering};
-use crate::{app};
-use crate::main_light::get_buff_response;
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
-use crate::sdk::common::compat::array4_to_int;
-use crate::sdk::light::*;
 use crate::sdk::pm::light_sw_reboot;
+use crate::state::{IrqState, SharedState};
 
 pub struct OtaManager {
     ota_rcv_last_idx: u16,
@@ -344,7 +347,7 @@ impl OtaManager {
         self.rf_slave_ota_finished_time = clock_time();
     }
 
-    pub fn rf_link_slave_ota_finish_handle(&mut self) // poll when ota busy in bridge
+    pub fn rf_link_slave_ota_finish_handle(&mut self, shared_state: &RefCell<SharedState>) // poll when ota busy in bridge
     {
         self.rf_link_slave_data_ota_save();
 
@@ -355,7 +358,7 @@ impl OtaManager {
             if 0 == self.terminate_cnt && *get_rf_slave_ota_terminate_flag() {
                 if is_add_packet_buf_ready() {
                     self.terminate_cnt = 6;
-                    rf_link_add_tx_packet(pkt_terminate.as_ptr() as *const PacketAttCmd, pkt_terminate.len());
+                    rf_link_add_tx_packet(shared_state, pkt_terminate.as_ptr() as *const PacketAttCmd, pkt_terminate.len());
                 }
             }
 
@@ -392,7 +395,7 @@ impl OtaManager {
     }
 }
 
-pub fn rf_link_slave_data_ota(data: *const PacketAttWrite) -> bool {
+pub fn rf_link_slave_data_ota(_: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool {
     app().ota_manager.rf_link_slave_data_ota(unsafe { &*(data as *const PacketAttData) });
 
     return true;

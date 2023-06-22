@@ -23,6 +23,7 @@ use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tm
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
+use crate::state::SHARED_STATE;
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use crate::version::BUILD_VERSION;
 
@@ -235,7 +236,10 @@ fn light_user_func() {
     factory_reset_cnt_check();
 
     app().light_manager.check_light_state_save();
-    app().mesh_manager.mesh_pair_proc_effect();
+
+    SHARED_STATE.lock(|shared_state| {
+        app().mesh_manager.mesh_pair_proc_effect(shared_state);
+    });
 }
 
 pub fn main_loop() {

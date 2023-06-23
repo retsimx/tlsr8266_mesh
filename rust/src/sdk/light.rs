@@ -15,10 +15,6 @@ pub_mut!(pair_config_mesh_name, [u8; 16], [0; 16]);
 pub_mut!(pair_config_mesh_pwd, [u8; 16], [0; 16]);
 pub_mut!(pair_config_mesh_ltk, [u8; 16], [0; 16]);
 
-pub_mut!(p_adv_pri_data, *const AdvPrivate, null());
-pub_mut!(p_adv_rsp_data, *const AdvRspPrivate, null_mut());
-pub_mut!(adv_private_data_len, u8, 0);
-
 pub_mut!(security_enable, bool, false);
 pub_mut!(not_need_login, bool, false);
 pub_mut!(pair_login_ok, bool, false);

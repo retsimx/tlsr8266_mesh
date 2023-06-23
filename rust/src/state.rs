@@ -1,7 +1,8 @@
 use core::cell::RefCell;
 use embassy_sync::blocking_mutex::{CriticalSectionMutex};
+use crate::config::VENDOR_ID;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData};
+use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData};
 
 #[repr(align(4))]
 pub struct State {
@@ -30,6 +31,9 @@ pub struct State {
     pub mesh_pair_enable: bool,
     pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
     pub pkt_user_cmd: MeshPkt,
+
+    pub adv_pri_data: AdvPrivate,
+    pub adv_rsp_pri_data: AdvRspPrivate
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -103,5 +107,20 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         ttl: 0,
         internal_par2: [0; 4],
         no_use: [0; 4]
+    },
+
+    adv_pri_data: AdvPrivate {
+        manufacture_id: VENDOR_ID,
+        mesh_product_uuid: VENDOR_ID,
+        mac_address: 0
+    },
+    adv_rsp_pri_data: AdvRspPrivate {
+        manufacture_id: VENDOR_ID,
+        mesh_product_uuid: VENDOR_ID,
+        mac_address: 0,
+        product_uuid: 0x1234,
+        status: 0x01,
+        device_address: 0,
+        rsv: [0; 16]
     }
 }));

@@ -1,19 +1,19 @@
 use core::cell::RefCell;
 use core::mem::size_of;
-use core::ptr::{addr_of, addr_of_mut, null};
+use core::ptr::{addr_of, null};
 use core::slice;
 
 use embassy_time::{Duration, Timer};
 use heapless::Deque;
 
-use crate::{app, pub_mut, SPAWNER};
+use crate::{app, SPAWNER};
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{AppCmdValue, get_device_address, MeshPkt};
+use crate::sdk::light::{AppCmdValue, get_device_address};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::state::{STATE, State};

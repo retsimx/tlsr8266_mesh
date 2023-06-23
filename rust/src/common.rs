@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use core::cmp::min;
+use core::mem::size_of;
 use core::ptr::addr_of;
 use core::slice;
 
@@ -274,7 +275,7 @@ pub fn pair_update_key(state: &RefCell<State>)
     let name_len = min(state.borrow().max_mesh_name_len, name_len);
 
     rf_link_slave_set_adv_mesh_name(&(*get_pair_nn())[0..name_len as usize]);
-    rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(*get_p_adv_pri_data() as *const u8, *get_adv_private_data_len() as usize) });
+    rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(state.borrow().adv_pri_data) as *const u8, size_of::<AdvPrivate>()) });
 }
 
 pub fn pair_load_key(state: &RefCell<State>)

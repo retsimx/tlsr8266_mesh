@@ -1,18 +1,19 @@
 use core::cell::RefCell;
 use core::mem::size_of;
+use core::ptr::addr_of;
+
+use crate::{app, BIT, uprintln};
+use crate::common::{access_code, mesh_node_init, pair_load_key};
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
-use crate::sdk::drivers::flash::flash_write_page;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
-use core::ptr::addr_of;
-use crate::{app, BIT, uprintln, uprintln_fast};
-use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
+use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, write_reg_rf_irq_status};
 use crate::state::{State, STATE};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;

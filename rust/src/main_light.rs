@@ -22,9 +22,8 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
-use crate::sdk::service::*;
 use crate::state::{State, STATE};
-use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
+use crate::vendor_light::{vendor_set_adv_data};
 use crate::version::BUILD_VERSION;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
@@ -90,10 +89,6 @@ fn light_init_default(state: &RefCell<State>) {
 
     get_pair_config_mesh_ltk()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
-    set_p_adv_pri_data(get_adv_pri_data());
-    set_adv_private_data_len(size_of::<AdvPrivate>() as u8);
-    set_p_adv_rsp_data(get_adv_rsp_pri_data());
-
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
 
@@ -128,7 +123,7 @@ pub fn user_init(state: &RefCell<State>) {
 
     factory_reset_handle();
 
-    vendor_set_adv_data();
+    vendor_set_adv_data(state);
 
     app().light_manager.device_status_update(state);
     app().mesh_manager.mesh_security_enable(true);

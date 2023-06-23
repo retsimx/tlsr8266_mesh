@@ -17,7 +17,6 @@ use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::state::{State, STATE};
-use crate::vendor_light::{get_adv_rsp_pri_data, get_adv_rsp_pri_data_addr};
 
 fn slave_timing_update_handle()
 {
@@ -455,11 +454,11 @@ fn irq_light_slave_rx(state: &RefCell<State>)
                     write_reg_rf_mode_control(0x85);                        // single TX
                     T_RX_LAST.store(rx_time, Ordering::Relaxed);
 
-                    (*get_adv_rsp_pri_data()).device_address = unsafe { *get_device_address_addr() };
+                    state.borrow_mut().adv_rsp_pri_data.device_address = unsafe { *get_device_address_addr() };
                     (*get_pkt_scan_rsp()).data[0] = 0x1e;
                     (*get_pkt_scan_rsp()).data[1] = 0xff;
                     (*get_pkt_scan_rsp()).data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
-                        unsafe { slice::from_raw_parts(get_adv_rsp_pri_data_addr() as *const u8, size_of::<AdvRspPrivate>()) }
+                        unsafe { slice::from_raw_parts(addr_of!(state.borrow().adv_rsp_pri_data) as *const u8, size_of::<AdvRspPrivate>()) }
                     );
                     (*get_pkt_scan_rsp()).dma_len = 0x27;
                     (*get_pkt_scan_rsp()).rf_len = 0x25;

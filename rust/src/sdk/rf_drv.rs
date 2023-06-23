@@ -1,12 +1,12 @@
+use core::cell::RefCell;
 use core::ptr::addr_of;
-use crate::common::{get_set_uuid_flag, set_set_uuid_flag};
-use crate::main_light::rf_link_light_event_callback;
-use crate::{uprintln};
+
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
+use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::ble_app::rf_drv_8266::{get_pkt_adv, get_user_data, get_user_data_len};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_group_address, PacketL2capData, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
-use crate::sdk::mcu::register::write_reg32;
+use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, get_dev_address_next_pos, get_dev_grp_next_pos, get_device_address, get_device_address_addr, get_group_address, set_dev_address_next_pos, set_dev_grp_next_pos, set_device_address};
+use crate::state::State;
 
 pub enum RF_POWER {
     RF_POWER_8dBm = 0,
@@ -109,11 +109,11 @@ pub fn rf_link_slave_set_adv_private_data(data: &[u8])
     }
 }
 
-pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
+pub fn rf_link_slave_set_adv_uuid_data(state: &RefCell<State>, uuid_data: &[u8])
 {
     let mut rf_len = get_pkt_adv().rf_len as usize;
     if uuid_data.len() as i8 <= 0x25 - rf_len as i8 {
-        if *get_set_uuid_flag() == false {
+        if state.borrow().set_uuid_flag == false {
             rf_len = rf_len - 9;
 
             let mut tmp_data = [0u8; 31];
@@ -122,7 +122,7 @@ pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
             get_pkt_adv().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
             get_pkt_adv().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
 
-            set_set_uuid_flag(true);
+            state.borrow_mut().set_uuid_flag = true;
             get_pkt_adv().rf_len += uuid_data.len() as u8;
             get_pkt_adv().dma_len += uuid_data.len() as u32;
         } else {
@@ -151,7 +151,7 @@ pub fn dev_grp_flash_clean()
     return;
 }
 
-pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
+pub fn rf_link_add_dev_addr(state: &RefCell<State>, dev_id: u16) -> bool
 {
   let mut tmp_dev_id = dev_id;
   let mut result = false;
@@ -169,7 +169,7 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
     flash_write_page(tmp_dev_id as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(write_buffer) as *const u8);
     set_dev_grp_next_pos(*get_dev_grp_next_pos() + 2);
     set_dev_address_next_pos(*get_dev_grp_next_pos());
-    rf_link_light_event_callback(0xc6);
+    rf_link_light_event_callback(state, 0xc6);
     result = true;
   }
   return result;

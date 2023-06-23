@@ -1,22 +1,19 @@
-use core::cell::{RefCell, RefMut};
+use core::cell::RefCell;
 use core::ptr::{addr_of, addr_of_mut, null_mut};
 use core::slice;
-use embassy_sync::blocking_mutex::NoopMutex;
 
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
-use crate::main_light::{get_max_mesh_name_len, rf_link_light_event_callback};
-use crate::mesh::{get_get_mac_en, get_mesh_pair_enable, set_get_mac_en};
-use crate::pub_mut;
+use crate::main_light::{rf_link_light_event_callback};
 use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
 use crate::sdk::ble_app::rf_drv_8266::get_mac_id;
 use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::state::IrqState;
+use crate::state::State;
 
 pub unsafe fn pair_dec_packet(ps: *mut PacketLlApp) -> bool {
     let mut result = true;
-    if *get_security_enable() != false {
+    if *get_security_enable() {
         (*get_pair_ivm())[5..5 + 3].copy_from_slice(&(*ps).app_cmd_v.sno);
 
         result = aes_att_decryption_packet(
@@ -30,25 +27,24 @@ pub unsafe fn pair_dec_packet(ps: *mut PacketLlApp) -> bool {
     return result;
 }
 
-pub fn pair_enc_packet(ps: *mut PacketLlApp) -> bool
+pub fn pair_enc_packet(ps: &mut PacketLlApp)
 {
-    unsafe {
-        if *get_security_enable() && (*ps).chan_id == 4 && (*ps).opcode == 0x1b && (*ps).handle == 0x12 {
-            let tick = read_reg_system_tick();
-            (*ps).app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
+    if *get_security_enable() && ps.chan_id == 4 && ps.opcode == 0x1b && ps.handle == 0x12 {
+        let tick = read_reg_system_tick();
+        unsafe {
+            ps.app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
 
-            (*get_pair_ivs())[3..3 + 5].copy_from_slice(slice::from_raw_parts(addr_of!((*ps).app_cmd_v.sno) as *const u8, 5));
+            (*get_pair_ivs())[3..3 + 5].copy_from_slice(slice::from_raw_parts(addr_of!(ps.app_cmd_v.sno) as *const u8, 5));
 
             aes_att_encryption_packet(
                 &(*get_pair_sk())[0..16],
                 &(*get_pair_ivs())[0..8],
-                slice::from_raw_parts_mut(addr_of!((*ps).app_cmd_v.dst) as *mut u8, 2),
-                addr_of!((*ps).app_cmd_v.op) as *mut u8,
-                (((*ps).l2cap_len & 0xff) - 10) as u8,
+                slice::from_raw_parts_mut(addr_of!(ps.app_cmd_v.dst) as *mut u8, 2),
+                addr_of!(ps.app_cmd_v.op) as *mut u8,
+                ((ps.l2cap_len & 0xff) - 10) as u8,
             );
         }
     }
-    return true;
 }
 
 pub unsafe fn pair_dec_packet_mesh(ps: *const MeshPkt) -> bool {
@@ -137,15 +133,15 @@ pub fn pair_flash_save_config(addr: u32, data: *const u8, length: u32)
     save_pair_info(addr, data, length);
 }
 
-pub fn pair_save_key()
+pub fn pair_save_key(state: &RefCell<State>)
 {
     let mut pass = [0u8; 16];
 
     pass[0] = PAIR_CONFIG_VALID_FLAG;
     pass[15] = PAIR_CONFIG_VALID_FLAG;
 
-    if *get_mesh_pair_enable() != false {
-        pass[1] = if *get_get_mac_en() { 1 } else { 0 };
+    if state.borrow().mesh_pair_enable {
+        pass[1] = if state.borrow().get_mac_en { 1 } else { 0 };
     }
 
     pair_flash_save_config(0, pass.as_ptr(), pass.len() as u32);
@@ -157,7 +153,7 @@ pub fn pair_save_key()
     pair_flash_save_config(0x20, pass.as_ptr(), pass.len() as u32);
     pair_flash_save_config(0x30, (*get_pair_ltk()).as_ptr(), get_pair_ltk().len() as u32);
 
-    pair_update_key();
+    pair_update_key(state);
 }
 
 pub fn pair_init()
@@ -168,16 +164,14 @@ pub fn pair_init()
     (*get_pair_ivs())[0..4].copy_from_slice(&(*get_mac_id())[0..4]);
 }
 
-pub fn pair_par_init()
+pub fn pair_par_init(state: &RefCell<State>)
 {
     set_ble_pair_st(0xe);
-    pair_load_key();
+    pair_load_key(state);
 }
 
-pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
+pub fn pair_proc(state: &RefCell<State>) -> *const PacketAttReadRsp
 {
-    let mut irq_state = irq_state.borrow_mut();
-
     let pair_st = *get_ble_pair_st();
     if *get_pairRead_pending() == false {
         return null_mut();
@@ -186,16 +180,16 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
 
     if *get_ble_pair_st() == 2 {
         if *get_security_enable() == false && *get_pair_login_ok() == false {
-            pair_par_init();
+            pair_par_init(state);
             set_pair_enc_enable(false);
             return null_mut();
         }
         get_pkt_read_rsp().l2cap_len = 10;
-        get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&irq_state.pair_rands);
+        get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&state.borrow().pair_rands);
         set_ble_pair_st(0xc);
     } else if *get_ble_pair_st() == 0x7 {
         if *get_security_enable() == false && *get_pair_login_ok() == false {
-            pair_par_init();
+            pair_par_init(state);
             set_pair_enc_enable(false);
             return null_mut();
         }
@@ -222,9 +216,9 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
             set_pair_enc_enable(false);
         } else {
             get_pkt_read_rsp().l2cap_len = 0x12;
-            unsafe { *(irq_state.pair_rands.as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
-            aes_att_encryption(irq_state.pair_randm.as_ptr(), irq_state.pair_rands.as_ptr(), get_pair_sk().as_mut_ptr());
-            irq_state.pair_rands.copy_from_slice(&(*get_pair_sk())[0..8]);
+            unsafe { *(state.borrow_mut().pair_rands.as_mut_ptr() as *mut u32) = read_reg_system_tick(); }
+            aes_att_encryption(state.borrow().pair_randm.as_ptr(), state.borrow().pair_rands.as_ptr(), get_pair_sk().as_mut_ptr());
+            state.borrow_mut().pair_rands.copy_from_slice(&(*get_pair_sk())[0..8]);
 
             (*get_pair_sk())[8..16].fill(0);
 
@@ -232,14 +226,14 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
             }
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
-            get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&irq_state.pair_rands);
+            get_pkt_read_rsp().value[1..1 + 8].copy_from_slice(&state.borrow().pair_rands);
             get_pkt_read_rsp().value[9..9 + 8].copy_from_slice(&get_pair_work()[0..8]);
 
             for index in 0..0x10 {
                 (*get_pair_work())[index] = (*get_pair_pass())[index] ^ (*get_pair_nn())[index];
             }
-            (*get_pair_sk())[0..8].copy_from_slice(&irq_state.pair_randm);
-            (*get_pair_sk())[8..16].copy_from_slice(&irq_state.pair_rands);
+            (*get_pair_sk())[0..8].copy_from_slice(&state.borrow().pair_randm);
+            (*get_pair_sk())[8..16].copy_from_slice(&state.borrow().pair_rands);
 
             aes_att_encryption(get_pair_work().as_ptr(), get_pair_sk().as_ptr(), get_pair_sk().as_mut_ptr());
             set_ble_pair_st(0xf);
@@ -250,7 +244,7 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
         if *get_security_enable() == false {
             get_pkt_read_rsp().value[1..1 + 0x10].copy_from_slice(get_pair_ltk());
         } else {
-            (*get_pair_work())[0..8].copy_from_slice(&irq_state.pair_randm);
+            (*get_pair_work())[0..8].copy_from_slice(&state.borrow().pair_randm);
 
             (*get_pair_work())[8..16].fill(0);
 
@@ -264,11 +258,11 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
     } else if *get_ble_pair_st() == 0xb {
         get_pkt_read_rsp().l2cap_len = 2;
         set_ble_pair_st(0);
-        if *get_mesh_pair_enable() != false {
-            set_get_mac_en(true);
+        if state.borrow().mesh_pair_enable {
+            state.borrow_mut().get_mac_en = true;
         }
-        rf_link_delete_pair();
-        rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
+        rf_link_delete_pair(state);
+        rf_link_light_event_callback(state, LGT_CMD_DEL_PAIR);
     } else if *get_ble_pair_st() == 0xe {
         get_pkt_read_rsp().l2cap_len = 2;
         set_ble_pair_st(0);
@@ -286,31 +280,29 @@ pub fn pair_proc(mut irq_state: &RefCell<IrqState>) -> *const PacketAttReadRsp
     return get_pkt_read_rsp();
 }
 
-pub fn pair_set_key(key: *const u8)
+pub fn pair_set_key(state: &RefCell<State>, key: *const u8)
 {
-    (*get_pair_nn())[0..*get_max_mesh_name_len() as usize].copy_from_slice(unsafe { slice::from_raw_parts(key, *get_max_mesh_name_len() as usize) });
+    (*get_pair_nn())[0..state.borrow().max_mesh_name_len].copy_from_slice(unsafe { slice::from_raw_parts(key, state.borrow().max_mesh_name_len) });
     (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
     (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x20), 0x10) });
 
-    pair_update_key();
+    pair_update_key(state);
 }
 
-pub fn pair_read(_: &RefCell<IrqState>, _: *const PacketAttWrite) -> bool
+pub fn pair_read(_: &RefCell<State>, _: *const PacketAttWrite) -> bool
 {
     set_pairRead_pending(true);
 
     true
 }
 
-pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool
+pub fn pair_write(state: &RefCell<State>, data: *const PacketAttWrite) -> bool
 {
-    let mut irq_state = irq_state.borrow_mut();
-
     let opcode = unsafe { (*data).value[0] as i8 };
     let src = unsafe { addr_of!((*data).value[1]) as *const u8 };
 
     if opcode == 1 {
-        irq_state.pair_randm.copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
+        state.borrow_mut().pair_randm.copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
 
         set_ble_pair_st(2);
         return true;
@@ -318,7 +310,7 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
 
     if opcode == 4 {
         if *get_security_enable() == false {
-            if *get_pair_login_ok() != false && *get_ble_pair_st() == 0xf {
+            if *get_pair_login_ok() && *get_ble_pair_st() == 0xf {
                 (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                 set_pair_setting_flag(PairState::PairSetting);
                 set_ble_pair_st(5);
@@ -331,16 +323,16 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
             let mut name_len = match get_pair_nn().iter().position(|r| *r == 0) {
                 Some(v) => v,
                 None => get_pair_nn().len()
-            } as u8;
+            };
 
-            if name_len <= *get_max_mesh_name_len() {
+            if name_len <= state.borrow().max_mesh_name_len {
                 set_pair_setting_flag(PairState::PairSetting);
                 set_ble_pair_st(5);
                 return true;
             }
         }
 
-        pair_par_init();
+        pair_par_init(state);
         set_pair_enc_enable(false);
         return true;
     }
@@ -351,35 +343,35 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
                     (*get_pair_work()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                     set_ble_pair_st(7);
                     unsafe {
-                        if *get_mesh_pair_enable() != false && 0x14 < (*data).l2cap_len && (*data).value[0x11] != 0 {
+                        if state.borrow().mesh_pair_enable && 0x14 < (*data).l2cap_len && (*data).value[0x11] != 0 {
                             aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_ltk_mesh().as_mut_ptr());
                             set_pair_setting_flag(PairState::PairSetMeshTxStart);
                             return true;
                         }
                     }
                     aes_att_decryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_ltk().as_mut_ptr());
-                    pair_save_key();
+                    pair_save_key(state);
                     set_pair_setting_flag(PairState::PairSetted);
-                    rf_link_light_event_callback(0xc5);
+                    rf_link_light_event_callback(state, 0xc5);
                     return true;
                 }
             } else if *get_pair_login_ok() && *get_ble_pair_st() == 6 {
                 (*get_pair_ltk()).fill(0);
                 set_ble_pair_st(7);
                 unsafe {
-                    if *get_mesh_pair_enable() && 0x14 < (*data).l2cap_len && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
+                    if state.borrow().mesh_pair_enable && 0x14 < (*data).l2cap_len && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
                         (*get_pair_ltk_mesh()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                         set_pair_setting_flag(PairState::PairSetMeshTxStart);
                         return true;
                     }
                 }
                 (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
-                pair_save_key();
+                pair_save_key(state);
                 set_pair_setting_flag(PairState::PairSetted);
-                rf_link_light_event_callback(0xc5);
+                rf_link_light_event_callback(state, 0xc5);
                 return true;
             }
-            pair_par_init();
+            pair_par_init(state);
             set_pair_setting_flag(PairState::PairSetted);
             set_pair_enc_enable(false);
             return true;
@@ -404,8 +396,8 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
             (*get_pair_sk_copy()).copy_from_slice(&(*get_pair_sk())[0..16]);
         }
 
-        irq_state.pair_randm.copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
-        (*get_pair_sk())[0..8].copy_from_slice(&irq_state.pair_randm);
+        state.borrow_mut().pair_randm.copy_from_slice(unsafe { slice::from_raw_parts(src, 8) });
+        (*get_pair_sk())[0..8].copy_from_slice(&state.borrow().pair_randm);
         (*get_pair_sk())[8..16].fill(0);
 
         set_pair_enc_enable(false);
@@ -419,7 +411,7 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
             aes_att_encryption(get_pair_sk().as_ptr(), get_pair_work().as_ptr(), get_pair_work().as_mut_ptr());
             index = if &(*get_pair_work())[0..8] == unsafe { slice::from_raw_parts(addr_of!((*data).value[9]), 8) } { u8::MAX } else { 0 };
         }
-        if iVar2 != 0 || *get_pair_login_ok() != false {
+        if iVar2 != 0 || *get_pair_login_ok() {
             if index != 0 {
                 if opcode == 8 {
                     set_ble_pair_st(9);
@@ -437,12 +429,12 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
                 set_pair_login_ok(false);
             }
         }
-        pair_par_init();
+        pair_par_init(state);
         return true;
     }
     if *get_security_enable() {
         if *get_ble_pair_st() != 5 {
-            pair_par_init();
+            pair_par_init(state);
             set_pair_enc_enable(false);
             return true;
         }
@@ -451,7 +443,7 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
 
     } else {
         if !*get_pair_login_ok() || *get_ble_pair_st() != 5 {
-            pair_par_init();
+            pair_par_init(state);
             set_pair_enc_enable(false);
             return true;
         }
@@ -465,7 +457,7 @@ pub fn pair_write(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) ->
         return true;
     }
 
-    pair_par_init();
+    pair_par_init(state);
     set_pair_enc_enable(false);
     return true;
 }

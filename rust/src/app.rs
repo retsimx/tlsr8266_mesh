@@ -1,3 +1,4 @@
+use core::cell::RefCell;
 use embassy_executor::Spawner;
 
 use crate::{app, uprintln};
@@ -16,6 +17,7 @@ use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::state::{State, STATE};
 use crate::uart_manager::UartManager;
 use crate::version::BUILD_VERSION;
 
@@ -46,7 +48,7 @@ impl App {
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&mut self, state: &RefCell<State>) {
         // Copy the password in to the pair config
         for i in 0..MESH_PWD_ENCODE_SK.len() {
             get_pair_config_pwd_encode_sk()[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
@@ -55,7 +57,7 @@ impl App {
         unsafe { rf_drv_init(true); }
 
         // Run our initialisation
-        user_init();
+        user_init(state);
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
@@ -71,7 +73,9 @@ impl App {
         uprintln!("Booting FW version {}", BUILD_VERSION);
 
         // Configure the rest of the system
-        self.init();
+        STATE.lock(|state| {
+            self.init(state);
+        });
 
         // Ready to go, enable interrupts and run the main loop
         irq_enable();

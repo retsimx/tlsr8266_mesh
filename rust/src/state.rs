@@ -1,35 +1,37 @@
 use core::cell::RefCell;
 use embassy_sync::blocking_mutex::{CriticalSectionMutex};
-use crate::embassy::sync::{IrqModeMutex, ThreadModeMutex};
-use crate::sdk::light::LightRxBuff;
+use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
+use crate::sdk::light::{BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, PacketAttData};
 
-pub struct SharedState {
+#[repr(align(4))]
+pub struct State {
     pub light_rx_wptr: usize,
     pub light_rx_buff: [LightRxBuff; 4],
-    pub blt_tx_fifo: [[u8; 48]; 8],
+    pub blt_tx_fifo: [[u8; 48]; BLT_FIFO_TX_PACKET_COUNT],
     pub blt_tx_wptr: usize,
-}
-
-pub struct IrqState {
+    pub conn_update_successed: bool,
+    pub buff_response: [PacketAttData; BUFF_RESPONSE_PACKET_COUNT],
     pub pair_rands: [u8; 8],
     pub pair_randm: [u8; 8],
+    pub conn_update_cnt: usize,
+    pub set_uuid_flag: bool,
+    pub max_mesh_name_len: usize,
+    pub led_event_pending: u32,
+    pub led_count: u32,
+    pub led_ton: u32,
+    pub led_toff: u32,
+    pub led_sel: u32,
+    pub led_tick: u32,
+    pub led_no: u32,
+    pub led_is_on: u32,
+
+    pub mesh_node_mask: [u32; MESH_NODE_MASK_LEN],
+    pub get_mac_en: bool,
+    pub mesh_pair_enable: bool,
+    pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
 }
 
-pub struct AppState {
-
-}
-
-pub static APP_STATE: ThreadModeMutex<RefCell<AppState>> = ThreadModeMutex::new(RefCell::new(AppState {
-
-}));
-
-#[no_mangle]
-pub static IRQ_STATE: IrqModeMutex<RefCell<IrqState>> = IrqModeMutex::new(RefCell::new(IrqState {
-    pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
-    pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
-}));
-
-pub static SHARED_STATE: CriticalSectionMutex<RefCell<SharedState>> = CriticalSectionMutex::new(RefCell::new(SharedState {
+pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
     light_rx_wptr: 0,
     light_rx_buff: [LightRxBuff{
         dma_len: 0,
@@ -43,5 +45,42 @@ pub static SHARED_STATE: CriticalSectionMutex<RefCell<SharedState>> = CriticalSe
         unk4: [0; 40]
     }; 4],
     blt_tx_fifo: [[0; 48]; 8],
-    blt_tx_wptr: 0
+    blt_tx_wptr: 0,
+    conn_update_successed: false,
+    buff_response: [PacketAttData {
+        dma_len: 0,
+        _type: 0,
+        rf_len: 0,
+        l2cap: 0,
+        chanid: 0,
+        att: 0,
+        hl: 0,
+        hh: 0,
+        dat: [0; 23]
+    }; 48],
+    pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
+    pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
+    conn_update_cnt: 0,
+    set_uuid_flag: false,
+    max_mesh_name_len: 16,
+    led_event_pending: 0,
+    led_count: 0,
+    led_ton: 0,
+    led_toff: 0,
+    led_sel: 0,
+    led_tick: 0,
+    led_no: 0,
+    led_is_on: 0,
+
+    mesh_node_mask: [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize],
+    get_mac_en: false,
+    mesh_pair_enable: false,
+    mesh_node_st: [mesh_node_st_t {
+        tick: 0,
+        val: mesh_node_st_val_t {
+            dev_adr: 0,
+            sn: 0,
+            par: [0; MESH_NODE_ST_PAR_LEN as usize],
+        }
+    }; MESH_NODE_MAX_NUM as usize]
 }));

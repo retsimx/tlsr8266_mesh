@@ -1,23 +1,20 @@
+use core::cell::RefCell;
+use core::cmp::min;
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::{app, pub_mut};
+use crate::{app};
 use crate::config::*;
-use crate::main_light::get_max_mesh_name_len;
-use crate::mesh::{get_get_mac_en, get_mesh_node_st, get_mesh_pair_enable, set_get_mac_en};
 use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
 use crate::sdk::ble_app::rf_drv_8266::get_mac_id;
+use crate::state::{State};
 
-pub_mut!(conn_update_successed, bool, false);
-pub_mut!(conn_update_cnt, u8, 0);
-pub_mut!(set_uuid_flag, bool, false);
-
-const UPDATE_CONN_PARA_CNT: u8 = 4;
-const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT as usize] = [
+const UPDATE_CONN_PARA_CNT: usize = 4;
+const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT] = [
     [16, 16 + 16, 420],
     [18, 18 + 16, 420],
     [32, 32 + 16, 420],
@@ -39,10 +36,10 @@ pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
     return true;
 }
 
-pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
+pub fn dev_addr_with_mac_match(state: &RefCell<State>, params: &[u8]) -> bool {
     return if params[0] == 0xff && params[1] == 0xff {
         // get
-        *get_get_mac_en()
+        state.borrow().get_mac_en
     } else {
         for i in 0..6 {
             if params[i] != (*get_mac_id())[i] {
@@ -84,19 +81,19 @@ pub fn save_pair_info(adr: u32, p: *const u8, n: u32) {
     interval_min + 20 ms <= interval_max <= 2second
     timeout <= 6second
 */
-pub fn update_ble_parameter_cb() {
-    if !*get_conn_update_successed() {
+pub fn update_ble_parameter_cb(state: &RefCell<State>) {
+    if !state.borrow().conn_update_successed {
         setup_ble_parameter_start(
             1,
             CONN_PARA_DATA[0][0],
             CONN_PARA_DATA[0][1],
             CONN_PARA_DATA[0][2],
         ); // interval 32: means 40ms;   timeout 200: means 2000ms
-        set_conn_update_cnt(*get_conn_update_cnt() + 1);
+        state.borrow_mut().conn_update_cnt += 1;
     }
 }
 
-pub fn rf_update_conn_para(p: &PacketLlData) -> u8 {
+pub fn rf_update_conn_para(state: &RefCell<State>, p: &PacketLlData) -> u8 {
     let pp = unsafe { &*(addr_of!(*p) as *const PktL2capSigConnParaUpRsp) };
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
@@ -112,20 +109,20 @@ pub fn rf_update_conn_para(p: &PacketLlData) -> u8 {
         //l2cap data pkt, start pkt
         match (*pp).result {
             0x0000 => {
-                set_conn_update_cnt(0);
-                set_conn_update_successed(true);
+                state.borrow_mut().conn_update_cnt = 0;
+                state.borrow_mut().conn_update_successed = true;
             }
             0x0001 => {
-                if *get_conn_update_cnt() >= UPDATE_CONN_PARA_CNT {
-                    set_conn_update_cnt(0);
+                if state.borrow().conn_update_cnt >= UPDATE_CONN_PARA_CNT {
+                    state.borrow_mut().conn_update_cnt = 0;
                 } else {
                     setup_ble_parameter_start(
                         1,
-                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][0],
-                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][1],
-                        CONN_PARA_DATA[*get_conn_update_cnt() as usize][2],
+                        CONN_PARA_DATA[state.borrow().conn_update_cnt][0],
+                        CONN_PARA_DATA[state.borrow().conn_update_cnt][1],
+                        CONN_PARA_DATA[state.borrow().conn_update_cnt][2],
                     );
-                    set_conn_update_cnt(*get_conn_update_cnt() + 1);
+                    state.borrow_mut().conn_update_cnt += 1;
                 }
             }
             _ => ()
@@ -177,11 +174,11 @@ pub fn retrieve_dev_grp_address()
     }
 }
 
-pub fn mesh_node_init()
+pub fn mesh_node_init(state: &RefCell<State>)
 {
-    app().mesh_manager.mesh_node_buf_init();
-    get_mesh_node_st()[0].val.dev_adr = *get_device_address() as u8;
-    get_mesh_node_st()[0].val.sn = *get_device_node_sn();
+    app().mesh_manager.mesh_node_buf_init(state);
+    state.borrow_mut().mesh_node_st[0].val.dev_adr = *get_device_address() as u8;
+    state.borrow_mut().mesh_node_st[0].val.sn = *get_device_node_sn();
     set_mesh_node_max(1);
 }
 
@@ -266,23 +263,21 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
     return destbuf[0];
 }
 
-pub fn pair_update_key()
+pub fn pair_update_key(state: &RefCell<State>)
 {
     set_pair_ac(access_code(&(*get_pair_nn())[0..16], &(*get_pair_pass())[0..16]));
-    let mut name_len = match (*get_pair_nn()).iter().position(|r| *r == 0) {
+    let name_len = match (*get_pair_nn()).iter().position(|r| *r == 0) {
         Some(v) => v,
         None => get_pair_nn().len()
-    } as u8;
+    };
 
-    if *get_max_mesh_name_len() < name_len {
-        name_len = *get_max_mesh_name_len();
-    }
+    let name_len = min(state.borrow().max_mesh_name_len, name_len);
 
     rf_link_slave_set_adv_mesh_name(&(*get_pair_nn())[0..name_len as usize]);
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(*get_p_adv_pri_data() as *const u8, *get_adv_private_data_len() as usize) });
 }
 
-pub fn pair_load_key()
+pub fn pair_load_key(state: &RefCell<State>)
 {
     pair_flash_config_init();
 
@@ -293,11 +288,11 @@ pub fn pair_load_key()
         get_pair_pass().iter_mut().for_each(|v| { *v = 0 });
         get_pair_ltk().iter_mut().for_each(|v| { *v = 0 });
 
-        (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, *get_max_mesh_name_len() as usize) });
+        (*get_pair_nn()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.borrow().max_mesh_name_len) });
         (*get_pair_pass()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
 
-        if *get_mesh_pair_enable() == true {
-            set_get_mac_en(unsafe { *(pairing_addr as *const bool).offset(0x1) });
+        if state.borrow().mesh_pair_enable {
+            state.borrow_mut().get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
         }
 
         let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
@@ -307,6 +302,6 @@ pub fn pair_load_key()
 
         (*get_pair_ltk()).copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
 
-        pair_update_key();
+        pair_update_key(state);
     }
 }

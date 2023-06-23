@@ -7,13 +7,13 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{write_reg_rf_irq_status, FLD_RF_IRQ_MASK};
 use core::ptr::addr_of;
-use crate::{app, BIT, pub_mut, uprintln};
+use crate::{app, BIT, uprintln, uprintln_fast};
 use crate::common::{mesh_node_init, access_code, pair_load_key};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
-use crate::state::SharedState;
+use crate::state::{State, STATE};
 use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
@@ -77,27 +77,6 @@ pub struct mesh_node_st_t {
     pub val: mesh_node_st_val_t,
 }
 
-pub_mut!(
-    mesh_node_mask,
-    [u32; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize],
-    [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize]
-);
-
-pub_mut!(get_mac_en, bool, false);
-pub_mut!(mesh_pair_enable, bool, false);
-pub_mut!(
-    mesh_node_st,
-    [mesh_node_st_t; MESH_NODE_MAX_NUM as usize],
-    [mesh_node_st_t {
-        tick: 0,
-        val: mesh_node_st_val_t {
-            dev_adr: 0,
-            sn: 0,
-            par: [0; MESH_NODE_ST_PAR_LEN as usize],
-        }
-    }; MESH_NODE_MAX_NUM as usize]
-);
-
 pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
@@ -146,8 +125,8 @@ impl MeshManager {
     }
 
     pub fn send_mesh_message(&self, data: &[u8; 13], destination: u16) {
-        critical_section::with(|_| {
-            light_slave_tx_command(data, destination);
+        STATE.lock(|state| {
+            light_slave_tx_command(state, data, destination);
 
             if *get_security_enable()
             {
@@ -159,13 +138,13 @@ impl MeshManager {
         });
     }
 
-    pub fn mesh_pair_init(&mut self) {
-        set_mesh_pair_enable(true);
+    pub fn mesh_pair_init(&mut self, state: &RefCell<State>) {
+        state.borrow_mut().mesh_pair_enable = true;
         self.mesh_pair_cmd_interval = MESH_PAIR_CMD_INTERVAL;
         self.mesh_pair_timeout = MESH_PAIR_TIMEOUT;
     }
 
-    pub fn mesh_pair_proc_effect(&mut self, shared_state: &RefCell<SharedState>) {
+    pub fn mesh_pair_proc_effect(&mut self, state: &RefCell<State>) {
         if self.effect_new_mesh != 0
             || (self.effect_new_mesh_delay_time != 0
             && (clock_time_exceed(
@@ -173,7 +152,7 @@ impl MeshManager {
             self.mesh_pair_cmd_interval * 1000,
         )))
         {
-            self.save_effect_new_mesh(shared_state);
+            self.save_effect_new_mesh(state);
             self.effect_new_mesh = 0;
             self.effect_new_mesh_delay_time = 0;
         }
@@ -186,9 +165,9 @@ impl MeshManager {
             ^ (self.new_mesh_ltk[i] ^ self.new_mesh_ltk[i + 8]);
     }
 
-    pub fn mesh_pair_proc_get_mac_flag(&mut self) {
-        set_get_mac_en(false); // set success
-        if *get_mesh_pair_enable() {
+    pub fn mesh_pair_proc_get_mac_flag(&mut self, state: &RefCell<State>) {
+        state.borrow_mut().get_mac_en = false; // set success
+        if state.borrow().mesh_pair_enable {
             let mut data: [u8; 1] = [0];
             flash_write_page(
                 (FLASH_ADR_PAIRING as i32 + *get_adr_flash_cfg_idx() + 1) as u32,
@@ -232,7 +211,7 @@ impl MeshManager {
         }
     }
 
-    fn mesh_cmd_notify(&self, shared_state: &RefCell<SharedState>, op: u8, p: &[u8], dev_adr: u16) -> i32 {
+    fn mesh_cmd_notify(&self, state: &RefCell<State>, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
         if *get_slave_link_connected() && *get_pair_login_ok() {
             if p.len() > 10 {
@@ -260,7 +239,7 @@ impl MeshManager {
             pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
             if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(shared_state, addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
+                if rf_link_add_tx_packet(state, addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
                     err = 0;
                 }
             }
@@ -269,9 +248,9 @@ impl MeshManager {
         return err;
     }
 
-    fn mesh_pair_complete_notify(&self, shared_state: &RefCell<SharedState>) -> i32 {
+    fn mesh_pair_complete_notify(&self, state: &RefCell<State>) -> i32 {
         let par = [CMD_NOTIFY_MESH_PAIR_END];
-        return self.mesh_cmd_notify(shared_state, LGT_CMD_MESH_CMD_NOTIFY, &par, *get_device_address());
+        return self.mesh_cmd_notify(state, LGT_CMD_MESH_CMD_NOTIFY, &par, *get_device_address());
     }
 
     fn safe_effect_new_mesh_finish(&mut self) {
@@ -285,16 +264,16 @@ impl MeshManager {
         set_pair_setting_flag(PairState::PairSetted);
     }
 
-    fn save_effect_new_mesh(&mut self, shared_state: &RefCell<SharedState>) {
-        if self.default_mesh_time_ref != 0 || *get_get_mac_en() {
-            self.mesh_pair_complete_notify(shared_state);
+    fn save_effect_new_mesh(&mut self, state: &RefCell<State>) {
+        if self.default_mesh_time_ref != 0 || state.borrow().get_mac_en {
+            self.mesh_pair_complete_notify(state);
             sleep_us(1000);
             /* Switch to normal mesh */
-            pair_load_key();
+            pair_load_key(state);
             self.default_mesh_time_ref = 0;
 
-            mesh_node_init();
-            app().light_manager.device_status_update();
+            mesh_node_init(state);
+            app().light_manager.device_status_update(state);
             self.safe_effect_new_mesh_finish();
             return;
         }
@@ -307,13 +286,13 @@ impl MeshManager {
             get_pair_ltk()[0..16].copy_from_slice(&get_pair_ltk_mesh()[0..16]);
         }
 
-        self.mesh_pair_complete_notify(shared_state);
+        self.mesh_pair_complete_notify(state);
 
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
-        pair_save_key();
+        pair_save_key(state);
         rf_set_ble_access_code(*get_pair_ac()); // use new access code at once.
-        rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
+        rf_link_light_event_callback(state, LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
         write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16); // clear current rx in buffer
         irq_restore(r);
@@ -343,15 +322,15 @@ impl MeshManager {
         get_pair_ltk()[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
     }
 
-    fn get_online_node_cnt(&mut self) -> u8 {
+    fn get_online_node_cnt(&mut self, state: &RefCell<State>) -> u8 {
         let mut cnt = 0;
         for i in 0..*get_mesh_node_max() {
-            if get_mesh_node_st()[i as usize].tick != 0 {
+            if state.borrow().mesh_node_st[i as usize].tick != 0 {
                 cnt += 1;
                 if i > 0 {
                     self.mesh_pair_notify_rsp_mask
-                        [(get_mesh_node_st()[i as usize].val.dev_adr / 8) as usize] |=
-                        BIT!(get_mesh_node_st()[i as usize].val.dev_adr % 8);
+                        [(state.borrow_mut().mesh_node_st[i as usize].val.dev_adr / 8) as usize] |=
+                        BIT!(state.borrow().mesh_node_st[i as usize].val.dev_adr % 8);
                 }
             }
         }
@@ -359,7 +338,7 @@ impl MeshManager {
         return cnt;
     }
 
-    pub fn mesh_pair_proc(&mut self) {
+    pub fn mesh_pair_proc(&mut self, state: &RefCell<State>) {
         let mut dst_addr = 0xFFFF;
         let mut op_para: [u8; 16] = [0; 16];
 
@@ -372,7 +351,7 @@ impl MeshManager {
             self.default_mesh_effect_delay_ref = 0;
 
             if self.default_mesh_time == 0x00 {
-                pair_load_key();
+                pair_load_key(state);
                 self.default_mesh_time_ref = 0;
             } else {
                 self.switch_to_default_mesh((self.default_mesh_time / 1000) as u8);
@@ -385,7 +364,7 @@ impl MeshManager {
             if self.default_mesh_time == 255000 {
                 self.default_mesh_time_ref = clock_time() | 1;
             } else {
-                pair_load_key();
+                pair_load_key(state);
                 self.default_mesh_time_ref = 0;
             }
         }
@@ -396,15 +375,15 @@ impl MeshManager {
         )
         {
             //mesh pair time out
-            pair_load_key();
+            pair_load_key(state);
             set_pair_setting_flag(PairState::PairSetted);
-            rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
+            rf_link_light_event_callback(state, LGT_CMD_MESH_PAIR_TIMEOUT);
             return;
         }
 
         if *get_pair_setting_flag() == PairState::PairSetMeshTxStart
             && self.mesh_pair_state == MeshPairState::MeshPairName1
-            && self.get_online_node_cnt() == 1
+            && self.get_online_node_cnt(state) == 1
         {
             op_para[0] = LGT_CMD_MESH_PAIR;
             op_para[3] = MeshPairState::MeshPairEffect as u8;
@@ -505,20 +484,22 @@ impl MeshManager {
             return;
         }
 
-        light_slave_tx_command(&op_para, dst_addr);
+        STATE.lock(|state| {
+            light_slave_tx_command(state, &op_para, dst_addr);
+        });
     }
 
-    pub fn mesh_node_buf_init(&self) {
-        *get_mesh_node_st() = [mesh_node_st_t {
+    pub fn mesh_node_buf_init(&self, state: &RefCell<State>) {
+        state.borrow_mut().mesh_node_st.fill(mesh_node_st_t {
             tick: 0,
             val: mesh_node_st_val_t {
                 dev_adr: 0,
                 sn: 0,
                 par: [0; MESH_NODE_ST_PAR_LEN as usize],
             },
-        }; MESH_NODE_MAX_NUM as usize];
+        });
 
-        app().light_manager.device_status_update();
+        app().light_manager.device_status_update(state);
     }
 
     pub fn mesh_security_enable(&self, enable: bool)

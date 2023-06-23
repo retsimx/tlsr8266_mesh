@@ -15,6 +15,7 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQM
 use crate::sdk::light::{AppCmdValue, get_device_address, MeshPkt};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::state::STATE;
 
 pub_mut!(pkt_user_cmd, MeshPkt, MeshPkt {
     dma_len: 0x27,
@@ -93,7 +94,7 @@ async fn node_report_task() {
 
     loop {
         let mut data = [0; UART_DATA_LEN-5];
-        while mesh_node_report_status(&mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) != 0 {
+        while STATE.lock(|state| { mesh_node_report_status(state, &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) }) != 0 {
             msg.data[3..UART_DATA_LEN-2].copy_from_slice(data.as_slice());
             while !app().uart_manager.send_message(&msg) {
                 yield_now().await;
@@ -262,7 +263,9 @@ impl UartManager {
                 (*SPAWNER).spawn(node_report_task()).unwrap();
             }
 
-            mesh_report_status_enable(true);
+            STATE.lock(|state| {
+                mesh_report_status_enable(state, true);
+            });
         }
 
         // Light ctrl
@@ -288,7 +291,9 @@ impl UartManager {
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {
-            mesh_report_status_enable(true);
+            STATE.lock(|state| {
+                mesh_report_status_enable(state, true);
+            });
         }
 
         // Finally ack the message once we've handled it

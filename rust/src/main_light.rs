@@ -1,16 +1,17 @@
+use core::cell::RefCell;
 use core::cmp::min;
 use core::convert::TryInto;
 use core::mem::size_of;
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of};
 
 use fixed::types::I16F16;
 
 use crate::{app};
-use crate::{BIT, pub_mut};
+use crate::{BIT};
 use crate::common::*;
 use crate::config::*;
 use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
-use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, rf_link_slave_set_buffer, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -23,7 +24,7 @@ use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tm
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::sdk::service::*;
-use crate::state::SHARED_STATE;
+use crate::state::{State, STATE};
 use crate::vendor_light::{get_adv_pri_data, get_adv_rsp_pri_data, vendor_set_adv_data};
 use crate::version::BUILD_VERSION;
 
@@ -49,32 +50,8 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
 // pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
-pub_mut!(buff_response, [PacketAttData; 48], [PacketAttData {
-    dma_len: 0,
-    _type: 0,
-    rf_len: 0,
-    l2cap: 0,
-    chanid: 0,
-    att: 0,
-    hl: 0,
-    hh: 0,
-    dat: [0; 23]
-}; 48]);
-pub_mut!(max_mesh_name_len, u8, 16);
-
-pub_mut!(led_event_pending, u32, 0);
-
-pub_mut!(led_count, u32, 0);
-pub_mut!(led_ton, u32, 0);
-pub_mut!(led_toff, u32, 0);
-pub_mut!(led_sel, u32, 0);
-pub_mut!(led_tick, u32, 0);
-pub_mut!(led_no, u32, 0);
-pub_mut!(led_is_on, u32, 0);
-
-
-fn cfg_led_event(e: u32) {
-    set_led_event_pending(e);
+fn cfg_led_event(state: &RefCell<State>, e: u32) {
+    state.borrow_mut().led_event_pending = e;
 }
 
 pub fn light_hw_timer1_config() {
@@ -90,16 +67,16 @@ pub fn light_hw_timer1_config() {
     write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN as u32);
 }
 
-fn light_init_default() {
+fn light_init_default(state: &RefCell<State>) {
     let mut _max_mesh_name_len = 0;
-    let len = (get_adv_data().len() + size_of::<AdvPrivate>() + 2) as u8;
+    let len = get_adv_data().len() + size_of::<AdvPrivate>() + 2;
     if len < 31 {
         _max_mesh_name_len = 31 - len - 2;
-        set_max_mesh_name_len(if _max_mesh_name_len < 16 {
+        state.borrow_mut().max_mesh_name_len = if _max_mesh_name_len < 16 {
             _max_mesh_name_len
         } else {
             16
-        });
+        };
     }
 
     light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
@@ -128,7 +105,6 @@ fn light_init_default() {
 
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
-    rf_link_slave_set_buffer(get_buff_response().as_mut_slice());
 
     vendor_id_init(VENDOR_ID);
 
@@ -136,14 +112,14 @@ fn light_init_default() {
 
     light_hw_timer1_config();
 
-    app().mesh_manager.mesh_pair_init();
+    app().mesh_manager.mesh_pair_init(state);
 }
 
-pub fn user_init() {
+pub fn user_init(state: &RefCell<State>) {
     // for app ota
     app().ota_manager.check_ota_area_startup();
 
-    light_init_default();
+    light_init_default(state);
 
     pwm_set_duty(PWMID_G, PMW_MAX_TICK, 0);
     pwm_set_duty(PWMID_B, PMW_MAX_TICK, PMW_MAX_TICK);
@@ -155,66 +131,68 @@ pub fn user_init() {
     gpio_set_func(PWM_B as u32, !AS_GPIO);
 
     //retrieve lumen value
-    app().light_manager.light_lum_retrieve();
+    app().light_manager.light_lum_retrieve(state);
 
-    rf_link_slave_init(40000);
+    rf_link_slave_init(state, 40000);
 
     factory_reset_handle();
 
     vendor_set_adv_data();
 
-    app().light_manager.device_status_update();
+    app().light_manager.device_status_update(state);
     app().mesh_manager.mesh_security_enable(true);
 }
 
-fn proc_led() {
-    if *get_led_count() == 0 && *get_led_event_pending() == 0 {
+fn proc_led(state: &RefCell<State>) {
+    let mut state = state.borrow_mut();
+
+    if state.led_count == 0 && state.led_event_pending == 0 {
         return; //led flash finished
     }
 
-    if *get_led_event_pending() != 0 {
+    if state.led_event_pending != 0 {
         // new event
-        set_led_ton((*get_led_event_pending() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        set_led_toff(((*get_led_event_pending() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        set_led_count((*get_led_event_pending() >> 16) & 0xff);
-        set_led_sel(*get_led_event_pending() >> 24);
+        state.led_ton = (state.led_event_pending & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US;
+        state.led_toff = ((state.led_event_pending >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US;
+        state.led_count = (state.led_event_pending >> 16) & 0xff;
+        state.led_sel = state.led_event_pending >> 24;
 
-        set_led_event_pending(0);
-        set_led_tick(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
-        set_led_no(0);
-        set_led_is_on(0);
+        state.led_event_pending = 0;
+        state.led_tick = clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US;
+        state.led_no = 0;
+        state.led_is_on = 0;
     }
 
-    if clock_time() - *get_led_tick()
-        >= (if *get_led_is_on() != 0 {
-        *get_led_ton()
+    if clock_time() - state.led_tick
+        >= (if state.led_is_on != 0 {
+        state.led_ton
     } else {
-        *get_led_toff()
+        state.led_toff
     })
     {
-        set_led_tick(clock_time());
-        let led_off = (*get_led_is_on() != 0 || *get_led_ton() == 0) && *get_led_toff() != 0;
-        let led_on = *get_led_is_on() == 0 && *get_led_ton() != 0;
+        state.led_tick = clock_time();
+        let led_off = (state.led_is_on != 0 || state.led_ton == 0) && state.led_toff != 0;
+        let led_on = state.led_is_on == 0 && state.led_ton != 0;
 
-        set_led_is_on(!*get_led_is_on());
-        if *get_led_is_on() != 0 {
-            set_led_no(*get_led_no() + 1);
-            if *get_led_no() - 1 == *get_led_count() {
-                set_led_count(0);
-                set_led_no(0);
+        state.led_is_on = !state.led_is_on;
+        if state.led_is_on != 0 {
+            state.led_no += 1;
+            if state.led_no - 1 == state.led_count {
+                state.led_count = 0;
+                state.led_no = 0;
                 app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
-            if *get_led_sel() & BIT!(0) != 0 {
+            if state.led_sel & BIT!(0) != 0 {
                 app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
-            if *get_led_sel() & BIT!(1) != 0 {
+            if state.led_sel & BIT!(1) != 0 {
                 app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
-            if *get_led_sel() & BIT!(5) != 0 {}
+            if state.led_sel & BIT!(5) != 0 {}
         }
     }
 }
@@ -237,8 +215,8 @@ fn light_user_func() {
 
     app().light_manager.check_light_state_save();
 
-    SHARED_STATE.lock(|shared_state| {
-        app().mesh_manager.mesh_pair_proc_effect(shared_state);
+    STATE.lock(|state| {
+        app().mesh_manager.mesh_pair_proc_effect(state);
     });
 }
 
@@ -249,7 +227,10 @@ pub fn main_loop() {
 
     light_user_func();
     rf_link_slave_proc();
-    proc_led();
+
+    STATE.lock(|state| {
+        proc_led(state);
+    });
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
@@ -258,6 +239,7 @@ pub fn main_loop() {
 Called to handle messages that require a response to be returned
 */
 pub fn rf_link_response_callback(
+    state: &RefCell<State>,
     ppp: *mut PacketAttValue,
     p_req: *const PacketAttValue,
 ) -> bool {
@@ -366,7 +348,7 @@ pub fn rf_link_response_callback(
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(&params, false);
+            let idx = app().ota_manager.rf_mesh_data_ota(state, &params, false);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -374,7 +356,7 @@ pub fn rf_link_response_callback(
         CMD_END_OTA => {
             ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(&params, true);
+            let idx = app().ota_manager.rf_mesh_data_ota(state, &params, true);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -388,7 +370,7 @@ pub fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 Called to handle messages sent to us that don't require a response
 */
-pub fn rf_link_data_callback(p: *const PacketL2capData) {
+pub fn rf_link_data_callback(state: &RefCell<State>, p: *const PacketL2capData) {
     // p start from l2cap_len of RfPacketAttCmdT
     let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
@@ -422,12 +404,12 @@ pub fn rf_link_data_callback(p: *const PacketL2capData) {
             match params[0] {
                 LIGHT_DEL_GRP_PARAM => {
                     if rf_link_del_group(val) {
-                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+                        cfg_led_event(state, LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
                 LIGHT_ADD_GRP_PARAM => {
                     if rf_link_add_group(val) {
-                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+                        cfg_led_event(state, LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
                 _ => ()
@@ -435,9 +417,9 @@ pub fn rf_link_data_callback(p: *const PacketL2capData) {
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
-            if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
-                if rf_link_add_dev_addr(val) {
-                    app().mesh_manager.mesh_pair_proc_get_mac_flag();
+            if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(state, &params) {
+                if rf_link_add_dev_addr(state, val) {
+                    app().mesh_manager.mesh_pair_proc_get_mac_flag(state);
                 }
             }
         }
@@ -452,9 +434,9 @@ pub fn rf_link_data_callback(p: *const PacketL2capData) {
             irq_disable();
             let res = (params[0] as u32).try_into();
             if res.is_ok() {
-                kick_out(res.unwrap());
+                kick_out(state, res.unwrap());
             } else {
-                kick_out(KickoutReason::OutOfMesh);
+                kick_out(state, KickoutReason::OutOfMesh);
             }
             light_sw_reboot();
         }
@@ -465,7 +447,7 @@ pub fn rf_link_data_callback(p: *const PacketL2capData) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
+pub fn light_slave_tx_command(state: &RefCell<State>, p_cmd: &[u8], para: u16) -> bool {
     let mut cmd_op_para: [u8; 16] = [0; 16];
     let cmd_sno = clock_time() + *get_device_address() as u32;
 
@@ -476,23 +458,23 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> bool {
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    mesh_push_user_command(cmd_sno, dst, cmd_op_para.as_ptr(), 13)
+    mesh_push_user_command(state, cmd_sno, dst, cmd_op_para.as_ptr(), 13)
 }
 
-pub fn rf_link_light_event_callback(status: u8) {
+pub fn rf_link_light_event_callback(state: &RefCell<State>, status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
-            mesh_node_init();
-            app().light_manager.device_status_update();
-            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+            mesh_node_init(state);
+            app().light_manager.device_status_update(state);
+            cfg_led_event(state, LED_EVENT_FLASH_1HZ_4S);
         }
         LGT_CMD_SET_DEV_ADDR => {
-            mesh_node_init();
-            app().light_manager.device_status_update();
-            cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
+            mesh_node_init(state);
+            app().light_manager.device_status_update(state);
+            cfg_led_event(state, LED_EVENT_FLASH_1HZ_4S);
         }
-        LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
-        LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
+        LGT_CMD_DEL_PAIR => cfg_led_event(state, LED_EVENT_FLASH_1HZ_4S),
+        LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(state, LED_EVENT_FLASH_2HZ_2S),
         _ => ()
     }
 }

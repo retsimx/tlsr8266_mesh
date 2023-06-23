@@ -5,7 +5,6 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::app;
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
-use crate::main_light::get_buff_response;
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::compat::array4_to_int;
@@ -18,11 +17,11 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::{IrqState, SharedState};
+use crate::state::State;
 
 pub struct OtaManager {
     ota_rcv_last_idx: u16,
-    slave_ota_data_cache_idx: u8,
+    slave_ota_data_cache_idx: usize,
     pub rf_slave_ota_finished_time: u32,
     terminate_cnt: u8,
 }
@@ -133,7 +132,7 @@ impl OtaManager {
         }
     }
 
-    pub fn rf_link_slave_data_ota(&mut self, data: &PacketAttData) {
+    pub fn rf_link_slave_data_ota(&mut self, state: &RefCell<State>, data: &PacketAttData) {
         if *get_rf_slave_ota_finished_flag() != OtaState::Continue || *get_rf_slave_ota_busy_mesh() {
             return;
         }
@@ -150,12 +149,12 @@ impl OtaManager {
             }
         }
 
-        get_buff_response()[(self.slave_ota_data_cache_idx % 16) as usize] = *data;
+        state.borrow_mut().buff_response[self.slave_ota_data_cache_idx % 16] = *data;
 
         self.slave_ota_data_cache_idx += 1;
     }
 
-    pub fn rf_mesh_data_ota(&mut self, pkt_data: &[u8], last: bool) -> u16 {
+    pub fn rf_mesh_data_ota(&mut self, state: &RefCell<State>, pkt_data: &[u8], last: bool) -> u16 {
         if *get_rf_slave_ota_finished_flag() != OtaState::Continue || *get_rf_slave_ota_busy() || !*get_rf_slave_ota_busy_mesh(){
             return u16::MAX;
         }
@@ -170,10 +169,10 @@ impl OtaManager {
         if LAST_INDEX.load(Ordering::Relaxed) == u16::MAX || LAST_INDEX.load(Ordering::Relaxed) < index {
             LAST_INDEX.store(index, Ordering::Relaxed);
 
-            get_buff_response()[0] = data;
+            state.borrow_mut().buff_response[0] = data;
             self.slave_ota_data_cache_idx = 1;
 
-            self.rf_link_slave_data_ota_save();
+            self.rf_link_slave_data_ota_save(state);
 
             set_rf_slave_ota_timeout_s(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
 
@@ -185,12 +184,12 @@ impl OtaManager {
         LAST_INDEX.load(Ordering::Relaxed)
     }
 
-    pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
+    pub fn rf_link_slave_data_ota_save(&mut self, state: &RefCell<State>) -> bool {
         let packet_len = if *get_rf_slave_ota_busy_mesh() { 8 } else { 16 };
 
         let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
-            let p = &get_buff_response()[i as usize];
+            let p = state.borrow().buff_response[i];
             let n_data_len = (p.l2cap - 7) as usize;
 
             if *get_rf_slave_ota_busy_mesh() || crc16(&p.dat[0..n_data_len + 2]) == p.dat[n_data_len + 2] as u16 | (p.dat[n_data_len + 3] as u16) << 8
@@ -347,9 +346,9 @@ impl OtaManager {
         self.rf_slave_ota_finished_time = clock_time();
     }
 
-    pub fn rf_link_slave_ota_finish_handle(&mut self, shared_state: &RefCell<SharedState>) // poll when ota busy in bridge
+    pub fn rf_link_slave_ota_finish_handle(&mut self, state: &RefCell<State>) // poll when ota busy in bridge
     {
-        self.rf_link_slave_data_ota_save();
+        self.rf_link_slave_data_ota_save(state);
 
         let pkt_terminate: [u8; 8] = [0x04, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x13];
 
@@ -358,7 +357,7 @@ impl OtaManager {
             if 0 == self.terminate_cnt && *get_rf_slave_ota_terminate_flag() {
                 if is_add_packet_buf_ready() {
                     self.terminate_cnt = 6;
-                    rf_link_add_tx_packet(shared_state, pkt_terminate.as_ptr() as *const PacketAttCmd, pkt_terminate.len());
+                    rf_link_add_tx_packet(state, pkt_terminate.as_ptr() as *const PacketAttCmd, pkt_terminate.len());
                 }
             }
 
@@ -395,8 +394,8 @@ impl OtaManager {
     }
 }
 
-pub fn rf_link_slave_data_ota(_: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool {
-    app().ota_manager.rf_link_slave_data_ota(unsafe { &*(data as *const PacketAttData) });
+pub fn rf_link_slave_data_ota(state: &RefCell<State>, data: *const PacketAttWrite) -> bool {
+    app().ota_manager.rf_link_slave_data_ota(state, unsafe { &*(data as *const PacketAttData) });
 
     return true;
 }

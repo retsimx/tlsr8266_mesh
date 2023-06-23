@@ -95,6 +95,7 @@ with open(inputfile + ".tc32", 'w') as outputfile:
             section_seen = True
             last_section_name = line.split('\t')[-1].split(',')[0]
             last_section_extra = ',' + ','.join(line.split('\t')[-1].split(',')[1:]).strip()
+            last_section_extra = last_section_extra.replace(',"a",%progbits,unique,1', ',"a",%progbits')
 
             if ".ram_code" not in line and '.note' not in line:
                 line = "\t@ " + line
@@ -140,6 +141,7 @@ with open(inputfile + ".tc32", 'w') as outputfile:
                 section_seen = True
                 last_section_name = lines[index+1].split('\t')[-1].split(',')[0]
                 last_section_extra = ',' + ','.join(lines[index+1].split('\t')[-1].split(',')[1:]).strip()
+                last_section_extra = last_section_extra.replace(',"a",%progbits,unique,1', ',"a",%progbits')
 
             if last_section_name != '.ram_code':
                 name = line.split('\t')[-1].split(',')[0]

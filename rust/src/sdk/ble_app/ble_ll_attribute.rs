@@ -12,7 +12,7 @@ use crate::sdk::app_att_light::{attribute_t, get_send_to_master, get_TelinkSppDa
 use crate::sdk::ble_app::rf_drv_8266::get_gAttributes;
 use crate::sdk::light::{get_rf_slave_ota_finished_flag, OtaState, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttWrite, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketL2capData, PacketL2capHead, PacketVersionInd, set_rf_slave_ota_terminate_flag};
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::state::IrqState;
+use crate::state::State;
 
 pub_mut!(pkt_version_ind, PacketVersionInd, PacketVersionInd {
     dma_len: 8,
@@ -140,7 +140,7 @@ pub unsafe fn l2cap_att_search(mut handle_start: u16, handle_end: u16, uuid: &[u
     return None;
 }
 
-pub unsafe fn l2cap_att_handler(mut irq_state: &RefCell<IrqState>, packet: *const PacketL2capData) -> (*const PacketL2capHead, usize)
+pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const PacketL2capData) -> (*const PacketL2capHead, usize)
 {
     if *get_gAttributes() == null_mut() {
         return (null(), 0);
@@ -426,7 +426,7 @@ pub unsafe fn l2cap_att_handler(mut irq_state: &RefCell<IrqState>, packet: *cons
                 return (get_rf_packet_att_rsp_addr() as *const PacketL2capHead, size_of_val(&*get_rf_packet_att_rsp()));
             }
 
-            (*(*get_gAttributes()).offset(tick as isize)).r.unwrap()(irq_state, packet as *const PacketAttWrite);
+            (*(*get_gAttributes()).offset(tick as isize)).r.unwrap()(state, packet as *const PacketAttWrite);
             // return get_rf_pkt_unknown_response_addr() as *const RfPacketL2capHeadT;
             (null(), 0)
         },
@@ -542,7 +542,7 @@ pub unsafe fn l2cap_att_handler(mut irq_state: &RefCell<IrqState>, packet: *cons
                 return result;
             }
 
-            (*(*get_gAttributes()).offset(tick as isize)).w.unwrap()(irq_state, packet as *const PacketAttWrite);
+            (*(*get_gAttributes()).offset(tick as isize)).w.unwrap()(state, packet as *const PacketAttWrite);
 
             result
         },

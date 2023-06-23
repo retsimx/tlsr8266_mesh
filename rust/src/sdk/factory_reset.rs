@@ -1,16 +1,17 @@
-use crate::config::{FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::light::{get_pair_config_mesh_ltk};
-use crate::sdk::mcu::clock::clock_time_exceed;
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use core::cell::RefCell;
 use core::cmp::min;
 use core::convert::TryFrom;
-use core::ptr::{addr_of, copy_nonoverlapping};
-use crate::BIT;
+
 use crate::{app, pub_mut};
-use crate::mesh::{get_mesh_pair_enable, set_get_mac_en};
-use crate::sdk::mcu::crypto::{encode_password};
+use crate::BIT;
+use crate::config::{FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
+use crate::sdk::light::get_pair_config_mesh_ltk;
+use crate::sdk::mcu::clock::clock_time_exceed;
+use crate::sdk::mcu::crypto::encode_password;
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::pm::light_sw_reboot;
+use crate::state::State;
 
 const SERIALS_CNT: u8 = 5; // must less than 7
 const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
@@ -183,7 +184,7 @@ impl TryFrom<u32> for KickoutReason {
     }
 }
 
-pub fn kick_out(par: KickoutReason) {
+pub fn kick_out(state: &RefCell<State>, par: KickoutReason) {
     factory_reset();
 
     if par == KickoutReason::OutOfMesh {
@@ -207,8 +208,8 @@ pub fn kick_out(par: KickoutReason) {
         buff[0] = PAIR_VALID_FLAG;
         buff[15] = PAIR_VALID_FLAG;
 
-        if *get_mesh_pair_enable() {
-            set_get_mac_en(true);
+        if state.borrow().mesh_pair_enable {
+            state.borrow_mut().get_mac_en = true;
             buff[1] = 1;
         }
         flash_write_page(pairing_addr, 16, buff.as_mut_ptr());

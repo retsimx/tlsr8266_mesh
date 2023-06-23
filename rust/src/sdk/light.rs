@@ -162,7 +162,11 @@ pub const LIGHT_DEL_GRP_PARAM: u8 = 0x00;
 
 pub const DEVICE_ADDR_MASK_DEFAULT: u16 = 0x7FFF;
 
-pub const MESH_NODE_MAX_NUM: u16 = 64;
+pub const MESH_NODE_MAX_NUM: usize = 64;
+pub const MESH_NODE_MASK_LEN: usize = ((MESH_NODE_MAX_NUM + 31) >> 5);
+
+pub const BUFF_RESPONSE_PACKET_COUNT: usize = 48;
+pub const BLT_FIFO_TX_PACKET_COUNT: usize = 8;
 
 pub const PKT_CMD_LEN: usize = 11;
 
@@ -645,8 +649,8 @@ pub_mut!(st_brige_no, u32, 0);
 pub_mut!(app_cmd_time, u32, 0);
 pub_mut!(mesh_user_cmd_idx, u8, 0);
 pub_mut!(slave_tx_cmd_time, u32, 0);
-pub_mut!(slave_status_buffer_wptr, u8, 0);
-pub_mut!(slave_status_buffer_rptr, u8, 0);
+pub_mut!(slave_status_buffer_wptr, usize, 0);
+pub_mut!(slave_status_buffer_rptr, usize, 0);
 pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);
 pub_mut!(slave_read_status_unicast_flag, u8, 0);
 pub_mut!(mesh_node_report_enable, bool, false);
@@ -660,7 +664,7 @@ pub_mut!(rcv_pkt_ttc, u8, 0);
 pub_mut!(org_ttl, u8, 0);
 pub_mut!(slave_read_status_response, bool, false);
 pub_mut!(slave_sno, [u8; 3], [0; 3]);
-pub_mut!(slave_status_record_idx, u16, 0);
+pub_mut!(slave_status_record_idx, usize, 0);
 pub_mut!(notify_req_mask_idx, u8, 0);
 pub_mut!(adv_flag, bool, true);
 pub_mut!(online_st_flag, bool, true);

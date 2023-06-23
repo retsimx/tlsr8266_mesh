@@ -1,21 +1,20 @@
-use core::cell::{RefCell, RefMut};
+use core::cell::RefCell;
+use core::ptr::{addr_of, null, null_mut};
+use core::slice;
+
+use crate::{pub_mut, pub_static};
 use crate::config::{DEVICE_NAME, MESH_NAME};
+use crate::ota::rf_link_slave_data_ota;
+use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
+use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
+use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::light::*;
 use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use core::convert::AsRef;
-use core::mem::transmute;
-use core::ptr::{addr_of, null, null_mut};
-use core::slice;
-use crate::{pub_mut, pub_static};
+use crate::state::State;
 use crate::version::BUILD_VERSION;
-use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
-use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
-use crate::state::IrqState;
-use crate::ota::rf_link_slave_data_ota;
-use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
 * @{
@@ -200,16 +199,16 @@ static spp_otaname: &[u8] = b"OTA";
 static spp_pairname: &[u8] = b"Pair";
 static spp_devicename: &[u8] = b"DevName";
 
-fn mesh_status_write(mut irq_state: &RefCell<IrqState>, p: *const PacketAttWrite) -> bool {
+fn mesh_status_write(state: &RefCell<State>, p: *const PacketAttWrite) -> bool {
     if !*get_pair_login_ok() {
         return true;
     }
     unsafe {
         SppDataServer2ClientData.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
         if (*p).l2cap_len > (3 + 1) {
-            mesh_report_status_enable_mask(addr_of!((*p).value) as *const u8, (*p).l2cap_len - 3);
+            mesh_report_status_enable_mask(state, addr_of!((*p).value) as *const u8, (*p).l2cap_len - 3);
         } else {
-            mesh_report_status_enable(if (*p).value[0] != 0 {true} else {false});
+            mesh_report_status_enable(state, if (*p).value[0] != 0 {true} else {false});
         }
     }
     return true;
@@ -223,8 +222,8 @@ pub struct attribute_t {
     pub attrMaxLen: u8,
     pub uuid: *const u8,
     pub pAttrValue: *mut u8,
-    pub w: Option<fn(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool>,
-    pub r: Option<fn(irq_state: &RefCell<IrqState>, data: *const PacketAttWrite) -> bool>,
+    pub w: Option<fn(state: &RefCell<State>, data: *const PacketAttWrite) -> bool>,
+    pub r: Option<fn(state: &RefCell<State>, data: *const PacketAttWrite) -> bool>,
 }
 
 #[macro_export]

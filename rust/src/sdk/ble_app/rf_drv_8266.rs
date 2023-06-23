@@ -7,7 +7,7 @@ use crate::{BIT, pub_mut, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::sdk::app_att_light::{attribute_t, get_gAttributes_def};
+use crate::sdk::app_att_light::{AttributeT, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
 use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_slave_link_interval, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
@@ -418,7 +418,7 @@ pub unsafe fn blc_ll_init_basic_mcu()
     write_reg16(0xf2c, 0xc00);
 }
 
-pub_mut!(gAttributes, *mut attribute_t, null_mut());
+pub_mut!(gAttributes, *mut AttributeT, null_mut());
 pub_mut!(irq_mask_save, u32, 0);
 pub_mut!(slave_link_state, u32, 0);
 pub_mut!(slave_listen_interval, u32, 0);
@@ -617,7 +617,7 @@ fn rf_link_slave_data_write_no_dec(state: &RefCell<State>, data: &mut PacketAttW
     unsafe { *(addr_of!((*get_pkt_light_data()).opcode) as *mut u16) = *get_device_address() };
     unsafe { *(addr_of!((*get_pkt_light_data()).value.src) as *mut u16) = *get_device_address() };
     set_app_cmd_time(read_reg_system_tick());
-    (*get_pkt_light_data()).value.val[18] = *get_max_relay_num();
+    (*get_pkt_light_data()).value.val[18] = MAX_RELAY_NUM;
 
     if device_match || group_match {
         rf_link_data_callback(state, addr_of!((*get_pkt_light_data()).l2cap_len) as *const PacketL2capData);
@@ -640,7 +640,7 @@ fn rf_link_slave_data_write_no_dec(state: &RefCell<State>, data: &mut PacketAttW
 
     (*get_pkt_light_status()).value.val[13] = 0;
     (*get_pkt_light_status()).value.val[14] = 0;
-    (*get_pkt_light_status()).value.val[18] = *get_max_relay_num();
+    (*get_pkt_light_status()).value.val[18] = MAX_RELAY_NUM;
     (*get_pkt_light_data()).value.val[16] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {

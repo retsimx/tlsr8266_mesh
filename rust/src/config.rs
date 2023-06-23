@@ -43,6 +43,4 @@ pub const FLASH_ADR_LUM: u32 = 0x78000;
 pub const FLASH_ADR_DEV_GRP_ADR: u32 = 0x79000;
 pub const FLASH_ADR_RESET_CNT: u32 = 0x7A000;
 pub const FLASH_ADR_PANIC_INFO: u32 = 0x7B000;
-// pub_mut!(flash_adr_scene, u32, 0x7C000);
-// pub_mut!(flash_adr_user_data, u32, 0x7D000);
 pub const FLASH_ADR_LIGHT_NEW_FW: u32 = 0x40000;

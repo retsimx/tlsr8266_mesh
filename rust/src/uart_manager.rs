@@ -1,5 +1,6 @@
+use core::cell::RefCell;
 use core::mem::size_of;
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of, addr_of_mut, null};
 use core::slice;
 
 use embassy_time::{Duration, Timer};
@@ -15,27 +16,7 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQM
 use crate::sdk::light::{AppCmdValue, get_device_address, MeshPkt};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::state::STATE;
-
-pub_mut!(pkt_user_cmd, MeshPkt, MeshPkt {
-    dma_len: 0x27,
-    _type: 2,
-    rf_len: 0x25,
-    l2cap_len: 0xCCDD,
-    chan_id: 0,
-    src_tx: 0,
-    handle1: 0,
-    sno: [0; 3],
-    src_adr: 0,
-    dst_adr: 0,
-    op: 0,
-    vendor_id: 0,
-    par: [0; 10],
-    internal_par1: [0; 5],
-    ttl: 0,
-    internal_par2: [0; 4],
-    no_use: [0; 4]
-});
+use crate::state::{STATE, State};
 
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
@@ -148,10 +129,10 @@ impl UartManager {
     }
 
     #[inline(always)]
-    pub fn check_irq(&mut self) {
+    pub fn check_irq(&mut self, state: *const RefCell<State>) {
         let irq_s = UartDriver::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            self.handle_rx(self.driver.rxdata_buf);
+        if irq_s & UARTIRQMASK::RX as u8 != 0 && state != null() {
+            self.handle_rx(unsafe { &*state }, self.driver.rxdata_buf);
         }
 
         if irq_s & UARTIRQMASK::TX as u8 != 0 {
@@ -245,7 +226,7 @@ impl UartManager {
         }
     }
 
-    pub fn handle_rx(&mut self, msg: uart_data_t) {
+    pub fn handle_rx(&mut self, state: &RefCell<State>, msg: uart_data_t) {
         // Check the crc of the packet
         let crc = crc16(&msg.data[0..42]);
         if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
@@ -276,7 +257,7 @@ impl UartManager {
             let mut data = [0; 13];
             data.copy_from_slice(&msg.data[5..5+13]);
 
-            let mymsg = unsafe {slice::from_raw_parts(addr_of!(get_pkt_user_cmd().dst_adr) as *const u8, 15)};
+            let mymsg = unsafe {slice::from_raw_parts(addr_of!(state.borrow().pkt_user_cmd.dst_adr) as *const u8, 15)};
             critical_section::with(|_| {
                 // Record the message
                 if self.sent.is_full() {

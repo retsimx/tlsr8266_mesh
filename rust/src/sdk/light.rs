@@ -29,7 +29,8 @@ pub_mut!(slave_first_connected_tick, u32, 0);
 pub_mut!(device_address, u16, 0);
 pub_mut!(device_node_sn, u8, 1);
 pub_mut!(dev_grp_next_pos, u16, 0);
-pub_mut!(max_relay_num, u8, 3);
+
+pub static MAX_RELAY_NUM: u8 = 3;
 
 pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize], [0; MAX_GROUP_NUM as usize]);
 

@@ -14,7 +14,6 @@ use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, 
 use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
 use crate::sdk::light::*;
 use crate::state::{State, STATE};
-use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -23,9 +22,9 @@ pub const MESH_PAIR_TIMEOUT: u32 = 10;
 //unit: ms
 pub const MESH_PAIR_NOTIFY_TIMEOUT: u32 = 2500;
 
-pub const MESH_NODE_ST_VAL_LEN: u8 = 4;
+pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
-pub const MESH_NODE_ST_PAR_LEN: u8 = MESH_NODE_ST_VAL_LEN - 2;
+pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
 
 #[derive(Clone, Copy, PartialEq)]
 enum MeshPairState {
@@ -128,13 +127,15 @@ impl MeshManager {
         STATE.lock(|state| {
             light_slave_tx_command(state, data, destination);
 
+            let mut state = state.borrow_mut();
+
             if *get_security_enable()
             {
-                get_pkt_user_cmd()._type |= BIT!(7);
-                pair_enc_packet_mesh(get_pkt_user_cmd_addr());
+                state.pkt_user_cmd._type |= BIT!(7);
+                pair_enc_packet_mesh(&mut state.pkt_user_cmd);
             }
 
-            mesh_send_command(get_pkt_user_cmd_addr() as *const PacketAttCmd, 0);
+            mesh_send_command(addr_of!(state.pkt_user_cmd) as *const PacketAttCmd, 0);
         });
     }
 

@@ -1,12 +1,14 @@
+use core::cell::RefCell;
 use core::cmp::min;
 use core::mem::size_of;
-use core::ptr::addr_of;
+use core::ptr::{addr_of, null};
 use crate::{app, BIT};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_HZ, clock_time, clock_time_exceed};
 use crate::sdk::mcu::gpio::{AS_UART, GPIO_PIN_TYPE, gpio_set_func, gpio_set_input_en, gpio_set_output_en};
 use crate::sdk::mcu::register::{FLD_DMA, FLD_IRQ, read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask, write_reg16, write_reg8, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma1_addr, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0, write_reg_irq_mask, write_reg_rst0};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::state::State;
 
 pub const UART_DATA_LEN: usize = 44;      // data max 252
 
@@ -190,7 +192,7 @@ impl UartDriver {
         while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 100*1000) {
             wd_clear();
 
-            app().uart_manager.check_irq();
+            app().uart_manager.check_irq(null());
         }
 
         self.uart_set_tx_busy_flag();

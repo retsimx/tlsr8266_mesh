@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use embassy_sync::blocking_mutex::{CriticalSectionMutex};
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, PacketAttData};
+use crate::sdk::light::{BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData};
 
 #[repr(align(4))]
 pub struct State {
@@ -29,6 +29,7 @@ pub struct State {
     pub get_mac_en: bool,
     pub mesh_pair_enable: bool,
     pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
+    pub pkt_user_cmd: MeshPkt,
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -82,5 +83,25 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
             sn: 0,
             par: [0; MESH_NODE_ST_PAR_LEN as usize],
         }
-    }; MESH_NODE_MAX_NUM as usize]
+    }; MESH_NODE_MAX_NUM],
+
+    pkt_user_cmd: MeshPkt {
+        dma_len: 0x27,
+        _type: 2,
+        rf_len: 0x25,
+        l2cap_len: 0xCCDD,
+        chan_id: 0,
+        src_tx: 0,
+        handle1: 0,
+        sno: [0; 3],
+        src_adr: 0,
+        dst_adr: 0,
+        op: 0,
+        vendor_id: 0,
+        par: [0; 10],
+        internal_par1: [0; 5],
+        ttl: 0,
+        internal_par2: [0; 4],
+        no_use: [0; 4]
+    }
 }));

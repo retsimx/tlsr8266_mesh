@@ -5,7 +5,7 @@ use core::ptr::{addr_of, addr_of_mut, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use crate::{app, BIT, pub_mut, uprintln_fast};
+use crate::{app, BIT, pub_mut};
 use crate::common::{rf_update_conn_para, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -19,7 +19,7 @@ use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::state::{State, STATE};
-use crate::uart_manager::{get_pkt_user_cmd, get_pkt_user_cmd_addr, light_mesh_rx_cb};
+use crate::uart_manager::light_mesh_rx_cb;
 
 pub_mut!(slave_timing_update, u32, 0);
 pub_mut!(slave_instant_next, u16, 0);
@@ -307,7 +307,7 @@ pub fn rf_link_rc_data(state: &RefCell<State>, mut packet: MeshPkt, needs_decode
     }
 
     // Don't do anything if this packet has been relayed too many times
-    if *get_max_relay_num() + 6 < packet.internal_par1[CURRENT_RELAY_COUNT] {
+    if MAX_RELAY_NUM + 6 < packet.internal_par1[CURRENT_RELAY_COUNT] {
         return false;
     }
 
@@ -402,10 +402,10 @@ pub fn rf_link_rc_data(state: &RefCell<State>, mut packet: MeshPkt, needs_decode
             if pkt_valid {
                 (*get_pkt_light_status()).value.val[13] = packet.par[9];
                 (*get_pkt_light_status()).value.val[18] = packet.internal_par1[CURRENT_RELAY_COUNT];
-                if *get_max_relay_num() < packet.internal_par1[CURRENT_RELAY_COUNT] {
+                if MAX_RELAY_NUM < packet.internal_par1[CURRENT_RELAY_COUNT] {
                     (*get_pkt_light_status()).value.val[14] = 0;
                 } else {
-                    (*get_pkt_light_status()).value.val[14] = *get_max_relay_num() - packet.internal_par1[CURRENT_RELAY_COUNT];
+                    (*get_pkt_light_status()).value.val[14] = MAX_RELAY_NUM - packet.internal_par1[CURRENT_RELAY_COUNT];
                 }
             }
         } else if op == LGT_CMD_LIGHT_GRP_REQ {
@@ -1037,47 +1037,47 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
     }
 }
 
-fn mesh_user_command_pkt_enc2buf()
+fn mesh_user_command_pkt_enc2buf(state: &RefCell<State>)
 {
+    let mut state = state.borrow_mut();
+
     if !*get_security_enable() {
-        get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
+        get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&state.pkt_user_cmd) });
     } else {
-        (*get_pkt_user_cmd())._type |= BIT!(7);
-        get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&*get_pkt_user_cmd()) });
+        state.pkt_user_cmd._type |= BIT!(7);
+        get_pkt_mesh_user_cmd_buf().clone_from(unsafe { transmute(&state.pkt_user_cmd) });
         pair_enc_packet_mesh(get_pkt_mesh_user_cmd_buf_addr());
     }
 }
 
-pub fn mesh_send_user_command() -> u8
+pub fn mesh_send_user_command(state: &RefCell<State>) -> u8
 {
     if *get_mesh_user_cmd_idx() == 0 {
         return 0;
     }
     set_mesh_user_cmd_idx(*get_mesh_user_cmd_idx() - 1);
-    critical_section::with(|_| {
-        rf_set_tx_rx_off();
-        rf_set_ble_access_code(*get_pair_ac());
-        rf_set_ble_crc_adv();
 
-        let mut user_cmd = false;
+    rf_set_tx_rx_off();
+    rf_set_ble_access_code(*get_pair_ac());
+    rf_set_ble_crc_adv();
 
-        if ((((*get_pkt_user_cmd()).handle1 as u32) << 0x1e) as i32) < 0 {
-            if ((((*get_pkt_user_cmd()).handle1 as u32) << 0x1e) as i32) < 0 {
-                user_cmd = true;
-            }
+    let mut user_cmd = false;
 
-            mesh_user_command_pkt_enc2buf();
+    if (((state.borrow().pkt_user_cmd.handle1 as u32) << 0x1e) as i32) < 0 {
+        user_cmd = true;
+
+        mesh_user_command_pkt_enc2buf(state);
+    }
+
+    for chn in SYS_CHN_LISTEN {
+        if !user_cmd {
+            rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, unsafe { &mut state.borrow_mut().pkt_user_cmd });
+            mesh_user_command_pkt_enc2buf(state);
         }
+        rf_set_ble_channel(chn);
+        rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
+    }
 
-        for chn in SYS_CHN_LISTEN {
-            if !user_cmd {
-                rf_link_proc_ttc(*get_slave_tx_cmd_time(), 0, unsafe { &mut *get_pkt_user_cmd_addr() });
-                mesh_user_command_pkt_enc2buf();
-            }
-            rf_set_ble_channel(chn);
-            rf_start_srx2tx(get_pkt_mesh_user_cmd_buf_addr() as u32, CLOCK_SYS_CLOCK_1US * 0x1e + read_reg_system_tick());
-        }
-    });
     *get_mesh_user_cmd_idx()
 }
 
@@ -1107,7 +1107,7 @@ pub fn tx_packet_bridge(state: &RefCell<State>)
     app_bridge_cmd_handle(*get_t_bridge_cmd());
 
     if *get_slave_data_valid() == 0 {
-        mesh_send_user_command();
+        mesh_send_user_command(state);
     }
 }
 
@@ -1221,7 +1221,7 @@ pub fn rf_link_match_group_mac(sno: *const AppCmdValue) -> (bool, bool)
 
 pub fn mesh_push_user_command(state: &RefCell<State>, sno: u32, dst: u16, cmd_op_para: *const u8, len: u8) -> bool
 {
-    let max_relay = *get_max_relay_num() + 1;
+    let max_relay = MAX_RELAY_NUM + 1;
 
     if len > 2 {
         let mut pkt_len = 0xd;
@@ -1237,50 +1237,51 @@ pub fn mesh_push_user_command(state: &RefCell<State>, sno: u32, dst: u16, cmd_op
 
             let cmd_op_para = unsafe { slice::from_raw_parts(cmd_op_para, pkt_len as usize) };
 
-            critical_section::with(|_| {
-                if cmd_op_para[0] & 0x3f == 6 {
-                    set_mesh_user_cmd_idx(0x20);
-                    if 0xff00 > cmd_op_para[4] as u16 * 0x100 + cmd_op_para[3] as u16 {
-                        set_mesh_user_cmd_idx(4);
-                    }
-                } else {
-                    set_mesh_user_cmd_idx(BRIDGE_MAX_CNT as u8);
+            if cmd_op_para[0] & 0x3f == 6 {
+                set_mesh_user_cmd_idx(0x20);
+                if 0xff00 > cmd_op_para[4] as u16 * 0x100 + cmd_op_para[3] as u16 {
+                    set_mesh_user_cmd_idx(4);
                 }
+            } else {
+                set_mesh_user_cmd_idx(BRIDGE_MAX_CNT as u8);
+            }
 
-                (*get_pkt_user_cmd()).dma_len = 0x27;
-                (*get_pkt_user_cmd()).l2cap_len = 0x21;
-                (*get_pkt_user_cmd()).rf_len = 0x25;
+            {
+                let mut pkt = &mut state.borrow_mut().pkt_user_cmd;
+                pkt.dma_len = 0x27;
+                pkt.l2cap_len = 0x21;
+                pkt.rf_len = 0x25;
 
-                (*get_pkt_user_cmd())._type = 2;
-                (*get_pkt_user_cmd()).chan_id = 0xff03;
-                (*get_pkt_user_cmd()).src_tx = *get_device_address();
-                (*get_pkt_user_cmd()).handle1 = 0;
-                (*get_pkt_user_cmd()).op = 0;
-                (*get_pkt_user_cmd()).vendor_id = 0;
-                (*get_pkt_user_cmd()).par.fill(0);
-                (*get_pkt_user_cmd()).internal_par1.fill(0);
-                (*get_pkt_user_cmd()).ttl = 0;
-                (*get_pkt_user_cmd()).internal_par2[0] = 0;
-                (*get_pkt_user_cmd()).sno.copy_from_slice(unsafe {
+                pkt._type = 2;
+                pkt.chan_id = 0xff03;
+                pkt.src_tx = *get_device_address();
+                pkt.handle1 = 0;
+                pkt.op = 0;
+                pkt.vendor_id = 0;
+                pkt.par.fill(0);
+                pkt.internal_par1.fill(0);
+                pkt.ttl = 0;
+                pkt.internal_par2[0] = 0;
+                pkt.sno.copy_from_slice(unsafe {
                     slice::from_raw_parts(addr_of!(sno) as *const u8, 3)
                 });
-                (*get_pkt_user_cmd()).src_adr = *get_device_address();
-                (*get_pkt_user_cmd()).dst_adr = dst;
+                pkt.src_adr = *get_device_address();
+                pkt.dst_adr = dst;
                 unsafe {
-                    slice::from_raw_parts_mut(addr_of_mut!((*get_pkt_user_cmd()).op), pkt_len as usize).copy_from_slice(cmd_op_para)
+                    slice::from_raw_parts_mut(addr_of_mut!(pkt.op), pkt_len as usize).copy_from_slice(cmd_op_para)
                 }
 
-                (*get_pkt_user_cmd()).internal_par1[CURRENT_RELAY_COUNT] = max_relay;
+                pkt.internal_par1[CURRENT_RELAY_COUNT] = max_relay;
+            }
 
-                let (group_match, device_match) = rf_link_match_group_mac(addr_of_mut!((*get_pkt_user_cmd()).sno) as *const AppCmdValue);
-                set_slave_tx_cmd_time(read_reg_system_tick());
-                if group_match || device_match {
-                    rf_link_rc_data(state, *get_pkt_user_cmd(), false);
-                    if device_match {
-                        set_mesh_user_cmd_idx(0);
-                    }
+            let (group_match, device_match) = rf_link_match_group_mac(addr_of!(state.borrow().pkt_user_cmd.sno) as *const AppCmdValue);
+            set_slave_tx_cmd_time(read_reg_system_tick());
+            if group_match || device_match {
+                rf_link_rc_data(state, state.borrow().pkt_user_cmd, false);
+                if device_match {
+                    set_mesh_user_cmd_idx(0);
                 }
-            });
+            }
 
             return true;
         }

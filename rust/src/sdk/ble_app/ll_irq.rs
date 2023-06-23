@@ -133,13 +133,13 @@ pub fn mesh_node_report_status(state: &RefCell<State>, params: &mut [u8], len: u
     return result;
 }
 
-pub fn irq_st_listen()
+pub fn irq_st_listen(state: &RefCell<State>)
 {
     set_slave_link_state(4);
     rf_stop_trx();
 
     app_bridge_cmd_handle(read_reg_system_tick());
-    mesh_send_user_command();
+    mesh_send_user_command(state);
 
     rf_set_rxmode_mesh_listen();
     write_reg_system_tick_irq(read_reg_system_tick() + *get_slave_listen_interval());
@@ -572,7 +572,7 @@ extern "C" fn irq_handler() {
                 IrqHandlerStatus::Adv => irq_st_adv(state),
                 IrqHandlerStatus::Bridge => irq_st_bridge(state),
                 IrqHandlerStatus::Rx => irq_st_ble_rx(),
-                IrqHandlerStatus::Listen => irq_st_listen(),
+                IrqHandlerStatus::Listen => irq_st_listen(state),
                 IrqHandlerStatus::None => {}
             }
         }
@@ -603,6 +603,6 @@ extern "C" fn irq_handler() {
             app().light_manager.transition_step();
         }
 
-        app().uart_manager.check_irq();
+        app().uart_manager.check_irq(state);
     });
 }

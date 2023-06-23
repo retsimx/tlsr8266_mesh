@@ -8,10 +8,11 @@ use num_traits::FromPrimitive;
 
 use crate::pub_mut;
 use crate::config::VENDOR_ID;
-use crate::sdk::app_att_light::{attribute_t, get_send_to_master, get_TelinkSppDataClient2ServiceUUID, get_TelinkSppDataOtaUUID, get_TelinkSppDataPairUUID, get_TelinkSppDataServer2ClientUUID, get_TelinkSppServiceUUID};
+use crate::sdk::app_att_light::{AttributeT, SEND_TO_MASTER, TELINK_SPP_DATA_CLIENT2SERVICE_UUID, TELINK_SPP_DATA_OTA_UUID, TELINK_SPP_DATA_PAIR_UUID, TELINK_SPP_DATA_SERVER2CLIENT_UUID, TELINK_SPP_SERVICE_UUID};
 use crate::sdk::ble_app::rf_drv_8266::get_gAttributes;
 use crate::sdk::light::{get_rf_slave_ota_finished_flag, OtaState, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttWrite, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketL2capData, PacketL2capHead, PacketVersionInd, set_rf_slave_ota_terminate_flag};
 use crate::sdk::mcu::register::read_reg_system_tick;
+use crate::sdk::service::{TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_SERVER2CLIENT};
 use crate::state::State;
 
 pub_mut!(pkt_version_ind, PacketVersionInd, PacketVersionInd {
@@ -115,9 +116,9 @@ pub enum GattOp {
     AttOpWriteCmd = 0x52, // ATT Write Command
 }
 
-pub unsafe fn l2cap_att_search(mut handle_start: u16, handle_end: u16, uuid: &[u8]) -> Option<(*const attribute_t, u16)>
+pub unsafe fn l2cap_att_search(mut handle_start: u16, handle_end: u16, uuid: &[u8]) -> Option<(*const AttributeT, u16)>
 {
-    let att_num = (*(*get_gAttributes()).offset(0)).attNum as u16;
+    let att_num = (*(*get_gAttributes()).offset(0)).att_num as u16;
 
     if att_num != handle_start {
         let mut end = handle_end;
@@ -125,7 +126,7 @@ pub unsafe fn l2cap_att_search(mut handle_start: u16, handle_end: u16, uuid: &[u
             end = att_num;
         }
         for handle_start in handle_start..=end {
-            if (*(*get_gAttributes()).offset(handle_start as isize)).uuidLen == 2 {
+            if (*(*get_gAttributes()).offset(handle_start as isize)).uuid_len == 2 {
                 if *(uuid.as_ptr() as *const u16) == *((*(*get_gAttributes()).offset(handle_start as isize)).uuid as *const u16) {
                     return Some(((*get_gAttributes()).offset(handle_start as isize), handle_start));
                 }
@@ -178,8 +179,8 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             set_att_service_discover_tick(read_reg_system_tick() | 1);
             let mut start_handle = (*packet).value[4];
             let mut end_handle = (*packet).value[6];
-            if (*(*get_gAttributes())).attNum < (*packet).value[6] {
-                end_handle = (*(*get_gAttributes())).attNum;
+            if (*(*get_gAttributes())).att_num < (*packet).value[6] {
+                end_handle = (*(*get_gAttributes())).att_num;
             }
             if start_handle <= end_handle {
                 let mut uuid_len = 0;
@@ -188,8 +189,8 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                 let mut offset_adj = 4;
                 loop {
                     if uuid_len == 0 {
-                        uuid_len = (*(*get_gAttributes()).offset(start_handle as isize)).uuidLen;
-                    } else if (*(*get_gAttributes()).offset(start_handle as isize)).uuidLen != uuid_len {
+                        uuid_len = (*(*get_gAttributes()).offset(start_handle as isize)).uuid_len;
+                    } else if (*(*get_gAttributes()).offset(start_handle as isize)).uuid_len != uuid_len {
                         if counter == 0 {
                             break;
                         }
@@ -205,7 +206,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     }
                     (*get_rf_packet_att_rsp()).value[counter as usize + 1] = start_handle;
                     (*get_rf_packet_att_rsp()).value[counter as usize + 2] = 0;
-                    if (*(*get_gAttributes()).offset(start_handle as isize)).uuidLen == 2 {
+                    if (*(*get_gAttributes()).offset(start_handle as isize)).uuid_len == 2 {
                         *(addr_of!((*get_rf_packet_att_rsp()).value[counter as usize + 3]) as *mut u16) = *((*(*get_gAttributes()).offset(start_handle as isize)).uuid as *const u16);
                         counter = counter + 4;
                     } else {
@@ -253,14 +254,14 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                 }
                 let found_attr = handle.unwrap().0;
                 let found_handle = handle.unwrap().1;
-                if (*found_attr).attrLen == 2 && *((*found_attr).pAttrValue as *const u16) == value {
+                if (*found_attr).attr_len == 2 && *((*found_attr).p_attr_value as *const u16) == value {
                     (*get_rf_packet_att_rsp()).value[counter * 2] = (found_handle & 0xff) as u8;
                     (*get_rf_packet_att_rsp()).value[counter * 2 + 1] = (found_handle >> 8) as u8;
                     start_handle = counter as u16 + 1;
-                    (*get_rf_packet_att_rsp()).value[start_handle as usize * 2] = ((*found_attr).attNum as u16 + (found_handle - 1) & 0xff) as u8;
-                    (*get_rf_packet_att_rsp()).value[start_handle as usize * 2 + 1] = ((*found_attr).attNum as u16 + (found_handle - 1) >> 8) as u8;
+                    (*get_rf_packet_att_rsp()).value[start_handle as usize * 2] = ((*found_attr).att_num as u16 + (found_handle - 1) & 0xff) as u8;
+                    (*get_rf_packet_att_rsp()).value[start_handle as usize * 2 + 1] = ((*found_attr).att_num as u16 + (found_handle - 1) >> 8) as u8;
                     counter = start_handle as usize + 1;
-                    start_handle = found_handle as u16 + (*found_attr).attNum as u16;
+                    start_handle = found_handle as u16 + (*found_attr).att_num as u16;
                 } else {
                     start_handle = found_handle + 1;
                 }
@@ -304,14 +305,14 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     tick = 0;
                 } else {
                     let found_attr = handle.unwrap().0;
-                    if (*found_attr).uuidLen != bVar11 {
+                    if (*found_attr).uuid_len != bVar11 {
                         return (null(), 0);
                     }
                     found_handle = handle.unwrap().1;
                     (*get_rf_packet_att_rsp()).value[1] = found_handle as u8;
                     (*get_rf_packet_att_rsp()).value[2] = (found_handle >> 8) as u8;
-                    (*get_rf_packet_att_rsp()).value[3..3+(*found_attr).attrLen as usize].copy_from_slice(slice::from_raw_parts((*found_attr).pAttrValue, (*found_attr).attrLen as usize));
-                    tick = (*found_attr).attrLen + 2;
+                    (*get_rf_packet_att_rsp()).value[3..3+(*found_attr).attr_len as usize].copy_from_slice(slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize));
+                    tick = (*found_attr).attr_len + 2;
                     (*get_rf_packet_att_rsp()).value[0] = tick;
                 }
             } else {
@@ -326,14 +327,14 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                         tick = 0;
                     } else {
                         let found_attr = handle.unwrap().0;
-                        if (*found_attr).uuidLen != bVar11 {
+                        if (*found_attr).uuid_len != bVar11 {
                             return (null(), 0);
                         }
                         found_handle = handle.unwrap().1;
                         (*get_rf_packet_att_rsp()).value[1] = found_handle as u8;
                         (*get_rf_packet_att_rsp()).value[2] = (found_handle >> 8) as u8;
-                        (*get_rf_packet_att_rsp()).value[3..3+(*found_attr).attrLen as usize].copy_from_slice(slice::from_raw_parts((*found_attr).pAttrValue, (*found_attr).attrLen as usize));
-                        tick = (*found_attr).attrLen + 2;
+                        (*get_rf_packet_att_rsp()).value[3..3+(*found_attr).attr_len as usize].copy_from_slice(slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize));
+                        tick = (*found_attr).attr_len + 2;
                         (*get_rf_packet_att_rsp()).value[0] = tick;
                     }
                 }
@@ -350,7 +351,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     let found_attr = handle.unwrap().0;
                     found_handle = handle.unwrap().1;
 
-                    if !((counter == 0 || (*found_attr.offset(1)).uuidLen == counter) && tick + (*found_attr).uuidLen < 0x13) {
+                    if !((counter == 0 || (*found_attr.offset(1)).uuid_len == counter) && tick + (*found_attr).uuid_len < 0x13) {
                         break;
                     }
 
@@ -358,7 +359,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     tick = tick + 1;
                     (*get_rf_packet_att_rsp()).value[tick as usize + 1] = 0;
                     tick = tick + 1;
-                    (*get_rf_packet_att_rsp()).value[tick as usize + 1] = *(*found_attr).pAttrValue;
+                    (*get_rf_packet_att_rsp()).value[tick as usize + 1] = *(*found_attr).p_attr_value;
                     tick = tick + 1;
                     (*get_rf_packet_att_rsp()).value[tick as usize + 1] = found_handle as u8 + 1;
                     tick = tick + 1;
@@ -366,14 +367,14 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     (*get_rf_packet_att_rsp()).value[tick as usize + 1] = 0;
                     tick = tick + 1;
 
-                    (*get_rf_packet_att_rsp()).value[tick as usize + 1..tick as usize + 1 + (*found_attr.offset(1)).uuidLen as usize].copy_from_slice(
+                    (*get_rf_packet_att_rsp()).value[tick as usize + 1..tick as usize + 1 + (*found_attr.offset(1)).uuid_len as usize].copy_from_slice(
                         slice::from_raw_parts(
                         (*found_attr.offset(1)).uuid,
-                        (*found_attr.offset(1)).uuidLen as usize
+                        (*found_attr.offset(1)).uuid_len as usize
                         )
                     );
 
-                    counter = (*found_attr.offset(1)).uuidLen;
+                    counter = (*found_attr.offset(1)).uuid_len;
                     tick = counter + tick;
                 }
                 (*get_rf_packet_att_rsp()).value[0] = counter + 5;
@@ -398,29 +399,29 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             if (*packet).value[5] != 0 {
                 return (null(), 0);
             }
-            if (*(*get_gAttributes())).attNum < tick as u8 {
+            if (*(*get_gAttributes())).att_num < tick as u8 {
                 return (null(), 0);
             }
             if (*(*get_gAttributes()).offset(tick as isize)).r.is_none() {
                 slice::from_raw_parts_mut(
                     addr_of_mut!((*get_rf_packet_att_rsp()).value[0]) as *mut u8,
-                    (*(*get_gAttributes()).offset(tick as isize)).attrLen as usize,
+                    (*(*get_gAttributes()).offset(tick as isize)).attr_len as usize,
                 ).copy_from_slice(
                     slice::from_raw_parts(
-                        (*(*get_gAttributes()).offset(tick as isize)).pAttrValue,
-                        (*(*get_gAttributes()).offset(tick as isize)).attrLen as usize,
+                        (*(*get_gAttributes()).offset(tick as isize)).p_attr_value,
+                        (*(*get_gAttributes()).offset(tick as isize)).attr_len as usize,
                     )
                 );
 
-                if (*(*get_gAttributes()).offset(tick as isize)).pAttrValue == (*get_send_to_master()).as_mut_ptr() {
-                    (*get_send_to_master()).fill(0);
+                if (*(*get_gAttributes()).offset(tick as isize)).p_attr_value == unsafe { SEND_TO_MASTER.as_mut_ptr() } {
+                    unsafe { SEND_TO_MASTER.fill(0); }
                 } else if tick == 0x18 && *get_rf_slave_ota_finished_flag() != OtaState::Continue {
                     set_rf_slave_ota_terminate_flag(true);
                 }
-                (*get_rf_packet_att_rsp()).rf_len = (*(*get_gAttributes()).offset(tick as isize)).attrLen + 5;
+                (*get_rf_packet_att_rsp()).rf_len = (*(*get_gAttributes()).offset(tick as isize)).attr_len + 5;
                 (*get_rf_packet_att_rsp()).dma_len = (*get_rf_packet_att_rsp()).rf_len as u32 + 2;
                 (*get_rf_packet_att_rsp())._type = 2;
-                (*get_rf_packet_att_rsp()).l2cap_len = (*(*get_gAttributes()).offset(tick as isize)).attrLen as u16 + 1;
+                (*get_rf_packet_att_rsp()).l2cap_len = (*(*get_gAttributes()).offset(tick as isize)).attr_len as u16 + 1;
                 (*get_rf_packet_att_rsp()).chan_id = 4;
                 (*get_rf_packet_att_rsp()).opcode = 0xb;
                 return (get_rf_packet_att_rsp_addr() as *const PacketL2capHead, size_of_val(&*get_rf_packet_att_rsp()));
@@ -448,9 +449,9 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
 
                 let mut attr_len = 0;
                 if counter == 0 {
-                    attr_len = (*found_attr).attrLen;
+                    attr_len = (*found_attr).attr_len;
                 } else {
-                    attr_len = (*found_attr).attrLen;
+                    attr_len = (*found_attr).attr_len;
                     if attr_len as u16 != counter {
                         break;
                     }
@@ -463,18 +464,18 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                 (*get_rf_packet_att_rsp()).value[dest_ptr * 2 + 2] = (counter >> 8) as u8;
 
                 handle_start = dest_ptr as u16 + 1;
-                (*get_rf_packet_att_rsp()).value[(handle_start * 2) as usize + 1] = (((counter - 1) + (*found_attr).attNum as u16) & 0xff) as u8;
-                (*get_rf_packet_att_rsp()).value[(handle_start * 2) as usize + 2] = (((counter - 1) + (*found_attr).attNum as u16) >> 8) as u8;
+                (*get_rf_packet_att_rsp()).value[(handle_start * 2) as usize + 1] = (((counter - 1) + (*found_attr).att_num as u16) & 0xff) as u8;
+                (*get_rf_packet_att_rsp()).value[(handle_start * 2) as usize + 2] = (((counter - 1) + (*found_attr).att_num as u16) >> 8) as u8;
 
                 handle_start = handle_start + 1;
-                (*get_rf_packet_att_rsp()).value[(handle_start as usize * 2) + 1..(handle_start as usize * 2) + (*found_attr).attrLen as usize + 1].copy_from_slice(
+                (*get_rf_packet_att_rsp()).value[(handle_start as usize * 2) + 1..(handle_start as usize * 2) + (*found_attr).attr_len as usize + 1].copy_from_slice(
                     slice::from_raw_parts(
-                        (*found_attr).pAttrValue,
-                        (*found_attr).attrLen as usize,
+                        (*found_attr).p_attr_value,
+                        (*found_attr).attr_len as usize,
                     )
                 );
-                dest_ptr = handle_start as usize + ((*found_attr).attrLen as usize / 2);
-                counter = counter + (*found_attr).attNum as u16;
+                dest_ptr = handle_start as usize + ((*found_attr).attr_len as usize / 2);
+                counter = counter + (*found_attr).att_num as u16;
                 handle_start = counter;
                 counter = attr_len as u16;
                 if handle_start > handle_end {
@@ -503,7 +504,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                 if tick < 2 {
                     return (null(), 0);
                 }
-                if *(*(*get_gAttributes()).offset(tick as isize - 1)).pAttrValue & 0xc == 0 {
+                if *(*(*get_gAttributes()).offset(tick as isize - 1)).p_attr_value & 0xc == 0 {
                     return (null(), 0);
                 }
             }
@@ -511,7 +512,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             if (*packet).value[5] != 0 {
                 return result;
             }
-            if (*(*get_gAttributes())).attNum < tick {
+            if (*(*get_gAttributes())).att_num < tick {
                 return result;
             }
             if (*packet).value[3] == 0x12 {
@@ -522,20 +523,20 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
                     return result;
                 }
 
-                if (*(*get_gAttributes()).offset(tick as isize)).pAttrValue as u32 <= addr_of!(__RAM_START_ADDR) as u32 {
+                if (*(*get_gAttributes()).offset(tick as isize)).p_attr_value as u32 <= addr_of!(__RAM_START_ADDR) as u32 {
                     return result;
                 }
 
                 let dest = slice::from_raw_parts_mut(
-                    (*(*get_gAttributes()).offset(tick as isize)).pAttrValue,
-                    (*(*get_gAttributes()).offset(tick as isize)).attrLen as usize,
+                    (*(*get_gAttributes()).offset(tick as isize)).p_attr_value,
+                    (*(*get_gAttributes()).offset(tick as isize)).attr_len as usize,
                 );
 
                 dest.fill(0);
                 dest.copy_from_slice(
                     slice::from_raw_parts(
                         addr_of!((*packet).value[6]),
-                        (*(*get_gAttributes()).offset(tick as isize)).attrLen as usize,
+                        (*(*get_gAttributes()).offset(tick as isize)).attr_len as usize,
                     )
                 );
 
@@ -548,15 +549,4 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
         },
         _ => (null(), 0),
     };
-}
-
-pub fn setSppUUID(service_uuid: *const u8, server2client_uuid: *const u8, client2service_uuid: *const u8, ota_uuid: *const u8, pair_uuid: *const u8)
-{
-    unsafe {
-        (*get_TelinkSppServiceUUID()).copy_from_slice(slice::from_raw_parts(service_uuid, 0x10));
-        (*get_TelinkSppDataServer2ClientUUID()).copy_from_slice(slice::from_raw_parts(server2client_uuid, 0x10));
-        (*get_TelinkSppDataClient2ServiceUUID()).copy_from_slice(slice::from_raw_parts(client2service_uuid, 0x10));
-        (*get_TelinkSppDataOtaUUID()).copy_from_slice(slice::from_raw_parts(ota_uuid, 0x10));
-        (*get_TelinkSppDataPairUUID()).copy_from_slice(slice::from_raw_parts(pair_uuid, 0x10));
-    }
 }

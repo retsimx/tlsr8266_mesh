@@ -10,7 +10,6 @@ use crate::{app};
 use crate::{BIT};
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::ble_ll_attribute::setSppUUID;
 use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{get_adv_data, rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -90,14 +89,6 @@ fn light_init_default(state: &RefCell<State>) {
     get_pair_config_mesh_pwd()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
 
     get_pair_config_mesh_ltk()[0..16].copy_from_slice(&MESH_LTK[0..16]);
-
-    setSppUUID(
-        TELINK_SPP_UUID_SERVICE.as_ptr(),
-        TELINK_SPP_DATA_SERVER2CLIENT.as_ptr(),
-        TELINK_SPP_DATA_CLIENT2SERVER.as_ptr(),
-        TELINK_SPP_DATA_OTA.as_ptr(),
-        TELINK_SPP_DATA_PAIR.as_ptr(),
-    );
 
     set_p_adv_pri_data(get_adv_pri_data());
     set_adv_private_data_len(size_of::<AdvPrivate>() as u8);
@@ -257,7 +248,7 @@ pub fn rf_link_response_callback(
     ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
     ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
-    ppp.val[18] = *get_max_relay_num();
+    ppp.val[18] = MAX_RELAY_NUM;
 
     let mut idx = 0;
     match ppp.val[15] {

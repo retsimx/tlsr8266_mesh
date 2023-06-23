@@ -635,7 +635,7 @@ pub const UPDATE_CONNECT_PARA_DELAY_MS: u32 = 1000;
 
 pub_mut!(update_interval_user_max, u16, 0);
 pub_mut!(update_interval_user_min, u16, 0);
-pub_mut!(update_timeout_user, u16, 0);
+pub_mut!(update_timeout_user, u32, 0);
 pub const INTERVAL_THRESHOLD: u16 = 16;
 pub_mut!(update_interval_flag, u16, 0);
 pub_mut!(update_interval_time, bool, false);

@@ -4,12 +4,11 @@ use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::{app, uprintln_fast};
+use crate::{app};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::{MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
-use crate::sdk::ble_app::ble_ll_attribute::{get_slave_link_time_out, set_att_service_discover_tick, set_slave_link_time_out};
 use crate::sdk::ble_app::ble_ll_pair::pair_proc;
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
@@ -27,17 +26,21 @@ fn slave_timing_update_handle(state: &RefCell<State>)
             ble_ll_channel_table_calc(state, get_slave_chn_map(), false);
             (*get_pkt_init()).chm = *get_slave_chn_map();
         }
-    } else if *get_slave_timing_update() == 2 && *get_slave_instant_next() == *get_slave_instant() {
-        set_slave_timing_update(0);
-        set_slave_timing_update2_ok_time(*get_ble_conn_offset() + *get_slave_next_connect_tick());
-        set_slave_link_interval(*get_ble_conn_interval());
-        set_slave_link_time_out(*get_ble_conn_timeout());
-        set_slave_timing_update2_flag(1);
-        set_slave_window_size(*get_ble_conn_interval() - CLOCK_SYS_CLOCK_1US * 0x4e2);
-        if *get_slave_window_size_update() < *get_slave_window_size() {
-            set_slave_window_size(*get_slave_window_size_update());
+    } else {
+        let mut state = state.borrow_mut();
+
+        if *get_slave_timing_update() == 2 && *get_slave_instant_next() == *get_slave_instant() {
+            set_slave_timing_update(0);
+            set_slave_timing_update2_ok_time(*get_ble_conn_offset() + *get_slave_next_connect_tick());
+            set_slave_link_interval(*get_ble_conn_interval());
+            state.slave_link_time_out = *get_ble_conn_timeout();
+            set_slave_timing_update2_flag(1);
+            set_slave_window_size(*get_ble_conn_interval() - CLOCK_SYS_CLOCK_1US * 0x4e2);
+            if *get_slave_window_size_update() < *get_slave_window_size() {
+                set_slave_window_size(*get_slave_window_size_update());
+            }
+            set_slave_next_connect_tick(*get_slave_timing_update2_ok_time());
         }
-        set_slave_next_connect_tick(*get_slave_timing_update2_ok_time());
     }
 }
 
@@ -235,7 +238,7 @@ pub fn irq_st_bridge(state: &RefCell<State>)
         write_reg8(0xf04, 0x68);
     }
 
-    if *get_slave_link_time_out() * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - *get_slave_connected_tick() {
+    if state.borrow().slave_link_time_out * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - *get_slave_connected_tick() {
         if *get_rf_slave_ota_busy() {
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
         }
@@ -269,7 +272,7 @@ pub fn irq_st_bridge(state: &RefCell<State>)
             write_reg8(0xf04, 0x68);
         }
 
-        set_att_service_discover_tick(0);
+        state.borrow_mut().att_service_discover_tick = 0;
         set_need_update_connect_para(false);
 
         return;

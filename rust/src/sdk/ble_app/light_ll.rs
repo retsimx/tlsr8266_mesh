@@ -11,7 +11,7 @@ use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
 use crate::sdk::ble_app::ble_ll_att::ble_ll_channel_table_calc;
-use crate::sdk::ble_app::ble_ll_attribute::{get_att_service_discover_tick, get_slave_link_time_out, l2cap_att_handler, set_att_service_discover_tick, set_slave_link_time_out};
+use crate::sdk::ble_app::ble_ll_attribute::{l2cap_att_handler};
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_init, pair_save_key, pair_set_key};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -581,73 +581,84 @@ fn check_par_con(packet: &PacketLlInit) -> bool
 
 pub fn rf_link_slave_connect(state: &RefCell<State>, packet: &PacketLlInit, time: u32) -> bool
 {
-    state.borrow_mut().conn_update_successed = false;
-    state.borrow_mut().conn_update_cnt = 0;
+    {
+        let mut state = state.borrow_mut();
+        state.conn_update_successed = false;
+        state.conn_update_cnt = 0;
+    }
 
     if *get_slave_connection_enable() || packet.scan_a == packet.adv_a {
         if check_par_con(packet) == false {
             rf_stop_trx();
 
-            set_slave_window_offset(CLOCK_SYS_CLOCK_1US * 1250 * (packet.woffset as u32 + 1));
+            {
+                let mut state = state.borrow_mut();
 
-            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick());
-            write_reg_irq_src(0x100000);
-            write_reg_system_tick_irq(time + *get_slave_window_offset() + CLOCK_SYS_CLOCK_1US * (0 - if packet.woffset == 0 { 500 } else { 700 }));
-            if 0x80000000 < read_reg_system_tick_irq() - read_reg_system_tick() {
-                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
-            }
+                set_slave_window_offset(CLOCK_SYS_CLOCK_1US * 1250 * (packet.woffset as u32 + 1));
 
-            set_light_conn_sn_master(0x80);
-            set_slave_connected_tick(read_reg_system_tick());
-            if *get_security_enable() {
-                set_slave_first_connected_tick(*get_slave_connected_tick());
-            }
+                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick());
+                write_reg_irq_src(0x100000);
+                write_reg_system_tick_irq(time + *get_slave_window_offset() + CLOCK_SYS_CLOCK_1US * (0 - if packet.woffset == 0 { 500 } else { 700 }));
+                if 0x80000000 < read_reg_system_tick_irq() - read_reg_system_tick() {
+                    write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
+                }
 
-            set_slave_status_tick(((packet.interval as u32 * 5) >> 2) as u8);
-            set_slave_link_interval(packet.interval as u32 * CLOCK_SYS_CLOCK_1US * 1250);
-            set_slave_window_size((packet.wsize as u32 * 1250 + 1100) * CLOCK_SYS_CLOCK_1US);
+                set_light_conn_sn_master(0x80);
+                set_slave_connected_tick(read_reg_system_tick());
+                if *get_security_enable() {
+                    set_slave_first_connected_tick(*get_slave_connected_tick());
+                }
 
-            let tmp = *get_slave_link_interval() - CLOCK_SYS_CLOCK_1US * 1250;
-            if tmp <= *get_slave_window_size() && *get_slave_window_size() - tmp != 0 {
-                set_slave_window_size(tmp);
-            }
+                set_slave_status_tick(((packet.interval as u32 * 5) >> 2) as u8);
+                set_slave_link_interval(packet.interval as u32 * CLOCK_SYS_CLOCK_1US * 1250);
+                set_slave_window_size((packet.wsize as u32 * 1250 + 1100) * CLOCK_SYS_CLOCK_1US);
 
-            set_slave_link_time_out(packet.timeout as u32 * 10000);
-            unsafe {
-                slice::from_raw_parts_mut(
-                    addr_of_mut!((*get_pkt_init()).scan_a) as *mut u8,
-                    0x22,
-                ).copy_from_slice(
-                    slice::from_raw_parts(
-                        addr_of!(packet.scan_a) as *const u8,
+                let tmp = *get_slave_link_interval() - CLOCK_SYS_CLOCK_1US * 1250;
+                if tmp <= *get_slave_window_size() && *get_slave_window_size() - tmp != 0 {
+                    set_slave_window_size(tmp);
+                }
+
+                state.slave_link_time_out = packet.timeout as u32 * 10000;
+                unsafe {
+                    slice::from_raw_parts_mut(
+                        addr_of_mut!((*get_pkt_init()).scan_a) as *mut u8,
                         0x22,
+                    ).copy_from_slice(
+                        slice::from_raw_parts(
+                            addr_of!(packet.scan_a) as *const u8,
+                            0x22,
+                        )
                     )
-                )
-            };
+                };
+            }
 
             ble_ll_channel_table_calc(state, &get_pkt_init().chm, true);
 
-            // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
-            write_reg_rf_crc((((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
-            rf_reset_sn();
+            {
+                let mut state = state.borrow_mut();
 
-            set_slave_instant(0);
-            set_slave_timing_update2_flag(0);
-            set_slave_interval_old(0);
-            set_slave_timing_update2_ok_time(0);
-            set_slave_window_size_update(0);
+                // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
+                write_reg_rf_crc((((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);
+                rf_reset_sn();
 
-            pair_init();
+                set_slave_instant(0);
+                set_slave_timing_update2_flag(0);
+                set_slave_interval_old(0);
+                set_slave_timing_update2_ok_time(0);
+                set_slave_window_size_update(0);
 
-            set_mesh_node_report_enable(false);
+                pair_init();
 
-            state.borrow_mut().mesh_node_mask.fill(0);
+                set_mesh_node_report_enable(false);
 
-            set_p_st_handler(IrqHandlerStatus::Rx);
-            set_need_update_connect_para(true);
-            set_att_service_discover_tick(read_reg_system_tick() | 1);
+                state.mesh_node_mask.fill(0);
 
-            write_reg8(0x00800f04, 0x67);  // tx wail & settle time
+                set_p_st_handler(IrqHandlerStatus::Rx);
+                set_need_update_connect_para(true);
+                state.att_service_discover_tick = read_reg_system_tick() | 1;
+
+                write_reg8(0x00800f04, 0x67);  // tx wail & settle time
+            }
 
             return true;
         }
@@ -713,8 +724,10 @@ pub fn is_receive_ota_window() -> bool
     return result;
 }
 
-pub fn setup_ble_parameter_start(delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u16) -> u32
+pub fn setup_ble_parameter_start(state: &RefCell<State>, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
 {
+    let mut state = state.borrow_mut();
+
     let mut invalid = false;
 
     if interval_max | interval_min == 0 {
@@ -732,7 +745,7 @@ pub fn setup_ble_parameter_start(delay: u16, mut interval_min: u16, mut interval
     }
 
     if timeout == 0 {
-        set_update_timeout_user(*get_slave_link_time_out() as u16);
+        set_update_timeout_user(state.slave_link_time_out);
     } else {
         set_update_timeout_user(timeout);
         if timeout < 100 {
@@ -755,14 +768,22 @@ pub fn setup_ble_parameter_start(delay: u16, mut interval_min: u16, mut interval
 
 fn update_connect_para(state: &RefCell<State>)
 {
-    if *get_need_update_connect_para() {
-        if *get_att_service_discover_tick() != 0 {
-            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - *get_att_service_discover_tick() {
-                update_ble_parameter_cb(state);
-                set_need_update_connect_para(false);
-                set_att_service_discover_tick(0);
+    let mut do_cb = false;
+    {
+        let mut state = state.borrow_mut();
+        if *get_need_update_connect_para() {
+            if state.att_service_discover_tick != 0 {
+                if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - state.att_service_discover_tick {
+                    do_cb = true;
+                    set_need_update_connect_para(false);
+                    state.att_service_discover_tick = 0;
+                }
             }
         }
+    }
+
+    if do_cb {
+        update_ble_parameter_cb(state);
     }
 }
 

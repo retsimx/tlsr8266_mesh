@@ -1,13 +1,12 @@
-use core::cell::{RefCell, RefMut};
+use core::cell::{RefCell};
 use core::cmp::min;
-use core::ptr::{addr_of, addr_of_mut, null_mut};
+use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
 use crate::{BIT, pub_mut, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::sdk::app_att_light::{AttributeT, get_gAttributes_def};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
 use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_slave_link_interval, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
@@ -418,7 +417,6 @@ pub unsafe fn blc_ll_init_basic_mcu()
     write_reg16(0xf2c, 0xc00);
 }
 
-pub_mut!(gAttributes, *mut AttributeT, null_mut());
 pub_mut!(irq_mask_save, u32, 0);
 pub_mut!(slave_link_state, u32, 0);
 pub_mut!(slave_listen_interval, u32, 0);
@@ -814,8 +812,6 @@ pub fn rf_link_slave_init(state: &RefCell<State>, interval: u32)
         (*get_pkt_light_status()).value.src[1] = (*get_mac_id())[1];
 
         set_slave_adv_enable(true);
-
-        set_gAttributes(get_gAttributes_def().as_mut_ptr());
 
         retrieve_dev_grp_address();
 

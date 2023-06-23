@@ -304,10 +304,10 @@ const fn size_of_val<T>(_: &T) -> usize {
 }
 
 pub_mut!(
-    gAttributes_def,
+    gAttributes,
     [AttributeT; 29],
     [
-        attrdef!((unsafe { gAttributes_def.0.len() - 1 }) as u8, 0, 0, 0),
+        attrdef!((unsafe { gAttributes.0.len() - 1 }) as u8, 0, 0, 0),
         // gatt
         attrdefu!(6, 2, 2, 2, PRIMARY_SERVICE_UUID, GAP_SERVICE_UUID),
         attrdefu!(0, 2, 1, 1, CHARACTER_UUID, DEV_NAME_CHARACTER),

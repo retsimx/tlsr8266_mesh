@@ -1,8 +1,10 @@
 use core::cell::RefCell;
-use embassy_sync::blocking_mutex::{CriticalSectionMutex};
+
+use embassy_sync::blocking_mutex::CriticalSectionMutex;
+
 use crate::config::VENDOR_ID;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData};
+use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketVersionInd};
 
 #[repr(align(4))]
 pub struct State {
@@ -37,12 +39,22 @@ pub struct State {
 
     pub ble_ll_channel_num: usize,
     pub ble_ll_last_unmapped_ch: usize,
-    pub ble_ll_channel_table: [u8; 40]
+    pub ble_ll_channel_table: [u8; 40],
+
+    pub pkt_version_ind: PacketVersionInd,
+    pub rf_pkt_unknown_response: PacketCtrlUnknown,
+    pub pkt_feature_rsp: PacketFeatureRsp,
+    pub pkt_mtu_rsp: PacketAttMtu,
+    pub pkt_err_rsp: PacketAttErrRsp,
+    pub rf_packet_att_rsp: PacketAttReadRsp,
+    pub pkt_write_rsp: PacketAttWriteRsp,
+    pub att_service_discover_tick: u32,
+    pub slave_link_time_out: u32,
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
     light_rx_wptr: 0,
-    light_rx_buff: [LightRxBuff{
+    light_rx_buff: [LightRxBuff {
         dma_len: 0,
         unk1: [0; 3],
         rssi: 0,
@@ -51,7 +63,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         sno: [0; 3],
         unk3: [0; 5],
         mac: [0; 4],
-        unk4: [0; 40]
+        unk4: [0; 40],
     }; 4],
     blt_tx_fifo: [[0; 48]; 8],
     blt_tx_wptr: 0,
@@ -65,7 +77,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         att: 0,
         hl: 0,
         hh: 0,
-        dat: [0; 23]
+        dat: [0; 23],
     }; 48],
     pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
     pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
@@ -90,7 +102,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
             dev_adr: 0,
             sn: 0,
             par: [0; MESH_NODE_ST_PAR_LEN as usize],
-        }
+        },
     }; MESH_NODE_MAX_NUM],
 
     pkt_user_cmd: MeshPkt {
@@ -110,13 +122,13 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         internal_par1: [0; 5],
         ttl: 0,
         internal_par2: [0; 4],
-        no_use: [0; 4]
+        no_use: [0; 4],
     },
 
     adv_pri_data: AdvPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
-        mac_address: 0
+        mac_address: 0,
     },
     adv_rsp_pri_data: AdvRspPrivate {
         manufacture_id: VENDOR_ID,
@@ -125,10 +137,73 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         product_uuid: 0x1234,
         status: 0x01,
         device_address: 0,
-        rsv: [0; 16]
+        rsv: [0; 16],
     },
 
     ble_ll_channel_num: 0,
     ble_ll_last_unmapped_ch: 0,
-    ble_ll_channel_table: [0; 40]
+    ble_ll_channel_table: [0; 40],
+
+    pkt_version_ind: PacketVersionInd {
+        dma_len: 8,
+        _type: 3,
+        rf_len: 6,
+        opcode: 0x0c,
+        main_ver: 0x08,
+        vendor: VENDOR_ID,
+        sub_ver: 0x08,
+    },
+    rf_pkt_unknown_response: PacketCtrlUnknown {
+        dma_len: 0x04,
+        _type: 0x03,
+        rf_len: 0x02,
+        opcode: 0x07,
+        data: [0],
+    },
+    pkt_feature_rsp: PacketFeatureRsp {
+        dma_len: 0x0b,
+        _type: 0x3,
+        rf_len: 0x09,
+        opcode: 0x09,
+        data: [1, 0, 0, 0, 0, 0, 0, 0],
+    },
+    pkt_mtu_rsp: PacketAttMtu {
+        dma_len: 0x09,
+        _type: 2,
+        rf_len: 0x07,
+        l2cap_len: 0x03,
+        chan_id: 0x04,
+        opcode: 0x03,
+        mtu: [0x17, 0x00],
+    },
+    pkt_err_rsp: PacketAttErrRsp {
+        dma_len: 0x0b,
+        _type: 0x02,
+        rf_len: 0x09,
+        l2cap_len: 0x05,
+        chan_id: 0x04,
+        opcode: 0x01,
+        err_opcode: 0,
+        err_handle: 0,
+        err_reason: 0x0a,
+    },
+    rf_packet_att_rsp: PacketAttReadRsp {
+        dma_len: 0,
+        _type: 0,
+        rf_len: 0,
+        l2cap_len: 0,
+        chan_id: 0,
+        opcode: 0,
+        value: [0; 22],
+    },
+    pkt_write_rsp: PacketAttWriteRsp {
+        dma_len: 0x07,
+        _type: 2,
+        rf_len: 0x05,
+        l2cap_len: 0x01,
+        chan_id: 0x04,
+        opcode: 0x13,
+    },
+    att_service_discover_tick: 0,
+    slave_link_time_out: 0,
 }));

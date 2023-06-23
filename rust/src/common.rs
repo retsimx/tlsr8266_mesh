@@ -85,10 +85,11 @@ pub fn save_pair_info(adr: u32, p: *const u8, n: u32) {
 pub fn update_ble_parameter_cb(state: &RefCell<State>) {
     if !state.borrow().conn_update_successed {
         setup_ble_parameter_start(
+            state,
             1,
             CONN_PARA_DATA[0][0],
             CONN_PARA_DATA[0][1],
-            CONN_PARA_DATA[0][2],
+            CONN_PARA_DATA[0][2] as u32,
         ); // interval 32: means 40ms;   timeout 200: means 2000ms
         state.borrow_mut().conn_update_cnt += 1;
     }
@@ -118,10 +119,11 @@ pub fn rf_update_conn_para(state: &RefCell<State>, p: &PacketLlData) -> u8 {
                     state.borrow_mut().conn_update_cnt = 0;
                 } else {
                     setup_ble_parameter_start(
+                        state,
                         1,
                         CONN_PARA_DATA[state.borrow().conn_update_cnt][0],
                         CONN_PARA_DATA[state.borrow().conn_update_cnt][1],
-                        CONN_PARA_DATA[state.borrow().conn_update_cnt][2],
+                        CONN_PARA_DATA[state.borrow().conn_update_cnt][2] as u32,
                     );
                     state.borrow_mut().conn_update_cnt += 1;
                 }

@@ -1,35 +1,39 @@
-use core::slice;
-use crate::{pub_mut, uprintln};
+use core::cell::RefCell;
 
-pub_mut!(ble_ll_channelNum, u32, 0);
-pub_mut!(ble_ll_lastUnmappedCh, u32, 0);
-pub_mut!(ble_ll_channelTable, [u8; 40], [0; 40]);
+use crate::state::State;
 
-pub fn ble_ll_channel_table_calc(mut channel: *const u8, reset: bool)
+pub fn ble_ll_channel_table_calc(state: &RefCell<State>, channel: &[u8], reset: bool)
 {
-    set_ble_ll_channelNum(0);
+    let mut state = state.borrow_mut();
+
+    state.ble_ll_channel_num = 0;
+
     if reset {
-        set_ble_ll_lastUnmappedCh(0);
+        state.ble_ll_last_unmapped_ch = 0;
     }
+
     for chan_id in (0..0x28).step_by(8) {
         for shift in 0..8 {
-            if (unsafe { *channel } >> shift) & 1 != 0 {
-                (*get_ble_ll_channelTable())[*get_ble_ll_channelNum() as usize] = chan_id + shift;
-                set_ble_ll_channelNum(*get_ble_ll_channelNum() + 1);
+            if (channel[chan_id / 8] >> shift) & 1 != 0 {
+                let chan_num = state.ble_ll_channel_num;
+                state.ble_ll_channel_table[chan_num] = chan_id as u8 + shift;
+
+                state.ble_ll_channel_num += 1;
             }
         };
-        channel = unsafe { channel.offset(1) };
     }
 }
 
-pub fn ble_ll_conn_get_next_channel(channel_map: *const u8, hop: u8) -> u32
+pub fn ble_ll_conn_get_next_channel(state: &RefCell<State>, channel_map: &[u8], hop: u8) -> u32
 {
-    let mut index = (*get_ble_ll_lastUnmappedCh() as u8 + hop) % 0x25;
-    set_ble_ll_lastUnmappedCh(index as u32);
-    unsafe {
-        if (*channel_map.offset((index >> 3) as isize) >> (index & 7)) & 0x80 == 0 {
-            index = (*get_ble_ll_channelTable())[(index % *get_ble_ll_channelNum() as u8) as usize];
-        }
+    let mut state = state.borrow_mut();
+
+    let mut index = (state.ble_ll_last_unmapped_ch + hop as usize) % 0x25;
+    state.ble_ll_last_unmapped_ch = index;
+
+    if (channel_map[(index >> 3)] >> (index & 7)) & 0x80 == 0 {
+        index = state.ble_ll_channel_table[(index % state.ble_ll_channel_num)] as usize;
     }
+
     return index as u32;
 }

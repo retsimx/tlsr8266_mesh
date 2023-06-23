@@ -33,7 +33,11 @@ pub struct State {
     pub pkt_user_cmd: MeshPkt,
 
     pub adv_pri_data: AdvPrivate,
-    pub adv_rsp_pri_data: AdvRspPrivate
+    pub adv_rsp_pri_data: AdvRspPrivate,
+
+    pub ble_ll_channel_num: usize,
+    pub ble_ll_last_unmapped_ch: usize,
+    pub ble_ll_channel_table: [u8; 40]
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -122,5 +126,9 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         status: 0x01,
         device_address: 0,
         rsv: [0; 16]
-    }
+    },
+
+    ble_ll_channel_num: 0,
+    ble_ll_last_unmapped_ch: 0,
+    ble_ll_channel_table: [0; 40]
 }));

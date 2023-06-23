@@ -18,13 +18,13 @@ use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::state::{State, STATE};
 
-fn slave_timing_update_handle()
+fn slave_timing_update_handle(state: &RefCell<State>)
 {
     set_slave_instant(*get_slave_instant() + 1);
     if *get_slave_timing_update() == 1 {
         if *get_slave_instant_next() == *get_slave_instant() {
             set_slave_timing_update(0);
-            ble_ll_channel_table_calc((*get_slave_chn_map()).as_ptr(), false);
+            ble_ll_channel_table_calc(state, get_slave_chn_map(), false);
             (*get_pkt_init()).chm = *get_slave_chn_map();
         }
     } else if *get_slave_timing_update() == 2 && *get_slave_instant_next() == *get_slave_instant() {
@@ -338,15 +338,15 @@ pub fn irq_st_bridge(state: &RefCell<State>)
         }
 
         set_slave_next_connect_tick(*get_slave_next_connect_tick() + *get_slave_link_interval());
-        slave_timing_update_handle();
-        ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f);
+        slave_timing_update_handle(state);
+        ble_ll_conn_get_next_channel(state, &get_pkt_init().chm, (*get_pkt_init()).hop & 0x1f);
     }
 
     write_reg_system_tick_irq(*get_slave_next_connect_tick());
     set_p_st_handler(IrqHandlerStatus::Rx);
 }
 
-pub fn irq_st_ble_rx()
+pub fn irq_st_ble_rx(state: &RefCell<State>)
 {
     write_reg8(0x080050f, 0x80);
     rf_stop_trx();
@@ -355,7 +355,7 @@ pub fn irq_st_ble_rx()
 
     write_reg8(0x00800f04, 0x67);  // tx wail & settle time
 
-    rf_set_ble_channel(ble_ll_conn_get_next_channel((*get_pkt_init()).chm.as_ptr(), (*get_pkt_init()).hop & 0x1f) as u8);
+    rf_set_ble_channel(ble_ll_conn_get_next_channel(state, &get_pkt_init().chm, (*get_pkt_init()).hop & 0x1f) as u8);
     // rf_set_ble_access_code(unsafe { *(addr_of!((*get_pkt_init()).aa) as *const u32) });
     // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
 
@@ -377,7 +377,7 @@ pub fn irq_st_ble_rx()
     set_slave_timing_adjust_enable(true);
     rf_start_brx(addr_of!(PKT_EMPTY) as u32, *get_slave_tick_brx());
     sleep_us(2);
-    slave_timing_update_handle();
+    slave_timing_update_handle(state);
 }
 
 fn irq_light_slave_tx()
@@ -570,7 +570,7 @@ extern "C" fn irq_handler() {
             match *get_p_st_handler() {
                 IrqHandlerStatus::Adv => irq_st_adv(state),
                 IrqHandlerStatus::Bridge => irq_st_bridge(state),
-                IrqHandlerStatus::Rx => irq_st_ble_rx(),
+                IrqHandlerStatus::Rx => irq_st_ble_rx(state),
                 IrqHandlerStatus::Listen => irq_st_listen(state),
                 IrqHandlerStatus::None => {}
             }

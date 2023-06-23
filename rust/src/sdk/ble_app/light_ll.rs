@@ -625,7 +625,7 @@ pub fn rf_link_slave_connect(state: &RefCell<State>, packet: &PacketLlInit, time
                 )
             };
 
-            ble_ll_channel_table_calc((*get_pkt_init()).chm.as_ptr(), true);
+            ble_ll_channel_table_calc(state, &get_pkt_init().chm, true);
 
             // rf_set_ble_crc(&(*get_pkt_init()).crcinit);
             write_reg_rf_crc((((*get_pkt_init()).crcinit[1] as u32) << 8) | (((*get_pkt_init()).crcinit[2] as u32) << 0x10) | (*get_pkt_init()).crcinit[0] as u32);

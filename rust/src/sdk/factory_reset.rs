@@ -28,37 +28,34 @@ pub const FLASH_ADR_PAR_MAX: u32 = 0x80000;
 pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
 pub const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
 
-pub_mut!(adr_reset_cnt_idx, u32, 0);
-pub_mut!(reset_cnt, u8, 0);
-pub_mut!(clear_st, u8, 3);
-pub_mut!(reset_check_time, u32, 0);
+fn reset_cnt_clean(state: &RefCell<State>) {
+    let mut state = state.borrow_mut();
 
-fn reset_cnt_clean() {
-    if *get_adr_reset_cnt_idx() < 3840 {
+    if state.adr_reset_cnt_idx < 3840 {
         return;
     }
     flash_erase_sector(FLASH_ADR_RESET_CNT);
-    set_adr_reset_cnt_idx(0);
+    state.adr_reset_cnt_idx = 0;
 }
 
-fn write_reset_cnt(cnt: u8) {
+fn write_reset_cnt(state: &RefCell<State>, cnt: u8) {
     let data = [cnt];
     flash_write_page(
-        FLASH_ADR_RESET_CNT + *get_adr_reset_cnt_idx(),
+        FLASH_ADR_RESET_CNT + state.borrow().adr_reset_cnt_idx,
         1,
         data.as_ptr(),
     );
 }
 
-fn clear_reset_cnt() {
-    write_reset_cnt(RESET_CNT_RECOUNT_FLAG);
+fn clear_reset_cnt(state: &RefCell<State>) {
+    write_reset_cnt(state, RESET_CNT_RECOUNT_FLAG);
 }
 
-fn reset_cnt_get_idx() {
+fn reset_cnt_get_idx(state: &RefCell<State>) {
     let pf = FLASH_ADR_RESET_CNT as *const u8;
-    set_adr_reset_cnt_idx(0);
-    while *get_adr_reset_cnt_idx() < 4096 {
-        let restcnt_bit = unsafe { *pf.offset(adr_reset_cnt_idx.0 as isize) };
+    state.borrow_mut().adr_reset_cnt_idx = 0;
+    while state.borrow().adr_reset_cnt_idx < 4096 {
+        let restcnt_bit = unsafe { *pf.offset(state.borrow().adr_reset_cnt_idx as isize) };
         if restcnt_bit != RESET_CNT_RECOUNT_FLAG
         //end
         {
@@ -66,86 +63,103 @@ fn reset_cnt_get_idx() {
         	 || ((!(BIT!(0)|BIT!(1)|BIT!(2)|BIT!(3)|BIT!(4)|BIT!(5))) as u8 == restcnt_bit)
             {
                 // the fifth not valid
-                clear_reset_cnt();
+                clear_reset_cnt(state);
             } else {
                 break;
             }
         }
-        set_adr_reset_cnt_idx(*get_adr_reset_cnt_idx() + 1);
+        state.borrow_mut().adr_reset_cnt_idx += 1;
     }
 
-    reset_cnt_clean();
+    reset_cnt_clean(state);
 }
 
-fn get_reset_cnt_bit() -> u8 {
-    if *get_adr_reset_cnt_idx() < 0 {
-        reset_cnt_clean();
+fn get_reset_cnt_bit(state: &RefCell<State>) -> u8 {
+    if state.borrow().adr_reset_cnt_idx < 0 {
+        reset_cnt_clean(state);
         return 0;
     }
 
     let mut data = [0];
     flash_read_page(
-        FLASH_ADR_RESET_CNT + *get_adr_reset_cnt_idx(),
+        FLASH_ADR_RESET_CNT + state.borrow().adr_reset_cnt_idx,
         1,
         data.as_mut_ptr(),
     );
-    set_reset_cnt(data[0]);
-    return *get_reset_cnt();
+    state.borrow_mut().reset_cnt = data[0];
+    return state.borrow().reset_cnt;
 }
 
-fn increase_reset_cnt() {
-    let mut restcnt_bit = get_reset_cnt_bit();
+fn increase_reset_cnt(state: &RefCell<State>) {
+    let mut restcnt_bit = get_reset_cnt_bit(state);
     for i in 0..8 {
         if restcnt_bit & BIT!(i) != 0 {
-            if i < 3 {
-                set_reset_cnt(i);
-            } else if i < 5 {
-                set_reset_cnt(3);
-            } else if i < 7 {
-                set_reset_cnt(4);
+            {
+                let mut state = state.borrow_mut();
+                if i < 3 {
+                    state.reset_cnt = i;
+                } else if i < 5 {
+                    state.reset_cnt = 3;
+                } else if i < 7 {
+                    state.reset_cnt = 4;
+                }
             }
 
             restcnt_bit &= !(BIT!(i));
-            write_reset_cnt(restcnt_bit);
+            write_reset_cnt(state, restcnt_bit);
             break;
         }
     }
 }
 
-pub fn factory_reset_handle() {
-    reset_cnt_get_idx();
-    let restcnt_bit = get_reset_cnt_bit();
+pub fn factory_reset_handle(state: &RefCell<State>) {
+    reset_cnt_get_idx(state);
+    let restcnt_bit = get_reset_cnt_bit(state);
     if restcnt_bit == RESET_FLAG {
         irq_disable();
         factory_reset();
         app().ota_manager.rf_led_ota_ok();
         light_sw_reboot();
     } else {
-        increase_reset_cnt();
+        increase_reset_cnt(state);
     }
 }
 
-pub fn factory_reset_cnt_check() {
-    if *get_clear_st() == 0 {
-        return;
-    }
+pub fn factory_reset_cnt_check(state: &RefCell<State>) {
+    let mut increase_cnt = false;
+    let mut clear_cnt = false;
+    {
+        let mut state = state.borrow_mut();
 
-    if *get_clear_st() == 3 {
-        set_clear_st(*get_clear_st() - 1);
-        set_reset_check_time(FACTORY_RESET_SERIALS[*get_reset_cnt() as usize * 2] as u32);
-    }
+        if state.clear_st == 0 {
+            return;
+        }
 
-    if *get_clear_st() == 2 && clock_time_exceed(0, *get_reset_check_time() * 1000 * 1000) {
-        set_clear_st(*get_clear_st() - 1);
-        set_reset_check_time(FACTORY_RESET_SERIALS[*get_reset_cnt() as usize * 2 + 1] as u32);
-        if *get_reset_cnt() == 3 || *get_reset_cnt() == 4 {
-            increase_reset_cnt();
+        if state.clear_st == 3 {
+            state.clear_st -= 1;
+            state.reset_check_time = FACTORY_RESET_SERIALS[state.reset_cnt as usize * 2] as u32;
+        }
+
+        if state.clear_st == 2 && clock_time_exceed(0, state.reset_check_time * 1000 * 1000) {
+           state.clear_st -= 1;
+           state.reset_check_time = FACTORY_RESET_SERIALS[state.reset_cnt as usize * 2 + 1] as u32;
+            if state.reset_cnt == 3 || state.reset_cnt == 4 {
+                increase_cnt = true;
+            }
+        }
+
+        if state.clear_st == 1 && clock_time_exceed(0, state.reset_check_time * 1000 * 1000) {
+            state.clear_st = 0;
+            clear_cnt = true;
         }
     }
 
-    if *get_clear_st() == 1 && clock_time_exceed(0, *get_reset_check_time() * 1000 * 1000) {
-        set_clear_st(0);
-        clear_reset_cnt();
+    if increase_cnt {
+        increase_reset_cnt(state);
+    }
+
+    if clear_cnt {
+        clear_reset_cnt(state);
     }
 }
 

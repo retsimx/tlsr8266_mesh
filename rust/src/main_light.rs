@@ -121,7 +121,7 @@ pub fn user_init(state: &RefCell<State>) {
 
     rf_link_slave_init(state, 40000);
 
-    factory_reset_handle();
+    factory_reset_handle(state);
 
     vendor_set_adv_data(state);
 
@@ -197,11 +197,10 @@ fn light_auth_check() {
 fn light_user_func() {
     light_auth_check();
 
-    factory_reset_cnt_check();
-
     app().light_manager.check_light_state_save();
 
     STATE.lock(|state| {
+        factory_reset_cnt_check(state);
         app().mesh_manager.mesh_pair_proc_effect(state);
     });
 }

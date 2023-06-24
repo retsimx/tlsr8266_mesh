@@ -71,7 +71,12 @@ pub struct State {
     pub slave_next_connect_tick: u32,
     pub slave_timing_update2_ok_time: u32,
     pub p_st_handler: IrqHandlerStatus,
-    pub pkt_light_report: PacketAttCmd
+    pub pkt_light_report: PacketAttCmd,
+
+    pub adr_reset_cnt_idx: u32,
+    pub reset_cnt: u8,
+    pub clear_st: u8,
+    pub reset_check_time: u32,
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -264,6 +269,10 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
             dst: [0; 2],
             val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         }
-    }
+    },
 
+    adr_reset_cnt_idx: 0,
+    reset_cnt: 0,
+    clear_st: 3,
+    reset_check_time: 0,
 }));

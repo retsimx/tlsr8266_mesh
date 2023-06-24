@@ -77,7 +77,7 @@ fn light_init_default(state: &RefCell<State>) {
         };
     }
 
-    light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
+    light_check_tick_per_us(state, CLOCK_SYS_CLOCK_1US);
 
     get_pair_config_mesh_name().fill(0);
     let len = min(MESH_NAME.len(), _max_mesh_name_len as usize);
@@ -92,7 +92,7 @@ fn light_init_default(state: &RefCell<State>) {
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RF_POWER::RF_POWER_8dBm as u32);
 
-    vendor_id_init(VENDOR_ID);
+    vendor_id_init(state, VENDOR_ID);
 
     usb_dp_pullup_en(true);
 

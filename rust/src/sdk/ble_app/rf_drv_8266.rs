@@ -8,7 +8,7 @@ use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retri
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{copy_par_user_all, get_slave_link_interval, IrqHandlerStatus, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, set_p_st_handler};
+use crate::sdk::ble_app::light_ll::{copy_par_user_all, rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop};
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
@@ -639,7 +639,7 @@ fn rf_link_slave_data_write_no_dec(state: &RefCell<State>, data: &mut PacketAttW
     (*get_pkt_light_status()).value.val[13] = 0;
     (*get_pkt_light_status()).value.val[14] = 0;
     (*get_pkt_light_status()).value.val[18] = MAX_RELAY_NUM;
-    (*get_pkt_light_data()).value.val[16] = (*get_slave_link_interval() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
+    (*get_pkt_light_data()).value.val[16] = (state.borrow().slave_link_interval / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
             set_slave_data_valid(params[0] as u32 * 2 + 1);
@@ -751,7 +751,7 @@ pub fn rf_link_slave_init(state: &RefCell<State>, interval: u32)
 {
     unsafe {
         blc_ll_init_basic_mcu();
-        set_p_st_handler(IrqHandlerStatus::Adv);
+        state.borrow_mut().p_st_handler = IrqHandlerStatus::Adv;
         set_slave_link_state(0);
         set_slave_listen_interval(interval * CLOCK_SYS_CLOCK_1US);
 

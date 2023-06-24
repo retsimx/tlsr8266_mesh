@@ -4,7 +4,7 @@ use embassy_sync::blocking_mutex::CriticalSectionMutex;
 
 use crate::config::VENDOR_ID;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketVersionInd};
+use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, IrqHandlerStatus, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttValue, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketVersionInd};
 
 #[repr(align(4))]
 pub struct State {
@@ -50,6 +50,28 @@ pub struct State {
     pub pkt_write_rsp: PacketAttWriteRsp,
     pub att_service_discover_tick: u32,
     pub slave_link_time_out: u32,
+
+    pub slave_timing_update: u32,
+    pub slave_instant_next: u16,
+    pub slave_chn_map: [u8; 5],
+    pub slave_interval_old: u32,
+    pub slave_link_interval: u32,
+    pub slave_window_size_update: u32,
+    pub ble_conn_timeout: u32,
+    pub ble_conn_interval: u32,
+    pub ble_conn_offset: u32,
+    pub add_tx_packet_rsp_failed: u32,
+    pub t_scan_rsp_intvl: u32,
+    pub g_vendor_id: u16,
+    pub light_rcv_rssi: u8,
+    pub rcv_pkt_time: u32,
+    pub light_conn_sn_master: u16,
+    pub slave_window_size: u32,
+    pub slave_timing_update2_flag: u32,
+    pub slave_next_connect_tick: u32,
+    pub slave_timing_update2_ok_time: u32,
+    pub p_st_handler: IrqHandlerStatus,
+    pub pkt_light_report: PacketAttCmd
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -206,4 +228,42 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     },
     att_service_discover_tick: 0,
     slave_link_time_out: 0,
+
+    slave_timing_update: 0,
+    slave_instant_next: 0,
+    slave_chn_map: [0; 5],
+    slave_interval_old: 0,
+    slave_link_interval: 0x9c400,
+    slave_window_size_update: 0,
+    ble_conn_timeout: 0,
+    ble_conn_interval: 0,
+    ble_conn_offset: 0,
+    add_tx_packet_rsp_failed: 0,
+    t_scan_rsp_intvl: 0x92,
+    g_vendor_id: 0x211,
+    light_rcv_rssi:0,
+    rcv_pkt_time: 0,
+    light_conn_sn_master: 0,
+    slave_window_size: 0,
+    slave_timing_update2_flag: 0,
+    slave_next_connect_tick: 0,
+    slave_timing_update2_ok_time: 0,
+    p_st_handler: IrqHandlerStatus::None,
+    pkt_light_report: PacketAttCmd {
+        dma_len: 0x1D,
+        _type: 2,
+        rf_len: 0x1B,
+        l2cap_len: 0x17,
+        chan_id: 4,
+        opcode: 0x1B,
+        handle: 0x12,
+        handle1: 0,
+        value: PacketAttValue {
+            sno: [0; 3],
+            src: [0; 2],
+            dst: [0; 2],
+            val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        }
+    }
+
 }));

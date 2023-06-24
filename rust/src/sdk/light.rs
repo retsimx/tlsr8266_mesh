@@ -735,3 +735,12 @@ pub_mut!(pkt_init, PacketLlInit, PacketLlInit {
     chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
     hop: 0xac
 });
+
+#[derive(PartialEq, Copy, Clone)]
+pub enum IrqHandlerStatus {
+    None,
+    Adv,
+    Bridge,
+    Rx,
+    Listen
+}

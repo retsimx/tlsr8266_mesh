@@ -1,6 +1,6 @@
-use core::cell::RefCell;
 use core::mem::size_of;
-use core::ptr::{addr_of, null};
+use core::ops::DerefMut;
+use core::ptr::{addr_of, null_mut};
 use core::slice;
 
 use embassy_time::{Duration, Timer};
@@ -13,7 +13,7 @@ use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::{AppCmdValue, get_device_address};
+use crate::sdk::light::AppCmdValue;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::state::{STATE, State};
@@ -29,9 +29,9 @@ pub enum UartMsg {
 }
 
 // AppCmdValueT
-pub fn light_mesh_rx_cb(data: &AppCmdValue) {
+pub fn light_mesh_rx_cb(state: &mut State, data: &AppCmdValue) {
     // Don't report messages that we sent
-    if !app().uart_manager.started() || (data.src == *get_device_address() && data.dst != *get_device_address()){
+    if !app().uart_manager.started() || (data.src == state.device_address && data.dst != state.device_address){
         return;
     }
 
@@ -75,7 +75,7 @@ async fn node_report_task() {
 
     loop {
         let mut data = [0; UART_DATA_LEN-5];
-        while STATE.lock(|state| { mesh_node_report_status(state, &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) }) != 0 {
+        while STATE.lock(|state| { mesh_node_report_status(state.borrow_mut().deref_mut(), &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) }) != 0 {
             msg.data[3..UART_DATA_LEN-2].copy_from_slice(data.as_slice());
             while !app().uart_manager.send_message(&msg) {
                 yield_now().await;
@@ -129,10 +129,11 @@ impl UartManager {
     }
 
     #[inline(always)]
-    pub fn check_irq(&mut self, state: *const RefCell<State>) {
+    pub fn check_irq(&mut self, state: *mut State) {
         let irq_s = UartDriver::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 && state != null() {
-            self.handle_rx(unsafe { &*state }, self.driver.rxdata_buf);
+        if irq_s & UARTIRQMASK::RX as u8 != 0 && state != null_mut() {
+            let state = unsafe { &mut *state };
+            self.handle_rx(state, self.driver.rxdata_buf);
         }
 
         if irq_s & UARTIRQMASK::TX as u8 != 0 {
@@ -226,7 +227,7 @@ impl UartManager {
         }
     }
 
-    pub fn handle_rx(&mut self, state: &RefCell<State>, msg: uart_data_t) {
+    pub fn handle_rx(&mut self, state: &mut State, msg: uart_data_t) {
         // Check the crc of the packet
         let crc = crc16(&msg.data[0..42]);
         if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
@@ -244,9 +245,7 @@ impl UartManager {
                 (*SPAWNER).spawn(node_report_task()).unwrap();
             }
 
-            STATE.lock(|state| {
-                mesh_report_status_enable(state, true);
-            });
+            mesh_report_status_enable(state, true);
         }
 
         // Light ctrl
@@ -257,24 +256,21 @@ impl UartManager {
             let mut data = [0; 13];
             data.copy_from_slice(&msg.data[5..5+13]);
 
-            let mymsg = unsafe {slice::from_raw_parts(addr_of!(state.borrow().pkt_user_cmd.dst_adr) as *const u8, 15)};
-            critical_section::with(|_| {
-                // Record the message
-                if self.sent.is_full() {
-                    self.sent.pop_front();
-                }
+            let mymsg = unsafe {slice::from_raw_parts(addr_of!(state.pkt_user_cmd.dst_adr) as *const u8, 15)};
 
-                self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
-            });
+            // Record the message
+            if self.sent.is_full() {
+                self.sent.pop_front();
+            }
+
+            self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
 
             // Send the message in to the mesh
-            app().mesh_manager.send_mesh_message(&data, destination);
+            app().mesh_manager.send_mesh_message(state, &data, destination);
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {
-            STATE.lock(|state| {
-                mesh_report_status_enable(state, true);
-            });
+            mesh_report_status_enable(state, true);
         }
 
         // Finally ack the message once we've handled it

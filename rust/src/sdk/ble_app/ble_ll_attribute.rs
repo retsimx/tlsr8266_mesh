@@ -1,4 +1,3 @@
-use core::cell::RefCell;
 use core::mem::size_of_val;
 use core::ptr::{addr_of, addr_of_mut, null};
 use core::slice;
@@ -7,7 +6,7 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 
 use crate::sdk::app_att_light::{AttributeT, get_gAttributes, SEND_TO_MASTER};
-use crate::sdk::light::{get_rf_slave_ota_finished_flag, OtaState, PacketAttWrite, PacketL2capData, PacketL2capHead, set_rf_slave_ota_terminate_flag};
+use crate::sdk::light::{OtaState, PacketAttWrite, PacketL2capData, PacketL2capHead};
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::state::State;
 
@@ -76,10 +75,10 @@ pub unsafe fn l2cap_att_search(mut handle_start: usize, handle_end: usize, uuid:
     return None;
 }
 
-pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const PacketL2capData) -> (*const PacketL2capHead, usize)
+pub unsafe fn l2cap_att_handler(state: &mut State, mut packet: *const PacketL2capData) -> (*const PacketL2capHead, usize)
 {
     {
-        let mut state = state.borrow_mut();
+
 
         if (*packet).opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8 {
             let handle = (*packet).handle1;
@@ -108,12 +107,12 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
 
     return match FromPrimitive::from_u8((*packet).value[3]) {
         Some(GattOp::AttOpExchangeMtuReq) => {
-            let state = state.borrow_mut();
+
 
             return (addr_of!(state.pkt_mtu_rsp) as *const PacketL2capHead, size_of_val(&state.pkt_mtu_rsp));
         },
         Some(GattOp::AttOpFindInfoReq) => {
-            let mut state = state.borrow_mut();
+
 
             state.att_service_discover_tick = read_reg_system_tick() | 1;
             let mut start_handle = (*packet).value[4] as usize;
@@ -178,7 +177,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             (addr_of!(state.pkt_err_rsp) as *const PacketL2capHead, size_of_val(&state.pkt_err_rsp))
         },
         Some(GattOp::AttOpFindByTypeValueReq) => {
-            let mut state = state.borrow_mut();
+
 
             state.att_service_discover_tick = read_reg_system_tick() | 1;
             let mut start_handle = (*packet).value[4] as usize;
@@ -229,7 +228,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             }
         },
         Some(GattOp::AttOpReadByTypeReq) => {
-            let mut state = state.borrow_mut();
+
 
             state.att_service_discover_tick = read_reg_system_tick() | 1;
             let mut handle_start = (*packet).value[4] as usize;
@@ -341,7 +340,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             let att_num = (*packet).value[4] as usize;
 
             {
-                let mut state = state.borrow_mut();
+
 
                 if (*packet).value[5] != 0 {
                     return (null(), 0);
@@ -362,8 +361,8 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
 
                     if get_gAttributes()[att_num].p_attr_value == unsafe { SEND_TO_MASTER.as_mut_ptr() } {
                         unsafe { SEND_TO_MASTER.fill(0); }
-                    } else if att_num == 0x18 && *get_rf_slave_ota_finished_flag() != OtaState::Continue {
-                        set_rf_slave_ota_terminate_flag(true);
+                    } else if att_num == 0x18 && state.rf_slave_ota_finished_flag != OtaState::Continue {
+                        state.rf_slave_ota_terminate_flag = true;
                     }
                     state.rf_packet_att_rsp.rf_len = get_gAttributes()[att_num].attr_len + 5;
                     state.rf_packet_att_rsp.dma_len = state.rf_packet_att_rsp.rf_len as u32 + 2;
@@ -380,7 +379,7 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
             (null(), 0)
         },
         Some(GattOp::AttOpReadByGroupTypeReq) => {
-            let mut state = state.borrow_mut();
+
 
             state.att_service_discover_tick = read_reg_system_tick() | 1;
             let mut handle_start = (*packet).value[4] as usize;
@@ -453,13 +452,13 @@ pub unsafe fn l2cap_att_handler(state: &RefCell<State>, mut packet: *const Packe
 
             let mut result;
             {
-                let state = state.borrow_mut();
+
 
                 if *(get_gAttributes()[att_num].uuid as *const u16) != 0x2902 {
                     if att_num < 2 {
                         return (null(), 0);
                     }
-                    if *get_gAttributes()[att_num - 1].p_attr_value & 0xc == 0 {
+                    if unsafe { *get_gAttributes()[att_num - 1].p_attr_value } & 0xc == 0 {
                         return (null(), 0);
                     }
                 }

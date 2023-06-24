@@ -1,8 +1,9 @@
-use core::cell::RefCell;
+use core::ops::DerefMut;
+
 use embassy_executor::Spawner;
 
 use crate::{app, uprintln};
-use crate::config::{MESH_PWD_ENCODE_SK};
+use crate::config::MESH_PWD_ENCODE_SK;
 use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
@@ -48,13 +49,13 @@ impl App {
         }
     }
 
-    pub fn init(&mut self, state: &RefCell<State>) {
+    pub fn init(&mut self, state: &mut State) {
         // Copy the password in to the pair config
         for i in 0..MESH_PWD_ENCODE_SK.len() {
-            get_pair_config_pwd_encode_sk()[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
+            state.pair_config_pwd_encode_sk[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
         }
 
-        unsafe { rf_drv_init(true); }
+        unsafe { rf_drv_init(state, true); }
 
         // Run our initialisation
         user_init(state);
@@ -74,6 +75,9 @@ impl App {
 
         // Configure the rest of the system
         STATE.lock(|state| {
+            let mut binding = state.borrow_mut();
+            let state = binding.deref_mut();
+
             self.init(state);
         });
 
@@ -87,7 +91,12 @@ impl App {
         let mut data = [0 as u8; 13];
         data[0] = LGT_POWER_ON;
 
-        app().mesh_manager.send_mesh_message(&data, 0xffff);
+        STATE.lock(|state| {
+            let mut binding = state.borrow_mut();
+            let state = binding.deref_mut();
+
+            app().mesh_manager.send_mesh_message(state, &data, 0xffff);
+        });
 
         // Start the panic checker to see if there is information we need to send
         spawner.spawn(panic_check(spawner)).unwrap();

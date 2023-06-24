@@ -1,63 +1,12 @@
 use core::mem;
-use core::mem::size_of;
-use core::ptr::{null, null_mut};
 
-use heapless::Deque;
-
-use crate::{BIT, const_assert, pub_mut};
-use crate::mesh::mesh_node_st_val_t;
+use crate::{BIT, const_assert};
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
-
-// These are filled at startup from values in config.rs
-pub_mut!(pair_config_mesh_name, [u8; 16], [0; 16]);
-pub_mut!(pair_config_mesh_pwd, [u8; 16], [0; 16]);
-pub_mut!(pair_config_mesh_ltk, [u8; 16], [0; 16]);
-
-pub_mut!(security_enable, bool, false);
-pub_mut!(not_need_login, bool, false);
-pub_mut!(pair_login_ok, bool, false);
-pub_mut!(pair_sk, [u8; 16], [0; 16]);
-pub_mut!(pair_sk_copy, [u8; 16], [0; 16]);
-pub_mut!(slave_first_connected_tick, u32, 0);
-
-pub_mut!(device_address, u16, 0);
-pub_mut!(device_node_sn, u8, 1);
-pub_mut!(dev_grp_next_pos, u16, 0);
-
 pub static MAX_RELAY_NUM: u8 = 3;
-
-pub_mut!(group_address, [u16; MAX_GROUP_NUM as usize], [0; MAX_GROUP_NUM as usize]);
-
-pub_mut!(adr_flash_cfg_idx, i32, 0);
-
-pub_mut!(slave_link_connected, bool, false);
-
-pub_mut!(slave_read_status_busy, u8, 0);
-pub_mut!(rf_slave_ota_busy, bool, false);
-
-pub_mut!(pair_setting_flag, PairState, PairState::PairSetted);
-pub_mut!(pair_ac, u32, 0);
-
-pub_mut!(pair_nn, [u8; 16], [0; 16]);
-pub_mut!(pair_pass, [u8; 16], [0; 16]);
-pub_mut!(pair_ltk, [u8; 16], [0; 16]);
-pub_mut!(pair_ltk_mesh, [u8; 16], [0; 16]);
-
-pub_mut!(cur_ota_flash_addr, u32, 0);
-pub_mut!(rf_slave_ota_finished_flag, OtaState, OtaState::Continue);
-pub_mut!(rf_slave_ota_terminate_flag, bool, false);
-pub_mut!(mesh_node_max, u8, 0);
-
 pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
-pub_mut!(rf_slave_ota_timeout_s, u16, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
-pub_mut!(set_mesh_info_expired_flag, bool, false);
-pub_mut!(set_mesh_info_time, u32, 0);
-
 pub const LOOP_INTERVAL_US: u16 = 10000;
-
-pub_mut!(pair_ivm, [u8; 8], [0, 0, 0, 0, 1, 0, 0, 0]);
 
 // must be 255
 pub const PMW_MAX_TICK_BASE: u16 = 255;
@@ -573,168 +522,16 @@ pub fn is_unicast_addr(p_addr: &[u8]) -> bool {
     return p_addr[1] & 0x80 == 0;
 }
 
-// Shit required for linking
-/////////////// password encode sk initial  ///////////////////////////////////////////////////
-pub_mut!(pair_config_pwd_encode_sk, [u8; 17], [0; 17]);
-pub_mut!(ble_pair_st, u8, 0);
-pub_mut!(pair_enc_enable, bool, false);
-pub_mut!(pair_ivs, [u8; 8], [0; 8]);
-pub_mut!(pair_work, [u8; 16], [0; 16]);
-pub_mut!(pairRead_pending, bool, false);
-pub_mut!(pkt_read_rsp, PacketAttReadRsp, PacketAttReadRsp {
-    dma_len: 0x1d,
-	_type: 2,
-	rf_len: 0x1b,
-	l2cap_len: 0x17,
-	chan_id: 0x4,
-	opcode: 0xb,
-	value: [0; 22]
-});
-
-/////////////// adv par define ///////////////////////////////////////////////////
-pub_mut!(adv_interval2listen_interval, u16, 4);
-// unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-pub_mut!(online_status_interval2listen_interval, u16, 8);
-// unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-pub_mut!(rf_slave_ota_busy_mesh, bool, false);
-
 // flash mesh extend shit needed to link
 pub const CFG_ADR_CALIBRATION_512K_FLASH: u32 = CFG_ADR_MAC_512K_FLASH + 0x10;
 // don't change
 pub const CFG_SECTOR_ADR_CALIBRATION_CODE: u32 = CFG_ADR_CALIBRATION_512K_FLASH;
-pub_mut!(
-    flash_sector_calibration,
-    u32,
-    CFG_SECTOR_ADR_CALIBRATION_CODE
-);
 
-pub_mut!(
-    slave_status_record,
-    [StatusRecord; MESH_NODE_MAX_NUM as usize],
-    [StatusRecord {
-        adr: [0],
-        alarm_id: 0
-    }; MESH_NODE_MAX_NUM as usize]
-);
-pub_mut!(
-    slave_status_record_size,
-    u16,
-    size_of::<[StatusRecord; MESH_NODE_MAX_NUM as usize]>() as u16
-);
-
-pub_mut!(
-    rc_pkt_buf,
-    Deque<PktBuf, 5>,
-    Deque::new()
-);
-
-pub_mut!(dev_address_next_pos, u16, 0);
-
-pub_mut!(need_update_connect_para, bool, false);
 pub const UPDATE_CONNECT_PARA_DELAY_MS: u32 = 1000;
 
-pub_mut!(update_interval_user_max, u16, 0);
-pub_mut!(update_interval_user_min, u16, 0);
-pub_mut!(update_timeout_user, u32, 0);
 pub const INTERVAL_THRESHOLD: u16 = 16;
-pub_mut!(update_interval_flag, u16, 0);
-pub_mut!(update_interval_time, bool, false);
 pub const ONLINE_STATUS_COMP: u32 = 3;
-pub_mut!(slave_data_valid, u32, 0);
-pub_mut!(t_bridge_cmd, u32, 0);
-pub_mut!(st_brige_no, u32, 0);
-pub_mut!(app_cmd_time, u32, 0);
-pub_mut!(mesh_user_cmd_idx, u8, 0);
-pub_mut!(slave_tx_cmd_time, u32, 0);
-pub_mut!(slave_status_buffer_wptr, usize, 0);
-pub_mut!(slave_status_buffer_rptr, usize, 0);
-pub_mut!(slave_stat_sno, [u8; 3], [0; 3]);
-pub_mut!(slave_read_status_unicast_flag, u8, 0);
-pub_mut!(mesh_node_report_enable, bool, false);
-pub_mut!(slave_timing_adjust_enable, bool, false);
-pub_mut!(slave_tick_brx, u32, 0);
-pub_mut!(slave_window_offset, u32, 0);
-pub_mut!(slave_instant, u16, 0);
-pub_mut!(slave_status_tick, u8, 0);
-pub_mut!(slave_link_cmd, u8, 0);
-pub_mut!(rcv_pkt_ttc, u8, 0);
-pub_mut!(org_ttl, u8, 0);
-pub_mut!(slave_read_status_response, bool, false);
-pub_mut!(slave_sno, [u8; 3], [0; 3]);
-pub_mut!(slave_status_record_idx, usize, 0);
-pub_mut!(notify_req_mask_idx, u8, 0);
-pub_mut!(adv_flag, bool, true);
-pub_mut!(online_st_flag, bool, true);
-pub_mut!(slave_read_status_busy_time, u32, 0);
 pub const SLAVE_READ_STATUS_BUSY_TIMEOUT: u32 = 25000;
-pub_mut!(st_listen_no, u32, 0);
-
-pub_mut!(pkt_light_adv_status, PacketAttWrite, PacketAttWrite {
-    dma_len: 0x27,
-    rtype: 2,
-    rf_len: 0x25,
-    l2cap_len: 0x21,
-    chan_id: 0xffff,
-    opcode: 0,
-    handle: 0,
-    handle1: 0,
-    value: [0; 30]
-});
-
-pub_mut!(pkt_mesh, MeshPkt, MeshPkt {
-    dma_len: 0,
-    _type: 0,
-    rf_len: 0,
-    l2cap_len: 0,
-    chan_id: 0,
-    src_tx: 0,
-    handle1: 0,
-    sno: [0; 3],
-    src_adr: 0,
-    dst_adr: 0,
-    op: 0,
-    vendor_id: 0,
-    par: [0; 10],
-    internal_par1: [0; 5],
-    ttl: 0,
-    internal_par2: [0; 4],
-    no_use: [0; 4]
-});
-pub_mut!(pkt_mesh_user_cmd_buf, MeshPkt, MeshPkt {
-    dma_len: 0,
-    _type: 0,
-    rf_len: 0,
-    l2cap_len: 0,
-    chan_id: 0,
-    src_tx: 0,
-    handle1: 0,
-    sno: [0; 3],
-    src_adr: 0,
-    dst_adr: 0,
-    op: 0,
-    vendor_id: 0,
-    par: [0; 10],
-    internal_par1: [0; 5],
-    ttl: 0,
-    internal_par2: [0; 4],
-    no_use: [0; 4]
-});
-pub_mut!(pkt_init, PacketLlInit, PacketLlInit {
-    dma_len: 0x24,
-    _type: 0x5,
-    rf_len: 0x22,
-    scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
-    adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
-    aa: [0xaa, 0x55, 0x55, 0xaa],
-    crcinit: [0x55, 0x55, 0x55],
-    wsize: 2,
-    woffset: 0x1f,
-    interval: 0x20,
-    latency: 0,
-    timeout: 0x48,
-    chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
-    hop: 0xac
-});
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum IrqHandlerStatus {
@@ -744,3 +541,14 @@ pub enum IrqHandlerStatus {
     Rx,
     Listen
 }
+
+// This needs to be forced in to .data otherwise the DMA module will try to fetch from flash, which
+// doesn't work
+#[link_section = ".data"]
+pub static PKT_EMPTY: PacketL2capHead = PacketL2capHead {
+    dma_len: 2,
+    _type: 1,
+    rf_len: 0,
+    l2cap_len: 0,
+    chan_id: 0,
+};

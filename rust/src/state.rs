@@ -1,10 +1,12 @@
 use core::cell::RefCell;
+use core::mem::size_of;
 
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
+use heapless::Deque;
 
 use crate::config::VENDOR_ID;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, IrqHandlerStatus, LightRxBuff, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttValue, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketVersionInd};
+use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, CFG_SECTOR_ADR_CALIBRATION_CODE, IrqHandlerStatus, LightRxBuff, MAX_GROUP_NUM, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, OtaState, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttValue, PacketAttWrite, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketLlInit, PacketScanRsp, PacketVersionInd, PairState, PktBuf, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, RfPacketAdvIndModuleT, StatusRecord};
 
 #[repr(align(4))]
 pub struct State {
@@ -77,6 +79,129 @@ pub struct State {
     pub reset_cnt: u8,
     pub clear_st: u8,
     pub reset_check_time: u32,
+
+    // These are filled at startup from values in config.rs
+    pub pair_config_mesh_name: [u8; 16],
+    pub pair_config_mesh_pwd: [u8; 16],
+    pub pair_config_mesh_ltk: [u8; 16],
+
+    pub security_enable: bool,
+    pub not_need_login: bool,
+    pub pair_login_ok: bool,
+    pub pair_sk: [u8; 16],
+    pub pair_sk_copy: [u8; 16],
+    pub slave_first_connected_tick: u32,
+
+    pub device_address: u16,
+    pub device_node_sn: u8,
+    pub dev_grp_next_pos: u16,
+
+    pub group_address: [u16; MAX_GROUP_NUM as usize],
+
+    pub adr_flash_cfg_idx: i32,
+
+    pub slave_link_connected: bool,
+
+    pub slave_read_status_busy: u8,
+    pub rf_slave_ota_busy: bool,
+
+    pub pair_setting_flag: PairState,
+    pub pair_ac: u32,
+
+    pub pair_nn: [u8; 16],
+    pub pair_pass: [u8; 16],
+    pub pair_ltk: [u8; 16],
+    pub pair_ltk_mesh: [u8; 16],
+
+    pub cur_ota_flash_addr: u32,
+    pub rf_slave_ota_finished_flag: OtaState,
+    pub rf_slave_ota_terminate_flag: bool,
+    pub mesh_node_max: u8,
+
+    pub rf_slave_ota_timeout_s: u16,
+    pub set_mesh_info_expired_flag: bool,
+    pub set_mesh_info_time: u32,
+
+    pub pair_ivm: [u8; 8],
+
+    pub pair_config_pwd_encode_sk: [u8; 17],
+    pub ble_pair_st: u8,
+    pub pair_enc_enable: bool,
+    pub pair_ivs: [u8; 8],
+    pub pair_work: [u8; 16],
+    pub pair_read_pending: bool,
+
+    /////////////// adv par define ///////////////////////////////////////////////////
+    pub adv_interval2listen_interval: u16,
+    // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
+    pub online_status_interval2listen_interval: u16,
+    // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
+    pub rf_slave_ota_busy_mesh: bool,
+
+    pub flash_sector_calibration: u32,
+    pub slave_status_record: [StatusRecord; MESH_NODE_MAX_NUM],
+    pub slave_status_record_size: u16,
+    pub rc_pkt_buf: Deque<PktBuf, 5>,
+
+    pub dev_address_next_pos: u16,
+    pub need_update_connect_para: bool,
+    pub update_interval_user_max: u16,
+    pub update_interval_user_min: u16,
+    pub update_timeout_user: u32,
+    pub update_interval_flag: u16,
+    pub update_interval_time: bool,
+    pub slave_data_valid: u32,
+    pub t_bridge_cmd: u32,
+    pub st_brige_no: u32,
+    pub app_cmd_time: u32,
+    pub mesh_user_cmd_idx: u8,
+    pub slave_tx_cmd_time: u32,
+    pub slave_status_buffer_wptr: usize,
+    pub slave_status_buffer_rptr: usize,
+    pub slave_stat_sno: [u8; 3],
+    pub slave_read_status_unicast_flag: u8,
+    pub mesh_node_report_enable: bool,
+    pub slave_timing_adjust_enable: bool,
+    pub slave_tick_brx: u32,
+    pub slave_window_offset: u32,
+    pub slave_instant: u16,
+    pub slave_status_tick: u8,
+    pub slave_link_cmd: u8,
+    pub rcv_pkt_ttc: u8,
+    pub org_ttl: u8,
+    pub slave_read_status_response: bool,
+    pub slave_sno: [u8; 3],
+    pub slave_status_record_idx: usize,
+    pub notify_req_mask_idx: u8,
+    pub adv_flag: bool,
+    pub online_st_flag: bool,
+    pub slave_read_status_busy_time: u32,
+    pub st_listen_no: u32,
+
+    pub slave_link_state: u32,
+    pub slave_listen_interval: u32,
+    pub slave_connected_tick: u32,
+    pub slave_adv_enable: bool,
+    pub slave_connection_enable: bool,
+    pub mac_id: [u8; 6],
+    pub adv_data: [u8; 3],
+    pub user_data_len: u8,
+    pub user_data: [u8; 16],
+
+    pub rf_tp_base: u32,
+    pub rf_tp_gain: u32,
+    pub rf_tx_mode: u8,
+    pub rfhw_tx_power: u8,
+
+    pub pkt_adv: RfPacketAdvIndModuleT,
+    pub pkt_scan_rsp: PacketScanRsp,
+    pub pkt_light_data: PacketAttCmd,
+    pub pkt_light_status: PacketAttCmd,
+    pub pkt_read_rsp: PacketAttReadRsp,
+    pub pkt_light_adv_status: PacketAttWrite,
+    pub pkt_mesh: MeshPkt,
+    pub pkt_mesh_user_cmd_buf: MeshPkt,
+    pub pkt_init: PacketLlInit,
 }
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
@@ -246,7 +371,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     add_tx_packet_rsp_failed: 0,
     t_scan_rsp_intvl: 0x92,
     g_vendor_id: 0x211,
-    light_rcv_rssi:0,
+    light_rcv_rssi: 0,
     rcv_pkt_time: 0,
     light_conn_sn_master: 0,
     slave_window_size: 0,
@@ -267,12 +392,247 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
             sno: [0; 3],
             src: [0; 2],
             dst: [0; 2],
-            val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-        }
+            val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        },
     },
 
     adr_reset_cnt_idx: 0,
     reset_cnt: 0,
     clear_st: 3,
     reset_check_time: 0,
+
+    pair_config_mesh_name: [0; 16],
+    pair_config_mesh_pwd: [0; 16],
+    pair_config_mesh_ltk: [0; 16],
+
+    security_enable: false,
+    not_need_login: false,
+    pair_login_ok: false,
+    pair_sk: [0; 16],
+    pair_sk_copy: [0; 16],
+    slave_first_connected_tick: 0,
+
+    device_address: 0,
+    device_node_sn: 1,
+    dev_grp_next_pos: 0,
+
+    group_address: [0; MAX_GROUP_NUM as usize],
+
+    adr_flash_cfg_idx: 0,
+
+    slave_link_connected: false,
+
+    slave_read_status_busy: 0,
+    rf_slave_ota_busy: false,
+
+    pair_setting_flag: PairState::PairSetted,
+    pair_ac: 0,
+
+    pair_nn: [0; 16],
+    pair_pass: [0; 16],
+    pair_ltk: [0; 16],
+    pair_ltk_mesh: [0; 16],
+
+    cur_ota_flash_addr: 0,
+    rf_slave_ota_finished_flag: OtaState::Continue,
+    rf_slave_ota_terminate_flag: false,
+    mesh_node_max: 0,
+
+    rf_slave_ota_timeout_s: RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
+    set_mesh_info_expired_flag: false,
+    set_mesh_info_time: 0,
+
+    pair_ivm: [0, 0, 0, 0, 1, 0, 0, 0],
+
+    pair_config_pwd_encode_sk: [0; 17],
+    ble_pair_st: 0,
+    pair_enc_enable: false,
+    pair_ivs: [0; 8],
+    pair_work: [0; 16],
+    pair_read_pending: false,
+
+    adv_interval2listen_interval: 4,
+    online_status_interval2listen_interval: 8,
+    rf_slave_ota_busy_mesh: false,
+
+    flash_sector_calibration: CFG_SECTOR_ADR_CALIBRATION_CODE,
+
+    slave_status_record: [StatusRecord {
+        adr: [0],
+        alarm_id: 0,
+    }; MESH_NODE_MAX_NUM],
+
+    slave_status_record_size: size_of::<[StatusRecord; MESH_NODE_MAX_NUM]>() as u16,
+    rc_pkt_buf: Deque::new(),
+
+    dev_address_next_pos: 0,
+    need_update_connect_para: false,
+    update_interval_user_max: 0,
+    update_interval_user_min: 0,
+    update_timeout_user: 0,
+    update_interval_flag: 0,
+    update_interval_time: false,
+    slave_data_valid: 0,
+    t_bridge_cmd: 0,
+    st_brige_no: 0,
+    app_cmd_time: 0,
+    mesh_user_cmd_idx: 0,
+    slave_tx_cmd_time: 0,
+    slave_status_buffer_wptr: 0,
+    slave_status_buffer_rptr: 0,
+    slave_stat_sno: [0; 3],
+    slave_read_status_unicast_flag: 0,
+    mesh_node_report_enable: false,
+    slave_timing_adjust_enable: false,
+    slave_tick_brx: 0,
+    slave_window_offset: 0,
+    slave_instant: 0,
+    slave_status_tick: 0,
+    slave_link_cmd: 0,
+    rcv_pkt_ttc: 0,
+    org_ttl: 0,
+    slave_read_status_response: false,
+    slave_sno: [0; 3],
+    slave_status_record_idx: 0,
+    notify_req_mask_idx: 0,
+    adv_flag: true,
+    online_st_flag: true,
+    slave_read_status_busy_time: 0,
+    st_listen_no: 0,
+
+    slave_link_state: 0,
+    slave_listen_interval: 0,
+    slave_connected_tick: 0,
+    slave_adv_enable: false,
+    slave_connection_enable: false,
+    mac_id: [0; 6],
+    adv_data: [2, 1, 5],
+    user_data_len: 0,
+    user_data: [0; 16],
+
+    rf_tp_base: 0x1D,
+    rf_tp_gain: 0xC,
+    rf_tx_mode: 0,
+    rfhw_tx_power: 0x40,
+
+    pkt_adv: RfPacketAdvIndModuleT {
+        dma_len: 0x27,
+        _type: 0,
+        rf_len: 0x25,
+        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+        data: [0; 31]
+    },
+    pkt_scan_rsp: PacketScanRsp {
+        dma_len: 0x27,
+        _type: 0x4,
+        rf_len: 0x25,
+        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+        data: [0; 31]
+    },
+    pkt_light_data: PacketAttCmd {
+        dma_len: 0x27,
+        _type: 2,
+        rf_len: 0x25,
+        l2cap_len: 0xCCDD,
+        chan_id: 0,
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: PacketAttValue {
+            sno: [0; 3],
+            src: [0; 2],
+            dst: [0; 2],
+            val: [0; 23]
+        }
+    },
+    pkt_light_status: PacketAttCmd {
+        dma_len: 0x27,
+        _type: 2,
+        rf_len: 0x25,
+        l2cap_len: 0x21,
+        chan_id: 0,
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: PacketAttValue {
+            sno: [0; 3],
+            src: [0; 2],
+            dst: [0; 2],
+            val: [0; 23]
+        }
+    },
+    pkt_read_rsp: PacketAttReadRsp {
+        dma_len: 0x1d,
+        _type: 2,
+        rf_len: 0x1b,
+        l2cap_len: 0x17,
+        chan_id: 0x4,
+        opcode: 0xb,
+        value: [0; 22],
+    },
+    pkt_light_adv_status: PacketAttWrite {
+        dma_len: 0x27,
+        rtype: 2,
+        rf_len: 0x25,
+        l2cap_len: 0x21,
+        chan_id: 0xffff,
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: [0; 30],
+    },
+    pkt_mesh: MeshPkt {
+        dma_len: 0,
+        _type: 0,
+        rf_len: 0,
+        l2cap_len: 0,
+        chan_id: 0,
+        src_tx: 0,
+        handle1: 0,
+        sno: [0; 3],
+        src_adr: 0,
+        dst_adr: 0,
+        op: 0,
+        vendor_id: 0,
+        par: [0; 10],
+        internal_par1: [0; 5],
+        ttl: 0,
+        internal_par2: [0; 4],
+        no_use: [0; 4],
+    },
+    pkt_mesh_user_cmd_buf: MeshPkt {
+        dma_len: 0,
+        _type: 0,
+        rf_len: 0,
+        l2cap_len: 0,
+        chan_id: 0,
+        src_tx: 0,
+        handle1: 0,
+        sno: [0; 3],
+        src_adr: 0,
+        dst_adr: 0,
+        op: 0,
+        vendor_id: 0,
+        par: [0; 10],
+        internal_par1: [0; 5],
+        ttl: 0,
+        internal_par2: [0; 4],
+        no_use: [0; 4],
+    },
+    pkt_init: PacketLlInit {
+        dma_len: 0x24,
+        _type: 0x5,
+        rf_len: 0x22,
+        scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+        adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+        aa: [0xaa, 0x55, 0x55, 0xaa],
+        crcinit: [0x55, 0x55, 0x55],
+        wsize: 2,
+        woffset: 0x1f,
+        interval: 0x20,
+        latency: 0,
+        timeout: 0x48,
+        chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+        hop: 0xac,
+    },
 }));

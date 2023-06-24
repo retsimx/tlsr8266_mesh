@@ -188,8 +188,8 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
-fn mesh_status_write(state: &RefCell<State>, p: *const PacketAttWrite) -> bool {
-    if !*get_pair_login_ok() {
+fn mesh_status_write(state: &mut State, p: *const PacketAttWrite) -> bool {
+    if !state.pair_login_ok {
         return true;
     }
     unsafe {
@@ -211,8 +211,8 @@ pub struct AttributeT {
     pub attr_max_len: u8,
     pub uuid: *const u8,
     pub p_attr_value: *mut u8,
-    pub w: Option<fn(state: &RefCell<State>, data: *const PacketAttWrite) -> bool>,
-    pub r: Option<fn(state: &RefCell<State>, data: *const PacketAttWrite) -> bool>,
+    pub w: Option<fn(state: &mut State, data: *const PacketAttWrite) -> bool>,
+    pub r: Option<fn(state: &mut State, data: *const PacketAttWrite) -> bool>,
 }
 
 #[macro_export]

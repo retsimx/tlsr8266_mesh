@@ -1,12 +1,10 @@
-use core::cell::RefCell;
 use core::cmp::min;
 use core::convert::TryFrom;
 
-use crate::{app, pub_mut};
+use crate::app;
 use crate::BIT;
 use crate::config::{FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::light::get_pair_config_mesh_ltk;
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
@@ -28,8 +26,8 @@ pub const FLASH_ADR_PAR_MAX: u32 = 0x80000;
 pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
 pub const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
 
-fn reset_cnt_clean(state: &RefCell<State>) {
-    let mut state = state.borrow_mut();
+fn reset_cnt_clean(state: &mut State) {
+
 
     if state.adr_reset_cnt_idx < 3840 {
         return;
@@ -38,24 +36,24 @@ fn reset_cnt_clean(state: &RefCell<State>) {
     state.adr_reset_cnt_idx = 0;
 }
 
-fn write_reset_cnt(state: &RefCell<State>, cnt: u8) {
+fn write_reset_cnt(state: &mut State, cnt: u8) {
     let data = [cnt];
     flash_write_page(
-        FLASH_ADR_RESET_CNT + state.borrow().adr_reset_cnt_idx,
+        FLASH_ADR_RESET_CNT + state.adr_reset_cnt_idx,
         1,
         data.as_ptr(),
     );
 }
 
-fn clear_reset_cnt(state: &RefCell<State>) {
+fn clear_reset_cnt(state: &mut State) {
     write_reset_cnt(state, RESET_CNT_RECOUNT_FLAG);
 }
 
-fn reset_cnt_get_idx(state: &RefCell<State>) {
+fn reset_cnt_get_idx(state: &mut State) {
     let pf = FLASH_ADR_RESET_CNT as *const u8;
-    state.borrow_mut().adr_reset_cnt_idx = 0;
-    while state.borrow().adr_reset_cnt_idx < 4096 {
-        let restcnt_bit = unsafe { *pf.offset(state.borrow().adr_reset_cnt_idx as isize) };
+    state.adr_reset_cnt_idx = 0;
+    while state.adr_reset_cnt_idx < 4096 {
+        let restcnt_bit = unsafe { *pf.offset(state.adr_reset_cnt_idx as isize) };
         if restcnt_bit != RESET_CNT_RECOUNT_FLAG
         //end
         {
@@ -68,34 +66,34 @@ fn reset_cnt_get_idx(state: &RefCell<State>) {
                 break;
             }
         }
-        state.borrow_mut().adr_reset_cnt_idx += 1;
+        state.adr_reset_cnt_idx += 1;
     }
 
     reset_cnt_clean(state);
 }
 
-fn get_reset_cnt_bit(state: &RefCell<State>) -> u8 {
-    if state.borrow().adr_reset_cnt_idx < 0 {
+fn get_reset_cnt_bit(state: &mut State) -> u8 {
+    if state.adr_reset_cnt_idx < 0 {
         reset_cnt_clean(state);
         return 0;
     }
 
     let mut data = [0];
     flash_read_page(
-        FLASH_ADR_RESET_CNT + state.borrow().adr_reset_cnt_idx,
+        FLASH_ADR_RESET_CNT + state.adr_reset_cnt_idx,
         1,
         data.as_mut_ptr(),
     );
-    state.borrow_mut().reset_cnt = data[0];
-    return state.borrow().reset_cnt;
+    state.reset_cnt = data[0];
+    return state.reset_cnt;
 }
 
-fn increase_reset_cnt(state: &RefCell<State>) {
+fn increase_reset_cnt(state: &mut State) {
     let mut restcnt_bit = get_reset_cnt_bit(state);
     for i in 0..8 {
         if restcnt_bit & BIT!(i) != 0 {
             {
-                let mut state = state.borrow_mut();
+
                 if i < 3 {
                     state.reset_cnt = i;
                 } else if i < 5 {
@@ -112,24 +110,24 @@ fn increase_reset_cnt(state: &RefCell<State>) {
     }
 }
 
-pub fn factory_reset_handle(state: &RefCell<State>) {
+pub fn factory_reset_handle(state: &mut State) {
     reset_cnt_get_idx(state);
     let restcnt_bit = get_reset_cnt_bit(state);
     if restcnt_bit == RESET_FLAG {
         irq_disable();
         factory_reset();
         app().ota_manager.rf_led_ota_ok();
-        light_sw_reboot();
+        light_sw_reboot(state);
     } else {
         increase_reset_cnt(state);
     }
 }
 
-pub fn factory_reset_cnt_check(state: &RefCell<State>) {
+pub fn factory_reset_cnt_check(state: &mut State) {
     let mut increase_cnt = false;
     let mut clear_cnt = false;
     {
-        let mut state = state.borrow_mut();
+
 
         if state.clear_st == 0 {
             return;
@@ -198,19 +196,18 @@ impl TryFrom<u32> for KickoutReason {
     }
 }
 
-pub fn kick_out(state: &RefCell<State>, par: KickoutReason) {
+pub fn kick_out(state: &mut State, par: KickoutReason) {
     factory_reset();
 
     if par == KickoutReason::OutOfMesh {
         let pairing_addr = FLASH_ADR_PAIRING;
-        let mut buff: [u8; 16] = [0; 16];
-        buff[0..16].copy_from_slice(&get_pair_config_mesh_ltk()[0..16]);
+        let mut buff: [u8; 16] = state.pair_config_mesh_ltk;
         flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];
         let len = min(MESH_PWD.len(), buff.len());
         buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-        encode_password(buff.as_mut_slice());
+        encode_password(state, buff.as_mut_slice());
         flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];
@@ -222,8 +219,8 @@ pub fn kick_out(state: &RefCell<State>, par: KickoutReason) {
         buff[0] = PAIR_VALID_FLAG;
         buff[15] = PAIR_VALID_FLAG;
 
-        if state.borrow().mesh_pair_enable {
-            state.borrow_mut().get_mac_en = true;
+        if state.mesh_pair_enable {
+            state.get_mac_en = true;
             buff[1] = 1;
         }
         flash_write_page(pairing_addr, 16, buff.as_mut_ptr());

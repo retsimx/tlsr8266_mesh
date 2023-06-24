@@ -1,23 +1,25 @@
-use core::cell::RefCell;
-use core::cmp::{min};
+use core::cmp::min;
 use core::mem::size_of;
+use core::ops::DerefMut;
 use core::ptr::addr_of;
+
+use const_format::formatcp;
 use embassy_executor::Spawner;
-use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use embassy_time::{Duration, Instant};
+use fixed::types::{I16F16, U16F16};
 use heapless::Deque;
+
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
+use crate::sdk::ble_app::light_ll::ll_device_status_update;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::pwm_set_cmp;
+use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
-use fixed::types::{I16F16, U16F16};
-use const_format::formatcp;
-use crate::sdk::ble_app::light_ll::ll_device_status_update;
 use crate::state::{State, STATE};
 
 const TRANSITION_TIME_MS: u64 = 1500;
@@ -83,7 +85,7 @@ impl LightManager {
         }
     }
 
-    fn handle_on_off(&mut self, state: &RefCell<State>, on: u8) {
+    fn handle_on_off(&mut self, state: &mut State, on: u8) {
         self.light_onoff(
             state,
          match on {
@@ -151,7 +153,7 @@ impl LightManager {
             });
 
             match msg.cmd {
-                LGT_CMD_LIGHT_ONOFF => STATE.lock(|state| { self.handle_on_off(state, msg.params[0]) }),
+                LGT_CMD_LIGHT_ONOFF => STATE.lock(|state| { self.handle_on_off(state.borrow_mut().deref_mut(), msg.params[0]) }),
                 LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
                 _ => {}
             }
@@ -288,7 +290,7 @@ impl LightManager {
     }
 
     //retrieve LUM : brightness or RGB/CT value
-    pub fn light_lum_retrieve(&mut self, state: &RefCell<State>) {
+    pub fn light_lum_retrieve(&mut self, state: &mut State) {
         let mut i = 0;
         while i < FLASH_SECTOR_SIZE {
             self.light_lum_addr = FLASH_ADR_LUM + i as u32;
@@ -372,12 +374,12 @@ impl LightManager {
         self.begin_transition(state.cw.to_num(), state.ww.to_num(), match on { true => self.brightness, false => 0 });
     }
 
-    pub fn light_onoff(&mut self, state: &RefCell<State>, on: bool) {
+    pub fn light_onoff(&mut self, state: &mut State, on: bool) {
         self.light_onoff_hw(on);
         self.device_status_update(state);
     }
 
-    pub fn device_status_update(&self, state: &RefCell<State>) {
+    pub fn device_status_update(&self, state: &mut State) {
         // packet
         let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
 

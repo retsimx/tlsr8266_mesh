@@ -2,9 +2,9 @@ use core::cell::RefCell;
 
 use crate::state::State;
 
-pub fn ble_ll_channel_table_calc(state: &RefCell<State>, channel: &[u8], reset: bool)
+pub fn ble_ll_channel_table_calc(state: &mut State, channel: &[u8], reset: bool)
 {
-    let mut state = state.borrow_mut();
+
 
     state.ble_ll_channel_num = 0;
 
@@ -24,9 +24,9 @@ pub fn ble_ll_channel_table_calc(state: &RefCell<State>, channel: &[u8], reset: 
     }
 }
 
-pub fn ble_ll_conn_get_next_channel(state: &RefCell<State>, channel_map: &[u8], hop: u8) -> u32
+pub fn ble_ll_conn_get_next_channel(state: &mut State, channel_map: &[u8], hop: u8) -> u32
 {
-    let mut state = state.borrow_mut();
+
 
     let mut index = (state.ble_ll_last_unmapped_ch + hop as usize) % 0x25;
     state.ble_ll_last_unmapped_ch = index;

@@ -3,6 +3,7 @@ use core::convert::TryInto;
 use core::mem::size_of;
 use core::ops::DerefMut;
 use core::ptr::addr_of;
+use embassy_time::{Duration, Timer};
 
 use fixed::types::I16F16;
 
@@ -10,7 +11,7 @@ use crate::app;
 use crate::BIT;
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::{is_receive_ota_window, light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -202,14 +203,12 @@ fn light_user_func(state: &mut State) {
     app().mesh_manager.mesh_pair_proc_effect(state);
 }
 
-pub fn main_loop() {
+pub async fn main_loop() {
+    Timer::after(Duration::from_micros(LOOP_INTERVAL_US)).await;
+
     STATE.lock(|state| {
         let mut binding = state.borrow_mut();
         let state = binding.deref_mut();
-
-        if !is_receive_ota_window(state) {
-            return;
-        }
 
         light_user_func(state);
         rf_link_slave_proc(state);

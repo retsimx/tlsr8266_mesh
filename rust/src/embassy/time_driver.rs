@@ -10,7 +10,7 @@ embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{});
 
 impl Driver for MyDriver {
     fn now(&self) -> u64 {
-        clock_time64() as u64
+        clock_time64()
     }
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
         return Option::from(AlarmHandle::new(0));

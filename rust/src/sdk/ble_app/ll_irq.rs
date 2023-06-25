@@ -180,57 +180,47 @@ pub fn irq_st_adv(state: &mut State)
     static LAST_ALARM_TIME: AtomicU32 = AtomicU32::new(0);
     static I_BEACON_CNT: AtomicU32 = AtomicU32::new(0);
 
-    let mut report_online_status = false;
-
     write_reg8(0x80050f, 0);
     rf_stop_trx();
 
-    {
+    state.slave_link_state = 1;
 
-
-        state.slave_link_state = 1;
-
-        if !state.adv_flag || get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
-            state.adv_flag = false;
-            ST_PNO.store(0, Ordering::Relaxed);
-            if state.online_st_flag {
-                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xdac + read_reg_system_tick());
-                if CLOCK_SYS_CLOCK_1US * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
-                    LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
-                } else {
-                    report_online_status = true;
-                }
+    if !state.adv_flag || get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
+        state.adv_flag = false;
+        ST_PNO.store(0, Ordering::Relaxed);
+        if state.online_st_flag {
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xdac + read_reg_system_tick());
+            if CLOCK_SYS_CLOCK_1US * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
+                LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
             } else {
-                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
+                mesh_send_online_status(state);
+                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
             }
-            state.online_st_flag = false;
-            state.p_st_handler = IrqHandlerStatus::Listen;
-            write_reg_rf_irq_status(1);
         } else {
-            rf_set_ble_access_code_adv();
-            rf_set_ble_crc_adv();
-
-            rf_set_ble_channel(state, SYS_CHN_ADV[ST_PNO.load(Ordering::Relaxed) as usize % 3]);
-            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0x4b0 + read_reg_system_tick());
-            write_reg_rf_irq_status(1);
-
-            if ST_PNO.load(Ordering::Relaxed) < 3 {
-                rf_start_stx2rx(addr_of!(state.pkt_adv) as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
-            }
-
-            ST_PNO.store(ST_PNO.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
-            if get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
-                ST_PNO.store(0, Ordering::Relaxed);
-                state.adv_flag = false;
-            }
-
-            state.p_st_handler = IrqHandlerStatus::Listen;
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
         }
-    }
+        state.online_st_flag = false;
+        state.p_st_handler = IrqHandlerStatus::Listen;
+        write_reg_rf_irq_status(1);
+    } else {
+        rf_set_ble_access_code_adv();
+        rf_set_ble_crc_adv();
 
-    if report_online_status {
-        mesh_send_online_status(state);
-        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
+        rf_set_ble_channel(state, SYS_CHN_ADV[ST_PNO.load(Ordering::Relaxed) as usize % 3]);
+        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0x4b0 + read_reg_system_tick());
+        write_reg_rf_irq_status(1);
+
+        if ST_PNO.load(Ordering::Relaxed) < 3 {
+            rf_start_stx2rx(addr_of!(state.pkt_adv) as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
+        }
+
+        ST_PNO.store(ST_PNO.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        if get_gatt_adv_cnt() <= ST_PNO.load(Ordering::Relaxed) {
+            ST_PNO.store(0, Ordering::Relaxed);
+            state.adv_flag = false;
+        }
+
+        state.p_st_handler = IrqHandlerStatus::Listen;
     }
 }
 

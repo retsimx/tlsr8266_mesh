@@ -6,7 +6,7 @@ use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
 pub static MAX_RELAY_NUM: u8 = 3;
 pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
-pub const LOOP_INTERVAL_US: u16 = 10000;
+pub const LOOP_INTERVAL_US: u64 = 10000;
 
 // must be 255
 pub const PMW_MAX_TICK_BASE: u16 = 255;

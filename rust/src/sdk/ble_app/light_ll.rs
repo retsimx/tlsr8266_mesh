@@ -1,6 +1,5 @@
 use core::cmp::min;
 use core::mem::{size_of, transmute};
-use core::ops::DerefMut;
 use core::ptr::{addr_of, addr_of_mut, null};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
@@ -11,21 +10,18 @@ use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
 use crate::sdk::ble_app::ble_ll_att::ble_ll_channel_table_calc;
-use crate::sdk::ble_app::ble_ll_attribute::{l2cap_att_handler};
+use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pair_enc_packet_mesh, pair_init, pair_save_key, pair_set_key};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::state::{State, STATE};
+use crate::state::State;
 use crate::uart_manager::light_mesh_rx_cb;
-
 
 fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
 {
-
-
     let mut src_index = 0;
     let mut result = 0xfffffffe;
     let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
@@ -667,32 +663,6 @@ pub fn ll_device_status_update(state: &mut State, val_par: &[u8])
     state.mesh_node_mask[0] |= 1;
 }
 
-pub fn is_receive_ota_window(state: &mut State) -> bool
-{
-    static TICK_LOOP: AtomicU32 = AtomicU32::new(0);
-
-
-
-    if LOOP_INTERVAL_US != 0 {
-        if read_reg_system_tick() - TICK_LOOP.load(Ordering::Relaxed) <= LOOP_INTERVAL_US as u32 * CLOCK_SYS_CLOCK_1US {
-            return true;
-        }
-        TICK_LOOP.store(read_reg_system_tick(), Ordering::Relaxed);
-    }
-    if state.slave_link_state == 1 && CLOCK_SYS_CLOCK_1US == 0x10 {
-        return true;
-    }
-
-    let mut result = false;
-    if state.rf_slave_ota_busy {
-        if state.slave_link_state == 7 {
-            result = 6 < state.slave_link_state;
-        }
-    }
-
-    return result;
-}
-
 pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
 {
 
@@ -872,6 +842,7 @@ pub fn mesh_send_command(state: &mut State, packet: *const PacketAttCmd, retrans
             for chn in SYS_CHN_LISTEN {
                 rf_set_ble_channel(state, chn);
                 rf_start_srx2tx(packet as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+
                 sleep_us(600);
             }
         }

@@ -4,7 +4,6 @@ use embassy_executor::Spawner;
 
 use crate::{app, uprintln};
 use crate::config::MESH_PWD_ENCODE_SK;
-use crate::embassy::yield_now::yield_now;
 use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
@@ -102,14 +101,14 @@ impl App {
         spawner.spawn(panic_check(spawner)).unwrap();
 
         loop {
+            // Clear the watchdog timer
             wd_clear();
-            main_loop();
+
+            // Run the main loop - this only runs once per LOOP_INTERVAL_US
+            main_loop().await;
 
             // Clear any uart errors if they've occurred
             UartDriver::uart_error_clr();
-
-            // Let other tasks run
-            yield_now().await;
         }
     }
 }

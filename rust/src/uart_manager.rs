@@ -16,7 +16,7 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQM
 use crate::sdk::light::AppCmdValue;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::state::{STATE, State};
+use crate::state::{DEVICE_ADDRESS, SimplifyLS, STATE, State};
 
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
@@ -29,9 +29,9 @@ pub enum UartMsg {
 }
 
 // AppCmdValueT
-pub fn light_mesh_rx_cb(state: &mut State, data: &AppCmdValue) {
+pub fn light_mesh_rx_cb(data: &AppCmdValue) {
     // Don't report messages that we sent
-    if !app().uart_manager.started() || (data.src == state.device_address && data.dst != state.device_address){
+    if !app().uart_manager.started() || (data.src == DEVICE_ADDRESS.get() && data.dst != DEVICE_ADDRESS.get()){
         return;
     }
 
@@ -256,14 +256,12 @@ impl UartManager {
             let mut data = [0; 13];
             data.copy_from_slice(&msg.data[5..5+13]);
 
-            let mymsg = unsafe {slice::from_raw_parts(addr_of!(state.pkt_user_cmd.dst_adr) as *const u8, 15)};
-
             // Record the message
             if self.sent.is_full() {
                 self.sent.pop_front();
             }
 
-            self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
+            self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..3+15]).unwrap()).unwrap();
 
             // Send the message in to the mesh
             app().mesh_manager.send_mesh_message(state, &data, destination);

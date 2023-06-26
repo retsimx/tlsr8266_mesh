@@ -28,16 +28,6 @@ pub struct App {
     pub uart_manager: UartManager
 }
 
-#[embassy_executor::task]
-async fn light_manager(spawner: Spawner) {
-    app().light_manager.run(spawner).await;
-}
-
-#[embassy_executor::task]
-async fn panic_check(_spawner: Spawner) {
-    check_panic_info().await;
-}
-
 impl App {
     pub const fn default() -> App {
         App {
@@ -80,10 +70,31 @@ impl App {
             self.init(state);
         });
 
+        // Start the mesh packet sender
+        #[embassy_executor::task]
+        async fn mesh_packet_sender() {
+            app().mesh_manager.send_mesh_msg_task().await;
+        }
+
+        spawner.spawn(mesh_packet_sender()).unwrap();
+
+        // Start the mesh packet receive handler
+        #[embassy_executor::task]
+        async fn mesh_packet_rcv() {
+            app().mesh_manager.rcv_mesh_msg_task().await;
+        }
+
+        spawner.spawn(mesh_packet_rcv()).unwrap();
+
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
 
         // Start the light manager
+        #[embassy_executor::task]
+        async fn light_manager(spawner: Spawner) {
+            app().light_manager.run(spawner).await;
+        }
+
         spawner.spawn(light_manager(spawner)).unwrap();
 
         // Send a message to the network saying that we just booted up
@@ -98,6 +109,11 @@ impl App {
         });
 
         // Start the panic checker to see if there is information we need to send
+        #[embassy_executor::task]
+        async fn panic_check(_spawner: Spawner) {
+            check_panic_info().await;
+        }
+
         spawner.spawn(panic_check(spawner)).unwrap();
 
         loop {

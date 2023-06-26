@@ -5,7 +5,7 @@ use crate::config::FLASH_ADR_DEV_GRP_ADR;
 use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT};
-use crate::state::State;
+use crate::state::{DEVICE_ADDRESS, SimplifyLS, State};
 
 pub enum RfPower {
     RfPower8dBm = 0,
@@ -144,7 +144,8 @@ pub fn dev_grp_flash_clean(state: &mut State)
     if 0xfff < state.dev_grp_next_pos || 0xfff < state.dev_address_next_pos {
         flash_erase_sector(FLASH_ADR_DEV_GRP_ADR);
         flash_write_page(FLASH_ADR_DEV_GRP_ADR, 0x10, state.group_address.as_ptr() as *const u8);
-        flash_write_page(FLASH_ADR_DEV_GRP_ADR + 0x10, 2, addr_of!(state.device_address) as *const u8);
+        let device_address = DEVICE_ADDRESS.get();
+        flash_write_page(FLASH_ADR_DEV_GRP_ADR + 0x10, 2, addr_of!(device_address) as *const u8);
         state.dev_address_next_pos = 0x12;
         state.dev_grp_next_pos = 0x12;
     }
@@ -155,7 +156,7 @@ pub fn rf_link_add_dev_addr(state: &mut State, dev_id: u16) -> bool
 {
   let mut tmp_dev_id = dev_id;
   let mut result = false;
-  if tmp_dev_id != 0 && tmp_dev_id & !DEVICE_ADDR_MASK_DEFAULT == 0 && state.device_address != tmp_dev_id {
+  if tmp_dev_id != 0 && tmp_dev_id & !DEVICE_ADDR_MASK_DEFAULT == 0 && DEVICE_ADDRESS.get() != tmp_dev_id {
     result = true;
     let write_buffer = dev_id;
     dev_grp_flash_clean(state);
@@ -165,7 +166,7 @@ pub fn rf_link_add_dev_addr(state: &mut State, dev_id: u16) -> bool
       flash_write_page(FLASH_ADR_DEV_GRP_ADR -2 + state.dev_address_next_pos as u32, 2, addr_of!(zero_data) as *const u8);
       tmp_dev_id = state.dev_grp_next_pos;
     }
-    state.device_address = write_buffer;
+    DEVICE_ADDRESS.set(write_buffer);
     flash_write_page(tmp_dev_id as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(write_buffer) as *const u8);
     state.dev_grp_next_pos = state.dev_grp_next_pos + 2;
     state.dev_address_next_pos = state.dev_grp_next_pos;

@@ -7,11 +7,11 @@ use embassy_time::{Duration, Timer};
 
 use fixed::types::I16F16;
 
-use crate::app;
+use crate::{app};
 use crate::BIT;
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_push_user_command, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_construct_packet, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -23,7 +23,7 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
-use crate::state::{State, STATE};
+use crate::state::{DEVICE_ADDRESS, SECURITY_ENABLE, SimplifyLS, State, STATE};
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 
@@ -127,7 +127,7 @@ pub fn user_init(state: &mut State) {
     vendor_set_adv_data(state);
 
     app().light_manager.device_status_update(state);
-    app().mesh_manager.mesh_security_enable(state, true);
+    app().mesh_manager.mesh_security_enable(true);
 }
 
 fn proc_led(state: &mut State) {
@@ -185,7 +185,7 @@ fn proc_led(state: &mut State) {
 }
 
 fn light_auth_check(state: &mut State) {
-    if state.security_enable
+    if SECURITY_ENABLE.get()
         && !state.pair_login_ok
         && state.slave_first_connected_tick != 0
         && clock_time_exceed(state.slave_first_connected_tick, AUTH_TIME * 1000 * 1000)
@@ -232,8 +232,8 @@ pub fn rf_link_response_callback(
     // mac-app[5] low 2 bytes used as ttc && hop-count
     let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
-    ppp.src[0] = (state.device_address & 0xff) as u8;
-    ppp.src[1] = ((state.device_address >> 8) & 0xff) as u8;
+    ppp.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
+    ppp.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
 
     let params = &p_req.val[3..13];
     ppp.val[3..10 + 3].fill(0);
@@ -316,8 +316,8 @@ pub fn rf_link_response_callback(
                 //params[2]
                 ppp.val[5 + i] = i as u8;
             }
-            ppp.val[3] = (state.device_address & 0xFF) as u8;
-            ppp.val[4] = ((state.device_address >> 8) & 0xff) as u8;
+            ppp.val[3] = (DEVICE_ADDRESS.get() & 0xFF) as u8;
+            ppp.val[4] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
         },
         CMD_START_OTA => {
             ppp.val[0] = LGT_CMD_START_OTA_RSP | 0xc0;
@@ -431,9 +431,9 @@ pub fn rf_link_data_callback(state: &mut State, p: *const PacketL2capData) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(state: &mut State, p_cmd: &[u8], para: u16) -> bool {
-    let mut cmd_op_para: [u8; 16] = [0; 16];
-    let cmd_sno = clock_time() + state.device_address as u32;
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> MeshPkt {
+    let mut cmd_op_para: [u8; 13] = [0; 13];
+    let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
 
     cmd_op_para[0..13].copy_from_slice(&p_cmd[0..13]);
 
@@ -442,7 +442,7 @@ pub fn light_slave_tx_command(state: &mut State, p_cmd: &[u8], para: u16) -> boo
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    mesh_push_user_command(state, cmd_sno, dst, cmd_op_para.as_ptr(), 13)
+    mesh_construct_packet(cmd_sno, dst, &cmd_op_para)
 }
 
 pub fn rf_link_light_event_callback(state: &mut State, status: u8) {

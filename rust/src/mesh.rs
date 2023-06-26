@@ -1,19 +1,25 @@
 use core::mem::size_of;
+use core::ops::DerefMut;
 use core::ptr::addr_of;
 
+use embassy_time::{Duration, Timer};
+use heapless::{Deque, Vec};
+
 use crate::{app, BIT, uprintln};
-use crate::common::{access_code, mesh_node_init, pair_load_key};
+use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
+use crate::embassy::time_driver::clock_time64;
+use crate::embassy::yield_now::yield_now;
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, mesh_send_command, rf_link_add_tx_packet};
-use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code;
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_match_group_mac, rf_link_proc_ttc, rf_link_rc_data};
+use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_tx_rx_off, rf_start_srx2tx};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, write_reg_rf_irq_status};
-use crate::state::State;
+use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
+use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SECURITY_ENABLE, SimplifyLS, State, STATE};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -76,6 +82,16 @@ pub struct mesh_node_st_t {
     pub val: mesh_node_st_val_t,
 }
 
+struct SendPkt {
+    pub delay: u64,
+    pub pkt: MeshPkt
+}
+
+struct RcvPkt {
+    pub decode: bool,
+    pub pkt: MeshPkt
+}
+
 pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
@@ -95,7 +111,9 @@ pub struct MeshManager {
     mesh_pair_checksum: [u8; 8],
     mesh_pair_retry_max: u8,
     mesh_pair_time: u32,
-    mesh_pair_state: MeshPairState
+    mesh_pair_state: MeshPairState,
+    pkt_send_buf: Vec<SendPkt, 5>,
+    pkt_rcv_buf: Deque<RcvPkt, 10>,
 }
 
 impl MeshManager {
@@ -119,20 +137,23 @@ impl MeshManager {
             mesh_pair_checksum: [0; 8],
             mesh_pair_retry_max: 3,
             mesh_pair_time: 0,
-            mesh_pair_state: MeshPairState::MeshPairName1
+            mesh_pair_state: MeshPairState::MeshPairName1,
+            pkt_send_buf: Vec::new(),
+            pkt_rcv_buf: Deque::new()
         }
     }
 
-    pub fn send_mesh_message(&self, state: &mut State, data: &[u8; 13], destination: u16) {
-        light_slave_tx_command(state, data, destination);
-
-        if state.security_enable
-        {
-            state.pkt_user_cmd._type |= BIT!(7);
-            pair_enc_packet_mesh(state, addr_of!(state.pkt_user_cmd) as *mut MeshPkt);
+    pub fn send_mesh_message(&mut self, state: &mut State, data: &[u8; 13], destination: u16) {
+        let pkt = light_slave_tx_command(data, destination);
+        let (group_match, device_match) = rf_link_match_group_mac(state, addr_of!(pkt.sno) as *const AppCmdValue);
+        if group_match || device_match {
+            app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
+            if !device_match {
+                self.add_send_mesh_msg(&pkt, 0);
+            }
+        } else {
+            self.add_send_mesh_msg(&pkt, 0);
         }
-
-        mesh_send_command(state, addr_of!(state.pkt_user_cmd) as *const PacketAttCmd, 0);
     }
 
     pub fn mesh_pair_init(&mut self, state: &mut State) {
@@ -247,7 +268,7 @@ impl MeshManager {
 
     fn mesh_pair_complete_notify(&self, state: &mut State) -> i32 {
         let par = [CMD_NOTIFY_MESH_PAIR_END];
-        return self.mesh_cmd_notify(state, LGT_CMD_MESH_CMD_NOTIFY, &par, state.device_address);
+        return self.mesh_cmd_notify(state, LGT_CMD_MESH_CMD_NOTIFY, &par, DEVICE_ADDRESS.get());
     }
 
     fn safe_effect_new_mesh_finish(&mut self, state: &mut State) {
@@ -278,9 +299,9 @@ impl MeshManager {
         if self.effect_new_mesh == 0 {
             state.pair_nn = self.new_mesh_name;
             state.pair_pass = self.new_mesh_pwd;
-            state.pair_ltk = self.new_mesh_ltk;
+            PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(&self.new_mesh_ltk) });
         } else {
-            state.pair_ltk = state.pair_ltk_mesh;
+            PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(&state.pair_ltk_mesh) });
         }
 
         self.mesh_pair_complete_notify(state);
@@ -288,7 +309,7 @@ impl MeshManager {
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
         pair_save_key(state);
-        rf_set_ble_access_code(state.pair_ac); // use new access code at once.
+        rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
         rf_link_light_event_callback(state, LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
         write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16); // clear current rx in buffer
@@ -312,11 +333,11 @@ impl MeshManager {
 
         /* Only change AC and LTK */
         uprintln!("pairac c");
-        state.pair_ac = access_code(
+        PAIR_AC.set(access_code(
             &state.pair_config_mesh_name,
             &state.pair_config_mesh_pwd,
-        );
-        state.pair_ltk = state.pair_config_mesh_ltk;
+        ));
+        PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(&state.pair_config_mesh_ltk) });
     }
 
     fn get_online_node_cnt(&mut self, state: &mut State) -> u8 {
@@ -481,7 +502,16 @@ impl MeshManager {
             return;
         }
 
-        light_slave_tx_command(state, &op_para, dst_addr);
+        let pkt = light_slave_tx_command(&op_para, dst_addr);
+        let (group_match, device_match) = rf_link_match_group_mac(state, addr_of!(pkt.sno) as *const AppCmdValue);
+        if group_match || device_match {
+            app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
+            if !device_match {
+                self.add_send_mesh_msg(&pkt, 0);
+            }
+        } else {
+            self.add_send_mesh_msg(&pkt, 0);
+        }
     }
 
     pub fn mesh_node_buf_init(&self, state: &mut State) {
@@ -497,8 +527,104 @@ impl MeshManager {
         app().light_manager.device_status_update(state);
     }
 
-    pub fn mesh_security_enable(&self, state: &mut State, enable: bool)
+    pub fn mesh_security_enable(&self, enable: bool)
     {
-        state.security_enable = enable;
+        SECURITY_ENABLE.set(enable);
+    }
+
+    pub fn add_send_mesh_msg(&mut self, packet: &MeshPkt, delay: u64) {
+        if self.pkt_send_buf.push(
+            SendPkt {
+                delay,
+                pkt: *packet
+            }
+        ).is_err() {
+            uprintln!("pkt send buf is full, dropping packet...");
+        }
+    }
+
+    pub async fn send_mesh_msg_task(&mut self) {
+        loop {
+            yield_now().await;
+
+            let result = critical_section::with(|_| {
+                let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| elem.delay < clock_time64()).last();
+                if found.is_none() {
+                    return None
+                }
+
+                let (index, _) = found.unwrap();
+
+                let pkt = self.pkt_send_buf.swap_remove(index);
+
+                Some(pkt)
+            });
+
+            if result.is_none() {
+                continue
+            }
+
+            let mut result = result.unwrap();
+
+            result.pkt.src_tx = DEVICE_ADDRESS.get();
+            result.pkt.handle1 = 0;
+
+            if (((result.pkt.handle1 as u32) << 0x1e) as i32) >= 0 {
+                rf_link_proc_ttc(read_reg_system_tick(), 0, &mut result.pkt);
+            }
+
+            // Encrypt the packet if required
+            if SECURITY_ENABLE.get()
+            {
+                result.pkt._type |= BIT!(7);
+                pair_enc_packet_mesh(&mut result.pkt);
+            }
+
+            // Configure the BLE mode
+            rf_set_tx_rx_off();
+            rf_set_ble_access_code(PAIR_AC.get());
+            rf_set_ble_crc_adv();
+
+            // Pick a random start channel
+            let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) as usize;
+
+            // Send the packet on each channel
+            for channel_index in start_chan_idx..start_chan_idx + SYS_CHN_LISTEN.len() {
+                rf_set_ble_channel(SYS_CHN_LISTEN[channel_index % SYS_CHN_LISTEN.len()]);
+                rf_start_srx2tx(addr_of!(result.pkt) as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+
+                Timer::after(Duration::from_micros(600)).await;
+            }
+        }
+    }
+
+    pub fn add_rcv_mesh_msg(&mut self, packet: &MeshPkt, decode: bool) {
+        if self.pkt_rcv_buf.push_back(
+            RcvPkt {
+                decode,
+                pkt: *packet
+            }
+        ).is_err() {
+            uprintln!("pkt rcv buf is full, dropping packet...");
+        }
+    }
+
+    pub async fn rcv_mesh_msg_task(&mut self) {
+        loop {
+            while self.pkt_rcv_buf.is_empty() {
+                yield_now().await;
+            }
+
+            let mut result = critical_section::with(|_| {
+                self.pkt_rcv_buf.pop_front().unwrap()
+            });
+
+            STATE.lock(|state| {
+                let mut binding = state.borrow_mut();
+                let state = binding.deref_mut();
+
+                rf_link_rc_data(state, &mut result.pkt, result.decode);
+            });
+        }
     }
 }

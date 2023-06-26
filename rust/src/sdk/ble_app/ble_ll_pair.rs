@@ -1,4 +1,5 @@
 use core::cell::RefCell;
+use core::ops::Deref;
 use core::ptr::{addr_of, addr_of_mut, null_mut};
 use core::slice;
 
@@ -8,11 +9,11 @@ use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
 use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::state::State;
+use crate::state::{PAIR_LTK, SECURITY_ENABLE, SimplifyLS, State};
 
 pub unsafe fn pair_dec_packet(state: &mut State, ps: *mut PacketLlApp) -> bool {
     let mut result = true;
-    if state.security_enable {
+    if SECURITY_ENABLE.get() {
         state.pair_ivm[5..5 + 3].copy_from_slice(&(*ps).app_cmd_v.sno);
 
         result = aes_att_decryption_packet(
@@ -28,7 +29,7 @@ pub unsafe fn pair_dec_packet(state: &mut State, ps: *mut PacketLlApp) -> bool {
 
 pub fn pair_enc_packet(state: &mut State, ps: &mut PacketLlApp)
 {
-    if state.security_enable && ps.chan_id == 4 && ps.opcode == 0x1b && ps.handle == 0x12 {
+    if SECURITY_ENABLE.get() && ps.chan_id == 4 && ps.opcode == 0x1b && ps.handle == 0x12 {
         let tick = read_reg_system_tick();
         unsafe {
             ps.app_cmd_v.sno.copy_from_slice(slice::from_raw_parts(addr_of!(tick) as *const u8, 3));
@@ -49,7 +50,7 @@ pub fn pair_enc_packet(state: &mut State, ps: &mut PacketLlApp)
 pub unsafe fn pair_dec_packet_mesh(state: &mut State, ps: *const MeshPkt) -> bool {
     let mut ltk = [0u8; 16];
 
-    if !state.security_enable {
+    if !SECURITY_ENABLE.get() {
         return true;
     }
 
@@ -62,7 +63,9 @@ pub unsafe fn pair_dec_packet_mesh(state: &mut State, ps: *const MeshPkt) -> boo
         return false;
     }
 
-    ltk.copy_from_slice(&state.pair_ltk[0..16]);
+    PAIR_LTK.lock(|pair_ltk| {
+        ltk.copy_from_slice(pair_ltk.borrow().deref());
+    });
 
     let mut result;
     if (*ps).chan_id as u16 == 0xffff {
@@ -85,42 +88,41 @@ pub unsafe fn pair_dec_packet_mesh(state: &mut State, ps: *const MeshPkt) -> boo
     return result;
 }
 
-pub fn pair_enc_packet_mesh(state: &State, ps: *mut MeshPkt) -> bool
+pub fn pair_enc_packet_mesh(ps: &mut MeshPkt) -> bool
 {
-    let mut result = true;
+    if SECURITY_ENABLE.get() {
+        let ltk = PAIR_LTK.lock(|pair_ltk| {
+            pair_ltk.borrow().deref().clone()
+        });
 
-    unsafe {
-        let mut ltk = [0u8; 16];
-
-        result = false;
-        if state.security_enable {
-            ltk.copy_from_slice(&state.pair_ltk[0..16]);
-
-            if (*ps).chan_id == 0xffff {
+        if ps.chan_id == 0xffff {
+            unsafe {
                 aes_att_encryption_packet(
-                    ltk.as_slice(),
-                    slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
-                    slice::from_raw_parts_mut(addr_of!((*ps).internal_par2[1]) as *mut u8, 2),
-                    addr_of!((*ps).sno) as *mut u8,
+                    &ltk,
+                    slice::from_raw_parts(addr_of!(ps.rf_len) as *const u8, 8),
+                    slice::from_raw_parts_mut(addr_of!(ps.internal_par2[1]) as *mut u8, 2),
+                    addr_of!(ps.sno) as *mut u8,
                     0x1c,
                 );
-
-                result = true;
-            } else {
-                aes_att_encryption_packet(
-                    ltk.as_slice(),
-                    slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
-                    slice::from_raw_parts_mut((addr_of!((*ps).sno) as u32 + ((*ps).rf_len as u32 - 0xb)) as *mut u8, 4),
-                    addr_of!((*ps).op) as *mut u8,
-                    (*ps).rf_len - 0x12,
-                );
-
-                result = true;
             }
-        }
 
-        return result;
+            return true
+        } else {
+            unsafe {
+                aes_att_encryption_packet(
+                    &ltk,
+                    slice::from_raw_parts(addr_of!(ps.handle1) as *const u8, 8),
+                    slice::from_raw_parts_mut((addr_of!(ps.sno) as u32 + (ps.rf_len as u32 - 0xb)) as *mut u8, 4),
+                    addr_of!(ps.op) as *mut u8,
+                    ps.rf_len - 0x12,
+                );
+            }
+
+            return true
+        }
     }
+
+    false
 }
 
 pub fn pair_flash_save_config(state: &mut State, addr: u32, data: *const u8, length: u32)
@@ -151,7 +153,9 @@ pub fn pair_save_key(state: &mut State)
     encode_password(state, pass.as_mut_slice());
 
     pair_flash_save_config(state, 0x20, pass.as_ptr(), pass.len() as u32);
-    pair_flash_save_config(state, 0x30, state.pair_ltk.as_ptr(), state.pair_ltk.len() as u32);
+    PAIR_LTK.lock(|pair_ltk| {
+        pair_flash_save_config(state, 0x30, pair_ltk.borrow().deref().as_ptr(), pair_ltk.borrow().deref().len() as u32);
+    });
 
     pair_update_key(state);
 }
@@ -179,7 +183,7 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
     state.pair_read_pending = false;
 
     if state.ble_pair_st == 2 {
-        if state.security_enable == false && state.pair_login_ok == false {
+        if SECURITY_ENABLE.get() == false && state.pair_login_ok == false {
             pair_par_init(state);
             state.pair_enc_enable = false;
             return null_mut();
@@ -188,24 +192,26 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
         state.pkt_read_rsp.value[1..1 + 8].copy_from_slice(&state.pair_rands);
         state.ble_pair_st = 0xc;
     } else if state.ble_pair_st == 0x7 {
-        if state.security_enable == false && state.pair_login_ok == false {
+        if SECURITY_ENABLE.get() == false && state.pair_login_ok == false {
             pair_par_init(state);
             state.pair_enc_enable = false;
             return null_mut();
         }
         state.pkt_read_rsp.l2cap_len = 0x12;
-        for index in 0..0x10 {
-            state.pair_work[index] = state.pair_nn[index] ^ state.pair_pass[index] ^ state.pair_ltk[index];
-        }
+        PAIR_LTK.lock(|pair_ltk| {
+            for index in 0..0x10 {
+                state.pair_work[index] = state.pair_nn[index] ^ state.pair_pass[index] ^ pair_ltk.borrow()[index];
+            }
+        });
 
-        if state.security_enable == false {
+        if SECURITY_ENABLE.get() == false {
             state.pkt_read_rsp.value[1..1 + 0x10].copy_from_slice(&state.pair_work[0..10]);
         } else {
             aes_att_encryption(state.pair_sk.as_ptr(), state.pair_work.as_ptr(), addr_of_mut!(state.pkt_read_rsp.value[1]));
         }
         state.ble_pair_st = 0xf;
     } else if state.ble_pair_st == 0xd {
-        if state.security_enable == false {
+        if SECURITY_ENABLE.get() == false {
             state.pkt_read_rsp.l2cap_len = 0x12;
             for index in 0..0x10 {
                 state.pair_work[index] = state.pair_pass[index] ^ state.pair_nn[index];
@@ -241,8 +247,10 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
         }
     } else if state.ble_pair_st == 0x9 {
         state.pkt_read_rsp.l2cap_len = 0x12;
-        if state.security_enable == false {
-            state.pkt_read_rsp.value[1..1 + 0x10].copy_from_slice(&state.pair_ltk);
+        if SECURITY_ENABLE.get() == false {
+            PAIR_LTK.lock(|pair_ltk| {
+                state.pkt_read_rsp.value[1..1 + 0x10].copy_from_slice(pair_ltk.borrow().deref());
+            });
         } else {
             state.pair_work[0..8].copy_from_slice(&state.pair_randm);
 
@@ -251,7 +259,9 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
             for index in 0..0x10 {
                 state.pair_sk[index] = state.pair_nn[index] ^ state.pair_pass[index] ^ state.pair_work[index];
             }
-            aes_att_encryption(state.pair_sk.as_ptr(), state.pair_ltk.as_ptr(), state.pkt_read_rsp.value[1..1 + 0x10].as_mut_ptr());
+            PAIR_LTK.lock(|pair_ltk| {
+                aes_att_encryption(state.pair_sk.as_ptr(), pair_ltk.borrow().deref().as_ptr(), state.pkt_read_rsp.value[1..1 + 0x10].as_mut_ptr());
+            });
             state.ble_pair_st = 0xf;
             &state.pair_sk.copy_from_slice(&state.pair_sk_copy);
         }
@@ -277,6 +287,7 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
     state.pkt_read_rsp.dma_len = state.pkt_read_rsp.l2cap_len as u32 + 6;
 
     state.pkt_read_rsp.value[0] = pair_st;
+
     return &state.pkt_read_rsp;
 }
 
@@ -284,7 +295,9 @@ pub fn pair_set_key(state: &mut State, key: *const u8)
 {
     state.pair_nn[0..state.max_mesh_name_len].copy_from_slice(unsafe { slice::from_raw_parts(key, state.max_mesh_name_len) });
     state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
-    state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x20), 0x10) });
+    PAIR_LTK.lock(|pair_ltk| {
+        pair_ltk.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x20), 0x10) });
+    });
 
     pair_update_key(state);
 }
@@ -309,7 +322,7 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
     }
 
     if opcode == 4 {
-        if state.security_enable == false {
+        if SECURITY_ENABLE.get() == false {
             if state.pair_login_ok && state.ble_pair_st == 0xf {
                 state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                 state.pair_setting_flag = PairState::PairSetting;
@@ -338,7 +351,7 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
     }
     if opcode != 5 {
         if opcode == 6 {
-            if state.security_enable {
+            if SECURITY_ENABLE.get() {
                 if state.ble_pair_st == 6 {
                     state.pair_work.copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
                     state.ble_pair_st = 7;
@@ -349,14 +362,18 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
                             return true;
                         }
                     }
-                    aes_att_decryption(state.pair_sk.as_ptr(), state.pair_work.as_ptr(), state.pair_ltk.as_mut_ptr());
+                    PAIR_LTK.lock(|pair_ltk| {
+                        aes_att_decryption(state.pair_sk.as_ptr(), state.pair_work.as_ptr(), pair_ltk.borrow_mut().as_mut_ptr());
+                    });
                     pair_save_key(state);
                     state.pair_setting_flag = PairState::PairSetted;
                     rf_link_light_event_callback(state, 0xc5);
                     return true;
                 }
             } else if state.pair_login_ok && state.ble_pair_st == 6 {
-                state.pair_ltk.fill(0);
+                PAIR_LTK.lock(|pair_ltk| {
+                    pair_ltk.borrow_mut().fill(0);
+                });
                 state.ble_pair_st = 7;
                 unsafe {
                     if state.mesh_pair_enable && 0x14 < (*data).l2cap_len && ((((*data).value[0x11] as u32) << 0x1f) as i32) < 0 {
@@ -365,7 +382,9 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
                         return true;
                     }
                 }
-                state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                PAIR_LTK.lock(|pair_ltk| {
+                    pair_ltk.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts(src, 0x10) });
+                });
                 pair_save_key(state);
                 state.pair_setting_flag = PairState::PairSetted;
                 rf_link_light_event_callback(state, 0xc5);
@@ -405,7 +424,7 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
         for index in 0..0x10 {
             state.pair_work[index] = state.pair_pass[index] ^ state.pair_nn[index];
         }
-        if state.security_enable == false {
+        if SECURITY_ENABLE.get() == false {
             index = if &state.pair_work[0..16] == unsafe { slice::from_raw_parts(src, 0x10) } { u8::MAX } else { 0 };
         } else {
             aes_att_encryption(state.pair_sk.as_ptr(), state.pair_work.as_ptr(), state.pair_work.as_mut_ptr());
@@ -432,7 +451,7 @@ pub fn pair_write(state: &mut State, data: *const PacketAttWrite) -> bool
         pair_par_init(state);
         return true;
     }
-    if state.security_enable {
+    if SECURITY_ENABLE.get() {
         if state.ble_pair_st != 5 {
             pair_par_init(state);
             state.pair_enc_enable = false;

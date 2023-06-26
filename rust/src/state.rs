@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use heapless::Deque;
@@ -34,7 +35,6 @@ pub struct State {
     pub get_mac_en: bool,
     pub mesh_pair_enable: bool,
     pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
-    pub pkt_user_cmd: MeshPkt,
 
     pub adv_pri_data: AdvPrivate,
     pub adv_rsp_pri_data: AdvRspPrivate,
@@ -65,7 +65,6 @@ pub struct State {
     pub add_tx_packet_rsp_failed: u32,
     pub t_scan_rsp_intvl: u32,
     pub g_vendor_id: u16,
-    pub light_rcv_rssi: u8,
     pub rcv_pkt_time: u32,
     pub light_conn_sn_master: u16,
     pub slave_window_size: u32,
@@ -85,14 +84,12 @@ pub struct State {
     pub pair_config_mesh_pwd: [u8; 16],
     pub pair_config_mesh_ltk: [u8; 16],
 
-    pub security_enable: bool,
     pub not_need_login: bool,
     pub pair_login_ok: bool,
     pub pair_sk: [u8; 16],
     pub pair_sk_copy: [u8; 16],
     pub slave_first_connected_tick: u32,
 
-    pub device_address: u16,
     pub device_node_sn: u8,
     pub dev_grp_next_pos: u16,
 
@@ -106,11 +103,9 @@ pub struct State {
     pub rf_slave_ota_busy: bool,
 
     pub pair_setting_flag: PairState,
-    pub pair_ac: u32,
 
     pub pair_nn: [u8; 16],
     pub pair_pass: [u8; 16],
-    pub pair_ltk: [u8; 16],
     pub pair_ltk_mesh: [u8; 16],
 
     pub cur_ota_flash_addr: u32,
@@ -154,8 +149,6 @@ pub struct State {
     pub t_bridge_cmd: u32,
     pub st_brige_no: u32,
     pub app_cmd_time: u32,
-    pub mesh_user_cmd_idx: u8,
-    pub slave_tx_cmd_time: u32,
     pub slave_status_buffer_wptr: usize,
     pub slave_status_buffer_rptr: usize,
     pub slave_stat_sno: [u8; 3],
@@ -176,9 +169,7 @@ pub struct State {
     pub adv_flag: bool,
     pub online_st_flag: bool,
     pub slave_read_status_busy_time: u32,
-    pub st_listen_no: u32,
 
-    pub slave_link_state: u32,
     pub slave_listen_interval: u32,
     pub slave_connected_tick: u32,
     pub slave_adv_enable: bool,
@@ -188,8 +179,6 @@ pub struct State {
     pub user_data_len: u8,
     pub user_data: [u8; 16],
 
-    pub rf_tp_base: u32,
-    pub rf_tp_gain: u32,
     pub rf_tx_mode: u8,
     pub rfhw_tx_power: u8,
 
@@ -199,10 +188,11 @@ pub struct State {
     pub pkt_light_status: PacketAttCmd,
     pub pkt_read_rsp: PacketAttReadRsp,
     pub pkt_light_adv_status: PacketAttWrite,
-    pub pkt_mesh: MeshPkt,
     pub pkt_mesh_user_cmd_buf: MeshPkt,
     pub pkt_init: PacketLlInit,
 }
+
+pub static PAIR_LTK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
 
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
     light_rx_wptr: 0,
@@ -256,26 +246,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
             par: [0; MESH_NODE_ST_PAR_LEN as usize],
         },
     }; MESH_NODE_MAX_NUM],
-
-    pkt_user_cmd: MeshPkt {
-        dma_len: 0x27,
-        _type: 2,
-        rf_len: 0x25,
-        l2cap_len: 0xCCDD,
-        chan_id: 0,
-        src_tx: 0,
-        handle1: 0,
-        sno: [0; 3],
-        src_adr: 0,
-        dst_adr: 0,
-        op: 0,
-        vendor_id: 0,
-        par: [0; 10],
-        internal_par1: [0; 5],
-        ttl: 0,
-        internal_par2: [0; 4],
-        no_use: [0; 4],
-    },
 
     adv_pri_data: AdvPrivate {
         manufacture_id: VENDOR_ID,
@@ -371,7 +341,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     add_tx_packet_rsp_failed: 0,
     t_scan_rsp_intvl: 0x92,
     g_vendor_id: 0x211,
-    light_rcv_rssi: 0,
     rcv_pkt_time: 0,
     light_conn_sn_master: 0,
     slave_window_size: 0,
@@ -405,14 +374,12 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     pair_config_mesh_pwd: [0; 16],
     pair_config_mesh_ltk: [0; 16],
 
-    security_enable: false,
     not_need_login: false,
     pair_login_ok: false,
     pair_sk: [0; 16],
     pair_sk_copy: [0; 16],
     slave_first_connected_tick: 0,
 
-    device_address: 0,
     device_node_sn: 1,
     dev_grp_next_pos: 0,
 
@@ -426,11 +393,9 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     rf_slave_ota_busy: false,
 
     pair_setting_flag: PairState::PairSetted,
-    pair_ac: 0,
 
     pair_nn: [0; 16],
     pair_pass: [0; 16],
-    pair_ltk: [0; 16],
     pair_ltk_mesh: [0; 16],
 
     cur_ota_flash_addr: 0,
@@ -476,8 +441,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     t_bridge_cmd: 0,
     st_brige_no: 0,
     app_cmd_time: 0,
-    mesh_user_cmd_idx: 0,
-    slave_tx_cmd_time: 0,
     slave_status_buffer_wptr: 0,
     slave_status_buffer_rptr: 0,
     slave_stat_sno: [0; 3],
@@ -498,9 +461,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     adv_flag: true,
     online_st_flag: true,
     slave_read_status_busy_time: 0,
-    st_listen_no: 0,
 
-    slave_link_state: 0,
     slave_listen_interval: 0,
     slave_connected_tick: 0,
     slave_adv_enable: false,
@@ -510,8 +471,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     user_data_len: 0,
     user_data: [0; 16],
 
-    rf_tp_base: 0x1D,
-    rf_tp_gain: 0xC,
     rf_tx_mode: 0,
     rfhw_tx_power: 0x40,
 
@@ -581,25 +540,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         handle1: 0,
         value: [0; 30],
     },
-    pkt_mesh: MeshPkt {
-        dma_len: 0,
-        _type: 0,
-        rf_len: 0,
-        l2cap_len: 0,
-        chan_id: 0,
-        src_tx: 0,
-        handle1: 0,
-        sno: [0; 3],
-        src_adr: 0,
-        dst_adr: 0,
-        op: 0,
-        vendor_id: 0,
-        par: [0; 10],
-        internal_par1: [0; 5],
-        ttl: 0,
-        internal_par2: [0; 4],
-        no_use: [0; 4],
-    },
     pkt_mesh_user_cmd_buf: MeshPkt {
         dma_len: 0,
         _type: 0,
@@ -636,3 +576,60 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         hop: 0xac,
     },
 }));
+
+pub static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
+pub static PAIR_AC: AtomicU32 = AtomicU32::new(0);
+
+pub static RF_TP_BASE: AtomicU32 = AtomicU32::new(0x1D);
+pub static RF_TP_GAIN: AtomicU32 = AtomicU32::new(0xC);
+
+pub static SLAVE_LINK_STATE: AtomicU8 = AtomicU8::new(0);
+
+pub static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
+
+pub static ST_LISTEN_NO: AtomicU32 = AtomicU32::new(0);
+
+pub trait SimplifyLS<T> {
+    fn get(&self) -> T;
+    fn set(&self, val: T);
+}
+
+impl SimplifyLS<bool> for AtomicBool {
+    fn get(&self) -> bool {
+        self.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, val: bool) {
+        self.store(val, Ordering::Relaxed);
+    }
+}
+
+impl SimplifyLS<u8> for AtomicU8 {
+    fn get(&self) -> u8 {
+        self.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, val: u8) {
+        self.store(val, Ordering::Relaxed);
+    }
+}
+
+impl SimplifyLS<u16> for AtomicU16 {
+    fn get(&self) -> u16 {
+        self.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, val: u16) {
+        self.store(val, Ordering::Relaxed);
+    }
+}
+
+impl SimplifyLS<u32> for AtomicU32 {
+    fn get(&self) -> u32 {
+        self.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, val: u32) {
+        self.store(val, Ordering::Relaxed);
+    }
+}

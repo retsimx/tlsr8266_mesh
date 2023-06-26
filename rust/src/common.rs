@@ -10,7 +10,7 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
-use crate::state::{State};
+use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SimplifyLS, State};
 
 const UPDATE_CONN_PARA_CNT: usize = 4;
 const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT] = [
@@ -154,7 +154,7 @@ pub fn retrieve_dev_grp_address(state: &mut State)
             state.dev_address_next_pos = addr_next_pos;
         } else {
             if grp_addr & !dev_mask == 0 {
-                state.device_address = grp_addr & dev_mask;
+                DEVICE_ADDRESS.set(grp_addr & dev_mask);
                 addr_next_pos = grp_next_pos;
                 state.dev_grp_next_pos = addr_next_pos;
                 state.dev_address_next_pos = addr_next_pos;
@@ -169,10 +169,10 @@ pub fn retrieve_dev_grp_address(state: &mut State)
             break;
         }
     }
-    if state.device_address == 0 {
-        state.device_address = (state.mac_id[0] as u16) | ((state.mac_id[1] as u16) << 8);
+    if DEVICE_ADDRESS.get() == 0 {
+        DEVICE_ADDRESS.set((state.mac_id[0] as u16) | ((state.mac_id[1] as u16) << 8));
         if state.mac_id[0] == 0 {
-            state.device_address = 1;
+            DEVICE_ADDRESS.set(1);
         }
     }
 }
@@ -181,9 +181,7 @@ pub fn mesh_node_init(state: &mut State)
 {
     app().mesh_manager.mesh_node_buf_init(state);
 
-
-
-    state.mesh_node_st[0].val.dev_adr = state.device_address as u8;
+    state.mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
     state.mesh_node_st[0].val.sn = state.device_node_sn;
     state.mesh_node_max = 1;
 }
@@ -273,7 +271,7 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key(state: &mut State)
 {
-    state.pair_ac = access_code(&state.pair_nn, &state.pair_pass);
+    PAIR_AC.set(access_code(&state.pair_nn, &state.pair_pass));
     let name_len = match state.pair_nn.iter().position(|r| *r == 0) {
         Some(v) => v,
         None => state.pair_nn.len()
@@ -295,7 +293,7 @@ pub fn pair_load_key(state: &mut State)
     if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
         state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
         state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
-        state.pair_ltk.iter_mut().for_each(|v| { *v = 0 });
+        PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().iter_mut().for_each(|v| { *v = 0 }) });
 
         state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
         state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
@@ -311,7 +309,7 @@ pub fn pair_load_key(state: &mut State)
             state.pair_pass = decoded;
         }
 
-        state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
+        PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) }) });
 
         pair_update_key(state);
     }

@@ -20,7 +20,7 @@ use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_access_code, write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::State;
+use crate::state::{DEVICE_ADDRESS, RF_TP_BASE, RF_TP_GAIN, SimplifyLS, SLAVE_LINK_STATE, State};
 use crate::version::BUILD_VERSION;
 
 const RF_FAST_MODE: bool = true;
@@ -362,12 +362,12 @@ pub unsafe fn rf_drv_init(state: &mut State, enable: bool) -> u8
 
             if *(FLASH_ADR_MAC as *const u8).offset(0x11) != 0xff {
                 let u_var5 = *(FLASH_ADR_MAC as *const u8).offset(0x11) as u32;
-                state.rf_tp_base = u_var5;
-                state.rf_tp_gain = ((u_var5 - 0x19) << 8) / 80;
+                RF_TP_BASE.set(u_var5);
+                RF_TP_GAIN.set(((u_var5 - 0x19) << 8) / 80);
             }
             if *(FLASH_ADR_MAC as *const u8).offset(0x12) != 0xff {
-                let u_var5 = state.rf_tp_base - *(FLASH_ADR_MAC as *const u8).offset(0x12) as u32;
-                state.rf_tp_gain = (u_var5 << 8) / 80;
+                let u_var5 = RF_TP_BASE.get() - *(FLASH_ADR_MAC as *const u8).offset(0x12) as u32;
+                RF_TP_GAIN.set((u_var5 << 8) / 80);
             }
         } else {
             analog_write(6, 0);  // power off sar
@@ -518,7 +518,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
         tmp = tmp << 8 | data.value[5] as u32;
         if ((!tmp << 0x10) as i32) < 0 && op == LGT_CMD_LIGHT_ONOFF {
             if tmp == 0 {
-                tmp = state.device_address as u32;
+                tmp = DEVICE_ADDRESS.get() as u32;
             }
             uprintln!("stub: mesh_node_check_force_notify")
             // mesh_node_check_force_notify(uVar4, params[0]);
@@ -544,8 +544,8 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
     state.pkt_light_data.rf_len = 0x25;
     state.pkt_light_data.l2cap_len = 0x21;
     // todo: What type is pkt_light_data here?
-    unsafe { *(addr_of!(state.pkt_light_data.opcode) as *mut u16) = state.device_address };
-    unsafe { *(addr_of!(state.pkt_light_data.value.src) as *mut u16) = state.device_address };
+    unsafe { *(addr_of!(state.pkt_light_data.opcode) as *mut u16) = DEVICE_ADDRESS.get() };
+    unsafe { *(addr_of!(state.pkt_light_data.value.src) as *mut u16) = DEVICE_ADDRESS.get() };
     state.app_cmd_time = read_reg_system_tick();
     state.pkt_light_data.value.val[18] = MAX_RELAY_NUM;
 
@@ -641,7 +641,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
         copy_par_user_all(state, params_len as u32, state.pkt_light_data.value.val[3..].as_ptr());
         state.pkt_light_status.value.sno = state.slave_sno;
 
-        unsafe { *(addr_of!(state.pkt_light_status.value.src) as *mut u16) = state.device_address };
+        unsafe { *(addr_of!(state.pkt_light_status.value.src) as *mut u16) = DEVICE_ADDRESS.get() };
 
         let tmp_pkt: PacketAttValue = PacketAttValue::default();
 
@@ -653,7 +653,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
         }
 
         unsafe {
-            *(addr_of!(tmp_pkt.src) as *mut u16) = state.device_address;
+            *(addr_of!(tmp_pkt.src) as *mut u16) = DEVICE_ADDRESS.get();
         }
 
         if rf_link_response_callback(state, addr_of!(state.pkt_light_status.value) as *mut PacketAttValue, &tmp_pkt) {
@@ -684,7 +684,7 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
     unsafe {
         blc_ll_init_basic_mcu(state);
         state.p_st_handler = IrqHandlerStatus::Adv;
-        state.slave_link_state = 0;
+        SLAVE_LINK_STATE.set(0);
         state.slave_listen_interval = interval * CLOCK_SYS_CLOCK_1US;
 
         state.slave_connected_tick = CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick();
@@ -867,7 +867,7 @@ pub fn rf_set_tx_rx_off()
     write_reg8(0x800f02, RF_TRX_OFF);        // reset tx/rx state machine
 }
 
-pub fn rf_set_ble_channel(state: &State, mut chn: u8) {
+pub fn rf_set_ble_channel(chn: u8) {
     write_reg8(0x40d, chn);
 
     let mut gain = 0;
@@ -912,12 +912,12 @@ pub fn rf_set_ble_channel(state: &State, mut chn: u8) {
     write_reg16(0x8004d6, intgn);    // {intg_N}
     // write_reg32 (0x8004d0, (fre - 2) * 58254 + 1125);	// {intg_N, frac}
 
-    rf_set_tp_gain(state, gain);
+    rf_set_tp_gain(gain);
 }
 
-fn rf_set_tp_gain(state: &State, gain: u8)
+fn rf_set_tp_gain(gain: u8)
 {
-    unsafe { analog_write(0x93, state.rf_tp_base as u8 - ((gain as u32 * state.rf_tp_gain + 0x80) >> 8) as u8); }
+    unsafe { analog_write(0x93, RF_TP_BASE.get() as u8 - ((gain as u32 * RF_TP_GAIN.get() + 0x80) >> 8) as u8); }
 }
 
 pub fn rf_start_stx2rx(addr: u32, tick: u32)

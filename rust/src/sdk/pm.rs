@@ -313,7 +313,7 @@ pub fn cpu_wakeup_init() {
 
 // recover status before software reboot
 fn light_sw_reboot_callback(state: *mut State) {
-    if state != null_mut() && unsafe { (*state).rf_slave_ota_busy } {
+    if state != null_mut() && unsafe { ((*state).rf_slave_ota_busy || (*state).rf_slave_ota_busy_mesh)} {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,

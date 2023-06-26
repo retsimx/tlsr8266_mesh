@@ -470,6 +470,7 @@ fn irq_light_slave_rx(state: &mut State)
         if !state.rf_slave_ota_busy && SLAVE_LINK_STATE.get() != 7 {
             app().mesh_manager.add_rcv_mesh_msg(&unsafe { *(packet as *mut MeshPkt) }, true);
 
+            rf_set_rxmode();
             return;
         }
 

@@ -418,8 +418,6 @@ pub fn rf_link_rc_data(state: &mut State, packet: &mut MeshPkt, needs_decode: bo
         app().mesh_manager.add_send_mesh_msg(&packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));
     }
 
-    rf_set_rxmode();
-
     return true;
 }
 

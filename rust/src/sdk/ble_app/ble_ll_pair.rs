@@ -68,18 +68,18 @@ pub unsafe fn pair_dec_packet_mesh(state: &mut State, ps: *const MeshPkt) -> boo
     });
 
     let mut result;
-    if (*ps).chan_id as u16 == 0xffff {
+    if (*ps).chan_id == 0xffff {
         result = aes_att_decryption_packet(
-            ltk.as_slice(),
-            slice::from_raw_parts(addr_of!((*ps).rf_len) as *const u8, 8),
-            slice::from_raw_parts(addr_of!((*ps).internal_par2[1]) as *const u8, 2),
+            &ltk,
+            slice::from_raw_parts(addr_of!((*ps).rf_len), 8),
+            slice::from_raw_parts(addr_of!((*ps).internal_par2[1]), 2),
             addr_of!((*ps).sno) as *mut u8,
             0x1c,
         );
     } else {
         result = aes_att_decryption_packet(
-            ltk.as_slice(),
-            slice::from_raw_parts(addr_of!((*ps).handle1) as *const u8, 8),
+            &ltk,
+            slice::from_raw_parts(addr_of!((*ps).handle1), 8),
             slice::from_raw_parts((addr_of!((*ps).sno) as u32 + (rf_len as u32 - 0xb)) as *const u8, 4),
             addr_of!((*ps).op) as *mut u8,
             rf_len - 0x12,
@@ -99,7 +99,7 @@ pub fn pair_enc_packet_mesh(ps: &mut MeshPkt) -> bool
             unsafe {
                 aes_att_encryption_packet(
                     &ltk,
-                    slice::from_raw_parts(addr_of!(ps.rf_len) as *const u8, 8),
+                    slice::from_raw_parts(addr_of!(ps.rf_len), 8),
                     slice::from_raw_parts_mut(addr_of!(ps.internal_par2[1]) as *mut u8, 2),
                     addr_of!(ps.sno) as *mut u8,
                     0x1c,
@@ -111,7 +111,7 @@ pub fn pair_enc_packet_mesh(ps: &mut MeshPkt) -> bool
             unsafe {
                 aes_att_encryption_packet(
                     &ltk,
-                    slice::from_raw_parts(addr_of!(ps.handle1) as *const u8, 8),
+                    slice::from_raw_parts(addr_of!(ps.handle1), 8),
                     slice::from_raw_parts_mut((addr_of!(ps.sno) as u32 + (ps.rf_len as u32 - 0xb)) as *mut u8, 4),
                     addr_of!(ps.op) as *mut u8,
                     ps.rf_len - 0x12,

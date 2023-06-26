@@ -26,17 +26,18 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
     let mut src_index = 0;
     let mut result = 0xfffffffe;
     let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
-
     while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
         if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
             let mesh_node_max = state.mesh_node_max;
             let mut current_index = 1;
+            let mut mesh_node_st = &mut state.mesh_node_st[current_index];
             if mesh_node_max >= 2 {
-                if state.mesh_node_st[current_index].val.dev_adr != pkt[src_index].dev_adr {
+                if mesh_node_st.val.dev_adr != pkt[src_index].dev_adr {
                     for tidx in 1..MESH_NODE_MAX_NUM {
                         current_index = tidx;
+                        mesh_node_st = &mut state.mesh_node_st[current_index];
 
-                        if mesh_node_max <= tidx as u8 || pkt[src_index].dev_adr == state.mesh_node_st[current_index].val.dev_adr {
+                        if mesh_node_max <= tidx as u8 || pkt[src_index].dev_adr == mesh_node_st.val.dev_adr {
                             break;
                         }
                     }
@@ -50,28 +51,28 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
             if mesh_node_max as usize == current_index {
                 state.mesh_node_max += 1;
 
-                state.mesh_node_st[current_index].val = pkt[src_index];
-                state.mesh_node_st[current_index].tick = tick;
+                mesh_node_st.val = pkt[src_index];
+                mesh_node_st.tick = tick;
 
                 state.mesh_node_mask[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
 
                 result = mesh_node_max as u32;
             } else if current_index < mesh_node_max as usize {
-                let sn_difference = pkt[src_index].sn - state.mesh_node_st[current_index].val.sn;
-                let par_match = pkt[src_index].par == state.mesh_node_st[current_index].val.par;
+                let sn_difference = pkt[src_index].sn - mesh_node_st.val.sn;
+                let par_match = pkt[src_index].par == mesh_node_st.val.par;
 
                 // todo: Why the divided by two here?
                 let timeout= (ONLINE_STATUS_TIMEOUT * 1000) / 2;
 
                 result = current_index as u32;
-                if sn_difference - 2 < 0x3f || (sn_difference != 0 && (state.mesh_node_st[current_index].tick == 0 || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - state.mesh_node_st[current_index].tick)) {
-                    state.mesh_node_st[current_index].val = pkt[src_index];
+                if sn_difference - 2 < 0x3f || (sn_difference != 0 && (mesh_node_st.tick == 0 || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - mesh_node_st.tick)) {
+                    mesh_node_st.val = pkt[src_index];
 
-                    if !par_match || state.mesh_node_st[current_index].tick == 0 {
+                    if !par_match || mesh_node_st.tick == 0 {
                         state.mesh_node_mask[current_index >> 5] |= 1 << (current_index & 0x1f);
                     }
 
-                    state.mesh_node_st[current_index].tick = tick;
+                    mesh_node_st.tick = tick;
                 }
             }
         }
@@ -621,8 +622,6 @@ pub fn ll_device_status_update(state: &mut State, val_par: &[u8])
 
 pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
 {
-
-
     let mut invalid = false;
 
     if interval_max | interval_min == 0 {
@@ -663,29 +662,20 @@ pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min
 
 fn update_connect_para(state: &mut State)
 {
-    let mut do_cb = false;
-    {
+    if state.need_update_connect_para {
+        if state.att_service_discover_tick != 0 {
+            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - state.att_service_discover_tick {
+                state.need_update_connect_para = false;
+                state.att_service_discover_tick = 0;
 
-        if state.need_update_connect_para {
-            if state.att_service_discover_tick != 0 {
-                if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - state.att_service_discover_tick {
-                    do_cb = true;
-                    state.need_update_connect_para = false;
-                    state.att_service_discover_tick = 0;
-                }
+                update_ble_parameter_cb(state);
             }
         }
-    }
-
-    if do_cb {
-        update_ble_parameter_cb(state);
     }
 }
 
 fn set_mesh_info_time_handle(state: &mut State)
 {
-
-
     if state.set_mesh_info_time != 0 && !state.set_mesh_info_expired_flag && state.set_mesh_info_time * CLOCK_SYS_CLOCK_1US * 1000000 < read_reg_system_tick() {
         state.set_mesh_info_expired_flag = true;
     }
@@ -703,8 +693,6 @@ pub fn mesh_node_flush_status(state: &mut State)
     let tick = read_reg_system_tick();
     TICK_NODE_REPORT.store(tick, Ordering::Relaxed);
 
-
-
     // Iterate over each mesh node and check if it's timed out
     for count in 1..state.mesh_node_max as usize {
         if state.mesh_node_st[count].tick != 0 && (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - state.mesh_node_st[count].tick as u32 {
@@ -718,8 +706,6 @@ pub fn mesh_node_flush_status(state: &mut State)
 
 fn mesh_node_keep_alive(state: &mut State)
 {
-
-
     state.device_node_sn = state.device_node_sn + 1;
     if state.device_node_sn == 0 {
         state.device_node_sn = 1;
@@ -738,17 +724,17 @@ fn mesh_node_adv_status(state: &mut State, p_data: &mut [u8]) -> u32
     p_data.fill(0);
 
     // Get the max number of elements the result data can hold
-    let mut elems = p_data.len() / MESH_NODE_ST_VAL_LEN as usize;
-    if (state.mesh_node_max as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN as usize {
+    let mut elems = p_data.len() / MESH_NODE_ST_VAL_LEN;
+    if (state.mesh_node_max as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN {
         elems = state.mesh_node_max as usize;
     }
 
     // Copy our status in to the result data first
-    p_data[0..MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
+    p_data[0..MESH_NODE_ST_VAL_LEN].copy_from_slice(
         unsafe {
             slice::from_raw_parts(
                 addr_of!(state.mesh_node_st[0].val) as *const u8,
-                MESH_NODE_ST_VAL_LEN as usize,
+                MESH_NODE_ST_VAL_LEN,
             )
         }
     );
@@ -763,13 +749,13 @@ fn mesh_node_adv_status(state: &mut State, p_data: &mut [u8]) -> u32
     while out_index < elems && count < max_node {
         let mnc = MESH_NODE_CUR.load(Ordering::Relaxed);
         if mnc < max_node && state.mesh_node_st[mnc].tick != 0 {
-            let ptr = MESH_NODE_ST_VAL_LEN as usize * out_index;
+            let ptr = MESH_NODE_ST_VAL_LEN * out_index;
             out_index = out_index + 1;
-            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN as usize].copy_from_slice(
+            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN].copy_from_slice(
                 unsafe {
                     slice::from_raw_parts(
                         addr_of!(state.mesh_node_st[mnc].val) as *const u8,
-                        MESH_NODE_ST_VAL_LEN as usize,
+                        MESH_NODE_ST_VAL_LEN,
                     )
                 }
             );

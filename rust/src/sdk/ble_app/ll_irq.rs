@@ -173,9 +173,6 @@ fn get_gatt_adv_cnt() -> u32
 pub fn irq_st_adv(state: &mut State)
 {
     static ST_PNO: AtomicU32 = AtomicU32::new(0);
-    static LAST_IBEACON_TIME: AtomicU32 = AtomicU32::new(0);
-    static LAST_ALARM_TIME: AtomicU32 = AtomicU32::new(0);
-    static I_BEACON_CNT: AtomicU32 = AtomicU32::new(0);
 
     write_reg8(0x80050f, 0);
     rf_stop_trx();
@@ -186,13 +183,8 @@ pub fn irq_st_adv(state: &mut State)
         state.adv_flag = false;
         ST_PNO.store(0, Ordering::Relaxed);
         if state.online_st_flag {
-            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xdac + read_reg_system_tick());
-            if CLOCK_SYS_CLOCK_1US * 30000000 < read_reg_system_tick() - LAST_ALARM_TIME.load(Ordering::Relaxed) {
-                LAST_ALARM_TIME.store(read_reg_system_tick(), Ordering::Relaxed);
-            } else {
-                mesh_send_online_status(state);
-                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-            }
+            mesh_send_online_status(state);
+            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
         } else {
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
         }

@@ -3,9 +3,9 @@ use core::mem::size_of;
 use core::ops::DerefMut;
 use core::ptr::{addr_of, addr_of_mut, null};
 use core::slice;
-use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::{app, BIT, uprintln};
+use crate::{app, BIT};
 use crate::common::{rf_update_conn_para, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::embassy::time_driver::clock_time64;
@@ -17,7 +17,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_enc_packet, pa
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::register::{*};
 use crate::state::{*};
 use crate::uart_manager::light_mesh_rx_cb;
@@ -787,6 +787,13 @@ fn mesh_node_adv_status(state: &mut State, p_data: &mut [u8]) -> u32
 pub fn mesh_send_online_status(state: &mut State)
 {
     static ADV_ST_SN: AtomicU32 = AtomicU32::new(0);
+    static LAST_STATUS_TIME: AtomicU32 = AtomicU32::new(0);
+
+    if !clock_time_exceed(LAST_STATUS_TIME.get(), 1000*500) {
+        return;
+    }
+
+    LAST_STATUS_TIME.set(clock_time());
 
     state.pkt_light_adv_status.value.fill(0);
 
@@ -907,8 +914,6 @@ pub fn app_bridge_cmd_handle(state: &mut State, bridge_cmd_time: u32)
 pub fn tx_packet_bridge(state: &mut State)
 {
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);
-    static LAST_ALARM_TIME_BRIDGE: AtomicU32 = AtomicU32::new(0);
-    static LAST_CONN_IBEACON_TIME: AtomicU32 = AtomicU32::new(0);
 
     rf_set_tx_rx_off();
 
@@ -920,12 +925,7 @@ pub fn tx_packet_bridge(state: &mut State)
     let tick = read_reg_system_tick();
     if state.slave_listen_interval * state.online_status_interval2listen_interval as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
         TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
-        if CLOCK_SYS_CLOCK_1US * 30000000 < tick - LAST_ALARM_TIME_BRIDGE.load(Ordering::Relaxed) {
-            LAST_ALARM_TIME_BRIDGE.store(tick, Ordering::Relaxed);
-            // noop
-        } else {
-            mesh_send_online_status(state);
-        }
+        mesh_send_online_status(state);
     }
     app_bridge_cmd_handle(state, state.t_bridge_cmd);
 }

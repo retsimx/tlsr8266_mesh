@@ -34,13 +34,9 @@ And the reverse engineering via Ghidra and trust1995's improved TC32 processor s
 
 ### Versions
 
-I ended up using `nightly-i686-unknown-linux-gnu` , (currently `rustc 1.71.0-nightly (87b1f891e 2023-04-29)` at time of writing)
+I ended up using `nightly-i686-unknown-linux-gnu` for building and running tests, and `thumbv6m-none-eabi` for targeting the MCU, (currently `1.72.0-nightly (8c74a5d27 2023-06-14)` at time of writing)
 
-To get rust ready for development:-
-
-1. `rustup default nightly-i686-unknown-linux-gnu`
-2. `rustup target install thumbv6m-none-eabi`
-3. `rustup component add rust-src --toolchain nightly-i686-unknown-linux-gnu` - for building core to target the MCU.
+Make sure you have `rustup` installed - the correct toolchain will be installed automatically by the `rust/rust-toolchain.toml` file, which will install the correct compiler, targets and components.
 
 
 

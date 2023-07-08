@@ -111,7 +111,7 @@ pub struct MeshManager {
     mesh_pair_retry_max: u8,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 5>,
+    pkt_send_buf: Vec<SendPkt, 10>,
     pkt_rcv_buf: Deque<RcvPkt, 10>,
 }
 
@@ -544,8 +544,6 @@ impl MeshManager {
 
     pub async fn send_mesh_msg_task(&mut self) {
         loop {
-            yield_now().await;
-
             let result = critical_section::with(|_| {
                 let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| elem.delay < clock_time64()).last();
                 if found.is_none() {
@@ -560,6 +558,7 @@ impl MeshManager {
             });
 
             if result.is_none() {
+                yield_now().await;
                 continue
             }
 

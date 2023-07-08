@@ -16,7 +16,7 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::State;
+use crate::state::{*};
 
 pub struct OtaManager {
     ota_rcv_last_idx: u16,
@@ -132,17 +132,17 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota(&mut self, state: &mut State, data: &PacketAttData) {
-        if state.rf_slave_ota_finished_flag != OtaState::Continue || state.rf_slave_ota_busy_mesh {
+        if state.rf_slave_ota_finished_flag != OtaState::Continue || RF_SLAVE_OTA_BUSY_MESH.get() {
             return;
         }
 
-        if !state.rf_slave_ota_busy {
+        if !RF_SLAVE_OTA_BUSY.get() {
             if !state.pair_login_ok
             {
                 return;
             }
 
-            state.rf_slave_ota_busy = true;
+            RF_SLAVE_OTA_BUSY.set(true);
             if state.slave_read_status_busy != 0 {
                 rf_link_slave_read_status_stop(state);
             }
@@ -154,7 +154,7 @@ impl OtaManager {
     }
 
     pub fn rf_mesh_data_ota(&mut self, state: &mut State, pkt_data: &[u8], last: bool) -> u16 {
-        if state.rf_slave_ota_finished_flag != OtaState::Continue || state.rf_slave_ota_busy || !state.rf_slave_ota_busy_mesh{
+        if state.rf_slave_ota_finished_flag != OtaState::Continue || RF_SLAVE_OTA_BUSY.get() || !RF_SLAVE_OTA_BUSY_MESH.get() {
             return u16::MAX;
         }
 
@@ -184,14 +184,14 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota_save(&mut self, state: &mut State) -> bool {
-        let packet_len = if state.rf_slave_ota_busy_mesh { 8 } else { 16 };
+        let packet_len = if RF_SLAVE_OTA_BUSY_MESH.get() { 8 } else { 16 };
 
         let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
             let p = state.buff_response[i];
             let n_data_len = (p.l2cap - 7) as usize;
 
-            if state.rf_slave_ota_busy_mesh || crc16(&p.dat[0..n_data_len + 2]) == p.dat[n_data_len + 2] as u16 | (p.dat[n_data_len + 3] as u16) << 8
+            if RF_SLAVE_OTA_BUSY_MESH.get() || crc16(&p.dat[0..n_data_len + 2]) == p.dat[n_data_len + 2] as u16 | (p.dat[n_data_len + 3] as u16) << 8
             {
                 state.rf_slave_ota_timeout_s = RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS; // refresh timeout
 
@@ -323,7 +323,7 @@ impl OtaManager {
         }
     }
 
-    pub fn rf_link_slave_ota_finish_led_and_reboot(&self, state: &mut State, st: OtaState) {
+    pub fn rf_link_slave_ota_finish_led_and_reboot(&self, st: OtaState) {
         match st {
             OtaState::Error => {
                 self.erase_ota_data();
@@ -337,7 +337,7 @@ impl OtaManager {
             _ => ()
         }
         irq_disable();
-        light_sw_reboot(state);
+        light_sw_reboot();
     }
 
     fn rf_slave_ota_finished_flag_set(&mut self, state: &mut State, reset_flag: OtaState) {
@@ -378,7 +378,7 @@ impl OtaManager {
             }
 
             if reboot_flag {
-                self.rf_link_slave_ota_finish_led_and_reboot(state, state.rf_slave_ota_finished_flag);
+                self.rf_link_slave_ota_finish_led_and_reboot(state.rf_slave_ota_finished_flag);
                 // have been rebooted
             }
         }

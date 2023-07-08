@@ -20,7 +20,7 @@ use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_access_code, write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::{DEVICE_ADDRESS, RF_TP_BASE, RF_TP_GAIN, SimplifyLS, SLAVE_LINK_STATE, State};
+use crate::state::{*};
 use crate::version::BUILD_VERSION;
 
 const RF_FAST_MODE: bool = true;
@@ -382,10 +382,14 @@ pub fn rf_stop_trx() {
 }
 
 
-pub unsafe fn blc_ll_init_basic_mcu(state: &mut State)
+pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
-    write_reg_dma2_addr(addr_of!(state.light_rx_buff[state.light_rx_wptr]) as u16);
+
+    LIGHT_RX_BUFF.lock(|light_rx_buff| {
+        let mut light_rx_buff = light_rx_buff.borrow();
+        write_reg_dma2_addr(addr_of!(light_rx_buff[LIGHT_RX_WPTR.get()]) as u16);
+    });
 
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);
@@ -480,7 +484,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
     }
 
     let sno = &data.value[0..3];
-    if sno == state.slave_sno {
+    if sno == state.SLAVE_SNO {
         return true;
     }
 
@@ -552,11 +556,11 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
     if device_match || group_match {
         rf_link_data_callback(state, addr_of!(state.pkt_light_data.l2cap_len) as *const PacketL2capData);
     }
-    state.slave_sno.copy_from_slice(sno);
+    state.SLAVE_SNO.copy_from_slice(sno);
 
     state.slave_link_cmd = op;
 
-    if !rf_link_is_notify_req(state, op) {
+    if !rf_link_is_notify_req(op) {
         if state.slave_read_status_busy != 0 {
             rf_link_slave_read_status_stop(state);
         }
@@ -571,7 +575,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
     state.pkt_light_status.value.val[13] = 0;
     state.pkt_light_status.value.val[14] = 0;
     state.pkt_light_status.value.val[18] = MAX_RELAY_NUM;
-    state.pkt_light_data.value.val[16] = (state.slave_link_interval / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
+    state.pkt_light_data.value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
             state.slave_data_valid = params[0] as u32 * 2 + 1;
@@ -639,7 +643,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
 
     if device_match || group_match {
         copy_par_user_all(state, params_len as u32, state.pkt_light_data.value.val[3..].as_ptr());
-        state.pkt_light_status.value.sno = state.slave_sno;
+        state.pkt_light_status.value.sno = state.SLAVE_SNO;
 
         unsafe { *(addr_of!(state.pkt_light_status.value.src) as *mut u16) = DEVICE_ADDRESS.get() };
 
@@ -682,13 +686,13 @@ fn rf_link_slave_set_adv(state: &mut State, adv_data_ptr: &[u8])
 pub fn rf_link_slave_init(state: &mut State, interval: u32)
 {
     unsafe {
-        blc_ll_init_basic_mcu(state);
+        blc_ll_init_basic_mcu();
         state.p_st_handler = IrqHandlerStatus::Adv;
         SLAVE_LINK_STATE.set(0);
         state.slave_listen_interval = interval * CLOCK_SYS_CLOCK_1US;
 
-        state.slave_connected_tick = CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick();
-        write_reg_system_tick_irq(state.slave_connected_tick);
+        SLAVE_CONNECTED_TICK.set(CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick());
+        write_reg_system_tick_irq(SLAVE_CONNECTED_TICK.get());
 
         write_reg8(0xf04, 0x68);
 
@@ -725,7 +729,7 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
             }
             flash_write_page(pairing_addr, 16, buff.as_mut_ptr());
             irq_disable();
-            light_sw_reboot(state);
+            light_sw_reboot();
             loop {}
         }
 

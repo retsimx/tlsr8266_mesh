@@ -266,7 +266,7 @@ pub fn panic(info: &PanicInfo) -> ! {
     stream.send(true, false);
     write_panic_info(&stream);
 
-    light_sw_reboot(null_mut());
+    light_sw_reboot();
 
     loop {}
 }

@@ -117,7 +117,7 @@ pub fn factory_reset_handle(state: &mut State) {
         irq_disable();
         factory_reset();
         app().ota_manager.rf_led_ota_ok();
-        light_sw_reboot(state);
+        light_sw_reboot();
     } else {
         increase_reset_cnt(state);
     }

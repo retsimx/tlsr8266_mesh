@@ -75,7 +75,7 @@ async fn node_report_task() {
 
     loop {
         let mut data = [0; UART_DATA_LEN-5];
-        while STATE.lock(|state| { mesh_node_report_status(state.borrow_mut().deref_mut(), &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN as usize) }) != 0 {
+        while STATE.lock(|state| { mesh_node_report_status(state.borrow_mut().deref_mut(), &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN) }) != 0 {
             msg.data[3..UART_DATA_LEN-2].copy_from_slice(data.as_slice());
             while !app().uart_manager.send_message(&msg) {
                 yield_now().await;

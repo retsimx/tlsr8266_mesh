@@ -1,7 +1,0 @@
-#[build.'cfg(target_arch = "arm")']
-#rustflags = ["--emit=llvm-ir"]
-#target = "thumbv6m-none-eabi"
-
-#[unstable]
-#build-std = ["core"]
-#build-std-features = []

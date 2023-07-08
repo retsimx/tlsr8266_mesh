@@ -188,8 +188,6 @@ pub fn mesh_node_init(state: &mut State)
 
 pub fn pair_flash_clean(state: &mut State)
 {
-
-
     let mut flash_dat_swap: [u8; 64] = [0; 64];
     let flash_dat_swap_len = flash_dat_swap.len();
 

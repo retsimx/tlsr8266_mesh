@@ -1,5 +1,4 @@
 use core::mem::size_of;
-use core::ops::DerefMut;
 use core::ptr::addr_of;
 
 use embassy_time::{Duration, Timer};
@@ -13,13 +12,13 @@ use crate::embassy::yield_now::yield_now;
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_match_group_mac, rf_link_proc_ttc, rf_link_rc_data};
-use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_tx_rx_off, rf_start_srx2tx};
+use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_srx2tx};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
-use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SECURITY_ENABLE, SimplifyLS, State, STATE};
+use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SECURITY_ENABLE, SimplifyLS, SLAVE_LINK_CONNECTED, State};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -64,7 +63,7 @@ impl TryFrom<u8> for MeshPairState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct mesh_node_st_val_t {
     pub dev_adr: u8,
@@ -231,7 +230,7 @@ impl MeshManager {
 
     fn mesh_cmd_notify(&self, state: &mut State, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
-        if state.slave_link_connected && state.pair_login_ok {
+        if SLAVE_LINK_CONNECTED.get() && state.pair_login_ok {
             if p.len() > 10 {
                 //max length of par is 10
                 return -1;
@@ -520,7 +519,7 @@ impl MeshManager {
             val: mesh_node_st_val_t {
                 dev_adr: 0,
                 sn: 0,
-                par: [0; MESH_NODE_ST_PAR_LEN as usize],
+                par: [0; MESH_NODE_ST_PAR_LEN],
             },
         });
 
@@ -580,21 +579,26 @@ impl MeshManager {
                 pair_enc_packet_mesh(&mut result.pkt);
             }
 
-            // Configure the BLE mode
-            rf_set_tx_rx_off();
-            rf_set_ble_access_code(PAIR_AC.get());
-            rf_set_ble_crc_adv();
-
             // Pick a random start channel
             let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) as usize;
 
             // Send the packet on each channel
             for channel_index in start_chan_idx..start_chan_idx + SYS_CHN_LISTEN.len() {
-                rf_set_ble_channel(SYS_CHN_LISTEN[channel_index % SYS_CHN_LISTEN.len()]);
-                rf_start_srx2tx(addr_of!(result.pkt) as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+                // This block needs to operate in a critical section
+                critical_section::with(|_| {
+                    // Configure the BLE mode
+                    rf_set_tx_rx_off();
+                    rf_set_ble_access_code(PAIR_AC.get());
+                    rf_set_ble_crc_adv();
+
+                    rf_set_ble_channel(SYS_CHN_LISTEN[channel_index % SYS_CHN_LISTEN.len()]);
+                    rf_start_srx2tx(addr_of!(result.pkt) as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+                });
 
                 Timer::after(Duration::from_micros(600)).await;
             }
+
+            rf_set_rxmode();
         }
     }
 
@@ -619,12 +623,7 @@ impl MeshManager {
                 self.pkt_rcv_buf.pop_front().unwrap()
             });
 
-            STATE.lock(|state| {
-                let mut binding = state.borrow_mut();
-                let state = binding.deref_mut();
-
-                rf_link_rc_data(state, &mut result.pkt, result.decode);
-            });
+            rf_link_rc_data(&mut result.pkt, result.decode);
         }
     }
 }

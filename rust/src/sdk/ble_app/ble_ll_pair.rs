@@ -47,7 +47,7 @@ pub fn pair_enc_packet(state: &mut State, ps: &mut PacketLlApp)
     }
 }
 
-pub unsafe fn pair_dec_packet_mesh(state: &mut State, ps: *const MeshPkt) -> bool {
+pub unsafe fn pair_dec_packet_mesh(ps: *const MeshPkt) -> bool {
     let mut ltk = [0u8; 16];
 
     if !SECURITY_ENABLE.get() {

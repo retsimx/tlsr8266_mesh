@@ -1,4 +1,3 @@
-use core::ptr::null_mut;
 use crate::{app, BIT};
 use crate::common::REGA_LIGHT_OFF;
 use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
@@ -6,7 +5,7 @@ use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
-use crate::state::State;
+use crate::state::{*};
 
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read(0x00);
@@ -312,8 +311,8 @@ pub fn cpu_wakeup_init() {
 }
 
 // recover status before software reboot
-fn light_sw_reboot_callback(state: *mut State) {
-    if state != null_mut() && unsafe { ((*state).rf_slave_ota_busy || (*state).rf_slave_ota_busy_mesh)} {
+fn light_sw_reboot_callback() {
+    if RF_SLAVE_OTA_BUSY.get() || RF_SLAVE_OTA_BUSY_MESH.get() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,
@@ -338,10 +337,10 @@ fn light_sw_reboot_ll()
     loop {}
 }
 
-pub fn light_sw_reboot(state: *mut State)
+pub fn light_sw_reboot()
 {
     irq_disable();
-    light_sw_reboot_callback(state);
+    light_sw_reboot_callback();
     light_sw_reboot_ll();
     return;
 }

@@ -23,7 +23,7 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
-use crate::state::{DEVICE_ADDRESS, SECURITY_ENABLE, SimplifyLS, State, STATE};
+use crate::state::{*};
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 
@@ -327,7 +327,7 @@ pub fn rf_link_response_callback(
             ppp.val[5] = (BUILD_VERSION >> 16) as u8;
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
-            state.rf_slave_ota_busy_mesh = true;
+            RF_SLAVE_OTA_BUSY_MESH.set(true);
         },
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
@@ -412,7 +412,7 @@ pub fn rf_link_data_callback(state: &mut State, p: *const PacketL2capData) {
             let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
             flash_erase_sector(FLASH_ADR_MAC);
             flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
-            light_sw_reboot(state);
+            light_sw_reboot();
         }
         LGT_CMD_KICK_OUT => {
             irq_disable();
@@ -422,7 +422,7 @@ pub fn rf_link_data_callback(state: &mut State, p: *const PacketL2capData) {
             } else {
                 kick_out(state, KickoutReason::OutOfMesh);
             }
-            light_sw_reboot(state);
+            light_sw_reboot();
         }
         LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),
         _ => ()

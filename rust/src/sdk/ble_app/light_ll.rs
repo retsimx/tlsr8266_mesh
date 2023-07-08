@@ -28,6 +28,13 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
     let mut result = 0xfffffffe;
     let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
     while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
+        // todo: This needs to be removed when we figure out why dev address 1 is being introduced
+        // todo: incorrectly
+        if pkt[src_index].dev_adr == 1 {
+            src_index += 1;
+            continue;
+        }
+
         if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
             let mesh_node_max = state.mesh_node_max;
             let mut current_index = 1;

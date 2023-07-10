@@ -128,7 +128,7 @@ pub enum LightOpType {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-pub enum PairState {
+pub enum ePairState {
     PairSetted = 0,
     PairSetting = 1,
     PairSetMeshTxStart = 2,

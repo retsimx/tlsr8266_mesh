@@ -720,7 +720,7 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
             buff[0] = PAIR_VALID_FLAG;
             buff[15] = PAIR_VALID_FLAG;
 
-            if state.mesh_pair_enable {
+            if MESH_PAIR_ENABLE.get() {
                 state.get_mac_en = true;
                 buff[1] = 1;
             }

@@ -1,10 +1,9 @@
 use core::cmp::min;
 use core::mem::size_of;
-use core::ops::{Deref, DerefMut};
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::{app};
+use crate::app;
 use crate::config::*;
 use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -136,8 +135,6 @@ pub fn rf_update_conn_para(state: &mut State, p: &PacketLlData) -> u8 {
 
 pub fn retrieve_dev_grp_address(state: &mut State)
 {
-
-
     let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
     let mut addr_next_pos = state.dev_address_next_pos;
     let mut grp_next_pos = 0;
@@ -272,17 +269,18 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key(state: &mut State)
 {
-    let mut pair_nn = PAIR_NN.lock().unwrap();
-    let mut pair_nn = pair_nn.borrow_mut();
-    PAIR_AC.set(access_code(pair_nn.deref(), PAIR_PASS.lock().unwrap().borrow().deref()));
-    let name_len = match pair_nn.iter().position(|r| *r == 0) {
+    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state = pair_state_binding.borrow();
+
+    PAIR_AC.set(access_code(&pair_state.pair_nn, &pair_state.pair_pass));
+    let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
         Some(v) => v,
-        None => pair_nn.len()
+        None => pair_state.pair_nn.len()
     };
 
     let name_len = min(state.max_mesh_name_len, name_len);
 
-    rf_link_slave_set_adv_mesh_name(state, &pair_nn[0..name_len]);
+    rf_link_slave_set_adv_mesh_name(state, &pair_state.pair_nn[0..name_len]);
     rf_link_slave_set_adv_private_data(state, unsafe { slice::from_raw_parts(addr_of!(state.adv_pri_data) as *const u8, size_of::<AdvPrivate>()) });
 }
 
@@ -293,23 +291,26 @@ pub fn pair_load_key(state: &mut State)
     let pairing_addr = FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx;
 
     if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
-        PAIR_NN.lock().unwrap().borrow_mut().iter_mut().for_each(|v| { *v = 0 });
-        PAIR_PASS.lock().unwrap().borrow_mut().iter_mut().for_each(|v| { *v = 0 });
-        PAIR_LTK.lock().unwrap().borrow_mut().iter_mut().for_each(|v| { *v = 0 });
+        let pair_state_binding = PAIR_STATE.lock().unwrap();
+        let mut pair_state = pair_state_binding.borrow_mut();
 
-        PAIR_NN.lock().unwrap().borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
-        PAIR_PASS.lock().unwrap().borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
+        pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
+        pair_state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
+        pair_state.pair_ltk.iter_mut().for_each(|v| { *v = 0 });
 
-        if state.mesh_pair_enable {
+        pair_state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
+        pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
+
+        if MESH_PAIR_ENABLE.get() {
             state.get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
         }
 
         let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
         if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
-            decode_password(state, PAIR_PASS.lock().unwrap().borrow_mut().deref_mut());
+            decode_password(state, &mut pair_state.pair_pass);
         }
 
-        PAIR_LTK.lock().unwrap().borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
+        pair_state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
 
         pair_update_key(state);
     }

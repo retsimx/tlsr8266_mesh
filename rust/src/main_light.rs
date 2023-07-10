@@ -3,11 +3,11 @@ use core::convert::TryInto;
 use core::mem::size_of;
 use core::ops::DerefMut;
 use core::ptr::addr_of;
-use embassy_time::{Duration, Timer};
 
+use embassy_time::{Duration, Timer};
 use fixed::types::I16F16;
 
-use crate::{app};
+use crate::app;
 use crate::BIT;
 use crate::common::*;
 use crate::config::*;
@@ -99,7 +99,7 @@ fn light_init_default(state: &mut State) {
 
     light_hw_timer1_config();
 
-    app().mesh_manager.mesh_pair_init(state);
+    app().mesh_manager.mesh_pair_init();
 }
 
 pub fn user_init(state: &mut State) {
@@ -131,8 +131,6 @@ pub fn user_init(state: &mut State) {
 }
 
 fn proc_led(state: &mut State) {
-
-
     if state.led_count == 0 && state.led_event_pending == 0 {
         return; //led flash finished
     }
@@ -206,7 +204,7 @@ fn light_user_func(state: &mut State) {
 pub async fn main_loop() {
     Timer::after(Duration::from_micros(LOOP_INTERVAL_US)).await;
 
-    let mut binding = STATE.lock().unwrap();
+    let binding = STATE.lock().unwrap();
     let mut state = binding.borrow_mut();
     let state = state.deref_mut();
 
@@ -317,7 +315,7 @@ pub fn rf_link_response_callback(
             }
             ppp.val[3] = (DEVICE_ADDRESS.get() & 0xFF) as u8;
             ppp.val[4] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
-        },
+        }
         CMD_START_OTA => {
             ppp.val[0] = LGT_CMD_START_OTA_RSP | 0xc0;
 
@@ -327,7 +325,7 @@ pub fn rf_link_response_callback(
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
             RF_SLAVE_OTA_BUSY_MESH.set(true);
-        },
+        }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
 
@@ -335,7 +333,7 @@ pub fn rf_link_response_callback(
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
-        },
+        }
         CMD_END_OTA => {
             ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
 

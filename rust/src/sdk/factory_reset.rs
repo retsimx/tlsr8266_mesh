@@ -9,7 +9,7 @@ use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::State;
+use crate::state::{*};
 
 const SERIALS_CNT: u8 = 5; // must less than 7
 const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
@@ -219,7 +219,7 @@ pub fn kick_out(state: &mut State, par: KickoutReason) {
         buff[0] = PAIR_VALID_FLAG;
         buff[15] = PAIR_VALID_FLAG;
 
-        if state.mesh_pair_enable {
+        if MESH_PAIR_ENABLE.get() {
             state.get_mac_en = true;
             buff[1] = 1;
         }

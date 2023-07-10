@@ -58,10 +58,12 @@ impl CriticalSectionRawMutex {
 unsafe impl RawMutex for CriticalSectionRawMutex {
     const INIT: Self = Self::new();
 
+    #[inline(always)]
     fn lock(&self) {
         unsafe { self._restore_state.replace(critical_section::acquire()); }
     }
 
+    #[inline(always)]
     fn unlock(&self) {
         unsafe { critical_section::release(*self._restore_state.borrow()); }
     }
@@ -312,6 +314,7 @@ impl<T: ?Sized> Mutex<T> {
     /// }).join().expect("thread::spawn failed");
     /// assert_eq!(*mutex.lock().unwrap(), 10);
     /// ```
+    #[inline(always)]
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
         unsafe {
             self.inner.lock();
@@ -334,6 +337,7 @@ impl<T: ?Sized> Mutex<T> {
     /// *guard += 20;
     /// Mutex::unlock(guard);
     /// ```
+    #[inline(always)]
     pub fn unlock(guard: MutexGuard<'_, T>) {
         drop(guard);
     }

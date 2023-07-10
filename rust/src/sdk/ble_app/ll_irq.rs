@@ -88,7 +88,7 @@ pub fn mesh_node_report_status(state: &mut State, params: &mut [u8], len: usize)
     //      Iterate over each bit in the 32 bit value and find any set bits
     //      Report the status of the light at any set bits and clear the bit from the mask
 
-    let mut binding = MESH_NODE_MASK.lock().unwrap();
+    let binding = MESH_NODE_MASK.lock().unwrap();
     let mut mesh_node_mask = binding.borrow_mut();
 
     state.mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
@@ -250,12 +250,12 @@ pub fn irq_st_bridge(state: &mut State)
         if state.slave_read_status_busy != 0 {
             rf_link_slave_read_status_stop(state);
         }
-        if state.pair_setting_flag == PairState::PairSetted {
+        if state.pair_setting_flag == ePairState::PairSetted {
             state.slave_data_valid = 0;
         } else {
             state.slave_data_valid = 0;
             pair_load_key(state);
-            state.pair_setting_flag = PairState::PairSetted;
+            state.pair_setting_flag = ePairState::PairSetted;
         }
         if CLOCK_SYS_CLOCK_1US == 0x10 {
             write_reg8(0xf04, 0x5e);
@@ -400,7 +400,7 @@ fn irq_light_slave_rx()
     }
 
     let mut dma_len = 0;
-    let mut binding = LIGHT_RX_BUFF.lock().unwrap();
+    let binding = LIGHT_RX_BUFF.lock().unwrap();
     let mut light_rx_buff = binding.borrow_mut();
     let mut light_rx_buff = light_rx_buff.deref_mut();
 
@@ -426,7 +426,7 @@ fn irq_light_slave_rx()
 
     #[inline(never)]
     fn slow(rx_index: usize, dma_len: u8, light_rx_buff: &mut [LightRxBuff; 4]) {
-        let mut binding = STATE.lock().unwrap();
+        let binding = STATE.lock().unwrap();
         let mut state = binding.borrow_mut();
         let mut state = state.deref_mut();
 
@@ -552,7 +552,7 @@ extern "C" fn irq_handler() {
 
     #[inline(never)]
     fn slow() {
-        let mut binding = STATE.lock().unwrap();
+        let binding = STATE.lock().unwrap();
         let mut state = binding.borrow_mut();
         let mut state = state.deref_mut();
 

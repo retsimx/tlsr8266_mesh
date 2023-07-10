@@ -1096,7 +1096,7 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8]) -> MeshPkt
 #[inline(never)]
 pub fn mesh_report_status_enable(enable: bool)
 {
-    let mut binding = MESH_NODE_MASK.lock().unwrap();
+    let binding = MESH_NODE_MASK.lock().unwrap();
     let mut mesh_node_mask = binding.borrow_mut();
     if enable {
         if MESH_NODE_MAX.get() >> 5 != 0 {

@@ -2,10 +2,10 @@ use core::cell::RefCell;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use heapless::Deque;
 
 use crate::config::VENDOR_ID;
+use crate::embassy::sync::mutex::Mutex;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
 use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, CFG_SECTOR_ADR_CALIBRATION_CODE, IrqHandlerStatus, LIGHT_RX_BUFF_COUNT, LightRxBuff, MAX_GROUP_NUM, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, OtaState, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttValue, PacketAttWrite, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketLlInit, PacketScanRsp, PacketVersionInd, PairState, PktBuf, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, RfPacketAdvIndModuleT, StatusRecord};
 
@@ -160,7 +160,7 @@ pub struct State {
     pub pkt_init: PacketLlInit,
 }
 
-pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
+pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     blt_tx_fifo: [[0; 48]; 8],
     blt_tx_wptr: 0,
     conn_update_successed: false,
@@ -501,15 +501,15 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     },
 }));
 
-pub static PAIR_LTK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_SK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_WORK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_NN: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_PASS: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_LTK_MESH: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static PAIR_SK_COPY: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_LTK: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_SK: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_WORK: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_NN: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_PASS: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_LTK_MESH: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
+pub static PAIR_SK_COPY: Mutex<RefCell<[u8; 16]>> = Mutex::new(RefCell::new([0; 16]));
 
-pub static LIGHT_RX_BUFF: CriticalSectionMutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = CriticalSectionMutex::new(RefCell::new(
+pub static LIGHT_RX_BUFF: Mutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = Mutex::new(RefCell::new(
     [
         LightRxBuff {
             dma_len: 0,
@@ -525,9 +525,9 @@ pub static LIGHT_RX_BUFF: CriticalSectionMutex<RefCell<[LightRxBuff; LIGHT_RX_BU
     ]
 ));
 
-pub static MESH_NODE_MASK: CriticalSectionMutex<RefCell<[u32; MESH_NODE_MASK_LEN]>> = CriticalSectionMutex::new(RefCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
-pub static PAIR_RANDS: CriticalSectionMutex<RefCell<[u8; 8]>> = CriticalSectionMutex::new(RefCell::new([0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]));
-pub static PAIR_RANDM: CriticalSectionMutex<RefCell<[u8; 8]>> = CriticalSectionMutex::new(RefCell::new([0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]));
+pub static MESH_NODE_MASK: Mutex<RefCell<[u32; MESH_NODE_MASK_LEN]>> = Mutex::new(RefCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
+pub static PAIR_RANDS: Mutex<RefCell<[u8; 8]>> = Mutex::new(RefCell::new([0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]));
+pub static PAIR_RANDM: Mutex<RefCell<[u8; 8]>> = Mutex::new(RefCell::new([0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]));
 
 pub static BLE_PAIR_ST: AtomicU8 = AtomicU8::new(0);
 pub static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);

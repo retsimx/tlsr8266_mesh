@@ -62,7 +62,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
                 mesh_node_st.val = pkt[src_index];
                 mesh_node_st.tick = tick;
 
-                MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f));
+                MESH_NODE_MASK.lock().unwrap().borrow_mut()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
 
                 result = mesh_node_max as u32;
             } else if current_index < mesh_node_max as usize {
@@ -77,7 +77,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {
-                        MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[current_index >> 5] |= 1 << (current_index & 0x1f));
+                        MESH_NODE_MASK.lock().unwrap().borrow_mut()[current_index >> 5] |= 1 << (current_index & 0x1f);
                     }
 
                     mesh_node_st.tick = tick;
@@ -250,12 +250,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt, needs_decode: bool) -> bool {
             return false;
         }
 
-        STATE.lock(|state| {
-            let mut binding = state.borrow_mut();
-            let state = binding.deref_mut();
-
-            mesh_node_update_status(state, unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
-        });
+        mesh_node_update_status(STATE.lock().unwrap().borrow_mut().deref_mut(), unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
 
         return false;
     }
@@ -281,164 +276,163 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt, needs_decode: bool) -> bool {
         op = op_cmd[0] & 0x3f;
     }
 
-    STATE.lock(|state| {
-        let mut binding = state.borrow_mut();
-        let state = binding.deref_mut();
+    let mut state_binding = STATE.lock().unwrap();
+    let mut state = state_binding.borrow_mut();
+    let mut state = state.deref_mut();
 
-        let cmd_pkt = unsafe { &*(addr_of!(packet.sno) as *const AppCmdValue) };
-        let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(addr_of!(state.SLAVE_SNO) as *const u8, 3) };
-        let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(state, op, cmd_pkt);
-        let pkt_valid = (no_match_slave_sno || state.slave_link_cmd != op) && !pkt_exists_in_buf;
+    let cmd_pkt = unsafe { &*(addr_of!(packet.sno) as *const AppCmdValue) };
+    let no_match_slave_sno = cmd_pkt.sno != unsafe { slice::from_raw_parts(addr_of!(state.SLAVE_SNO) as *const u8, 3) };
+    let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(state, op, cmd_pkt);
+    let pkt_valid = (no_match_slave_sno || state.slave_link_cmd != op) && !pkt_exists_in_buf;
 
-        // If the slave link is connected (Android) and the dest address is us, then we should forward
-        // the packet on to the slave link
-        let mut should_notify = {
-            packet.dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get()
-        };
+    // If the slave link is connected (Android) and the dest address is us, then we should forward
+    // the packet on to the slave link
+    let mut should_notify = {
+        packet.dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get()
+    };
 
-        // See if we should call the message callback
-        if pkt_valid || (rf_link_is_notify_rsp(op) && should_notify)
-        {
-            light_mesh_rx_cb(cmd_pkt);
-        }
+    // See if we should call the message callback
+    if pkt_valid || (rf_link_is_notify_rsp(op) && should_notify)
+    {
+        light_mesh_rx_cb(cmd_pkt);
+    }
 
-        // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
-        // for a response, then send this response to the slave
-        if rf_link_is_notify_rsp(op) && should_notify {
-            if state.slave_read_status_busy != op || cmd_pkt.sno != state.slave_stat_sno {
-                return false;
-            }
-            rf_link_slave_add_status(state, &packet);
+    // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
+    // for a response, then send this response to the slave
+    if rf_link_is_notify_rsp(op) && should_notify {
+        if state.slave_read_status_busy != op || cmd_pkt.sno != state.slave_stat_sno {
             return false;
         }
+        rf_link_slave_add_status(state, &packet);
+        return false;
+    }
 
-        state.rcv_pkt_ttc = packet.par[9];
+    state.rcv_pkt_ttc = packet.par[9];
 
-        let (group_match, device_match) = rf_link_match_group_mac(state, cmd_pkt);
+    let (group_match, device_match) = rf_link_match_group_mac(state, cmd_pkt);
 
-        // Record the packet so we don't handle it again if we receive it again
-        if group_match || device_match {
-            if pkt_valid {
-                rc_pkt_buf_push(state, op, cmd_pkt);
-                rf_link_data_callback(state, l2cap_data);
-            }
+    // Record the packet so we don't handle it again if we receive it again
+    if group_match || device_match {
+        if pkt_valid {
+            rc_pkt_buf_push(state, op, cmd_pkt);
+            rf_link_data_callback(state, l2cap_data);
         }
+    }
 
-        // Only handle notify requests once
-        if rf_link_is_notify_req(op) {
-            state.slave_read_status_response = device_match;
+    // Only handle notify requests once
+    if rf_link_is_notify_req(op) {
+        state.slave_read_status_response = device_match;
 
-            if req_cmd_is_notify_ok(state, op, cmd_pkt) {
-                state.slave_read_status_response = false;
-            } else {
-                req_cmd_set_notify_ok_flag(state, op, cmd_pkt);
-            }
-        }
-
-        let relay_count = packet.internal_par1[CURRENT_RELAY_COUNT];
-
-        packet.dma_len = (packet.l2cap_len as u32 + 6) & 0xffffff;
-        packet.rf_len = packet.l2cap_len as u8 + 4;
-
-        let mut ttl = relay_count;
-
-        if no_match_slave_sno || state.slave_link_cmd != op {
-            packet.src_tx = DEVICE_ADDRESS.get();
-
-            state.SLAVE_SNO = cmd_pkt.sno;
-            state.slave_link_cmd = op;
+        if req_cmd_is_notify_ok(state, op, cmd_pkt) {
+            state.slave_read_status_response = false;
         } else {
-            ttl = state.org_ttl;
+            req_cmd_set_notify_ok_flag(state, op, cmd_pkt);
         }
+    }
 
-        state.org_ttl = ttl;
+    let relay_count = packet.internal_par1[CURRENT_RELAY_COUNT];
 
-        if rf_link_is_notify_req(op) && state.slave_read_status_response {
-            state.pkt_light_status.value.sno = cmd_pkt.sno;
-            packet.src_tx = DEVICE_ADDRESS.get();
-            if op == LGT_CMD_LIGHT_READ_STATUS {
-                state.pkt_light_status.value.val[15] = GET_STATUS;
-                if pkt_valid {
-                    state.pkt_light_status.value.val[13] = packet.par[9];
-                    state.pkt_light_status.value.val[18] = packet.internal_par1[CURRENT_RELAY_COUNT];
-                    if MAX_RELAY_NUM < packet.internal_par1[CURRENT_RELAY_COUNT] {
-                        state.pkt_light_status.value.val[14] = 0;
-                    } else {
-                        state.pkt_light_status.value.val[14] = MAX_RELAY_NUM - packet.internal_par1[CURRENT_RELAY_COUNT];
-                    }
+    packet.dma_len = (packet.l2cap_len as u32 + 6) & 0xffffff;
+    packet.rf_len = packet.l2cap_len as u8 + 4;
+
+    let mut ttl = relay_count;
+
+    if no_match_slave_sno || state.slave_link_cmd != op {
+        packet.src_tx = DEVICE_ADDRESS.get();
+
+        state.SLAVE_SNO = cmd_pkt.sno;
+        state.slave_link_cmd = op;
+    } else {
+        ttl = state.org_ttl;
+    }
+
+    state.org_ttl = ttl;
+
+    if rf_link_is_notify_req(op) && state.slave_read_status_response {
+        state.pkt_light_status.value.sno = cmd_pkt.sno;
+        packet.src_tx = DEVICE_ADDRESS.get();
+        if op == LGT_CMD_LIGHT_READ_STATUS {
+            state.pkt_light_status.value.val[15] = GET_STATUS;
+            if pkt_valid {
+                state.pkt_light_status.value.val[13] = packet.par[9];
+                state.pkt_light_status.value.val[18] = packet.internal_par1[CURRENT_RELAY_COUNT];
+                if MAX_RELAY_NUM < packet.internal_par1[CURRENT_RELAY_COUNT] {
+                    state.pkt_light_status.value.val[14] = 0;
+                } else {
+                    state.pkt_light_status.value.val[14] = MAX_RELAY_NUM - packet.internal_par1[CURRENT_RELAY_COUNT];
                 }
-            } else if op == LGT_CMD_LIGHT_GRP_REQ {
-                state.pkt_light_status.value.val[15] = packet.internal_par1[1];
-            } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-                state.pkt_light_status.value.val[15] = GET_GROUP1;
-            } else if op == LGT_CMD_CONFIG_DEV_ADDR {
-                state.pkt_light_status.value.val[15] = GET_DEV_ADDR;
-            } else if op == LGT_CMD_USER_NOTIFY_REQ {
-                state.pkt_light_status.value.val[15] = GET_USER_NOTIFY;
-            } else if op == LGT_CMD_START_OTA_REQ {
-                state.pkt_light_status.value.val[15] = CMD_START_OTA;
-            } else if op == LGT_CMD_OTA_DATA_REQ {
-                state.pkt_light_status.value.val[15] = CMD_OTA_DATA;
-            } else if op == LGT_CMD_END_OTA_REQ {
-                state.pkt_light_status.value.val[15] = CMD_END_OTA;
             }
-            unsafe { copy_par_user_all(state, params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
-            if (no_match_slave_sno || state.slave_link_cmd != op) || params[1] != 0 {
-                state.pkt_light_status.value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
+        } else if op == LGT_CMD_LIGHT_GRP_REQ {
+            state.pkt_light_status.value.val[15] = packet.internal_par1[1];
+        } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
+            state.pkt_light_status.value.val[15] = GET_GROUP1;
+        } else if op == LGT_CMD_CONFIG_DEV_ADDR {
+            state.pkt_light_status.value.val[15] = GET_DEV_ADDR;
+        } else if op == LGT_CMD_USER_NOTIFY_REQ {
+            state.pkt_light_status.value.val[15] = GET_USER_NOTIFY;
+        } else if op == LGT_CMD_START_OTA_REQ {
+            state.pkt_light_status.value.val[15] = CMD_START_OTA;
+        } else if op == LGT_CMD_OTA_DATA_REQ {
+            state.pkt_light_status.value.val[15] = CMD_OTA_DATA;
+        } else if op == LGT_CMD_END_OTA_REQ {
+            state.pkt_light_status.value.val[15] = CMD_END_OTA;
+        }
+        unsafe { copy_par_user_all(state, params_len as u32, (addr_of!(packet.vendor_id) as u32 + 1) as *const u8); }
+        if (no_match_slave_sno || state.slave_link_cmd != op) || params[1] != 0 {
+            state.pkt_light_status.value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.src_adr) as *const u8, 2) });
 
-                let mut request_params: PacketAttValue = PacketAttValue::default();
+            let mut request_params: PacketAttValue = PacketAttValue::default();
 
-                unsafe {
-                    slice::from_raw_parts_mut(addr_of_mut!(request_params) as *mut u8, size_of::<PacketAttValue>()).copy_from_slice(
-                        slice::from_raw_parts(
-                            addr_of!(*cmd_pkt) as *const u8,
-                            size_of::<PacketAttValue>(),
-                        )
+            unsafe {
+                slice::from_raw_parts_mut(addr_of_mut!(request_params) as *mut u8, size_of::<PacketAttValue>()).copy_from_slice(
+                    slice::from_raw_parts(
+                        addr_of!(*cmd_pkt) as *const u8,
+                        size_of::<PacketAttValue>(),
                     )
-                }
+                )
+            }
 
-                let mut result_data = state.pkt_light_status.value;
-                if rf_link_response_callback(state, &mut result_data, &request_params) {
-                    state.pkt_light_status.value = result_data;
-                    state.pkt_light_status._type |= BIT!(7);
+            let mut result_data = state.pkt_light_status.value;
+            if rf_link_response_callback(state, &mut result_data, &request_params) {
+                state.pkt_light_status.value = result_data;
+                state.pkt_light_status._type |= BIT!(7);
 
-                    app().mesh_manager.add_send_mesh_msg(unsafe { &*(addr_of!(state.pkt_light_status) as *const MeshPkt) }, 0);
-                }
+                app().mesh_manager.add_send_mesh_msg(unsafe { &*(addr_of!(state.pkt_light_status) as *const MeshPkt) }, 0);
             }
         }
+    }
 
-        // Relay the message if it's not for us
-        if relay_count != 0 && state.org_ttl == relay_count && !device_match
-        {
-            if state.slave_read_status_busy == 0 || !rf_link_is_notify_rsp(op) {
-                packet.internal_par1[CURRENT_RELAY_COUNT] = relay_count - 1;
-            }
-
-            packet._type |= BIT!(7);
-
-            if op != LGT_CMD_LIGHT_STATUS {
-                rf_link_proc_ttc(RCV_PKT_TIME.get(), state.rcv_pkt_ttc, packet);
-            }
-
-            if rf_link_is_notify_req(op) {
-                let relay_time = min(
-                    ((((read_reg_system_tick() - RCV_PKT_TIME.get()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
-                    0xff
-                );
-
-                packet.internal_par1[LAST_RELAY_TIME] = relay_time as u8;
-            }
-
-            let mut delay = 100;
-            if !SLAVE_LINK_CONNECTED.get() {
-                delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 0xf) * 500);
-            }
-
-            app().mesh_manager.add_send_mesh_msg(&packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));
+    // Relay the message if it's not for us
+    if relay_count != 0 && state.org_ttl == relay_count && !device_match
+    {
+        if state.slave_read_status_busy == 0 || !rf_link_is_notify_rsp(op) {
+            packet.internal_par1[CURRENT_RELAY_COUNT] = relay_count - 1;
         }
 
-        return true;
-    })
+        packet._type |= BIT!(7);
+
+        if op != LGT_CMD_LIGHT_STATUS {
+            rf_link_proc_ttc(RCV_PKT_TIME.get(), state.rcv_pkt_ttc, packet);
+        }
+
+        if rf_link_is_notify_req(op) {
+            let relay_time = min(
+                ((((read_reg_system_tick() - RCV_PKT_TIME.get()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.internal_par1[LAST_RELAY_TIME] as u32,
+                0xff
+            );
+
+            packet.internal_par1[LAST_RELAY_TIME] = relay_time as u8;
+        }
+
+        let mut delay = 100;
+        if !SLAVE_LINK_CONNECTED.get() {
+            delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 0xf) * 500);
+        }
+
+        app().mesh_manager.add_send_mesh_msg(&packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));
+    }
+
+    return true;
 }
 
 pub fn rf_link_slave_data(state: &mut State, packet: &PacketLlData, time: u32) -> bool {
@@ -584,7 +578,7 @@ pub fn rf_link_slave_connect(state: &mut State, packet: &PacketLlInit, time: u32
 
             MESH_NODE_REPORT_ENABLE.set(false);
 
-            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut().fill(0));
+            MESH_NODE_MASK.lock().unwrap().borrow_mut().fill(0);
 
             state.p_st_handler = IrqHandlerStatus::Rx;
             state.need_update_connect_para = true;
@@ -629,7 +623,7 @@ pub fn ll_device_status_update(state: &mut State, val_par: &[u8])
     state.mesh_node_st[0].val.par.copy_from_slice(val_par);
     state.mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 
-    MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[0] |= 1);
+    MESH_NODE_MASK.lock().unwrap().borrow_mut()[0] |= 1;
 }
 
 pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
@@ -711,7 +705,7 @@ pub fn mesh_node_flush_status(state: &mut State)
             state.mesh_node_st[count].tick = 0;
 
             // Set the bit in the mask so that the status is reported (Since the device has changed to offline now)
-            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[count >> 5] |= 1 << (count & 0x1f));
+            MESH_NODE_MASK.lock().unwrap().borrow_mut()[count >> 5] |= 1 << (count & 0x1f);
         }
     }
 }
@@ -1099,15 +1093,18 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8]) -> MeshPkt
     pkt
 }
 
+#[inline(never)]
 pub fn mesh_report_status_enable(enable: bool)
 {
+    let mut binding = MESH_NODE_MASK.lock().unwrap();
+    let mut mesh_node_mask = binding.borrow_mut();
     if enable {
         if MESH_NODE_MAX.get() >> 5 != 0 {
-            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut().iter_mut().for_each(|v| { *v = 0xfffffffe }));
+            mesh_node_mask.iter_mut().for_each(|v| { *v = 0xfffffffe });
         }
 
         if MESH_NODE_MAX.get() & 0x1f != 0 {
-            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[MESH_NODE_MAX.get() as usize >> 5] = (1 << (MESH_NODE_MAX.get() & 0x1f)) - 1);
+            mesh_node_mask[MESH_NODE_MAX.get() as usize >> 5] = (1 << (MESH_NODE_MAX.get() & 0x1f)) - 1;
         }
     }
 
@@ -1116,20 +1113,24 @@ pub fn mesh_report_status_enable(enable: bool)
 
 pub fn mesh_report_status_enable_mask(data: &[u8])
 {
-    STATE.lock(|state| {
-        MESH_NODE_REPORT_ENABLE.set(data[0] != 0);
-        if MESH_NODE_REPORT_ENABLE.get() && data.len() > 1 {
-            for index in 1..data.len() {
-                if MESH_NODE_MAX.get() != 0 {
-                    state.borrow_mut().mesh_node_st.iter_mut().enumerate().for_each(|(i, v)| {
-                        if data[index] == v.val.dev_adr {
-                            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[i >> 5] |= 1 << (i & 0x1f));
-                        }
-                    });
-                }
+    let mut mesh_node_mask_binding = MESH_NODE_MASK.lock().unwrap();
+    let mut mesh_node_mask = mesh_node_mask_binding.borrow_mut();
+
+    let mut state_binding = STATE.lock().unwrap();
+    let mut state = state_binding.borrow_mut();
+
+    MESH_NODE_REPORT_ENABLE.set(data[0] != 0);
+    if MESH_NODE_REPORT_ENABLE.get() && data.len() > 1 {
+        for index in 1..data.len() {
+            if MESH_NODE_MAX.get() != 0 {
+                state.mesh_node_st.iter_mut().enumerate().for_each(|(i, v)| {
+                    if data[index] == v.val.dev_adr {
+                        mesh_node_mask[i >> 5] |= 1 << (i & 0x1f);
+                    }
+                });
             }
         }
-    });
+    }
 }
 
 pub fn rf_link_delete_pair(state: &mut State)

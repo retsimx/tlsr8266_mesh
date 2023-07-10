@@ -206,15 +206,14 @@ fn light_user_func(state: &mut State) {
 pub async fn main_loop() {
     Timer::after(Duration::from_micros(LOOP_INTERVAL_US)).await;
 
-    STATE.lock(|state| {
-        let mut binding = state.borrow_mut();
-        let state = binding.deref_mut();
+    let mut binding = STATE.lock().unwrap();
+    let mut state = binding.borrow_mut();
+    let state = state.deref_mut();
 
-        light_user_func(state);
-        rf_link_slave_proc(state);
+    light_user_func(state);
+    rf_link_slave_proc(state);
 
-        proc_led(state);
-    });
+    proc_led(state);
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.

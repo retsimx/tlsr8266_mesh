@@ -386,11 +386,7 @@ pub fn rf_stop_trx() {
 pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
-
-    LIGHT_RX_BUFF.lock(|light_rx_buff| {
-        let mut light_rx_buff = light_rx_buff.borrow();
-        write_reg_dma2_addr(addr_of!(light_rx_buff[LIGHT_RX_WPTR.get()]) as u16);
-    });
+    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock().unwrap().borrow()[LIGHT_RX_WPTR.get()]) as u16);
 
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);
@@ -712,7 +708,7 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
             let mut buff: [u8; 16] = [0; 16];
             let len = min(MESH_PWD.len(), buff.len());
             buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-            encode_password(state, buff.as_mut_slice());
+            encode_password(state, &mut buff);
             flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
             let mut buff: [u8; 16] = [0; 16];

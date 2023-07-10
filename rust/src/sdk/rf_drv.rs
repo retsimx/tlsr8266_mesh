@@ -103,7 +103,7 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
     state.pkt_adv.rf_len = iVar5 + 6;
 
     if iVar5 + 6 + state.user_data_len < 0x26 && state.user_data_len != 0 {
-        state.pkt_adv.data[iVar5 as usize..iVar5 as usize + state.user_data_len as usize].copy_from_slice(state.user_data.as_slice());
+        state.pkt_adv.data[iVar5 as usize..iVar5 as usize + state.user_data_len as usize].copy_from_slice(&state.user_data);
         state.pkt_adv.dma_len += state.user_data_len as u32;
         state.pkt_adv.rf_len += state.user_data_len;
     }

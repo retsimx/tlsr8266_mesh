@@ -3,7 +3,7 @@ use core::cmp::min;
 use core::fmt::Write;
 use core::ops::DerefMut;
 use core::panic::PanicInfo;
-use core::ptr::{addr_of, addr_of_mut, null_mut};
+use core::ptr::{addr_of, addr_of_mut};
 
 use critical_section::RawRestoreState;
 
@@ -223,16 +223,11 @@ pub async fn check_panic_info() {
 
         let len = min(10, buffer.len());
 
-        let mut data = [0 as u8; 13];
+        let mut data = [0u8; 13];
         data[0] = LGT_PANIC_MSG;
         data[3..3+len].copy_from_slice(&buffer[0..len]);
 
-        STATE.lock(|state| {
-            let mut binding = state.borrow_mut();
-            let state = binding.deref_mut();
-
-            app().mesh_manager.send_mesh_message(state, &data, 0xffff);
-        });
+        app().mesh_manager.send_mesh_message(STATE.lock().unwrap().borrow_mut().deref_mut(), &data, 0xffff);
 
         buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
     }
@@ -241,15 +236,10 @@ pub async fn check_panic_info() {
     delay(100).await;
 
     // Send an empty panic message to indicate the end of the message
-    let mut data = [0 as u8; 13];
+    let mut data = [0u8; 13];
     data[0] = LGT_PANIC_MSG;
 
-    STATE.lock(|state| {
-        let mut binding = state.borrow_mut();
-        let state = binding.deref_mut();
-
-        app().mesh_manager.send_mesh_message(state, &data, 0xffff);
-    });
+    app().mesh_manager.send_mesh_message(STATE.lock().unwrap().borrow_mut().deref_mut(), &data, 0xffff);
 
     // Finally clear the panic info
     flash_erase_sector(panic_addr);

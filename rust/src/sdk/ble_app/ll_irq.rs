@@ -73,7 +73,7 @@ fn rf_link_slave_read_status_update(state: &mut State)
 
 pub fn mesh_node_report_status(state: &mut State, params: &mut [u8], len: usize) -> usize
 {
-    if !state.mesh_node_report_enable {
+    if !MESH_NODE_REPORT_ENABLE.get() {
         return 0;
     }
 
@@ -87,7 +87,7 @@ pub fn mesh_node_report_status(state: &mut State, params: &mut [u8], len: usize)
     //      Iterate over each bit in the 32 bit value and find any set bits
     //      Report the status of the light at any set bits and clear the bit from the mask
 
-    let mut new_mask = state.mesh_node_mask;
+    let mut new_mask = MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow().clone());
 
     state.mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
         if result >= len {
@@ -127,7 +127,7 @@ pub fn mesh_node_report_status(state: &mut State, params: &mut [u8], len: usize)
         }
     });
 
-    state.mesh_node_mask = new_mask;
+    MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut().copy_from_slice(&new_mask));
 
     return result;
 }
@@ -238,14 +238,14 @@ pub fn irq_st_bridge(state: &mut State)
         write_reg_dma_tx_rptr(0x10);
         SLAVE_LINK_CONNECTED.set(false);
         if state.not_need_login == false {
-            state.pair_login_ok = false;
+            PAIR_LOGIN_OK.set(false);
         }
         if SECURITY_ENABLE.get() == false {
-            mesh_report_status_enable(state, false);
+            mesh_report_status_enable(false);
         } else {
             state.slave_first_connected_tick = 0;
-            state.pair_login_ok = false;
-            mesh_report_status_enable(state, false);
+            PAIR_LOGIN_OK.set(false);
+            mesh_report_status_enable(false);
         }
         if state.slave_read_status_busy != 0 {
             rf_link_slave_read_status_stop(state);

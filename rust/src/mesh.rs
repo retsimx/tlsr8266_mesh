@@ -18,7 +18,7 @@ use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
-use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SECURITY_ENABLE, SimplifyLS, SLAVE_LINK_CONNECTED, State};
+use crate::state::{*};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -230,7 +230,7 @@ impl MeshManager {
 
     fn mesh_cmd_notify(&self, state: &mut State, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
-        if SLAVE_LINK_CONNECTED.get() && state.pair_login_ok {
+        if SLAVE_LINK_CONNECTED.get() && PAIR_LOGIN_OK.get() {
             if p.len() > 10 {
                 //max length of par is 10
                 return -1;
@@ -296,11 +296,13 @@ impl MeshManager {
         }
 
         if self.effect_new_mesh == 0 {
-            state.pair_nn = self.new_mesh_name;
-            state.pair_pass = self.new_mesh_pwd;
+            PAIR_NN.lock(|pair_nn| pair_nn.borrow_mut().copy_from_slice(&self.new_mesh_name));
+            PAIR_PASS.lock(|pair_pass| pair_pass.borrow_mut().copy_from_slice(&self.new_mesh_pwd));
             PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(&self.new_mesh_ltk) });
         } else {
-            PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(&state.pair_ltk_mesh) });
+            PAIR_LTK_MESH.lock(|pair_ltk_mesh|
+               PAIR_LTK.lock(|pair_ltk| pair_ltk.borrow_mut().copy_from_slice(pair_ltk_mesh.borrow().as_slice())
+            ));
         }
 
         self.mesh_pair_complete_notify(state);
@@ -341,7 +343,7 @@ impl MeshManager {
 
     fn get_online_node_cnt(&mut self, state: &mut State) -> u8 {
         let mut cnt = 0;
-        for i in 0..state.mesh_node_max {
+        for i in 0..MESH_NODE_MAX.get() {
             if state.mesh_node_st[i as usize].tick != 0 {
                 cnt += 1;
                 if i > 0 {
@@ -421,32 +423,44 @@ impl MeshManager {
                 match self.mesh_pair_state {
                     MeshPairState::MeshPairName1 => {
                         // send mesh name [0-7]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_nn[0..8]);
+                        PAIR_NN.lock(|pair_nn|
+                            op_para[4..4 + 8].copy_from_slice(&pair_nn.borrow()[0..8])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairName2;
                     }
                     MeshPairState::MeshPairName2 => {
                         // send mesh name [8-15]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_nn[8..16]);
+                        PAIR_NN.lock(|pair_nn|
+                            op_para[4..4 + 8].copy_from_slice(&pair_nn.borrow()[8..16])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairPwd1;
                     }
                     MeshPairState::MeshPairPwd1 => {
                         // send mesh pwd [0-7]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_pass[0..8]);
+                        PAIR_PASS.lock(|pair_pass|
+                            op_para[4..4 + 8].copy_from_slice(&pair_pass.borrow()[0..8])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairPwd2;
                     }
                     MeshPairState::MeshPairPwd2 => {
                         // send mesh pwd [8-15]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_pass[8..16]);
+                        PAIR_PASS.lock(|pair_pass|
+                            op_para[4..4 + 8].copy_from_slice(&pair_pass.borrow()[8..16])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairLtk1;
                     }
                     MeshPairState::MeshPairLtk1 => {
                         // send mesh ltk [0-7]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_ltk_mesh[0..8]);
+                        PAIR_LTK_MESH.lock(|pair_ltk_mesh|
+                            op_para[4..4 + 8].copy_from_slice(&pair_ltk_mesh.borrow()[0..8])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairLtk2;
                     }
                     MeshPairState::MeshPairLtk2 => {
                         // send mesh ltk [8-15]
-                        op_para[4..4 + 8].copy_from_slice(&state.pair_ltk_mesh[8..16]);
+                        PAIR_LTK_MESH.lock(|pair_ltk_mesh|
+                            op_para[4..4 + 8].copy_from_slice(&pair_ltk_mesh.borrow()[8..16])
+                        );
                         self.mesh_pair_state = MeshPairState::MeshPairName1;
                         state.pair_setting_flag = PairState::PairSetMeshTxDone;
                     }

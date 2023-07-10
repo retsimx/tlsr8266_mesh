@@ -513,6 +513,7 @@ dependencies = [
 name = "tlsr8266_mesh"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "const_format",
  "critical-section",
  "embassy-executor",

@@ -15,8 +15,6 @@ pub struct State {
     pub blt_tx_wptr: usize,
     pub conn_update_successed: bool,
     pub buff_response: [PacketAttData; BUFF_RESPONSE_PACKET_COUNT],
-    pub pair_rands: [u8; 8],
-    pub pair_randm: [u8; 8],
     pub conn_update_cnt: usize,
     pub set_uuid_flag: bool,
     pub max_mesh_name_len: usize,
@@ -29,7 +27,6 @@ pub struct State {
     pub led_no: u32,
     pub led_is_on: u32,
 
-    pub mesh_node_mask: [u32; MESH_NODE_MASK_LEN],
     pub get_mac_en: bool,
     pub mesh_pair_enable: bool,
     pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
@@ -74,9 +71,6 @@ pub struct State {
     pub pair_config_mesh_ltk: [u8; 16],
 
     pub not_need_login: bool,
-    pub pair_login_ok: bool,
-    pub pair_sk: [u8; 16],
-    pub pair_sk_copy: [u8; 16],
     pub slave_first_connected_tick: u32,
 
     pub device_node_sn: u8,
@@ -90,14 +84,9 @@ pub struct State {
 
     pub pair_setting_flag: PairState,
 
-    pub pair_nn: [u8; 16],
-    pub pair_pass: [u8; 16],
-    pub pair_ltk_mesh: [u8; 16],
-
     pub cur_ota_flash_addr: u32,
     pub rf_slave_ota_finished_flag: OtaState,
     pub rf_slave_ota_terminate_flag: bool,
-    pub mesh_node_max: u8,
 
     pub rf_slave_ota_timeout_s: u16,
     pub set_mesh_info_expired_flag: bool,
@@ -106,11 +95,7 @@ pub struct State {
     pub pair_ivm: [u8; 8],
 
     pub pair_config_pwd_encode_sk: [u8; 17],
-    pub ble_pair_st: u8,
-    pub pair_enc_enable: bool,
     pub pair_ivs: [u8; 8],
-    pub pair_work: [u8; 16],
-    pub pair_read_pending: bool,
 
     /////////////// adv par define ///////////////////////////////////////////////////
     pub adv_interval2listen_interval: u16,
@@ -138,7 +123,6 @@ pub struct State {
     pub slave_status_buffer_rptr: usize,
     pub slave_stat_sno: [u8; 3],
     pub slave_read_status_unicast_flag: u8,
-    pub mesh_node_report_enable: bool,
     pub slave_timing_adjust_enable: bool,
     pub slave_tick_brx: u32,
     pub slave_window_offset: u32,
@@ -176,23 +160,6 @@ pub struct State {
     pub pkt_init: PacketLlInit,
 }
 
-pub static PAIR_LTK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
-pub static LIGHT_RX_BUFF: CriticalSectionMutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = CriticalSectionMutex::new(RefCell::new(
-    [
-        LightRxBuff {
-            dma_len: 0,
-            unk1: [0; 3],
-            rssi: 0,
-            unk2: [0; 3],
-            rx_time: 0,
-            sno: [0; 3],
-            unk3: [0; 5],
-            mac: [0; 4],
-            unk4: [0; 40],
-        }; LIGHT_RX_BUFF_COUNT
-    ]
-));
-
 pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::new(RefCell::new(State {
     blt_tx_fifo: [[0; 48]; 8],
     blt_tx_wptr: 0,
@@ -208,8 +175,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
         hh: 0,
         dat: [0; 23],
     }; 48],
-    pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
-    pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
     conn_update_cnt: 0,
     set_uuid_flag: false,
     max_mesh_name_len: 16,
@@ -222,7 +187,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     led_no: 0,
     led_is_on: 0,
 
-    mesh_node_mask: [0; ((MESH_NODE_MAX_NUM + 31) >> 5) as usize],
     get_mac_en: false,
     mesh_pair_enable: false,
     mesh_node_st: [mesh_node_st_t {
@@ -353,9 +317,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     pair_config_mesh_ltk: [0; 16],
 
     not_need_login: false,
-    pair_login_ok: false,
-    pair_sk: [0; 16],
-    pair_sk_copy: [0; 16],
     slave_first_connected_tick: 0,
 
     device_node_sn: 1,
@@ -369,14 +330,9 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
 
     pair_setting_flag: PairState::PairSetted,
 
-    pair_nn: [0; 16],
-    pair_pass: [0; 16],
-    pair_ltk_mesh: [0; 16],
-
     cur_ota_flash_addr: 0,
     rf_slave_ota_finished_flag: OtaState::Continue,
     rf_slave_ota_terminate_flag: false,
-    mesh_node_max: 0,
 
     rf_slave_ota_timeout_s: RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
     set_mesh_info_expired_flag: false,
@@ -385,11 +341,7 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     pair_ivm: [0, 0, 0, 0, 1, 0, 0, 0],
 
     pair_config_pwd_encode_sk: [0; 17],
-    ble_pair_st: 0,
-    pair_enc_enable: false,
     pair_ivs: [0; 8],
-    pair_work: [0; 16],
-    pair_read_pending: false,
 
     adv_interval2listen_interval: 4,
     online_status_interval2listen_interval: 8,
@@ -419,7 +371,6 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     slave_status_buffer_rptr: 0,
     slave_stat_sno: [0; 3],
     slave_read_status_unicast_flag: 0,
-    mesh_node_report_enable: false,
     slave_timing_adjust_enable: false,
     slave_tick_brx: 0,
     slave_window_offset: 0,
@@ -550,10 +501,43 @@ pub static STATE: CriticalSectionMutex<RefCell<State>> = CriticalSectionMutex::n
     },
 }));
 
+pub static PAIR_LTK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_SK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_WORK: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_NN: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_PASS: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_LTK_MESH: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+pub static PAIR_SK_COPY: CriticalSectionMutex<RefCell<[u8; 16]>> = CriticalSectionMutex::new(RefCell::new([0; 16]));
+
+pub static LIGHT_RX_BUFF: CriticalSectionMutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = CriticalSectionMutex::new(RefCell::new(
+    [
+        LightRxBuff {
+            dma_len: 0,
+            unk1: [0; 3],
+            rssi: 0,
+            unk2: [0; 3],
+            rx_time: 0,
+            sno: [0; 3],
+            unk3: [0; 5],
+            mac: [0; 4],
+            unk4: [0; 40],
+        }; LIGHT_RX_BUFF_COUNT
+    ]
+));
+
+pub static MESH_NODE_MASK: CriticalSectionMutex<RefCell<[u32; MESH_NODE_MASK_LEN]>> = CriticalSectionMutex::new(RefCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
+pub static PAIR_RANDS: CriticalSectionMutex<RefCell<[u8; 8]>> = CriticalSectionMutex::new(RefCell::new([0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]));
+pub static PAIR_RANDM: CriticalSectionMutex<RefCell<[u8; 8]>> = CriticalSectionMutex::new(RefCell::new([0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]));
+
+pub static BLE_PAIR_ST: AtomicU8 = AtomicU8::new(0);
+pub static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
+pub static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
+
 pub static LIGHT_RX_WPTR: AtomicUsize = AtomicUsize::new(0);
 
 pub static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
 pub static PAIR_AC: AtomicU32 = AtomicU32::new(0);
+pub static PAIR_READ_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub static RF_TP_BASE: AtomicU32 = AtomicU32::new(0x1D);
 pub static RF_TP_GAIN: AtomicU32 = AtomicU32::new(0xC);
@@ -578,6 +562,9 @@ pub static SLAVE_TIMING_UPDATE2_OK_TIME: AtomicU32 = AtomicU32::new(0);
 pub static SLAVE_NEXT_CONNECT_TICK: AtomicU32 = AtomicU32::new(0);
 pub static RF_SLAVE_OTA_BUSY_MESH: AtomicBool = AtomicBool::new(false);
 pub static RF_SLAVE_OTA_BUSY: AtomicBool = AtomicBool::new(false);
+
+pub static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
+pub static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
 
 pub trait SimplifyLS<T> {
     fn get(&self) -> T;

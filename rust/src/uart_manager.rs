@@ -245,7 +245,7 @@ impl UartManager {
                 (*SPAWNER).spawn(node_report_task()).unwrap();
             }
 
-            mesh_report_status_enable(state, true);
+            mesh_report_status_enable(true);
         }
 
         // Light ctrl
@@ -268,7 +268,7 @@ impl UartManager {
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {
-            mesh_report_status_enable(state, true);
+            mesh_report_status_enable(true);
         }
 
         // Finally ack the message once we've handled it

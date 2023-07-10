@@ -186,7 +186,7 @@ fn proc_led(state: &mut State) {
 
 fn light_auth_check(state: &mut State) {
     if SECURITY_ENABLE.get()
-        && !state.pair_login_ok
+        && !PAIR_LOGIN_OK.get()
         && state.slave_first_connected_tick != 0
         && clock_time_exceed(state.slave_first_connected_tick, AUTH_TIME * 1000 * 1000)
     {

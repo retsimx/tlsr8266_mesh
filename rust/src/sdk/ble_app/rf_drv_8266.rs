@@ -1,4 +1,5 @@
 use core::cmp::min;
+use core::ops::DerefMut;
 use core::ptr::addr_of;
 use core::slice;
 
@@ -668,9 +669,9 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut PacketAttWrite)
     return true;
 }
 
-pub fn rf_link_slave_data_write(state: &mut State, data: *const PacketAttWrite) -> bool {
-    if state.pair_login_ok && unsafe { pair_dec_packet(state, data as *mut PacketLlApp) } {
-        return rf_link_slave_data_write_no_dec(state, unsafe { &mut *(data as *mut PacketAttWrite) });
+pub fn rf_link_slave_data_write(state: &mut State, data: &mut PacketAttWrite) -> bool {
+    if PAIR_LOGIN_OK.get() && pair_dec_packet(state, data) {
+        return rf_link_slave_data_write_no_dec(state, data);
     }
 
     return false;

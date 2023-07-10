@@ -137,7 +137,7 @@ impl OtaManager {
         }
 
         if !RF_SLAVE_OTA_BUSY.get() {
-            if !state.pair_login_ok
+            if !PAIR_LOGIN_OK.get()
             {
                 return;
             }
@@ -393,8 +393,8 @@ impl OtaManager {
     }
 }
 
-pub fn rf_link_slave_data_ota(state: &mut State, data: *const PacketAttWrite) -> bool {
-    app().ota_manager.rf_link_slave_data_ota(state, unsafe { &*(data as *const PacketAttData) });
+pub fn rf_link_slave_data_ota(state: &mut State, data: &mut PacketAttWrite) -> bool {
+    app().ota_manager.rf_link_slave_data_ota(state, unsafe { &*(addr_of!((*data)) as *const PacketAttData) });
 
     return true;
 }

@@ -36,7 +36,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
         }
 
         if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
-            let mesh_node_max = state.mesh_node_max;
+            let mesh_node_max = MESH_NODE_MAX.get();
             let mut current_index = 1;
             let mut mesh_node_st = &mut state.mesh_node_st[current_index];
             if mesh_node_max >= 2 {
@@ -57,12 +57,12 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
             }
 
             if mesh_node_max as usize == current_index {
-                state.mesh_node_max += 1;
+                MESH_NODE_MAX.set(MESH_NODE_MAX.get() + 1);
 
                 mesh_node_st.val = pkt[src_index];
                 mesh_node_st.tick = tick;
 
-                state.mesh_node_mask[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
+                MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f));
 
                 result = mesh_node_max as u32;
             } else if current_index < mesh_node_max as usize {
@@ -77,7 +77,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {
-                        state.mesh_node_mask[current_index >> 5] |= 1 << (current_index & 0x1f);
+                        MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[current_index >> 5] |= 1 << (current_index & 0x1f));
                     }
 
                     mesh_node_st.tick = tick;
@@ -582,9 +582,9 @@ pub fn rf_link_slave_connect(state: &mut State, packet: &PacketLlInit, time: u32
 
             pair_init(state);
 
-            state.mesh_node_report_enable = false;
+            MESH_NODE_REPORT_ENABLE.set(false);
 
-            state.mesh_node_mask.fill(0);
+            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut().fill(0));
 
             state.p_st_handler = IrqHandlerStatus::Rx;
             state.need_update_connect_para = true;
@@ -629,7 +629,7 @@ pub fn ll_device_status_update(state: &mut State, val_par: &[u8])
     state.mesh_node_st[0].val.par.copy_from_slice(val_par);
     state.mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 
-    state.mesh_node_mask[0] |= 1;
+    MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[0] |= 1);
 }
 
 pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
@@ -706,12 +706,12 @@ pub fn mesh_node_flush_status(state: &mut State)
     TICK_NODE_REPORT.store(tick, Ordering::Relaxed);
 
     // Iterate over each mesh node and check if it's timed out
-    for count in 1..state.mesh_node_max as usize {
+    for count in 1..MESH_NODE_MAX.get() as usize {
         if state.mesh_node_st[count].tick != 0 && (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10 < (tick >> 0x10 | 1) - state.mesh_node_st[count].tick as u32 {
             state.mesh_node_st[count].tick = 0;
 
             // Set the bit in the mask so that the status is reported (Since the device has changed to offline now)
-            state.mesh_node_mask[count >> 5] |= 1 << (count & 0x1f);
+            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[count >> 5] |= 1 << (count & 0x1f));
         }
     }
 }
@@ -736,8 +736,8 @@ fn mesh_node_adv_status(state: &mut State, p_data: &mut [u8]) -> u32
 
     // Get the max number of elements the result data can hold
     let mut elems = p_data.len() / MESH_NODE_ST_VAL_LEN;
-    if (state.mesh_node_max as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN {
-        elems = state.mesh_node_max as usize;
+    if (MESH_NODE_MAX.get() as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN {
+        elems = MESH_NODE_MAX.get() as usize;
     }
 
     // Copy our status in to the result data first
@@ -753,7 +753,7 @@ fn mesh_node_adv_status(state: &mut State, p_data: &mut [u8]) -> u32
     // Update our own record to keep our status record in sync
     mesh_node_keep_alive(state);
 
-    let max_node = state.mesh_node_max as usize;
+    let max_node = MESH_NODE_MAX.get() as usize;
     let mut count = 1;
 
     let mut out_index = count;
@@ -1099,36 +1099,37 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8]) -> MeshPkt
     pkt
 }
 
-pub fn mesh_report_status_enable(state: &mut State, enable: bool)
+pub fn mesh_report_status_enable(enable: bool)
 {
-
     if enable {
-        if state.mesh_node_max >> 5 != 0 {
-            state.mesh_node_mask.iter_mut().for_each(|v| { *v = 0xfffffffe });
+        if MESH_NODE_MAX.get() >> 5 != 0 {
+            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut().iter_mut().for_each(|v| { *v = 0xfffffffe }));
         }
 
-        if state.mesh_node_max & 0x1f != 0 {
-            state.mesh_node_mask[state.mesh_node_max as usize >> 5] = (1 << (state.mesh_node_max & 0x1f)) - 1;
+        if MESH_NODE_MAX.get() & 0x1f != 0 {
+            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[MESH_NODE_MAX.get() as usize >> 5] = (1 << (MESH_NODE_MAX.get() & 0x1f)) - 1);
         }
     }
 
-    state.mesh_node_report_enable = enable;
+    MESH_NODE_REPORT_ENABLE.set(enable);
 }
 
-pub fn mesh_report_status_enable_mask(state: &mut State, data: *const u8, len: u16)
+pub fn mesh_report_status_enable_mask(data: &[u8])
 {
-    state.mesh_node_report_enable = if unsafe { *data } != 0 { true } else { false };
-    if state.mesh_node_report_enable && len > 1 {
-        for index in 1..len {
-            if state.mesh_node_max != 0 {
-                state.mesh_node_st.iter_mut().enumerate().for_each(|(i, v)| {
-                    if unsafe { *data.offset(index as isize) } == v.val.dev_adr {
-                        state.mesh_node_mask[i >> 5] |= 1 << (i & 0x1f);
-                    }
-                });
+    STATE.lock(|state| {
+        MESH_NODE_REPORT_ENABLE.set(data[0] != 0);
+        if MESH_NODE_REPORT_ENABLE.get() && data.len() > 1 {
+            for index in 1..data.len() {
+                if MESH_NODE_MAX.get() != 0 {
+                    state.borrow_mut().mesh_node_st.iter_mut().enumerate().for_each(|(i, v)| {
+                        if data[index] == v.val.dev_adr {
+                            MESH_NODE_MASK.lock(|mesh_node_mask| mesh_node_mask.borrow_mut()[i >> 5] |= 1 << (i & 0x1f));
+                        }
+                    });
+                }
             }
         }
-    }
+    });
 }
 
 pub fn rf_link_delete_pair(state: &mut State)
@@ -1142,7 +1143,7 @@ pub fn rf_link_delete_pair(state: &mut State)
     pair_save_key(state);
 
     if state.not_need_login == false {
-        state.pair_login_ok = false;
+        PAIR_LOGIN_OK.set(false);
     }
 }
 

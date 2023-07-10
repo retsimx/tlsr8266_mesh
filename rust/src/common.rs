@@ -10,7 +10,7 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
-use crate::state::{DEVICE_ADDRESS, PAIR_AC, PAIR_LTK, SimplifyLS, State};
+use crate::state::{*};
 
 const UPDATE_CONN_PARA_CNT: usize = 4;
 const CONN_PARA_DATA: [[u16; 3]; UPDATE_CONN_PARA_CNT] = [
@@ -183,7 +183,7 @@ pub fn mesh_node_init(state: &mut State)
 
     state.mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
     state.mesh_node_st[0].val.sn = state.device_node_sn;
-    state.mesh_node_max = 1;
+    MESH_NODE_MAX.set(1);
 }
 
 pub fn pair_flash_clean(state: &mut State)
@@ -230,11 +230,13 @@ pub fn pair_flash_config_init(state: &mut State) -> bool
 
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 {
-    let mut destbuf = [0u32; 4];
+    let mut destbuf = [0u8; 16];
 
     // todo: Why is this called twice? It's called twice in the original code...
-    aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
-    aes_att_encryption(name.as_ptr(), pass.as_ptr(), destbuf.as_mut_ptr() as *mut u8);
+    aes_att_encryption(name, pass, &mut destbuf);
+    aes_att_encryption(name, pass, &mut destbuf);
+
+    let mut destbuf: [u32; 4] = bytemuck::cast(destbuf);
 
     let mut bit = destbuf[0] >> 1 ^ destbuf[0];
     let mut inner_count = 0;
@@ -269,15 +271,17 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key(state: &mut State)
 {
-    PAIR_AC.set(access_code(&state.pair_nn, &state.pair_pass));
-    let name_len = match state.pair_nn.iter().position(|r| *r == 0) {
+    PAIR_NN.lock(|pair_nn| PAIR_PASS.lock(|pair_pass|
+        PAIR_AC.set(access_code(pair_nn.borrow().as_slice(), pair_pass.borrow().as_slice()))
+    ));
+    let name_len = match PAIR_NN.lock(|pair_nn| pair_nn.borrow().iter().position(|r| *r == 0)) {
         Some(v) => v,
-        None => state.pair_nn.len()
+        None => PAIR_NN.lock(|pair_nn| pair_nn.borrow().len())
     };
 
     let name_len = min(state.max_mesh_name_len, name_len);
 
-    let nn = state.pair_nn.clone();
+    let nn = PAIR_NN.lock(|pair_nn| pair_nn.borrow().clone());
     rf_link_slave_set_adv_mesh_name(state, &nn[0..name_len]);
     rf_link_slave_set_adv_private_data(state, unsafe { slice::from_raw_parts(addr_of!(state.adv_pri_data) as *const u8, size_of::<AdvPrivate>()) });
 }
@@ -289,12 +293,12 @@ pub fn pair_load_key(state: &mut State)
     let pairing_addr = FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx;
 
     if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
-        state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
-        state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
+        PAIR_NN.lock(|pair_nn| pair_nn.borrow_mut().iter_mut().for_each(|v| { *v = 0 }));
+        PAIR_PASS.lock(|pair_pass| pair_pass.borrow_mut().iter_mut().for_each(|v| { *v = 0 }));
         PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().iter_mut().for_each(|v| { *v = 0 }) });
 
-        state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
-        state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
+        PAIR_NN.lock(|pair_nn| pair_nn.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) }));
+        PAIR_PASS.lock(|pair_pass| pair_pass.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) }));
 
         if state.mesh_pair_enable {
             state.get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
@@ -302,9 +306,9 @@ pub fn pair_load_key(state: &mut State)
 
         let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
         if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
-            let mut decoded = state.pair_pass.clone();
+            let mut decoded = PAIR_PASS.lock(|pair_pass| pair_pass.borrow().clone());
             decode_password(state, &mut decoded);
-            state.pair_pass = decoded;
+            PAIR_PASS.lock(|pair_pass| pair_pass.borrow_mut().copy_from_slice(&decoded));
         }
 
         PAIR_LTK.lock(|pair_ltk| { pair_ltk.borrow_mut().copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) }) });

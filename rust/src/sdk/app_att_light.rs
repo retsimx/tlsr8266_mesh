@@ -13,7 +13,7 @@ use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use crate::state::State;
+use crate::state::{*};
 use crate::version::BUILD_VERSION;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
@@ -188,16 +188,16 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
-fn mesh_status_write(state: &mut State, p: *const PacketAttWrite) -> bool {
-    if !state.pair_login_ok {
+fn mesh_status_write(state: &mut State, p: &mut PacketAttWrite) -> bool {
+    if !PAIR_LOGIN_OK.get() {
         return true;
     }
     unsafe {
         SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
         if (*p).l2cap_len > (3 + 1) {
-            mesh_report_status_enable_mask(state, addr_of!((*p).value) as *const u8, (*p).l2cap_len - 3);
+            mesh_report_status_enable_mask(&p.value[0..p.l2cap_len as usize - 3]);
         } else {
-            mesh_report_status_enable(state, if (*p).value[0] != 0 {true} else {false});
+            mesh_report_status_enable(p.value[0] != 0);
         }
     }
     return true;
@@ -211,8 +211,8 @@ pub struct AttributeT {
     pub attr_max_len: u8,
     pub uuid: *const u8,
     pub p_attr_value: *mut u8,
-    pub w: Option<fn(state: &mut State, data: *const PacketAttWrite) -> bool>,
-    pub r: Option<fn(state: &mut State, data: *const PacketAttWrite) -> bool>,
+    pub w: Option<fn(state: &mut State, data: &mut PacketAttWrite) -> bool>,
+    pub r: Option<fn(state: &mut State, data: &mut PacketAttWrite) -> bool>,
 }
 
 #[macro_export]

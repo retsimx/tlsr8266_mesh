@@ -1,13 +1,12 @@
-pub fn crc16(mut pD: &[u8]) -> u16 {
+pub fn crc16(data: &[u8]) -> u16 {
     let poly: [u16; 2] = [0, 0xa001]; //0x8005 <==> 0xa001
     let mut crc: u16 = 0xffff;
-    // let i,j;
 
-    let mut j = pD.len();
+    let mut j = data.len();
     while j > 0 {
-        let mut ds = pD[pD.len() - j];
+        let mut ds = data[data.len() - j];
 
-        for i in 0..8 {
+        for _ in 0..8 {
             crc = (crc >> 1) ^ poly[((crc ^ (ds as u16)) & 1) as usize];
             ds = ds >> 1;
         }

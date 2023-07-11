@@ -19,7 +19,7 @@ pub fn pair_dec_packet(state: &mut State, ps: &mut PacketAttWrite) -> bool {
         src.copy_from_slice(&ps.value[3..3+2]);
 
          aes_att_decryption_packet(
-             &PAIR_STATE.lock().unwrap().borrow().pair_sk,
+             &PAIR_STATE.lock().borrow().pair_sk,
             &state.pair_ivm,
             &src,
             &mut ps.value[5..5+ps.l2cap_len as usize - 8]
@@ -42,7 +42,7 @@ pub fn pair_enc_packet(state: &mut State, ps: &mut PacketLlApp)
         state.pair_ivs[7] = (ps.app_cmd_v.src >> 8) as u8;
 
         aes_att_encryption_packet(
-            &PAIR_STATE.lock().unwrap().borrow().pair_sk,
+            &PAIR_STATE.lock().borrow().pair_sk,
         &state.pair_ivs,
         unsafe { slice::from_raw_parts_mut(addr_of!(ps.app_cmd_v.dst) as *mut u8, 2) },
         unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.app_cmd_v.op),((ps.l2cap_len & 0xff) - 10) as usize) }
@@ -66,7 +66,7 @@ pub fn pair_dec_packet_mesh(ps: &mut MeshPkt) -> bool {
         return false;
     }
 
-    ltk.copy_from_slice(&PAIR_STATE.lock().unwrap().borrow().pair_ltk);
+    ltk.copy_from_slice(&PAIR_STATE.lock().borrow().pair_ltk);
 
     if ps.chan_id == 0xffff {
         aes_att_decryption_packet(
@@ -88,7 +88,7 @@ pub fn pair_dec_packet_mesh(ps: &mut MeshPkt) -> bool {
 pub fn pair_enc_packet_mesh(ps: &mut MeshPkt) -> bool
 {
     if SECURITY_ENABLE.get() {
-        let pair_state_binding = PAIR_STATE.lock().unwrap();
+        let pair_state_binding = PAIR_STATE.lock();
         let mut pair_state = pair_state_binding.borrow_mut();
 
         if ps.chan_id == 0xffff {
@@ -136,7 +136,7 @@ pub fn pair_save_key(state: &mut State)
         pass[1] = if state.get_mac_en { 1 } else { 0 };
     }
 
-    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state_binding = PAIR_STATE.lock();
     let pair_state = pair_state_binding.borrow();
 
     pair_flash_save_config(state, 0, pass.as_ptr(), pass.len() as u32);
@@ -174,7 +174,7 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
     }
     PAIR_READ_PENDING.set(false);
 
-    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state_binding = PAIR_STATE.lock();
     let mut pair_state = pair_state_binding.borrow_mut();;
 
     if BLE_PAIR_ST.get() == 2 {
@@ -297,7 +297,7 @@ pub fn pair_proc(state: &mut State) -> *const PacketAttReadRsp
 
 pub fn pair_set_key(state: &mut State, key: *const u8)
 {
-    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state_binding = PAIR_STATE.lock();
     let mut pair_state = pair_state_binding.borrow_mut();
     pair_state.pair_nn[0..state.max_mesh_name_len].copy_from_slice(unsafe { slice::from_raw_parts(key, state.max_mesh_name_len) });
     pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts(key.offset(0x10), 0x10) });
@@ -318,7 +318,7 @@ pub fn pair_write(state: &mut State, data: &mut PacketAttWrite) -> bool
     let opcode = unsafe { (*data).value[0] as i8 };
     let src = unsafe { addr_of!((*data).value[1]) };
 
-    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state_binding = PAIR_STATE.lock();
     let mut pair_state = pair_state_binding.borrow_mut();
 
     if opcode == 1 {

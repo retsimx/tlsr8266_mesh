@@ -153,7 +153,7 @@ impl LightManager {
             });
 
             match msg.cmd {
-                LGT_CMD_LIGHT_ONOFF => self.handle_on_off(STATE.lock().unwrap().borrow_mut().deref_mut(), msg.params[0]),
+                LGT_CMD_LIGHT_ONOFF => self.handle_on_off(STATE.lock().borrow_mut().deref_mut(), msg.params[0]),
                 LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
                 _ => {}
             }

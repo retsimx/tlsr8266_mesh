@@ -63,7 +63,7 @@ impl App {
         uprintln!("Booting FW version {}", BUILD_VERSION);
 
         // Configure the rest of the system
-        self.init(STATE.lock().unwrap().borrow_mut().deref_mut());
+        self.init(STATE.lock().borrow_mut().deref_mut());
 
         // Start the mesh packet sender
         #[embassy_executor::task]
@@ -96,7 +96,7 @@ impl App {
         let mut data = [0 as u8; 13];
         data[0] = LGT_POWER_ON;
 
-        app().mesh_manager.send_mesh_message(STATE.lock().unwrap().borrow_mut().deref_mut(), &data, 0xffff);
+        app().mesh_manager.send_mesh_message(STATE.lock().borrow_mut().deref_mut(), &data, 0xffff);
 
         // Start the panic checker to see if there is information we need to send
         #[embassy_executor::task]

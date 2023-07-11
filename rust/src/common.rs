@@ -269,7 +269,7 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key(state: &mut State)
 {
-    let pair_state_binding = PAIR_STATE.lock().unwrap();
+    let pair_state_binding = PAIR_STATE.lock();
     let pair_state = pair_state_binding.borrow();
 
     PAIR_AC.set(access_code(&pair_state.pair_nn, &pair_state.pair_pass));
@@ -291,7 +291,7 @@ pub fn pair_load_key(state: &mut State)
     let pairing_addr = FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx;
 
     if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
-        let pair_state_binding = PAIR_STATE.lock().unwrap();
+        let pair_state_binding = PAIR_STATE.lock();
         let mut pair_state = pair_state_binding.borrow_mut();
 
         pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });

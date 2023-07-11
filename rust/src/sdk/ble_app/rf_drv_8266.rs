@@ -386,7 +386,7 @@ pub fn rf_stop_trx() {
 pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
-    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock().unwrap().borrow()[LIGHT_RX_WPTR.get()]) as u16);
+    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock().borrow()[LIGHT_RX_WPTR.get()]) as u16);
 
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);

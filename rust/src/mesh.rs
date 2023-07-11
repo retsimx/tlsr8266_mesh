@@ -295,7 +295,7 @@ impl MeshManager {
             return;
         }
 
-        let pair_state_binding = PAIR_STATE.lock().unwrap();
+        let pair_state_binding = PAIR_STATE.lock();
         let mut pair_state = pair_state_binding.borrow_mut();
 
         if self.effect_new_mesh == 0 {
@@ -340,7 +340,7 @@ impl MeshManager {
             &state.pair_config_mesh_name,
             &state.pair_config_mesh_pwd,
         ));
-        PAIR_STATE.lock().unwrap().borrow_mut().pair_ltk.copy_from_slice(&state.pair_config_mesh_ltk);
+        PAIR_STATE.lock().borrow_mut().pair_ltk.copy_from_slice(&state.pair_config_mesh_ltk);
     }
 
     fn get_online_node_cnt(&mut self, state: &mut State) -> u8 {
@@ -420,7 +420,7 @@ impl MeshManager {
         {
             self.mesh_pair_time = clock_time();
             if state.pair_setting_flag == ePairState::PairSetMeshTxStart {
-                let pair_state_binding = PAIR_STATE.lock().unwrap();
+                let pair_state_binding = PAIR_STATE.lock();
                 let pair_state = pair_state_binding.borrow();
 
                 op_para[0] = LGT_CMD_MESH_PAIR;

@@ -62,7 +62,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
                 mesh_node_st.val = pkt[src_index];
                 mesh_node_st.tick = tick;
 
-                MESH_NODE_MASK.lock().unwrap().borrow_mut()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
+                MESH_NODE_MASK.lock().borrow_mut()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
 
                 result = mesh_node_max as u32;
             } else if current_index < mesh_node_max as usize {
@@ -77,7 +77,7 @@ fn mesh_node_update_status(state: &mut State, pkt: &[mesh_node_st_val_t]) -> u32
                     mesh_node_st.val = pkt[src_index];
 
                     if !par_match || mesh_node_st.tick == 0 {
-                        MESH_NODE_MASK.lock().unwrap().borrow_mut()[current_index >> 5] |= 1 << (current_index & 0x1f);
+                        MESH_NODE_MASK.lock().borrow_mut()[current_index >> 5] |= 1 << (current_index & 0x1f);
                     }
 
                     mesh_node_st.tick = tick;
@@ -250,7 +250,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt, needs_decode: bool) -> bool {
             return false;
         }
 
-        mesh_node_update_status(STATE.lock().unwrap().borrow_mut().deref_mut(), unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
+        mesh_node_update_status(STATE.lock().borrow_mut().deref_mut(), unsafe { slice::from_raw_parts(addr_of!(packet.sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
 
         return false;
     }
@@ -276,7 +276,7 @@ pub fn rf_link_rc_data(packet: &mut MeshPkt, needs_decode: bool) -> bool {
         op = op_cmd[0] & 0x3f;
     }
 
-    let mut state_binding = STATE.lock().unwrap();
+    let mut state_binding = STATE.lock();
     let mut state = state_binding.borrow_mut();
     let mut state = state.deref_mut();
 
@@ -578,7 +578,7 @@ pub fn rf_link_slave_connect(state: &mut State, packet: &PacketLlInit, time: u32
 
             MESH_NODE_REPORT_ENABLE.set(false);
 
-            MESH_NODE_MASK.lock().unwrap().borrow_mut().fill(0);
+            MESH_NODE_MASK.lock().borrow_mut().fill(0);
 
             state.p_st_handler = IrqHandlerStatus::Rx;
             state.need_update_connect_para = true;
@@ -623,7 +623,7 @@ pub fn ll_device_status_update(state: &mut State, val_par: &[u8])
     state.mesh_node_st[0].val.par.copy_from_slice(val_par);
     state.mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 
-    MESH_NODE_MASK.lock().unwrap().borrow_mut()[0] |= 1;
+    MESH_NODE_MASK.lock().borrow_mut()[0] |= 1;
 }
 
 pub fn setup_ble_parameter_start(state: &mut State, delay: u16, mut interval_min: u16, mut interval_max: u16, timeout: u32) -> u32
@@ -705,7 +705,7 @@ pub fn mesh_node_flush_status(state: &mut State)
             state.mesh_node_st[count].tick = 0;
 
             // Set the bit in the mask so that the status is reported (Since the device has changed to offline now)
-            MESH_NODE_MASK.lock().unwrap().borrow_mut()[count >> 5] |= 1 << (count & 0x1f);
+            MESH_NODE_MASK.lock().borrow_mut()[count >> 5] |= 1 << (count & 0x1f);
         }
     }
 }
@@ -1096,7 +1096,7 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8]) -> MeshPkt
 #[inline(never)]
 pub fn mesh_report_status_enable(enable: bool)
 {
-    let binding = MESH_NODE_MASK.lock().unwrap();
+    let binding = MESH_NODE_MASK.lock();
     let mut mesh_node_mask = binding.borrow_mut();
     if enable {
         if MESH_NODE_MAX.get() >> 5 != 0 {
@@ -1113,10 +1113,10 @@ pub fn mesh_report_status_enable(enable: bool)
 
 pub fn mesh_report_status_enable_mask(data: &[u8])
 {
-    let mut mesh_node_mask_binding = MESH_NODE_MASK.lock().unwrap();
+    let mut mesh_node_mask_binding = MESH_NODE_MASK.lock();
     let mut mesh_node_mask = mesh_node_mask_binding.borrow_mut();
 
-    let mut state_binding = STATE.lock().unwrap();
+    let mut state_binding = STATE.lock();
     let mut state = state_binding.borrow_mut();
 
     MESH_NODE_REPORT_ENABLE.set(data[0] != 0);

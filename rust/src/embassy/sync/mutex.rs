@@ -5,7 +5,10 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use critical_section::RestoreState;
-use crate::embassy::sync::poison::{LockResult, Flag, Guard, map_result};
+
+/// NB: Poisoning is not required for the TLSR8266 because if a panic occurs while the lock is held
+/// then the entire chip will reboot anyway. So using a mutex after a panic is impossible. Due to
+/// this the poisoning code has been removed to reduce code size and execution overheads
 
 
 /// Raw mutex trait.
@@ -125,10 +128,7 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 ///         // The shared state can only be accessed once the lock is held.
 ///         // Our non-atomic increment is safe because we're the only thread
 ///         // which can access the shared state when the lock is held.
-///         //
-///         // We unwrap() the return value to assert that we are not expecting
-///         // threads to ever fail while holding the lock.
-///         let mut data = data.lock().unwrap();
+///         let mut data = data.lock();
 ///         *data += 1;
 ///         if *data == N {
 ///             tx.send(()).unwrap();
@@ -152,7 +152,7 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 /// let _ = thread::spawn(move || -> () {
 ///     // This thread will acquire the mutex first, unwrapping the result of
 ///     // `lock` because the lock has not been poisoned.
-///     let _guard = lock2.lock().unwrap();
+///     let _guard = lock2.lock();
 ///
 ///     // This panic while holding the lock (`_guard` is in scope) will poison
 ///     // the mutex.
@@ -189,7 +189,7 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 ///     threads.push(thread::spawn(move || {
 ///         // Here we use a block to limit the lifetime of the lock guard.
 ///         let result = {
-///             let mut data = data_mutex_clone.lock().unwrap();
+///             let mut data = data_mutex_clone.lock();
 ///             // This is the result of some important and long-ish work.
 ///             let result = data.iter().fold(0, |acc, x| acc + x * 2);
 ///             data.push(result);
@@ -199,11 +199,11 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 ///         };
 ///         // The guard created here is a temporary dropped at the end of the statement, i.e.
 ///         // the lock would not remain being held even if the thread did some additional work.
-///         *res_mutex_clone.lock().unwrap() += result;
+///         *res_mutex_clone.lock() += result;
 ///     }));
 /// });
 ///
-/// let mut data = data_mutex.lock().unwrap();
+/// let mut data = data_mutex.lock();
 /// // This is the result of some important and long-ish work.
 /// let result = data.iter().fold(0, |acc, x| acc + x * 2);
 /// data.push(result);
@@ -221,7 +221,7 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 /// // Here the mutex guard is not assigned to a variable and so, even if the
 /// // scope does not end after this line, the mutex is still released: there is
 /// // no deadlock.
-/// *res_mutex.lock().unwrap() += result;
+/// *res_mutex.lock() += result;
 ///
 /// threads.into_iter().for_each(|thread| {
 ///     thread
@@ -229,13 +229,13 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 ///         .expect("The thread creating or execution failed !")
 /// });
 ///
-/// assert_eq!(*res_mutex.lock().unwrap(), 800);
+/// assert_eq!(*res_mutex.lock(), 800);
 /// ```
 ///
 
 pub struct Mutex<T: ?Sized> {
     inner: CriticalSectionRawMutex,
-    poison: Flag,
+    //poison: Flag,
     data: UnsafeCell<T>,
 }
 
@@ -256,8 +256,7 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 /// [`lock`]: Mutex::lock
 /// [`try_lock`]: Mutex::try_lock
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
-    lock: &'a Mutex<T>,
-    poison: Guard,
+    lock: &'a Mutex<T>
 }
 
 // impl<T: ?Sized> !Send for MutexGuard<'_, T> {}
@@ -274,7 +273,7 @@ impl<T> Mutex<T> {
     /// let mutex = Mutex::new(0);
     /// ```
     pub const fn new(t: T) -> Mutex<T> {
-        Mutex { inner: CriticalSectionRawMutex::new(), poison: Flag::new(), data: UnsafeCell::new(t) }
+        Mutex { inner: CriticalSectionRawMutex::new(), data: UnsafeCell::new(t) }
     }
 }
 
@@ -310,12 +309,12 @@ impl<T: ?Sized> Mutex<T> {
     /// let c_mutex = Arc::clone(&mutex);
     ///
     /// thread::spawn(move || {
-    ///     *c_mutex.lock().unwrap() = 10;
+    ///     *c_mutex.lock() = 10;
     /// }).join().expect("thread::spawn failed");
-    /// assert_eq!(*mutex.lock().unwrap(), 10);
+    /// assert_eq!(*mutex.lock(), 10);
     /// ```
     #[inline(always)]
-    pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
+    pub fn lock(&self) -> MutexGuard<'_, T> {
         unsafe {
             self.inner.lock();
             MutexGuard::new(self)
@@ -333,77 +332,13 @@ impl<T: ?Sized> Mutex<T> {
     /// use std::sync::Mutex;
     /// let mutex = Mutex::new(0);
     ///
-    /// let mut guard = mutex.lock().unwrap();
+    /// let mut guard = mutex.lock();
     /// *guard += 20;
     /// Mutex::unlock(guard);
     /// ```
     #[inline(always)]
     pub fn unlock(guard: MutexGuard<'_, T>) {
         drop(guard);
-    }
-
-    /// Determines whether the mutex is poisoned.
-    ///
-    /// If another thread is active, the mutex can still become poisoned at any
-    /// time. You should not trust a `false` value for program correctness
-    /// without additional synchronization.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::sync::{Arc, Mutex};
-    /// use std::thread;
-    ///
-    /// let mutex = Arc::new(Mutex::new(0));
-    /// let c_mutex = Arc::clone(&mutex);
-    ///
-    /// let _ = thread::spawn(move || {
-    ///     let _lock = c_mutex.lock().unwrap();
-    ///     panic!(); // the mutex gets poisoned
-    /// }).join();
-    /// assert_eq!(mutex.is_poisoned(), true);
-    /// ```
-    #[inline]
-    pub fn is_poisoned(&self) -> bool {
-        self.poison.get()
-    }
-
-    /// Clear the poisoned state from a mutex
-    ///
-    /// If the mutex is poisoned, it will remain poisoned until this function is called. This
-    /// allows recovering from a poisoned state and marking that it has recovered. For example, if
-    /// the value is overwritten by a known-good value, then the mutex can be marked as
-    /// un-poisoned. Or possibly, the value could be inspected to determine if it is in a
-    /// consistent state, and if so the poison is removed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(mutex_unpoison)]
-    ///
-    /// use std::sync::{Arc, Mutex};
-    /// use std::thread;
-    ///
-    /// let mutex = Arc::new(Mutex::new(0));
-    /// let c_mutex = Arc::clone(&mutex);
-    ///
-    /// let _ = thread::spawn(move || {
-    ///     let _lock = c_mutex.lock().unwrap();
-    ///     panic!(); // the mutex gets poisoned
-    /// }).join();
-    ///
-    /// assert_eq!(mutex.is_poisoned(), true);
-    /// let x = mutex.lock().unwrap_or_else(|mut e| {
-    ///     **e.get_mut() = 1;
-    ///     mutex.clear_poison();
-    ///     e.into_inner()
-    /// });
-    /// assert_eq!(mutex.is_poisoned(), false);
-    /// assert_eq!(*x, 1);
-    /// ```
-    #[inline]
-    pub fn clear_poison(&self) {
-        self.poison.clear();
     }
 
     /// Consumes this mutex, returning the underlying data.
@@ -421,12 +356,11 @@ impl<T: ?Sized> Mutex<T> {
     /// let mutex = Mutex::new(0);
     /// assert_eq!(mutex.into_inner().unwrap(), 0);
     /// ```
-    pub fn into_inner(self) -> LockResult<T>
+    pub fn into_inner(self) -> T
         where
             T: Sized,
     {
-        let data = self.data.into_inner();
-        map_result(self.poison.borrow(), |()| data)
+        self.data.into_inner()
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -446,11 +380,10 @@ impl<T: ?Sized> Mutex<T> {
     ///
     /// let mut mutex = Mutex::new(0);
     /// *mutex.get_mut().unwrap() = 10;
-    /// assert_eq!(*mutex.lock().unwrap(), 10);
+    /// assert_eq!(*mutex.lock(), 10);
     /// ```
-    pub fn get_mut(&mut self) -> LockResult<&mut T> {
-        let data = self.data.get_mut();
-        map_result(self.poison.borrow(), |()| data)
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.get_mut()
     }
 }
 
@@ -469,11 +402,9 @@ impl<T: ?Sized + Default> Default for Mutex<T> {
     }
 }
 
-
-
 impl<'mutex, T: ?Sized> MutexGuard<'mutex, T> {
-    unsafe fn new(lock: &'mutex Mutex<T>) -> LockResult<MutexGuard<'mutex, T>> {
-        map_result(lock.poison.guard(), |guard| MutexGuard { lock, poison: guard })
+    unsafe fn new(lock: &'mutex Mutex<T>) -> MutexGuard<'mutex, T> {
+        MutexGuard { lock }
     }
 }
 
@@ -494,7 +425,6 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
-        self.lock.poison.done(&self.poison);
         self.lock.inner.unlock();
     }
 }
@@ -515,6 +445,3 @@ pub fn guard_lock<'a, T: ?Sized>(guard: &MutexGuard<'a, T>) -> &'a CriticalSecti
     &guard.lock.inner
 }
 
-pub fn guard_poison<'a, T: ?Sized>(guard: &MutexGuard<'a, T>) -> &'a Flag {
-    &guard.lock.poison
-}

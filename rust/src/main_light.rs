@@ -204,7 +204,7 @@ fn light_user_func(state: &mut State) {
 pub async fn main_loop() {
     Timer::after(Duration::from_micros(LOOP_INTERVAL_US)).await;
 
-    let binding = STATE.lock().unwrap();
+    let binding = STATE.lock();
     let mut state = binding.borrow_mut();
     let state = state.deref_mut();
 

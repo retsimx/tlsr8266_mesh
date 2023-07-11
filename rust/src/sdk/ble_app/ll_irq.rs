@@ -88,7 +88,7 @@ pub fn mesh_node_report_status(state: &mut State, params: &mut [u8], len: usize)
     //      Iterate over each bit in the 32 bit value and find any set bits
     //      Report the status of the light at any set bits and clear the bit from the mask
 
-    let binding = MESH_NODE_MASK.lock().unwrap();
+    let binding = MESH_NODE_MASK.lock();
     let mut mesh_node_mask = binding.borrow_mut();
 
     state.mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
@@ -400,7 +400,7 @@ fn irq_light_slave_rx()
     }
 
     let mut dma_len = 0;
-    let binding = LIGHT_RX_BUFF.lock().unwrap();
+    let binding = LIGHT_RX_BUFF.lock();
     let mut light_rx_buff = binding.borrow_mut();
     let mut light_rx_buff = light_rx_buff.deref_mut();
 
@@ -426,7 +426,7 @@ fn irq_light_slave_rx()
 
     #[inline(never)]
     fn slow(rx_index: usize, dma_len: u8, light_rx_buff: &mut [LightRxBuff; 4]) {
-        let binding = STATE.lock().unwrap();
+        let binding = STATE.lock();
         let mut state = binding.borrow_mut();
         let mut state = state.deref_mut();
 
@@ -552,7 +552,7 @@ extern "C" fn irq_handler() {
 
     #[inline(never)]
     fn slow() {
-        let binding = STATE.lock().unwrap();
+        let binding = STATE.lock();
         let mut state = binding.borrow_mut();
         let mut state = state.deref_mut();
 

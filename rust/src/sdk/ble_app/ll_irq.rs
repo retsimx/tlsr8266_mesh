@@ -1,4 +1,3 @@
-use core::cell::RefMut;
 use core::mem::size_of;
 use core::ops::DerefMut;
 use core::ptr::{addr_of, null};
@@ -16,6 +15,7 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
 use crate::sdk::mcu::register::{*};
+use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttReadRsp};
 use crate::state::{*};
 
 fn slave_timing_update_handle(state: &mut State)
@@ -25,7 +25,7 @@ fn slave_timing_update_handle(state: &mut State)
         state.slave_timing_update = 0;
         let chn_map = state.slave_chn_map.clone();
         ble_ll_channel_table_calc(state, &chn_map, false);
-        state.pkt_init.chm = chn_map;
+        state.pkt_init.ll_init_mut().chm = chn_map;
     } else {
 
 
@@ -63,7 +63,7 @@ fn rf_link_slave_read_status_update(state: &mut State)
     while state.slave_status_buffer_wptr != rptr {
         rptr = rptr % BUFF_RESPONSE_PACKET_COUNT;
         let packet = state.buff_response[rptr];
-        if !rf_link_add_tx_packet(state, addr_of!(packet) as *const PacketAttCmd, size_of::<PacketAttCmd>()) {
+        if !rf_link_add_tx_packet(state, &packet) {
             return;
         }
 
@@ -305,16 +305,18 @@ pub fn irq_st_bridge(state: &mut State)
 
     if is_add_packet_buf_ready() {
         let pair_proc_result = pair_proc(state);
-        if pair_proc_result != null() {
-            rf_link_add_tx_packet(state, pair_proc_result as *const PacketAttCmd, size_of::<PacketAttReadRsp>());
+        if pair_proc_result.is_some() {
+            let pkt = *pair_proc_result.unwrap();
+            rf_link_add_tx_packet(state, &pkt);
         }
     }
     mesh_node_flush_status(state);
     if is_add_packet_buf_ready() && !app().uart_manager.started() {
         let mut data = [0u8; 20];
         if mesh_node_report_status(state, &mut data, 10 / MESH_NODE_ST_VAL_LEN) != 0 {
-            state.pkt_light_report.value.val[3..].copy_from_slice(&data);
-            rf_link_add_tx_packet(state, &state.pkt_light_report, size_of::<PacketAttCmd>());
+            state.pkt_light_report.att_cmd_mut().value.val[3..].copy_from_slice(&data);
+            let pkt = state.pkt_light_report;
+            rf_link_add_tx_packet(state, &pkt);
         }
     }
 
@@ -336,8 +338,8 @@ pub fn irq_st_bridge(state: &mut State)
         SLAVE_NEXT_CONNECT_TICK.set(SLAVE_NEXT_CONNECT_TICK.get() + SLAVE_LINK_INTERVAL.get());
 
         slave_timing_update_handle(state);
-        let chn_map = state.pkt_init.chm;
-        ble_ll_conn_get_next_channel(state, &chn_map, state.pkt_init.hop & 0x1f);
+        let chn_map = state.pkt_init.ll_init().chm;
+        ble_ll_conn_get_next_channel(state, &chn_map, state.pkt_init.ll_init().hop & 0x1f);
     }
 
     write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
@@ -353,14 +355,14 @@ pub fn irq_st_ble_rx(state: &mut State)
 
     write_reg8(0x00800f04, 0x67);  // tx wail & settle time
 
-    let chn_map = state.pkt_init.chm;
-    let next_chan = ble_ll_conn_get_next_channel(state, &chn_map, state.pkt_init.hop & 0x1f) as u8;
+    let chn_map = state.pkt_init.ll_init().chm;
+    let next_chan = ble_ll_conn_get_next_channel(state, &chn_map, state.pkt_init.ll_init().hop & 0x1f) as u8;
     rf_set_ble_channel(next_chan);
 
     // rf_set_ble_access_code(unsafe { *(addr_of!((state.pkt_init()).aa) as *const u32) });
     // rf_set_ble_crc(&(state.pkt_init()).crcinit);
-    write_reg_rf_access_code(((state.pkt_init.aa[2] as u32) << 8) | ((state.pkt_init.aa[1] as u32) << 0x10) | (state.pkt_init.aa[3] as u32) | ((state.pkt_init.aa[0] as u32) << 0x18));
-    write_reg_rf_crc(((state.pkt_init.crcinit[1] as u32) << 8) | ((state.pkt_init.crcinit[2] as u32) << 0x10) | state.pkt_init.crcinit[0] as u32);
+    write_reg_rf_access_code(((state.pkt_init.ll_init().aa[2] as u32) << 8) | ((state.pkt_init.ll_init().aa[1] as u32) << 0x10) | (state.pkt_init.ll_init().aa[3] as u32) | ((state.pkt_init.ll_init().aa[0] as u32) << 0x18));
+    write_reg_rf_crc(((state.pkt_init.ll_init().crcinit[1] as u32) << 8) | ((state.pkt_init.ll_init().crcinit[2] as u32) << 0x10) | state.pkt_init.ll_init().crcinit[0] as u32);
 
     SLAVE_NEXT_CONNECT_TICK.set(SLAVE_LINK_INTERVAL.get() + read_reg_system_tick_irq());
     if RF_SLAVE_OTA_BUSY.get() == false {
@@ -434,7 +436,7 @@ fn irq_light_slave_rx()
         let rx_time = entry.rx_time;
 
         if dma_len > 0xe && dma_len == (entry.sno[1] & 0x3f) + 0x11 && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40 {
-            let packet = addr_of!(entry.rx_time);
+            let packet = unsafe { &*(addr_of!(entry.rx_time) as *const Packet) };
 
             let cmd = entry.sno[0] & 0xf;
             RCV_PKT_TIME.set(rx_time);
@@ -446,13 +448,13 @@ fn irq_light_slave_rx()
                         write_reg_rf_mode_control(0x85);                        // single TX
 
                         state.adv_rsp_pri_data.device_address = DEVICE_ADDRESS.get();
-                        state.pkt_scan_rsp.data[0] = 0x1e;
-                        state.pkt_scan_rsp.data[1] = 0xff;
-                        state.pkt_scan_rsp.data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
+                        state.pkt_scan_rsp.scan_rsp_mut().data[0] = 0x1e;
+                        state.pkt_scan_rsp.scan_rsp_mut().data[1] = 0xff;
+                        state.pkt_scan_rsp.scan_rsp_mut().data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
                             unsafe { slice::from_raw_parts(addr_of!(state.adv_rsp_pri_data) as *const u8, size_of::<AdvRspPrivate>()) }
                         );
-                        state.pkt_scan_rsp.dma_len = 0x27;
-                        state.pkt_scan_rsp.rf_len = 0x25;
+                        state.pkt_scan_rsp.head_mut().dma_len = 0x27;
+                        state.pkt_scan_rsp.head_mut().rf_len = 0x25;
 
                         write_reg_dma3_addr(addr_of!(state.pkt_scan_rsp) as u16);
                         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
@@ -463,7 +465,7 @@ fn irq_light_slave_rx()
 
                 if cmd == 5 {
                     if entry.mac == state.mac_id[0..4] {
-                        rf_link_slave_connect(state, unsafe { &*(packet as *const PacketLlInit) }, rx_time);
+                        rf_link_slave_connect(state, packet, rx_time);
 
                         return;
                     }
@@ -471,7 +473,7 @@ fn irq_light_slave_rx()
             }
 
             if !RF_SLAVE_OTA_BUSY.get() && SLAVE_LINK_STATE.get() != 7 {
-                app().mesh_manager.add_rcv_mesh_msg(&unsafe { *(packet as *mut MeshPkt) }, true);
+                app().mesh_manager.add_rcv_mesh_msg(packet, true);
 
                 rf_set_rxmode();
                 return;
@@ -485,7 +487,7 @@ fn irq_light_slave_rx()
                 SLAVE_CONNECTED_TICK.set(read_reg_system_tick());
                 SLAVE_LINK_CONNECTED.set(true);
 
-                rf_link_slave_data(state, unsafe { &*(packet as *const PacketLlData) }, rx_time);
+                rf_link_slave_data(state, packet, rx_time);
             }
 
 

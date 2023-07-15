@@ -13,9 +13,9 @@ use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQMASK};
-use crate::sdk::light::AppCmdValue;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
+use crate::sdk::packet_types::{AppCmdValue, Packet};
 use crate::state::{DEVICE_ADDRESS, SimplifyLS, STATE, State};
 
 pub enum UartMsg {
@@ -29,13 +29,13 @@ pub enum UartMsg {
 }
 
 // AppCmdValueT
-pub fn light_mesh_rx_cb(data: &AppCmdValue) {
+pub fn light_mesh_rx_cb(data: &Packet) {
     // Don't report messages that we sent
-    if !app().uart_manager.started() || (data.src == DEVICE_ADDRESS.get() && data.dst != DEVICE_ADDRESS.get()){
+    if !app().uart_manager.started() || (data.ll_app().value.src == DEVICE_ADDRESS.get() && data.ll_app().value.dst != DEVICE_ADDRESS.get()){
         return;
     }
 
-    let data = addr_of!(*data) as *const u8;
+    let data = addr_of!(data.ll_app().value) as *const u8;
     // Compute the CRC of important bits. This is from start of AppCmdValueT.dst (5) to end of AppCmdValueT.par (20)
     let msg = unsafe {slice::from_raw_parts((data as u32 + 5) as *const u8, 20-5)};
 

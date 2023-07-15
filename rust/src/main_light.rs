@@ -21,6 +21,7 @@ use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, clock_time
 use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
+use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::state::{*};
@@ -221,11 +222,9 @@ Called to handle messages that require a response to be returned
 */
 pub fn rf_link_response_callback(
     state: &mut State,
-    ppp: *mut PacketAttValue,
-    p_req: *const PacketAttValue,
+    ppp: &mut PacketAttValue,
+    p_req: &PacketAttValue,
 ) -> bool {
-    let ppp = unsafe { &mut (*ppp) };
-    let p_req = unsafe { &(*p_req) };
     // mac-app[5] low 2 bytes used as ttc && hop-count
     let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
@@ -351,14 +350,14 @@ pub fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 Called to handle messages sent to us that don't require a response
 */
-pub fn rf_link_data_callback(state: &mut State, p: *const PacketL2capData) {
+pub fn rf_link_data_callback(state: &mut State, p: &Packet) {
     // p start from l2cap_len of RfPacketAttCmdT
     let mut op_cmd: [u8; 3] = [0; 3];
     let mut op_cmd_len: u8 = 0;
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
     rf_link_get_op_para(
-        unsafe { &*p },
+        p,
         &mut op_cmd,
         &mut op_cmd_len,
         &mut params,
@@ -428,7 +427,7 @@ pub fn rf_link_data_callback(state: &mut State, p: *const PacketL2capData) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> MeshPkt {
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> Packet {
     let mut cmd_op_para: [u8; 13] = [0; 13];
     let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
 

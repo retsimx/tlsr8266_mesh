@@ -28,7 +28,7 @@ pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
     let mut iVar2;
     let mut iVar3;
 
-    if state.pkt_adv.rf_len as i8 - 6 < 1 {
+    if state.pkt_adv.head().rf_len as i8 - 6 < 1 {
         iVar3 = 1;
         iVar1 = 2;
         iVar2 = 0;
@@ -37,13 +37,13 @@ pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
         let mut breakit = false;
         loop {
             iVar3 = iVar2 + 1;
-            if state.pkt_adv.data[iVar2 + 1] == 9 {
+            if state.pkt_adv.adv_ind_module().data[iVar2 + 1] == 9 {
                 iVar1 = iVar2 + 2;
                 breakit = true;
                 break;
             }
-            iVar2 = state.pkt_adv.data[iVar2] as usize + 1 + iVar2;
-            if iVar2 as i8 >= state.pkt_adv.rf_len as i8 - 6 {
+            iVar2 = state.pkt_adv.adv_ind_module().data[iVar2] as usize + 1 + iVar2;
+            if iVar2 as i8 >= state.pkt_adv.head().rf_len as i8 - 6 {
                 break;
             }
         }
@@ -53,12 +53,12 @@ pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
         }
     }
 
-    state.pkt_adv.data[iVar1..iVar1 + name.len()].copy_from_slice(name);
+    state.pkt_adv.adv_ind_module_mut().data[iVar1..iVar1 + name.len()].copy_from_slice(name);
 
-    state.pkt_adv.data[iVar2] = name.len() as u8 + 1;
-    state.pkt_adv.data[iVar3] = 9;
-    state.pkt_adv.dma_len = (iVar2 + name.len() + 2 + 8) as u32;
-    state.pkt_adv.rf_len = (iVar2 + name.len() + 2 + 6) as u8;
+    state.pkt_adv.adv_ind_module_mut().data[iVar2] = name.len() as u8 + 1;
+    state.pkt_adv.adv_ind_module_mut().data[iVar3] = 9;
+    state.pkt_adv.head_mut().dma_len = (iVar2 + name.len() + 2 + 8) as u32;
+    state.pkt_adv.head_mut().rf_len = (iVar2 + name.len() + 2 + 6) as u8;
 }
 
 pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
@@ -67,7 +67,7 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
     let iVar4;
     let mut iVar5;
 
-    let mut rf_len = state.pkt_adv.rf_len;
+    let mut rf_len = state.pkt_adv.head().rf_len;
     if rf_len as i8 - 6 < 1 {
         iVar4 = 1;
         iVar3 = 2;
@@ -76,10 +76,10 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
         iVar5 = 0;
         iVar3 = 0;
         loop {
-            let uVar6 = state.pkt_adv.data[iVar3] + 1;
-            let adv_data = state.pkt_adv.data.clone();
-            state.pkt_adv.data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&adv_data[iVar3..iVar3 + uVar6 as usize]);
-            if state.pkt_adv.data[iVar3 + 1] == 0xff {
+            let uVar6 = state.pkt_adv.adv_ind_module().data[iVar3] + 1;
+            let adv_data = state.pkt_adv.adv_ind_module().data.clone();
+            state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&adv_data[iVar3..iVar3 + uVar6 as usize]);
+            if state.pkt_adv.adv_ind_module().data[iVar3 + 1] == 0xff {
                 if uVar6 == 10 {
                     break;
                 }
@@ -94,46 +94,46 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
         iVar3 = iVar5 as usize + 2;
         iVar4 = iVar5 + 1;
     }
-    state.pkt_adv.data[iVar3..iVar3 + data.len()].copy_from_slice(data);
+    state.pkt_adv.adv_ind_module_mut().data[iVar3..iVar3 + data.len()].copy_from_slice(data);
 
-    state.pkt_adv.data[iVar5 as usize] = data.len() as u8 + 1;
-    state.pkt_adv.data[iVar4 as usize] = 0xff;
+    state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize] = data.len() as u8 + 1;
+    state.pkt_adv.adv_ind_module_mut().data[iVar4 as usize] = 0xff;
     iVar5 = data.len() as u8 + 2 + iVar5;
-    state.pkt_adv.dma_len = iVar5 as u32 + 8;
-    state.pkt_adv.rf_len = iVar5 + 6;
+    state.pkt_adv.head_mut().dma_len = iVar5 as u32 + 8;
+    state.pkt_adv.head_mut().rf_len = iVar5 + 6;
 
     if iVar5 + 6 + state.user_data_len < 0x26 && state.user_data_len != 0 {
-        state.pkt_adv.data[iVar5 as usize..iVar5 as usize + state.user_data_len as usize].copy_from_slice(&state.user_data);
-        state.pkt_adv.dma_len += state.user_data_len as u32;
-        state.pkt_adv.rf_len += state.user_data_len;
+        state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize..iVar5 as usize + state.user_data_len as usize].copy_from_slice(&state.user_data);
+        state.pkt_adv.head_mut().dma_len += state.user_data_len as u32;
+        state.pkt_adv.head_mut().rf_len += state.user_data_len;
     }
 }
 
 pub fn rf_link_slave_set_adv_uuid_data(state: &mut State, uuid_data: &[u8])
 {
-    let mut rf_len = state.pkt_adv.rf_len as usize;
+    let mut rf_len = state.pkt_adv.head_mut().rf_len as usize;
     if uuid_data.len() as i8 <= 0x25 - rf_len as i8 {
         if state.set_uuid_flag == false {
             rf_len = rf_len - 9;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..rf_len].copy_from_slice(&state.pkt_adv.data[3..3 + rf_len]);
+            tmp_data[0..rf_len].copy_from_slice(&state.pkt_adv.adv_ind_module().data[3..3 + rf_len]);
 
-            state.pkt_adv.data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            state.pkt_adv.data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
+            state.pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
+            state.pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
 
             state.set_uuid_flag = true;
-            state.pkt_adv.rf_len += uuid_data.len() as u8;
-            state.pkt_adv.dma_len += uuid_data.len() as u32;
+            state.pkt_adv.head_mut().rf_len += uuid_data.len() as u8;
+            state.pkt_adv.head_mut().dma_len += uuid_data.len() as u32;
         } else {
             let uuid_len = uuid_data.len() + 3;
             rf_len = (rf_len - 6) - uuid_len;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..uuid_len].copy_from_slice(&state.pkt_adv.data[0..0 + uuid_len]);
+            tmp_data[0..uuid_len].copy_from_slice(&state.pkt_adv.adv_ind_module().data[0..0 + uuid_len]);
 
-            state.pkt_adv.data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            state.pkt_adv.data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
+            state.pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
+            state.pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
         }
     }
 }

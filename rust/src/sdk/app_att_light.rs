@@ -9,6 +9,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
 use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::light::*;
+use crate::sdk::packet_types::Packet;
 use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
@@ -188,22 +189,23 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
-fn mesh_status_write(state: &mut State, p: &mut PacketAttWrite) -> bool {
+fn mesh_status_write(_: &mut State, p: &Packet) -> bool {
     if !PAIR_LOGIN_OK.get() {
         return true;
     }
     unsafe {
-        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice(slice::from_raw_parts(addr_of!((*p).value) as *const u8, 4));
-        if (*p).l2cap_len > (3 + 1) {
-            mesh_report_status_enable_mask(&p.value[0..p.l2cap_len as usize - 3]);
+        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice( &p.att_write().value[0..4]);
+        if p.head().l2cap_len > (3 + 1) {
+            mesh_report_status_enable_mask(&p.att_write().value[0..p.head().l2cap_len as usize - 3]);
         } else {
-            mesh_report_status_enable(p.value[0] != 0);
+            mesh_report_status_enable(p.att_write().value[0] != 0);
         }
     }
     return true;
 }
 
 #[repr(C, align(4))]
+#[derive(PartialEq)]
 pub struct AttributeT {
     pub att_num: u8,
     pub uuid_len: u8,
@@ -211,8 +213,8 @@ pub struct AttributeT {
     pub attr_max_len: u8,
     pub uuid: *const u8,
     pub p_attr_value: *mut u8,
-    pub w: Option<fn(state: &mut State, data: &mut PacketAttWrite) -> bool>,
-    pub r: Option<fn(state: &mut State, data: &mut PacketAttWrite) -> bool>,
+    pub w: Option<fn(state: &mut State, data: &Packet) -> bool>,
+    pub r: Option<fn(state: &mut State, data: &Packet) -> bool>,
 }
 
 #[macro_export]

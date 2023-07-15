@@ -10,3 +10,4 @@ pub mod pm;
 pub mod rf_drv;
 pub mod service;
 pub mod ble_app;
+pub mod packet_types;

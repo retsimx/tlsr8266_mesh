@@ -1,4 +1,3 @@
-use core::mem::size_of;
 use core::ptr::addr_of;
 
 use embassy_time::{Duration, Timer};
@@ -18,6 +17,7 @@ use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
+use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use crate::state::{*};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
@@ -83,12 +83,12 @@ pub struct mesh_node_st_t {
 
 struct SendPkt {
     pub delay: u64,
-    pub pkt: MeshPkt,
+    pub pkt: Packet,
 }
 
 struct RcvPkt {
     pub decode: bool,
-    pub pkt: MeshPkt,
+    pub pkt: Packet,
 }
 
 pub struct MeshManager {
@@ -144,7 +144,7 @@ impl MeshManager {
 
     pub fn send_mesh_message(&mut self, state: &mut State, data: &[u8; 13], destination: u16) {
         let pkt = light_slave_tx_command(data, destination);
-        let (group_match, device_match) = rf_link_match_group_mac(state, addr_of!(pkt.sno) as *const AppCmdValue);
+        let (group_match, device_match) = rf_link_match_group_mac(state, &pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
             if !device_match {
@@ -237,11 +237,13 @@ impl MeshManager {
             }
 
             let mut pkt_notify = PacketAttCmd {
-                dma_len: 0x1d,  // dma_len
-                _type: 0x02,    // type
-                rf_len: 0x1b,   // rf_len
-                l2cap_len: 0x17, // u16
-                chan_id: 0x04,   // chanid
+                head: PacketL2capHead {
+                    dma_len: 0x1d,  // dma_len
+                    _type: 0x02,    // type
+                    rf_len: 0x1b,   // rf_len
+                    l2cap_len: 0x17, // u16
+                    chan_id: 0x04,   // chanid
+                },
                 opcode: 0x1b,   // notify
                 handle: 0x12,
                 handle1: 0x00, // status handler
@@ -256,7 +258,7 @@ impl MeshManager {
             pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
             if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(state, addr_of!(pkt_notify), size_of::<PacketAttCmd>()) {
+                if rf_link_add_tx_packet(state, &Packet { att_cmd: pkt_notify }) {
                     err = 0;
                 }
             }
@@ -295,16 +297,18 @@ impl MeshManager {
             return;
         }
 
-        let pair_state_binding = PAIR_STATE.lock();
-        let mut pair_state = pair_state_binding.borrow_mut();
+        {
+            let pair_state_binding = PAIR_STATE.lock();
+            let mut pair_state = pair_state_binding.borrow_mut();
 
-        if self.effect_new_mesh == 0 {
-            pair_state.pair_nn.copy_from_slice(&self.new_mesh_name);
-            pair_state.pair_pass.copy_from_slice(&self.new_mesh_pwd);
-            pair_state.pair_ltk.copy_from_slice(&self.new_mesh_ltk);
-        } else {
-            let pair_ltk_mesh = pair_state.pair_ltk_mesh;
-            pair_state.pair_ltk.copy_from_slice(&pair_ltk_mesh);
+            if self.effect_new_mesh == 0 {
+                pair_state.pair_nn.copy_from_slice(&self.new_mesh_name);
+                pair_state.pair_pass.copy_from_slice(&self.new_mesh_pwd);
+                pair_state.pair_ltk.copy_from_slice(&self.new_mesh_ltk);
+            } else {
+                let pair_ltk_mesh = pair_state.pair_ltk_mesh;
+                pair_state.pair_ltk.copy_from_slice(&pair_ltk_mesh);
+            }
         }
 
         self.mesh_pair_complete_notify(state);
@@ -321,10 +325,10 @@ impl MeshManager {
         self.safe_effect_new_mesh_finish(state);
     }
 
-    pub fn mesh_pair_notify_refresh(&mut self, p: &PacketAttCmd) -> u8 {
-        if self.mesh_pair_checksum[0..8] == p.value.val[5..5 + 8] {
+    pub fn mesh_pair_notify_refresh(&mut self, p: &Packet) -> u8 {
+        if self.mesh_pair_checksum[0..8] == p.att_cmd().value.val[5..5 + 8] {
             // mesh pair : success one device, clear the mask flag
-            self.mesh_pair_notify_rsp_mask[(p.value.val[3] / 8) as usize] &= !(BIT!(p.value.val[3] % 8));
+            self.mesh_pair_notify_rsp_mask[(p.att_cmd().value.val[3] / 8) as usize] &= !(BIT!(p.att_cmd().value.val[3] % 8));
         }
 
         return 1; // if return 2, then the notify rsp will not report to master.
@@ -509,7 +513,7 @@ impl MeshManager {
         }
 
         let pkt = light_slave_tx_command(&op_para, dst_addr);
-        let (group_match, device_match) = rf_link_match_group_mac(state, addr_of!(pkt.sno) as *const AppCmdValue);
+        let (group_match, device_match) = rf_link_match_group_mac(state, &pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
             if !device_match {
@@ -538,7 +542,7 @@ impl MeshManager {
         SECURITY_ENABLE.set(enable);
     }
 
-    pub fn add_send_mesh_msg(&mut self, packet: &MeshPkt, delay: u64) {
+    pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64) {
         if self.pkt_send_buf.push(
             SendPkt {
                 delay,
@@ -571,17 +575,17 @@ impl MeshManager {
 
             let mut result = result.unwrap();
 
-            result.pkt.src_tx = DEVICE_ADDRESS.get();
-            result.pkt.handle1 = 0;
+            result.pkt.mesh_mut().src_tx = DEVICE_ADDRESS.get();
+            result.pkt.mesh_mut().handle1 = 0;
 
-            if (((result.pkt.handle1 as u32) << 0x1e) as i32) >= 0 {
+            if (((result.pkt.mesh().handle1 as u32) << 0x1e) as i32) >= 0 {
                 rf_link_proc_ttc(read_reg_system_tick(), 0, &mut result.pkt);
             }
 
             // Encrypt the packet if required
             if SECURITY_ENABLE.get()
             {
-                result.pkt._type |= BIT!(7);
+                result.pkt.head_mut()._type |= BIT!(7);
                 pair_enc_packet_mesh(&mut result.pkt);
             }
 
@@ -608,7 +612,7 @@ impl MeshManager {
         }
     }
 
-    pub fn add_rcv_mesh_msg(&mut self, packet: &MeshPkt, decode: bool) {
+    pub fn add_rcv_mesh_msg(&mut self, packet: &Packet, decode: bool) {
         if self.pkt_rcv_buf.push_back(
             RcvPkt {
                 decode,

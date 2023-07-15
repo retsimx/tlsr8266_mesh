@@ -7,14 +7,15 @@ use heapless::Deque;
 use crate::config::VENDOR_ID;
 use crate::embassy::sync::mutex::Mutex;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
-use crate::sdk::light::{AdvPrivate, AdvRspPrivate, BLT_FIFO_TX_PACKET_COUNT, BUFF_RESPONSE_PACKET_COUNT, CFG_SECTOR_ADR_CALIBRATION_CODE, IrqHandlerStatus, LIGHT_RX_BUFF_COUNT, LightRxBuff, MAX_GROUP_NUM, MESH_NODE_MASK_LEN, MESH_NODE_MAX_NUM, MeshPkt, OtaState, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttMtu, PacketAttReadRsp, PacketAttValue, PacketAttWrite, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketLlInit, PacketScanRsp, PacketVersionInd, ePairState, PktBuf, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, RfPacketAdvIndModuleT, StatusRecord};
+use crate::sdk::light::{*};
+use crate::sdk::packet_types::{*};
 
 #[repr(align(4))]
 pub struct State {
-    pub blt_tx_fifo: [[u8; 48]; BLT_FIFO_TX_PACKET_COUNT],
+    pub blt_tx_fifo: [Packet; BLT_FIFO_TX_PACKET_COUNT],
     pub blt_tx_wptr: usize,
     pub conn_update_successed: bool,
-    pub buff_response: [PacketAttData; BUFF_RESPONSE_PACKET_COUNT],
+    pub buff_response: [Packet; BUFF_RESPONSE_PACKET_COUNT],
     pub conn_update_cnt: usize,
     pub set_uuid_flag: bool,
     pub max_mesh_name_len: usize,
@@ -37,13 +38,13 @@ pub struct State {
     pub ble_ll_last_unmapped_ch: usize,
     pub ble_ll_channel_table: [u8; 40],
 
-    pub pkt_version_ind: PacketVersionInd,
-    pub rf_pkt_unknown_response: PacketCtrlUnknown,
-    pub pkt_feature_rsp: PacketFeatureRsp,
-    pub pkt_mtu_rsp: PacketAttMtu,
-    pub pkt_err_rsp: PacketAttErrRsp,
-    pub rf_packet_att_rsp: PacketAttReadRsp,
-    pub pkt_write_rsp: PacketAttWriteRsp,
+    pub pkt_version_ind: Packet,
+    pub rf_pkt_unknown_response: Packet,
+    pub pkt_feature_rsp: Packet,
+    pub pkt_mtu_rsp: Packet,
+    pub pkt_err_rsp: Packet,
+    pub rf_packet_att_rsp: Packet,
+    pub pkt_write_rsp: Packet,
     pub att_service_discover_tick: u32,
     pub slave_link_time_out: u32,
 
@@ -57,7 +58,7 @@ pub struct State {
     pub add_tx_packet_rsp_failed: u32,
     pub g_vendor_id: u16,
     pub p_st_handler: IrqHandlerStatus,
-    pub pkt_light_report: PacketAttCmd,
+    pub pkt_light_report: Packet,
 
     pub adr_reset_cnt_idx: u32,
     pub reset_cnt: u8,
@@ -131,7 +132,7 @@ pub struct State {
     pub rcv_pkt_ttc: u8,
     pub org_ttl: u8,
     pub slave_read_status_response: bool,
-    pub SLAVE_SNO: [u8; 3],
+    pub slave_sno: [u8; 3],
     pub slave_status_record_idx: usize,
     pub notify_req_mask_idx: u8,
     pub adv_flag: bool,
@@ -149,31 +150,55 @@ pub struct State {
     pub rf_tx_mode: u8,
     pub rfhw_tx_power: u8,
 
-    pub pkt_adv: RfPacketAdvIndModuleT,
-    pub pkt_scan_rsp: PacketScanRsp,
-    pub pkt_light_data: PacketAttCmd,
-    pub pkt_light_status: PacketAttCmd,
-    pub pkt_read_rsp: PacketAttReadRsp,
-    pub pkt_light_adv_status: PacketAttWrite,
-    pub pkt_mesh_user_cmd_buf: MeshPkt,
-    pub pkt_init: PacketLlInit,
+    pub pkt_adv: Packet,
+    pub pkt_scan_rsp: Packet,
+    pub pkt_light_data: Packet,
+    pub pkt_light_status: Packet,
+    pub pkt_read_rsp: Packet,
+    pub pkt_light_adv_status: Packet,
+    pub pkt_mesh_user_cmd_buf: Packet,
+    pub pkt_init: Packet,
 }
 
 pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
-    blt_tx_fifo: [[0; 48]; 8],
+    blt_tx_fifo: [
+        Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            }
+        };
+        8
+    ],
     blt_tx_wptr: 0,
     conn_update_successed: false,
-    buff_response: [PacketAttData {
-        dma_len: 0,
-        _type: 0,
-        rf_len: 0,
-        l2cap: 0,
-        chanid: 0,
-        att: 0,
-        hl: 0,
-        hh: 0,
-        dat: [0; 23],
-    }; 48],
+    buff_response: [
+        Packet {
+            att_data: PacketAttData {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                att: 0,
+                hl: 0,
+                hh: 0,
+                dat: [0; 23],
+            }
+        };
+        48
+    ],
     conn_update_cnt: 0,
     set_uuid_flag: false,
     max_mesh_name_len: 16,
@@ -215,65 +240,87 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     ble_ll_last_unmapped_ch: 0,
     ble_ll_channel_table: [0; 40],
 
-    pkt_version_ind: PacketVersionInd {
-        dma_len: 8,
-        _type: 3,
-        rf_len: 6,
-        opcode: 0x0c,
-        main_ver: 0x08,
-        vendor: VENDOR_ID,
-        sub_ver: 0x08,
+    pkt_version_ind: Packet {
+        version_ind: PacketVersionInd {
+            dma_len: 8,
+            _type: 3,
+            rf_len: 6,
+            opcode: 0x0c,
+            main_ver: 0x08,
+            vendor: VENDOR_ID,
+            sub_ver: 0x08,
+        }
     },
-    rf_pkt_unknown_response: PacketCtrlUnknown {
-        dma_len: 0x04,
-        _type: 0x03,
-        rf_len: 0x02,
-        opcode: 0x07,
-        data: [0],
+    rf_pkt_unknown_response: Packet {
+        ctrl_unknown: PacketCtrlUnknown {
+            dma_len: 0x04,
+            _type: 0x03,
+            rf_len: 0x02,
+            opcode: 0x07,
+            data: [0],
+        }
     },
-    pkt_feature_rsp: PacketFeatureRsp {
-        dma_len: 0x0b,
-        _type: 0x3,
-        rf_len: 0x09,
-        opcode: 0x09,
-        data: [1, 0, 0, 0, 0, 0, 0, 0],
+    pkt_feature_rsp: Packet {
+        feature_rsp: PacketFeatureRsp {
+            dma_len: 0x0b,
+            _type: 0x3,
+            rf_len: 0x09,
+            opcode: 0x09,
+            data: [1, 0, 0, 0, 0, 0, 0, 0],
+        }
     },
-    pkt_mtu_rsp: PacketAttMtu {
-        dma_len: 0x09,
-        _type: 2,
-        rf_len: 0x07,
-        l2cap_len: 0x03,
-        chan_id: 0x04,
-        opcode: 0x03,
-        mtu: [0x17, 0x00],
+    pkt_mtu_rsp: Packet {
+        att_mtu: PacketAttMtu {
+            head: PacketL2capHead {
+                dma_len: 0x09,
+                _type: 2,
+                rf_len: 0x07,
+                l2cap_len: 0x03,
+                chan_id: 0x04,
+            },
+            opcode: 0x03,
+            mtu: [0x17, 0x00],
+        }
     },
-    pkt_err_rsp: PacketAttErrRsp {
-        dma_len: 0x0b,
-        _type: 0x02,
-        rf_len: 0x09,
-        l2cap_len: 0x05,
-        chan_id: 0x04,
-        opcode: 0x01,
-        err_opcode: 0,
-        err_handle: 0,
-        err_reason: 0x0a,
+    pkt_err_rsp: Packet {
+        att_err_rsp: PacketAttErrRsp {
+            head: PacketL2capHead {
+                dma_len: 0x0b,
+                _type: 0x02,
+                rf_len: 0x09,
+                l2cap_len: 0x05,
+                chan_id: 0x04,
+            },
+            opcode: 0x01,
+            err_opcode: 0,
+            err_handle: 0,
+            err_reason: 0x0a,
+        }
     },
-    rf_packet_att_rsp: PacketAttReadRsp {
-        dma_len: 0,
-        _type: 0,
-        rf_len: 0,
-        l2cap_len: 0,
-        chan_id: 0,
-        opcode: 0,
-        value: [0; 22],
+    rf_packet_att_rsp: Packet {
+        att_read_rsp: PacketAttReadRsp {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 0,
+                chan_id: 0,
+            },
+            opcode: 0,
+            value: [0; 22],
+        }
     },
-    pkt_write_rsp: PacketAttWriteRsp {
-        dma_len: 0x07,
-        _type: 2,
-        rf_len: 0x05,
-        l2cap_len: 0x01,
-        chan_id: 0x04,
-        opcode: 0x13,
+    pkt_write_rsp: Packet {
+        att_write_rsp: PacketAttWriteRsp {
+            head: PacketL2capHead {
+                dma_len: 0x07,
+                _type: 2,
+                rf_len: 0x05,
+                l2cap_len: 0x01,
+                chan_id: 0x04,
+            },
+            opcode: 0x13,
+        }
     },
     att_service_discover_tick: 0,
     slave_link_time_out: 0,
@@ -288,21 +335,25 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     add_tx_packet_rsp_failed: 0,
     g_vendor_id: 0x211,
     p_st_handler: IrqHandlerStatus::None,
-    pkt_light_report: PacketAttCmd {
-        dma_len: 0x1D,
-        _type: 2,
-        rf_len: 0x1B,
-        l2cap_len: 0x17,
-        chan_id: 4,
-        opcode: 0x1B,
-        handle: 0x12,
-        handle1: 0,
-        value: PacketAttValue {
-            sno: [0; 3],
-            src: [0; 2],
-            dst: [0; 2],
-            val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        },
+    pkt_light_report: Packet {
+        att_cmd: PacketAttCmd {
+            head: PacketL2capHead {
+                dma_len: 0x1D,
+                _type: 2,
+                rf_len: 0x1B,
+                l2cap_len: 0x17,
+                chan_id: 4,
+            },
+            opcode: 0x1B,
+            handle: 0x12,
+            handle1: 0,
+            value: PacketAttValue {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            },
+        }
     },
 
     adr_reset_cnt_idx: 0,
@@ -378,7 +429,7 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     rcv_pkt_ttc: 0,
     org_ttl: 0,
     slave_read_status_response: false,
-    SLAVE_SNO: [0; 3],
+    slave_sno: [0; 3],
     slave_status_record_idx: 0,
     notify_req_mask_idx: 0,
     adv_flag: true,
@@ -396,106 +447,132 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     rf_tx_mode: 0,
     rfhw_tx_power: 0x40,
 
-    pkt_adv: RfPacketAdvIndModuleT {
-        dma_len: 0x27,
-        _type: 0,
-        rf_len: 0x25,
-        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
-        data: [0; 31],
+    pkt_adv: Packet {
+        adv_ind_module: RfPacketAdvIndModuleT {
+            dma_len: 0x27,
+            _type: 0,
+            rf_len: 0x25,
+            adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+            data: [0; 31],
+        }
     },
-    pkt_scan_rsp: PacketScanRsp {
-        dma_len: 0x27,
-        _type: 0x4,
-        rf_len: 0x25,
-        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
-        data: [0; 31],
+    pkt_scan_rsp: Packet {
+        scan_rsp: PacketScanRsp {
+            dma_len: 0x27,
+            _type: 0x4,
+            rf_len: 0x25,
+            adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+            data: [0; 31],
+        }
     },
-    pkt_light_data: PacketAttCmd {
-        dma_len: 0x27,
-        _type: 2,
-        rf_len: 0x25,
-        l2cap_len: 0xCCDD,
-        chan_id: 0,
-        opcode: 0,
-        handle: 0,
-        handle1: 0,
-        value: PacketAttValue {
+    pkt_light_data: Packet {
+        att_cmd: PacketAttCmd {
+            head: PacketL2capHead {
+                dma_len: 0x27,
+                _type: 2,
+                rf_len: 0x25,
+                l2cap_len: 0xCCDD,
+                chan_id: 0,
+            },
+            opcode: 0,
+            handle: 0,
+            handle1: 0,
+            value: PacketAttValue {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0; 23],
+            },
+        }
+    },
+    pkt_light_status: Packet {
+        att_cmd: PacketAttCmd {
+            head: PacketL2capHead {
+                dma_len: 0x27,
+                _type: 2,
+                rf_len: 0x25,
+                l2cap_len: 0x21,
+                chan_id: 0,
+            },
+            opcode: 0,
+            handle: 0,
+            handle1: 0,
+            value: PacketAttValue {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0; 23],
+            },
+        }
+    },
+    pkt_read_rsp: Packet {
+        att_read_rsp: PacketAttReadRsp {
+            head: PacketL2capHead {
+                dma_len: 0x1d,
+                _type: 2,
+                rf_len: 0x1b,
+                l2cap_len: 0x17,
+                chan_id: 0x4,
+            },
+            opcode: 0xb,
+            value: [0; 22],
+        }
+    },
+    pkt_light_adv_status: Packet {
+        att_write: PacketAttWrite {
+            head: PacketL2capHead {
+                dma_len: 0x27,
+                _type: 2,
+                rf_len: 0x25,
+                l2cap_len: 0x21,
+                chan_id: 0xffff,
+            },
+            opcode: 0,
+            handle: 0,
+            handle1: 0,
+            value: [0; 30],
+        }
+    },
+    pkt_mesh_user_cmd_buf: Packet {
+        mesh: MeshPkt {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 0,
+                chan_id: 0,
+            },
+            src_tx: 0,
+            handle1: 0,
             sno: [0; 3],
-            src: [0; 2],
-            dst: [0; 2],
-            val: [0; 23],
-        },
+            src_adr: 0,
+            dst_adr: 0,
+            op: 0,
+            vendor_id: 0,
+            par: [0; 10],
+            internal_par1: [0; 5],
+            ttl: 0,
+            internal_par2: [0; 4],
+            no_use: [0; 4],
+        }
     },
-    pkt_light_status: PacketAttCmd {
-        dma_len: 0x27,
-        _type: 2,
-        rf_len: 0x25,
-        l2cap_len: 0x21,
-        chan_id: 0,
-        opcode: 0,
-        handle: 0,
-        handle1: 0,
-        value: PacketAttValue {
-            sno: [0; 3],
-            src: [0; 2],
-            dst: [0; 2],
-            val: [0; 23],
-        },
-    },
-    pkt_read_rsp: PacketAttReadRsp {
-        dma_len: 0x1d,
-        _type: 2,
-        rf_len: 0x1b,
-        l2cap_len: 0x17,
-        chan_id: 0x4,
-        opcode: 0xb,
-        value: [0; 22],
-    },
-    pkt_light_adv_status: PacketAttWrite {
-        dma_len: 0x27,
-        rtype: 2,
-        rf_len: 0x25,
-        l2cap_len: 0x21,
-        chan_id: 0xffff,
-        opcode: 0,
-        handle: 0,
-        handle1: 0,
-        value: [0; 30],
-    },
-    pkt_mesh_user_cmd_buf: MeshPkt {
-        dma_len: 0,
-        _type: 0,
-        rf_len: 0,
-        l2cap_len: 0,
-        chan_id: 0,
-        src_tx: 0,
-        handle1: 0,
-        sno: [0; 3],
-        src_adr: 0,
-        dst_adr: 0,
-        op: 0,
-        vendor_id: 0,
-        par: [0; 10],
-        internal_par1: [0; 5],
-        ttl: 0,
-        internal_par2: [0; 4],
-        no_use: [0; 4],
-    },
-    pkt_init: PacketLlInit {
-        dma_len: 0x24,
-        _type: 0x5,
-        rf_len: 0x22,
-        scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
-        adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
-        aa: [0xaa, 0x55, 0x55, 0xaa],
-        crcinit: [0x55, 0x55, 0x55],
-        wsize: 2,
-        woffset: 0x1f,
-        interval: 0x20,
-        latency: 0,
-        timeout: 0x48,
-        chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
-        hop: 0xac,
+    pkt_init: Packet {
+        ll_init: PacketLlInit {
+            dma_len: 0x24,
+            _type: 0x5,
+            rf_len: 0x22,
+            scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+            adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+            aa: [0xaa, 0x55, 0x55, 0xaa],
+            crcinit: [0x55, 0x55, 0x55],
+            wsize: 2,
+            woffset: 0x1f,
+            interval: 0x20,
+            latency: 0,
+            timeout: 0x48,
+            chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+            hop: 0xac,
+        }
     },
 }));
 
@@ -541,6 +618,28 @@ pub static LIGHT_RX_BUFF: Mutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = M
         }; LIGHT_RX_BUFF_COUNT
     ]
 ));
+
+// This needs to be forced in to .data otherwise the DMA module will try to fetch from flash, which
+// doesn't work
+#[link_section = ".data"]
+pub static PKT_EMPTY: PacketL2capHead = PacketL2capHead {
+    dma_len: 2,
+    _type: 1,
+    rf_len: 0,
+    l2cap_len: 0,
+    chan_id: 0,
+};
+
+#[link_section = ".data"]
+pub static PKT_TERMINATE: Packet = Packet {
+    ctrl_unknown: PacketCtrlUnknown {
+        dma_len: 4,
+        _type: 3,
+        rf_len: 2,
+        opcode: 2,
+        data: [0x13],
+    }
+};
 
 pub static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 

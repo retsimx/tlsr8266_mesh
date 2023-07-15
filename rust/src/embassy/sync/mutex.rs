@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
-use core::cell::{RefCell, UnsafeCell};
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use critical_section::RestoreState;
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 
 /// NB: Poisoning is not required for the TLSR8266 because if a panic occurs while the lock is held
 /// then the entire chip will reboot anyway. So using a mutex after a panic is impossible. Due to
@@ -45,7 +47,7 @@ pub unsafe trait RawMutex {
 
 pub struct CriticalSectionRawMutex {
     _phantom: PhantomData<()>,
-    _restore_state: RefCell<RestoreState>
+    _restore_state: AtomicU8
 }
 
 unsafe impl Send for CriticalSectionRawMutex {}
@@ -54,7 +56,7 @@ unsafe impl Sync for CriticalSectionRawMutex {}
 impl CriticalSectionRawMutex {
     /// Create a new `CriticalSectionRawMutex`.
     pub const fn new() -> Self {
-        Self { _phantom: PhantomData, _restore_state: RefCell::new(RestoreState::invalid()) }
+        Self { _phantom: PhantomData, _restore_state: AtomicU8::new(0) }
     }
 }
 
@@ -63,12 +65,12 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        unsafe { self._restore_state.replace(critical_section::acquire()); }
+        self._restore_state.store(irq_disable(), Ordering::Relaxed);
     }
 
     #[inline(always)]
     fn unlock(&self) {
-        unsafe { critical_section::release(*self._restore_state.borrow()); }
+        irq_restore(self._restore_state.load(Ordering::Relaxed));
     }
 }
 

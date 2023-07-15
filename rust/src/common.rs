@@ -9,6 +9,7 @@ use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
+use crate::sdk::packet_types::Packet;
 use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
 use crate::state::{*};
 
@@ -52,11 +53,11 @@ pub fn dev_addr_with_mac_match(state: &mut State, params: &[u8]) -> bool {
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
-pub fn save_pair_info(state: &mut State, adr: u32, p: *const u8, n: u32) {
+pub fn save_pair_info(state: &mut State, adr: u32, p: &[u8]) {
     flash_write_page(
         (FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx + adr as i32) as u32,
-        n,
-        p,
+        p.len() as u32,
+        p.as_ptr()
     );
 }
 
@@ -93,21 +94,20 @@ pub fn update_ble_parameter_cb(state: &mut State) {
     }
 }
 
-pub fn rf_update_conn_para(state: &mut State, p: &PacketLlData) -> u8 {
-    let pp = unsafe { &*(addr_of!(*p) as *const PktL2capSigConnParaUpRsp) };
+pub fn rf_update_conn_para(state: &mut State, p: &Packet) -> u8 {
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
     for i in 0..9 {
         unsafe {
-            if *((&pp.rf_len) as *const u8).offset(i) != sig_conn_param_update_rsp[i as usize] {
+            if *((&p.head().rf_len) as *const u8).offset(i) != sig_conn_param_update_rsp[i as usize] {
                 equal = false;
             }
         }
     }
 
-    if equal && (((*pp)._type & 0b11) == 2) {
+    if equal && (p.head()._type & 0b11) == 2 {
         //l2cap data pkt, start pkt
-        match (*pp).result {
+        match p.sig_conn_para_up_rsp().result {
             0x0000 => {
                 state.conn_update_cnt = 0;
                 state.conn_update_successed = true;
@@ -291,26 +291,28 @@ pub fn pair_load_key(state: &mut State)
     let pairing_addr = FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx;
 
     if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
-        let pair_state_binding = PAIR_STATE.lock();
-        let mut pair_state = pair_state_binding.borrow_mut();
+        {
+            let pair_state_binding = PAIR_STATE.lock();
+            let mut pair_state = pair_state_binding.borrow_mut();
 
-        pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
-        pair_state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
-        pair_state.pair_ltk.iter_mut().for_each(|v| { *v = 0 });
+            pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
+            pair_state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
+            pair_state.pair_ltk.iter_mut().for_each(|v| { *v = 0 });
 
-        pair_state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
-        pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
+            pair_state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
+            pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
 
-        if MESH_PAIR_ENABLE.get() {
-            state.get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
+            if MESH_PAIR_ENABLE.get() {
+                state.get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
+            }
+
+            let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
+            if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
+                decode_password(state, &mut pair_state.pair_pass);
+            }
+
+            pair_state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
         }
-
-        let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
-        if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
-            decode_password(state, &mut pair_state.pair_pass);
-        }
-
-        pair_state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
 
         pair_update_key(state);
     }

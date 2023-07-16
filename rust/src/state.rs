@@ -86,42 +86,7 @@ pub static ADV_RSP_PRI_DATA: Mutex<UnsafeCell<AdvRspPrivate>> = Mutex::new(Unsaf
 ));
 
 pub static BLE_LL_CHANNEL_TABLE: Mutex<UnsafeCell<[u8; 40]>> = Mutex::new(UnsafeCell::new([0; 40]));
-pub static PKT_VERSION_IND: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        version_ind:
-        PacketVersionInd {
-            dma_len: 8,
-            _type: 3,
-            rf_len: 6,
-            opcode: 0x0c,
-            main_ver: 0x08,
-            vendor: VENDOR_ID,
-            sub_ver: 0x08,
-        }
-    }
-));
-pub static RF_PKT_UNKNOWN_RESPONSE: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        ctrl_unknown: PacketCtrlUnknown {
-            dma_len: 0x04,
-            _type: 0x03,
-            rf_len: 0x02,
-            opcode: 0x07,
-            data: [0],
-        }
-    }
-));
-pub static PKT_FEATURE_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        feature_rsp: PacketFeatureRsp {
-            dma_len: 0x0b,
-            _type: 0x3,
-            rf_len: 0x09,
-            opcode: 0x09,
-            data: [1, 0, 0, 0, 0, 0, 0, 0],
-        }
-    }
-));
+
 pub static PKT_MTU_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
     Packet {
         att_mtu: PacketAttMtu {
@@ -395,12 +360,14 @@ pub static LIGHT_RX_BUFF: Mutex<UnsafeCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> 
 // This needs to be forced in to .data otherwise the DMA module will try to fetch from flash, which
 // doesn't work
 #[link_section = ".data"]
-pub static PKT_EMPTY: PacketL2capHead = PacketL2capHead {
-    dma_len: 2,
-    _type: 1,
-    rf_len: 0,
-    l2cap_len: 0,
-    chan_id: 0,
+pub static PKT_EMPTY: Packet = Packet {
+    head: PacketL2capHead {
+        dma_len: 2,
+        _type: 1,
+        rf_len: 0,
+        l2cap_len: 0,
+        chan_id: 0,
+    }
 };
 
 #[link_section = ".data"]

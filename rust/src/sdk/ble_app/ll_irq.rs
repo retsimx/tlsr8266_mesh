@@ -4,7 +4,7 @@ use core::ptr::{addr_of, null};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::{app};
+use crate::{app, uprintln};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;

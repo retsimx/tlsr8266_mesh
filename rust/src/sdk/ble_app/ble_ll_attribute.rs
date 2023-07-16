@@ -4,11 +4,12 @@ use core::slice;
 
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use crate::config::VENDOR_ID;
 
 use crate::sdk::app_att_light::{AttributeT, get_gAttributes, SEND_TO_MASTER};
 use crate::sdk::light::OtaState;
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::sdk::packet_types::Packet;
+use crate::sdk::packet_types::{Packet, PacketCtrlUnknown, PacketFeatureRsp, PacketVersionInd};
 use crate::state::{*};
 use crate::uprintln;
 
@@ -112,21 +113,55 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet>
     if packet.l2cap_data().opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8 {
         let handle = packet.l2cap_data().handle1;
         if handle == 0xc {
-            PKT_VERSION_IND.lock().get_mut().head_mut().rf_len = 6;
+
             ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
-            return Some(*PKT_VERSION_IND.lock().get_mut())
+
+            return Some(
+                Packet {
+                    version_ind: PacketVersionInd {
+                        dma_len: 8,
+                        _type: 3,
+                        rf_len: 6,
+                        opcode: 0x0c,
+                        main_ver: 0x08,
+                        vendor: VENDOR_ID,
+                        sub_ver: 0x08,
+                    }
+                }
+            )
         }
         if handle != 8 {
             if handle == 2 {
                 SLAVE_LINK_TIME_OUT.set(1000000);
                 return None
             }
-            RF_PKT_UNKNOWN_RESPONSE.lock().get_mut().ctrl_unknown_mut().data[0] = handle;
-            return Some(*RF_PKT_UNKNOWN_RESPONSE.lock().get_mut())
+
+            return Some(
+                Packet {
+                    ctrl_unknown: PacketCtrlUnknown {
+                        dma_len: 0x04,
+                        _type: 0x03,
+                        rf_len: 0x02,
+                        opcode: 0x07,
+                        data: [handle],
+                    }
+                }
+            )
         }
-        PKT_FEATURE_RSP.lock().get_mut().head_mut().rf_len = 9;
+
         ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
-        return Some(*PKT_FEATURE_RSP.lock().get_mut())
+
+        return Some(
+            Packet {
+                feature_rsp: PacketFeatureRsp {
+                    dma_len: 0x0b,
+                    _type: 0x3,
+                    rf_len: 0x09,
+                    opcode: 0x09,
+                    data: [1, 0, 0, 0, 0, 0, 0, 0],
+                }
+            }
+        )
     }
 
     if *bytemuck::from_bytes::<u16>(&packet.l2cap_data().value[1..3]) != 4u16 {
@@ -135,8 +170,6 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet>
 
     let mut rf_packet_att_rsp_binding = RF_PACKET_ATT_RSP.lock();
     let mut _rf_packet_att_rsp = rf_packet_att_rsp_binding.get_mut();
-
-    uprintln!("Got op {}", packet.l2cap_data().value[3]);
 
     return match FromPrimitive::from_u8(packet.l2cap_data().value[3]) {
         Some(GattOp::AttOpExchangeMtuReq) => {

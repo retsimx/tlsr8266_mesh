@@ -937,12 +937,12 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
         BLT_TX_WPTR.set((index + 1) % BLT_FIFO_TX_PACKET_COUNT);
 
         let mut blt_tx_fifo_binding = BLT_TX_FIFO.lock();
-        let mut _blt_tx_fifo = blt_tx_fifo_binding.get_mut();
+        let mut blt_tx_fifo = blt_tx_fifo_binding.get_mut();
 
-        _blt_tx_fifo[index] = *packet;
-        pair_enc_packet(&mut _blt_tx_fifo[index]);
+        blt_tx_fifo[index] = *packet;
+        pair_enc_packet(&mut blt_tx_fifo[index]);
 
-        write_reg_dma_tx_fifo(addr_of!(_blt_tx_fifo[index]) as u16);
+        write_reg_dma_tx_fifo(addr_of!(blt_tx_fifo[index]) as u16);
         return true;
     }
     return false;

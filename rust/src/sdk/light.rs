@@ -110,7 +110,7 @@ pub const MESH_NODE_MAX_NUM: usize = 64;
 pub const MESH_NODE_MASK_LEN: usize = ((MESH_NODE_MAX_NUM + 31) >> 5);
 
 pub const LIGHT_RX_BUFF_COUNT: usize = 4;
-pub const BUFF_RESPONSE_PACKET_COUNT: usize = 48;
+pub const BUFF_RESPONSE_PACKET_COUNT: usize = 16;
 pub const BLT_FIFO_TX_PACKET_COUNT: usize = 8;
 
 pub const PKT_CMD_LEN: usize = 11;

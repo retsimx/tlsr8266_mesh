@@ -457,7 +457,7 @@ fn irq_light_slave_rx()
                         _pkt_scan_rsp.head_mut().dma_len = 0x27;
                         _pkt_scan_rsp.head_mut().rf_len = 0x25;
 
-                        write_reg_dma3_addr(addr_of!(_pkt_scan_rsp) as u16);
+                        write_reg_dma3_addr(addr_of!(*_pkt_scan_rsp) as u16);
                         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
 
                         return;

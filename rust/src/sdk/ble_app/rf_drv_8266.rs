@@ -3,7 +3,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
-use crate::{BIT, uprintln};
+use crate::{BIT, uprintln, uprintln_fast};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -473,7 +473,7 @@ fn rf_link_slave_read_status_start(_pkt_light_data: &mut Packet)
     NOTIFY_REQ_MASK_IDX.set(0);
 }
 
-fn rf_link_slave_data_write_no_dec(data: &mut Packet) -> bool {
+fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     if data.head().rf_len < 0x11 {
         return false;
     }
@@ -535,7 +535,7 @@ fn rf_link_slave_data_write_no_dec(data: &mut Packet) -> bool {
 
     unsafe {
         slice::from_raw_parts_mut(
-            addr_of_mut!(_pkt_light_data) as *mut u8,
+            addr_of_mut!(*_pkt_light_data) as *mut u8,
             params_len as usize + 0x11,
         ).copy_from_slice(
             slice::from_raw_parts(

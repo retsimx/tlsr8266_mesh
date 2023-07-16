@@ -103,8 +103,8 @@ pub struct MeshManager {
     mesh_pair_timeout: u32,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 10>,
-    pkt_rcv_buf: Deque<RcvPkt, 10>,
+    pkt_send_buf: Vec<SendPkt, 20>,
+    pkt_rcv_buf: Deque<RcvPkt, 20>,
 }
 
 impl MeshManager {

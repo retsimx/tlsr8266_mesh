@@ -31,18 +31,18 @@ pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
     return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
 }
 
-pub fn dev_addr_with_mac_rsp(state: &mut State, par_rsp: &mut [u8]) -> bool {
-    par_rsp[4..10].copy_from_slice(&state.mac_id);
+pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
+    par_rsp[4..10].copy_from_slice(&*MAC_ID.lock().get_mut());
     return true;
 }
 
-pub fn dev_addr_with_mac_match(state: &mut State, params: &[u8]) -> bool {
+pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
     return if params[0] == 0xff && params[1] == 0xff {
         // get
-        state.get_mac_en
+        GET_MAC_EN.get()
     } else {
         for i in 0..6 {
-            if params[i] != (state.mac_id)[i] {
+            if params[i] != (MAC_ID.lock().get_mut())[i] {
                 return false;
             }
         }
@@ -53,9 +53,9 @@ pub fn dev_addr_with_mac_match(state: &mut State, params: &[u8]) -> bool {
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
-pub fn save_pair_info(state: &mut State, adr: u32, p: &[u8]) {
+pub fn save_pair_info(adr: u32, p: &[u8]) {
     flash_write_page(
-        (FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx + adr as i32) as u32,
+        (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get() + adr as i32) as u32,
         p.len() as u32,
         p.as_ptr()
     );
@@ -81,20 +81,18 @@ pub fn save_pair_info(state: &mut State, adr: u32, p: &[u8]) {
     interval_min + 20 ms <= interval_max <= 2second
     timeout <= 6second
 */
-pub fn update_ble_parameter_cb(state: &mut State) {
-    if !state.conn_update_successed {
+pub fn update_ble_parameter_cb() {
+    if !CONN_UPDATE_SUCCESSED.get() {
         setup_ble_parameter_start(
-            state,
-            1,
             CONN_PARA_DATA[0][0],
             CONN_PARA_DATA[0][1],
             CONN_PARA_DATA[0][2] as u32,
         ); // interval 32: means 40ms;   timeout 200: means 2000ms
-        state.conn_update_cnt += 1;
+        CONN_UPDATE_CNT.inc();
     }
 }
 
-pub fn rf_update_conn_para(state: &mut State, p: &Packet) -> u8 {
+pub fn rf_update_conn_para(p: &Packet) -> u8 {
     let sig_conn_param_update_rsp: [u8; 9] = [0x0A, 0x06, 0x00, 0x05, 0x00, 0x13, 0x01, 0x02, 0x00];
     let mut equal = true;
     for i in 0..9 {
@@ -109,21 +107,19 @@ pub fn rf_update_conn_para(state: &mut State, p: &Packet) -> u8 {
         //l2cap data pkt, start pkt
         match p.sig_conn_para_up_rsp().result {
             0x0000 => {
-                state.conn_update_cnt = 0;
-                state.conn_update_successed = true;
+                CONN_UPDATE_CNT.set(0);
+                CONN_UPDATE_SUCCESSED.set(true);
             }
             0x0001 => {
-                if state.conn_update_cnt >= UPDATE_CONN_PARA_CNT {
-                    state.conn_update_cnt = 0;
+                if CONN_UPDATE_CNT.get() >= UPDATE_CONN_PARA_CNT {
+                    CONN_UPDATE_CNT.set(0);
                 } else {
                     setup_ble_parameter_start(
-                        state,
-                        1,
-                        CONN_PARA_DATA[state.conn_update_cnt][0],
-                        CONN_PARA_DATA[state.conn_update_cnt][1],
-                        CONN_PARA_DATA[state.conn_update_cnt][2] as u32,
+                        CONN_PARA_DATA[CONN_UPDATE_CNT.get()][0],
+                        CONN_PARA_DATA[CONN_UPDATE_CNT.get()][1],
+                        CONN_PARA_DATA[CONN_UPDATE_CNT.get()][2] as u32,
                     );
-                    state.conn_update_cnt += 1;
+                    CONN_UPDATE_CNT.inc();
                 }
             }
             _ => ()
@@ -133,33 +129,33 @@ pub fn rf_update_conn_para(state: &mut State, p: &Packet) -> u8 {
     return 0;
 }
 
-pub fn retrieve_dev_grp_address(state: &mut State)
+pub fn retrieve_dev_grp_address()
 {
     let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
-    let mut addr_next_pos = state.dev_address_next_pos;
+    let mut addr_next_pos = DEV_ADDRESS_NEXT_POS.get();
     let mut grp_next_pos = 0;
     let mut dest_addr_index = 0;
     let mut grp_addr_ptr = FLASH_ADR_DEV_GRP_ADR;
     loop {
-        state.dev_address_next_pos = addr_next_pos;
-        state.dev_grp_next_pos = grp_next_pos;
+        DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
+        DEV_GRP_NEXT_POS.set(grp_next_pos);
         let grp_addr;
         unsafe { grp_addr = *(grp_addr_ptr as *const u16); }
 
         grp_next_pos = grp_next_pos + 2;
         if grp_addr == 0xffff { break; }
         if grp_addr == 0 {
-            state.dev_address_next_pos = addr_next_pos;
+            DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
         } else {
             if grp_addr & !dev_mask == 0 {
                 DEVICE_ADDRESS.set(grp_addr & dev_mask);
                 addr_next_pos = grp_next_pos;
-                state.dev_grp_next_pos = addr_next_pos;
-                state.dev_address_next_pos = addr_next_pos;
+                DEV_GRP_NEXT_POS.set(addr_next_pos);
+                DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
             } else {
-                unsafe { *((state.group_address.as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
+                unsafe { *((GROUP_ADDRESS.lock().get_mut().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
                 dest_addr_index = dest_addr_index + 1;
-                state.dev_grp_next_pos = grp_next_pos;
+                DEV_GRP_NEXT_POS.set(grp_next_pos);
             }
         }
         grp_addr_ptr = grp_addr_ptr + 2;
@@ -168,38 +164,41 @@ pub fn retrieve_dev_grp_address(state: &mut State)
         }
     }
     if DEVICE_ADDRESS.get() == 0 {
-        DEVICE_ADDRESS.set((state.mac_id[0] as u16) | ((state.mac_id[1] as u16) << 8));
-        if state.mac_id[0] == 0 {
+        DEVICE_ADDRESS.set((MAC_ID.lock().get_mut()[0] as u16) | ((MAC_ID.lock().get_mut()[1] as u16) << 8));
+        if MAC_ID.lock().get_mut()[0] == 0 {
             DEVICE_ADDRESS.set(1);
         }
     }
 }
 
-pub fn mesh_node_init(state: &mut State)
+pub fn mesh_node_init()
 {
-    app().mesh_manager.mesh_node_buf_init(state);
+    app().mesh_manager.mesh_node_buf_init();
 
-    state.mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
-    state.mesh_node_st[0].val.sn = state.device_node_sn;
+    let mut mesh_node_st_binding = MESH_NODE_ST.lock();
+    let mut _mesh_node_st = mesh_node_st_binding.get_mut();
+
+    _mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
+    _mesh_node_st[0].val.sn = DEVICE_NODE_SN.get();
     MESH_NODE_MAX.set(1);
 }
 
-pub fn pair_flash_clean(state: &mut State)
+pub fn pair_flash_clean()
 {
     let mut flash_dat_swap: [u8; 64] = [0; 64];
     let flash_dat_swap_len = flash_dat_swap.len();
 
-    if state.adr_flash_cfg_idx >= 0xeff {
-        let src_addr = (FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx) as *const u8;
+    if ADR_FLASH_CFG_IDX.get() >= 0xeff {
+        let src_addr = (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get()) as *const u8;
         unsafe { flash_dat_swap.copy_from_slice(slice::from_raw_parts(src_addr, flash_dat_swap_len)); }
 
         flash_erase_sector(FLASH_ADR_PAIRING);
         flash_write_page(FLASH_ADR_PAIRING, flash_dat_swap_len as u32, flash_dat_swap.as_ptr());
-        state.adr_flash_cfg_idx = 0;
+        ADR_FLASH_CFG_IDX.set(0);
     }
 }
 
-pub fn pair_flash_config_init(state: &mut State) -> bool
+pub fn pair_flash_config_init() -> bool
 {
     let result;
 
@@ -215,11 +214,11 @@ pub fn pair_flash_config_init(state: &mut State) -> bool
                     break;
                 }
             };
-            state.adr_flash_cfg_idx = index as i32 + -0x40;
-            pair_flash_clean(state);
+            ADR_FLASH_CFG_IDX.set(index as i32 + -0x40);
+            pair_flash_clean();
             result = true;
         } else {
-            state.adr_flash_cfg_idx = -0x41;
+            ADR_FLASH_CFG_IDX.set(-0x41);
             result = false;
         }
     }
@@ -267,10 +266,10 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
     return destbuf[0];
 }
 
-pub fn pair_update_key(state: &mut State)
+pub fn pair_update_key()
 {
-    let pair_state_binding = PAIR_STATE.lock();
-    let pair_state = pair_state_binding.borrow();
+    let mut pair_state_binding = PAIR_STATE.lock();
+    let pair_state = pair_state_binding.get_mut();
 
     PAIR_AC.set(access_code(&pair_state.pair_nn, &pair_state.pair_pass));
     let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
@@ -278,42 +277,43 @@ pub fn pair_update_key(state: &mut State)
         None => pair_state.pair_nn.len()
     };
 
-    let name_len = min(state.max_mesh_name_len, name_len);
+    let name_len = min(MAX_MESH_NAME_LEN.get(), name_len);
 
-    rf_link_slave_set_adv_mesh_name(state, &pair_state.pair_nn[0..name_len]);
-    rf_link_slave_set_adv_private_data(state, unsafe { slice::from_raw_parts(addr_of!(state.adv_pri_data) as *const u8, size_of::<AdvPrivate>()) });
+    rf_link_slave_set_adv_mesh_name(&pair_state.pair_nn[0..name_len]);
+    let tmp = ADV_PRI_DATA.lock().get_mut().clone();
+    rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
 }
 
-pub fn pair_load_key(state: &mut State)
+pub fn pair_load_key()
 {
-    pair_flash_config_init(state);
+    pair_flash_config_init();
 
-    let pairing_addr = FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx;
+    let pairing_addr = FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get();
 
-    if -1 < state.adr_flash_cfg_idx && pairing_addr != 0x0 {
+    if -1 < ADR_FLASH_CFG_IDX.get() && pairing_addr != 0x0 {
         {
-            let pair_state_binding = PAIR_STATE.lock();
-            let mut pair_state = pair_state_binding.borrow_mut();
+            let mut pair_state_binding = PAIR_STATE.lock();
+            let pair_state = pair_state_binding.get_mut();
 
             pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
             pair_state.pair_pass.iter_mut().for_each(|v| { *v = 0 });
             pair_state.pair_ltk.iter_mut().for_each(|v| { *v = 0 });
 
-            pair_state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, state.max_mesh_name_len) });
+            pair_state.pair_nn.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x10) as *const u8, MAX_MESH_NAME_LEN.get()) });
             pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
 
             if MESH_PAIR_ENABLE.get() {
-                state.get_mac_en = unsafe { *(pairing_addr as *const bool).offset(0x1) };
+                GET_MAC_EN.set(unsafe { *(pairing_addr as *const bool).offset(0x1) });
             }
 
             let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
             if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
-                decode_password(state, &mut pair_state.pair_pass);
+                decode_password(&mut pair_state.pair_pass);
             }
 
             pair_state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });
         }
 
-        pair_update_key(state);
+        pair_update_key();
     }
 }

@@ -26,34 +26,32 @@ pub const FLASH_ADR_PAR_MAX: u32 = 0x80000;
 pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
 pub const CFG_SECTOR_ADR_MAC_CODE: u32 = CFG_ADR_MAC_512K_FLASH;
 
-fn reset_cnt_clean(state: &mut State) {
-
-
-    if state.adr_reset_cnt_idx < 3840 {
+fn reset_cnt_clean() {
+    if ADR_RESET_CNT_IDX.get() < 3840 {
         return;
     }
     flash_erase_sector(FLASH_ADR_RESET_CNT);
-    state.adr_reset_cnt_idx = 0;
+    ADR_RESET_CNT_IDX.set(0);
 }
 
-fn write_reset_cnt(state: &mut State, cnt: u8) {
+fn write_reset_cnt(cnt: u8) {
     let data = [cnt];
     flash_write_page(
-        FLASH_ADR_RESET_CNT + state.adr_reset_cnt_idx,
+        FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get(),
         1,
         data.as_ptr(),
     );
 }
 
-fn clear_reset_cnt(state: &mut State) {
-    write_reset_cnt(state, RESET_CNT_RECOUNT_FLAG);
+fn clear_reset_cnt() {
+    write_reset_cnt(RESET_CNT_RECOUNT_FLAG);
 }
 
-fn reset_cnt_get_idx(state: &mut State) {
+fn reset_cnt_get_idx() {
     let pf = FLASH_ADR_RESET_CNT as *const u8;
-    state.adr_reset_cnt_idx = 0;
-    while state.adr_reset_cnt_idx < 4096 {
-        let restcnt_bit = unsafe { *pf.offset(state.adr_reset_cnt_idx as isize) };
+    ADR_RESET_CNT_IDX.set(0);
+    while ADR_RESET_CNT_IDX.get() < 4096 {
+        let restcnt_bit = unsafe { *pf.offset(ADR_RESET_CNT_IDX.get() as isize) };
         if restcnt_bit != RESET_CNT_RECOUNT_FLAG
         //end
         {
@@ -61,103 +59,97 @@ fn reset_cnt_get_idx(state: &mut State) {
         	 || ((!(BIT!(0)|BIT!(1)|BIT!(2)|BIT!(3)|BIT!(4)|BIT!(5))) as u8 == restcnt_bit)
             {
                 // the fifth not valid
-                clear_reset_cnt(state);
+                clear_reset_cnt();
             } else {
                 break;
             }
         }
-        state.adr_reset_cnt_idx += 1;
+        ADR_RESET_CNT_IDX.inc();
     }
 
-    reset_cnt_clean(state);
+    reset_cnt_clean();
 }
 
-fn get_reset_cnt_bit(state: &mut State) -> u8 {
-    if state.adr_reset_cnt_idx < 0 {
-        reset_cnt_clean(state);
+fn get_reset_cnt_bit() -> u8 {
+    if ADR_RESET_CNT_IDX.get() < 0 {
+        reset_cnt_clean();
         return 0;
     }
 
     let mut data = [0];
     flash_read_page(
-        FLASH_ADR_RESET_CNT + state.adr_reset_cnt_idx,
+        FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get(),
         1,
         data.as_mut_ptr(),
     );
-    state.reset_cnt = data[0];
-    return state.reset_cnt;
+    RESET_CNT.set(data[0]);
+    return RESET_CNT.get();
 }
 
-fn increase_reset_cnt(state: &mut State) {
-    let mut restcnt_bit = get_reset_cnt_bit(state);
+fn increase_reset_cnt() {
+    let mut restcnt_bit = get_reset_cnt_bit();
     for i in 0..8 {
         if restcnt_bit & BIT!(i) != 0 {
-            {
-
-                if i < 3 {
-                    state.reset_cnt = i;
-                } else if i < 5 {
-                    state.reset_cnt = 3;
-                } else if i < 7 {
-                    state.reset_cnt = 4;
-                }
+            if i < 3 {
+                RESET_CNT.set(i);
+            } else if i < 5 {
+                RESET_CNT.set(3);
+            } else if i < 7 {
+                RESET_CNT.set(4);
             }
 
             restcnt_bit &= !(BIT!(i));
-            write_reset_cnt(state, restcnt_bit);
+            write_reset_cnt(restcnt_bit);
             break;
         }
     }
 }
 
-pub fn factory_reset_handle(state: &mut State) {
-    reset_cnt_get_idx(state);
-    let restcnt_bit = get_reset_cnt_bit(state);
+pub fn factory_reset_handle() {
+    reset_cnt_get_idx();
+    let restcnt_bit = get_reset_cnt_bit();
     if restcnt_bit == RESET_FLAG {
         irq_disable();
         factory_reset();
         app().ota_manager.rf_led_ota_ok();
         light_sw_reboot();
     } else {
-        increase_reset_cnt(state);
+        increase_reset_cnt();
     }
 }
 
-pub fn factory_reset_cnt_check(state: &mut State) {
+pub fn factory_reset_cnt_check() {
     let mut increase_cnt = false;
     let mut clear_cnt = false;
-    {
 
+    if CLEAR_ST.get() == 0 {
+        return;
+    }
 
-        if state.clear_st == 0 {
-            return;
+    if CLEAR_ST.get() == 3 {
+        CLEAR_ST.set(CLEAR_ST.get() - 1);
+        RESET_CHECK_TIME.set(FACTORY_RESET_SERIALS[RESET_CNT.get() as usize * 2] as u32);
+    }
+
+    if CLEAR_ST.get() == 2 && clock_time_exceed(0, RESET_CHECK_TIME.get() * 1000 * 1000) {
+        CLEAR_ST.set(CLEAR_ST.get() - 1);
+       RESET_CHECK_TIME.set(FACTORY_RESET_SERIALS[RESET_CNT.get() as usize * 2 + 1] as u32);
+        if RESET_CNT.get() == 3 || RESET_CNT.get() == 4 {
+            increase_cnt = true;
         }
+    }
 
-        if state.clear_st == 3 {
-            state.clear_st -= 1;
-            state.reset_check_time = FACTORY_RESET_SERIALS[state.reset_cnt as usize * 2] as u32;
-        }
-
-        if state.clear_st == 2 && clock_time_exceed(0, state.reset_check_time * 1000 * 1000) {
-           state.clear_st -= 1;
-           state.reset_check_time = FACTORY_RESET_SERIALS[state.reset_cnt as usize * 2 + 1] as u32;
-            if state.reset_cnt == 3 || state.reset_cnt == 4 {
-                increase_cnt = true;
-            }
-        }
-
-        if state.clear_st == 1 && clock_time_exceed(0, state.reset_check_time * 1000 * 1000) {
-            state.clear_st = 0;
-            clear_cnt = true;
-        }
+    if CLEAR_ST.get() == 1 && clock_time_exceed(0, RESET_CHECK_TIME.get() * 1000 * 1000) {
+        CLEAR_ST.set(0);
+        clear_cnt = true;
     }
 
     if increase_cnt {
-        increase_reset_cnt(state);
+        increase_reset_cnt();
     }
 
     if clear_cnt {
-        clear_reset_cnt(state);
+        clear_reset_cnt();
     }
 }
 
@@ -196,18 +188,18 @@ impl TryFrom<u32> for KickoutReason {
     }
 }
 
-pub fn kick_out(state: &mut State, par: KickoutReason) {
+pub fn kick_out(par: KickoutReason) {
     factory_reset();
 
     if par == KickoutReason::OutOfMesh {
         let pairing_addr = FLASH_ADR_PAIRING;
-        let mut buff: [u8; 16] = state.pair_config_mesh_ltk;
+        let mut buff: [u8; 16] = *PAIR_CONFIG_MESH_LTK.lock().get_mut();
         flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];
         let len = min(MESH_PWD.len(), buff.len());
         buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-        encode_password(state, &mut buff);
+        encode_password(&mut buff);
         flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];
@@ -220,7 +212,7 @@ pub fn kick_out(state: &mut State, par: KickoutReason) {
         buff[15] = PAIR_VALID_FLAG;
 
         if MESH_PAIR_ENABLE.get() {
-            state.get_mac_en = true;
+            GET_MAC_EN.set(true);
             buff[1] = 1;
         }
         flash_write_page(pairing_addr, 16, buff.as_mut_ptr());

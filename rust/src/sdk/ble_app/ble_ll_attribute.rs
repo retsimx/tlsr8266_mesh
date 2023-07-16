@@ -1,15 +1,15 @@
-use core::mem::size_of_val;
-use core::ptr::{addr_of, addr_of_mut, null};
+use core::ops::Deref;
+use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 
 use crate::sdk::app_att_light::{AttributeT, get_gAttributes, SEND_TO_MASTER};
-use crate::sdk::light::{OtaState};
+use crate::sdk::light::OtaState;
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::sdk::packet_types::Packet;
-use crate::state::State;
+use crate::state::{*};
 use crate::uprintln;
 
 #[cfg(not(test))]
@@ -107,38 +107,43 @@ pub fn l2cap_att_search(mut handle_start: usize, handle_end: usize, uuid: &[u8])
     return None;
 }
 
-pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
+pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet>
 {
     if packet.l2cap_data().opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8 {
         let handle = packet.l2cap_data().handle1;
         if handle == 0xc {
-            state.pkt_version_ind.head_mut().rf_len = 6;
-            state.att_service_discover_tick = read_reg_system_tick() | 1;
-            return Some(state.pkt_version_ind)
+            PKT_VERSION_IND.lock().get_mut().head_mut().rf_len = 6;
+            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+            return Some(*PKT_VERSION_IND.lock().get_mut())
         }
         if handle != 8 {
             if handle == 2 {
-                state.slave_link_time_out = 1000000;
+                SLAVE_LINK_TIME_OUT.set(1000000);
                 return None
             }
-            state.rf_pkt_unknown_response.ctrl_unknown_mut().data[0] = handle;
-            return Some(state.rf_pkt_unknown_response)
+            RF_PKT_UNKNOWN_RESPONSE.lock().get_mut().ctrl_unknown_mut().data[0] = handle;
+            return Some(*RF_PKT_UNKNOWN_RESPONSE.lock().get_mut())
         }
-        state.pkt_feature_rsp.head_mut().rf_len = 9;
-        state.att_service_discover_tick = read_reg_system_tick() | 1;
-        return Some(state.pkt_feature_rsp)
+        PKT_FEATURE_RSP.lock().get_mut().head_mut().rf_len = 9;
+        ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+        return Some(*PKT_FEATURE_RSP.lock().get_mut())
     }
 
     if *bytemuck::from_bytes::<u16>(&packet.l2cap_data().value[1..3]) != 4u16 {
         return None
     }
 
+    let mut rf_packet_att_rsp_binding = RF_PACKET_ATT_RSP.lock();
+    let mut _rf_packet_att_rsp = rf_packet_att_rsp_binding.get_mut();
+
+    uprintln!("Got op {}", packet.l2cap_data().value[3]);
+
     return match FromPrimitive::from_u8(packet.l2cap_data().value[3]) {
         Some(GattOp::AttOpExchangeMtuReq) => {
-            return Some(state.pkt_mtu_rsp)
+            return Some(*PKT_MTU_RSP.lock().get_mut())
         }
         Some(GattOp::AttOpFindInfoReq) => {
-            state.att_service_discover_tick = read_reg_system_tick() | 1;
+            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
             let mut start_handle = packet.l2cap_data().value[4] as usize;
             let mut end_handle = packet.l2cap_data().value[6] as usize;
             if get_gAttributes()[0].att_num < packet.l2cap_data().value[6] {
@@ -156,23 +161,23 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                         if counter == 0 {
                             break;
                         }
-
-                        state.rf_packet_att_rsp.head_mut().l2cap_len = counter + 2;
-                        state.rf_packet_att_rsp.head_mut().dma_len = counter as u32 + 8;
-                        state.rf_packet_att_rsp.head_mut()._type = 2;
-                        state.rf_packet_att_rsp.head_mut().rf_len = counter as u8 + 6;
-                        state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 5;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = handle;
-                        return Some(state.rf_packet_att_rsp)
+                        
+                        _rf_packet_att_rsp.head_mut().l2cap_len = counter + 2;
+                        _rf_packet_att_rsp.head_mut().dma_len = counter as u32 + 8;
+                        _rf_packet_att_rsp.head_mut()._type = 2;
+                        _rf_packet_att_rsp.head_mut().rf_len = counter as u8 + 6;
+                        _rf_packet_att_rsp.head_mut().chan_id = 4;
+                        _rf_packet_att_rsp.att_read_rsp_mut().opcode = 5;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[0] = handle;
+                        return Some(*_rf_packet_att_rsp)
                     }
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 1] = start_handle as u8;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 2] = 0;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 1] = start_handle as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 2] = 0;
                     if get_gAttributes()[start_handle].uuid_len == 2 {
-                        *bytemuck::from_bytes_mut(&mut state.rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 3..counter as usize + 5]) = unsafe { *(get_gAttributes()[start_handle].uuid as *const u16) };
+                        *bytemuck::from_bytes_mut(&mut _rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 3..counter as usize + 5]) = unsafe { *(get_gAttributes()[start_handle].uuid as *const u16) };
                         counter = counter + 4;
                     } else {
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 3..counter as usize + 3 + 0x10].copy_from_slice(
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[counter as usize + 3..counter as usize + 3 + 0x10].copy_from_slice(
                             unsafe {
                                 slice::from_raw_parts(
                                     get_gAttributes()[start_handle].uuid,
@@ -187,23 +192,23 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                     }
                     start_handle = start_handle + 1;
                     if end_handle < start_handle || 0x17 < offset_adj + counter {
-                        state.rf_packet_att_rsp.head_mut().l2cap_len = counter + 2;
-                        state.rf_packet_att_rsp.head_mut().dma_len = counter as u32 + 8;
-                        state.rf_packet_att_rsp.head_mut()._type = 2;
-                        state.rf_packet_att_rsp.head_mut().rf_len = counter as u8 + 6;
-                        state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 5;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = handle;
-                        return Some(state.rf_packet_att_rsp)
+                        _rf_packet_att_rsp.head_mut().l2cap_len = counter + 2;
+                        _rf_packet_att_rsp.head_mut().dma_len = counter as u32 + 8;
+                        _rf_packet_att_rsp.head_mut()._type = 2;
+                        _rf_packet_att_rsp.head_mut().rf_len = counter as u8 + 6;
+                        _rf_packet_att_rsp.head_mut().chan_id = 4;
+                        _rf_packet_att_rsp.att_read_rsp_mut().opcode = 5;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[0] = handle;
+                        return Some(*_rf_packet_att_rsp)
                     }
                 }
             }
-            state.pkt_err_rsp.att_err_rsp_mut().err_opcode = 4;
-            state.pkt_err_rsp.att_err_rsp_mut().err_handle = start_handle as u16;
-            Some(state.pkt_err_rsp)
+            PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_opcode = 4;
+            PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_handle = start_handle as u16;
+            Some(*PKT_ERR_RSP.lock().get_mut())
         }
         Some(GattOp::AttOpFindByTypeValueReq) => {
-            state.att_service_discover_tick = read_reg_system_tick() | 1;
+            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
             let mut start_handle = packet.l2cap_data().value[4] as usize;
             let end_handle = packet.l2cap_data().value[6] as usize;
             let mut uuid = [0; 2];
@@ -219,11 +224,11 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 let found_attr = &handle.unwrap().0[0];
                 let found_handle = handle.unwrap().1;
                 if found_attr.attr_len == 2 && unsafe { *(found_attr.p_attr_value as *const u16) } == value {
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2] = (found_handle & 0xff) as u8;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2 + 1] = (found_handle >> 8) as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2] = (found_handle & 0xff) as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2 + 1] = (found_handle >> 8) as u8;
                     start_handle = counter + 1;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2] = (found_attr.att_num as usize + (found_handle - 1) & 0xff) as u8;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2 + 1] = (found_attr.att_num as usize + (found_handle - 1) >> 8) as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2] = (found_attr.att_num as usize + (found_handle - 1) & 0xff) as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2 + 1] = (found_attr.att_num as usize + (found_handle - 1) >> 8) as u8;
                     counter = start_handle + 1;
                     start_handle = found_handle + found_attr.att_num as usize;
                 } else {
@@ -235,24 +240,24 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 }
             }
             if counter == 0 {
-                state.pkt_err_rsp.att_err_rsp_mut().err_opcode = 6;
-                state.pkt_err_rsp.att_err_rsp_mut().err_handle = start_handle as u16;
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_opcode = 6;
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_handle = start_handle as u16;
 
-                Some(state.pkt_err_rsp)
+                Some(*PKT_ERR_RSP.lock().get_mut())
             } else {
                 let c2 = counter * 2;
-                state.rf_packet_att_rsp.head_mut().dma_len = c2 as u32 + 7;
-                state.rf_packet_att_rsp.head_mut()._type = 2;
-                state.rf_packet_att_rsp.head_mut().rf_len = c2 as u8 + 5;
-                state.rf_packet_att_rsp.head_mut().l2cap_len = c2 as u16 + 1;
-                state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 7;
+                _rf_packet_att_rsp.head_mut().dma_len = c2 as u32 + 7;
+                _rf_packet_att_rsp.head_mut()._type = 2;
+                _rf_packet_att_rsp.head_mut().rf_len = c2 as u8 + 5;
+                _rf_packet_att_rsp.head_mut().l2cap_len = c2 as u16 + 1;
+                _rf_packet_att_rsp.head_mut().chan_id = 4;
+                _rf_packet_att_rsp.att_read_rsp_mut().opcode = 7;
 
-                Some(state.rf_packet_att_rsp)
+                Some(*_rf_packet_att_rsp)
             }
         }
         Some(GattOp::AttOpReadByTypeReq) => {
-            state.att_service_discover_tick = read_reg_system_tick() | 1;
+            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
             let mut handle_start = packet.l2cap_data().value[4] as usize;
             let handle_end = packet.l2cap_data().value[6] as usize;
             let mut bytes_read = 0;
@@ -265,7 +270,7 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 let handle = l2cap_att_search(handle_start, handle_end, &uuid);
                 if handle == None
                 {
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
                     bytes_read = 0;
                 } else {
                     let found_attr = &handle.unwrap().0[0];
@@ -276,10 +281,10 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
 
                     bytes_read = found_attr.attr_len + 2;
 
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize].copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize].copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
                 }
             } else {
                 let mut uuid = [0; 2];
@@ -289,7 +294,7 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                     let handle = l2cap_att_search(handle_start, handle_end, &uuid);
                     if handle == None
                     {
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
                         bytes_read = 0;
                     } else {
                         let found_attr = &handle.unwrap().0[0];
@@ -300,10 +305,10 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
 
                         bytes_read = (*found_attr).attr_len + 2;
 
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize].copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
-                        state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize].copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
+                        _rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
                     }
                 }
 
@@ -323,19 +328,19 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                         break;
                     }
 
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8;
                     bytes_read = bytes_read + 1;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
                     bytes_read = bytes_read + 1;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = unsafe { *(found_attr[0]).p_attr_value };
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = unsafe { *(found_attr[0]).p_attr_value };
                     bytes_read = bytes_read + 1;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8 + 1;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8 + 1;
                     bytes_read = bytes_read + 1;
                     handle_start = found_handle + 2;
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
                     bytes_read = bytes_read + 1;
 
-                    state.rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1..bytes_read as usize + 1 + (found_attr[1]).uuid_len as usize].copy_from_slice(
+                    _rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1..bytes_read as usize + 1 + (found_attr[1]).uuid_len as usize].copy_from_slice(
                         unsafe {
                             slice::from_raw_parts(
                                 found_attr[1].uuid,
@@ -347,22 +352,22 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                     counter = found_attr[1].uuid_len;
                     bytes_read = counter + bytes_read;
                 }
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter + 5;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter + 5;
             }
             if bytes_read == 0 {
-                state.pkt_err_rsp.att_err_rsp_mut().err_opcode = 8;
-                state.pkt_err_rsp.att_err_rsp_mut().err_handle = found_handle as u16;
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_opcode = 8;
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_handle = found_handle as u16;
 
-                Some(state.pkt_err_rsp)
+                Some(*PKT_ERR_RSP.lock().get_mut())
             } else {
-                state.rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
-                state.rf_packet_att_rsp.head_mut()._type = 2;
-                state.rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
-                state.rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
-                state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 9;
+                _rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
+                _rf_packet_att_rsp.head_mut()._type = 2;
+                _rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
+                _rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
+                _rf_packet_att_rsp.head_mut().chan_id = 4;
+                _rf_packet_att_rsp.att_read_rsp_mut().opcode = 9;
 
-                Some(state.rf_packet_att_rsp)
+                Some(*_rf_packet_att_rsp)
             }
         }
         Some(GattOp::AttOpReadReq) => {
@@ -377,7 +382,7 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
             if get_gAttributes()[att_num].r.is_none() {
                 unsafe {
                     slice::from_raw_parts_mut(
-                        addr_of_mut!(state.rf_packet_att_rsp.att_read_rsp_mut().value[0]),
+                        addr_of_mut!(_rf_packet_att_rsp.att_read_rsp_mut().value[0]),
                         get_gAttributes()[att_num].attr_len as usize,
                     ).copy_from_slice(
                         slice::from_raw_parts(
@@ -389,24 +394,24 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
 
                 if get_gAttributes()[att_num].p_attr_value == unsafe { SEND_TO_MASTER.as_mut_ptr() } {
                     unsafe { SEND_TO_MASTER.fill(0); }
-                } else if att_num == 0x18 && state.rf_slave_ota_finished_flag != OtaState::Continue {
-                    state.rf_slave_ota_terminate_flag = true;
+                } else if att_num == 0x18 && *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() != OtaState::Continue {
+                    RF_SLAVE_OTA_TERMINATE_FLAG.set(true);
                 }
-                state.rf_packet_att_rsp.head_mut().rf_len = get_gAttributes()[att_num].attr_len + 5;
-                state.rf_packet_att_rsp.head_mut().dma_len = state.rf_packet_att_rsp.head().rf_len as u32 + 2;
-                state.rf_packet_att_rsp.head_mut()._type = 2;
-                state.rf_packet_att_rsp.head_mut().l2cap_len = get_gAttributes()[att_num].attr_len as u16 + 1;
-                state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 0xb;
-                return Some(state.rf_packet_att_rsp)
+                _rf_packet_att_rsp.head_mut().rf_len = get_gAttributes()[att_num].attr_len + 5;
+                _rf_packet_att_rsp.head_mut().dma_len = _rf_packet_att_rsp.head_mut().rf_len as u32 + 2;
+                _rf_packet_att_rsp.head_mut()._type = 2;
+                _rf_packet_att_rsp.head_mut().l2cap_len = get_gAttributes()[att_num].attr_len as u16 + 1;
+                _rf_packet_att_rsp.head_mut().chan_id = 4;
+                _rf_packet_att_rsp.att_read_rsp_mut().opcode = 0xb;
+                return Some(*_rf_packet_att_rsp)
             }
 
-            get_gAttributes()[att_num].r.unwrap()(state, packet);
+            get_gAttributes()[att_num].r.unwrap()(packet);
 
             None
         }
         Some(GattOp::AttOpReadByGroupTypeReq) => {
-            state.att_service_discover_tick = read_reg_system_tick() | 1;
+            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
             let mut handle_start = packet.l2cap_data().value[4] as usize;
             let handle_end = packet.l2cap_data().value[6] as usize;
             let mut uuid = [0; 2];
@@ -434,15 +439,15 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                     break;
                 }
                 counter = handle.unwrap().1;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 1] = (counter & 0xff) as u8;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 2] = (counter >> 8) as u8;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 1] = (counter & 0xff) as u8;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 2] = (counter >> 8) as u8;
 
                 handle_start = dest_ptr + 1;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1] = (((counter - 1) + (*found_attr).att_num as usize) & 0xff) as u8;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 2] = (((counter - 1) + (*found_attr).att_num as usize) >> 8) as u8;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1] = (((counter - 1) + (*found_attr).att_num as usize) & 0xff) as u8;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 2] = (((counter - 1) + (*found_attr).att_num as usize) >> 8) as u8;
 
                 handle_start = handle_start + 1;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1..(handle_start * 2) + (*found_attr).attr_len as usize + 1].copy_from_slice(
+                _rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1..(handle_start * 2) + (*found_attr).attr_len as usize + 1].copy_from_slice(
                     unsafe {
                         slice::from_raw_parts(
                             found_attr.p_attr_value,
@@ -459,19 +464,19 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 }
             }
             if dest_ptr == 0 {
-                state.pkt_err_rsp.att_err_rsp_mut().err_opcode = 0x10;
-                state.pkt_err_rsp.att_err_rsp_mut().err_handle = packet.l2cap_data().value[4] as u16;
-                Some(state.pkt_err_rsp)
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_opcode = 0x10;
+                PKT_ERR_RSP.lock().get_mut().att_err_rsp_mut().err_handle = packet.l2cap_data().value[4] as u16;
+                Some(*PKT_ERR_RSP.lock().get_mut())
             } else {
-                state.rf_packet_att_rsp.head_mut().dma_len = (dest_ptr as u32 + 4) * 2;
-                state.rf_packet_att_rsp.head_mut()._type = 2;
-                state.rf_packet_att_rsp.head_mut().rf_len = state.rf_packet_att_rsp.head().dma_len as u8 - 2;
-                state.rf_packet_att_rsp.head_mut().l2cap_len = state.rf_packet_att_rsp.head().dma_len as u16 - 6;
-                state.rf_packet_att_rsp.head_mut().chan_id = 4;
-                state.rf_packet_att_rsp.att_read_rsp_mut().opcode = 0x11;
-                state.rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter as u8 + 4;
+                _rf_packet_att_rsp.head_mut().dma_len = (dest_ptr as u32 + 4) * 2;
+                _rf_packet_att_rsp.head_mut()._type = 2;
+                _rf_packet_att_rsp.head_mut().rf_len = _rf_packet_att_rsp.head_mut().dma_len as u8 - 2;
+                _rf_packet_att_rsp.head_mut().l2cap_len = _rf_packet_att_rsp.head_mut().dma_len as u16 - 6;
+                _rf_packet_att_rsp.head_mut().chan_id = 4;
+                _rf_packet_att_rsp.att_read_rsp_mut().opcode = 0x11;
+                _rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter as u8 + 4;
 
-                Some(state.rf_packet_att_rsp)
+                Some(*_rf_packet_att_rsp)
             }
         }
         Some(GattOp::AttOpWriteReq) | Some(GattOp::AttOpWriteCmd) => {
@@ -495,7 +500,7 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 return result;
             }
             if packet.l2cap_data().value[3] == 0x12 {
-                result = Some(state.pkt_write_rsp)
+                result = Some(*PKT_WRITE_RSP.lock().get_mut())
             }
             if get_gAttributes()[att_num].w.is_none() {
                 if unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) } < 3 {
@@ -526,7 +531,7 @@ pub fn l2cap_att_handler(state: &mut State, packet: &Packet) -> Option<Packet>
                 return result;
             }
 
-            get_gAttributes()[att_num].w.unwrap()(state, packet);
+            get_gAttributes()[att_num].w.unwrap()(packet);
 
             result
         }

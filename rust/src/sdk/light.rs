@@ -80,11 +80,11 @@ pub const LGT_PANIC_MSG: u8 = 0x34;
 
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;
-// return 8 group_address(low 1byte)
+// return 8 GROUP_ADDRESS(low 1byte)
 pub const GET_GROUP2: u8 = 2;
-// return front 4 group_address
+// return front 4 GROUP_ADDRESS
 pub const GET_GROUP3: u8 = 3;
-// return behind 4 group_address
+// return behind 4 GROUP_ADDRESS
 pub const GET_DEV_ADDR: u8 = 4;
 // return device address
 pub const GET_USER_NOTIFY: u8 = 7;
@@ -150,6 +150,7 @@ pub enum RecoverStatus {
     MeshOtaMaster100 = BIT!(1),
 }
 
+#[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct AdvPrivate {
     pub manufacture_id: u16,
@@ -158,6 +159,7 @@ pub struct AdvPrivate {
     pub mac_address: u32, // low 4 byte
 }
 
+#[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct AdvRspPrivate {
     pub manufacture_id: u16,             // 0
@@ -208,6 +210,9 @@ pub const UPDATE_CONNECT_PARA_DELAY_MS: u32 = 1000;
 pub const INTERVAL_THRESHOLD: u16 = 16;
 pub const ONLINE_STATUS_COMP: u32 = 3;
 pub const SLAVE_READ_STATUS_BUSY_TIMEOUT: u32 = 25000;
+
+pub const ADV_INTERVAL2LISTEN_INTERVAL: u16 = 4;
+pub const ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL: u16 = 8;
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum IrqHandlerStatus {

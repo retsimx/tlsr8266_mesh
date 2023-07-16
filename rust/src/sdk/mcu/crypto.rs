@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::ptr::addr_of;
 use crate::sdk::mcu::register::{read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key};
-use crate::state::State;
+use crate::state::{PAIR_CONFIG_PWD_ENCODE_SK};
 
 pub fn aes_ll_encryption(key: &[u8], source: &[u8], dest: &mut [u8], direction: u8)
 {
@@ -66,17 +66,17 @@ pub fn aes_att_decryption(key: &[u8], source: &[u8], dest: &mut [u8])
     aes_ll_swap(dest);
 }
 
-pub fn encode_password(state: &State, password: &mut [u8])
+pub fn encode_password(password: &mut [u8])
 {
     unsafe {
-        aes_att_encryption(&state.pair_config_pwd_encode_sk, &*addr_of!(*password), password);
+        aes_att_encryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut().as_slice(), &*addr_of!(*password), password);
     }
 }
 
-pub fn decode_password(state: &State, password: &mut [u8])
+pub fn decode_password(password: &mut [u8])
 {
     unsafe {
-        aes_att_decryption(&state.pair_config_pwd_encode_sk, &*addr_of!(*password), password);
+        aes_att_decryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut().as_slice(), &*addr_of!(*password), password);
     }
 }
 

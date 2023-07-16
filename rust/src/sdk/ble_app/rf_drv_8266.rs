@@ -1,5 +1,5 @@
 use core::cmp::min;
-use core::ops::DerefMut;
+use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
@@ -20,7 +20,7 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode, write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src, write_reg_rf_access_code, write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn, write_reg_system_tick_irq, write_reg_system_tick_mode};
 use crate::sdk::mcu::register::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc};
-use crate::sdk::packet_types::{Packet, PacketAttData, PacketAttValue};
+use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttData, PacketAttValue};
 use crate::sdk::pm::light_sw_reboot;
 use crate::state::{*};
 use crate::version::BUILD_VERSION;
@@ -341,16 +341,13 @@ const TBL_RF_INI: [TBLCMDSET; 61] = [
     }
 ];
 
-pub unsafe fn rf_drv_init(state: &mut State, enable: bool) -> u8
+pub unsafe fn rf_drv_init(enable: bool) -> u8
 {
     let result = analog_read(rega_deepsleep_flag) & 0x40;
 
     // This function is not complete
     critical_section::with(|_| {
-        state.rf_tx_mode = 0;
         if enable {
-            state.rfhw_tx_power = 0x40; // FR_TX_PA_MAX_POWER
-
             #[cfg(feature = "xtal-16mhz")]
             load_tbl_cmd_set(TBL_RF_INI.as_ptr(), TBL_RF_INI.len() as u32);
 
@@ -387,7 +384,7 @@ pub fn rf_stop_trx() {
 pub unsafe fn blc_ll_init_basic_mcu()
 {
     write_reg16(0xf0a, 700);
-    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock().borrow()[LIGHT_RX_WPTR.get()]) as u16);
+    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock().get_mut()[LIGHT_RX_WPTR.get()]) as u16);
 
     write_reg_dma2_ctrl(0x104);
     write_reg_dma_chn_irq_msk(0);
@@ -450,39 +447,39 @@ fn rf_link_get_rsp_type(opcode: u8, unk: u8) -> u8
     return result;
 }
 
-fn rf_link_slave_read_status_start(state: &mut State)
+fn rf_link_slave_read_status_start(_pkt_light_data: &mut Packet)
 {
-    state.slave_read_status_busy_time = read_reg_system_tick();
-    state.slave_read_status_busy = rf_link_get_rsp_type(state.pkt_light_data.att_cmd().value.val[0] & 0x3f,state.pkt_light_data.att_cmd().value.val[4]);
-    state.slave_read_status_unicast_flag = !state.pkt_light_data.att_cmd().value.dst[1] >> 7;
-    if -1 < (!((state.pkt_light_data.att_cmd().value.dst[1] as u32) << 0x18)) as i32 {
-       state.pkt_light_data.att_cmd_mut().value.val[8..8 + 4].fill(0);
-       state.pkt_light_data.att_cmd_mut().value.val[12] = state.slave_read_status_unicast_flag;
+    SLAVE_READ_STATUS_BUSY_TIME.set(read_reg_system_tick());
+    SLAVE_READ_STATUS_BUSY.set(rf_link_get_rsp_type(_pkt_light_data.att_cmd_mut().value.val[0] & 0x3f, _pkt_light_data.att_cmd_mut().value.val[4]));
+    SLAVE_READ_STATUS_UNICAST_FLAG.set(!_pkt_light_data.att_cmd_mut().value.dst[1] >> 7);
+    if -1 < (!((_pkt_light_data.att_cmd_mut().value.dst[1] as u32) << 0x18)) as i32 {
+       _pkt_light_data.att_cmd_mut().value.val[8..8 + 4].fill(0);
+       _pkt_light_data.att_cmd_mut().value.val[12] = SLAVE_READ_STATUS_UNICAST_FLAG.get();
     }
-    if state.pkt_light_data.att_cmd().value.val[0] & 0x3f == 0x1a {
-       state.pkt_light_data.att_cmd_mut().value.val[4..8 + 4].fill(0);
-       state.pkt_light_data.att_cmd_mut().value.val[3] = state.slave_status_tick;
+    if _pkt_light_data.att_cmd_mut().value.val[0] & 0x3f == 0x1a {
+       _pkt_light_data.att_cmd_mut().value.val[4..8 + 4].fill(0);
+       _pkt_light_data.att_cmd_mut().value.val[3] = SLAVE_STATUS_TICK.get();
     }
 
-    rf_link_slave_read_status_par_init(state);
+    rf_link_slave_read_status_par_init();
 
-    state.buff_response.fill(Packet { att_data: PacketAttData::default() });
+    BUFF_RESPONSE.lock().get_mut().fill(Packet { att_data: PacketAttData::default() });
 
-    state.slave_status_record_idx = 0;
-    state.slave_status_record.fill(
+    SLAVE_STATUS_RECORD_IDX.set(0);
+    SLAVE_STATUS_RECORD.lock().get_mut().fill(
         StatusRecord { adr: [0; 1], alarm_id: 0 }
     );
 
-    state.notify_req_mask_idx = 0;
+    NOTIFY_REQ_MASK_IDX.set(0);
 }
 
-fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut Packet) -> bool {
+fn rf_link_slave_data_write_no_dec(data: &mut Packet) -> bool {
     if data.head().rf_len < 0x11 {
         return false;
     }
 
     let sno = &data.att_write().value[0..3];
-    if sno == state.slave_sno {
+    if sno == *SLAVE_SNO.lock().get_mut() {
         return true;
     }
 
@@ -499,7 +496,7 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut Packet) -> bool
         false,
     );
 
-    let (group_match, device_match) = rf_link_match_group_mac(state, data);
+    let (group_match, device_match) = rf_link_match_group_mac(data);
     let op;
     let mut tmp = data.att_write().value[6] as u32;
     if op_cmd_len == 3 {
@@ -526,12 +523,19 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut Packet) -> bool
             // mesh_node_check_force_notify(uVar4, params[0]);
         }
     }
-   state.pkt_light_data.att_cmd_mut().value = PacketAttValue::default();
-   state.pkt_light_status.att_cmd_mut().value = PacketAttValue::default();
+
+    let mut pkt_light_status_binding = PKT_LIGHT_STATUS.lock();
+    let mut _pkt_light_status = pkt_light_status_binding.get_mut();
+
+    let mut pkt_light_data_binding = PKT_LIGHT_DATA.lock();
+    let mut _pkt_light_data = pkt_light_data_binding.get_mut();
+
+    _pkt_light_data.att_cmd_mut().value = PacketAttValue::default();
+    _pkt_light_status.att_cmd_mut().value = PacketAttValue::default();
 
     unsafe {
         slice::from_raw_parts_mut(
-            addr_of_mut!(state.pkt_light_data) as *mut u8,
+            addr_of_mut!(_pkt_light_data) as *mut u8,
             params_len as usize + 0x11,
         ).copy_from_slice(
             slice::from_raw_parts(
@@ -541,112 +545,111 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut Packet) -> bool
         )
     }
 
-   state.pkt_light_data.head_mut().chan_id = 0xff03;
-   state.pkt_light_data.head_mut().dma_len = 0x27;
-   state.pkt_light_data.head_mut().rf_len = 0x25;
-   state.pkt_light_data.head_mut().l2cap_len = 0x21;
-    // todo: What type is pkt_light_data here?
-    unsafe { *(addr_of_mut!(state.pkt_light_data.att_cmd_mut().opcode) as *mut u16) = DEVICE_ADDRESS.get() };
-    unsafe { *(addr_of_mut!(state.pkt_light_data.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
-    state.app_cmd_time = read_reg_system_tick();
-   state.pkt_light_data.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
+   _pkt_light_data.head_mut().chan_id = 0xff03;
+   _pkt_light_data.head_mut().dma_len = 0x27;
+   _pkt_light_data.head_mut().rf_len = 0x25;
+   _pkt_light_data.head_mut().l2cap_len = 0x21;
+    // todo: What type is PKT_LIGHT_DATA here?
+    unsafe { *(addr_of_mut!(_pkt_light_data.att_cmd_mut().opcode) as *mut u16) = DEVICE_ADDRESS.get() };
+    unsafe { *(addr_of_mut!(_pkt_light_data.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
+    APP_CMD_TIME.set(read_reg_system_tick());
+   _pkt_light_data.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
 
     if device_match || group_match {
-        let pkt = state.pkt_light_data;
-        rf_link_data_callback(state, &pkt);
+        rf_link_data_callback(_pkt_light_data);
     }
-    state.slave_sno.copy_from_slice(sno);
+    SLAVE_SNO.lock().get_mut().copy_from_slice(sno);
 
-    state.slave_link_cmd = op;
+    SLAVE_LINK_CMD.set(op);
 
     if !rf_link_is_notify_req(op) {
-        if state.slave_read_status_busy != 0 {
-            rf_link_slave_read_status_stop(state);
+        if SLAVE_READ_STATUS_BUSY.get() != 0 {
+            rf_link_slave_read_status_stop();
         }
         if device_match == false && unsafe { *(addr_of!(data.att_write().value[5]) as *const u16) } != 0 {
-            state.slave_data_valid = BRIDGE_MAX_CNT + 1;
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT + 1);
         } else {
-            state.slave_data_valid = 0;
+            SLAVE_DATA_VALID.set(0);
         }
         return true;
     }
 
-   state.pkt_light_status.att_cmd_mut().value.val[13] = 0;
-   state.pkt_light_status.att_cmd_mut().value.val[14] = 0;
-   state.pkt_light_status.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
-   state.pkt_light_data.att_cmd_mut().value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
+   _pkt_light_status.att_cmd_mut().value.val[13] = 0;
+   _pkt_light_status.att_cmd_mut().value.val[14] = 0;
+   _pkt_light_status.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
+   _pkt_light_data.att_cmd_mut().value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
-            state.slave_data_valid = params[0] as u32 * 2 + 1;
+            SLAVE_DATA_VALID.set(params[0] as u32 * 2 + 1);
             if op == LGT_CMD_LIGHT_GRP_REQ {
-               state.pkt_light_data.att_cmd_mut().value.val[15] = params[1];
+               _pkt_light_data.att_cmd_mut().value.val[15] = params[1];
             } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-               state.pkt_light_data.att_cmd_mut().value.val[15] = 1;
+               _pkt_light_data.att_cmd_mut().value.val[15] = 1;
             } else {
                 if op == LGT_CMD_CONFIG_DEV_ADDR {
-                   state.pkt_light_data.att_cmd_mut().value.val[15] = 4;
+                   _pkt_light_data.att_cmd_mut().value.val[15] = 4;
                 }
                 if op == LGT_CMD_USER_NOTIFY_REQ {
-                   state.pkt_light_data.att_cmd_mut().value.val[15] = 7;
+                   _pkt_light_data.att_cmd_mut().value.val[15] = 7;
                 } else {
-                   state.pkt_light_data.att_cmd_mut().value.val[15] = 0;
+                   _pkt_light_data.att_cmd_mut().value.val[15] = 0;
                 }
             }
         } else if op != LGT_CMD_CONFIG_DEV_ADDR {
             if op != LGT_CMD_LIGHT_CONFIG_GRP {
                 if op == LGT_CMD_LIGHT_GRP_REQ {
-                   state.pkt_light_data.att_cmd_mut().value.val[15] = params[1];
+                   _pkt_light_data.att_cmd_mut().value.val[15] = params[1];
                 } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-                   state.pkt_light_data.att_cmd_mut().value.val[15] = 1;
+                   _pkt_light_data.att_cmd_mut().value.val[15] = 1;
                 } else {
                     if op == LGT_CMD_CONFIG_DEV_ADDR {
-                       state.pkt_light_data.att_cmd_mut().value.val[15] = 4;
+                       _pkt_light_data.att_cmd_mut().value.val[15] = 4;
                     }
                     if op == LGT_CMD_USER_NOTIFY_REQ {
-                       state.pkt_light_data.att_cmd_mut().value.val[15] = 7;
+                       _pkt_light_data.att_cmd_mut().value.val[15] = 7;
                     } else {
-                       state.pkt_light_data.att_cmd_mut().value.val[15] = 0;
+                       _pkt_light_data.att_cmd_mut().value.val[15] = 0;
                     }
                 }
             }
-            state.slave_data_valid = BRIDGE_MAX_CNT * 2 + 1;
-           state.pkt_light_data.att_cmd_mut().value.val[15] = 1;
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
+           _pkt_light_data.att_cmd_mut().value.val[15] = 1;
         } else if dev_addr_with_mac_flag(params.as_ptr()) == false {
-            state.slave_data_valid = BRIDGE_MAX_CNT * 2 + 1;
-           state.pkt_light_data.att_cmd_mut().value.val[15] = 4;
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
+           _pkt_light_data.att_cmd_mut().value.val[15] = 4;
         } else {
-            state.slave_data_valid = params[3] as u32 * 2 + 1;
-           state.pkt_light_data.att_cmd_mut().value.val[15] = 4;
+            SLAVE_DATA_VALID.set(params[3] as u32 * 2 + 1);
+           _pkt_light_data.att_cmd_mut().value.val[15] = 4;
         }
     } else {
-        state.slave_data_valid = 0;
+        SLAVE_DATA_VALID.set(0);
         if op == LGT_CMD_LIGHT_GRP_REQ {
-           state.pkt_light_data.att_cmd_mut().value.val[15] = params[1];
+           _pkt_light_data.att_cmd_mut().value.val[15] = params[1];
         } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-           state.pkt_light_data.att_cmd_mut().value.val[15] = 1;
+           _pkt_light_data.att_cmd_mut().value.val[15] = 1;
         } else {
             if op == LGT_CMD_CONFIG_DEV_ADDR {
-               state.pkt_light_data.att_cmd_mut().value.val[15] = 4;
+               _pkt_light_data.att_cmd_mut().value.val[15] = 4;
             }
             if op == LGT_CMD_USER_NOTIFY_REQ {
-               state.pkt_light_data.att_cmd_mut().value.val[15] = 7;
+               _pkt_light_data.att_cmd_mut().value.val[15] = 7;
             } else {
-               state.pkt_light_data.att_cmd_mut().value.val[15] = 0;
+               _pkt_light_data.att_cmd_mut().value.val[15] = 0;
             }
         }
     }
-   state.pkt_light_status.att_cmd_mut().value.val[15] =state.pkt_light_data.att_cmd().value.val[15];
-    rf_link_slave_read_status_start(state);
+    _pkt_light_status.att_cmd_mut().value.val[15] =_pkt_light_data.att_cmd_mut().value.val[15];
+    rf_link_slave_read_status_start(_pkt_light_data.deref_mut());
 
-    state.slave_stat_sno.copy_from_slice(sno);
+    SLAVE_STAT_SNO.lock().get_mut().copy_from_slice(sno);
 
     if device_match || group_match {
-        let ptr = &state.pkt_light_data.att_cmd().value.val[3..];
-       state.pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
+        let ptr = &_pkt_light_data.att_cmd_mut().value.val[3..];
+       _pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
 
-       state.pkt_light_status.att_cmd_mut().value.sno = state.slave_sno;
+       _pkt_light_status.att_cmd_mut().value.sno = *SLAVE_SNO.lock().get_mut();
 
-        unsafe { *(addr_of!(state.pkt_light_status.att_cmd().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
+        unsafe { *(addr_of!(_pkt_light_status.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
 
         let tmp_pkt: PacketAttValue = PacketAttValue::default();
 
@@ -661,40 +664,41 @@ fn rf_link_slave_data_write_no_dec(state: &mut State, data: &mut Packet) -> bool
             *(addr_of!(tmp_pkt.src) as *mut u16) = DEVICE_ADDRESS.get();
         }
 
-        let mut value = state.pkt_light_status.att_cmd_mut().value;
-        if rf_link_response_callback(state, &mut value, &tmp_pkt) {
-            let mut pkt = state.pkt_light_status;
-            rf_link_slave_add_status(state, &mut pkt);
+        if rf_link_response_callback(&mut _pkt_light_status.att_cmd_mut().value, &tmp_pkt) {
+            rf_link_slave_add_status(_pkt_light_status);
         }
     }
 
     return true;
 }
 
-pub fn rf_link_slave_data_write(state: &mut State, data: &Packet) -> bool {
+pub fn rf_link_slave_data_write(data: &Packet) -> bool {
     let mut data: Packet = data.clone();
-    if PAIR_LOGIN_OK.get() && pair_dec_packet(state, &mut data) {
-        return rf_link_slave_data_write_no_dec(state, &mut data);
+    if PAIR_LOGIN_OK.get() && pair_dec_packet(&mut data) {
+        return rf_link_slave_data_write_no_dec(&mut data);
     }
 
     return false;
 }
 
-fn rf_link_slave_set_adv(state: &mut State, adv_data_ptr: &[u8])
+fn rf_link_slave_set_adv(adv_data_ptr: &[u8])
 {
-    state.pkt_adv.head_mut().dma_len = adv_data_ptr.len() as u32 + 8;
-    state.pkt_adv.head_mut().rf_len = adv_data_ptr.len() as u8 + 6;
+    let mut pkt_adv_binding = PKT_ADV.lock();
+    let mut _pkt_adv = pkt_adv_binding.get_mut();
 
-    state.pkt_adv.adv_ind_module_mut().data[0..adv_data_ptr.len()].copy_from_slice(&adv_data_ptr[0..adv_data_ptr.len()]);
+    _pkt_adv.head_mut().dma_len = adv_data_ptr.len() as u32 + 8;
+    _pkt_adv.head_mut().rf_len = adv_data_ptr.len() as u8 + 6;
+
+    _pkt_adv.adv_ind_module_mut().data[0..adv_data_ptr.len()].copy_from_slice(&adv_data_ptr[0..adv_data_ptr.len()]);
 }
 
-pub fn rf_link_slave_init(state: &mut State, interval: u32)
+pub fn rf_link_slave_init(interval: u32)
 {
     unsafe {
         blc_ll_init_basic_mcu();
-        state.p_st_handler = IrqHandlerStatus::Adv;
+        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Adv;
         SLAVE_LINK_STATE.set(0);
-        state.slave_listen_interval = interval * CLOCK_SYS_CLOCK_1US;
+        SLAVE_LISTEN_INTERVAL.set(interval * CLOCK_SYS_CLOCK_1US);
 
         SLAVE_CONNECTED_TICK.set(CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick());
         write_reg_system_tick_irq(SLAVE_CONNECTED_TICK.get());
@@ -710,13 +714,13 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
         if pair_addr == 0 {
             let pairing_addr = FLASH_ADR_PAIRING;
             let mut buff: [u8; 16] = [0; 16];
-            buff[0..16].copy_from_slice(&state.pair_config_mesh_ltk[0..16]);
+            buff[0..16].copy_from_slice(&PAIR_CONFIG_MESH_LTK.lock().get_mut()[0..16]);
             flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
 
             let mut buff: [u8; 16] = [0; 16];
             let len = min(MESH_PWD.len(), buff.len());
             buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-            encode_password(state, &mut buff);
+            encode_password(&mut buff);
             flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
             let mut buff: [u8; 16] = [0; 16];
@@ -729,7 +733,7 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
             buff[15] = PAIR_VALID_FLAG;
 
             if MESH_PAIR_ENABLE.get() {
-                state.get_mac_en = true;
+                GET_MAC_EN.set(true);
                 buff[1] = 1;
             }
             flash_write_page(pairing_addr, 16, buff.as_mut_ptr());
@@ -738,32 +742,31 @@ pub fn rf_link_slave_init(state: &mut State, interval: u32)
             loop {}
         }
 
-        flash_read_page(FLASH_ADR_MAC, 6, state.mac_id.as_mut_ptr());
+        flash_read_page(FLASH_ADR_MAC, 6, MAC_ID.lock().get_mut().as_mut_ptr());
 
-        state.pkt_adv.adv_ind_module_mut().adv_a = state.mac_id;
-        state.pkt_scan_rsp.scan_rsp_mut().adv_a = state.mac_id;
+        PKT_ADV.lock().get_mut().adv_ind_module_mut().adv_a = *MAC_ID.lock().get_mut();
+        PKT_SCAN_RSP.lock().get_mut().scan_rsp_mut().adv_a = *MAC_ID.lock().get_mut();
 
-        rf_link_slave_set_adv(state, &state.adv_data.clone());
-        pair_load_key(state);
+        rf_link_slave_set_adv(&ADV_DATA.lock().get_mut().clone());
+        pair_load_key();
 
-       state.pkt_light_data.att_cmd_mut().value.src[0] = state.mac_id[0];
-       state.pkt_light_data.att_cmd_mut().value.src[1] = state.mac_id[1];
+       PKT_LIGHT_DATA.lock().get_mut().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock().get_mut()[0..2]);
 
-       state.pkt_light_status.att_cmd_mut().value.src[0] = state.mac_id[0];
-       state.pkt_light_status.att_cmd_mut().value.src[1] = state.mac_id[1];
+       PKT_LIGHT_STATUS.lock().get_mut().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock().get_mut()[0..2]);
 
-        state.slave_adv_enable = true;
+        SLAVE_ADV_ENABLE.set(true);
 
-        retrieve_dev_grp_address(state);
+        retrieve_dev_grp_address();
 
-        mesh_node_init(state);
+        mesh_node_init();
 
-        write_reg32(0x808004, array4_to_int(&state.mac_id));
+        write_reg32(0x808004, array4_to_int(&*MAC_ID.lock().get_mut()));
         write_reg32(0x808008, BUILD_VERSION);
         write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
     }
 }
 
+#[repr(C, packed)]
 struct TblRfPowerT {
     pub a: u8,
     pub b: u8,

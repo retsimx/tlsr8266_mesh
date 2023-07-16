@@ -1,7 +1,6 @@
 use core::{fmt, slice};
 use core::cmp::min;
 use core::fmt::Write;
-use core::ops::DerefMut;
 use core::panic::PanicInfo;
 use core::ptr::{addr_of, addr_of_mut};
 
@@ -18,7 +17,6 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::STATE;
 use crate::uart_manager::UartMsg;
 
 struct TlsrCriticalSection;
@@ -227,7 +225,7 @@ pub async fn check_panic_info() {
         data[0] = LGT_PANIC_MSG;
         data[3..3+len].copy_from_slice(&buffer[0..len]);
 
-        app().mesh_manager.send_mesh_message(STATE.lock().borrow_mut().deref_mut(), &data, 0xffff);
+        app().mesh_manager.send_mesh_message(&data, 0xffff);
 
         buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }
     }
@@ -239,7 +237,7 @@ pub async fn check_panic_info() {
     let mut data = [0u8; 13];
     data[0] = LGT_PANIC_MSG;
 
-    app().mesh_manager.send_mesh_message(STATE.lock().borrow_mut().deref_mut(), &data, 0xffff);
+    app().mesh_manager.send_mesh_message(&data, 0xffff);
 
     // Finally clear the panic info
     flash_erase_sector(panic_addr);

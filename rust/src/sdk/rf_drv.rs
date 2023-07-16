@@ -1,11 +1,11 @@
 use core::ptr::addr_of;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
 use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT};
-use crate::state::{DEVICE_ADDRESS, SimplifyLS, State};
+use crate::state::{*};
 
 pub enum RfPower {
     RfPower8dBm = 0,
@@ -22,13 +22,16 @@ pub enum RfPower {
     RfPowerOff = 16,
 }
 
-pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
+pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
 {
     let mut iVar1 = 0;
     let mut iVar2;
     let mut iVar3;
 
-    if state.pkt_adv.head().rf_len as i8 - 6 < 1 {
+    let mut pkt_adv_binding = PKT_ADV.lock();
+    let mut _pkt_adv = pkt_adv_binding.get_mut();
+
+    if _pkt_adv.head().rf_len as i8 - 6 < 1 {
         iVar3 = 1;
         iVar1 = 2;
         iVar2 = 0;
@@ -37,13 +40,13 @@ pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
         let mut breakit = false;
         loop {
             iVar3 = iVar2 + 1;
-            if state.pkt_adv.adv_ind_module().data[iVar2 + 1] == 9 {
+            if _pkt_adv.adv_ind_module().data[iVar2 + 1] == 9 {
                 iVar1 = iVar2 + 2;
                 breakit = true;
                 break;
             }
-            iVar2 = state.pkt_adv.adv_ind_module().data[iVar2] as usize + 1 + iVar2;
-            if iVar2 as i8 >= state.pkt_adv.head().rf_len as i8 - 6 {
+            iVar2 = _pkt_adv.adv_ind_module().data[iVar2] as usize + 1 + iVar2;
+            if iVar2 as i8 >= _pkt_adv.head().rf_len as i8 - 6 {
                 break;
             }
         }
@@ -53,21 +56,24 @@ pub fn rf_link_slave_set_adv_mesh_name(state: &mut State, name: &[u8])
         }
     }
 
-    state.pkt_adv.adv_ind_module_mut().data[iVar1..iVar1 + name.len()].copy_from_slice(name);
+    _pkt_adv.adv_ind_module_mut().data[iVar1..iVar1 + name.len()].copy_from_slice(name);
 
-    state.pkt_adv.adv_ind_module_mut().data[iVar2] = name.len() as u8 + 1;
-    state.pkt_adv.adv_ind_module_mut().data[iVar3] = 9;
-    state.pkt_adv.head_mut().dma_len = (iVar2 + name.len() + 2 + 8) as u32;
-    state.pkt_adv.head_mut().rf_len = (iVar2 + name.len() + 2 + 6) as u8;
+    _pkt_adv.adv_ind_module_mut().data[iVar2] = name.len() as u8 + 1;
+    _pkt_adv.adv_ind_module_mut().data[iVar3] = 9;
+    _pkt_adv.head_mut().dma_len = (iVar2 + name.len() + 2 + 8) as u32;
+    _pkt_adv.head_mut().rf_len = (iVar2 + name.len() + 2 + 6) as u8;
 }
 
-pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
+pub fn rf_link_slave_set_adv_private_data(data: &[u8])
 {
     let mut iVar3 = 0;
     let iVar4;
     let mut iVar5;
 
-    let mut rf_len = state.pkt_adv.head().rf_len;
+    let mut pkt_adv_binding = PKT_ADV.lock();
+    let mut _pkt_adv = pkt_adv_binding.get_mut();
+
+    let mut rf_len = _pkt_adv.head().rf_len;
     if rf_len as i8 - 6 < 1 {
         iVar4 = 1;
         iVar3 = 2;
@@ -76,10 +82,10 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
         iVar5 = 0;
         iVar3 = 0;
         loop {
-            let uVar6 = state.pkt_adv.adv_ind_module().data[iVar3] + 1;
-            let adv_data = state.pkt_adv.adv_ind_module().data.clone();
-            state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&adv_data[iVar3..iVar3 + uVar6 as usize]);
-            if state.pkt_adv.adv_ind_module().data[iVar3 + 1] == 0xff {
+            let uVar6 = _pkt_adv.adv_ind_module().data[iVar3] + 1;
+            let _adv_data = _pkt_adv.adv_ind_module().data.clone();
+            _pkt_adv.adv_ind_module_mut().data[iVar5 as usize..iVar5 as usize + uVar6 as usize].copy_from_slice(&_adv_data[iVar3..iVar3 + uVar6 as usize]);
+            if _pkt_adv.adv_ind_module().data[iVar3 + 1] == 0xff {
                 if uVar6 == 10 {
                     break;
                 }
@@ -94,92 +100,89 @@ pub fn rf_link_slave_set_adv_private_data(state: &mut State, data: &[u8])
         iVar3 = iVar5 as usize + 2;
         iVar4 = iVar5 + 1;
     }
-    state.pkt_adv.adv_ind_module_mut().data[iVar3..iVar3 + data.len()].copy_from_slice(data);
+    _pkt_adv.adv_ind_module_mut().data[iVar3..iVar3 + data.len()].copy_from_slice(data);
 
-    state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize] = data.len() as u8 + 1;
-    state.pkt_adv.adv_ind_module_mut().data[iVar4 as usize] = 0xff;
+    _pkt_adv.adv_ind_module_mut().data[iVar5 as usize] = data.len() as u8 + 1;
+    _pkt_adv.adv_ind_module_mut().data[iVar4 as usize] = 0xff;
     iVar5 = data.len() as u8 + 2 + iVar5;
-    state.pkt_adv.head_mut().dma_len = iVar5 as u32 + 8;
-    state.pkt_adv.head_mut().rf_len = iVar5 + 6;
-
-    if iVar5 + 6 + state.user_data_len < 0x26 && state.user_data_len != 0 {
-        state.pkt_adv.adv_ind_module_mut().data[iVar5 as usize..iVar5 as usize + state.user_data_len as usize].copy_from_slice(&state.user_data);
-        state.pkt_adv.head_mut().dma_len += state.user_data_len as u32;
-        state.pkt_adv.head_mut().rf_len += state.user_data_len;
-    }
+    _pkt_adv.head_mut().dma_len = iVar5 as u32 + 8;
+    _pkt_adv.head_mut().rf_len = iVar5 + 6;
 }
 
-pub fn rf_link_slave_set_adv_uuid_data(state: &mut State, uuid_data: &[u8])
+pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
 {
-    let mut rf_len = state.pkt_adv.head_mut().rf_len as usize;
+    let mut pkt_adv_binding = PKT_ADV.lock();
+    let mut _pkt_adv = pkt_adv_binding.get_mut();
+
+    let mut rf_len = _pkt_adv.head().rf_len as usize;
     if uuid_data.len() as i8 <= 0x25 - rf_len as i8 {
-        if state.set_uuid_flag == false {
+        if SET_UUID_FLAG.get() == false {
             rf_len = rf_len - 9;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..rf_len].copy_from_slice(&state.pkt_adv.adv_ind_module().data[3..3 + rf_len]);
+            tmp_data[0..rf_len].copy_from_slice(&_pkt_adv.adv_ind_module().data[3..3 + rf_len]);
 
-            state.pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            state.pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
+            _pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
+            _pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
 
-            state.set_uuid_flag = true;
-            state.pkt_adv.head_mut().rf_len += uuid_data.len() as u8;
-            state.pkt_adv.head_mut().dma_len += uuid_data.len() as u32;
+            SET_UUID_FLAG.set(true);
+            _pkt_adv.head_mut().rf_len += uuid_data.len() as u8;
+            _pkt_adv.head_mut().dma_len += uuid_data.len() as u32;
         } else {
             let uuid_len = uuid_data.len() + 3;
             rf_len = (rf_len - 6) - uuid_len;
 
             let mut tmp_data = [0u8; 31];
-            tmp_data[0..uuid_len].copy_from_slice(&state.pkt_adv.adv_ind_module().data[0..0 + uuid_len]);
+            tmp_data[0..uuid_len].copy_from_slice(&_pkt_adv.adv_ind_module().data[0..0 + uuid_len]);
 
-            state.pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            state.pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
+            _pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
+            _pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + rf_len].copy_from_slice(&tmp_data[0..rf_len]);
         }
     }
 }
 
 
-pub fn dev_grp_flash_clean(state: &mut State)
+pub fn dev_grp_flash_clean()
 {
-    if 0xfff < state.dev_grp_next_pos || 0xfff < state.dev_address_next_pos {
+    if 0xfff < DEV_GRP_NEXT_POS.get() || 0xfff < DEV_ADDRESS_NEXT_POS.get() {
         flash_erase_sector(FLASH_ADR_DEV_GRP_ADR);
-        flash_write_page(FLASH_ADR_DEV_GRP_ADR, 0x10, state.group_address.as_ptr() as *const u8);
+        flash_write_page(FLASH_ADR_DEV_GRP_ADR, 0x10, GROUP_ADDRESS.lock().get_mut().as_ptr() as *const u8);
         let device_address = DEVICE_ADDRESS.get();
         flash_write_page(FLASH_ADR_DEV_GRP_ADR + 0x10, 2, addr_of!(device_address) as *const u8);
-        state.dev_address_next_pos = 0x12;
-        state.dev_grp_next_pos = 0x12;
+        DEV_ADDRESS_NEXT_POS.set(0x12);
+        DEV_GRP_NEXT_POS.set(0x12);
     }
     return;
 }
 
-pub fn rf_link_add_dev_addr(state: &mut State, dev_id: u16) -> bool
+pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
 {
   let mut tmp_dev_id = dev_id;
   let mut result = false;
   if tmp_dev_id != 0 && tmp_dev_id & !DEVICE_ADDR_MASK_DEFAULT == 0 && DEVICE_ADDRESS.get() != tmp_dev_id {
     result = true;
     let write_buffer = dev_id;
-    dev_grp_flash_clean(state);
-    tmp_dev_id = state.dev_grp_next_pos;
-    if tmp_dev_id != 0 && state.dev_address_next_pos != 0 {
+    dev_grp_flash_clean();
+    tmp_dev_id = DEV_GRP_NEXT_POS.get();
+    if tmp_dev_id != 0 && DEV_ADDRESS_NEXT_POS.get() != 0 {
       let zero_data = 0u16;
-      flash_write_page(FLASH_ADR_DEV_GRP_ADR -2 + state.dev_address_next_pos as u32, 2, addr_of!(zero_data) as *const u8);
-      tmp_dev_id = state.dev_grp_next_pos;
+      flash_write_page(FLASH_ADR_DEV_GRP_ADR -2 + DEV_ADDRESS_NEXT_POS.get() as u32, 2, addr_of!(zero_data) as *const u8);
+      tmp_dev_id = DEV_GRP_NEXT_POS.get();
     }
     DEVICE_ADDRESS.set(write_buffer);
     flash_write_page(tmp_dev_id as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(write_buffer) as *const u8);
-    state.dev_grp_next_pos = state.dev_grp_next_pos + 2;
-    state.dev_address_next_pos = state.dev_grp_next_pos;
-    rf_link_light_event_callback(state, 0xc6);
+    DEV_GRP_NEXT_POS.set(DEV_GRP_NEXT_POS.get() + 2);
+    DEV_ADDRESS_NEXT_POS.set(DEV_GRP_NEXT_POS.get());
+    rf_link_light_event_callback(0xc6);
     result = true;
   }
   return result;
 }
 
 
-pub fn rf_link_del_group(state: &mut State, group_id: u16) -> bool
+pub fn rf_link_del_group(group_id: u16) -> bool
 {
-    let mut grp_next_pos = state.dev_grp_next_pos;
+    let mut grp_next_pos = DEV_GRP_NEXT_POS.get();
     let mut grp_index = 0;
     let mut result = false;
     let mut iVar4 = 0;
@@ -190,7 +193,7 @@ pub fn rf_link_del_group(state: &mut State, group_id: u16) -> bool
         while iVar3 != 8 {
             iVar4 = iVar1;
             while group_id == 0xffff {
-                state.group_address[grp_index] = 0;
+                GROUP_ADDRESS.lock().get_mut()[grp_index] = 0;
                 iVar4 = 1;
                 iVar3 = iVar3 + 1;
                 grp_index += 1;
@@ -205,8 +208,8 @@ pub fn rf_link_del_group(state: &mut State, group_id: u16) -> bool
             if breakit {
                 break;
             }
-            if state.group_address[grp_index] == group_id {
-                state.group_address[iVar3] = 0;
+            if GROUP_ADDRESS.lock().get_mut()[grp_index] == group_id {
+                GROUP_ADDRESS.lock().get_mut()[iVar3] = 0;
                 iVar4 = 2;
                 break;
             }
@@ -242,24 +245,24 @@ pub fn rf_link_del_group(state: &mut State, group_id: u16) -> bool
     return result;
 }
 
-pub fn rf_link_add_group(state: &mut State, group_id: u16) -> bool
+pub fn rf_link_add_group(group_id: u16) -> bool
 {
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
 
     if group_id + 0x8000 < 0x7fff {
-        dev_grp_flash_clean(state);
-        if state.dev_grp_next_pos == 0 {
-            state.group_address[0] = group_id;
+        dev_grp_flash_clean();
+        if DEV_GRP_NEXT_POS.get() == 0 {
+            GROUP_ADDRESS.lock().get_mut()[0] = group_id;
         } else {
             for index in 0..8 {
-                if group_id == state.group_address[index] {
+                if group_id == GROUP_ADDRESS.lock().get_mut()[index] {
                     return false;
                 }
-                if state.group_address[index] == 0 {
-                    state.group_address[index] = group_id;
+                if GROUP_ADDRESS.lock().get_mut()[index] == 0 {
+                    GROUP_ADDRESS.lock().get_mut()[index] = group_id;
 
-                    flash_write_page(state.dev_grp_next_pos as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
-                    state.dev_grp_next_pos = state.dev_grp_next_pos + 2;
+                    flash_write_page(DEV_GRP_NEXT_POS.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
+                    DEV_GRP_NEXT_POS.set(DEV_GRP_NEXT_POS.get() + 2);
                     return true;
                 }
             }
@@ -267,13 +270,13 @@ pub fn rf_link_add_group(state: &mut State, group_id: u16) -> bool
             if OLDEST_POS.load(Ordering::Relaxed) == 0xffffffff {
                 OLDEST_POS.store(0, Ordering::Relaxed);
             }
-            rf_link_del_group(state, state.group_address[OLDEST_POS.load(Ordering::Relaxed)]);
-            state.group_address[OLDEST_POS.load(Ordering::Relaxed)] = group_id;
+            rf_link_del_group(GROUP_ADDRESS.lock().get_mut()[OLDEST_POS.load(Ordering::Relaxed)]);
+            GROUP_ADDRESS.lock().get_mut()[OLDEST_POS.load(Ordering::Relaxed)] = group_id;
             OLDEST_POS.store((OLDEST_POS.load(Ordering::Relaxed) + 1) % 8, Ordering::Relaxed);
         }
 
-        flash_write_page(state.dev_grp_next_pos as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
-        state.dev_grp_next_pos = state.dev_grp_next_pos + 2;
+        flash_write_page(DEV_GRP_NEXT_POS.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 2, addr_of!(group_id) as *const u8);
+        DEV_GRP_NEXT_POS.set(DEV_GRP_NEXT_POS.get() + 2);
         return true;
     }
     return false;

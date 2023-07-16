@@ -1,6 +1,5 @@
 use core::mem::size_of;
-use core::ops::DerefMut;
-use core::ptr::{addr_of, null_mut};
+use core::ptr::addr_of;
 use core::slice;
 
 use embassy_time::{Duration, Timer};
@@ -16,7 +15,7 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t, UartDriver, UARTIRQM
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{AppCmdValue, Packet};
-use crate::state::{DEVICE_ADDRESS, SimplifyLS, STATE, State};
+use crate::state::{DEVICE_ADDRESS, SimplifyLS};
 
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
@@ -76,7 +75,7 @@ async fn node_report_task() {
     loop {
         let mut data = [0; UART_DATA_LEN-5];
 
-        while mesh_node_report_status(STATE.lock().borrow_mut().deref_mut(), &mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN) != 0 {
+        while mesh_node_report_status(&mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN) != 0 {
             msg.data[3..UART_DATA_LEN-2].copy_from_slice(&data);
             while !app().uart_manager.send_message(&msg) {
                 yield_now().await;
@@ -130,11 +129,10 @@ impl UartManager {
     }
 
     #[inline(always)]
-    pub fn check_irq(&mut self, state: *mut State) {
+    pub fn check_irq(&mut self) {
         let irq_s = UartDriver::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 && state != null_mut() {
-            let state = unsafe { &mut *state };
-            self.handle_rx(state, self.driver.rxdata_buf);
+        if irq_s & UARTIRQMASK::RX as u8 != 0 {
+            self.handle_rx(self.driver.rxdata_buf);
         }
 
         if irq_s & UARTIRQMASK::TX as u8 != 0 {
@@ -228,7 +226,7 @@ impl UartManager {
         }
     }
 
-    pub fn handle_rx(&mut self, state: &mut State, msg: uart_data_t) {
+    pub fn handle_rx(&mut self, msg: uart_data_t) {
         // Check the crc of the packet
         let crc = crc16(&msg.data[0..42]);
         if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
@@ -265,7 +263,7 @@ impl UartManager {
             self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..3+15]).unwrap()).unwrap();
 
             // Send the message in to the mesh
-            app().mesh_manager.send_mesh_message(state, &data, destination);
+            app().mesh_manager.send_mesh_message(&data, destination);
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {

@@ -1,6 +1,5 @@
 use core::cmp::min;
 use core::mem::size_of;
-use core::ops::DerefMut;
 use core::ptr::addr_of;
 
 use const_format::formatcp;
@@ -20,7 +19,6 @@ use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM,
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{FLD_TMR, read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl};
-use crate::state::{State, STATE};
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -85,9 +83,8 @@ impl LightManager {
         }
     }
 
-    fn handle_on_off(&mut self, state: &mut State, on: u8) {
+    fn handle_on_off(&mut self, on: u8) {
         self.light_onoff(
-            state,
          match on {
                 LIGHT_ON_PARAM => true,
                 LIGHT_OFF_PARAM => false,
@@ -153,7 +150,7 @@ impl LightManager {
             });
 
             match msg.cmd {
-                LGT_CMD_LIGHT_ONOFF => self.handle_on_off(STATE.lock().borrow_mut().deref_mut(), msg.params[0]),
+                LGT_CMD_LIGHT_ONOFF => self.handle_on_off(msg.params[0]),
                 LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
                 _ => {}
             }
@@ -290,7 +287,7 @@ impl LightManager {
     }
 
     //retrieve LUM : brightness or RGB/CT value
-    pub fn light_lum_retrieve(&mut self, state: &mut State) {
+    pub fn light_lum_retrieve(&mut self) {
         let mut i = 0;
         while i < FLASH_SECTOR_SIZE {
             self.light_lum_addr = FLASH_ADR_LUM + i as u32;
@@ -314,9 +311,9 @@ impl LightManager {
         let val = analog_read(REGA_LIGHT_OFF);
         if val & RecoverStatus::LightOff as u8 != 0 {
             analog_write(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
-            self.light_onoff(state, false);
+            self.light_onoff(false);
         } else {
-            self.light_onoff(state, true);
+            self.light_onoff(true);
         }
     }
 
@@ -374,14 +371,14 @@ impl LightManager {
         self.begin_transition(state.cw.to_num(), state.ww.to_num(), match on { true => self.brightness, false => 0 });
     }
 
-    pub fn light_onoff(&mut self, state: &mut State, on: bool) {
+    pub fn light_onoff(&mut self, on: bool) {
         self.light_onoff_hw(on);
-        self.device_status_update(state);
+        self.device_status_update();
     }
 
-    pub fn device_status_update(&self, state: &mut State) {
+    pub fn device_status_update(&self) {
         // packet
-        let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN as usize] = [0xff; MESH_NODE_ST_PAR_LEN as usize];
+        let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN] = [0xff; MESH_NODE_ST_PAR_LEN];
 
         let on = if self.is_light_off() {
             0
@@ -392,6 +389,6 @@ impl LightManager {
         st_val_par[0] = on;
         st_val_par[1] = 0xff;
 
-        ll_device_status_update(state, &st_val_par);
+        ll_device_status_update(&st_val_par);
     }
 }

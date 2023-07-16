@@ -1,34 +1,32 @@
-use core::cell::RefCell;
+use crate::state::{*};
 
-use crate::state::State;
-
-pub fn ble_ll_channel_table_calc(state: &mut State, channel: &[u8], reset: bool)
+pub fn ble_ll_channel_table_calc(channel: &[u8], reset: bool)
 {
-    state.ble_ll_channel_num = 0;
+    BLE_LL_CHANNEL_NUM.set(0);
 
     if reset {
-        state.ble_ll_last_unmapped_ch = 0;
+        BLE_LL_LAST_UNMAPPED_CH.set(0);
     }
 
     for chan_id in (0..0x28).step_by(8) {
         for shift in 0..8 {
             if (channel[chan_id / 8] >> shift) & 1 != 0 {
-                let chan_num = state.ble_ll_channel_num;
-                state.ble_ll_channel_table[chan_num] = chan_id as u8 + shift;
+                let chan_num = BLE_LL_CHANNEL_NUM.get();
+                BLE_LL_CHANNEL_TABLE.lock().get_mut()[chan_num] = chan_id as u8 + shift;
 
-                state.ble_ll_channel_num += 1;
+                BLE_LL_CHANNEL_NUM.inc();
             }
         };
     }
 }
 
-pub fn ble_ll_conn_get_next_channel(state: &mut State, channel_map: &[u8], hop: u8) -> u32
+pub fn ble_ll_conn_get_next_channel(channel_map: &[u8], hop: u8) -> u32
 {
-    let mut index = (state.ble_ll_last_unmapped_ch + hop as usize) % 0x25;
-    state.ble_ll_last_unmapped_ch = index;
+    let mut index = (BLE_LL_LAST_UNMAPPED_CH.get() + hop as usize) % 0x25;
+    BLE_LL_LAST_UNMAPPED_CH.set(index);
 
     if (channel_map[(index >> 3)] >> (index & 7)) & 0x80 == 0 {
-        index = state.ble_ll_channel_table[(index % state.ble_ll_channel_num)] as usize;
+        index = BLE_LL_CHANNEL_TABLE.lock().get_mut()[(index % BLE_LL_CHANNEL_NUM.get())] as usize;
     }
 
     return index as u32;

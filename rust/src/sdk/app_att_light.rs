@@ -1,4 +1,4 @@
-use core::cell::RefCell;
+use core::cell::UnsafeCell;
 use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 
@@ -189,7 +189,7 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
-fn mesh_status_write(_: &mut State, p: &Packet) -> bool {
+fn mesh_status_write(p: &Packet) -> bool {
     if !PAIR_LOGIN_OK.get() {
         return true;
     }
@@ -204,7 +204,6 @@ fn mesh_status_write(_: &mut State, p: &Packet) -> bool {
     return true;
 }
 
-#[repr(C, align(4))]
 #[derive(PartialEq)]
 pub struct AttributeT {
     pub att_num: u8,
@@ -213,8 +212,8 @@ pub struct AttributeT {
     pub attr_max_len: u8,
     pub uuid: *const u8,
     pub p_attr_value: *mut u8,
-    pub w: Option<fn(state: &mut State, data: &Packet) -> bool>,
-    pub r: Option<fn(state: &mut State, data: &Packet) -> bool>,
+    pub w: Option<fn(data: &Packet) -> bool>,
+    pub r: Option<fn(data: &Packet) -> bool>,
 }
 
 #[macro_export]

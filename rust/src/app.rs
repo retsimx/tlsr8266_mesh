@@ -1,5 +1,3 @@
-use core::ops::DerefMut;
-
 use embassy_executor::Spawner;
 
 use crate::{app, uprintln};
@@ -17,7 +15,7 @@ use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::state::{State, STATE};
+use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::uart_manager::UartManager;
 use crate::version::BUILD_VERSION;
 
@@ -38,16 +36,14 @@ impl App {
         }
     }
 
-    pub fn init(&mut self, state: &mut State) {
+    pub fn init(&mut self) {
         // Copy the password in to the pair config
-        for i in 0..MESH_PWD_ENCODE_SK.len() {
-            state.pair_config_pwd_encode_sk[i] = MESH_PWD_ENCODE_SK.as_bytes()[i];
-        }
+        PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut()[0..MESH_PWD_ENCODE_SK.len()].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
 
-        unsafe { rf_drv_init(state, true); }
+        unsafe { rf_drv_init(true); }
 
         // Run our initialisation
-        user_init(state);
+        user_init();
     }
 
     pub async fn run(&mut self, spawner: Spawner) {
@@ -63,7 +59,7 @@ impl App {
         uprintln!("Booting FW version {}", BUILD_VERSION);
 
         // Configure the rest of the system
-        self.init(STATE.lock().borrow_mut().deref_mut());
+        self.init();
 
         // Start the mesh packet sender
         #[embassy_executor::task]
@@ -96,7 +92,7 @@ impl App {
         let mut data = [0 as u8; 13];
         data[0] = LGT_POWER_ON;
 
-        app().mesh_manager.send_mesh_message(STATE.lock().borrow_mut().deref_mut(), &data, 0xffff);
+        app().mesh_manager.send_mesh_message(&data, 0xffff);
 
         // Start the panic checker to see if there is information we need to send
         #[embassy_executor::task]

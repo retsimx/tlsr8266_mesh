@@ -1,6 +1,5 @@
-use core::cell::RefCell;
-use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::cell::{UnsafeCell};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use heapless::Deque;
 
@@ -10,158 +9,8 @@ use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
 use crate::sdk::light::{*};
 use crate::sdk::packet_types::{*};
 
-#[repr(align(4))]
-pub struct State {
-    pub blt_tx_fifo: [Packet; BLT_FIFO_TX_PACKET_COUNT],
-    pub blt_tx_wptr: usize,
-    pub conn_update_successed: bool,
-    pub buff_response: [Packet; BUFF_RESPONSE_PACKET_COUNT],
-    pub conn_update_cnt: usize,
-    pub set_uuid_flag: bool,
-    pub max_mesh_name_len: usize,
-    pub led_event_pending: u32,
-    pub led_count: u32,
-    pub led_ton: u32,
-    pub led_toff: u32,
-    pub led_sel: u32,
-    pub led_tick: u32,
-    pub led_no: u32,
-    pub led_is_on: u32,
-
-    pub get_mac_en: bool,
-    pub mesh_node_st: [mesh_node_st_t; MESH_NODE_MAX_NUM],
-
-    pub adv_pri_data: AdvPrivate,
-    pub adv_rsp_pri_data: AdvRspPrivate,
-
-    pub ble_ll_channel_num: usize,
-    pub ble_ll_last_unmapped_ch: usize,
-    pub ble_ll_channel_table: [u8; 40],
-
-    pub pkt_version_ind: Packet,
-    pub rf_pkt_unknown_response: Packet,
-    pub pkt_feature_rsp: Packet,
-    pub pkt_mtu_rsp: Packet,
-    pub pkt_err_rsp: Packet,
-    pub rf_packet_att_rsp: Packet,
-    pub pkt_write_rsp: Packet,
-    pub att_service_discover_tick: u32,
-    pub slave_link_time_out: u32,
-
-    pub slave_timing_update: u32,
-    pub slave_instant_next: u16,
-    pub slave_chn_map: [u8; 5],
-    pub slave_interval_old: u32,
-    pub ble_conn_timeout: u32,
-    pub ble_conn_interval: u32,
-    pub ble_conn_offset: u32,
-    pub add_tx_packet_rsp_failed: u32,
-    pub g_vendor_id: u16,
-    pub p_st_handler: IrqHandlerStatus,
-    pub pkt_light_report: Packet,
-
-    pub adr_reset_cnt_idx: u32,
-    pub reset_cnt: u8,
-    pub clear_st: u8,
-    pub reset_check_time: u32,
-
-    // These are filled at startup from values in config.rs
-    pub pair_config_mesh_name: [u8; 16],
-    pub pair_config_mesh_pwd: [u8; 16],
-    pub pair_config_mesh_ltk: [u8; 16],
-
-    pub not_need_login: bool,
-    pub slave_first_connected_tick: u32,
-
-    pub device_node_sn: u8,
-    pub dev_grp_next_pos: u16,
-
-    pub group_address: [u16; MAX_GROUP_NUM as usize],
-
-    pub adr_flash_cfg_idx: i32,
-
-    pub slave_read_status_busy: u8,
-
-    pub pair_setting_flag: ePairState,
-
-    pub cur_ota_flash_addr: u32,
-    pub rf_slave_ota_finished_flag: OtaState,
-    pub rf_slave_ota_terminate_flag: bool,
-
-    pub rf_slave_ota_timeout_s: u16,
-    pub set_mesh_info_expired_flag: bool,
-    pub set_mesh_info_time: u32,
-
-    pub pair_ivm: [u8; 8],
-
-    pub pair_config_pwd_encode_sk: [u8; 17],
-    pub pair_ivs: [u8; 8],
-
-    /////////////// adv par define ///////////////////////////////////////////////////
-    pub adv_interval2listen_interval: u16,
-    // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-    pub online_status_interval2listen_interval: u16,
-    // unit: default is 40ms, setting by 40000 from rf_link_slave_init (40000);
-
-    pub flash_sector_calibration: u32,
-    pub slave_status_record: [StatusRecord; MESH_NODE_MAX_NUM],
-    pub slave_status_record_size: u16,
-    pub rc_pkt_buf: Deque<PktBuf, 5>,
-
-    pub dev_address_next_pos: u16,
-    pub need_update_connect_para: bool,
-    pub update_interval_user_max: u16,
-    pub update_interval_user_min: u16,
-    pub update_timeout_user: u32,
-    pub update_interval_flag: u16,
-    pub update_interval_time: bool,
-    pub slave_data_valid: u32,
-    pub t_bridge_cmd: u32,
-    pub st_brige_no: u32,
-    pub app_cmd_time: u32,
-    pub slave_status_buffer_wptr: usize,
-    pub slave_status_buffer_rptr: usize,
-    pub slave_stat_sno: [u8; 3],
-    pub slave_read_status_unicast_flag: u8,
-    pub slave_timing_adjust_enable: bool,
-    pub slave_tick_brx: u32,
-    pub slave_window_offset: u32,
-    pub slave_instant: u16,
-    pub slave_status_tick: u8,
-    pub slave_link_cmd: u8,
-    pub rcv_pkt_ttc: u8,
-    pub org_ttl: u8,
-    pub slave_read_status_response: bool,
-    pub slave_sno: [u8; 3],
-    pub slave_status_record_idx: usize,
-    pub notify_req_mask_idx: u8,
-    pub adv_flag: bool,
-    pub online_st_flag: bool,
-    pub slave_read_status_busy_time: u32,
-
-    pub slave_listen_interval: u32,
-    pub slave_adv_enable: bool,
-    pub slave_connection_enable: bool,
-    pub mac_id: [u8; 6],
-    pub adv_data: [u8; 3],
-    pub user_data_len: u8,
-    pub user_data: [u8; 16],
-
-    pub rf_tx_mode: u8,
-    pub rfhw_tx_power: u8,
-
-    pub pkt_adv: Packet,
-    pub pkt_scan_rsp: Packet,
-    pub pkt_light_data: Packet,
-    pub pkt_light_status: Packet,
-    pub pkt_read_rsp: Packet,
-    pub pkt_light_adv_status: Packet,
-    pub pkt_mesh_user_cmd_buf: Packet,
-    pub pkt_init: Packet,
-}
-
-pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
-    blt_tx_fifo: [
+pub static BLT_TX_FIFO: Mutex<UnsafeCell<[Packet; BLT_FIFO_TX_PACKET_COUNT]>> = Mutex::new(UnsafeCell::new(
+    [
         Packet {
             att_write: PacketAttWrite {
                 head: PacketL2capHead {
@@ -177,11 +26,12 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
                 value: [0; 30],
             }
         };
-        8
-    ],
-    blt_tx_wptr: 0,
-    conn_update_successed: false,
-    buff_response: [
+        BLT_FIFO_TX_PACKET_COUNT
+    ]
+));
+
+pub static BUFF_RESPONSE: Mutex<UnsafeCell<[Packet; BUFF_RESPONSE_PACKET_COUNT]>> = Mutex::new(UnsafeCell::new(
+    [
         Packet {
             att_data: PacketAttData {
                 head: PacketL2capHead {
@@ -197,36 +47,34 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
                 dat: [0; 23],
             }
         };
-        48
-    ],
-    conn_update_cnt: 0,
-    set_uuid_flag: false,
-    max_mesh_name_len: 16,
-    led_event_pending: 0,
-    led_count: 0,
-    led_ton: 0,
-    led_toff: 0,
-    led_sel: 0,
-    led_tick: 0,
-    led_no: 0,
-    led_is_on: 0,
+        BUFF_RESPONSE_PACKET_COUNT
+    ]
+));
 
-    get_mac_en: false,
-    mesh_node_st: [mesh_node_st_t {
-        tick: 0,
-        val: mesh_node_st_val_t {
-            dev_adr: 0,
-            sn: 0,
-            par: [0; MESH_NODE_ST_PAR_LEN as usize],
-        },
-    }; MESH_NODE_MAX_NUM],
+pub static MESH_NODE_ST: Mutex<UnsafeCell<[mesh_node_st_t; MESH_NODE_MAX_NUM]>> = Mutex::new(UnsafeCell::new(
+    [
+        mesh_node_st_t {
+            tick: 0,
+            val: mesh_node_st_val_t {
+                dev_adr: 0,
+                sn: 0,
+                par: [0; MESH_NODE_ST_PAR_LEN],
+            },
+        };
+        MESH_NODE_MAX_NUM
+    ]
+));
 
-    adv_pri_data: AdvPrivate {
+pub static ADV_PRI_DATA: Mutex<UnsafeCell<AdvPrivate>> = Mutex::new(UnsafeCell::new(
+    AdvPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
         mac_address: 0,
-    },
-    adv_rsp_pri_data: AdvRspPrivate {
+    }
+));
+
+pub static ADV_RSP_PRI_DATA: Mutex<UnsafeCell<AdvRspPrivate>> = Mutex::new(UnsafeCell::new(
+    AdvRspPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
         mac_address: 0,
@@ -234,14 +82,14 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
         status: 0x01,
         device_address: 0,
         rsv: [0; 16],
-    },
+    }
+));
 
-    ble_ll_channel_num: 0,
-    ble_ll_last_unmapped_ch: 0,
-    ble_ll_channel_table: [0; 40],
-
-    pkt_version_ind: Packet {
-        version_ind: PacketVersionInd {
+pub static BLE_LL_CHANNEL_TABLE: Mutex<UnsafeCell<[u8; 40]>> = Mutex::new(UnsafeCell::new([0; 40]));
+pub static PKT_VERSION_IND: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
+        version_ind:
+        PacketVersionInd {
             dma_len: 8,
             _type: 3,
             rf_len: 6,
@@ -250,8 +98,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             vendor: VENDOR_ID,
             sub_ver: 0x08,
         }
-    },
-    rf_pkt_unknown_response: Packet {
+    }
+));
+pub static RF_PKT_UNKNOWN_RESPONSE: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         ctrl_unknown: PacketCtrlUnknown {
             dma_len: 0x04,
             _type: 0x03,
@@ -259,8 +109,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             opcode: 0x07,
             data: [0],
         }
-    },
-    pkt_feature_rsp: Packet {
+    }
+));
+pub static PKT_FEATURE_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         feature_rsp: PacketFeatureRsp {
             dma_len: 0x0b,
             _type: 0x3,
@@ -268,8 +120,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             opcode: 0x09,
             data: [1, 0, 0, 0, 0, 0, 0, 0],
         }
-    },
-    pkt_mtu_rsp: Packet {
+    }
+));
+pub static PKT_MTU_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_mtu: PacketAttMtu {
             head: PacketL2capHead {
                 dma_len: 0x09,
@@ -281,8 +135,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             opcode: 0x03,
             mtu: [0x17, 0x00],
         }
-    },
-    pkt_err_rsp: Packet {
+    }
+));
+pub static PKT_ERR_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_err_rsp: PacketAttErrRsp {
             head: PacketL2capHead {
                 dma_len: 0x0b,
@@ -296,8 +152,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             err_handle: 0,
             err_reason: 0x0a,
         }
-    },
-    rf_packet_att_rsp: Packet {
+    }
+));
+pub static RF_PACKET_ATT_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_read_rsp: PacketAttReadRsp {
             head: PacketL2capHead {
                 dma_len: 0,
@@ -309,8 +167,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             opcode: 0,
             value: [0; 22],
         }
-    },
-    pkt_write_rsp: Packet {
+    }
+));
+pub static PKT_WRITE_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_write_rsp: PacketAttWriteRsp {
             head: PacketL2capHead {
                 dma_len: 0x07,
@@ -321,21 +181,13 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             },
             opcode: 0x13,
         }
-    },
-    att_service_discover_tick: 0,
-    slave_link_time_out: 0,
+    }
+));
 
-    slave_timing_update: 0,
-    slave_instant_next: 0,
-    slave_chn_map: [0; 5],
-    slave_interval_old: 0,
-    ble_conn_timeout: 0,
-    ble_conn_interval: 0,
-    ble_conn_offset: 0,
-    add_tx_packet_rsp_failed: 0,
-    g_vendor_id: 0x211,
-    p_st_handler: IrqHandlerStatus::None,
-    pkt_light_report: Packet {
+pub static SLAVE_CHN_MAP: Mutex<UnsafeCell<[u8; 5]>> = Mutex::new(UnsafeCell::new([0; 5]));
+pub static P_ST_HANDLER: Mutex<UnsafeCell<IrqHandlerStatus>> = Mutex::new(UnsafeCell::new(IrqHandlerStatus::None));
+pub static PKT_LIGHT_REPORT: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_cmd: PacketAttCmd {
             head: PacketL2capHead {
                 dma_len: 0x1D,
@@ -354,100 +206,33 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
                 val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
             },
         }
-    },
-
-    adr_reset_cnt_idx: 0,
-    reset_cnt: 0,
-    clear_st: 3,
-    reset_check_time: 0,
-
-    pair_config_mesh_name: [0; 16],
-    pair_config_mesh_pwd: [0; 16],
-    pair_config_mesh_ltk: [0; 16],
-
-    not_need_login: false,
-    slave_first_connected_tick: 0,
-
-    device_node_sn: 1,
-    dev_grp_next_pos: 0,
-
-    group_address: [0; MAX_GROUP_NUM as usize],
-
-    adr_flash_cfg_idx: 0,
-
-    slave_read_status_busy: 0,
-
-    pair_setting_flag: ePairState::PairSetted,
-
-    cur_ota_flash_addr: 0,
-    rf_slave_ota_finished_flag: OtaState::Continue,
-    rf_slave_ota_terminate_flag: false,
-
-    rf_slave_ota_timeout_s: RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
-    set_mesh_info_expired_flag: false,
-    set_mesh_info_time: 0,
-
-    pair_ivm: [0, 0, 0, 0, 1, 0, 0, 0],
-
-    pair_config_pwd_encode_sk: [0; 17],
-    pair_ivs: [0; 8],
-
-    adv_interval2listen_interval: 4,
-    online_status_interval2listen_interval: 8,
-
-    flash_sector_calibration: CFG_SECTOR_ADR_CALIBRATION_CODE,
-
-    slave_status_record: [StatusRecord {
-        adr: [0],
-        alarm_id: 0,
-    }; MESH_NODE_MAX_NUM],
-
-    slave_status_record_size: size_of::<[StatusRecord; MESH_NODE_MAX_NUM]>() as u16,
-    rc_pkt_buf: Deque::new(),
-
-    dev_address_next_pos: 0,
-    need_update_connect_para: false,
-    update_interval_user_max: 0,
-    update_interval_user_min: 0,
-    update_timeout_user: 0,
-    update_interval_flag: 0,
-    update_interval_time: false,
-    slave_data_valid: 0,
-    t_bridge_cmd: 0,
-    st_brige_no: 0,
-    app_cmd_time: 0,
-    slave_status_buffer_wptr: 0,
-    slave_status_buffer_rptr: 0,
-    slave_stat_sno: [0; 3],
-    slave_read_status_unicast_flag: 0,
-    slave_timing_adjust_enable: false,
-    slave_tick_brx: 0,
-    slave_window_offset: 0,
-    slave_instant: 0,
-    slave_status_tick: 0,
-    slave_link_cmd: 0,
-    rcv_pkt_ttc: 0,
-    org_ttl: 0,
-    slave_read_status_response: false,
-    slave_sno: [0; 3],
-    slave_status_record_idx: 0,
-    notify_req_mask_idx: 0,
-    adv_flag: true,
-    online_st_flag: true,
-    slave_read_status_busy_time: 0,
-
-    slave_listen_interval: 0,
-    slave_adv_enable: false,
-    slave_connection_enable: false,
-    mac_id: [0; 6],
-    adv_data: [2, 1, 5],
-    user_data_len: 0,
-    user_data: [0; 16],
-
-    rf_tx_mode: 0,
-    rfhw_tx_power: 0x40,
-
-    pkt_adv: Packet {
+    }
+));
+pub static PAIR_CONFIG_MESH_NAME: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
+pub static PAIR_CONFIG_MESH_PWD: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
+pub static PAIR_CONFIG_MESH_LTK: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
+pub static GROUP_ADDRESS: Mutex<UnsafeCell<[u16; MAX_GROUP_NUM as usize]>> = Mutex::new(UnsafeCell::new([0; MAX_GROUP_NUM as usize]));
+pub static PAIR_SETTING_FLAG: Mutex<UnsafeCell<ePairState>> = Mutex::new(UnsafeCell::new(ePairState::PairSetted));
+pub static RF_SLAVE_OTA_FINISHED_FLAG: Mutex<UnsafeCell<OtaState>> = Mutex::new(UnsafeCell::new(OtaState::Continue));
+pub static PAIR_IVM: Mutex<UnsafeCell<[u8; 8]>> = Mutex::new(UnsafeCell::new([0, 0, 0, 0, 1, 0, 0, 0]));
+pub static PAIR_CONFIG_PWD_ENCODE_SK: Mutex<UnsafeCell<[u8; 17]>> = Mutex::new(UnsafeCell::new([0; 17]));
+pub static PAIR_IVS: Mutex<UnsafeCell<[u8; 8]>> = Mutex::new(UnsafeCell::new([0; 8]));
+pub static SLAVE_STATUS_RECORD: Mutex<UnsafeCell<[StatusRecord; MESH_NODE_MAX_NUM]>> = Mutex::new(UnsafeCell::new(
+    [
+        StatusRecord {
+            adr: [0],
+            alarm_id: 0,
+        };
+        MESH_NODE_MAX_NUM
+    ]
+));
+pub static RC_PKT_BUF: Mutex<UnsafeCell<Deque<PktBuf, 5>>> = Mutex::new(UnsafeCell::new(Deque::new()));
+pub static SLAVE_STAT_SNO: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([0; 3]));
+pub static SLAVE_SNO: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([0; 3]));
+pub static MAC_ID: Mutex<UnsafeCell<[u8; 6]>> = Mutex::new(UnsafeCell::new([0; 6]));
+pub static ADV_DATA: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([2, 1, 5]));
+pub static PKT_ADV: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         adv_ind_module: RfPacketAdvIndModuleT {
             dma_len: 0x27,
             _type: 0,
@@ -455,8 +240,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
             data: [0; 31],
         }
-    },
-    pkt_scan_rsp: Packet {
+    }
+));
+pub static PKT_SCAN_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         scan_rsp: PacketScanRsp {
             dma_len: 0x27,
             _type: 0x4,
@@ -464,8 +251,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
             data: [0; 31],
         }
-    },
-    pkt_light_data: Packet {
+    }
+));
+pub static PKT_LIGHT_DATA: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_cmd: PacketAttCmd {
             head: PacketL2capHead {
                 dma_len: 0x27,
@@ -484,8 +273,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
                 val: [0; 23],
             },
         }
-    },
-    pkt_light_status: Packet {
+    }
+));
+pub static PKT_LIGHT_STATUS: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_cmd: PacketAttCmd {
             head: PacketL2capHead {
                 dma_len: 0x27,
@@ -504,8 +295,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
                 val: [0; 23],
             },
         }
-    },
-    pkt_read_rsp: Packet {
+    }
+));
+pub static PKT_READ_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_read_rsp: PacketAttReadRsp {
             head: PacketL2capHead {
                 dma_len: 0x1d,
@@ -517,8 +310,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             opcode: 0xb,
             value: [0; 22],
         }
-    },
-    pkt_light_adv_status: Packet {
+    }
+));
+pub static PKT_LIGHT_ADV_STATUS: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         att_write: PacketAttWrite {
             head: PacketL2capHead {
                 dma_len: 0x27,
@@ -532,31 +327,10 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             handle1: 0,
             value: [0; 30],
         }
-    },
-    pkt_mesh_user_cmd_buf: Packet {
-        mesh: MeshPkt {
-            head: PacketL2capHead {
-                dma_len: 0,
-                _type: 0,
-                rf_len: 0,
-                l2cap_len: 0,
-                chan_id: 0,
-            },
-            src_tx: 0,
-            handle1: 0,
-            sno: [0; 3],
-            src_adr: 0,
-            dst_adr: 0,
-            op: 0,
-            vendor_id: 0,
-            par: [0; 10],
-            internal_par1: [0; 5],
-            ttl: 0,
-            internal_par2: [0; 4],
-            no_use: [0; 4],
-        }
-    },
-    pkt_init: Packet {
+    }
+));
+pub static PKT_INIT: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+    Packet {
         ll_init: PacketLlInit {
             dma_len: 0x24,
             _type: 0x5,
@@ -573,8 +347,8 @@ pub static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
             chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
             hop: 0xac,
         }
-    },
-}));
+    }
+));
 
 pub struct PairState {
     pub pair_ltk: [u8; 16],
@@ -586,10 +360,9 @@ pub struct PairState {
     pub pair_sk_copy: [u8; 16],
     pub pair_rands: [u8; 8],
     pub pair_randm: [u8; 8],
-
 }
 
-pub static PAIR_STATE: Mutex<RefCell<PairState>> = Mutex::new(RefCell::new(
+pub static PAIR_STATE: Mutex<UnsafeCell<PairState>> = Mutex::new(UnsafeCell::new(
     PairState {
         pair_ltk: [0; 16],
         pair_sk: [0; 16],
@@ -603,7 +376,7 @@ pub static PAIR_STATE: Mutex<RefCell<PairState>> = Mutex::new(RefCell::new(
     }
 ));
 
-pub static LIGHT_RX_BUFF: Mutex<RefCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = Mutex::new(RefCell::new(
+pub static LIGHT_RX_BUFF: Mutex<UnsafeCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = Mutex::new(UnsafeCell::new(
     [
         LightRxBuff {
             dma_len: 0,
@@ -643,7 +416,7 @@ pub static PKT_TERMINATE: Packet = Packet {
 
 pub static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
-pub static MESH_NODE_MASK: Mutex<RefCell<[u32; MESH_NODE_MASK_LEN]>> = Mutex::new(RefCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
+pub static MESH_NODE_MASK: Mutex<UnsafeCell<[u32; MESH_NODE_MASK_LEN]>> = Mutex::new(UnsafeCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
 pub static BLE_PAIR_ST: AtomicU8 = AtomicU8::new(0);
 pub static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
 pub static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
@@ -681,57 +454,139 @@ pub static RF_SLAVE_OTA_BUSY: AtomicBool = AtomicBool::new(false);
 pub static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
 pub static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
 
+pub static BLT_TX_WPTR: AtomicUsize = AtomicUsize::new(0);
+pub static CONN_UPDATE_SUCCESSED: AtomicBool = AtomicBool::new(false);
+pub static CONN_UPDATE_CNT: AtomicUsize = AtomicUsize::new(0);
+pub static SET_UUID_FLAG: AtomicBool = AtomicBool::new(false);
+pub static MAX_MESH_NAME_LEN: AtomicUsize = AtomicUsize::new(16);
+pub static LED_EVENT_PENDING: AtomicU32 = AtomicU32::new(0);
+pub static LED_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static LED_TON: AtomicU32 = AtomicU32::new(0);
+pub static LED_TOFF: AtomicU32 = AtomicU32::new(0);
+pub static LED_SEL: AtomicU32 = AtomicU32::new(0);
+pub static LED_TICK: AtomicU32 = AtomicU32::new(0);
+pub static LED_NO: AtomicU32 = AtomicU32::new(0);
+pub static LED_IS_ON: AtomicU32 = AtomicU32::new(0);
+pub static GET_MAC_EN: AtomicBool = AtomicBool::new(false);
+pub static BLE_LL_CHANNEL_NUM: AtomicUsize = AtomicUsize::new(0);
+pub static BLE_LL_LAST_UNMAPPED_CH: AtomicUsize = AtomicUsize::new(0);
+pub static ATT_SERVICE_DISCOVER_TICK: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_LINK_TIME_OUT: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_TIMING_UPDATE: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_INSTANT_NEXT: AtomicU16 = AtomicU16::new(0);
+pub static SLAVE_INTERVAL_OLD: AtomicU32 = AtomicU32::new(0);
+pub static BLE_CONN_TIMEOUT: AtomicU32 = AtomicU32::new(0);
+pub static BLE_CONN_INTERVAL: AtomicU32 = AtomicU32::new(0);
+pub static BLE_CONN_OFFSET: AtomicU32 = AtomicU32::new(0);
+pub static ADR_RESET_CNT_IDX: AtomicU32 = AtomicU32::new(0);
+pub static RESET_CNT: AtomicU8 = AtomicU8::new(0);
+pub static CLEAR_ST: AtomicU8 = AtomicU8::new(3);
+pub static RESET_CHECK_TIME: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_FIRST_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
+pub static DEVICE_NODE_SN: AtomicU8 = AtomicU8::new(1);
+pub static DEV_GRP_NEXT_POS: AtomicU16 = AtomicU16::new(0);
+pub static ADR_FLASH_CFG_IDX: AtomicI32 = AtomicI32::new(0);
+pub static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
+pub static CUR_OTA_FLASH_ADDR: AtomicU32 = AtomicU32::new(0);
+pub static RF_SLAVE_OTA_TERMINATE_FLAG: AtomicBool = AtomicBool::new(false);
+pub static RF_SLAVE_OTA_TIMEOUT_S: AtomicU16 = AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+pub static DEV_ADDRESS_NEXT_POS: AtomicU16 = AtomicU16::new(0);
+pub static NEED_UPDATE_CONNECT_PARA: AtomicBool = AtomicBool::new(false);
+pub static UPDATE_INTERVAL_USER_MAX: AtomicU16 = AtomicU16::new(0);
+pub static UPDATE_INTERVAL_USER_MIN: AtomicU16 = AtomicU16::new(0);
+pub static SLAVE_DATA_VALID: AtomicU32 = AtomicU32::new(0);
+pub static T_BRIDGE_CMD: AtomicU32 = AtomicU32::new(0);
+pub static ST_BRIGE_NO: AtomicU32 = AtomicU32::new(0);
+pub static APP_CMD_TIME: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_STATUS_BUFFER_WPTR: AtomicUsize = AtomicUsize::new(0);
+pub static SLAVE_STATUS_BUFFER_RPTR: AtomicUsize = AtomicUsize::new(0);
+pub static SLAVE_READ_STATUS_UNICAST_FLAG: AtomicU8 = AtomicU8::new(0);
+pub static SLAVE_TIMING_ADJUST_ENABLE: AtomicBool = AtomicBool::new(false);
+pub static SLAVE_TICK_BRX: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_WINDOW_OFFSET: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_INSTANT: AtomicU16 = AtomicU16::new(0);
+pub static SLAVE_STATUS_TICK: AtomicU8 = AtomicU8::new(0);
+pub static SLAVE_LINK_CMD: AtomicU8 = AtomicU8::new(0);
+pub static RCV_PKT_TTC: AtomicU8 = AtomicU8::new(0);
+pub static ORG_TTL: AtomicU8 = AtomicU8::new(0);
+pub static SLAVE_STATUS_RECORD_IDX: AtomicUsize = AtomicUsize::new(0);
+pub static NOTIFY_REQ_MASK_IDX: AtomicU8 = AtomicU8::new(0);
+pub static ADV_FLAG: AtomicBool = AtomicBool::new(true);
+pub static ONLINE_ST_FLAG: AtomicBool = AtomicBool::new(true);
+pub static SLAVE_READ_STATUS_BUSY_TIME: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_LISTEN_INTERVAL: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_ADV_ENABLE: AtomicBool = AtomicBool::new(false);
+pub static SLAVE_CONNECTION_ENABLE: AtomicBool = AtomicBool::new(false);
+
 pub trait SimplifyLS<T> {
     fn get(&self) -> T;
     fn set(&self, val: T);
+    fn inc(&self);
+    fn dec(&self);
 }
 
 impl SimplifyLS<bool> for AtomicBool {
     fn get(&self) -> bool {
         self.load(Ordering::Relaxed)
     }
-
     fn set(&self, val: bool) {
         self.store(val, Ordering::Relaxed);
     }
+    fn inc(&self) { panic!("Not valid for bool"); }
+    fn dec(&self) { panic!("Not valid for bool") }
 }
 
 impl SimplifyLS<u8> for AtomicU8 {
     fn get(&self) -> u8 {
         self.load(Ordering::Relaxed)
     }
-
     fn set(&self, val: u8) {
         self.store(val, Ordering::Relaxed);
     }
+    fn inc(&self) { self.set(self.get() + 1); }
+    fn dec(&self) { self.set(self.get() - 1); }
 }
 
 impl SimplifyLS<u16> for AtomicU16 {
     fn get(&self) -> u16 {
         self.load(Ordering::Relaxed)
     }
-
     fn set(&self, val: u16) {
         self.store(val, Ordering::Relaxed);
     }
+    fn inc(&self) { self.set(self.get() + 1); }
+    fn dec(&self) { self.set(self.get() - 1); }
 }
 
 impl SimplifyLS<u32> for AtomicU32 {
     fn get(&self) -> u32 {
         self.load(Ordering::Relaxed)
     }
-
     fn set(&self, val: u32) {
         self.store(val, Ordering::Relaxed);
     }
+    fn inc(&self) { self.set(self.get() + 1); }
+    fn dec(&self) { self.set(self.get() - 1); }
 }
 
 impl SimplifyLS<usize> for AtomicUsize {
     fn get(&self) -> usize {
         self.load(Ordering::Relaxed)
     }
-
     fn set(&self, val: usize) {
         self.store(val, Ordering::Relaxed);
     }
+    fn inc(&self) { self.set(self.get() + 1); }
+    fn dec(&self) { self.set(self.get() - 1); }
+}
+
+impl SimplifyLS<i32> for AtomicI32 {
+    fn get(&self) -> i32 {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: i32) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) { self.set(self.get() + 1); }
+    fn dec(&self) { self.set(self.get() - 1); }
 }

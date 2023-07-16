@@ -24,8 +24,6 @@ pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
 //unit: s
 pub const MESH_PAIR_TIMEOUT: u32 = 10;
-//unit: ms
-pub const MESH_PAIR_NOTIFY_TIMEOUT: u32 = 2500;
 
 pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
@@ -95,10 +93,6 @@ pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
     default_mesh_effect_delay_ref: u32,
-    /* When receive change to default mesh command, shall delay at least 500ms */
-    mesh_pair_start_notify_time: u32,
-    mesh_pair_retry_cnt: u8,
-    mesh_pair_notify_rsp_mask: [u8; 32],
     new_mesh_name: [u8; 16],
     new_mesh_pwd: [u8; 16],
     new_mesh_ltk: [u8; 16],
@@ -107,8 +101,6 @@ pub struct MeshManager {
     effect_new_mesh_delay_time: u32,
     mesh_pair_cmd_interval: u32,
     mesh_pair_timeout: u32,
-    mesh_pair_checksum: [u8; 8],
-    mesh_pair_retry_max: u8,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
     pkt_send_buf: Vec<SendPkt, 10>,
@@ -121,10 +113,6 @@ impl MeshManager {
             mesh_pair_start_time: 0,
             default_mesh_time: 0,
             default_mesh_effect_delay_ref: 0,
-            /* When receive change to default mesh command, shall delay at least 500ms */
-            mesh_pair_start_notify_time: 0,
-            mesh_pair_retry_cnt: 0,
-            mesh_pair_notify_rsp_mask: [0; 32],
             new_mesh_name: [0; 16],
             new_mesh_pwd: [0; 16],
             new_mesh_ltk: [0; 16],
@@ -133,8 +121,6 @@ impl MeshManager {
             effect_new_mesh_delay_time: 0,
             mesh_pair_cmd_interval: 0,
             mesh_pair_timeout: 0,
-            mesh_pair_checksum: [0; 8],
-            mesh_pair_retry_max: 3,
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
             pkt_send_buf: Vec::new(),
@@ -142,9 +128,9 @@ impl MeshManager {
         }
     }
 
-    pub fn send_mesh_message(&mut self, state: &mut State, data: &[u8; 13], destination: u16) {
+    pub fn send_mesh_message(&mut self, data: &[u8; 13], destination: u16) {
         let pkt = light_slave_tx_command(data, destination);
-        let (group_match, device_match) = rf_link_match_group_mac(state, &pkt);
+        let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
             if !device_match {
@@ -161,7 +147,7 @@ impl MeshManager {
         self.mesh_pair_timeout = MESH_PAIR_TIMEOUT;
     }
 
-    pub fn mesh_pair_proc_effect(&mut self, state: &mut State) {
+    pub fn mesh_pair_proc_effect(&mut self) {
         if self.effect_new_mesh != 0
             || (self.effect_new_mesh_delay_time != 0
             && (clock_time_exceed(
@@ -169,25 +155,18 @@ impl MeshManager {
             self.mesh_pair_cmd_interval * 1000,
         )))
         {
-            self.save_effect_new_mesh(state);
+            self.save_effect_new_mesh();
             self.effect_new_mesh = 0;
             self.effect_new_mesh_delay_time = 0;
         }
     }
 
-    pub fn get_mesh_pair_checksum_fn(&self, idx: u8) -> u8 {
-        let i = (idx % 8) as usize;
-        return (self.new_mesh_name[i] ^ self.new_mesh_name[i + 8])
-            ^ (self.new_mesh_pwd[i] ^ self.new_mesh_pwd[i + 8])
-            ^ (self.new_mesh_ltk[i] ^ self.new_mesh_ltk[i + 8]);
-    }
-
-    pub fn mesh_pair_proc_get_mac_flag(&mut self, state: &mut State) {
-        state.get_mac_en = false; // set success
+    pub fn mesh_pair_proc_get_mac_flag(&mut self) {
+        GET_MAC_EN.set(false); // set success
         if MESH_PAIR_ENABLE.get() {
             let mut data: [u8; 1] = [0];
             flash_write_page(
-                (FLASH_ADR_PAIRING as i32 + state.adr_flash_cfg_idx + 1) as u32,
+                (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get() + 1) as u32,
                 1,
                 data.as_mut_ptr(),
             );
@@ -228,7 +207,7 @@ impl MeshManager {
         }
     }
 
-    fn mesh_cmd_notify(&self, state: &mut State, op: u8, p: &[u8], dev_adr: u16) -> i32 {
+    fn mesh_cmd_notify(&self, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
         if SLAVE_LINK_CONNECTED.get() && PAIR_LOGIN_OK.get() {
             if p.len() > 10 {
@@ -258,7 +237,7 @@ impl MeshManager {
             pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
             if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(state, &Packet { att_cmd: pkt_notify }) {
+                if rf_link_add_tx_packet(&Packet { att_cmd: pkt_notify }) {
                     err = 0;
                 }
             }
@@ -267,39 +246,36 @@ impl MeshManager {
         return err;
     }
 
-    fn mesh_pair_complete_notify(&self, state: &mut State) -> i32 {
+    fn mesh_pair_complete_notify(&self) -> i32 {
         let par = [CMD_NOTIFY_MESH_PAIR_END];
-        return self.mesh_cmd_notify(state, LGT_CMD_MESH_CMD_NOTIFY, &par, DEVICE_ADDRESS.get());
+        return self.mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &par, DEVICE_ADDRESS.get());
     }
 
-    fn safe_effect_new_mesh_finish(&mut self, state: &mut State) {
+    fn safe_effect_new_mesh_finish(&mut self) {
         self.new_mesh_name = [0; 16];
         self.new_mesh_pwd = [0; 16];
         self.new_mesh_ltk = [0; 16];
-        self.mesh_pair_start_notify_time = 0;
-        self.mesh_pair_retry_cnt = 0;
         self.mesh_pair_start_time = 0;
-        self.mesh_pair_notify_rsp_mask = [0; 32];
-        state.pair_setting_flag = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
     }
 
-    fn save_effect_new_mesh(&mut self, state: &mut State) {
-        if self.default_mesh_time_ref != 0 || state.get_mac_en {
-            self.mesh_pair_complete_notify(state);
+    fn save_effect_new_mesh(&mut self) {
+        if self.default_mesh_time_ref != 0 || GET_MAC_EN.get() {
+            self.mesh_pair_complete_notify();
             sleep_us(1000);
             /* Switch to normal mesh */
-            pair_load_key(state);
+            pair_load_key();
             self.default_mesh_time_ref = 0;
 
-            mesh_node_init(state);
-            app().light_manager.device_status_update(state);
-            self.safe_effect_new_mesh_finish(state);
+            mesh_node_init();
+            app().light_manager.device_status_update();
+            self.safe_effect_new_mesh_finish();
             return;
         }
 
         {
-            let pair_state_binding = PAIR_STATE.lock();
-            let mut pair_state = pair_state_binding.borrow_mut();
+            let mut pair_state_binding = PAIR_STATE.lock();
+            let pair_state = pair_state_binding.get_mut();
 
             if self.effect_new_mesh == 0 {
                 pair_state.pair_nn.copy_from_slice(&self.new_mesh_name);
@@ -311,59 +287,48 @@ impl MeshManager {
             }
         }
 
-        self.mesh_pair_complete_notify(state);
+        self.mesh_pair_complete_notify();
 
         // make sure not receive legacy mesh data from now on
         let r = irq_disable();
-        pair_save_key(state);
+        pair_save_key();
         rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
-        rf_link_light_event_callback(state, LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
+        rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
         write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16); // clear current rx in buffer
         irq_restore(r);
 
-        self.safe_effect_new_mesh_finish(state);
+        self.safe_effect_new_mesh_finish();
     }
 
-    pub fn mesh_pair_notify_refresh(&mut self, p: &Packet) -> u8 {
-        if self.mesh_pair_checksum[0..8] == p.att_cmd().value.val[5..5 + 8] {
-            // mesh pair : success one device, clear the mask flag
-            self.mesh_pair_notify_rsp_mask[(p.att_cmd().value.val[3] / 8) as usize] &= !(BIT!(p.att_cmd().value.val[3] % 8));
-        }
-
-        return 1; // if return 2, then the notify rsp will not report to master.
-    }
-
-    fn switch_to_default_mesh(&mut self, state: &mut State, delay_s: u8) {
+    fn switch_to_default_mesh(&mut self, delay_s: u8) {
         self.default_mesh_time_ref = clock_time() | 1;
         self.default_mesh_time = delay_s as u32 * 1000;
 
         /* Only change AC and LTK */
         uprintln!("pairac c");
         PAIR_AC.set(access_code(
-            &state.pair_config_mesh_name,
-            &state.pair_config_mesh_pwd,
+            &*PAIR_CONFIG_MESH_NAME.lock().get_mut(),
+            &*PAIR_CONFIG_MESH_PWD.lock().get_mut(),
         ));
-        PAIR_STATE.lock().borrow_mut().pair_ltk.copy_from_slice(&state.pair_config_mesh_ltk);
+        PAIR_STATE.lock().get_mut().pair_ltk.copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock().get_mut());
     }
 
-    fn get_online_node_cnt(&mut self, state: &mut State) -> u8 {
+    fn get_online_node_cnt(&mut self) -> u8 {
+        let mut mesh_node_st_binding = MESH_NODE_ST.lock();
+        let _mesh_node_st = mesh_node_st_binding.get_mut();
+
         let mut cnt = 0;
         for i in 0..MESH_NODE_MAX.get() {
-            if state.mesh_node_st[i as usize].tick != 0 {
+            if _mesh_node_st[i as usize].tick != 0 {
                 cnt += 1;
-                if i > 0 {
-                    self.mesh_pair_notify_rsp_mask
-                        [(state.mesh_node_st[i as usize].val.dev_adr / 8) as usize] |=
-                        BIT!(state.mesh_node_st[i as usize].val.dev_adr % 8);
-                }
             }
         }
 
         return cnt;
     }
 
-    pub fn mesh_pair_proc(&mut self, state: &mut State) {
+    pub fn mesh_pair_proc(&mut self) {
         let mut dst_addr = 0xFFFF;
         let mut op_para: [u8; 16] = [0; 16];
 
@@ -376,10 +341,10 @@ impl MeshManager {
             self.default_mesh_effect_delay_ref = 0;
 
             if self.default_mesh_time == 0x00 {
-                pair_load_key(state);
+                pair_load_key();
                 self.default_mesh_time_ref = 0;
             } else {
-                self.switch_to_default_mesh(state, (self.default_mesh_time / 1000) as u8);
+                self.switch_to_default_mesh((self.default_mesh_time / 1000) as u8);
                 self.default_mesh_time_ref = clock_time() | 1;
             }
         } else if self.default_mesh_time_ref != 0
@@ -389,7 +354,7 @@ impl MeshManager {
             if self.default_mesh_time == 255000 {
                 self.default_mesh_time_ref = clock_time() | 1;
             } else {
-                pair_load_key(state);
+                pair_load_key();
                 self.default_mesh_time_ref = 0;
             }
         }
@@ -400,32 +365,29 @@ impl MeshManager {
         )
         {
             //mesh pair time out
-            pair_load_key(state);
-            state.pair_setting_flag = ePairState::PairSetted;
-            rf_link_light_event_callback(state, LGT_CMD_MESH_PAIR_TIMEOUT);
+            pair_load_key();
+            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+            rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
             return;
         }
 
-        if state.pair_setting_flag == ePairState::PairSetMeshTxStart
+        if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxStart
             && self.mesh_pair_state == MeshPairState::MeshPairName1
-            && self.get_online_node_cnt(state) == 1
+            && self.get_online_node_cnt() == 1
         {
             op_para[0] = LGT_CMD_MESH_PAIR;
             op_para[3] = MeshPairState::MeshPairEffect as u8;
             dst_addr = 0x0000; // there is noly one device in mesh,just effect itself.
             self.mesh_pair_state = MeshPairState::MeshPairName1;
-            self.mesh_pair_start_notify_time = 0;
-            self.mesh_pair_retry_cnt = 0;
             self.mesh_pair_start_time = 0;
-            self.mesh_pair_notify_rsp_mask = [0; 32];
-            state.pair_setting_flag = ePairState::PairSetted;
-        } else if state.pair_setting_flag as u8 >= ePairState::PairSetMeshTxStart as u8
+            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+        } else if *PAIR_SETTING_FLAG.lock().get_mut() as u8 >= ePairState::PairSetMeshTxStart as u8
             && clock_time_exceed(self.mesh_pair_time, self.mesh_pair_cmd_interval * 1000)
         {
             self.mesh_pair_time = clock_time();
-            if state.pair_setting_flag == ePairState::PairSetMeshTxStart {
-                let pair_state_binding = PAIR_STATE.lock();
-                let pair_state = pair_state_binding.borrow();
+            if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxStart {
+                let mut pair_state_binding = PAIR_STATE.lock();
+                let pair_state = pair_state_binding.get_mut();
 
                 op_para[0] = LGT_CMD_MESH_PAIR;
                 op_para[3] = self.mesh_pair_state as u8;
@@ -459,61 +421,35 @@ impl MeshManager {
                         // send mesh ltk [8-15]
                         op_para[4..4 + 8].copy_from_slice(&pair_state.pair_ltk_mesh[8..16]);
                         self.mesh_pair_state = MeshPairState::MeshPairName1;
-                        state.pair_setting_flag = ePairState::PairSetMeshTxDone;
+                        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshTxDone;
                     }
                     _ => {
                         self.mesh_pair_state = MeshPairState::MeshPairName1;
-                        self.mesh_pair_start_notify_time = 0;
-                        self.mesh_pair_retry_cnt = 0;
                         self.mesh_pair_start_time = 0;
-                        self.mesh_pair_notify_rsp_mask = [0; 32];
-                        state.pair_setting_flag = ePairState::PairSetted;
+                        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
                         return;
                     }
                 }
-            } else if state.pair_setting_flag == ePairState::PairSetMeshTxDone {
+            } else if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxDone {
                 // get mesh nodes' confirm value
                 op_para[0] = 0;
                 op_para[3] = 0x10; // bridge cnt
                 op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
-                state.pair_setting_flag = ePairState::PairSetMeshRxDone;
-                self.mesh_pair_start_notify_time = clock_time() | 0;
-                for i in 0..self.mesh_pair_checksum.len() {
-                    self.mesh_pair_checksum[i] = self.get_mesh_pair_checksum_fn(i as u8);
-                }
-            } else if state.pair_setting_flag == ePairState::PairSetMeshRxDone {
-                let mut effect_flag = self.mesh_pair_notify_rsp_mask == [0; 32];
-                if !effect_flag
-                    && clock_time_exceed(self.mesh_pair_start_time, MESH_PAIR_NOTIFY_TIMEOUT * 1000)
-                {
-                    if self.mesh_pair_retry_cnt < self.mesh_pair_retry_max {
-                        self.mesh_pair_start_time = clock_time() | 1;
-                        state.pair_setting_flag = ePairState::PairSetMeshTxStart;
-                        self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    } else {
-                        // retry timeout, effect or cancel?? effect now
-                        effect_flag = true;
-                    }
-                    self.mesh_pair_retry_cnt += 1;
-                }
-                if effect_flag {
-                    //send cmd to switch to new mesh
-                    op_para[0] = LGT_CMD_MESH_PAIR;
-                    op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
-                    self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    self.mesh_pair_start_notify_time = 0;
-                    self.mesh_pair_retry_cnt = 0;
-                    self.mesh_pair_start_time = 0;
-                    self.mesh_pair_notify_rsp_mask = [0; 32];
-                    state.pair_setting_flag = ePairState::PairSetted;
-                }
+                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshRxDone;
+            } else if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshRxDone {
+                //send cmd to switch to new mesh
+                op_para[0] = LGT_CMD_MESH_PAIR;
+                op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
+                self.mesh_pair_state = MeshPairState::MeshPairName1;
+                self.mesh_pair_start_time = 0;
+                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
             }
         } else {
             return;
         }
 
         let pkt = light_slave_tx_command(&op_para, dst_addr);
-        let (group_match, device_match) = rf_link_match_group_mac(state, &pkt);
+        let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
             if !device_match {
@@ -524,8 +460,8 @@ impl MeshManager {
         }
     }
 
-    pub fn mesh_node_buf_init(&self, state: &mut State) {
-        state.mesh_node_st.fill(mesh_node_st_t {
+    pub fn mesh_node_buf_init(&self) {
+        MESH_NODE_ST.lock().get_mut().fill(mesh_node_st_t {
             tick: 0,
             val: mesh_node_st_val_t {
                 dev_adr: 0,
@@ -534,7 +470,7 @@ impl MeshManager {
             },
         });
 
-        app().light_manager.device_status_update(state);
+        app().light_manager.device_status_update();
     }
 
     pub fn mesh_security_enable(&self, enable: bool)

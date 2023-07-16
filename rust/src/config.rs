@@ -1,7 +1,7 @@
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
 // General stuff
 
-// 0~max_mesh_name_len bytes  (strlen(adv_data) + strlen(MESH_NAME) + sizeof(LlAdvPrivateT))<=31
+// 0~MAX_MESH_NAME_LEN bytes  (strlen(ADV_DATA) + strlen(MESH_NAME) + sizeof(LlAdvPrivateT))<=31
 pub const MESH_NAME: &str = "out_of_mesh";
 // max 16 bytes
 pub const MESH_PWD: &str = "123";

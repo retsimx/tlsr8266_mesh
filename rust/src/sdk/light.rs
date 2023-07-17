@@ -214,6 +214,8 @@ pub const SLAVE_READ_STATUS_BUSY_TIMEOUT: u32 = 25000;
 pub const ADV_INTERVAL2LISTEN_INTERVAL: u16 = 4;
 pub const ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL: u16 = 8;
 
+pub const SEND_MESH_STATUS_INTERVAL_MS: u32 = 200;
+
 #[derive(PartialEq, Copy, Clone)]
 pub enum IrqHandlerStatus {
     None,

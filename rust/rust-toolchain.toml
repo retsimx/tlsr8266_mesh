@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly-2023-06-15"
+channel = "nightly-2023-07-17"
 components = [ "rust-src", "rustc" ]
 targets = [ "thumbv6m-none-eabi", "i686-unknown-linux-gnu" ]
 profile = "minimal"

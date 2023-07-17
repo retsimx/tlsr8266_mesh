@@ -38,7 +38,7 @@ impl App {
 
     pub fn init(&mut self) {
         // Copy the password in to the pair config
-        PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut()[0..MESH_PWD_ENCODE_SK.len()].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
+        PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
 
         unsafe { rf_drv_init(true); }
 

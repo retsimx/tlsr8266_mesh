@@ -127,12 +127,12 @@ pub fn factory_reset_cnt_check() {
     }
 
     if CLEAR_ST.get() == 3 {
-        CLEAR_ST.set(CLEAR_ST.get() - 1);
+        CLEAR_ST.dec();
         RESET_CHECK_TIME.set(FACTORY_RESET_SERIALS[RESET_CNT.get() as usize * 2] as u32);
     }
 
     if CLEAR_ST.get() == 2 && clock_time_exceed(0, RESET_CHECK_TIME.get() * 1000 * 1000) {
-        CLEAR_ST.set(CLEAR_ST.get() - 1);
+        CLEAR_ST.dec();
        RESET_CHECK_TIME.set(FACTORY_RESET_SERIALS[RESET_CNT.get() as usize * 2 + 1] as u32);
         if RESET_CNT.get() == 3 || RESET_CNT.get() == 4 {
             increase_cnt = true;
@@ -193,7 +193,7 @@ pub fn kick_out(par: KickoutReason) {
 
     if par == KickoutReason::OutOfMesh {
         let pairing_addr = FLASH_ADR_PAIRING;
-        let mut buff: [u8; 16] = *PAIR_CONFIG_MESH_LTK.lock().get_mut();
+        let mut buff: [u8; 16] = *PAIR_CONFIG_MESH_LTK.lock();
         flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];

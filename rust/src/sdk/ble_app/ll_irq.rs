@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::{app, uprintln};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
+use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
@@ -15,7 +16,7 @@ use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
 use crate::sdk::mcu::register::{*};
-use crate::sdk::packet_types::{Packet};
+use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead, PacketScanRsp, ScanRspData};
 use crate::state::{*};
 
 fn slave_timing_update_handle()
@@ -23,9 +24,9 @@ fn slave_timing_update_handle()
     SLAVE_INSTANT.inc();
     if SLAVE_TIMING_UPDATE.get() == 1 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
         SLAVE_TIMING_UPDATE.set(0);
-        let chn_map = SLAVE_CHN_MAP.lock().get_mut().clone();
+        let chn_map = SLAVE_CHN_MAP.lock().clone();
         ble_ll_channel_table_calc(&chn_map, false);
-        PKT_INIT.lock().get_mut().ll_init_mut().chm = chn_map;
+        PKT_INIT.lock().ll_init_mut().chm = chn_map;
     } else {
         if SLAVE_TIMING_UPDATE.get() == 2 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
             SLAVE_TIMING_UPDATE.set(0);
@@ -60,7 +61,7 @@ fn rf_link_slave_read_status_update()
     let mut rptr = SLAVE_STATUS_BUFFER_RPTR.get();
     while SLAVE_STATUS_BUFFER_WPTR.get() != rptr {
         rptr = rptr % BUFF_RESPONSE_PACKET_COUNT;
-        let packet = BUFF_RESPONSE.lock().get_mut()[rptr];
+        let packet = BUFF_RESPONSE.lock()[rptr];
         if !rf_link_add_tx_packet(&packet) {
             return;
         }
@@ -86,13 +87,10 @@ pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
     //      Iterate over each bit in the 32 bit value and find any set bits
     //      Report the status of the light at any set bits and clear the bit from the mask
 
-    let mut binding = MESH_NODE_MASK.lock();
-    let mut mesh_node_mask = binding.get_mut();
+    let mut mesh_node_mask = MESH_NODE_MASK.lock();
+    let mut mesh_node_st = MESH_NODE_ST.lock();
 
-    let mut mesh_node_st_binding = MESH_NODE_ST.lock();
-    let _mesh_node_st = mesh_node_st_binding.get_mut();
-
-    _mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
+    mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
         if result >= len {
             return;
         }
@@ -112,14 +110,14 @@ pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
             params[params_idx..params_idx + MESH_NODE_ST_VAL_LEN].copy_from_slice(
                 unsafe {
                     slice::from_raw_parts(
-                        addr_of!(_mesh_node_st[idx].val) as *const u8,
+                        addr_of!(mesh_node_st[idx].val) as *const u8,
                         MESH_NODE_ST_VAL_LEN,
                     )
                 }
             );
 
             // If the tick is 0 (Device offline), set the sn value to 0
-            if _mesh_node_st[idx].tick == 0 {
+            if mesh_node_st[idx].tick == 0 {
                 params[params_idx + 1] = 0;
             }
 
@@ -146,7 +144,7 @@ pub fn irq_st_listen()
     write_reg_system_tick_irq(read_reg_system_tick() + SLAVE_LISTEN_INTERVAL.get());
     if ADV_FLAG.get() {
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 7000 + read_reg_system_tick());
-        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Adv;
+        *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
         return;
     }
     if !ONLINE_ST_FLAG.get() {
@@ -155,7 +153,7 @@ pub fn irq_st_listen()
         ONLINE_ST_FLAG.set(ST_LISTEN_NO.get() % ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 != 0);
         if ADV_FLAG.get() {
             write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * CLOCK_SYS_CLOCK_1US + read_reg_system_tick_irq()));
-            *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Adv;
+            *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
             return;
         }
         if !ONLINE_ST_FLAG.get() {
@@ -163,7 +161,7 @@ pub fn irq_st_listen()
         }
     }
 
-    *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Adv;
+    *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
 }
 
 fn get_gatt_adv_cnt() -> u32
@@ -190,7 +188,7 @@ pub fn irq_st_adv()
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 500 + read_reg_system_tick());
         }
         ONLINE_ST_FLAG.set(false);
-        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Listen;
+        *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
         write_reg_rf_irq_status(1);
     } else {
         rf_set_ble_access_code_adv();
@@ -201,7 +199,7 @@ pub fn irq_st_adv()
         write_reg_rf_irq_status(1);
 
         if ST_PNO.load(Ordering::Relaxed) < 3 {
-            let tmp = *PKT_ADV.lock().get_mut();
+            let tmp = *PKT_ADV.lock();
             rf_start_stx2rx(addr_of!(tmp) as u32, CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
         }
 
@@ -211,8 +209,42 @@ pub fn irq_st_adv()
             ADV_FLAG.set(false);
         }
 
-        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Listen;
+        *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
     }
+}
+
+fn disconnect_ble() {
+    write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
+    *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
+    write_reg_dma_tx_rptr(0x10);
+    SLAVE_LINK_CONNECTED.set(false);
+    PAIR_LOGIN_OK.set(false);
+
+    if SECURITY_ENABLE.get() == false {
+        mesh_report_status_enable(false);
+    } else {
+        SLAVE_FIRST_CONNECTED_TICK.set(0);
+        PAIR_LOGIN_OK.set(false);
+        mesh_report_status_enable(false);
+    }
+    if SLAVE_READ_STATUS_BUSY.get() != 0 {
+        rf_link_slave_read_status_stop();
+    }
+    if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetted {
+        SLAVE_DATA_VALID.set(0);
+    } else {
+        SLAVE_DATA_VALID.set(0);
+        pair_load_key();
+        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+    }
+    if CLOCK_SYS_CLOCK_1US == 0x10 {
+        write_reg8(0xf04, 0x5e);
+    } else {
+        write_reg8(0xf04, 0x68);
+    }
+
+    ATT_SERVICE_DISCOVER_TICK.set(0);
+    NEED_UPDATE_CONNECT_PARA.set(false);
 }
 
 pub fn irq_st_bridge()
@@ -235,37 +267,9 @@ pub fn irq_st_bridge()
         if RF_SLAVE_OTA_BUSY.get() {
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
         }
-        write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Adv;
-        write_reg_dma_tx_rptr(0x10);
-        SLAVE_LINK_CONNECTED.set(false);
-        PAIR_LOGIN_OK.set(false);
 
-        if SECURITY_ENABLE.get() == false {
-            mesh_report_status_enable(false);
-        } else {
-            SLAVE_FIRST_CONNECTED_TICK.set(0);
-            PAIR_LOGIN_OK.set(false);
-            mesh_report_status_enable(false);
-        }
-        if SLAVE_READ_STATUS_BUSY.get() != 0 {
-            rf_link_slave_read_status_stop();
-        }
-        if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetted {
-            SLAVE_DATA_VALID.set(0);
-        } else {
-            SLAVE_DATA_VALID.set(0);
-            pair_load_key();
-            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
-        }
-        if CLOCK_SYS_CLOCK_1US == 0x10 {
-            write_reg8(0xf04, 0x5e);
-        } else {
-            write_reg8(0xf04, 0x68);
-        }
-
-        ATT_SERVICE_DISCOVER_TICK.set(0);
-        NEED_UPDATE_CONNECT_PARA.set(false);
+        // Disconnect
+        disconnect_ble();
 
         return;
     }
@@ -279,18 +283,16 @@ pub fn irq_st_bridge()
 
         if CLOCK_SYS_CLOCK_1US * 1000000 < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed) {
             RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
-            let sot = RF_SLAVE_OTA_TIMEOUT_S.get();
-            if sot != 0 {
-                RF_SLAVE_OTA_TIMEOUT_S.set(sot - 1);
-                if sot - 1 == 0
-                {
+            if RF_SLAVE_OTA_TIMEOUT_S.get() != 0 {
+                RF_SLAVE_OTA_TIMEOUT_S.dec();
+                if RF_SLAVE_OTA_TIMEOUT_S.get() == 0 {
                     app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
                 }
             }
         }
 
         write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
-        *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Rx;
+        *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
         return;
     }
 
@@ -315,8 +317,29 @@ pub fn irq_st_bridge()
     if is_add_packet_buf_ready() && !app().uart_manager.started() {
         let mut data = [0u8; 20];
         if mesh_node_report_status(&mut data, 10 / MESH_NODE_ST_VAL_LEN) != 0 {
-            PKT_LIGHT_REPORT.lock().get_mut().att_cmd_mut().value.val[3..].copy_from_slice(&data);
-            rf_link_add_tx_packet(PKT_LIGHT_REPORT.lock().get_mut());
+            let mut pkt = Packet {
+                att_cmd: PacketAttCmd {
+                    head: PacketL2capHead {
+                        dma_len: 0x1D,
+                        _type: 2,
+                        rf_len: 0x1B,
+                        l2cap_len: 0x17,
+                        chan_id: 4,
+                    },
+                    opcode: 0x1B,
+                    handle: 0x12,
+                    handle1: 0,
+                    value: PacketAttValue {
+                        sno: [0; 3],
+                        src: [0; 2],
+                        dst: [0; 2],
+                        val: [0xdc, VENDOR_ID as u8, (VENDOR_ID >> 8) as u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                    },
+                }
+            };
+
+            pkt.att_cmd_mut().value.val[3..].copy_from_slice(&data);
+            rf_link_add_tx_packet(&pkt);
         }
     }
 
@@ -338,12 +361,12 @@ pub fn irq_st_bridge()
         SLAVE_NEXT_CONNECT_TICK.set(SLAVE_NEXT_CONNECT_TICK.get() + SLAVE_LINK_INTERVAL.get());
 
         slave_timing_update_handle();
-        let chn_map = PKT_INIT.lock().get_mut().ll_init().chm;
-        ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().get_mut().ll_init().hop & 0x1f);
+        let chn_map = PKT_INIT.lock().ll_init().chm;
+        ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f);
     }
 
     write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
-    *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Rx;
+    *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
 }
 
 pub fn irq_st_ble_rx()
@@ -355,14 +378,14 @@ pub fn irq_st_ble_rx()
 
     write_reg8(0x00800f04, 0x67);  // tx wail & settle time
 
-    let chn_map = PKT_INIT.lock().get_mut().ll_init().chm;
-    let next_chan = ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().get_mut().ll_init().hop & 0x1f) as u8;
+    let chn_map = PKT_INIT.lock().ll_init().chm;
+    let next_chan = ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f) as u8;
     rf_set_ble_channel(next_chan);
 
     // rf_set_ble_access_code(unsafe { *(addr_of!((state.PKT_INIT()).aa) as *const u32) });
     // rf_set_ble_crc(&(state.PKT_INIT()).crcinit);
-    let aa = PKT_INIT.lock().get_mut().ll_init().aa;
-    let crcinit = PKT_INIT.lock().get_mut().ll_init().crcinit;
+    let aa = PKT_INIT.lock().ll_init().aa;
+    let crcinit = PKT_INIT.lock().ll_init().crcinit;
     write_reg_rf_access_code(((aa[2] as u32) << 8) | ((aa[1] as u32) << 0x10) | (aa[3] as u32) | ((aa[0] as u32) << 0x18));
     write_reg_rf_crc(((crcinit[1] as u32) << 8) | ((crcinit[2] as u32) << 0x10) | crcinit[0] as u32);
 
@@ -376,7 +399,7 @@ pub fn irq_st_ble_rx()
     } else {
         write_reg_system_tick_irq(10000 * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
     }
-    *P_ST_HANDLER.lock().get_mut() = IrqHandlerStatus::Bridge;
+    *P_ST_HANDLER.lock() = IrqHandlerStatus::Bridge;
     SLAVE_TICK_BRX.set(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     SLAVE_TIMING_ADJUST_ENABLE.set(true);
     rf_start_brx(addr_of!(PKT_EMPTY) as u32, SLAVE_TICK_BRX.get());
@@ -404,8 +427,7 @@ fn irq_light_slave_rx()
     }
 
     let mut dma_len = 0;
-    let mut binding = LIGHT_RX_BUFF.lock();
-    let mut light_rx_buff = binding.get_mut();
+    let mut light_rx_buff = LIGHT_RX_BUFF.lock();
 
     write_reg_dma2_addr(addr_of!(light_rx_buff[LIGHT_RX_WPTR.get()]) as u16);
     write_reg_rf_irq_status(1);
@@ -439,25 +461,28 @@ fn irq_light_slave_rx()
             RCV_PKT_TIME.set(rx_time);
             if SLAVE_LINK_STATE.get() == 1 {
                 if cmd == 3 {
-                    if entry.mac == MAC_ID.lock().get_mut()[0..4] {
+                    if entry.mac == MAC_ID.lock()[0..4] {
                         rf_stop_trx();
                         write_reg_rf_sched_tick(rx_time + T_SCAN_RSP_INTVL.get() * CLOCK_SYS_CLOCK_1US);
                         write_reg_rf_mode_control(0x85);                        // single TX
 
-                        let mut pkt_scan_rsp_binding = PKT_SCAN_RSP.lock();
-                        let mut _pkt_scan_rsp = pkt_scan_rsp_binding.get_mut();
+                        let pkt_scan_rsp = Packet {
+                            scan_rsp: PacketScanRsp {
+                                dma_len: 0x27,
+                                _type: 0x4,
+                                rf_len: 0x25,
+                                adv_a: *MAC_ID.lock(),
+                                data: ScanRspData {
+                                    handle: 0xff1e,
+                                    data: AdvRspPrivate {
+                                        device_address: DEVICE_ADDRESS.get(),
+                                        ..*ADV_RSP_PRI_DATA.lock()
+                                    }
+                                },
+                            }
+                        };
 
-                        ADV_RSP_PRI_DATA.lock().get_mut().device_address = DEVICE_ADDRESS.get();
-                        _pkt_scan_rsp.scan_rsp_mut().data[0] = 0x1e;
-                        _pkt_scan_rsp.scan_rsp_mut().data[1] = 0xff;
-                        let tmp = ADV_RSP_PRI_DATA.lock().get_mut().clone();
-                        _pkt_scan_rsp.scan_rsp_mut().data[2..2 + size_of::<AdvRspPrivate>()].copy_from_slice(
-                            unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvRspPrivate>()) }
-                        );
-                        _pkt_scan_rsp.head_mut().dma_len = 0x27;
-                        _pkt_scan_rsp.head_mut().rf_len = 0x25;
-
-                        write_reg_dma3_addr(addr_of!(*_pkt_scan_rsp) as u16);
+                        write_reg_dma3_addr(addr_of!(pkt_scan_rsp) as u16);
                         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
 
                         return;
@@ -465,7 +490,7 @@ fn irq_light_slave_rx()
                 }
 
                 if cmd == 5 {
-                    if entry.mac == MAC_ID.lock().get_mut()[0..4] {
+                    if entry.mac == MAC_ID.lock()[0..4] {
                         rf_link_slave_connect(packet, rx_time);
 
                         return;
@@ -512,7 +537,7 @@ fn irq_light_slave_rx()
         }
     }
 
-    slow(rx_index, dma_len, light_rx_buff);
+    slow(rx_index, dma_len, &mut *light_rx_buff);
 }
 
 static IS_IRQ_MODE: AtomicBool = AtomicBool::new(false);
@@ -520,17 +545,20 @@ static IS_IRQ_MODE: AtomicBool = AtomicBool::new(false);
 pub struct IrqTracker {}
 
 impl IrqTracker {
+    #[inline(always)]
     pub fn new() -> Self {
         IS_IRQ_MODE.store(true, Ordering::Relaxed);
         return IrqTracker {}
     }
 
+    #[inline(always)]
     pub fn in_irq() -> bool {
         IS_IRQ_MODE.load(Ordering::Relaxed)
     }
 }
 
 impl Drop for IrqTracker {
+    #[inline(always)]
     fn drop(&mut self) {
         IS_IRQ_MODE.store(false, Ordering::Relaxed);
     }
@@ -558,7 +586,7 @@ extern "C" fn irq_handler() {
         if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
             write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
             let state = {
-                *P_ST_HANDLER.lock().get_mut()
+                *P_ST_HANDLER.lock()
             };
             match state {
                 IrqHandlerStatus::Adv => irq_st_adv(),
@@ -577,12 +605,10 @@ extern "C" fn irq_handler() {
             clock_time64();
 
             if RF_SLAVE_OTA_BUSY_MESH.get() {
-                let sot = RF_SLAVE_OTA_TIMEOUT_S.get();
-                if sot != 0 {
-                    RF_SLAVE_OTA_TIMEOUT_S.set(sot - 1);
-                    if sot - 1 == 0
-                    {
-                        app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut());
+                if RF_SLAVE_OTA_TIMEOUT_S.get() != 0 {
+                    RF_SLAVE_OTA_TIMEOUT_S.dec();
+                    if RF_SLAVE_OTA_TIMEOUT_S.get() == 0 {
+                        app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*RF_SLAVE_OTA_FINISHED_FLAG.lock());
                     }
                 }
             }

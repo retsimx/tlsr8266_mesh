@@ -256,7 +256,7 @@ impl MeshManager {
         self.new_mesh_pwd = [0; 16];
         self.new_mesh_ltk = [0; 16];
         self.mesh_pair_start_time = 0;
-        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
     }
 
     fn save_effect_new_mesh(&mut self) {
@@ -274,8 +274,7 @@ impl MeshManager {
         }
 
         {
-            let mut pair_state_binding = PAIR_STATE.lock();
-            let pair_state = pair_state_binding.get_mut();
+            let mut pair_state = PAIR_STATE.lock();
 
             if self.effect_new_mesh == 0 {
                 pair_state.pair_nn.copy_from_slice(&self.new_mesh_name);
@@ -308,19 +307,18 @@ impl MeshManager {
         /* Only change AC and LTK */
         uprintln!("pairac c");
         PAIR_AC.set(access_code(
-            &*PAIR_CONFIG_MESH_NAME.lock().get_mut(),
-            &*PAIR_CONFIG_MESH_PWD.lock().get_mut(),
+            &*PAIR_CONFIG_MESH_NAME.lock(),
+            &*PAIR_CONFIG_MESH_PWD.lock(),
         ));
-        PAIR_STATE.lock().get_mut().pair_ltk.copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock().get_mut());
+        PAIR_STATE.lock().pair_ltk.copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock());
     }
 
     fn get_online_node_cnt(&mut self) -> u8 {
-        let mut mesh_node_st_binding = MESH_NODE_ST.lock();
-        let _mesh_node_st = mesh_node_st_binding.get_mut();
+        let mesh_node_st = MESH_NODE_ST.lock();
 
         let mut cnt = 0;
         for i in 0..MESH_NODE_MAX.get() {
-            if _mesh_node_st[i as usize].tick != 0 {
+            if mesh_node_st[i as usize].tick != 0 {
                 cnt += 1;
             }
         }
@@ -366,12 +364,12 @@ impl MeshManager {
         {
             //mesh pair time out
             pair_load_key();
-            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
             rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
             return;
         }
 
-        if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxStart
+        if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxStart
             && self.mesh_pair_state == MeshPairState::MeshPairName1
             && self.get_online_node_cnt() == 1
         {
@@ -380,14 +378,13 @@ impl MeshManager {
             dst_addr = 0x0000; // there is noly one device in mesh,just effect itself.
             self.mesh_pair_state = MeshPairState::MeshPairName1;
             self.mesh_pair_start_time = 0;
-            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
-        } else if *PAIR_SETTING_FLAG.lock().get_mut() as u8 >= ePairState::PairSetMeshTxStart as u8
+            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+        } else if *PAIR_SETTING_FLAG.lock() as u8 >= ePairState::PairSetMeshTxStart as u8
             && clock_time_exceed(self.mesh_pair_time, self.mesh_pair_cmd_interval * 1000)
         {
             self.mesh_pair_time = clock_time();
-            if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxStart {
-                let mut pair_state_binding = PAIR_STATE.lock();
-                let pair_state = pair_state_binding.get_mut();
+            if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxStart {
+                let pair_state = PAIR_STATE.lock();
 
                 op_para[0] = LGT_CMD_MESH_PAIR;
                 op_para[3] = self.mesh_pair_state as u8;
@@ -421,28 +418,28 @@ impl MeshManager {
                         // send mesh ltk [8-15]
                         op_para[4..4 + 8].copy_from_slice(&pair_state.pair_ltk_mesh[8..16]);
                         self.mesh_pair_state = MeshPairState::MeshPairName1;
-                        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshTxDone;
+                        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxDone;
                     }
                     _ => {
                         self.mesh_pair_state = MeshPairState::MeshPairName1;
                         self.mesh_pair_start_time = 0;
-                        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+                        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                         return;
                     }
                 }
-            } else if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshTxDone {
+            } else if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxDone {
                 // get mesh nodes' confirm value
                 op_para[0] = 0;
                 op_para[3] = 0x10; // bridge cnt
                 op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
-                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshRxDone;
-            } else if *PAIR_SETTING_FLAG.lock().get_mut() == ePairState::PairSetMeshRxDone {
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshRxDone;
+            } else if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshRxDone {
                 //send cmd to switch to new mesh
                 op_para[0] = LGT_CMD_MESH_PAIR;
                 op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
                 self.mesh_pair_state = MeshPairState::MeshPairName1;
                 self.mesh_pair_start_time = 0;
-                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
             }
         } else {
             return;
@@ -461,7 +458,7 @@ impl MeshManager {
     }
 
     pub fn mesh_node_buf_init(&self) {
-        MESH_NODE_ST.lock().get_mut().fill(mesh_node_st_t {
+        MESH_NODE_ST.lock().fill(mesh_node_st_t {
             tick: 0,
             val: mesh_node_st_val_t {
                 dev_adr: 0,

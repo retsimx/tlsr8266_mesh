@@ -69,14 +69,14 @@ pub fn aes_att_decryption(key: &[u8], source: &[u8], dest: &mut [u8])
 pub fn encode_password(password: &mut [u8])
 {
     unsafe {
-        aes_att_encryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut().as_slice(), &*addr_of!(*password), password);
+        aes_att_encryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().as_slice(), &*addr_of!(*password), password);
     }
 }
 
 pub fn decode_password(password: &mut [u8])
 {
     unsafe {
-        aes_att_decryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().get_mut().as_slice(), &*addr_of!(*password), password);
+        aes_att_decryption(PAIR_CONFIG_PWD_ENCODE_SK.lock().as_slice(), &*addr_of!(*password), password);
     }
 }
 

@@ -1,36 +1,14 @@
-use core::cell::{UnsafeCell};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use heapless::Deque;
 
 use crate::config::VENDOR_ID;
-use crate::embassy::sync::mutex::Mutex;
+use crate::embassy::sync::mutex::CriticalSectionMutex;
 use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
 use crate::sdk::light::{*};
 use crate::sdk::packet_types::{*};
 
-pub static BLT_TX_FIFO: Mutex<UnsafeCell<[Packet; BLT_FIFO_TX_PACKET_COUNT]>> = Mutex::new(UnsafeCell::new(
-    [
-        Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    dma_len: 0,
-                    _type: 0,
-                    rf_len: 0,
-                    l2cap_len: 0,
-                    chan_id: 0,
-                },
-                opcode: 0,
-                handle: 0,
-                handle1: 0,
-                value: [0; 30],
-            }
-        };
-        BLT_FIFO_TX_PACKET_COUNT
-    ]
-));
-
-pub static BUFF_RESPONSE: Mutex<UnsafeCell<[Packet; BUFF_RESPONSE_PACKET_COUNT]>> = Mutex::new(UnsafeCell::new(
+pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> = CriticalSectionMutex::new(
     [
         Packet {
             att_data: PacketAttData {
@@ -49,9 +27,9 @@ pub static BUFF_RESPONSE: Mutex<UnsafeCell<[Packet; BUFF_RESPONSE_PACKET_COUNT]>
         };
         BUFF_RESPONSE_PACKET_COUNT
     ]
-));
+);
 
-pub static MESH_NODE_ST: Mutex<UnsafeCell<[mesh_node_st_t; MESH_NODE_MAX_NUM]>> = Mutex::new(UnsafeCell::new(
+pub static MESH_NODE_ST: CriticalSectionMutex<[mesh_node_st_t; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
     [
         mesh_node_st_t {
             tick: 0,
@@ -63,17 +41,17 @@ pub static MESH_NODE_ST: Mutex<UnsafeCell<[mesh_node_st_t; MESH_NODE_MAX_NUM]>> 
         };
         MESH_NODE_MAX_NUM
     ]
-));
+);
 
-pub static ADV_PRI_DATA: Mutex<UnsafeCell<AdvPrivate>> = Mutex::new(UnsafeCell::new(
+pub static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> = CriticalSectionMutex::new(
     AdvPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
         mac_address: 0,
     }
-));
+);
 
-pub static ADV_RSP_PRI_DATA: Mutex<UnsafeCell<AdvRspPrivate>> = Mutex::new(UnsafeCell::new(
+pub static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> = CriticalSectionMutex::new(
     AdvRspPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
@@ -83,106 +61,23 @@ pub static ADV_RSP_PRI_DATA: Mutex<UnsafeCell<AdvRspPrivate>> = Mutex::new(Unsaf
         device_address: 0,
         rsv: [0; 16],
     }
-));
+);
 
-pub static BLE_LL_CHANNEL_TABLE: Mutex<UnsafeCell<[u8; 40]>> = Mutex::new(UnsafeCell::new([0; 40]));
+pub static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> = CriticalSectionMutex::new([0; 40]);
 
-pub static PKT_MTU_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_mtu: PacketAttMtu {
-            head: PacketL2capHead {
-                dma_len: 0x09,
-                _type: 2,
-                rf_len: 0x07,
-                l2cap_len: 0x03,
-                chan_id: 0x04,
-            },
-            opcode: 0x03,
-            mtu: [0x17, 0x00],
-        }
-    }
-));
-pub static PKT_ERR_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_err_rsp: PacketAttErrRsp {
-            head: PacketL2capHead {
-                dma_len: 0x0b,
-                _type: 0x02,
-                rf_len: 0x09,
-                l2cap_len: 0x05,
-                chan_id: 0x04,
-            },
-            opcode: 0x01,
-            err_opcode: 0,
-            err_handle: 0,
-            err_reason: 0x0a,
-        }
-    }
-));
-pub static RF_PACKET_ATT_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_read_rsp: PacketAttReadRsp {
-            head: PacketL2capHead {
-                dma_len: 0,
-                _type: 0,
-                rf_len: 0,
-                l2cap_len: 0,
-                chan_id: 0,
-            },
-            opcode: 0,
-            value: [0; 22],
-        }
-    }
-));
-pub static PKT_WRITE_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_write_rsp: PacketAttWriteRsp {
-            head: PacketL2capHead {
-                dma_len: 0x07,
-                _type: 2,
-                rf_len: 0x05,
-                l2cap_len: 0x01,
-                chan_id: 0x04,
-            },
-            opcode: 0x13,
-        }
-    }
-));
+pub static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::new([0; 5]);
+pub static P_ST_HANDLER: CriticalSectionMutex<IrqHandlerStatus> = CriticalSectionMutex::new(IrqHandlerStatus::None);
 
-pub static SLAVE_CHN_MAP: Mutex<UnsafeCell<[u8; 5]>> = Mutex::new(UnsafeCell::new([0; 5]));
-pub static P_ST_HANDLER: Mutex<UnsafeCell<IrqHandlerStatus>> = Mutex::new(UnsafeCell::new(IrqHandlerStatus::None));
-pub static PKT_LIGHT_REPORT: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_cmd: PacketAttCmd {
-            head: PacketL2capHead {
-                dma_len: 0x1D,
-                _type: 2,
-                rf_len: 0x1B,
-                l2cap_len: 0x17,
-                chan_id: 4,
-            },
-            opcode: 0x1B,
-            handle: 0x12,
-            handle1: 0,
-            value: PacketAttValue {
-                sno: [0; 3],
-                src: [0; 2],
-                dst: [0; 2],
-                val: [0xdc, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-            },
-        }
-    }
-));
-pub static PAIR_CONFIG_MESH_NAME: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
-pub static PAIR_CONFIG_MESH_PWD: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
-pub static PAIR_CONFIG_MESH_LTK: Mutex<UnsafeCell<[u8; 16]>> = Mutex::new(UnsafeCell::new([0; 16]));
-pub static GROUP_ADDRESS: Mutex<UnsafeCell<[u16; MAX_GROUP_NUM as usize]>> = Mutex::new(UnsafeCell::new([0; MAX_GROUP_NUM as usize]));
-pub static PAIR_SETTING_FLAG: Mutex<UnsafeCell<ePairState>> = Mutex::new(UnsafeCell::new(ePairState::PairSetted));
-pub static RF_SLAVE_OTA_FINISHED_FLAG: Mutex<UnsafeCell<OtaState>> = Mutex::new(UnsafeCell::new(OtaState::Continue));
-pub static PAIR_IVM: Mutex<UnsafeCell<[u8; 8]>> = Mutex::new(UnsafeCell::new([0, 0, 0, 0, 1, 0, 0, 0]));
-pub static PAIR_CONFIG_PWD_ENCODE_SK: Mutex<UnsafeCell<[u8; 17]>> = Mutex::new(UnsafeCell::new([0; 17]));
-pub static PAIR_IVS: Mutex<UnsafeCell<[u8; 8]>> = Mutex::new(UnsafeCell::new([0; 8]));
-pub static SLAVE_STATUS_RECORD: Mutex<UnsafeCell<[StatusRecord; MESH_NODE_MAX_NUM]>> = Mutex::new(UnsafeCell::new(
+pub static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_NUM as usize]> = CriticalSectionMutex::new([0; MAX_GROUP_NUM as usize]);
+pub static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> = CriticalSectionMutex::new(ePairState::PairSetted);
+pub static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> = CriticalSectionMutex::new(OtaState::Continue);
+pub static PAIR_IVM: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
+pub static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 17]> = CriticalSectionMutex::new([0; 17]);
+pub static PAIR_IVS: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0; 8]);
+pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
     [
         StatusRecord {
             adr: [0],
@@ -190,13 +85,13 @@ pub static SLAVE_STATUS_RECORD: Mutex<UnsafeCell<[StatusRecord; MESH_NODE_MAX_NU
         };
         MESH_NODE_MAX_NUM
     ]
-));
-pub static RC_PKT_BUF: Mutex<UnsafeCell<Deque<PktBuf, 5>>> = Mutex::new(UnsafeCell::new(Deque::new()));
-pub static SLAVE_STAT_SNO: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([0; 3]));
-pub static SLAVE_SNO: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([0; 3]));
-pub static MAC_ID: Mutex<UnsafeCell<[u8; 6]>> = Mutex::new(UnsafeCell::new([0; 6]));
-pub static ADV_DATA: Mutex<UnsafeCell<[u8; 3]>> = Mutex::new(UnsafeCell::new([2, 1, 5]));
-pub static PKT_ADV: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+);
+pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 5>> = CriticalSectionMutex::new(Deque::new());
+pub static SLAVE_STAT_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static SLAVE_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
+pub static ADV_DATA: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([2, 1, 5]);
+pub static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
     Packet {
         adv_ind_module: RfPacketAdvIndModuleT {
             dma_len: 0x27,
@@ -206,19 +101,9 @@ pub static PKT_ADV: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
             data: [0; 31],
         }
     }
-));
-pub static PKT_SCAN_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        scan_rsp: PacketScanRsp {
-            dma_len: 0x27,
-            _type: 0x4,
-            rf_len: 0x25,
-            adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
-            data: [0; 31],
-        }
-    }
-));
-pub static PKT_LIGHT_DATA: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+);
+
+pub static PKT_LIGHT_DATA: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
     Packet {
         att_cmd: PacketAttCmd {
             head: PacketL2capHead {
@@ -239,8 +124,8 @@ pub static PKT_LIGHT_DATA: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::ne
             },
         }
     }
-));
-pub static PKT_LIGHT_STATUS: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+);
+pub static PKT_LIGHT_STATUS: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
     Packet {
         att_cmd: PacketAttCmd {
             head: PacketL2capHead {
@@ -261,40 +146,9 @@ pub static PKT_LIGHT_STATUS: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::
             },
         }
     }
-));
-pub static PKT_READ_RSP: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_read_rsp: PacketAttReadRsp {
-            head: PacketL2capHead {
-                dma_len: 0x1d,
-                _type: 2,
-                rf_len: 0x1b,
-                l2cap_len: 0x17,
-                chan_id: 0x4,
-            },
-            opcode: 0xb,
-            value: [0; 22],
-        }
-    }
-));
-pub static PKT_LIGHT_ADV_STATUS: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
-    Packet {
-        att_write: PacketAttWrite {
-            head: PacketL2capHead {
-                dma_len: 0x27,
-                _type: 2,
-                rf_len: 0x25,
-                l2cap_len: 0x21,
-                chan_id: 0xffff,
-            },
-            opcode: 0,
-            handle: 0,
-            handle1: 0,
-            value: [0; 30],
-        }
-    }
-));
-pub static PKT_INIT: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
+);
+
+pub static PKT_INIT: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
     Packet {
         ll_init: PacketLlInit {
             dma_len: 0x24,
@@ -313,7 +167,7 @@ pub static PKT_INIT: Mutex<UnsafeCell<Packet>> = Mutex::new(UnsafeCell::new(
             hop: 0xac,
         }
     }
-));
+);
 
 pub struct PairState {
     pub pair_ltk: [u8; 16],
@@ -327,7 +181,7 @@ pub struct PairState {
     pub pair_randm: [u8; 8],
 }
 
-pub static PAIR_STATE: Mutex<UnsafeCell<PairState>> = Mutex::new(UnsafeCell::new(
+pub static PAIR_STATE: CriticalSectionMutex<PairState> = CriticalSectionMutex::new(
     PairState {
         pair_ltk: [0; 16],
         pair_sk: [0; 16],
@@ -339,9 +193,9 @@ pub static PAIR_STATE: Mutex<UnsafeCell<PairState>> = Mutex::new(UnsafeCell::new
         pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
         pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
     }
-));
+);
 
-pub static LIGHT_RX_BUFF: Mutex<UnsafeCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> = Mutex::new(UnsafeCell::new(
+pub static LIGHT_RX_BUFF: CriticalSectionMutex<[LightRxBuff; LIGHT_RX_BUFF_COUNT]> = CriticalSectionMutex::new(
     [
         LightRxBuff {
             dma_len: 0,
@@ -355,7 +209,7 @@ pub static LIGHT_RX_BUFF: Mutex<UnsafeCell<[LightRxBuff; LIGHT_RX_BUFF_COUNT]>> 
             unk4: [0; 40],
         }; LIGHT_RX_BUFF_COUNT
     ]
-));
+);
 
 // This needs to be forced in to .data otherwise the DMA module will try to fetch from flash, which
 // doesn't work
@@ -381,9 +235,26 @@ pub static PKT_TERMINATE: Packet = Packet {
     }
 };
 
+#[link_section = ".data"]
+pub static PKT_ERR_RSP: Packet = Packet {
+    att_err_rsp: PacketAttErrRsp {
+        head: PacketL2capHead {
+            dma_len: 0x0b,
+            _type: 0x02,
+            rf_len: 0x09,
+            l2cap_len: 0x05,
+            chan_id: 0x04,
+        },
+        opcode: 0x01,
+        err_opcode: 0,
+        err_handle: 0,
+        err_reason: 0x0a,
+    }
+};
+
 pub static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
-pub static MESH_NODE_MASK: Mutex<UnsafeCell<[u32; MESH_NODE_MASK_LEN]>> = Mutex::new(UnsafeCell::new([0; ((MESH_NODE_MAX_NUM + 31) >> 5)]));
+pub static MESH_NODE_MASK: CriticalSectionMutex<[u32; MESH_NODE_MASK_LEN]> = CriticalSectionMutex::new([0; MESH_NODE_MASK_LEN]);
 pub static BLE_PAIR_ST: AtomicU8 = AtomicU8::new(0);
 pub static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
 pub static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
@@ -421,7 +292,6 @@ pub static RF_SLAVE_OTA_BUSY: AtomicBool = AtomicBool::new(false);
 pub static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
 pub static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
 
-pub static BLT_TX_WPTR: AtomicUsize = AtomicUsize::new(0);
 pub static CONN_UPDATE_SUCCESSED: AtomicBool = AtomicBool::new(false);
 pub static CONN_UPDATE_CNT: AtomicUsize = AtomicUsize::new(0);
 pub static SET_UUID_FLAG: AtomicBool = AtomicBool::new(false);

@@ -5,6 +5,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU8, Ordering};
+use crate::sdk::ble_app::ll_irq::IrqTracker;
 
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 
@@ -72,6 +73,114 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
     fn unlock(&self) {
         irq_restore(self._restore_state.load(Ordering::Relaxed));
     }
+}
+
+
+/// A "mutex" that only allows borrowing from thread mode.
+///
+/// # Safety
+///
+/// **This Mutex is only safe on single-core systems.**
+///
+/// On multi-core systems, a `ThreadModeRawMutex` **is not sufficient** to ensure exclusive access.
+pub struct ThreadModeRawMutex {
+    _phantom: PhantomData<()>,
+}
+
+unsafe impl Send for ThreadModeRawMutex {}
+unsafe impl Sync for ThreadModeRawMutex {}
+
+impl ThreadModeRawMutex {
+    /// Create a new `ThreadModeRawMutex`.
+    pub const fn new() -> Self {
+        Self { _phantom: PhantomData }
+    }
+}
+
+unsafe impl RawMutex for ThreadModeRawMutex {
+    const INIT: Self = Self::new();
+
+    #[inline(always)]
+    fn lock(&self) {
+        assert!(!in_irq_mode(), "ThreadModeMutex can only be locked from thread mode.");
+    }
+
+    #[inline(always)]
+    fn unlock(&self) {
+        // Only allow dropping from thread mode. Dropping calls drop on the inner `T`, so
+        // `drop` needs the same guarantees as `lock`. `ThreadModeMutex<T>` is Send even if
+        // T isn't, so without this check a user could create a ThreadModeMutex in thread mode,
+        // send it to interrupt context and drop it there, which would "send" a T even if T is not Send.
+        assert!(
+            !in_irq_mode(),
+            "ThreadModeMutex can only be dropped from thread mode."
+        );
+
+        // Drop of the inner `T` happens after this.
+    }
+}
+
+impl Drop for ThreadModeRawMutex {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.unlock();
+    }
+}
+
+/// A "mutex" that only allows borrowing from Irq mode.
+///
+/// # Safety
+///
+/// **This Mutex is only safe on single-core systems.**
+///
+/// On multi-core systems, a `IrqModeRawMutex` **is not sufficient** to ensure exclusive access.
+pub struct IrqModeRawMutex {
+    _phantom: PhantomData<()>,
+}
+
+unsafe impl Send for IrqModeRawMutex {}
+unsafe impl Sync for IrqModeRawMutex {}
+
+impl IrqModeRawMutex {
+    /// Create a new `IrqModeRawMutex`.
+    pub const fn new() -> Self {
+        Self { _phantom: PhantomData }
+    }
+}
+
+unsafe impl RawMutex for IrqModeRawMutex {
+    const INIT: Self = Self::new();
+
+    #[inline(always)]
+    fn lock(&self) {
+        assert!(!in_irq_mode(), "IrqModeMutex can only be locked from Irq mode.");
+    }
+
+    #[inline(always)]
+    fn unlock(&self) {
+        // Only allow dropping from Irq mode. Dropping calls drop on the inner `T`, so
+        // `drop` needs the same guarantees as `lock`. `IrqModeMutex<T>` is Send even if
+        // T isn't, so without this check a user could create a IrqModeMutex in Irq mode,
+        // send it to interrupt context and drop it there, which would "send" a T even if T is not Send.
+        assert!(
+            !in_irq_mode(),
+            "IrqModeMutex can only be dropped from Irq mode."
+        );
+
+        // Drop of the inner `T` happens after this.
+    }
+}
+
+impl Drop for IrqModeRawMutex {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.unlock();
+    }
+}
+
+#[inline(always)]
+fn in_irq_mode() -> bool {
+    return IrqTracker::in_irq();
 }
 
 /// A mutual exclusion primitive useful for protecting shared data
@@ -235,16 +344,16 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 /// ```
 ///
 
-pub struct Mutex<T: ?Sized> {
-    inner: CriticalSectionRawMutex,
+pub struct Mutex<M, T: ?Sized> {
+    inner: M,
     //poison: Flag,
     data: UnsafeCell<T>,
 }
 
 // these are the only places where `T: Send` matters; all other
 // functionality works fine on a single thread.
-unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
-unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
+unsafe impl<M, T: ?Sized + Send> Send for Mutex<M, T> {}
+unsafe impl<M, T: ?Sized + Send> Sync for Mutex<M, T> {}
 
 /// An RAII implementation of a "scoped lock" of a mutex. When this structure is
 /// dropped (falls out of scope), the lock will be unlocked.
@@ -257,14 +366,14 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 ///
 /// [`lock`]: Mutex::lock
 /// [`try_lock`]: Mutex::try_lock
-pub struct MutexGuard<'a, T: ?Sized + 'a> {
-    lock: &'a Mutex<T>
+pub struct MutexGuard<'a, M: RawMutex, T: ?Sized + 'a> {
+    lock: &'a Mutex<M, T>
 }
 
 // impl<T: ?Sized> !Send for MutexGuard<'_, T> {}
-unsafe impl<T: ?Sized + Sync> Sync for MutexGuard<'_, T> {}
+unsafe impl<M: RawMutex, T: ?Sized + Sync> Sync for MutexGuard<'_, M, T> {}
 
-impl<T> Mutex<T> {
+impl<M: RawMutex, T> Mutex<M, T> {
     /// Creates a new mutex in an unlocked state ready for use.
     ///
     /// # Examples
@@ -274,12 +383,12 @@ impl<T> Mutex<T> {
     ///
     /// let mutex = Mutex::new(0);
     /// ```
-    pub const fn new(t: T) -> Mutex<T> {
-        Mutex { inner: CriticalSectionRawMutex::new(), data: UnsafeCell::new(t) }
+    pub const fn new(t: T) -> Mutex<M, T> {
+        Mutex { inner: M::INIT, data: UnsafeCell::new(t) }
     }
 }
 
-impl<T: ?Sized> Mutex<T> {
+impl<M: RawMutex, T: ?Sized> Mutex<M, T> {
     /// Acquires a mutex, blocking the current thread until it is able to do so.
     ///
     /// This function will block the local thread until it is available to acquire
@@ -316,7 +425,7 @@ impl<T: ?Sized> Mutex<T> {
     /// assert_eq!(*mutex.lock(), 10);
     /// ```
     #[inline(always)]
-    pub fn lock(&self) -> MutexGuard<'_, T> {
+    pub fn lock(&self) -> MutexGuard<'_, M, T> {
         unsafe {
             self.inner.lock();
             MutexGuard::new(self)
@@ -339,7 +448,7 @@ impl<T: ?Sized> Mutex<T> {
     /// Mutex::unlock(guard);
     /// ```
     #[inline(always)]
-    pub fn unlock(guard: MutexGuard<'_, T>) {
+    pub fn unlock(guard: MutexGuard<'_, M, T>) {
         drop(guard);
     }
 
@@ -389,7 +498,7 @@ impl<T: ?Sized> Mutex<T> {
     }
 }
 
-impl<T> From<T> for Mutex<T> {
+impl<M: RawMutex, T> From<T> for Mutex<M, T> {
     /// Creates a new mutex in an unlocked state ready for use.
     /// This is equivalent to [`Mutex::new`].
     fn from(t: T) -> Self {
@@ -397,20 +506,20 @@ impl<T> From<T> for Mutex<T> {
     }
 }
 
-impl<T: ?Sized + Default> Default for Mutex<T> {
+impl<M: RawMutex, T: ?Sized + Default> Default for Mutex<M, T> {
     /// Creates a `Mutex<T>`, with the `Default` value for T.
-    fn default() -> Mutex<T> {
+    fn default() -> Mutex<M, T> {
         Mutex::new(Default::default())
     }
 }
 
-impl<'mutex, T: ?Sized> MutexGuard<'mutex, T> {
-    unsafe fn new(lock: &'mutex Mutex<T>) -> MutexGuard<'mutex, T> {
+impl<'mutex, M: RawMutex, T: ?Sized> MutexGuard<'mutex, M, T> {
+    unsafe fn new(lock: &'mutex Mutex<M, T>) -> MutexGuard<'mutex, M, T> {
         MutexGuard { lock }
     }
 }
 
-impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+impl<M: RawMutex, T: ?Sized> Deref for MutexGuard<'_, M, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -418,32 +527,35 @@ impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+impl<M: RawMutex, T: ?Sized> DerefMut for MutexGuard<'_, M, T> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lock.data.get() }
     }
 }
 
-impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+impl<M: RawMutex, T: ?Sized> Drop for MutexGuard<'_, M, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.inner.unlock();
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'_, T> {
+impl<M: RawMutex, T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'_, M, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'_, T> {
+impl<M: RawMutex, T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'_, M, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
     }
 }
 
-pub fn guard_lock<'a, T: ?Sized>(guard: &MutexGuard<'a, T>) -> &'a CriticalSectionRawMutex {
+pub fn guard_lock<'a, M: RawMutex, T: ?Sized>(guard: &MutexGuard<'a, M, T>) -> &'a M {
     &guard.lock.inner
 }
 
+pub type CriticalSectionMutex<T> = Mutex<CriticalSectionRawMutex, T>;
+pub type ThreadModeMutex<T> = Mutex<ThreadModeRawMutex, T>;
+pub type IrqModeMutex<T> = Mutex<IrqModeRawMutex, T>;

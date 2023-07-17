@@ -10,7 +10,7 @@ use crate::app;
 use crate::BIT;
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_construct_packet, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc, vendor_id_init};
+use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_construct_packet, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -67,13 +67,13 @@ pub fn light_hw_timer1_config() {
 }
 
 fn light_init_default() {
-    let mut _max_mesh_name_len = 0;
-    let len = ADV_DATA.lock().get_mut().len() + size_of::<AdvPrivate>() + 2;
+    let mut max_mesh_name_len = 0;
+    let len = ADV_DATA.lock().len() + size_of::<AdvPrivate>() + 2;
     if len < 31 {
-        _max_mesh_name_len = 31 - len - 2;
+        max_mesh_name_len = 31 - len - 2;
         MAX_MESH_NAME_LEN.set(
-            if _max_mesh_name_len < 16 {
-                _max_mesh_name_len
+            if max_mesh_name_len < 16 {
+                max_mesh_name_len
             } else {
                 16
             }
@@ -82,20 +82,18 @@ fn light_init_default() {
 
     light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
 
-    PAIR_CONFIG_MESH_NAME.lock().get_mut().fill(0);
-    let len = min(MESH_NAME.len(), _max_mesh_name_len);
-    PAIR_CONFIG_MESH_NAME.lock().get_mut()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
+    PAIR_CONFIG_MESH_NAME.lock().fill(0);
+    let len = min(MESH_NAME.len(), max_mesh_name_len);
+    PAIR_CONFIG_MESH_NAME.lock()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
 
-    PAIR_CONFIG_MESH_PWD.lock().get_mut().fill(0);
+    PAIR_CONFIG_MESH_PWD.lock().fill(0);
     let len = min(MESH_PWD.len(), 16);
-    PAIR_CONFIG_MESH_PWD.lock().get_mut()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
+    PAIR_CONFIG_MESH_PWD.lock()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
 
-    PAIR_CONFIG_MESH_LTK.lock().get_mut()[0..16].copy_from_slice(&MESH_LTK[0..16]);
+    PAIR_CONFIG_MESH_LTK.lock()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RfPower::RfPower8dBm as u32);
-
-    vendor_id_init();
 
     usb_dp_pullup_en(true);
 
@@ -236,8 +234,7 @@ pub fn rf_link_response_callback(
 
     ppp.val[18] = MAX_RELAY_NUM;
 
-    let mut group_address_binding = GROUP_ADDRESS.lock();
-    let mut _group_address = group_address_binding.get_mut();
+    let group_address = GROUP_ADDRESS.lock();
 
     let mut idx = 0;
     match ppp.val[15] {
@@ -256,8 +253,8 @@ pub fn rf_link_response_callback(
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
             for i in 0..MAX_GROUP_NUM as usize {
                 ppp.val[i + 3] = 0xFF;
-                if _group_address[i] != 0 {
-                    ppp.val[idx + 3] = _group_address[i] as u8;
+                if group_address[i] != 0 {
+                    ppp.val[idx + 3] = group_address[i] as u8;
                     idx += 1;
                 }
             }
@@ -266,11 +263,11 @@ pub fn rf_link_response_callback(
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
             for i in 0..MAX_GROUP_NUM as usize {
                 ppp.val[i + 3] = 0xFF;
-                if _group_address[i / 2] != 0 {
+                if group_address[i / 2] != 0 {
                     ppp.val[idx + 3] = if (i % 2) != 0 {
-                        (_group_address[i / 2] >> 8) as u8
+                        (group_address[i / 2] >> 8) as u8
                     } else {
-                        _group_address[i / 2] as u8
+                        group_address[i / 2] as u8
                     };
                     idx += 1;
                 }
@@ -280,11 +277,11 @@ pub fn rf_link_response_callback(
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
             for i in 0..MAX_GROUP_NUM as usize {
                 ppp.val[i + 3] = 0xFF;
-                if _group_address[4 + i / 2] != 0 {
+                if group_address[4 + i / 2] != 0 {
                     ppp.val[idx + 3] = if (i % 2) != 0 {
-                        (_group_address[4 + i / 2] >> 8) as u8
+                        (group_address[4 + i / 2] >> 8) as u8
                     } else {
-                        _group_address[4 + i / 2] as u8
+                        group_address[4 + i / 2] as u8
                     };
                     idx += 1;
                 }

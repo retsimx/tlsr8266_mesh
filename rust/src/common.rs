@@ -32,7 +32,7 @@ pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
 }
 
 pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
-    par_rsp[4..10].copy_from_slice(&*MAC_ID.lock().get_mut());
+    par_rsp[4..10].copy_from_slice(&*MAC_ID.lock());
     return true;
 }
 
@@ -42,7 +42,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
         GET_MAC_EN.get()
     } else {
         for i in 0..6 {
-            if params[i] != (MAC_ID.lock().get_mut())[i] {
+            if params[i] != (MAC_ID.lock())[i] {
                 return false;
             }
         }
@@ -153,7 +153,7 @@ pub fn retrieve_dev_grp_address()
                 DEV_GRP_NEXT_POS.set(addr_next_pos);
                 DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
             } else {
-                unsafe { *((GROUP_ADDRESS.lock().get_mut().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
+                unsafe { *((GROUP_ADDRESS.lock().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
                 dest_addr_index = dest_addr_index + 1;
                 DEV_GRP_NEXT_POS.set(grp_next_pos);
             }
@@ -164,8 +164,8 @@ pub fn retrieve_dev_grp_address()
         }
     }
     if DEVICE_ADDRESS.get() == 0 {
-        DEVICE_ADDRESS.set((MAC_ID.lock().get_mut()[0] as u16) | ((MAC_ID.lock().get_mut()[1] as u16) << 8));
-        if MAC_ID.lock().get_mut()[0] == 0 {
+        DEVICE_ADDRESS.set((MAC_ID.lock()[0] as u16) | ((MAC_ID.lock()[1] as u16) << 8));
+        if MAC_ID.lock()[0] == 0 {
             DEVICE_ADDRESS.set(1);
         }
     }
@@ -175,11 +175,10 @@ pub fn mesh_node_init()
 {
     app().mesh_manager.mesh_node_buf_init();
 
-    let mut mesh_node_st_binding = MESH_NODE_ST.lock();
-    let mut _mesh_node_st = mesh_node_st_binding.get_mut();
+    let mut mesh_node_st = MESH_NODE_ST.lock();
 
-    _mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
-    _mesh_node_st[0].val.sn = DEVICE_NODE_SN.get();
+    mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8;
+    mesh_node_st[0].val.sn = DEVICE_NODE_SN.get();
     MESH_NODE_MAX.set(1);
 }
 
@@ -268,8 +267,7 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 
 pub fn pair_update_key()
 {
-    let mut pair_state_binding = PAIR_STATE.lock();
-    let pair_state = pair_state_binding.get_mut();
+    let pair_state = PAIR_STATE.lock();
 
     PAIR_AC.set(access_code(&pair_state.pair_nn, &pair_state.pair_pass));
     let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
@@ -280,7 +278,7 @@ pub fn pair_update_key()
     let name_len = min(MAX_MESH_NAME_LEN.get(), name_len);
 
     rf_link_slave_set_adv_mesh_name(&pair_state.pair_nn[0..name_len]);
-    let tmp = ADV_PRI_DATA.lock().get_mut().clone();
+    let tmp = ADV_PRI_DATA.lock().clone();
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
 }
 
@@ -292,8 +290,7 @@ pub fn pair_load_key()
 
     if -1 < ADR_FLASH_CFG_IDX.get() && pairing_addr != 0x0 {
         {
-            let mut pair_state_binding = PAIR_STATE.lock();
-            let pair_state = pair_state_binding.get_mut();
+            let mut pair_state = PAIR_STATE.lock();
 
             pair_state.pair_nn.iter_mut().for_each(|v| { *v = 0 });
             pair_state.pair_pass.iter_mut().for_each(|v| { *v = 0 });

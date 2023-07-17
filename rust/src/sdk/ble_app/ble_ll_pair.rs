@@ -7,14 +7,13 @@ use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
 use crate::sdk::light::{*};
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::sdk::packet_types::Packet;
+use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketL2capHead};
 use crate::state::{*};
 
 pub fn pair_dec_packet(ps: &mut Packet) -> bool {
     if SECURITY_ENABLE.get() {
-        let mut pair_ivm_binding = PAIR_IVM.lock();
-        let mut _pair_ivm = pair_ivm_binding.get_mut();
-        _pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value[0..3]);
+        let mut pair_ivm = PAIR_IVM.lock();
+        pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value[0..3]);
 
         let mut src: [u8; 2] = [0; 2];
         src.copy_from_slice(&ps.att_write().value[3..3 + 2]);
@@ -22,8 +21,8 @@ pub fn pair_dec_packet(ps: &mut Packet) -> bool {
         let l2len = ps.head().l2cap_len as usize;
 
         aes_att_decryption_packet(
-            &PAIR_STATE.lock().get_mut().pair_sk,
-            &*_pair_ivm,
+            &PAIR_STATE.lock().pair_sk,
+            &*pair_ivm,
             &src,
             &mut ps.att_write_mut().value[5..5 + l2len - 8],
         )
@@ -40,16 +39,15 @@ pub fn pair_enc_packet(ps: &mut Packet)
         ps.ll_app_mut().value.sno[1] = (tick >> 8) as u8;
         ps.ll_app_mut().value.sno[2] = (tick >> 16) as u8;
 
-        let mut pair_ivs_binding = PAIR_IVS.lock();
-        let mut _pair_ivs = pair_ivs_binding.get_mut();
+        let mut pair_ivs = PAIR_IVS.lock();
 
-        _pair_ivs[3..3 + 3].copy_from_slice(&ps.ll_app().value.sno);
-        _pair_ivs[6] = ps.ll_app().value.src as u8;
-        _pair_ivs[7] = (ps.ll_app().value.src >> 8) as u8;
+        pair_ivs[3..3 + 3].copy_from_slice(&ps.ll_app().value.sno);
+        pair_ivs[6] = ps.ll_app().value.src as u8;
+        pair_ivs[7] = (ps.ll_app().value.src >> 8) as u8;
 
         aes_att_encryption_packet(
-            &PAIR_STATE.lock().get_mut().pair_sk,
-            &*_pair_ivs,
+            &PAIR_STATE.lock().pair_sk,
+            &*pair_ivs,
             unsafe { slice::from_raw_parts_mut(addr_of!(ps.ll_app().value.dst) as *mut u8, 2) },
             unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.ll_app_mut().value.op), ((ps.head().l2cap_len & 0xff) - 10) as usize) },
         );
@@ -72,7 +70,7 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
         return false;
     }
 
-    ltk.copy_from_slice(&PAIR_STATE.lock().get_mut().pair_ltk);
+    ltk.copy_from_slice(&PAIR_STATE.lock().pair_ltk);
 
     if ps.head().chan_id == 0xffff {
         aes_att_decryption_packet(
@@ -94,8 +92,7 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
 pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool
 {
     if SECURITY_ENABLE.get() {
-        let mut pair_state_binding = PAIR_STATE.lock();
-        let mut pair_state = pair_state_binding.get_mut();
+        let mut pair_state = PAIR_STATE.lock();
 
         if ps.head().chan_id == 0xffff {
             aes_att_encryption_packet(
@@ -142,8 +139,7 @@ pub fn pair_save_key()
         pass[1] = if GET_MAC_EN.get() { 1 } else { 0 };
     }
 
-    let mut pair_state_binding = PAIR_STATE.lock();
-    let pair_state = pair_state_binding.get_mut();
+    let mut pair_state = PAIR_STATE.lock();
 
     pair_flash_save_config(0, &pass);
     pair_flash_save_config(0x10, &pair_state.pair_nn);
@@ -162,8 +158,8 @@ pub fn pair_init()
 {
     BLE_PAIR_ST.set(0);
     PAIR_ENC_ENABLE.set(false);
-    PAIR_IVM.lock().get_mut()[0..4].copy_from_slice(&MAC_ID.lock().get_mut()[0..4]);
-    PAIR_IVS.lock().get_mut()[0..4].copy_from_slice(&MAC_ID.lock().get_mut()[0..4]);
+    PAIR_IVM.lock()[0..4].copy_from_slice(&MAC_ID.lock()[0..4]);
+    PAIR_IVS.lock()[0..4].copy_from_slice(&MAC_ID.lock()[0..4]);
 }
 
 pub fn pair_par_init()
@@ -180,11 +176,20 @@ pub fn pair_proc() -> Option<Packet>
     }
     PAIR_READ_PENDING.set(false);
 
-    let mut pair_state_binding = PAIR_STATE.lock();
-    let mut pair_state = pair_state_binding.get_mut();
-
-    let mut pkt_read_rsp_binding = PKT_READ_RSP.lock();
-    let mut _pkt_read_rsp = pkt_read_rsp_binding.get_mut();
+    let mut pair_state = PAIR_STATE.lock();
+    let mut pkt_read_rsp = Packet {
+        att_read_rsp: PacketAttReadRsp {
+            head: PacketL2capHead {
+                dma_len: 0x1d,
+                _type: 2,
+                rf_len: 0x1b,
+                l2cap_len: 0x17,
+                chan_id: 0x4,
+            },
+            opcode: 0xb,
+            value: [0; 22],
+        }
+    };
 
     if BLE_PAIR_ST.get() == 2 {
         if SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
@@ -192,8 +197,8 @@ pub fn pair_proc() -> Option<Packet>
             PAIR_ENC_ENABLE.set(false);
             return None;
         }
-        _pkt_read_rsp.head_mut().l2cap_len = 10;
-        _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 8].copy_from_slice(&pair_state.pair_rands);
+        pkt_read_rsp.head_mut().l2cap_len = 10;
+        pkt_read_rsp.att_read_rsp_mut().value[1..1 + 8].copy_from_slice(&pair_state.pair_rands);
         BLE_PAIR_ST.set(0xc);
     } else if BLE_PAIR_ST.get() == 0x7 {
         if SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
@@ -201,30 +206,30 @@ pub fn pair_proc() -> Option<Packet>
             PAIR_ENC_ENABLE.set(false);
             return None;
         }
-        _pkt_read_rsp.head_mut().l2cap_len = 0x12;
+        pkt_read_rsp.head_mut().l2cap_len = 0x12;
         for index in 0..0x10 {
             pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_ltk[index];
         }
 
         if SECURITY_ENABLE.get() == false {
-            _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_work[0..10])
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_work[0..10])
         } else {
-            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work, &mut _pkt_read_rsp.att_read_rsp_mut().value[1..]);
+            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work, &mut pkt_read_rsp.att_read_rsp_mut().value[1..]);
         }
         BLE_PAIR_ST.set(0xf);
     } else if BLE_PAIR_ST.get() == 0xd {
         if SECURITY_ENABLE.get() == false {
-            _pkt_read_rsp.head_mut().l2cap_len = 0x12;
+            pkt_read_rsp.head_mut().l2cap_len = 0x12;
             for index in 0..0x10 {
                 pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
             }
 
-            _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_work);
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_work);
 
             BLE_PAIR_ST.set(0xf);
             PAIR_ENC_ENABLE.set(false);
         } else {
-            _pkt_read_rsp.head_mut().l2cap_len = 0x12;
+            pkt_read_rsp.head_mut().l2cap_len = 0x12;
             pair_state.pair_rands[0..4].copy_from_slice(bytemuck::bytes_of(&read_reg_system_tick()));
 
             aes_att_encryption(&pair_state.pair_randm.clone(), &pair_state.pair_rands.clone(), &mut pair_state.pair_sk);
@@ -240,8 +245,8 @@ pub fn pair_proc() -> Option<Packet>
 
             aes_att_encryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_work);
 
-            _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 8].copy_from_slice(&pair_state.pair_rands);
-            _pkt_read_rsp.att_read_rsp_mut().value[9..9 + 8].copy_from_slice(&pair_state.pair_work[0..8]);
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + 8].copy_from_slice(&pair_state.pair_rands);
+            pkt_read_rsp.att_read_rsp_mut().value[9..9 + 8].copy_from_slice(&pair_state.pair_work[0..8]);
 
             for index in 0..0x10 {
                 pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
@@ -258,9 +263,9 @@ pub fn pair_proc() -> Option<Packet>
             PAIR_ENC_ENABLE.set(true);
         }
     } else if BLE_PAIR_ST.get() == 0x9 {
-        _pkt_read_rsp.head_mut().l2cap_len = 0x12;
+        pkt_read_rsp.head_mut().l2cap_len = 0x12;
         if SECURITY_ENABLE.get() == false {
-            _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_ltk);
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10].copy_from_slice(&pair_state.pair_ltk);
         } else {
             let pair_randm = pair_state.pair_randm;
             pair_state.pair_work[0..8].copy_from_slice(&pair_randm);
@@ -270,13 +275,13 @@ pub fn pair_proc() -> Option<Packet>
                 pair_state.pair_sk[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_work[index];
             }
 
-            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk, &mut _pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10]);
+            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk, &mut pkt_read_rsp.att_read_rsp_mut().value[1..1 + 0x10]);
             BLE_PAIR_ST.set(0xf);
 
             pair_state.pair_sk = pair_state.pair_sk_copy;
         }
     } else if BLE_PAIR_ST.get() == 0xb {
-        _pkt_read_rsp.head_mut().l2cap_len = 2;
+        pkt_read_rsp.head_mut().l2cap_len = 2;
         BLE_PAIR_ST.set(0);
         if MESH_PAIR_ENABLE.get() {
             GET_MAC_EN.set(true);
@@ -284,30 +289,29 @@ pub fn pair_proc() -> Option<Packet>
         rf_link_delete_pair();
         rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
     } else if BLE_PAIR_ST.get() == 0xe {
-        _pkt_read_rsp.head_mut().l2cap_len = 2;
-        _pkt_read_rsp.head_mut().dma_len = 8;
-        _pkt_read_rsp.head_mut().rf_len = 0x6;
+        pkt_read_rsp.head_mut().l2cap_len = 2;
+        pkt_read_rsp.head_mut().dma_len = 8;
+        pkt_read_rsp.head_mut().rf_len = 0x6;
 
-        _pkt_read_rsp.att_read_rsp_mut().value[0] = pair_st;
+        pkt_read_rsp.att_read_rsp_mut().value[0] = pair_st;
 
         BLE_PAIR_ST.set(0);
 
-        return Some(*_pkt_read_rsp);
+        return Some(pkt_read_rsp);
     }
 
-    _pkt_read_rsp.head_mut().rf_len = _pkt_read_rsp.head_mut().l2cap_len as u8 + 0x4;
-    _pkt_read_rsp.head_mut().dma_len = _pkt_read_rsp.head_mut().l2cap_len as u32 + 6;
+    pkt_read_rsp.head_mut().rf_len = pkt_read_rsp.head_mut().l2cap_len as u8 + 0x4;
+    pkt_read_rsp.head_mut().dma_len = pkt_read_rsp.head_mut().l2cap_len as u32 + 6;
 
-    _pkt_read_rsp.att_read_rsp_mut().value[0] = pair_st;
+    pkt_read_rsp.att_read_rsp_mut().value[0] = pair_st;
 
-    return Some(*_pkt_read_rsp);
+    return Some(pkt_read_rsp);
 }
 
 pub fn pair_set_key(key: &[u8])
 {
     {
-        let mut pair_state_binding = PAIR_STATE.lock();
-        let mut pair_state = pair_state_binding.get_mut();
+        let mut pair_state = PAIR_STATE.lock();
         pair_state.pair_nn[0..MAX_MESH_NAME_LEN.get()].copy_from_slice(&key[0..MAX_MESH_NAME_LEN.get()]);
         pair_state.pair_pass.copy_from_slice(&key[16..16 + 16]);
         pair_state.pair_ltk.copy_from_slice(&key[32..32 + 16]);
@@ -328,8 +332,7 @@ pub fn pair_write(data: &Packet) -> bool
     let opcode = data.att_write().value[0];
     let src = &data.att_write().value[1..];
 
-    let mut pair_state_binding = PAIR_STATE.lock();
-    let mut pair_state = pair_state_binding.get_mut();
+    let mut pair_state = PAIR_STATE.lock();
 
     if opcode == 1 {
         pair_state.pair_randm.copy_from_slice(&src[0..8]);
@@ -342,7 +345,7 @@ pub fn pair_write(data: &Packet) -> bool
         if SECURITY_ENABLE.get() == false {
             if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == 0xf {
                 pair_state.pair_nn.copy_from_slice(&src[0..16]);
-                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetting;
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
                 BLE_PAIR_ST.set(5);
                 return true;
             }
@@ -357,7 +360,7 @@ pub fn pair_write(data: &Packet) -> bool
             };
 
             if name_len <= MAX_MESH_NAME_LEN.get() {
-                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetting;
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
                 BLE_PAIR_ST.set(5);
                 return true;
             }
@@ -376,13 +379,13 @@ pub fn pair_write(data: &Packet) -> bool
 
                     if MESH_PAIR_ENABLE.get() && 0x14 < data.head().l2cap_len && data.att_write().value[0x11] != 0 {
                         aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk_mesh);
-                        *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshTxStart;
+                        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
                         return true;
                     }
 
                     aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk);
                     pair_save_key();
-                    *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                     rf_link_light_event_callback(0xc5);
                     return true;
                 }
@@ -392,19 +395,19 @@ pub fn pair_write(data: &Packet) -> bool
                 BLE_PAIR_ST.set(7);
                 if MESH_PAIR_ENABLE.get() && 0x14 < data.head().l2cap_len && (((data.att_write().value[0x11] as u32) << 0x1f) as i32) < 0 {
                     pair_state.pair_ltk_mesh.copy_from_slice(&src[0..16]);
-                    *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetMeshTxStart;
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
                     return true;
                 }
 
                 pair_state.pair_ltk.copy_from_slice(&src[0..16]);
 
                 pair_save_key();
-                *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                 rf_link_light_event_callback(0xc5);
                 return true;
             }
             pair_par_init();
-            *PAIR_SETTING_FLAG.lock().get_mut() = ePairState::PairSetted;
+            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
             PAIR_ENC_ENABLE.set(false);
             return true;
         }

@@ -133,7 +133,7 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota(&mut self, data: &Packet) {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() != OtaState::Continue || RF_SLAVE_OTA_BUSY_MESH.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || RF_SLAVE_OTA_BUSY_MESH.get() {
             return;
         }
 
@@ -149,13 +149,13 @@ impl OtaManager {
             }
         }
 
-        BUFF_RESPONSE.lock().get_mut()[self.slave_ota_data_cache_idx % 16] = *data;
+        BUFF_RESPONSE.lock()[self.slave_ota_data_cache_idx % 16] = *data;
 
         self.slave_ota_data_cache_idx += 1;
     }
 
     pub fn rf_mesh_data_ota(&mut self, pkt_data: &[u8], last: bool) -> u16 {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() != OtaState::Continue || RF_SLAVE_OTA_BUSY.get() || !RF_SLAVE_OTA_BUSY_MESH.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || RF_SLAVE_OTA_BUSY.get() || !RF_SLAVE_OTA_BUSY_MESH.get() {
             return u16::MAX;
         }
 
@@ -169,14 +169,14 @@ impl OtaManager {
         if LAST_INDEX.load(Ordering::Relaxed) == u16::MAX || LAST_INDEX.load(Ordering::Relaxed) < index {
             LAST_INDEX.store(index, Ordering::Relaxed);
 
-            BUFF_RESPONSE.lock().get_mut()[0] = Packet { att_data: data };
+            BUFF_RESPONSE.lock()[0] = Packet { att_data: data };
             self.slave_ota_data_cache_idx = 1;
 
             self.rf_link_slave_data_ota_save();
 
             RF_SLAVE_OTA_TIMEOUT_S.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
 
-            if *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() != OtaState::Continue {
+            if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
                 RF_SLAVE_OTA_TIMEOUT_S.set(4);
             }
         }
@@ -189,7 +189,7 @@ impl OtaManager {
 
         let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
-            let p = BUFF_RESPONSE.lock().get_mut()[i];
+            let p = BUFF_RESPONSE.lock()[i];
             let n_data_len = (p.head().l2cap_len - 7) as usize;
 
             if RF_SLAVE_OTA_BUSY_MESH.get() || crc16(&p.att_data().dat[0..n_data_len + 2]) == p.att_data().dat[n_data_len + 2] as u16 | (p.att_data().dat[n_data_len + 3] as u16) << 8
@@ -252,7 +252,7 @@ impl OtaManager {
             }
 
             if reset_flag != OtaState::Continue {
-                if *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() == OtaState::Continue {
+                if *RF_SLAVE_OTA_FINISHED_FLAG.lock() == OtaState::Continue {
                     self.rf_slave_ota_finished_flag_set(reset_flag);
                 }
 
@@ -342,7 +342,7 @@ impl OtaManager {
     }
 
     fn rf_slave_ota_finished_flag_set(&mut self, reset_flag: OtaState) {
-        *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() = reset_flag;
+        *RF_SLAVE_OTA_FINISHED_FLAG.lock() = reset_flag;
         self.rf_slave_ota_finished_time = clock_time();
     }
 
@@ -350,7 +350,7 @@ impl OtaManager {
     {
         self.rf_link_slave_data_ota_save();
 
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut() != OtaState::Continue {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             let mut reboot_flag = false;
             if 0 == self.terminate_cnt && RF_SLAVE_OTA_TERMINATE_FLAG.get() {
                 if is_add_packet_buf_ready() {
@@ -377,7 +377,7 @@ impl OtaManager {
             }
 
             if reboot_flag {
-                self.rf_link_slave_ota_finish_led_and_reboot(*RF_SLAVE_OTA_FINISHED_FLAG.lock().get_mut());
+                self.rf_link_slave_ota_finish_led_and_reboot(*RF_SLAVE_OTA_FINISHED_FLAG.lock());
                 // have been rebooted
             }
         }

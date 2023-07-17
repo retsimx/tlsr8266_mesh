@@ -9,12 +9,11 @@ use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 
 pub fn vendor_set_adv_data() {
     // config adv data
-    let mut adv_pri_data_binding = ADV_PRI_DATA.lock();
-    let mut _adv_pri_data = adv_pri_data_binding.get_mut();
+    let mut adv_pri_data = ADV_PRI_DATA.lock();
 
-    _adv_pri_data.mac_address = array4_to_int(&*MAC_ID.lock().get_mut());
+    adv_pri_data.mac_address = array4_to_int(&*MAC_ID.lock());
 
-    let tmp = _adv_pri_data.clone();
+    let tmp = adv_pri_data.clone();
     rf_link_slave_set_adv_private_data(
         unsafe {
             slice::from_raw_parts(
@@ -24,17 +23,16 @@ pub fn vendor_set_adv_data() {
         }
     );
 
-    let mut adv_rsp_pri_data_binding = ADV_RSP_PRI_DATA.lock();
-    let mut _adv_rsp_pri_data = adv_rsp_pri_data_binding.get_mut();
+    let mut adv_rsp_pri_data = ADV_RSP_PRI_DATA.lock();
 
     // Light mode CCT = 0x02
-    _adv_rsp_pri_data.product_uuid = 0x02;
+    adv_rsp_pri_data.product_uuid = 0x02;
 
     // config adv rsp data
-    _adv_rsp_pri_data.mac_address = array4_to_int(&*MAC_ID.lock().get_mut());
+    adv_rsp_pri_data.mac_address = array4_to_int(&*MAC_ID.lock());
 
     // set rsv to 0..16
-    _adv_rsp_pri_data
+    adv_rsp_pri_data
         .rsv
         .iter_mut()
         .enumerate()

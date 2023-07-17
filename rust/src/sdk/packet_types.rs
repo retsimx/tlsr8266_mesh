@@ -1,6 +1,6 @@
 use core::mem;
 use crate::const_assert;
-use crate::sdk::light::PKT_CMD_LEN;
+use crate::sdk::light::{AdvRspPrivate, PKT_CMD_LEN};
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy)]
@@ -259,6 +259,13 @@ pub struct PktBuf {
 }
 
 #[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct ScanRspData {
+    pub handle: u16,
+    pub data: AdvRspPrivate
+}
+
+#[derive(Clone, Copy)]
 #[repr(C, align(4))]
 pub struct PacketScanRsp {
     pub dma_len: u32,       // 0     //won't be a fixed number as previous, should adjust with the mouse package number
@@ -266,8 +273,7 @@ pub struct PacketScanRsp {
     pub _type: u8,          // 4				//RA(1)_TA(1)_RFU(2)_TYPE(4)
     pub rf_len: u8,			// 5	//LEN(6)_RFU(2)
     pub adv_a: [u8; 6],		// 6	//adv address
-    pub data: [u8; 31]		// 12	//0-31 byte
-
+    pub data: ScanRspData		// 12	//0-31 byte
 }
 
 #[derive(Clone, Copy)]

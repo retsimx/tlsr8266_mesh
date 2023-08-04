@@ -6,9 +6,9 @@ AS=./toolchain/tc32/bin/tc32-elf-as
 
 [[ -f ".env" ]] && source .env
 
-# if JAVA_HOME not set, then set with default value
+# if LLC not set, then set with default value
 if [ "x$LLC" = "x" ]; then
-	LLC=../../../llvm/build/bin/llc
+	LLC=../../llvm/build/bin/llc
 fi
 
 cd rust

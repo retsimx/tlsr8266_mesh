@@ -86,7 +86,7 @@ pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MA
         MESH_NODE_MAX_NUM
     ]
 );
-pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 5>> = CriticalSectionMutex::new(Deque::new());
+pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 10>> = CriticalSectionMutex::new(Deque::new());
 pub static SLAVE_STAT_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 pub static SLAVE_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 pub static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);

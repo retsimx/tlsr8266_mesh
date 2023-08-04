@@ -71,10 +71,11 @@ fn reset_cnt_get_idx() {
 }
 
 fn get_reset_cnt_bit() -> u8 {
-    if ADR_RESET_CNT_IDX.get() < 0 {
-        reset_cnt_clean();
-        return 0;
-    }
+    // todo: Not convinced this actually does anything
+    // if ADR_RESET_CNT_IDX.get() == 0 {
+    //     reset_cnt_clean();
+    //     return 0;
+    // }
 
     let mut data = [0];
     flash_read_page(

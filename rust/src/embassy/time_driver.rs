@@ -13,7 +13,7 @@ impl Driver for MyDriver {
         clock_time64()
     }
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        return Option::from(AlarmHandle::new(0));
+        Option::from(AlarmHandle::new(0))
     }
     fn set_alarm_callback(&self, _alarm: AlarmHandle, _callback: fn(*mut ()), _ctx: *mut ()) {
 

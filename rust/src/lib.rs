@@ -30,7 +30,7 @@ static mut APP: App = App::default();
 static mut SPAWNER: *const Spawner = null_mut();
 
 pub fn app() -> &'static mut App {
-    return unsafe { &mut APP };
+    unsafe { &mut APP }
 }
 
 unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {

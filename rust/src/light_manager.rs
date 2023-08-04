@@ -350,7 +350,7 @@ impl LightManager {
     fn get_pwm_cmp(&self, val: I16F16, lum: I16F16) -> u16 {
         let val_lumen_map = self.calculate_lumen_map(lum);
 
-        return ((val.to_num::<u32>() * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16;
+        ((val.to_num::<u32>() * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16
     }
 
     pub fn light_adjust_cw(&self, val: I16F16, lum: I16F16) {

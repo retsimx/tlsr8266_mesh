@@ -135,6 +135,7 @@ impl FLD_RST {
     pub const ZB: FLD_RST = FLD_RST::BB;
 }
 
+#[repr(usize)]
 pub enum FLD_CLK_EN {
     GPIO_EN = BIT!(0),
     ALGM_EN = BIT!(1),
@@ -805,6 +806,7 @@ regrw!(reg_irq_mask, 0x640, 32);
 regrw!(reg_irq_pri, 0x644, 32);
 regrw!(reg_irq_src, 0x648, 32);
 regrw!(reg_irq_src3, 0x64a, 8);
+#[repr(usize)]
 pub enum FLD_IRQ {
     TMR0_EN = BIT!(0),
     TMR1_EN = BIT!(1),
@@ -868,6 +870,7 @@ regrw_idx!(reg_pwm_phase, 0x788, 16);
 regrw_idx!(reg_pwm_cycle, 0x794, 32);
 regrw_idx!(reg_pwm_cmp, 0x794, 16);
 
+#[repr(usize)]
 pub enum FLD_PWM {
     CMP = BIT_RNG!(0, 15),
     MAX = BIT_RNG!(16, 31),

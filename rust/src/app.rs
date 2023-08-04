@@ -89,7 +89,7 @@ impl App {
         spawner.spawn(light_manager(spawner)).unwrap();
 
         // Send a message to the network saying that we just booted up
-        let mut data = [0 as u8; 13];
+        let mut data = [0_u8; 13];
         data[0] = LGT_POWER_ON;
 
         app().mesh_manager.send_mesh_message(&data, 0xffff);

@@ -221,7 +221,7 @@ pub fn rf_link_response_callback(
     p_req: &PacketAttValue,
 ) -> bool {
     // mac-app[5] low 2 bytes used as ttc && hop-count
-    let dst_unicast = is_unicast_addr(&p_req.dst);
+    // let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
     ppp.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
     ppp.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
@@ -298,11 +298,11 @@ pub fn rf_link_response_callback(
 
             dst_unicast == 1 means destination address is unicast address.
             */
-            if dst_unicast {
-                // params[0 -- 9] is valid
-            } else {
-                // only params[0 -- 4] is valid
-            }
+            // if dst_unicast {
+            //     // params[0 -- 9] is valid
+            // } else {
+            //     // only params[0 -- 4] is valid
+            // }
 
             ppp.val[0] = LGT_CMD_USER_NOTIFY_RSP | 0xc0;
             for i in 0..8 {
@@ -325,7 +325,7 @@ pub fn rf_link_response_callback(
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(&params, false);
+            let idx = app().ota_manager.rf_mesh_data_ota(params, false);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -333,7 +333,7 @@ pub fn rf_link_response_callback(
         CMD_END_OTA => {
             ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(&params, true);
+            let idx = app().ota_manager.rf_mesh_data_ota(params, true);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -341,7 +341,7 @@ pub fn rf_link_response_callback(
         _ => return false
     }
 
-    return true;
+    true
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
@@ -394,10 +394,8 @@ pub fn rf_link_data_callback(p: &Packet) {
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
-            if !dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params) {
-                if rf_link_add_dev_addr(val) {
-                    app().mesh_manager.mesh_pair_proc_get_mac_flag();
-                }
+            if (!dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params)) && rf_link_add_dev_addr(val) {
+                app().mesh_manager.mesh_pair_proc_get_mac_flag();
             }
         }
         LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
@@ -410,11 +408,11 @@ pub fn rf_link_data_callback(p: &Packet) {
         LGT_CMD_KICK_OUT => {
             irq_disable();
             let res = (params[0] as u32).try_into();
-            if res.is_ok() {
-                kick_out(res.unwrap());
-            } else {
-                kick_out(KickoutReason::OutOfMesh);
+            match res {
+                Ok(res) => kick_out(res),
+                Err(..) => kick_out(KickoutReason::OutOfMesh)
             }
+
             light_sw_reboot();
         }
         LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),

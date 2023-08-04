@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::{app, BIT};
+use crate::{app, BIT, uprintln};
 use crate::common::{rf_update_conn_para, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, VENDOR_ID};
 use crate::embassy::sync::mutex::{CriticalSectionMutex, Mutex};
@@ -271,7 +271,6 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
 
     let no_match_slave_sno = packet.att_cmd().value.sno != *SLAVE_SNO.lock();
     let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, packet);
-    let pkt_valid = (no_match_slave_sno || SLAVE_LINK_CMD.get() != op) && !pkt_exists_in_buf;
 
     // If the slave link is connected (Android) and the dest address is us, then we should forward
     // the packet on to the slave link
@@ -279,11 +278,15 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
         packet.mesh().dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get()
     };
 
-    // See if we should call the message callback
-    if pkt_valid || (rf_link_is_notify_rsp(op) && should_notify)
+    // If the packet is valid (Doesn't exist in the packet buffer) or it's a notification message and it hasn't been
+    // ok'd yet, then we should send the message on
+    if !pkt_exists_in_buf || (rf_link_is_notify_rsp(op) && !req_cmd_is_notify_ok(op, packet))
     {
         light_mesh_rx_cb(packet);
     }
+
+    // Record the packet so we don't handle it again if we receive it again
+    rc_pkt_buf_push(op, packet);
 
     // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
     // for a response, then send this response to the slave
@@ -298,13 +301,8 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
     RCV_PKT_TTC.set(packet.mesh().par[9]);
 
     let (group_match, device_match) = rf_link_match_group_mac(packet);
-
-    // Record the packet so we don't handle it again if we receive it again
     if group_match || device_match {
-        if pkt_valid {
-            rc_pkt_buf_push(op, packet);
-            rf_link_data_callback(packet);
-        }
+        rf_link_data_callback(packet);
     }
 
     let mut slave_read_status_response = device_match;
@@ -343,14 +341,12 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
         packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
         if op == LGT_CMD_LIGHT_READ_STATUS {
             pkt_light_status.att_cmd_mut().value.val[15] = GET_STATUS;
-            if pkt_valid {
-                pkt_light_status.att_cmd_mut().value.val[13] = packet.mesh().par[9];
-                pkt_light_status.att_cmd_mut().value.val[18] = packet.mesh().internal_par1[CURRENT_RELAY_COUNT];
-                if MAX_RELAY_NUM < packet.mesh().internal_par1[CURRENT_RELAY_COUNT] {
-                    pkt_light_status.att_cmd_mut().value.val[14] = 0;
-                } else {
-                    pkt_light_status.att_cmd_mut().value.val[14] = MAX_RELAY_NUM - packet.mesh().internal_par1[CURRENT_RELAY_COUNT];
-                }
+            pkt_light_status.att_cmd_mut().value.val[13] = packet.mesh().par[9];
+            pkt_light_status.att_cmd_mut().value.val[18] = packet.mesh().internal_par1[CURRENT_RELAY_COUNT];
+            if MAX_RELAY_NUM < packet.mesh().internal_par1[CURRENT_RELAY_COUNT] {
+                pkt_light_status.att_cmd_mut().value.val[14] = 0;
+            } else {
+                pkt_light_status.att_cmd_mut().value.val[14] = MAX_RELAY_NUM - packet.mesh().internal_par1[CURRENT_RELAY_COUNT];
             }
         } else if op == LGT_CMD_LIGHT_GRP_REQ {
             pkt_light_status.att_cmd_mut().value.val[15] = packet.mesh().internal_par1[1];
@@ -409,7 +405,8 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
 
         let mut delay = 100;
         if !SLAVE_LINK_CONNECTED.get() {
-            delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) & 0xf) * 500);
+            // Random delay to avoid congestion between 0us and 8ms
+            delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 80) * 100);
         }
 
         app().mesh_manager.add_send_mesh_msg(packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));

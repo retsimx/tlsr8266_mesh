@@ -179,7 +179,7 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
 
 pub fn rf_link_del_group(group_id: u16) -> bool
 {
-    let mut grp_next_pos = DEV_GRP_NEXT_POS.get();
+    let mut grp_next_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
     let mut grp_index = 0;
     let mut result = false;
     let mut iVar4 = 0;
@@ -189,7 +189,7 @@ pub fn rf_link_del_group(group_id: u16) -> bool
         let mut breakit = false;
         while iVar3 != 8 {
             iVar4 = iVar1;
-            while group_id == 0xffff {
+            if group_id == 0xffff {
                 GROUP_ADDRESS.lock()[grp_index] = 0;
                 iVar4 = 1;
                 iVar3 = iVar3 + 1;

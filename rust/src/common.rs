@@ -28,26 +28,21 @@ pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
 pub const REGA_LIGHT_OFF: u8 = 0x3a;
 
 pub fn dev_addr_with_mac_flag(params: *const u8) -> bool {
-    return DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) };
+    DEV_ADDR_PAR_WITH_MAC == unsafe { *params.offset(2) }
 }
 
 pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
     par_rsp[4..10].copy_from_slice(&*MAC_ID.lock());
-    return true;
+    true
 }
 
 pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
-    return if params[0] == 0xff && params[1] == 0xff {
+    if params[0] == 0xff && params[1] == 0xff {
         // get
         GET_MAC_EN.get()
     } else {
-        for i in 0..6 {
-            if params[i] != (MAC_ID.lock())[i] {
-                return false;
-            }
-        }
-        return true;
-    };
+        return params[0..6] == *MAC_ID.lock();
+    }
 }
 
 // adr:0=flag 16=name 32=pwd 48=ltk
@@ -126,7 +121,7 @@ pub fn rf_update_conn_para(p: &Packet) -> u8 {
         }
     }
 
-    return 0;
+    0
 }
 
 pub fn retrieve_dev_grp_address()
@@ -142,23 +137,21 @@ pub fn retrieve_dev_grp_address()
         let grp_addr;
         unsafe { grp_addr = *(grp_addr_ptr as *const u16); }
 
-        grp_next_pos = grp_next_pos + 2;
+        grp_next_pos += 2;
         if grp_addr == 0xffff { break; }
         if grp_addr == 0 {
             DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
+        } else if grp_addr & !dev_mask == 0 {
+            DEVICE_ADDRESS.set(grp_addr & dev_mask);
+            addr_next_pos = grp_next_pos;
+            DEV_GRP_NEXT_POS.set(addr_next_pos);
+            DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
         } else {
-            if grp_addr & !dev_mask == 0 {
-                DEVICE_ADDRESS.set(grp_addr & dev_mask);
-                addr_next_pos = grp_next_pos;
-                DEV_GRP_NEXT_POS.set(addr_next_pos);
-                DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
-            } else {
-                unsafe { *((GROUP_ADDRESS.lock().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
-                dest_addr_index = dest_addr_index + 1;
-                DEV_GRP_NEXT_POS.set(grp_next_pos);
-            }
+            unsafe { *((GROUP_ADDRESS.lock().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
+            dest_addr_index += 1;
+            DEV_GRP_NEXT_POS.set(grp_next_pos);
         }
-        grp_addr_ptr = grp_addr_ptr + 2;
+        grp_addr_ptr += 2;
         if grp_next_pos == 0x1000 {
             break;
         }
@@ -208,7 +201,7 @@ pub fn pair_flash_config_init() -> bool
                 if *(FLASH_ADR_PAIRING as *const u8).offset(index) != *(FLASH_ADR_PAIRING as *const u8) {
                     break;
                 }
-                index = index + 0x40;
+                index += 0x40;
                 if index == 0x1000 {
                     break;
                 }
@@ -221,7 +214,7 @@ pub fn pair_flash_config_init() -> bool
             result = false;
         }
     }
-    return result;
+    result
 }
 
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32
@@ -240,9 +233,9 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
         if bit & 1 == 0 {
             break;
         }
-        inner_count = inner_count + 1;
+        inner_count += 1;
         if 5 < inner_count {
-            destbuf[0] = destbuf[0] ^ 1 << bit_count;
+            destbuf[0] ^= 1 << bit_count;
             inner_count = 0;
         }
     }
@@ -252,17 +245,17 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
         inner_count = 0;
 
         for bit_count in 0..0x20 {
-            inner_count = inner_count + if (1 << bit_count & bit) as u32 != 0 { 1 } else { 0 };
+            inner_count += if (1 << bit_count & bit) as u32 != 0 { 1 } else { 0 };
         }
 
         if inner_count < 3 {
-            destbuf[0] = destbuf[0] ^ 0xff;
+            destbuf[0] ^= 0xff;
         }
 
         bit = destbuf[0] ^ 0x55555555;
     }
 
-    return destbuf[0];
+    destbuf[0]
 }
 
 pub fn pair_update_key()
@@ -278,7 +271,7 @@ pub fn pair_update_key()
     let name_len = min(MAX_MESH_NAME_LEN.get(), name_len);
 
     rf_link_slave_set_adv_mesh_name(&pair_state.pair_nn[0..name_len]);
-    let tmp = ADV_PRI_DATA.lock().clone();
+    let tmp = *ADV_PRI_DATA.lock();
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
 }
 

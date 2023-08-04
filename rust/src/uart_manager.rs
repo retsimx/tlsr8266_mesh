@@ -51,7 +51,7 @@ pub fn light_mesh_rx_cb(data: &Packet) {
 
     msg.data[2] = UartMsg::MeshMessage as u8;
     for i in 0..size_of::<AppCmdValue>() {
-        unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.offset(i as isize) };
+        unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.add(i) };
     }
 
     app().uart_manager.send_message(&msg);
@@ -125,7 +125,7 @@ impl UartManager {
             let _ = self.send_channel.push_back(*msg);
         });
 
-        return true;
+        true
     }
 
     #[inline(always)]
@@ -170,7 +170,7 @@ impl UartManager {
         // Send the ack
         self.driver.uart_send(&result);
 
-        return true;
+        true
     }
 
     pub async fn sender(&mut self) {

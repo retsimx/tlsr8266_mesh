@@ -95,6 +95,7 @@ impl OtaManager {
         // Force reboot
         write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot as u8);
 
+        #[allow(clippy::empty_loop)]
         loop {}
     }
 
@@ -120,7 +121,8 @@ impl OtaManager {
                 return false;
             }
         }
-        return true;
+
+        true
     }
 
     pub fn erase_ota_data(&self) {
@@ -260,7 +262,7 @@ impl OtaManager {
             }
         }
         self.slave_ota_data_cache_idx = 0;
-        return true;
+        true
     }
 
     pub fn rf_ota_set_flag(&self) {
@@ -352,11 +354,9 @@ impl OtaManager {
 
         if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             let mut reboot_flag = false;
-            if 0 == self.terminate_cnt && RF_SLAVE_OTA_TERMINATE_FLAG.get() {
-                if is_add_packet_buf_ready() {
-                    self.terminate_cnt = 6;
-                    rf_link_add_tx_packet(&PKT_TERMINATE);
-                }
+            if 0 == self.terminate_cnt && RF_SLAVE_OTA_TERMINATE_FLAG.get() && is_add_packet_buf_ready() {
+                self.terminate_cnt = 6;
+                rf_link_add_tx_packet(&PKT_TERMINATE);
             }
 
             if self.terminate_cnt != 0 {
@@ -384,16 +384,16 @@ impl OtaManager {
     }
 
     pub fn get_ota_erase_sectors(&self) -> u32 {
-        return OtaManager::ERASE_SECTORS_FOR_OTA;
+        OtaManager::ERASE_SECTORS_FOR_OTA
     }
 
     pub fn is_valid_fw_len(&self, fw_len: u32) -> bool {
-        return fw_len <= (OtaManager::FW_SIZE_MAX_K * 1024);
+        fw_len <= (OtaManager::FW_SIZE_MAX_K * 1024)
     }
 }
 
 pub fn rf_link_slave_data_ota(data: &Packet) -> bool {
     app().ota_manager.rf_link_slave_data_ota(data);
 
-    return true;
+    true
 }

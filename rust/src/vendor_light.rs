@@ -13,7 +13,7 @@ pub fn vendor_set_adv_data() {
 
     adv_pri_data.mac_address = array4_to_int(&*MAC_ID.lock());
 
-    let tmp = adv_pri_data.clone();
+    let tmp = *adv_pri_data;
     rf_link_slave_set_adv_private_data(
         unsafe {
             slice::from_raw_parts(

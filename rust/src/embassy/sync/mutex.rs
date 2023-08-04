@@ -62,6 +62,7 @@ impl CriticalSectionRawMutex {
 }
 
 unsafe impl RawMutex for CriticalSectionRawMutex {
+    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self::new();
 
     #[inline(always)]
@@ -180,7 +181,7 @@ impl Drop for IrqModeRawMutex {
 
 #[inline(always)]
 fn in_irq_mode() -> bool {
-    return IrqTracker::in_irq();
+    IrqTracker::in_irq()
 }
 
 /// A mutual exclusion primitive useful for protecting shared data

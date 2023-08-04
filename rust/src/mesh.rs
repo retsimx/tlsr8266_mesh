@@ -68,7 +68,7 @@ pub struct mesh_node_st_val_t {
     // don't change include type
     pub sn: u8,
     // don't change include type
-    pub par: [u8; MESH_NODE_ST_PAR_LEN as usize], //lumen-rsv,
+    pub par: [u8; MESH_NODE_ST_PAR_LEN], //lumen-rsv,
 }
 
 #[derive(Clone, Copy)]
@@ -236,19 +236,17 @@ impl MeshManager {
 
             pkt_notify.value.val[3..3 + p.len()].copy_from_slice(&p[0..p.len()]);
 
-            if is_add_packet_buf_ready() {
-                if rf_link_add_tx_packet(&Packet { att_cmd: pkt_notify }) {
-                    err = 0;
-                }
+            if is_add_packet_buf_ready() && rf_link_add_tx_packet(&Packet { att_cmd: pkt_notify }) {
+                err = 0;
             }
         }
 
-        return err;
+        err
     }
 
     fn mesh_pair_complete_notify(&self) -> i32 {
         let par = [CMD_NOTIFY_MESH_PAIR_END];
-        return self.mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &par, DEVICE_ADDRESS.get());
+        self.mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &par, DEVICE_ADDRESS.get())
     }
 
     fn safe_effect_new_mesh_finish(&mut self) {
@@ -323,7 +321,7 @@ impl MeshManager {
             }
         }
 
-        return cnt;
+        cnt
     }
 
     pub fn mesh_pair_proc(&mut self) {
@@ -490,11 +488,8 @@ impl MeshManager {
         loop {
             let result = critical_section::with(|_| {
                 let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| elem.delay < clock_time64()).last();
-                if found.is_none() {
-                    return None;
-                }
 
-                let (index, _) = found.unwrap();
+                let (index, _) = found?;
 
                 let pkt = self.pkt_send_buf.swap_remove(index);
 

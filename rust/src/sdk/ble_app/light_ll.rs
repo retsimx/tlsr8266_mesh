@@ -272,8 +272,13 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         // Prepare and send the ack message
         let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
 
-        pkt_light_status.att_cmd_mut().value.sno = packet.att_cmd().value.sno;
+        let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
+        pkt_light_status.att_cmd_mut().value.sno.copy_from_slice(unsafe {
+            slice::from_raw_parts(addr_of!(cmd_sno) as *const u8, 3)
+        });
+
         packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
+
         unsafe {
             // todo: I reckon this is probably incorrect, why is there a +1?
             let ptr = slice::from_raw_parts((addr_of!(packet.mesh().vendor_id) as u32 + 1) as *const u8, params_len as usize);
@@ -293,6 +298,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 
             pkt_light_status.att_cmd_mut().value.val[3..10 + 3].fill(0);
             pkt_light_status.att_cmd_mut().value.val[3] = op;
+            pkt_light_status.att_cmd_mut().value.val[4..4+3].copy_from_slice(&packet.att_cmd().value.sno);
 
             pkt_light_status.head_mut()._type |= BIT!(7);
 

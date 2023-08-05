@@ -269,40 +269,43 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     if group_match || device_match {
         rf_link_data_callback(packet);
 
-        // Prepare and send the ack message
-        let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
+        // Don't worry about responding with an ack for a notify request.
+        if !rf_link_is_notify_req(op) {
+            // Prepare and send the ack message
+            let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
 
-        let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
-        pkt_light_status.att_cmd_mut().value.sno.copy_from_slice(unsafe {
-            slice::from_raw_parts(addr_of!(cmd_sno) as *const u8, 3)
-        });
+            let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
+            pkt_light_status.att_cmd_mut().value.sno.copy_from_slice(unsafe {
+                slice::from_raw_parts(addr_of!(cmd_sno) as *const u8, 3)
+            });
 
-        packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
+            packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
 
-        unsafe {
-            // todo: I reckon this is probably incorrect, why is there a +1?
-            let ptr = slice::from_raw_parts((addr_of!(packet.mesh().vendor_id) as u32 + 1) as *const u8, params_len as usize);
-            pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
-        }
+            unsafe {
+                // todo: I reckon this is probably incorrect, why is there a +1?
+                let ptr = slice::from_raw_parts((addr_of!(packet.mesh().vendor_id) as u32 + 1) as *const u8, params_len as usize);
+                pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
+            }
 
-        if not_slave_message || SLAVE_LINK_CMD.get() != op {
-            pkt_light_status.att_cmd_mut().value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().src_adr) as *const u8, 2) });
+            if not_slave_message || SLAVE_LINK_CMD.get() != op {
+                pkt_light_status.att_cmd_mut().value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().src_adr) as *const u8, 2) });
 
-            pkt_light_status.att_cmd_mut().value.dst = packet.att_cmd().value.src;
-            pkt_light_status.att_cmd_mut().value.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
-            pkt_light_status.att_cmd_mut().value.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
+                pkt_light_status.att_cmd_mut().value.dst = packet.att_cmd().value.src;
+                pkt_light_status.att_cmd_mut().value.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
+                pkt_light_status.att_cmd_mut().value.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
 
-            pkt_light_status.att_cmd_mut().value.val[0] = LGT_CMD_LIGHT_ACK | 0xc0;
-            pkt_light_status.att_cmd_mut().value.val[1] = (VENDOR_ID & 0xFF) as u8;
-            pkt_light_status.att_cmd_mut().value.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
+                pkt_light_status.att_cmd_mut().value.val[0] = LGT_CMD_LIGHT_ACK | 0xc0;
+                pkt_light_status.att_cmd_mut().value.val[1] = (VENDOR_ID & 0xFF) as u8;
+                pkt_light_status.att_cmd_mut().value.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
-            pkt_light_status.att_cmd_mut().value.val[3..10 + 3].fill(0);
-            pkt_light_status.att_cmd_mut().value.val[3] = op;
-            pkt_light_status.att_cmd_mut().value.val[4..4+3].copy_from_slice(&packet.att_cmd().value.sno);
+                pkt_light_status.att_cmd_mut().value.val[3..10 + 3].fill(0);
+                pkt_light_status.att_cmd_mut().value.val[3] = op;
+                pkt_light_status.att_cmd_mut().value.val[4..4 + 3].copy_from_slice(&packet.att_cmd().value.sno);
 
-            pkt_light_status.head_mut()._type |= BIT!(7);
+                pkt_light_status.head_mut()._type |= BIT!(7);
 
-            app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0);
+                app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0);
+            }
         }
     }
 

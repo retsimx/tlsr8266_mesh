@@ -258,17 +258,17 @@ impl UartManager {
             let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
 
             let mut data = [0; 13];
-            data.copy_from_slice(&msg.data[5..5+13]);
+            data.copy_from_slice(&msg.data[5..18]);
 
             // Record the message
             if self.sent.is_full() {
                 self.sent.pop_front();
             }
 
-            self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..3+15]).unwrap()).unwrap();
+            self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..18]).unwrap()).unwrap();
 
             // Send the message in to the mesh
-            sno = app().mesh_manager.send_mesh_message(&data, destination);
+            sno = app().mesh_manager.send_mesh_message(&data, destination, msg.data[18], if msg.data[19] != 0 { true } else { false });
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {

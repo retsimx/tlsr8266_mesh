@@ -124,16 +124,21 @@ impl MeshManager {
         }
     }
 
-    pub fn send_mesh_message(&mut self, data: &[u8; 13], destination: u16) -> [u8; 3] {
-        let pkt = light_slave_tx_command(data, destination);
+    pub fn send_mesh_message(&mut self, data: &[u8; 13], destination: u16, retransmit_count: u8, send_ack: bool) -> [u8; 3] {
+        // Sends a message to the mesh and returns the SNO of the sent message
+        // data: 13 bytes of data usually in form [op, vendor_id_hi, vendor_id_lo, params...]
+        // destination: The address of the destination
+        // retransmit_count: How many times the packet should be rebroadcast at each node
+        // send_ack: If the destination device should send an ack message back after it's handled the message
+        let pkt = light_slave_tx_command(data, destination, retransmit_count, send_ack);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
+                self.add_send_mesh_msg(&pkt, 0, pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
             }
         } else {
-            self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
+            self.add_send_mesh_msg(&pkt, 0, pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
         }
 
         return pkt.mesh().sno;
@@ -441,15 +446,15 @@ impl MeshManager {
             return;
         }
 
-        let pkt = light_slave_tx_command(&op_para, dst_addr);
+        let pkt = light_slave_tx_command(&op_para, dst_addr, 0, false);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
+                self.add_send_mesh_msg(&pkt, 0, pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
             }
         } else {
-            self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
+            self.add_send_mesh_msg(&pkt, 0, pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
         }
     }
 

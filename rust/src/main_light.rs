@@ -420,7 +420,7 @@ pub fn rf_link_data_callback(p: &Packet) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> Packet {
+pub fn light_slave_tx_command(p_cmd: &[u8], para: u16, retransmit_count: u8, send_ack: bool) -> Packet {
     let mut cmd_op_para: [u8; 13] = [0; 13];
     let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
 
@@ -431,7 +431,7 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16) -> Packet {
     cmd_op_para[2] = (VENDOR_ID >> 8) as u8;
 
     let dst = para;
-    mesh_construct_packet(cmd_sno, dst, &cmd_op_para)
+    mesh_construct_packet(cmd_sno, dst, &cmd_op_para, retransmit_count, send_ack)
 }
 
 pub fn rf_link_light_event_callback(status: u8) {

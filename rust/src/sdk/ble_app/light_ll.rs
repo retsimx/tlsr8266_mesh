@@ -380,7 +380,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         let mut delay = 100;
         if !SLAVE_LINK_CONNECTED.get() {
             // Random delay to avoid congestion between 0us and 8ms
-            delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 80) * 100);
+            delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 16) * 500);
         }
 
         app().mesh_manager.add_send_mesh_msg(packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64), packet.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);

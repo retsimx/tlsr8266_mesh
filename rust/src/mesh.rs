@@ -99,7 +99,7 @@ pub struct MeshManager {
     mesh_pair_timeout: u32,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 10>,
+    pkt_send_buf: Vec<SendPkt, 20>,
     pkt_rcv_buf: Deque<Packet, 10>,
 }
 
@@ -493,7 +493,7 @@ impl MeshManager {
             yield_now().await;
 
             let result = critical_section::with(|_| {
-                let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| elem.delay < clock_time64()).last();
+                let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| clock_time64() > elem.delay).next();
 
                 let (index, _) = found?;
 
@@ -541,7 +541,10 @@ impl MeshManager {
             rf_set_rxmode();
 
             if result.send_count != 0 {
-                self.add_send_mesh_msg(&result.pkt, 0, result.send_count - 1);
+                // Random delay to avoid congestion between 0us and 8ms
+                let delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 16) * 500);
+
+                self.add_send_mesh_msg(&result.pkt, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64), result.send_count - 1);
             }
         }
     }

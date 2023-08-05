@@ -94,7 +94,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
 
 fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &Packet) -> bool
 {
-    RC_PKT_BUF.lock().iter().any(|v| v.op == opcode && v.sno == cmd_pkt.att_cmd().value.sno)
+    RC_PKT_BUF.lock().iter().any(|v| v.op == opcode && &v.sno == &cmd_pkt.att_cmd().value.sno)
 }
 
 fn rf_link_is_notify_rsp(opcode: u8) -> bool
@@ -113,10 +113,6 @@ fn rf_link_is_notify_rsp(opcode: u8) -> bool
 
 fn rc_pkt_buf_push(opcode: u8, cmd_pkt: &Packet)
 {
-    if rf_link_is_notify_rsp(opcode) || is_exist_in_rc_pkt_buf(opcode, cmd_pkt) {
-        return;
-    }
-
     let mut rc_pkt_buf = RC_PKT_BUF.lock();
 
     if rc_pkt_buf.is_full() {
@@ -135,14 +131,14 @@ fn rc_pkt_buf_push(opcode: u8, cmd_pkt: &Packet)
 fn req_cmd_is_notify_ok(opcode: u8, cmd_pkt: &Packet) -> bool
 {
     RC_PKT_BUF.lock().iter().any(|pkt| {
-        pkt.op == opcode && pkt.sno == cmd_pkt.att_cmd().value.sno && pkt.notify_ok_flag
+        pkt.op == opcode && &pkt.sno == &cmd_pkt.att_cmd().value.sno && pkt.notify_ok_flag
     })
 }
 
 fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet)
 {
     RC_PKT_BUF.lock().iter_mut().filter(
-        |v| { v.op == opcode && v.sno == cmd_pkt.att_cmd().value.sno }
+        |v| { v.op == opcode && &v.sno == &cmd_pkt.att_cmd().value.sno }
     ).for_each(
         |v| { v.notify_ok_flag = true }
     );
@@ -220,38 +216,19 @@ pub fn rf_link_slave_add_status(packet: &Packet)
     }
 }
 
-pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
-    if SLAVE_LINK_CONNECTED.get() {
-        if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 1000) as i32 {
-            return false;
-        }
-    }
-
-    if packet.head().rf_len != 0x25 || packet.head().l2cap_len != 0x21 || packet.head()._type & 3 != 2 || packet.head().chan_id == 0xeeff || (needs_decode && !pair_dec_packet_mesh(packet)) {
-        return false;
-    }
-
+pub fn rf_link_rc_data(packet: &mut Packet) {
     // Check if this is a node update packet (pkt adv status)
     if packet.head().chan_id == 0xffff {
-        if MESH_NODE_ST_VAL_LEN == 4 {
-            if packet.mesh().internal_par1[LAST_RELAY_TIME] != 0xa5 || packet.mesh().internal_par1[CURRENT_RELAY_COUNT] != 0xa5 {
-                return false;
-            }
+        if packet.att_write().value[24..28].iter().all(|v| *v == 0xa5) {
+            mesh_node_update_status(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
         }
 
-        // todo: ttl? Probably packet is not the right type in this check
-        if packet.mesh().ttl != 0xa5 || packet.mesh().internal_par2[0] != 0xa5 {
-            return false;
-        }
-
-        mesh_node_update_status(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
-
-        return false;
+        return;
     }
 
     // Don't do anything if this packet has been relayed too many times
     if MAX_RELAY_NUM + 6 < packet.mesh().internal_par1[CURRENT_RELAY_COUNT] {
-        return false;
+        return;
     }
 
     // Parse the opcode and parameters from the packet
@@ -260,7 +237,7 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
     let mut params: [u8; 16] = [0; 16];
     let mut params_len: u8 = 0;
     if !rf_link_get_op_para(packet, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
-        return false;
+        return;
     }
 
     // Get the opcode
@@ -270,32 +247,27 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
     }
 
     let no_match_slave_sno = packet.att_cmd().value.sno != *SLAVE_SNO.lock();
-    let pkt_exists_in_buf = is_exist_in_rc_pkt_buf(op, packet);
 
-    // If the slave link is connected (Android) and the dest address is us, then we should forward
-    // the packet on to the slave link
-    let should_notify = {
-        packet.mesh().dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get()
-    };
-
-    // If the packet is valid (Doesn't exist in the packet buffer) or it's a notification message and it hasn't been
-    // ok'd yet, then we should send the message on
-    if !pkt_exists_in_buf || (rf_link_is_notify_rsp(op) && !req_cmd_is_notify_ok(op, packet))
-    {
-        light_mesh_rx_cb(packet);
+    // If we've already seen this packet, then there is nothing else to do
+    if is_exist_in_rc_pkt_buf(op, packet) {
+        return;
     }
+
+    // Send this packet over UART
+    light_mesh_rx_cb(packet);
 
     // Record the packet so we don't handle it again if we receive it again
     rc_pkt_buf_push(op, packet);
 
-    // If we should notify, and the opcode is a response opcode and the slave (Android) is waiting
-    // for a response, then send this response to the slave
-    if rf_link_is_notify_rsp(op) && should_notify {
+    // If the slave link is connected (Android) and the dest address is us, then we should forward
+    // the packet on to the slave link if the opcode is a response opcode and the slave (Android) is waiting
+    // for a response
+    if rf_link_is_notify_rsp(op) && packet.mesh().dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get() {
         if SLAVE_READ_STATUS_BUSY.get() != op || packet.att_cmd().value.sno != *SLAVE_STAT_SNO.lock() {
-            return false;
+            return;
         }
         rf_link_slave_add_status(packet);
-        return false;
+        return;
     }
 
     RCV_PKT_TTC.set(packet.mesh().par[9]);
@@ -394,15 +366,6 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
             rf_link_proc_ttc(RCV_PKT_TIME.get(), RCV_PKT_TTC.get(), packet);
         }
 
-        if rf_link_is_notify_req(op) {
-            let relay_time = min(
-                ((((read_reg_system_tick() - RCV_PKT_TIME.get()) / CLOCK_SYS_CLOCK_1US) + 500) >> 10) + packet.mesh().internal_par1[LAST_RELAY_TIME] as u32,
-                0xff,
-            );
-
-            packet.mesh_mut().internal_par1[LAST_RELAY_TIME] = relay_time as u8;
-        }
-
         let mut delay = 100;
         if !SLAVE_LINK_CONNECTED.get() {
             // Random delay to avoid congestion between 0us and 8ms
@@ -411,8 +374,6 @@ pub fn rf_link_rc_data(packet: &mut Packet, needs_decode: bool) -> bool {
 
         app().mesh_manager.add_send_mesh_msg(packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));
     }
-
-    return true;
 }
 
 pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {

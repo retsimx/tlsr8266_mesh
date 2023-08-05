@@ -116,7 +116,6 @@ pub const BLT_FIFO_TX_PACKET_COUNT: usize = 8;
 pub const PKT_CMD_LEN: usize = 11;
 
 pub const MAX_RELAY_COUNT: usize = 2;
-pub const LAST_RELAY_TIME: usize = 3;
 pub const CURRENT_RELAY_COUNT: usize = 4;
 
 pub enum LightOpType {

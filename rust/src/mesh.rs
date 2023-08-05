@@ -84,11 +84,6 @@ struct SendPkt {
     pub pkt: Packet,
 }
 
-struct RcvPkt {
-    pub decode: bool,
-    pub pkt: Packet,
-}
-
 pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
@@ -103,8 +98,8 @@ pub struct MeshManager {
     mesh_pair_timeout: u32,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 20>,
-    pkt_rcv_buf: Deque<RcvPkt, 20>,
+    pkt_send_buf: Vec<SendPkt, 10>,
+    pkt_rcv_buf: Deque<Packet, 10>,
 }
 
 impl MeshManager {
@@ -132,7 +127,7 @@ impl MeshManager {
         let pkt = light_slave_tx_command(data, destination);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
-            app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
+            app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
                 self.add_send_mesh_msg(&pkt, 0);
             }
@@ -446,7 +441,7 @@ impl MeshManager {
         let pkt = light_slave_tx_command(&op_para, dst_addr);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
-            app().mesh_manager.add_rcv_mesh_msg(&pkt, false);
+            app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
                 self.add_send_mesh_msg(&pkt, 0);
             }
@@ -540,13 +535,8 @@ impl MeshManager {
         }
     }
 
-    pub fn add_rcv_mesh_msg(&mut self, packet: &Packet, decode: bool) {
-        if self.pkt_rcv_buf.push_back(
-            RcvPkt {
-                decode,
-                pkt: *packet,
-            }
-        ).is_err() {
+    pub fn add_rcv_mesh_msg(&mut self, packet: &Packet) {
+        if self.pkt_rcv_buf.push_back(*packet).is_err() {
             uprintln!("pkt rcv buf is full, dropping packet...");
         }
     }
@@ -561,7 +551,7 @@ impl MeshManager {
                 self.pkt_rcv_buf.pop_front().unwrap()
             });
 
-            rf_link_rc_data(&mut result.pkt, result.decode);
+            rf_link_rc_data(&mut result);
         }
     }
 }

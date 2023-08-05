@@ -10,7 +10,7 @@ use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
-use crate::sdk::ble_app::ble_ll_pair::pair_proc;
+use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_proc};
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{*};
@@ -499,7 +499,25 @@ fn irq_light_slave_rx()
             }
 
             if !RF_SLAVE_OTA_BUSY.get() && SLAVE_LINK_STATE.get() != 7 {
-                app().mesh_manager.add_rcv_mesh_msg(packet, true);
+                let mut packet = *packet;
+
+                let mut pkt_valid = || {
+                    if SLAVE_LINK_CONNECTED.get() {
+                        if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 1000) as i32 {
+                            return false;
+                        }
+                    }
+
+                    if packet.head().rf_len != 0x25 || packet.head().l2cap_len != 0x21 || packet.head()._type & 3 != 2 || packet.head().chan_id == 0xeeff || !pair_dec_packet_mesh(&mut packet) {
+                        return false;
+                    }
+
+                    true
+                };
+
+                if pkt_valid() {
+                    app().mesh_manager.add_rcv_mesh_msg(&packet);
+                }
 
                 rf_set_rxmode();
                 return;

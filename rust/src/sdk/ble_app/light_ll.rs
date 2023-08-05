@@ -287,7 +287,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             pkt_light_status.att_cmd_mut().value.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
             pkt_light_status.att_cmd_mut().value.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
 
-            pkt_light_status.att_cmd_mut().value.val[0] = LGT_CMD_LIGHT_ACK;
+            pkt_light_status.att_cmd_mut().value.val[0] = LGT_CMD_LIGHT_ACK | 0xc0;
             pkt_light_status.att_cmd_mut().value.val[1] = (VENDOR_ID & 0xFF) as u8;
             pkt_light_status.att_cmd_mut().value.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 

@@ -92,7 +92,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
     return 1;
 }
 
-fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &Packet) -> bool
+pub fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &Packet) -> bool
 {
     RC_PKT_BUF.lock().iter().any(|v| v.op == opcode && v.sno == cmd_pkt.att_cmd().value.sno)
 }

@@ -510,6 +510,31 @@ fn irq_light_slave_rx()
                         return false;
                     }
 
+                    // Check if this is a node update packet (pkt adv status)
+                    if packet.head().chan_id == 0xffff {
+                        return true;
+                    }
+
+                    // Parse the opcode and parameters from the packet
+                    let mut op_cmd: [u8; 3] = [0; 3];
+                    let mut op_cmd_len: u8 = 0;
+                    let mut params: [u8; 16] = [0; 16];
+                    let mut params_len: u8 = 0;
+                    if !rf_link_get_op_para(&packet, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
+                        return false;
+                    }
+
+                    // Get the opcode
+                    let mut op = 0;
+                    if op_cmd_len == 3 {
+                        op = op_cmd[0] & 0x3f;
+                    }
+
+                    // If we've already seen this packet, then there is nothing else to do
+                    if is_exist_in_rc_pkt_buf(op, &packet) {
+                        return false;
+                    }
+
                     true
                 };
 

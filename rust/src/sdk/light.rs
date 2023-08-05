@@ -2,7 +2,6 @@ use crate::BIT;
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
-pub const MAX_RELAY_NUM: u8 = 3;
 pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
 pub const LOOP_INTERVAL_US: u64 = 10000;
 
@@ -78,6 +77,9 @@ pub const LGT_CMD_SET_MAC_ADDR: u8 = 0x31;
 pub const LGT_POWER_ON: u8 = 0x32;
 pub const LGT_PANIC_MSG: u8 = 0x34;
 
+// Sent to acknowledge a non-notify message
+pub const LGT_CMD_LIGHT_ACK: u8 = 0x35;
+
 pub const GET_STATUS: u8 = 0;
 pub const GET_GROUP1: u8 = 1;
 // return 8 GROUP_ADDRESS(low 1byte)
@@ -114,9 +116,6 @@ pub const BUFF_RESPONSE_PACKET_COUNT: usize = 16;
 pub const BLT_FIFO_TX_PACKET_COUNT: usize = 8;
 
 pub const PKT_CMD_LEN: usize = 11;
-
-pub const MAX_RELAY_COUNT: usize = 2;
-pub const CURRENT_RELAY_COUNT: usize = 4;
 
 pub enum LightOpType {
     OpType1 = 1,

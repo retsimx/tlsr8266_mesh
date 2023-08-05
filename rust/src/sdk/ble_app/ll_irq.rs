@@ -1,10 +1,8 @@
-use core::mem::size_of;
-use core::ops::{Deref, DerefMut};
-use core::ptr::{addr_of, null};
+use core::ptr::{addr_of};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::{app, uprintln};
+use crate::{app};
 use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
 use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
@@ -519,7 +517,6 @@ fn irq_light_slave_rx()
                     app().mesh_manager.add_rcv_mesh_msg(&packet);
                 }
 
-                rf_set_rxmode();
                 return;
             }
 

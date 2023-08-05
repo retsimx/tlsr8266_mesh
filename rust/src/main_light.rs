@@ -232,8 +232,6 @@ pub fn rf_link_response_callback(
     ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
     ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
-    ppp.val[18] = MAX_RELAY_NUM;
-
     let group_address = GROUP_ADDRESS.lock();
 
     let mut idx = 0;

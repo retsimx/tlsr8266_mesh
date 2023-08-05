@@ -3,7 +3,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
-use crate::{BIT, uprintln, uprintln_fast};
+use crate::{BIT, uprintln};
 use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
@@ -549,8 +549,6 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     // todo: What type is PKT_LIGHT_DATA here?
     unsafe { *(addr_of_mut!(pkt_light_data.att_cmd_mut().opcode) as *mut u16) = DEVICE_ADDRESS.get() };
     unsafe { *(addr_of_mut!(pkt_light_data.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
-    APP_CMD_TIME.set(read_reg_system_tick());
-   pkt_light_data.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
 
     if device_match || group_match {
         rf_link_data_callback(&*pkt_light_data);
@@ -573,7 +571,6 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
 
    pkt_light_status.att_cmd_mut().value.val[13] = 0;
    pkt_light_status.att_cmd_mut().value.val[14] = 0;
-   pkt_light_status.att_cmd_mut().value.val[18] = MAX_RELAY_NUM;
    pkt_light_data.att_cmd_mut().value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {

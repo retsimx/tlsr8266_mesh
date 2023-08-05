@@ -146,7 +146,7 @@ impl UartManager {
         msg.data[43] = ((crc >> 8) & 0xff) as u8;
     }
 
-    fn ack_msg(&mut self, msg: &uart_data_t) -> bool {
+    fn ack_msg(&mut self, msg: &uart_data_t, sno: &[u8]) -> bool {
         // If data[1] is 0xff, it means this message is an ack from the client
         if msg.data[1] == UartMsg::Ack as u8 {
             self.last_ack = msg.data[0];
@@ -163,6 +163,9 @@ impl UartManager {
 
         // Ack the counter
         result.data[1] = 0xff;
+
+        // Set the sno
+        result.data[2..2+3].copy_from_slice(sno);
 
         // Set the crc16
         Self::compute_crc(&mut result);
@@ -247,6 +250,8 @@ impl UartManager {
             mesh_report_status_enable(true);
         }
 
+        let mut sno = [0u8; 3];
+
         // Light ctrl
         if msg.data[2] == UartMsg::LightCtrl as u8 {
             // p_cmd : cmd[3]+para[10]
@@ -263,7 +268,7 @@ impl UartManager {
             self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..3+15]).unwrap()).unwrap();
 
             // Send the message in to the mesh
-            app().mesh_manager.send_mesh_message(&data, destination);
+            sno = app().mesh_manager.send_mesh_message(&data, destination);
         }
 
         if msg.data[2] == UartMsg::LightStatus as u8 {
@@ -271,6 +276,6 @@ impl UartManager {
         }
 
         // Finally ack the message once we've handled it
-        self.ack_msg(&msg);
+        self.ack_msg(&msg, &sno);
     }
 }

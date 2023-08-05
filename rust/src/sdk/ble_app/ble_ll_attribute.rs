@@ -1,4 +1,3 @@
-use core::ops::Deref;
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
@@ -11,7 +10,6 @@ use crate::sdk::light::OtaState;
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::sdk::packet_types::{Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp, PacketL2capHead, PacketVersionInd};
 use crate::state::{*};
-use crate::uprintln;
 
 #[cfg(not(test))]
 extern "C" {

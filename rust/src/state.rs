@@ -86,7 +86,7 @@ pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MA
         MESH_NODE_MAX_NUM
     ]
 );
-pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 10>> = CriticalSectionMutex::new(Deque::new());
+pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> = CriticalSectionMutex::new(Deque::new());
 pub static SLAVE_STAT_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 pub static SLAVE_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 pub static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
@@ -334,7 +334,6 @@ pub static UPDATE_INTERVAL_USER_MIN: AtomicU16 = AtomicU16::new(0);
 pub static SLAVE_DATA_VALID: AtomicU32 = AtomicU32::new(0);
 pub static T_BRIDGE_CMD: AtomicU32 = AtomicU32::new(0);
 pub static ST_BRIGE_NO: AtomicU32 = AtomicU32::new(0);
-pub static APP_CMD_TIME: AtomicU32 = AtomicU32::new(0);
 pub static SLAVE_STATUS_BUFFER_WPTR: AtomicUsize = AtomicUsize::new(0);
 pub static SLAVE_STATUS_BUFFER_RPTR: AtomicUsize = AtomicUsize::new(0);
 pub static SLAVE_READ_STATUS_UNICAST_FLAG: AtomicU8 = AtomicU8::new(0);
@@ -344,8 +343,6 @@ pub static SLAVE_WINDOW_OFFSET: AtomicU32 = AtomicU32::new(0);
 pub static SLAVE_INSTANT: AtomicU16 = AtomicU16::new(0);
 pub static SLAVE_STATUS_TICK: AtomicU8 = AtomicU8::new(0);
 pub static SLAVE_LINK_CMD: AtomicU8 = AtomicU8::new(0);
-pub static RCV_PKT_TTC: AtomicU8 = AtomicU8::new(0);
-pub static ORG_TTL: AtomicU8 = AtomicU8::new(0);
 pub static SLAVE_STATUS_RECORD_IDX: AtomicUsize = AtomicUsize::new(0);
 pub static NOTIFY_REQ_MASK_IDX: AtomicU8 = AtomicU8::new(0);
 pub static ADV_FLAG: AtomicBool = AtomicBool::new(true);

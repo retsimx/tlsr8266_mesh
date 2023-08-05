@@ -10,7 +10,7 @@ use crate::embassy::time_driver::clock_time64;
 use crate::embassy::yield_now::yield_now;
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_match_group_mac, rf_link_proc_ttc, rf_link_rc_data};
+use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_match_group_mac, rf_link_rc_data};
 use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_srx2tx};
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
@@ -123,7 +123,7 @@ impl MeshManager {
         }
     }
 
-    pub fn send_mesh_message(&mut self, data: &[u8; 13], destination: u16) {
+    pub fn send_mesh_message(&mut self, data: &[u8; 13], destination: u16) -> [u8; 3] {
         let pkt = light_slave_tx_command(data, destination);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
@@ -134,6 +134,8 @@ impl MeshManager {
         } else {
             self.add_send_mesh_msg(&pkt, 0);
         }
+
+        return pkt.mesh().sno;
     }
 
     pub fn mesh_pair_init(&mut self) {
@@ -500,10 +502,6 @@ impl MeshManager {
 
             result.pkt.mesh_mut().src_tx = DEVICE_ADDRESS.get();
             result.pkt.mesh_mut().handle1 = 0;
-
-            if (((result.pkt.mesh().handle1 as u32) << 0x1e) as i32) >= 0 {
-                rf_link_proc_ttc(read_reg_system_tick(), 0, &mut result.pkt);
-            }
 
             // Encrypt the packet if required
             if SECURITY_ENABLE.get()

@@ -214,6 +214,8 @@ pub const ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL: u16 = 8;
 
 pub const SEND_MESH_STATUS_INTERVAL_MS: u32 = 200;
 
+pub const PACKET_REPEAT_SEND_COUNT: u8 = 5;
+
 #[derive(PartialEq, Copy, Clone)]
 pub enum IrqHandlerStatus {
     None,

@@ -304,7 +304,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 
                 pkt_light_status.head_mut()._type |= BIT!(7);
 
-                app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0);
+                app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0, PACKET_REPEAT_SEND_COUNT);
             }
         }
     }
@@ -367,7 +367,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &packet.att_cmd().value) {
                 pkt_light_status.head_mut()._type |= BIT!(7);
 
-                app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0);
+                app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0, PACKET_REPEAT_SEND_COUNT);
             }
         }
     }
@@ -383,7 +383,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 80) * 100);
         }
 
-        app().mesh_manager.add_send_mesh_msg(packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64));
+        app().mesh_manager.add_send_mesh_msg(packet, clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64), PACKET_REPEAT_SEND_COUNT);
     }
 }
 
@@ -752,7 +752,7 @@ pub fn mesh_send_online_status()
 
     pkt_light_adv_status.att_write_mut().value[24..28].fill(0xa5);
 
-    app().mesh_manager.add_send_mesh_msg(&pkt_light_adv_status, 0);
+    app().mesh_manager.add_send_mesh_msg(&pkt_light_adv_status, 0, PACKET_REPEAT_SEND_COUNT);
 }
 
 pub fn back_to_rxmode_bridge()
@@ -800,7 +800,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
                 pkt_light_data.att_cmd_mut().value.val[17] = relay_time as u8;
             }
 
-            app().mesh_manager.add_send_mesh_msg(&*pkt_light_data, 0);
+            app().mesh_manager.add_send_mesh_msg(&*pkt_light_data, 0, PACKET_REPEAT_SEND_COUNT);
         }
     }
 }

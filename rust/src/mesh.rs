@@ -82,6 +82,7 @@ pub struct mesh_node_st_t {
 struct SendPkt {
     pub delay: u64,
     pub pkt: Packet,
+    pub send_count: u8
 }
 
 pub struct MeshManager {
@@ -129,10 +130,10 @@ impl MeshManager {
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(&pkt, 0);
+                self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
             }
         } else {
-            self.add_send_mesh_msg(&pkt, 0);
+            self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
         }
 
         return pkt.mesh().sno;
@@ -445,10 +446,10 @@ impl MeshManager {
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(&pkt, 0);
+                self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
             }
         } else {
-            self.add_send_mesh_msg(&pkt, 0);
+            self.add_send_mesh_msg(&pkt, 0, PACKET_REPEAT_SEND_COUNT);
         }
     }
 
@@ -470,11 +471,12 @@ impl MeshManager {
         SECURITY_ENABLE.set(enable);
     }
 
-    pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64) {
+    pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64, send_count: u8) {
         if self.pkt_send_buf.push(
             SendPkt {
                 delay,
                 pkt: *packet,
+                send_count
             }
         ).is_err() {
             uprintln!("pkt send buf is full, dropping packet...");
@@ -483,6 +485,8 @@ impl MeshManager {
 
     pub async fn send_mesh_msg_task(&mut self) {
         loop {
+            yield_now().await;
+
             let result = critical_section::with(|_| {
                 let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| elem.delay < clock_time64()).last();
 
@@ -494,20 +498,20 @@ impl MeshManager {
             });
 
             if result.is_none() {
-                yield_now().await;
                 continue;
             }
 
-            let mut result = result.unwrap();
+            let result = result.unwrap();
+            let mut pkt = result.pkt;
 
-            result.pkt.mesh_mut().src_tx = DEVICE_ADDRESS.get();
-            result.pkt.mesh_mut().handle1 = 0;
+            pkt.mesh_mut().src_tx = DEVICE_ADDRESS.get();
+            pkt.mesh_mut().handle1 = 0;
 
             // Encrypt the packet if required
             if SECURITY_ENABLE.get()
             {
-                result.pkt.head_mut()._type |= BIT!(7);
-                pair_enc_packet_mesh(&mut result.pkt);
+                pkt.head_mut()._type |= BIT!(7);
+                pair_enc_packet_mesh(&mut pkt);
             }
 
             // Pick a random start channel
@@ -523,13 +527,17 @@ impl MeshManager {
                     rf_set_ble_crc_adv();
 
                     rf_set_ble_channel(SYS_CHN_LISTEN[channel_index % SYS_CHN_LISTEN.len()]);
-                    rf_start_srx2tx(addr_of!(result.pkt) as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
+                    rf_start_srx2tx(addr_of!(pkt) as u32, read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30);
                 });
 
                 Timer::after(Duration::from_micros(600)).await;
             }
 
             rf_set_rxmode();
+
+            if result.send_count != 0 {
+                self.add_send_mesh_msg(&result.pkt, 0, result.send_count - 1);
+            }
         }
     }
 
@@ -541,15 +549,15 @@ impl MeshManager {
 
     pub async fn rcv_mesh_msg_task(&mut self) {
         loop {
-            while self.pkt_rcv_buf.is_empty() {
-                yield_now().await;
+            yield_now().await;
+
+            if !self.pkt_rcv_buf.is_empty() {
+                let mut result = critical_section::with(|_| {
+                    self.pkt_rcv_buf.pop_front().unwrap()
+                });
+
+                rf_link_rc_data(&mut result);
             }
-
-            let mut result = critical_section::with(|_| {
-                self.pkt_rcv_buf.pop_front().unwrap()
-            });
-
-            rf_link_rc_data(&mut result);
         }
     }
 }

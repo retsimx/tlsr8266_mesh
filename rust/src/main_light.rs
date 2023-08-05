@@ -53,10 +53,10 @@ fn cfg_led_event(e: u32) {
     LED_EVENT_PENDING.set(e);
 }
 
-pub fn light_hw_timer1_config() {
+pub fn light_hw_timer_config() {
     // Enable timer1 interrupts for controlling light transitions
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
-    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 50); // ~ 50hz
+    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
 
     // enable timer0 interrupt for tracking clock_time overflow
     write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
@@ -97,7 +97,7 @@ fn light_init_default() {
 
     usb_dp_pullup_en(true);
 
-    light_hw_timer1_config();
+    light_hw_timer_config();
 
     app().mesh_manager.mesh_pair_init();
 }

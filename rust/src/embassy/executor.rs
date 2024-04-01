@@ -8,17 +8,15 @@ pub struct Executor {
     not_send: PhantomData<*mut ()>,
 }
 
+#[export_name = "__pender"]
+fn __pender(_context: *mut ()) {}
+
 impl Executor {
     /// Create a new Executor.
     pub fn new() -> Self {
         Self {
             // use Signal_Work_Thread_Mode as substitute for local interrupt register
-            inner: raw::Executor::new(
-                raw::Pender::new_from_callback(
-                    |_| {},
-                    ptr::null_mut(),
-                )
-            ),
+            inner: raw::Executor::new(ptr::null_mut()),
             not_send: PhantomData,
         }
     }

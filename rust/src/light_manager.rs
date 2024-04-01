@@ -132,11 +132,11 @@ impl LightManager {
     }
 
     pub fn send_message(&mut self, cmd: u8, params: [u8; 16]) {
-        if !self.channel.is_full() {
-            critical_section::with(|_| {
+        critical_section::with(|_| {
+            if !self.channel.is_full() {
                 self.channel.push_back(Message { cmd, params }).unwrap();
-            });
-        }
+            }
+        });
     }
 
     pub async fn run(&mut self, _spawner: Spawner) {

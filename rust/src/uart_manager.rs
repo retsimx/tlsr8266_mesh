@@ -88,11 +88,11 @@ async fn node_report_task() {
 
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<uart_data_t, 10>,
+    send_channel: Deque<uart_data_t, 6>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
-    sent: Deque<[u8; 15], 10>
+    sent: Deque<[u8; 15], 6>
 }
 
 impl UartManager {
@@ -117,12 +117,10 @@ impl UartManager {
     }
 
     pub fn send_message(&mut self, msg: &uart_data_t) -> bool {
-        if self.send_channel.is_full() {
-            return false;
-        }
-
         critical_section::with(|_| {
-            let _ = self.send_channel.push_back(*msg);
+            if !self.send_channel.is_full() {
+                self.send_channel.push_back(*msg).expect("Unable to push message on to the send channel");
+            }
         });
 
         true

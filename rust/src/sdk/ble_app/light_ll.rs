@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::{app, BIT};
+use crate::{app, BIT, uprintln};
 use crate::common::{rf_update_conn_para, SYS_CHN_LISTEN, update_ble_parameter_cb};
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, VENDOR_ID};
 use crate::embassy::sync::mutex::{CriticalSectionMutex, Mutex};
@@ -366,7 +366,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 
             if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &packet.att_cmd().value) {
                 pkt_light_status.head_mut()._type |= BIT!(7);
-
+                
                 app().mesh_manager.add_send_mesh_msg(&*pkt_light_status, 0, packet.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
             }
         }
@@ -968,9 +968,14 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8], retransmit_
         no_use: [0; 4],
     };
 
-    pkt.sno.copy_from_slice(unsafe {
-        slice::from_raw_parts(addr_of!(sno) as *const u8, 3)
-    });
+    // Set send number
+    pkt.sno[0] = sno as u8;
+    pkt.sno[1] = (sno >> 8) as u8;
+    pkt.sno[2] = (sno >> 16) as u8;
+
+    // todo: replace this unsafe
+    // Set opcode
+    // pkt.op = cmd_op_para[0];
 
     unsafe {
         slice::from_raw_parts_mut(addr_of_mut!(pkt.op), cmd_op_para.len()).copy_from_slice(cmd_op_para)

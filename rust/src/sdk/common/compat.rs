@@ -10,7 +10,7 @@ use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::drivers::uart::{UART_DATA_LEN, uart_data_t};
+use crate::sdk::drivers::uart::{UART_DATA_LEN, UartDataT};
 use crate::sdk::light::LGT_PANIC_MSG;
 use crate::sdk::mcu::analog::analog_write;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
@@ -135,7 +135,7 @@ impl<const size: usize> UartStream<size> {
         while !buffer.is_empty() {
             let len = min(UART_DATA_LEN - 3, buffer.len());
 
-            let mut msg = uart_data_t {
+            let mut msg = UartDataT {
                 len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
             };
 
@@ -250,7 +250,7 @@ pub fn panic(info: &PanicInfo) -> ! {
 
     let mut stream = UartStream::<256>::new();
 
-    write!(stream, "{}", info).ok();
+    let _ = write!(stream, "{}", info);
     stream.send(true, false);
     write_panic_info(&stream);
 

@@ -40,7 +40,7 @@ impl App {
         // Copy the password in to the pair config
         PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
 
-        unsafe { rf_drv_init(true); }
+        rf_drv_init(true);
 
         // Run our initialisation
         user_init();
@@ -56,7 +56,7 @@ impl App {
         // Get uart ready to go early
         self.uart_manager.init();
 
-        uprintln!("Booting FW version {}", BUILD_VERSION);
+        uprintln!("Booting FW version {}, 16MHz: {}", BUILD_VERSION & 0x7fffffff, (BUILD_VERSION >> 31) == 1);
 
         // Configure the rest of the system
         self.init();
@@ -110,7 +110,7 @@ impl App {
             main_loop().await;
 
             // Clear any uart errors if they've occurred
-            UartDriver::uart_error_clr();
+            UartDriver::clear_error();
         }
     }
 }

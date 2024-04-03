@@ -341,7 +341,7 @@ const TBL_RF_INI: [TBLCMDSET; 61] = [
     }
 ];
 
-pub unsafe fn rf_drv_init(enable: bool) -> u8
+pub fn rf_drv_init(enable: bool) -> u8
 {
     let result = analog_read(rega_deepsleep_flag) & 0x40;
 
@@ -359,14 +359,16 @@ pub unsafe fn rf_drv_init(enable: bool) -> u8
                 write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32)
             }
 
-            if *(FLASH_ADR_MAC as *const u8).offset(0x11) != 0xff {
-                let u_var5 = *(FLASH_ADR_MAC as *const u8).offset(0x11) as u32;
-                RF_TP_BASE.set(u_var5);
-                RF_TP_GAIN.set(((u_var5 - 0x19) << 8) / 80);
-            }
-            if *(FLASH_ADR_MAC as *const u8).offset(0x12) != 0xff {
-                let u_var5 = RF_TP_BASE.get() - *(FLASH_ADR_MAC as *const u8).offset(0x12) as u32;
-                RF_TP_GAIN.set((u_var5 << 8) / 80);
+            unsafe {
+                if *(FLASH_ADR_MAC as *const u8).offset(0x11) != 0xff {
+                    let u_var5 = *(FLASH_ADR_MAC as *const u8).offset(0x11) as u32;
+                    RF_TP_BASE.set(u_var5);
+                    RF_TP_GAIN.set(((u_var5 - 0x19) << 8) / 80);
+                }
+                if *(FLASH_ADR_MAC as *const u8).offset(0x12) != 0xff {
+                    let u_var5 = RF_TP_BASE.get() - *(FLASH_ADR_MAC as *const u8).offset(0x12) as u32;
+                    RF_TP_GAIN.set((u_var5 << 8) / 80);
+                }
             }
         } else {
             analog_write(6, 0);  // power off sar
@@ -572,7 +574,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
    pkt_light_status.att_cmd_mut().value.val[13] = 0;
    pkt_light_status.att_cmd_mut().value.val[14] = 0;
    pkt_light_data.att_cmd_mut().value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
-    if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params.as_ptr())) {
+    if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(&params)) {
         if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
             SLAVE_DATA_VALID.set(params[0] as u32 * 2 + 1);
             if op == LGT_CMD_LIGHT_GRP_REQ {
@@ -608,7 +610,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
             }
             SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
            pkt_light_data.att_cmd_mut().value.val[15] = 1;
-        } else if dev_addr_with_mac_flag(params.as_ptr()) == false {
+        } else if dev_addr_with_mac_flag(&params) == false {
             SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
            pkt_light_data.att_cmd_mut().value.val[15] = 4;
         } else {

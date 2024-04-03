@@ -391,7 +391,7 @@ pub fn rf_link_data_callback(p: &Packet) {
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
-            if (!dev_addr_with_mac_flag(params.as_ptr()) || dev_addr_with_mac_match(&params)) && rf_link_add_dev_addr(val) {
+            if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params)) && rf_link_add_dev_addr(val) {
                 app().mesh_manager.mesh_pair_proc_get_mac_flag();
             }
         }

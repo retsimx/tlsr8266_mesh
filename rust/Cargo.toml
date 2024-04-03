@@ -6,12 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = false
 panic = "abort"
 
 [dependencies]
-#portable-atomic = { version = "1.6.0", features = [] }
 paste = "1.0"
 embassy-time = { version = "0.1", features = ["tick-hz-32_000_000"] }
 embassy-executor = { version = "0.3", features = ["nightly", "integrated-timers"] }
@@ -30,4 +29,4 @@ mry = "0.7.1"
 # If enabled, use a 16MHz crystal.
 # USE WITH CAUTION. Flashing a 12MHz (default) build on to a 16MHz board, or vice versa WILL BRICK THE CHIP unless you
 # can use SWS to reprogram the chip.
-#xtal-16mhz = []
+xtal-16mhz = []

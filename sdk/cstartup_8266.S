@@ -17,7 +17,7 @@
 	.equ IRQ_MODE, 		0x12	@ Interrupt Request mode
 	.equ SVC_MODE, 		0x13	@ Supervisor mode 
 
-	.equ IRQ_STK_SIZE,	0x500
+	.equ IRQ_STK_SIZE,	0x600
 	.equ __LOAD_RAM, 	__LOAD_RAM_SIZE__
 	.equ __RAM_START_ADDR, 	(0x808000) 
 	.equ __RAM_SIZE_MAX, 	(16*1024)

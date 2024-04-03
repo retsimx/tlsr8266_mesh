@@ -19,6 +19,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
 use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use crate::state::{*};
+use crate::uart_manager::light_mesh_rx_cb;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -477,14 +478,19 @@ impl MeshManager {
     }
 
     pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64, send_count: u8) {
-        if self.pkt_send_buf.push(
-            SendPkt {
-                delay,
-                pkt: *packet,
-                send_count
+        // If we sent the message, and we are sending the message back to ourselves - just report the packet over uart
+        if packet.ll_app().value.src == DEVICE_ADDRESS.get() && packet.ll_app().value.dst == DEVICE_ADDRESS.get(){
+            light_mesh_rx_cb(&*packet);
+        } else {
+            if self.pkt_send_buf.push(
+                SendPkt {
+                    delay,
+                    pkt: *packet,
+                    send_count
+                }
+            ).is_err() {
+                uprintln!("pkt send buf is full, dropping packet...");
             }
-        ).is_err() {
-            uprintln!("pkt send buf is full, dropping packet...");
         }
     }
 

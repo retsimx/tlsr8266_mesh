@@ -1,5 +1,0 @@
-include ':BluetoothLightLib',
-        ':BluetoothLightDemo'
-//':MeshLight',
-// ':daoGenerator',
-

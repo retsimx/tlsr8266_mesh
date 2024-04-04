@@ -29,4 +29,4 @@ mry = "0.7.1"
 # If enabled, use a 16MHz crystal.
 # USE WITH CAUTION. Flashing a 12MHz (default) build on to a 16MHz board, or vice versa WILL BRICK THE CHIP unless you
 # can use SWS to reprogram the chip.
-xtal-16mhz = []
+#xtal-16mhz = []

@@ -15,7 +15,7 @@ freq(270000000)
 # 130289000 : E104-BT05-TB
 
 SWS_MULTIPLIER = 3
-RX_RATE = 130289000 # 122051000     # The receive speed (Change this based on TYBT1 or E104-BT05 values above)
+RX_RATE = 122051000     # The receive speed (Change this based on TYBT1 or E104-BT05 values above)
 TX_RATE = 50000000      # The transmission speed (This value is ok for both boards I'm working with)
 
 rp2.PIO(0).remove_program()

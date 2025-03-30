@@ -2,7 +2,7 @@
 
 ### Versions
 
-I ended up using `nightly-i686-unknown-linux-gnu` for building and running tests, and `thumbv6m-none-eabi` for targeting the MCU, (currently `nightly-2024-03-31`)
+I ended up using `nightly-i686-unknown-linux-gnu` for building and running tests, and `thumbv6m-none-eabi` for targeting the MCU, (currently `nightly-2025-03-30`)
 
 Make sure you have `rustup` installed - the correct toolchain will be installed automatically by the `rust/rust-toolchain.toml` file, which will install the correct compiler, targets and components.
 

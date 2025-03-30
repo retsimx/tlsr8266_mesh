@@ -32,22 +32,34 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
     }
 }
 
-pub static mut uartstream: UartStream<128> = UartStream::new();
+// Define a function to get a new UartStream rather than using a static mutable
+#[inline]
+pub fn get_uart_stream() -> UartStream<128> {
+    UartStream::new()
+}
+
+// Helper function to print and send data to the uart
+#[inline]
+pub fn print_to_uart<F>(doasync: bool, f: F) 
+where
+    F: FnOnce(&mut UartStream<128>) -> fmt::Result
+{
+    critical_section::with(|_| {
+        let mut stream = get_uart_stream();
+        let _ = f(&mut stream);
+        stream.send(false, doasync);
+    });
+}
 
 #[macro_export]
 macro_rules! uprintln {
     ( $($arg:tt)* ) => {
         {
             use core::fmt::Write;
-            use crate::sdk::common::compat::uartstream;
-
-            critical_section::with(|_| {
-                #[allow(unused_unsafe)]
-                unsafe {
-                    uartstream.length = 0;
-                    core::writeln!(uartstream, $($arg)*).unwrap();
-                    uartstream.send(false, true);
-                }
+            use crate::sdk::common::compat::print_to_uart;
+            
+            print_to_uart(true, |stream| {
+                core::writeln!(stream, $($arg)*)
             });
         }
     };
@@ -57,16 +69,10 @@ macro_rules! uprintln {
 macro_rules! uprintln_fast {
     ( $($arg:tt)* ) => {
         {
-            use core::fmt::Write;
-            use crate::sdk::common::compat::uartstream;
-
-            critical_section::with(|_| {
-                #[allow(unused_unsafe)]
-                unsafe {
-                    uartstream.length = 0;
-                    core::writeln!(uartstream, $($arg)*).unwrap();
-                    uartstream.send(false, false);
-                }
+            use crate::sdk::common::compat::print_to_uart;
+            
+            print_to_uart(false, |stream| {
+                core::writeln!(stream, $($arg)*)
             });
         }
     };

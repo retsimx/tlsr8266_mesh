@@ -24,7 +24,7 @@ pub const IRQ_TIMER1_ENABLE: bool = true;
 pub const ONLINE_STATUS_TIMEOUT: u32 = 3000;
 
 pub const AUTH_TIME: u32 = 60;
-pub const MAX_GROUP_NUM: u8 = 8;
+pub const MAX_GROUP_COUNT: u8 = 8;
 
 pub const START_UP_FLAG: u32 = 0x544c4e4b;
 

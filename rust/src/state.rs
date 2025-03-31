@@ -71,7 +71,7 @@ pub static P_ST_HANDLER: CriticalSectionMutex<IrqHandlerStatus> = CriticalSectio
 pub static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
 pub static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
 pub static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
-pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_NUM as usize]> = CriticalSectionMutex::new([0; MAX_GROUP_NUM as usize]);
+pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> = CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
 pub static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> = CriticalSectionMutex::new(ePairState::PairSetted);
 pub static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> = CriticalSectionMutex::new(OtaState::Continue);
 pub static PAIR_IVM: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
@@ -255,7 +255,7 @@ pub static PKT_ERR_RSP: Packet = Packet {
 pub static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
 pub static MESH_NODE_MASK: CriticalSectionMutex<[u32; MESH_NODE_MASK_LEN]> = CriticalSectionMutex::new([0; MESH_NODE_MASK_LEN]);
-pub static BLE_PAIR_ST: AtomicU8 = AtomicU8::new(0);
+pub static BLE_PAIR_ST: AtomicPairState = AtomicPairState::new(PairState::Idle);
 pub static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
 pub static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
 
@@ -423,4 +423,63 @@ impl SimplifyLS<i32> for AtomicI32 {
     }
     fn inc(&self) { self.set(self.get() + 1); }
     fn dec(&self) { self.set(self.get() - 1); }
+}
+
+/// Represents the current state of the BLE pairing process
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PairState {
+    Idle = 0x00,                      // Initial/idle state
+    Reserved = 0x01,                  // Reserved (unused state)
+    AwaitingRandom = 0x02,           // Waiting for random challenge
+    Reserved3 = 0x03,                 // Reserved (unused state)
+    Reserved4 = 0x04,                 // Reserved (unused state)
+    ReceivingMeshName = 0x05,        // Receiving mesh name
+    ReceivingMeshPassword = 0x06,    // Receiving mesh password
+    ReceivingMeshLtk = 0x07,         // Receiving long-term key
+    Reserved8 = 0x08,                 // Reserved (unused state)
+    RequestingLtk = 0x09,            // Requesting LTK
+    ResetMesh = 0x0A,                // Reset mesh configuration
+    DeletePairing = 0x0B,            // Deleting pairing
+    RandomConfirmation = 0x0C,       // Random value confirmation
+    SessionKeyExchange = 0x0D,       // Session key exchange
+    Init = 0x0E,                     // Initialization state
+    Completed = 0x0F,                // Pairing process completed
+}
+
+impl From<u8> for PairState {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => Self::Idle,
+            0x02 => Self::AwaitingRandom,
+            0x05 => Self::ReceivingMeshName,
+            0x06 => Self::ReceivingMeshPassword,
+            0x07 => Self::ReceivingMeshLtk,
+            0x09 => Self::RequestingLtk,
+            0x0A => Self::ResetMesh,
+            0x0B => Self::DeletePairing,
+            0x0C => Self::RandomConfirmation,
+            0x0D => Self::SessionKeyExchange,
+            0x0E => Self::Init,
+            0x0F => Self::Completed,
+            _ => Self::Idle,  // Default to Idle for unrecognized states
+        }
+    }
+}
+
+// Replace the raw atomic with an atomic PairState wrapper
+pub struct AtomicPairState(AtomicU8);
+
+impl AtomicPairState {
+    pub const fn new(state: PairState) -> Self {
+        Self(AtomicU8::new(state as u8))
+    }
+
+    pub fn get(&self) -> PairState {
+        PairState::from(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, value: PairState) {
+        self.0.store(value as u8, Ordering::Relaxed)
+    }
 }

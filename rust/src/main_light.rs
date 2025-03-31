@@ -92,7 +92,7 @@ fn light_init_default() {
     PAIR_CONFIG_MESH_LTK.lock()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
     rf_link_slave_pairing_enable(true);
-    rf_set_power_level_index(RfPower::RfPower8dBm as u32);
+    rf_set_power_level_index(RfPower::Power8dBm as u32);
 
     usb_dp_pullup_en(true);
 
@@ -248,7 +248,7 @@ pub fn rf_link_response_callback(
         }
         GET_GROUP1 => {
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP1 | 0xc0;
-            for i in 0..MAX_GROUP_NUM as usize {
+            for i in 0..MAX_GROUP_COUNT as usize {
                 ppp.val[i + 3] = 0xFF;
                 if group_address[i] != 0 {
                     ppp.val[idx + 3] = group_address[i] as u8;
@@ -258,7 +258,7 @@ pub fn rf_link_response_callback(
         }
         GET_GROUP2 => {
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP2 | 0xc0;
-            for i in 0..MAX_GROUP_NUM as usize {
+            for i in 0..MAX_GROUP_COUNT as usize {
                 ppp.val[i + 3] = 0xFF;
                 if group_address[i / 2] != 0 {
                     ppp.val[idx + 3] = if (i % 2) != 0 {
@@ -272,7 +272,7 @@ pub fn rf_link_response_callback(
         }
         GET_GROUP3 => {
             ppp.val[0] = LGT_CMD_LIGHT_GRP_RSP3 | 0xc0;
-            for i in 0..MAX_GROUP_NUM as usize {
+            for i in 0..MAX_GROUP_COUNT as usize {
                 ppp.val[i + 3] = 0xFF;
                 if group_address[4 + i / 2] != 0 {
                     ppp.val[idx + 3] = if (i % 2) != 0 {

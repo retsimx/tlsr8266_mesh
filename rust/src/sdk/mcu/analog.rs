@@ -5,12 +5,14 @@ use crate::sdk::mcu::register::{
 };
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn analog_wait() {
     while read_reg_ana_ctrl() & (FLD_ANA::BUSY as u8) != 0 {}
 }
 
 #[inline(never)]
 #[link_section = ".ram_code"]
+#[cfg_attr(test, mry::mry)]
 pub fn analog_read(addr: u8) -> u8 {
     let r = irq_disable();
 
@@ -28,6 +30,7 @@ pub fn analog_read(addr: u8) -> u8 {
 
 #[inline(never)]
 #[link_section = ".ram_code"]
+#[cfg_attr(test, mry::mry)]
 pub fn analog_write(addr: u8, v: u8) {
     let r = irq_disable();
 

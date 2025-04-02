@@ -41,10 +41,12 @@ pub fn read_reg32(addr: u32) -> u32 {
 macro_rules! regrw_idx {
     ( $x:ident, $a:expr, $s:literal ) => {
         paste::paste! {
+            #[cfg_attr(test, mry::mry)]
             pub fn [<read_ $x>](i: u32) -> [<u $s>] {
                 return [<read_reg $s>]($a + i);
             }
 
+            #[cfg_attr(test, mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>], i: u32) {
                 [<write_reg $s>]($a + i, value);
             }
@@ -56,10 +58,12 @@ macro_rules! regrw_idx {
 macro_rules! regrw {
     ( $x:ident, $a:expr, $s:expr ) => {
         paste::paste! {
+            #[cfg_attr(test, mry::mry)]
             pub fn [<read_ $x>]() -> [<u $s>] {
                 return [<read_reg $s>]($a);
             }
 
+            #[cfg_attr(test, mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>]) {
                 [<write_reg $s>]($a, value);
             }
@@ -71,10 +75,12 @@ macro_rules! regrw {
 macro_rules! regrw_copy {
     ( $x:ident, $y:ident, $t:expr ) => {
         paste::paste! {
+            #[cfg_attr(test, mry::mry)]
             pub fn [<read_ $x>]() -> [<u $t>] {
                 [<read_ $y>]()
             }
 
+            #[cfg_attr(test, mry::mry)]
             pub fn [<write_ $x>](value: [<u $t>]) {
                 [<write_ $y>](value)
             }

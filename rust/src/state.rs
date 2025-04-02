@@ -169,7 +169,7 @@ pub static PKT_INIT: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
     }
 );
 
-pub struct PairState {
+pub struct PairStateData {
     pub pair_ltk: [u8; 16],
     pub pair_sk: [u8; 16],
     pub pair_work: [u8; 16],
@@ -181,8 +181,8 @@ pub struct PairState {
     pub pair_randm: [u8; 8],
 }
 
-pub static PAIR_STATE: CriticalSectionMutex<PairState> = CriticalSectionMutex::new(
-    PairState {
+pub static PAIR_STATE: CriticalSectionMutex<PairStateData> = CriticalSectionMutex::new(
+    PairStateData {
         pair_ltk: [0; 16],
         pair_sk: [0; 16],
         pair_work: [0; 16],
@@ -430,14 +430,10 @@ impl SimplifyLS<i32> for AtomicI32 {
 #[repr(u8)]
 pub enum PairState {
     Idle = 0x00,                      // Initial/idle state
-    Reserved = 0x01,                  // Reserved (unused state)
     AwaitingRandom = 0x02,           // Waiting for random challenge
-    Reserved3 = 0x03,                 // Reserved (unused state)
-    Reserved4 = 0x04,                 // Reserved (unused state)
     ReceivingMeshName = 0x05,        // Receiving mesh name
     ReceivingMeshPassword = 0x06,    // Receiving mesh password
     ReceivingMeshLtk = 0x07,         // Receiving long-term key
-    Reserved8 = 0x08,                 // Reserved (unused state)
     RequestingLtk = 0x09,            // Requesting LTK
     ResetMesh = 0x0A,                // Reset mesh configuration
     DeletePairing = 0x0B,            // Deleting pairing

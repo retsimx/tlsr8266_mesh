@@ -4,7 +4,7 @@ use core::slice;
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
 use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
-use crate::sdk::light::{*};
+use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketL2capHead};
@@ -61,11 +61,18 @@ const PACKET_TYPE_ENCRYPTED: u8 = 0x80;     // Flag indicating packet is encrypt
 // Buffer size constants
 const KEY_SIZE: usize = 0x10;               // Size of cryptographic keys (16 bytes)
 const RANDOM_CHALLENGE_SIZE: usize = 8;     // Size of random challenge values (8 bytes)
-const HEADER_SIZE: usize = 2;               // Size of header in value field (2 bytes)
+const HEADER_SIZE: u16 = 2;                 // Size of header in value field (2 bytes)
 
 // Response packet size constants
 const RESP_WITH_RANDOM: u16 = 10;           // 8 bytes random + 2 header bytes
 const RESP_WITH_KEY: u16 = 0x12;            // 16 bytes key data + 2 header bytes
+
+// Constants for flash operations
+const SECTOR_SIZE: i32 = 0x40;        // Size of each flash storage sector as i32
+
+// Command codes for light events
+const LGT_CMD_DEL_PAIR: u8 = 0xc7;    // Delete pairing information
+const LGT_CMD_PAIR_OK: u8 = 0xc5;    // Pairing successful
 
 /// Decrypt an incoming BLE packet using the current pairing session key
 /// 
@@ -236,11 +243,11 @@ pub fn pair_flash_save_config(addr: u32, data: &[u8])
     const OFFSET_NAME: u32 = 0x10;          // Mesh network name
     const OFFSET_PASSWORD: u32 = 0x20;      // Mesh network password (encrypted)
     const OFFSET_LTK: u32 = 0x30;           // Long-term key
-    const SECTOR_SIZE: u32 = 0x40;          // Size of each flash storage sector
 
     // For a new config set (addr=0), clean the old sector and increment the index
     if addr == OFFSET_HEADER {
         pair_flash_clean();
+        // Cast to i32 to match ADR_FLASH_CFG_IDX type
         ADR_FLASH_CFG_IDX.set(ADR_FLASH_CFG_IDX.get() + SECTOR_SIZE);
     }
 

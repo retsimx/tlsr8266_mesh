@@ -10,7 +10,7 @@ use crate::embassy::sync::mutex::{CriticalSectionMutex, Mutex};
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
-use crate::sdk::ble_app::ble_ll_att::ble_ll_channel_table_calc;
+use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet, pair_init, pair_save_key, pair_set_key};
 use crate::sdk::ble_app::rf_drv_8266::{*};
@@ -507,7 +507,7 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
             });
 
             let chn_map = PKT_INIT.lock().ll_init().chm;
-            ble_ll_channel_table_calc(&chn_map, true);
+            ble_ll_build_available_channel_table(&chn_map, true);
 
             // rf_set_ble_crc(&(state.PKT_INIT()).crcinit);
             let crcinit = PKT_INIT.lock().ll_init().crcinit;

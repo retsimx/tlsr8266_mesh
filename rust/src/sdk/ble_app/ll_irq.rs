@@ -7,7 +7,7 @@ use crate::common::{pair_load_key, SYS_CHN_ADV, SYS_CHN_LISTEN};
 use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
 use crate::mesh::MESH_NODE_ST_VAL_LEN;
-use crate::sdk::ble_app::ble_ll_att::{ble_ll_channel_table_calc, ble_ll_conn_get_next_channel};
+use crate::sdk::ble_app::ble_ll_channel_selection::{ble_ll_build_available_channel_table, ble_ll_select_next_data_channel};
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet_mesh, pair_proc};
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
@@ -23,7 +23,7 @@ fn slave_timing_update_handle()
     if SLAVE_TIMING_UPDATE.get() == 1 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
         SLAVE_TIMING_UPDATE.set(0);
         let chn_map = SLAVE_CHN_MAP.lock().clone();
-        ble_ll_channel_table_calc(&chn_map, false);
+        ble_ll_build_available_channel_table(&chn_map, false);
         PKT_INIT.lock().ll_init_mut().chm = chn_map;
     } else {
         if SLAVE_TIMING_UPDATE.get() == 2 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
@@ -360,7 +360,7 @@ pub fn irq_st_bridge()
 
         slave_timing_update_handle();
         let chn_map = PKT_INIT.lock().ll_init().chm;
-        ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f);
+        ble_ll_select_next_data_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f);
     }
 
     write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
@@ -377,7 +377,7 @@ pub fn irq_st_ble_rx()
     write_reg8(0x00800f04, 0x67);  // tx wail & settle time
 
     let chn_map = PKT_INIT.lock().ll_init().chm;
-    let next_chan = ble_ll_conn_get_next_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f) as u8;
+    let next_chan = ble_ll_select_next_data_channel(&chn_map, PKT_INIT.lock().ll_init().hop & 0x1f) as u8;
     rf_set_ble_channel(next_chan);
 
     // rf_set_ble_access_code(unsafe { *(addr_of!((state.PKT_INIT()).aa) as *const u32) });

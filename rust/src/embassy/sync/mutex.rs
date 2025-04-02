@@ -67,12 +67,16 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        self._restore_state.store(irq_disable(), Ordering::Relaxed);
+        if !cfg!(test) {
+            self._restore_state.store(irq_disable(), Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
     fn unlock(&self) {
-        irq_restore(self._restore_state.load(Ordering::Relaxed));
+        if !cfg!(test) {
+            irq_restore(self._restore_state.load(Ordering::Relaxed));
+        }
     }
 }
 

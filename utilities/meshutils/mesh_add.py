@@ -37,7 +37,7 @@ from bleak import BleakClient, BleakScanner
 
 from mesh_common import (
     # Constants
-    mesh_name, mesh_pass, shared_key,
+    shared_key,
     pair_characteristic_uuid, notify_characteristic_uuid,
     command_characteristic_uuid,
     PAIR_OP_VERIFY_CREDENTIALS, PAIR_OP_SET_MESH_NAME,
@@ -65,8 +65,8 @@ async def main():
     # Parse command line arguments
     args_parser = argparse.ArgumentParser(description='TLSR8266 Mesh Device Provisioning Tool')
     args_parser.add_argument('--mesh_address', help="The address of the new node in the mesh. Should be a unique (in the mesh) value between 1 and 63", required=True, type=int)
-    args_parser.add_argument('--mesh_name', help="The name of the mesh. eg `mymesh`. (Must be 16 bytes or fewer)", required=True, type=str)
-    args_parser.add_argument('--mesh_password', help="The password of the mesh. eg `mymeshpwd` (Must be 16 bytes or fewer)", required=True, type=str)
+    args_parser.add_argument('--mesh_name', help="The name of the mesh. eg `mymesh`. (Must be 16 bytes or fewer)", required=True, type=str, default="out_of_mesh")
+    args_parser.add_argument('--mesh_password', help="The password of the mesh. eg `mymeshpwd` (Must be 16 bytes or fewer)", required=True, type=str, default="123")
     args_parser.add_argument('--mesh_ltk', help="The long-term key for the mesh in hex format (32 hex characters / 16 bytes)", required=False, type=str)
 
     args = args_parser.parse_args()
@@ -76,6 +76,9 @@ async def main():
     print(os.system("/bin/bash ./scripts/device_cleanup.sh"))
 
     # Scan for unprovisioned device (advertising with default name)
+    mesh_name = args.mesh_name
+    mesh_password = args.mesh_password
+
     print(f"Scanning for unprovisioned device with name '{mesh_name}'...")
     device = await BleakScanner.find_device_by_name(name=mesh_name, timeout=5)
 
@@ -145,7 +148,7 @@ async def main():
         print("Provisioning mesh parameters...")
 
         # Prepare and encrypt mesh name
-        name = args.mesh_name.encode()
+        name = mesh_name.encode()
         # Pad name to 16 bytes
         name = bytearray(name) + bytearray([0] * (16 - len(name)))
         # Encrypt name with session key
@@ -154,7 +157,7 @@ async def main():
         name.reverse()
 
         # Prepare and encrypt mesh password
-        pwd = args.mesh_password.encode()
+        pwd = mesh_password.encode()
         # Pad password to 16 bytes
         pwd = bytearray(pwd) + bytearray([0] * (16 - len(pwd)))
         # Encrypt password with session key
@@ -228,7 +231,7 @@ async def main():
             return
 
         print(f"Light with MAC ({device.address}) successfully added to mesh network")
-        print(f"Mesh Name: {args.mesh_name}")
+        print(f"Mesh Name: {mesh_name}")
         print(f"Mesh Address: {mesh_address}")
         if using_default_ltk:
             print("Using default LTK")

@@ -33,7 +33,7 @@ from bleak import BleakClient
 
 from mesh_common import (
     # Constants
-    mesh_name, mesh_pass, shared_key, VERSION_MASK, VERSION_16MHZ,
+    shared_key, VERSION_MASK, VERSION_16MHZ,
     pair_characteristic_uuid, notify_characteristic_uuid,
     command_characteristic_uuid, ota_characteristic_uuid,
     firmware_revision_uuid, PAIR_OP_VERIFY_CREDENTIALS,
@@ -187,12 +187,11 @@ async def main():
             print("Authenticating with device...")
 
             # Set mesh credentials from arguments
-            global mesh_name, mesh_pass
             mesh_name = args.mesh_name
             mesh_pass = args.mesh_password
 
             # Generate and verify mesh credentials
-            plaintext_mesh_credentials = encode_mesh_credentials()
+            plaintext_mesh_credentials = encode_mesh_credentials(mesh_name, mesh_pass)
 
             # Prepare authentication request
             enc_key = bytearray(shared_key)[:] + b'\0' * 8  # Pad shared key to 16 bytes

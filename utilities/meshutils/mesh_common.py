@@ -13,8 +13,6 @@ from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
 
 # Default values for unprovisioned devices
-mesh_name = "out_of_mesh"   # Name used to find unprovisioned devices
-mesh_pass = "123"           # Default password for unprovisioned devices
 shared_key = get_random_bytes(8)  # Random challenge for authentication (pair_randm)
 
 # GATT characteristic UUIDs
@@ -152,7 +150,7 @@ class PacketParser:
         packet[0] = index & 0xFF
         packet[1] = (index >> 8) & 0xFF
 
-def encode_mesh_credentials():
+def encode_mesh_credentials(mesh_name, mesh_pass):
     """
     Generate credential verification material by XORing the mesh name and password.
     
@@ -162,8 +160,6 @@ def encode_mesh_credentials():
     Returns:
         bytes: XORed mesh name and password (16 bytes)
     """
-    global mesh_name, mesh_pass
-    
     # Truncate mesh name to 16 bytes if needed
     if len(mesh_name) > KEY_SIZE:
         mesh_name = mesh_name[:KEY_SIZE]

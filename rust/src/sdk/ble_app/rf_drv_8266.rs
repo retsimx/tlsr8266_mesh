@@ -192,7 +192,7 @@ pub fn blc_ll_init_basic_mcu()
     write_reg_rf_irq_status(0xfffe);
 
     // Configure RF interrupts for RX and TX events
-    write_reg_rf_irq_mask(FLD_RF_IRQ_MASK::IRQ_RX as u16 | FLD_RF_IRQ_MASK::IRQ_TX as u16);
+    write_reg_rf_irq_mask((FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX).bits());
 
     // Set up system tick interrupt for timing BLE events
     write_reg_system_tick_irq(read_reg_system_tick() | (0x80 << 0x18));
@@ -1981,8 +1981,8 @@ mod tests {
         mock_write_reg_rf_irq_status(0xfffe).returns(());
         
         // The expected value should be IRQ_RX | IRQ_TX
-        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX as u16 | FLD_RF_IRQ_MASK::IRQ_TX as u16;
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask).returns(());
+        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX;
+        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).returns(());
         
         mock_read_reg_system_tick().returns(0x1234); // Simulate some system tick value
         mock_write_reg_system_tick_irq(0x1234 | (0x80 << 0x18)).returns(());
@@ -2016,7 +2016,7 @@ mod tests {
         mock_write_reg_rf_irq_status(0xfffe).assert_called(1);
         
         // Configure RF interrupts for RX and TX
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask).assert_called(1);
+        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).assert_called(1);
         
         // System tick interrupt configuration
         mock_read_reg_system_tick().assert_called(1);
@@ -2063,8 +2063,8 @@ mod tests {
         mock_write_reg_rf_irq_mask(0).returns(());
         mock_write_reg_rf_irq_status(0xfffe).returns(());
         
-        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX as u16 | FLD_RF_IRQ_MASK::IRQ_TX as u16;
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask).returns(());
+        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX;
+        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).returns(());
         
         mock_read_reg_system_tick().returns(0x1234);
         mock_write_reg_system_tick_irq(0x1234 | (0x80 << 0x18)).returns(());

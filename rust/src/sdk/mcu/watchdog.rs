@@ -13,9 +13,9 @@ pub fn wd_set_interval(ms: u32) //  in ms
     let mut val = read_reg_tmr_ctrl();
     SET_FLD_V!(
         val,
-        FLD_TMR::TMR_WD_CAPT as u32,
+        FLD_TMR::TMR_WD_CAPT.bits(),
         (ms * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF),
-        FLD_TMR::TMR2_MODE as u32,
+        FLD_TMR::TMR2_MODE.bits(),
         0
     );
     write_reg_tmr_ctrl(val);
@@ -25,20 +25,20 @@ pub fn wd_set_interval(ms: u32) //  in ms
 #[inline(always)]
 pub fn wd_start() {
     let mut val = read_reg_tmr_ctrl();
-    SET_FLD!(val, FLD_TMR::TMR_WD_EN as u32);
+    SET_FLD!(val, FLD_TMR::TMR_WD_EN.bits());
     write_reg_tmr_ctrl(val);
 }
 
 #[inline(always)]
 pub fn wd_stop() {
     let mut val = read_reg_tmr_ctrl();
-    CLR_FLD!(val, FLD_TMR::TMR_WD_EN as u32);
+    CLR_FLD!(val, FLD_TMR::TMR_WD_EN.bits());
     write_reg_tmr_ctrl(val);
 }
 
 #[inline(always)]
 pub fn wd_clear() {
     let mut val = read_reg_tmr_ctrl();
-    SET_FLD!(val, FLD_TMR::CLR_WD as u32);
+    SET_FLD!(val, FLD_TMR::CLR_WD.bits());
     write_reg_tmr_ctrl(val);
 }

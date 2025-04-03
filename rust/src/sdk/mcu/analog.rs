@@ -7,7 +7,7 @@ use crate::sdk::mcu::register::{
 #[inline(always)]
 #[cfg_attr(test, mry::mry)]
 pub fn analog_wait() {
-    while read_reg_ana_ctrl() & (FLD_ANA::BUSY as u8) != 0 {}
+    while read_reg_ana_ctrl() & (FLD_ANA::BUSY.bits()) != 0 {}
 }
 
 #[inline(never)]
@@ -17,7 +17,7 @@ pub fn analog_read(addr: u8) -> u8 {
     let r = irq_disable();
 
     write_reg_ana_addr(addr);
-    write_reg_ana_ctrl(FLD_ANA::START as u8 | FLD_ANA::RSV as u8);
+    write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RSV).bits());
     //   Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RSV) << 16) | addr;"
     //   This will fail because of time sequence and more over size is bigger
     analog_wait();
@@ -36,7 +36,7 @@ pub fn analog_write(addr: u8, v: u8) {
 
     write_reg_ana_addr(addr);
     write_reg_ana_data(v);
-    write_reg_ana_ctrl(FLD_ANA::START as u8 | FLD_ANA::RW as u8);
+    write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RW).bits());
 
     //	 Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RW) << 16) | (v << 8) | addr;"
     //   This will fail because of time sequence and more over size is bigger

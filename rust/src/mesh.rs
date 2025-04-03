@@ -296,7 +296,7 @@ impl MeshManager {
         rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
         sleep_us(1000);
-        write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX as u16); // clear current rx in buffer
+        write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits()); // clear current rx in buffer
         irq_restore(r);
 
         self.safe_effect_new_mesh_finish();

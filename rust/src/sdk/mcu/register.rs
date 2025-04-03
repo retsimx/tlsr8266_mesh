@@ -258,12 +258,14 @@ macro_rules! regrw_copy {
 regrw!(reg_master_spi_data, 0x0c, 8);
 regrw!(reg_master_spi_ctrl, 0x0d, 8);
 
-pub enum FLD_MASTER_SPI {
-    CS = BIT!(0),
-    SDO = BIT!(1),
-    CONT = BIT!(2),
-    RD = BIT!(3),
-    BUSY = BIT!(4),
+bitflags! {
+    pub struct FLD_MASTER_SPI: u8 {
+        const CS = BIT!(0);
+        const SDO = BIT!(1);
+        const CONT = BIT!(2);
+        const RD = BIT!(3);
+        const BUSY = BIT!(4);
+    }
 }
 
 //****************************************************
@@ -338,85 +340,90 @@ regrw!(reg_rst1, 0x61, 8);
 regrw!(reg_rst2, 0x62, 8);
 regrw!(reg_rst_clk0, 0x60, 32);
 
-pub enum FLD_RST {
-    SPI = BIT!(0),
-    I2C = BIT!(1),
-    USB = BIT!(2),
-    USB_PHY = BIT!(3),
-    MCU = BIT!(4),
-    MAC = BIT!(5),
-    AIF = BIT!(6),
-    BB = BIT!(7),
-    GPIO = BIT!(8),
-    ALGM = BIT!(9),
-    DMA = BIT!(10),
-    UART = BIT!(11),
-    PWM = BIT!(12),
-    AES = BIT!(13),
-    SWR_M = BIT!(14),
-    SWR_S = BIT!(15),
-    SBC = BIT!(16),
-    AUD = BIT!(17),
-    DFIFO = BIT!(18),
-    ADC = BIT!(19),
-    SOFT_MCU = BIT!(20),
-    MCIC = BIT!(21),
-    SOFT_MCIC = BIT!(22),
-    RSV = BIT!(23),
-}
-
-impl FLD_RST {
-    pub const ZB: FLD_RST = FLD_RST::BB;
+bitflags! {
+    pub struct FLD_RST: u32 {
+        const SPI = BIT!(0);
+        const I2C = BIT!(1);
+        const USB = BIT!(2);
+        const USB_PHY = BIT!(3);
+        const MCU = BIT!(4);
+        const MAC = BIT!(5);
+        const AIF = BIT!(6);
+        const BB = BIT!(7);
+        const GPIO = BIT!(8);
+        const ALGM = BIT!(9);
+        const DMA = BIT!(10);
+        const UART = BIT!(11);
+        const PWM = BIT!(12);
+        const AES = BIT!(13);
+        const SWR_M = BIT!(14);
+        const SWR_S = BIT!(15);
+        const SBC = BIT!(16);
+        const AUD = BIT!(17);
+        const DFIFO = BIT!(18);
+        const ADC = BIT!(19);
+        const SOFT_MCU = BIT!(20);
+        const MCIC = BIT!(21);
+        const SOFT_MCIC = BIT!(22);
+        const RSV = BIT!(23);
+    }
 }
 
 regrw!(reg_clk_en, 0x64, 16);
 regrw!(reg_clk_en1, 0x64, 8);
 regrw!(reg_clk_en2, 0x65, 8);
 
-#[repr(usize)]
-pub enum FLD_CLK_EN {
-    GPIO_EN = BIT!(0),
-    ALGM_EN = BIT!(1),
-    DMA_EN = BIT!(2),
-    UART_EN = BIT!(3),
-    PWM_EN = BIT!(4),
-    AES_EN = BIT!(5),
-    PLL_EN = BIT!(6),
-    SWIRE_EN = BIT!(7),
-    SBC_EN = BIT!(8),
-    AUD_EN = BIT!(9),
-    DIFIO_EN = BIT!(10),
-    I2S = BIT_RNG!(11, 12),
-    C32K = BIT_RNG!(13, 15),
-    SPI_EN = BIT!(24),
-    I2C_EN = BIT!(25),
-    USB_EN = BIT!(26),
-    USB_PHY_EN = BIT!(27),
-    MCU_EN = BIT!(28),
-    MAC_EN = BIT!(29),
-    ADC_EN = BIT!(30), // ADC interface
-    ZB_EN = BIT!(31),
+bitflags! {
+    pub struct FLD_CLK_EN: u32 {
+        const GPIO_EN = BIT!(0);
+        const ALGM_EN = BIT!(1);
+        const DMA_EN = BIT!(2);
+        const UART_EN = BIT!(3);
+        const PWM_EN = BIT!(4);
+        const AES_EN = BIT!(5);
+        const PLL_EN = BIT!(6);
+        const SWIRE_EN = BIT!(7);
+        const SBC_EN = BIT!(8);
+        const AUD_EN = BIT!(9);
+        const DIFIO_EN = BIT!(10);
+        const I2S = BIT_RNG!(11, 12);
+        const C32K = BIT_RNG!(13, 15);
+        const SPI_EN = BIT!(24);
+        const I2C_EN = BIT!(25);
+        const USB_EN = BIT!(26);
+        const USB_PHY_EN = BIT!(27);
+        const MCU_EN = BIT!(28);
+        const MAC_EN = BIT!(29);
+        const ADC_EN = BIT!(30); // ADC interface
+        const ZB_EN = BIT!(31);
+    }
 }
 
-pub enum FLD_CLK2_EN {
-    SBC_EN = BIT!(0),
-    AUD_EN = BIT!(1),
-    DIFIO_EN = BIT!(2),
-    I2S = BIT_RNG!(3, 4),
-    C32K = BIT_RNG!(5, 7),
+bitflags! {
+    pub struct FLD_CLK2_EN: u8 {
+        const SBC_EN = BIT!(0);
+        const AUD_EN = BIT!(1);
+        const DIFIO_EN = BIT!(2);
+        const I2S = BIT_RNG!(3, 4);
+        const C32K = BIT_RNG!(5, 7);
+    }
 }
 
 regrw!(reg_clk_sel, 0x66, 8);
 
-pub enum FLD_CLK_SEL {
-    DIV = BIT_RNG!(0, 4),
-    SRC = BIT_RNG!(5, 7),
+bitflags! {
+    pub struct FLD_CLK_SEL: u8 {
+        const DIV = BIT_RNG!(0, 4);
+        const SRC = BIT_RNG!(5, 7);
+    }
 }
 
 regrw!(reg_i2s_step, 0x67, 8);
-pub enum FLD_I2S_STEP {
-    STEP = BIT_RNG!(0, 6),
-    CLK_EN = BIT!(7),
+bitflags! {
+    pub struct FLD_I2S_STEP: u8 {
+        const STEP = BIT_RNG!(0, 6);
+        const CLK_EN = BIT!(7);
+    }
 }
 
 regrw!(reg_i2s_mod, 0x68, 8);
@@ -479,24 +486,32 @@ regrw!(reg_i2s_mod, 0x68, 8);
 regrw!(reg_adc_step_l, 0x69, 8);
 regrw!(reg_adc_mod_l, 0x6a, 8);
 regrw!(reg_adc_mod, 0x6a, 16);
-pub enum FLD_ADC_MOD {
-    MOD = BIT_RNG!(0, 11),
-    STEP_H = BIT_RNG!(12, 14),
-    CLK_EN = BIT!(15),
+
+bitflags! {
+    pub struct FLD_ADC_MOD: u16 {
+        const MOD = BIT_RNG!(0, 11);
+        const STEP_H = BIT_RNG!(12, 14);
+        const CLK_EN = BIT!(15);
+    }
 }
 
 regrw!(reg_adc_clk_en, 0x6b, 8);
 regrw!(reg_adc_mod_h, 0x6b, 8);
-pub enum FLD_ADC_MOD_H {
-    H = BIT_RNG!(0, 3),
-    H_STEP = BIT_RNG!(4, 6),
-    H_CLK = BIT!(7),
+
+bitflags! {
+    pub struct FLD_ADC_MOD_H: u8 {
+        const H = BIT_RNG!(0, 3);
+        const H_STEP = BIT_RNG!(4, 6);
+        const H_CLK = BIT!(7);
+    }
 }
 
 regrw!(reg_dmic_step, 0x6c, 8);
-pub enum FLD_DMIC_STEP {
-    STEP = BIT_RNG!(0, 6),
-    CLK_EN = BIT!(7),
+bitflags! {
+    pub struct FLD_DMIC_STEP: u8 {
+        const STEP = BIT_RNG!(0, 6);
+        const CLK_EN = BIT!(7);
+    }
 }
 regrw!(reg_dmic_mod, 0x6d, 8);
 
@@ -573,32 +588,38 @@ regrw!(reg_dmic_mod, 0x6d, 8);
 //    ```
 
 regrw!(reg_wakeup_en, 0x6e, 8);
-pub enum FLD_WAKEUP_SRC {
-    I2C = BIT!(0),
-    SPI = BIT!(1),
-    USB = BIT!(2),
-    GPIO = BIT!(3),
-    I2C_SYN = BIT!(4),
-    GPIO_RM = BIT!(5),
-    USB_RESM = BIT!(6),
-    RST_SYS = BIT!(7),
+bitflags! {
+    pub struct FLD_WAKEUP_SRC: u8 {
+        const I2C = BIT!(0);
+        const SPI = BIT!(1);
+        const USB = BIT!(2);
+        const GPIO = BIT!(3);
+        const I2C_SYN = BIT!(4);
+        const GPIO_RM = BIT!(5);
+        const USB_RESM = BIT!(6);
+        const RST_SYS = BIT!(7);
+    }
 }
 
 regrw!(reg_pwdn_ctrl, 0x6f, 8);
-pub enum FldPwdnCtrl {
-    Reboot = BIT!(5),
-    Sleep = BIT!(7),
+bitflags! {
+    pub struct FldPwdnCtrl: u8 {
+        const Reboot = BIT!(5);
+        const Sleep = BIT!(7);
+    }
 }
 
 regrw!(reg_fhs_sel, 0x70, 8);
-pub enum FLD_FHS_SELECT {
-    SELECT = BIT_RNG!(0, 1),
+bitflags! {
+    pub struct FLD_FHS_SELECT: u8 {
+        const SELECT = BIT_RNG!(0, 1);
+    }
 }
-pub enum FHS_SEL {
-    SEL_192M_PLL = 0,
-    //	SEL_48M_PLL = 1,
-    SEL_32M_OSC = 1,
-    //	SEL_16M_OSC = 3,
+bitflags! {
+    pub struct FHS_SEL: u8 {
+        const SEL_192M_PLL = BIT!(0);
+        const SEL_32M_OSC = BIT!(1);
+    }
 }
 
 regrw!(reg_mcu_wakeup_mask, 0x78, 32);
@@ -668,12 +689,14 @@ regrw!(reg_ana_addr, 0xb8, 8);
 regrw!(reg_ana_data, 0xb9, 8);
 regrw!(reg_ana_ctrl, 0xba, 8);
 
-pub enum FLD_ANA {
-    BUSY = BIT!(0),
-    RSV = BIT!(4),
-    RW = BIT!(5),
-    START = BIT!(6),
-    CYC = BIT!(7),
+bitflags! {
+    pub struct FLD_ANA: u8 {
+        const BUSY = BIT!(0);
+        const RSV = BIT!(4);
+        const RW = BIT!(5);
+        const START = BIT!(6);
+        const CYC = BIT!(7);
+    }
 }
 
 //****************************************************
@@ -717,20 +740,23 @@ pub enum FLD_ANA {
 // RF transmission mode registers
 regrw!(reg_rf_tx_mode1, 0x400, 8);
 regrw!(reg_rf_tx_mode, 0x400, 16);
-pub enum FLD_RF_TX_MODE {
-    DMA_EN = BIT!(0),
-    CRC_EN = BIT!(1),
-    BANDWIDTH = BIT_RNG!(2, 3),
-    OUTPUT = BIT!(4),
-    TST_OUT = BIT!(5),
-    TST_EN = BIT!(6),
-    TST_MODE = BIT!(7),
-    ZB_PN_EN = BIT!(8),
-    ZB_FEC_EN = BIT!(9),
-    ZB_INTL_EN = BIT!(10), // interleaving
-    TX_1M2M_PN_EN = BIT!(11),
-    TX_1M2M_FEC_EN = BIT!(12),
-    TX_1M2M_INTL_EN = BIT!(13), // interleaving
+
+bitflags! {
+    pub struct FLD_RF_TX_MODE: u16 {
+        const DMA_EN = BIT!(0);
+        const CRC_EN = BIT!(1);
+        const BANDWIDTH = BIT_RNG!(2, 3);
+        const OUTPUT = BIT!(4);
+        const TST_OUT = BIT!(5);
+        const TST_EN = BIT!(6);
+        const TST_MODE = BIT!(7);
+        const ZB_PN_EN = BIT!(8);
+        const ZB_FEC_EN = BIT!(9);
+        const ZB_INTL_EN = BIT!(10); // interleaving
+        const TX_1M2M_PN_EN = BIT!(11);
+        const TX_1M2M_FEC_EN = BIT!(12);
+        const TX_1M2M_INTL_EN = BIT!(13); // interleaving
+    }
 }
 
 // RF channel control register
@@ -742,27 +768,31 @@ regrw!(reg_rf_tx_buf_sta, 0x41c, 32);
 // RF reception registers
 regrw!(reg_rf_rx_sense_thr, 0x422, 8);
 regrw!(reg_rf_rx_auto, 0x426, 8);
-pub enum FLD_RF_RX_AUTO {
-    IRR_GAIN = BIT!(0),
-    RX_IRR_PHASE = BIT!(1),
-    RX_DAC_I = BIT!(2),
-    RX_DAC_Q = BIT!(3),
-    RX_LNA_GAIN = BIT!(4),
-    RX_MIX2_GAIN = BIT!(5),
-    RX_PGA_GAIN = BIT!(6),
-    RX_CAL_EN = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_RX_AUTO: u8 {
+        const IRR_GAIN = BIT!(0);
+        const RX_IRR_PHASE = BIT!(1);
+        const RX_DAC_I = BIT!(2);
+        const RX_DAC_Q = BIT!(3);
+        const RX_LNA_GAIN = BIT!(4);
+        const RX_MIX2_GAIN = BIT!(5);
+        const RX_PGA_GAIN = BIT!(6);
+        const RX_CAL_EN = BIT!(7);
+    }
 }
 
 regrw!(reg_rf_rx_sync, 0x427, 8);
-pub enum FLD_RF_SYNC {
-    FREQ_COMP_EN = BIT!(0),
-    ADC_SYNC = BIT!(1),
-    ADC_INP_SIGNED = BIT!(2),
-    SWAP_ADC_IQ = BIT!(3),
-    NOTCH_FREQ_SEL = BIT!(4),
-    NOTCH_BAND_SEL = BIT!(5),
-    NOTCH_EN = BIT!(6),
-    DN_CONV_FREQ_SEL = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_SYNC: u8 {
+        const FREQ_COMP_EN = BIT!(0);
+        const ADC_SYNC = BIT!(1);
+        const ADC_INP_SIGNED = BIT!(2);
+        const SWAP_ADC_IQ = BIT!(3);
+        const NOTCH_FREQ_SEL = BIT!(4);
+        const NOTCH_BAND_SEL = BIT!(5);
+        const NOTCH_EN = BIT!(6);
+        const DN_CONV_FREQ_SEL = BIT!(7);
+    }
 }
 
 regrw!(reg_rf_rx_mode, 0x428, 8);
@@ -781,78 +811,94 @@ bitflags! {
 }
 
 regrw!(reg_rf_rx_pilot, 0x42b, 8);
-pub enum FLD_RF_PILOT {
-    LEN = BIT_RNG!(0, 3),
-    RF_ZB_SFD_CHK = BIT!(4),
-    RF_1M_SFD_CHK = BIT!(5),
-    RF_2M_SFD_CHK = BIT!(6),
-    RF_ZB_OR_AUTO = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_PILOT: u8 {
+        const LEN = BIT_RNG!(0, 3);
+        const RF_ZB_SFD_CHK = BIT!(4);
+        const RF_1M_SFD_CHK = BIT!(5);
+        const RF_2M_SFD_CHK = BIT!(6);
+        const RF_ZB_OR_AUTO = BIT!(7);
+    }
 }
 
 regrw!(reg_rf_rx_chn_dc, 0x42c, 32);
 regrw!(reg_rf_rx_q_chn_cal, 0x42f, 8);
-pub enum FLD_RF_RX_DCQ_CAL {
-    FLD_RF_RX_DCQ_HIGH = BIT_RNG!(0, 6),
-    FLD_RF_RX_DCQ_CAL_START = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_RX_DCQ_CAL: u8 {
+        const FLD_RF_RX_DCQ_HIGH = BIT_RNG!(0, 6);
+        const FLD_RF_RX_DCQ_CAL_START = BIT!(7);
+    }
 }
 regrw!(reg_rf_rx_pel, 0x434, 16);
 regrw!(reg_rf_rx_pel_gain, 0x434, 32);
 regrw!(reg_rf_rx_rssi_offset, 0x439, 8);
 
 regrw!(reg_rf_rx_hdx, 0x43b, 8);
-pub enum FLD_RF_RX_HDX {
-    RX_HEADER_LEN = BIT_RNG!(0, 3),
-    RT_TICK_LO_SEL = BIT!(4),
-    RT_TICK_HI_SEL = BIT!(5),
-    RT_TICK_FRAME = BIT!(6),
-    PKT_LEN_OUTP_EN = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_RX_HDX: u8 {
+        const RX_HEADER_LEN = BIT_RNG!(0, 3);
+        const RT_TICK_LO_SEL = BIT!(4);
+        const RT_TICK_HI_SEL = BIT!(5);
+        const RT_TICK_FRAME = BIT!(6);
+        const PKT_LEN_OUTP_EN = BIT!(7);
+    }
 }
 
 regrw!(reg_rf_rx_gctl, 0x43c, 8);
-pub enum FLD_RF_RX_GCTL {
-    CIC_SAT_LO_EN = BIT!(0),
-    CIC_SAT_HI_EN = BIT!(1),
-    AUTO_PWR = BIT!(2),
-    ADC_RST_VAL = BIT!(4),
-    ADC_RST_EN = BIT!(5),
-    PWR_CHG_DET_S = BIT!(6),
-    PWR_CHG_DET_N = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_RX_GCTL: u8 {
+        const CIC_SAT_LO_EN = BIT!(0);
+        const CIC_SAT_HI_EN = BIT!(1);
+        const AUTO_PWR = BIT!(2);
+        const ADC_RST_VAL = BIT!(4);
+        const ADC_RST_EN = BIT!(5);
+        const PWR_CHG_DET_S = BIT!(6);
+        const PWR_CHG_DET_N = BIT!(7);
+    }
 }
 regrw!(reg_rf_rx_peak, 0x43d, 8);
-pub enum FLD_RF_RX_PEAK {
-    FLD_RX_PEAK_DET_SRC_EN = BIT_RNG!(0, 2),
-    FLD_TX_PEAK_DET_EN = BIT!(3),
-    FLD_PEAK_DET_NUM = BIT_RNG!(4, 5),
-    FLD_PEAK_MAX_CNT_PRD = BIT_RNG!(6, 7),
+bitflags! {
+    pub struct FLD_RF_RX_PEAK: u8 {
+        const FLD_RX_PEAK_DET_SRC_EN = BIT_RNG!(0, 2);
+        const FLD_TX_PEAK_DET_EN = BIT!(3);
+        const FLD_PEAK_DET_NUM = BIT_RNG!(4, 5);
+        const FLD_PEAK_MAX_CNT_PRD = BIT_RNG!(6, 7);
+    }
 }
 
 regrw!(reg_rf_rx_status, 0x443, 8);
-pub enum FLD_RF_RX_STATUS {
-    RX_STATE = BIT_RNG!(0, 3),
-    RX_STA_RSV = BIT_RNG!(4, 5),
-    RX_INTR = BIT!(6),
-    TX_INTR = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_RX_STATUS: u8 {
+        const RX_STATE = BIT_RNG!(0, 3);
+        const RX_STA_RSV = BIT_RNG!(4, 5);
+        const RX_INTR = BIT!(6);
+        const TX_INTR = BIT!(7);
+    }
 }
 
 regrw!(reg_rx_rnd_mode, 0x447, 8);
-pub enum FLD_RX_RND_MODE {
-    SRC = BIT!(0),
-    MANU_MODE = BIT!(1),
-    AUTO_RD = BIT!(2),
-    FREE_MODE = BIT!(3),
-    CLK_DIV = BIT_RNG!(4, 7),
+bitflags! {
+    pub struct FLD_RX_RND_MODE: u8 {
+        const SRC = BIT!(0);
+        const MANU_MODE = BIT!(1);
+        const AUTO_RD = BIT!(2);
+        const FREE_MODE = BIT!(3);
+        const CLK_DIV = BIT_RNG!(4, 7);
+    }
 }
 regrw!(reg_rnd_number, 0x448, 16);
 
 regrw!(reg_rf_crc, 0x44c, 32);
 
 regrw!(reg_rf_rtt, 0x454, 32);
-pub enum FLD_RF_RTT {
-    CAL = BIT_RNG!(0, 7),
-    CYC1 = BIT_RNG!(8, 15),
-    LOCK = BIT_RNG!(16, 23),
-    SD_DLY_40M = BIT_RNG!(24, 27),
-    SD_DLY_BYPASS = BIT!(28),
+bitflags! {
+    pub struct FLD_RF_RTT: u32 {
+        const CAL = BIT_RNG!(0, 7);
+        const CYC1 = BIT_RNG!(8, 15);
+        const LOCK = BIT_RNG!(16, 23);
+        const SD_DLY_40M = BIT_RNG!(24, 27);
+        const SD_DLY_BYPASS = BIT!(28);
+    }
 }
 
 regrw!(reg_rf_chn_rssi, 0x458, 8);
@@ -879,79 +925,87 @@ regrw!(reg_pll_tx_frac, 0x4e4, 32);
 regrw!(reg_pll_tx_ctrl, 0x4e8, 8);
 regrw!(reg_pll_ctrl16, 0x4e8, 16);
 regrw!(reg_pll_ctrl, 0x4e8, 32);
-pub enum FLD_PLL_CTRL {
-    TX_CYC0 = BIT!(0),
-    TX_SOF = BIT!(1),
-    TX_CYC1 = BIT!(2),
-    TX_PRE_EN = BIT!(3),
-    TX_VCO_EN = BIT!(4),
-    TX_PWDN_DIV = BIT!(5),
-    TX_MOD_EN = BIT!(6),
-    TX_MOD_TRAN_EN = BIT!(7),
-    RX_CYC0 = BIT!(8),
-    RX_SOF = BIT!(9),
-    RX_CYC1 = BIT!(10),
-    RX_PRES_EN = BIT!(11),
-    RX_VCO_EN = BIT!(12),
-    RX_PWDN_DIV = BIT!(13),
-    RX_PEAK_EN = BIT!(14),
-    RX_TP_CYC = BIT!(15),
-    SD_RSTB = BIT!(16),
-    SD_INTG_EN = BIT!(17),
-    CP_TRI = BIT!(18),
-    PWDN_INTG1 = BIT!(19),
-    PWDN_INTG2 = BIT!(20),
-    PWDN_INTG_DIV = BIT!(21),
-    PEAK_DET_EN = BIT!(22),
-    OPEN_LOOP_EN = BIT!(23),
-    RX_TICK_EN = BIT!(24),
-    TX_TICK_EN = BIT!(25),
-    RX_ALWAYS_ON = BIT!(26),
-    TX_ALWAYS_ON = BIT!(27),
-    MANUAL_MODE_EN = BIT!(28),
-    CAL_DONE_EN = BIT!(29),
-    LOCK_EN = BIT!(30),
+bitflags! {
+    pub struct FLD_PLL_CTRL: u32 {
+        const TX_CYC0 = BIT!(0);
+        const TX_SOF = BIT!(1);
+        const TX_CYC1 = BIT!(2);
+        const TX_PRE_EN = BIT!(3);
+        const TX_VCO_EN = BIT!(4);
+        const TX_PWDN_DIV = BIT!(5);
+        const TX_MOD_EN = BIT!(6);
+        const TX_MOD_TRAN_EN = BIT!(7);
+        const RX_CYC0 = BIT!(8);
+        const RX_SOF = BIT!(9);
+        const RX_CYC1 = BIT!(10);
+        const RX_PRES_EN = BIT!(11);
+        const RX_VCO_EN = BIT!(12);
+        const RX_PWDN_DIV = BIT!(13);
+        const RX_PEAK_EN = BIT!(14);
+        const RX_TP_CYC = BIT!(15);
+        const SD_RSTB = BIT!(16);
+        const SD_INTG_EN = BIT!(17);
+        const CP_TRI = BIT!(18);
+        const PWDN_INTG1 = BIT!(19);
+        const PWDN_INTG2 = BIT!(20);
+        const PWDN_INTG_DIV = BIT!(21);
+        const PEAK_DET_EN = BIT!(22);
+        const OPEN_LOOP_EN = BIT!(23);
+        const RX_TICK_EN = BIT!(24);
+        const TX_TICK_EN = BIT!(25);
+        const RX_ALWAYS_ON = BIT!(26);
+        const TX_ALWAYS_ON = BIT!(27);
+        const MANUAL_MODE_EN = BIT!(28);
+        const CAL_DONE_EN = BIT!(29);
+        const LOCK_EN = BIT!(30);
+    }
 }
 
 regrw!(reg_pll_rx_ctrl, 0x4e9, 8);
-pub enum FLD_PLL_RX_CTRL {
-    CYC0 = BIT!(0),
-    SOF = BIT!(1),
-    CYC1 = BIT!(2),
-    PRES_EN = BIT!(3),
-    VCO_EN = BIT!(4),
-    PD_DIV = BIT!(5),
-    PEAK_EN = BIT!(6),
-    TP_CYC = BIT!(7),
+bitflags! {
+    pub struct FLD_PLL_RX_CTRL: u8 {
+        const CYC0 = BIT!(0);
+        const SOF = BIT!(1);
+        const CYC1 = BIT!(2);
+        const PRES_EN = BIT!(3);
+        const VCO_EN = BIT!(4);
+        const PD_DIV = BIT!(5);
+        const PEAK_EN = BIT!(6);
+        const TP_CYC = BIT!(7);
+    }
 }
 
 regrw!(reg_pll_ctrl_a, 0x4eb, 8);
-pub enum FLD_PLL_CTRL_A {
-    RX_TICK_EN = BIT!(0),
-    TX_TICK_EN = BIT!(1),
-    RX_ALWAYS_ON = BIT!(2),
-    TX_ALWAYS_ON = BIT!(3),
-    MANUAL_MODE_EN = BIT!(4),
-    CAL_DONE_EN = BIT!(5),
-    LOCK_EN = BIT!(6),
+bitflags! {
+    pub struct FLD_PLL_CTRL_A: u8 {
+        const RX_TICK_EN = BIT!(0);
+        const TX_TICK_EN = BIT!(1);
+        const RX_ALWAYS_ON = BIT!(2);
+        const TX_ALWAYS_ON = BIT!(3);
+        const MANUAL_MODE_EN = BIT!(4);
+        const CAL_DONE_EN = BIT!(5);
+        const LOCK_EN = BIT!(6);
+    }
 }
 
 // PLL polarity controls
 regrw!(reg_pll_pol_ctrl, 0x4ec, 16);
-pub enum FLD_PLL_POL_CTRL {
-    TX_PRE_EN = BIT!(0),
-    TX_VCO_EN = BIT!(1),
-    TX_PD_DIV = BIT!(2),
-    MOD_EN = BIT!(3),
-    MOD_TRAN_EN = BIT!(4),
-    RX_PRE_EN = BIT!(5),
-    RX_VCO_EN = BIT!(6),
-    RX_PD_DIV = BIT!(7),
-    SD_RSTB = BIT!(8),
-    SD_INTG_EN = BIT!(9),
-    CP_TRI = BIT!(10),
-    TX_SOF = BIT!(11),
-    RX_SOF = BIT!(12),
+bitflags! {
+    pub struct FLD_PLL_POL_CTRL: u16 {
+        const TX_PRE_EN = BIT!(0);
+        const TX_VCO_EN = BIT!(1);
+        const TX_PD_DIV = BIT!(2);
+        const MOD_EN = BIT!(3);
+        const MOD_TRAN_EN = BIT!(4);
+        const RX_PRE_EN = BIT!(5);
+        const RX_VCO_EN = BIT!(6);
+        const RX_PD_DIV = BIT!(7);
+        const SD_RSTB = BIT!(8);
+        const SD_INTG_EN = BIT!(9);
+        const CP_TRI = BIT!(10);
+        const TX_SOF = BIT!(11);
+        const RX_SOF = BIT!(12);
+    }
 }
 
 regrw!(reg_rf_rx_cap, 0x4f0, 16); 
@@ -1070,17 +1124,19 @@ regrw_copy!(reg_dma_rf_rx_ctrl, reg_dma2_ctrl, 16);
 regrw_copy!(reg_dma_rf_tx_addr, reg_dma3_addr, 16);
 regrw_copy!(reg_dma_rf_tx_ctrl, reg_dma3_ctrl, 16);
 
-pub enum FLD_DMA {
-    BUF_SIZE = BIT_RNG!(0, 7),
-    WR_MEM = BIT!(8),
-    PINGPONG_EN = BIT!(9),
-    FIFO_EN = BIT!(10),
-    AUTO_MODE = BIT!(11),
-    BYTE_MODE = BIT!(12),
+bitflags! {
+    pub struct FLD_DMA: u32 {
+        const BUF_SIZE = BIT_RNG!(0, 7);
+        const WR_MEM = BIT!(8);
+        const PINGPONG_EN = BIT!(9);
+        const FIFO_EN = BIT!(10);
+        const AUTO_MODE = BIT!(11);
+        const BYTE_MODE = BIT!(12);
 
-    RPTR_CLR = BIT!(4),
-    RPTR_NEXT = BIT!(5),
-    RPTR_SET = BIT!(6),
+        const RPTR_CLR = BIT!(4);
+        const RPTR_NEXT = BIT!(5);
+        const RPTR_SET = BIT!(6);
+    }
 }
 
 impl FLD_DMA {
@@ -1319,73 +1375,87 @@ regrw!(reg_gpio_pf_setting2, 0x5ac, 32);
 // GPIO control and configuration registers
 regrw!(reg_gpio_ctrl, 0x5a4, 32);
 
-pub enum GPIO_CTRL {
-    GPIO_WAKEUP_EN = BIT!(0),
-    GPIO_IRQ_EN = BIT!(1),
-    I2S_SLAVE_EN = BIT!(2),
-    RMII_REFCLK_OUTPUT_EN = BIT!(3),
+bitflags! {
+    pub struct GPIO_CTRL: u32 {
+        const GPIO_WAKEUP_EN = BIT!(0);
+        const GPIO_IRQ_EN = BIT!(1);
+        const I2S_SLAVE_EN = BIT!(2);
+        const RMII_REFCLK_OUTPUT_EN = BIT!(3);
+    }
 }
 
 regrw!(reg_gpio_config_func, 0x5b0, 32);
 regrw!(reg_gpio_config_func0, 0x5b0, 8);
 
-pub enum GPIO_CFG_FUNC0 {
-    FLD_I2S_REFCLK_DMIC = BIT!(0),
-    FLD_I2S_BCK_BB_PEAK = BIT!(1),
-    FLD_I2S_BCK_PWM1 = BIT!(2),
-    FLD_I2S_LCK_UART_RX = BIT!(3),
-    FLD_I2S_LCK_PWM2 = BIT!(4),
-    FLD_I2S_DO_UART_TX = BIT!(5),
-    FLD_I2S_DO_PWM3 = BIT!(6),
-    FLD_I2S_DI_DMIC = BIT!(7),
+bitflags! {
+    pub struct GPIO_CFG_FUNC0: u8 {
+        const FLD_I2S_REFCLK_DMIC = BIT!(0);
+        const FLD_I2S_BCK_BB_PEAK = BIT!(1);
+        const FLD_I2S_BCK_PWM1 = BIT!(2);
+        const FLD_I2S_LCK_UART_RX = BIT!(3);
+        const FLD_I2S_LCK_PWM2 = BIT!(4);
+        const FLD_I2S_DO_UART_TX = BIT!(5);
+        const FLD_I2S_DO_PWM3 = BIT!(6);
+        const FLD_I2S_DI_DMIC = BIT!(7);
+    }
 }
 
 regrw!(reg_gpio_config_func1, 0x5b1, 8);
-pub enum GPIO_CFG_FUNC1 {
-    FLD_RP_TX_CYC1 = BIT!(0),
-    FLD_RN_BB_RSSI = BIT!(1),
-    FLD_GP6_BB_SS2 = BIT!(2),
-    FLD_GP7_RXADC_CLK = BIT!(3),
-    FLD_RP_T0 = BIT!(4),
-    FLD_RN_T1 = BIT!(5),
-    FLD_GP6_TE = BIT!(6),
-    FLD_GP7_MDC = BIT!(7),
+bitflags! {
+    pub struct GPIO_CFG_FUNC1: u8 {
+        const FLD_RP_TX_CYC1 = BIT!(0);
+        const FLD_RN_BB_RSSI = BIT!(1);
+        const FLD_GP6_BB_SS2 = BIT!(2);
+        const FLD_GP7_RXADC_CLK = BIT!(3);
+        const FLD_RP_T0 = BIT!(4);
+        const FLD_RN_T1 = BIT!(5);
+        const FLD_GP6_TE = BIT!(6);
+        const FLD_GP7_MDC = BIT!(7);
+    }
 }
 
 regrw!(reg_gpio_config_func2, 0x5b2, 8);
-pub enum GPIO_CFG_FUNC2 {
-    FLD_GP8_RXADC_DAT = BIT!(0),
-    FLD_GP9_BB_SS1 = BIT!(1),
-    FLD_GP10_BBSS0 = BIT!(2),
-    FLD_SWS_BB_GAIN4 = BIT!(3),
-    FLD_DMIC_CK_BBCLK_BB = BIT!(4),
-    FLD_DMIC_CK_REFCLK = BIT!(5),
-    FLD_I2S_BCK_R0 = BIT!(6),
-    FLD_I2S_LCK_R1 = BIT!(7),
+bitflags! {
+    pub struct GPIO_CFG_FUNC2: u8 {
+        const FLD_GP8_RXADC_DAT = BIT!(0);
+        const FLD_GP9_BB_SS1 = BIT!(1);
+        const FLD_GP10_BBSS0 = BIT!(2);
+        const FLD_SWS_BB_GAIN4 = BIT!(3);
+        const FLD_DMIC_CK_BBCLK_BB = BIT!(4);
+        const FLD_DMIC_CK_REFCLK = BIT!(5);
+        const FLD_I2S_BCK_R0 = BIT!(6);
+        const FLD_I2S_LCK_R1 = BIT!(7);
+    }
 }
 
 regrw!(reg_gpio_config_func3, 0x5b3, 8);
-enum GPIO_CFG_FUNC3 {
-    FLD_CN_BB_GAIN3 = BIT!(0),
-    FLD_CK_BB_GAIN2 = BIT!(1),
-    FLD_DO_BB_GAIN1 = BIT!(2),
-    FLD_DI_BB_GAIN0 = BIT!(3),
-    //	FLD_I2S_LCK_PWM2	=	BIT!(4),//NOT SURE
-    FLD_I2S_DO_RXDV = BIT!(5),
-    FLD_I2S_DI_RXER = BIT!(6),
-    FLD_I2S_DI_TXSD = BIT!(7),
+bitflags! {
+    pub struct GPIO_CFG_FUNC3: u8 {
+        const FLD_CN_BB_GAIN3 = BIT!(0);
+        const FLD_CK_BB_GAIN2 = BIT!(1);
+        const FLD_DO_BB_GAIN1 = BIT!(2);
+        const FLD_DI_BB_GAIN0 = BIT!(3);
+        //	FLD_I2S_LCK_PWM2	=	BIT!(4),//NOT SURE
+        const FLD_I2S_DO_RXDV = BIT!(5);
+        const FLD_I2S_DI_RXER = BIT!(6);
+        const FLD_I2S_DI_TXSD = BIT!(7);
+    }
 }
 
 regrw!(reg_gpio_config_func4, 0x5b4, 8);
-pub enum GPIO_CFG_FUNC4 {
-    FLD_DMIC_CK_RX_CLK = BIT!(0),
-    FLD_I2S_DI_RX_DAT = BIT!(1),
+bitflags! {
+    pub struct GPIO_CFG_FUNC4: u8 {
+        const FLD_DMIC_CK_RX_CLK = BIT!(0);
+        const FLD_I2S_DI_RX_DAT = BIT!(1);
+    }
 }
 
 regrw!(reg_gpio_wakeup_irq, 0x5b5, 8);
-pub enum FLD_GPIO_WAKEUP_IRQ {
-    WAKEUP_EN = BIT!(2),
-    INTERRUPT_EN = BIT!(3),
+bitflags! {
+    pub struct FLD_GPIO_WAKEUP_IRQ: u8 {
+        const WAKEUP_EN = BIT!(2);
+        const INTERRUPT_EN = BIT!(3);
+    }
 }
 
 // GPIO IRQ control
@@ -1459,29 +1529,33 @@ regrw!(reg_tmr_ctrl, 0x620, 32);
 regrw!(reg_tmr_ctrl16, 0x620, 16);
 regrw!(reg_tmr_ctrl8, 0x620, 8);
 
-pub enum FLD_TMR {
-    TMR0_EN = BIT!(0),
-    TMR0_MODE = BIT_RNG!(1, 2),
-    TMR1_EN = BIT!(3),
-    TMR1_MODE = BIT_RNG!(4, 5),
-    TMR2_EN = BIT!(6),
-    TMR2_MODE = BIT_RNG!(7, 8),
-    TMR_WD_CAPT = BIT_RNG!(9, 22),
-    TMR_WD_EN = BIT!(23),
-    TMR0_STA = BIT!(24),
-    TMR1_STA = BIT!(25),
-    TMR2_STA = BIT!(26),
-    CLR_WD = BIT!(27),
+bitflags! {
+    pub struct FLD_TMR: u32 {
+        const TMR0_EN = BIT!(0);
+        const TMR0_MODE = BIT_RNG!(1, 2);
+        const TMR1_EN = BIT!(3);
+        const TMR1_MODE = BIT_RNG!(4, 5);
+        const TMR2_EN = BIT!(6);
+        const TMR2_MODE = BIT_RNG!(7, 8);
+        const TMR_WD_CAPT = BIT_RNG!(9, 22);
+        const TMR_WD_EN = BIT!(23);
+        const TMR0_STA = BIT!(24);
+        const TMR1_STA = BIT!(25);
+        const TMR2_STA = BIT!(26);
+        const CLR_WD = BIT!(27);
+    }
 }
 
 pub const WATCHDOG_TIMEOUT_COEFF: u32 = 18; //  check register definiton, 0x622
 
 regrw!(reg_tmr_sta, 0x623, 8);
-pub enum FLD_TMR_STA {
-    TMR0 = BIT!(0),
-    TMR1 = BIT!(1),
-    TMR2 = BIT!(2),
-    WD = BIT!(3),
+bitflags! {
+    pub struct FLD_TMR_STA: u8 {
+        const TMR0 = BIT!(0);
+        const TMR1 = BIT!(1);
+        const TMR2 = BIT!(2);
+        const WD = BIT!(3);
+    }
 }
 
 regrw!(reg_tmr0_capt, 0x624, 32);
@@ -1563,36 +1637,37 @@ regrw!(reg_irq_src, 0x648, 32);
 regrw!(reg_irq_src3, 0x64a, 8);
 regrw!(reg_irq_en, 0x643, 8);
 
-#[repr(usize)]
-pub enum FLD_IRQ {
-    TMR0_EN = BIT!(0),
-    TMR1_EN = BIT!(1),
-    TMR2_EN = BIT!(2),
-    USB_PWDN_EN = BIT!(3),
-    DMA_EN = BIT!(4),
-    DAM_FIFO_EN = BIT!(5),
-    SBC_MAC_EN = BIT!(6),
-    HOST_CMD_EN = BIT!(7),
+bitflags! {
+    pub struct FLD_IRQ: u32 {
+        const TMR0_EN = BIT!(0);
+        const TMR1_EN = BIT!(1);
+        const TMR2_EN = BIT!(2);
+        const USB_PWDN_EN = BIT!(3);
+        const DMA_EN = BIT!(4);
+        const DAM_FIFO_EN = BIT!(5);
+        const SBC_MAC_EN = BIT!(6);
+        const HOST_CMD_EN = BIT!(7);
 
-    EP0_SETUP_EN = BIT!(8),
-    EP0_DAT_EN = BIT!(9),
-    EP0_STA_EN = BIT!(10),
-    SET_INTF_EN = BIT!(11),
-    IRQ4_EN = BIT!(12),
-    ZB_RT_EN = BIT!(13),
-    SW_EN = BIT!(14),
-    AN_EN = BIT!(15),
+        const EP0_SETUP_EN = BIT!(8);
+        const EP0_DAT_EN = BIT!(9);
+        const EP0_STA_EN = BIT!(10);
+        const SET_INTF_EN = BIT!(11);
+        const IRQ4_EN = BIT!(12);
+        const ZB_RT_EN = BIT!(13);
+        const SW_EN = BIT!(14);
+        const AN_EN = BIT!(15);
 
-    USB_250US_EN = BIT!(16),
-    USB_RST_EN = BIT!(17),
-    GPIO_EN = BIT!(18),
-    PM_EN = BIT!(19),
-    SYSTEM_TIMER = BIT!(20),
-    GPIO_RISC0_EN = BIT!(21),
-    GPIO_RISC1_EN = BIT!(22),
-    GPIO_RISC2_EN = BIT!(23),
+        const USB_250US_EN = BIT!(16);
+        const USB_RST_EN = BIT!(17);
+        const GPIO_EN = BIT!(18);
+        const PM_EN = BIT!(19);
+        const SYSTEM_TIMER = BIT!(20);
+        const GPIO_RISC0_EN = BIT!(21);
+        const GPIO_RISC1_EN = BIT!(22);
+        const GPIO_RISC2_EN = BIT!(23);
 
-    EN = BIT_RNG!(24, 31),
+        const EN = BIT_RNG!(24, 31);
+    }
 }
 
 //****************************************************
@@ -1652,9 +1727,11 @@ regrw!(reg_system_wakeup_tick, 0x748, 32);
 regrw!(reg_system_tick_mode, 0x74c, 8);
 regrw!(reg_system_tick_ctrl, 0x74f, 8);
 
-pub enum FLD_SYSTEM_TICK {
-    START = BIT!(0),
-    STOP = BIT!(1),
+bitflags! {
+    pub struct FLD_SYSTEM_TICK: u8 {
+        const START = BIT!(0);
+        const STOP = BIT!(1);
+    }
 }
 
 impl FLD_SYSTEM_TICK {
@@ -1735,10 +1812,11 @@ regrw_idx!(reg_pwm_phase, 0x788, 16);
 regrw_idx!(reg_pwm_cycle, 0x794, 32);
 regrw_idx!(reg_pwm_cmp, 0x794, 16);
 
-#[repr(usize)]
-pub enum FLD_PWM {
-    CMP = BIT_RNG!(0, 15),
-    MAX = BIT_RNG!(16, 31),
+bitflags! {
+    pub struct FLD_PWM: u32 {
+        const CMP = BIT_RNG!(0, 15);
+        const MAX = BIT_RNG!(16, 31);
+    }
 }
 
 regrw_idx!(reg_pwm_pulse_num, 0x7ac, 16); // i == 0, 1
@@ -1815,33 +1893,37 @@ regrw!(reg_rf_sched_tick, 0xf18, 32);
 regrw!(reg_rf_irq_mask, 0xf1c, 16);
 regrw!(reg_rf_irq_status, 0xf20, 16);
 
-pub enum FLD_RF_IRQ_MASK {
-    IRQ_RX = BIT!(0),
-    IRQ_TX = BIT!(1),
-    IRX_RX_TIMEOUT = BIT!(2),
-    IRX_CMD_DONE = BIT!(5),
-    IRX_RETRY_HIT = BIT!(7),
+bitflags! {
+    pub struct FLD_RF_IRQ_MASK: u16 {
+        const IRQ_RX = BIT!(0);
+        const IRQ_TX = BIT!(1);
+        const IRX_RX_TIMEOUT = BIT!(2);
+        const IRX_CMD_DONE = BIT!(5);
+        const IRX_RETRY_HIT = BIT!(7);
+    }
 }
 
 regrw!(reg_rf_event_clear, 0xf28, 32);
 regrw!(reg_rf_timing_config, 0xf2c, 16);
 
 // The value for FLD_RF_RX_STATE
-pub enum FLD_RF_RX_STATE {
-    IDLE = 0,
-    SET_GAIN = 1,
-    CIC_SETTLE = 2,
-    LPF_SETTLE = 3,
-    PE = 4,
-    SYN_START = 5,
-    GLOB_SYN = 6,
-    GLOB_LOCK = 7,
-    LOCAL_SYN = 8,
-    LOCAL_LOCK = 9,
-    ALIGN = 10,
-    ADJUST = 11,
-    DEMOD = 12, // de modulation
-    FOOTER = 13,
+bitflags! {
+    pub struct FLD_RF_RX_STATE: u8 {
+        const IDLE = 0;
+        const SET_GAIN = 1;
+        const CIC_SETTLE = 2;
+        const LPF_SETTLE = 3;
+        const PE = 4;
+        const SYN_START = 5;
+        const GLOB_SYN = 6;
+        const GLOB_LOCK = 7;
+        const LOCAL_SYN = 8;
+        const LOCAL_LOCK = 9;
+        const ALIGN = 10;
+        const ADJUST = 11;
+        const DEMOD = 12; // de modulation
+        const FOOTER = 13;
+    }
 }
 
 ///////////////////// PM register /////////////////////////

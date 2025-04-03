@@ -54,15 +54,15 @@ fn cfg_led_event(e: u32) {
 
 pub fn light_hw_timer_config() {
     // Enable timer1 interrupts for controlling light transitions
-    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN as u32);
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN.bits());
     write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
 
     // enable timer0 interrupt for tracking clock_time overflow
-    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN as u32);
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN.bits());
     write_reg_tmr0_tick(0);
     write_reg_tmr0_capt(CLOCK_SYS_CLOCK_1S);
 
-    write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN as u32);
+    write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN.bits());
 }
 
 fn light_init_default() {

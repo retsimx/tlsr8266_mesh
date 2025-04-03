@@ -10,9 +10,9 @@ pub fn pwm_set_cmp(id: u32, cmp: u16) {
 pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
     write_reg_pwm_cycle(
         MASK_VAL!(
-            FLD_PWM::CMP as u32,
+            FLD_PWM::CMP.bits(),
             cmp_tick as u32,
-            FLD_PWM::MAX as u32,
+            FLD_PWM::MAX.bits(),
             max_tick as u32
         ),
         id << 2,

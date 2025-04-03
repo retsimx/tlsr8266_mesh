@@ -612,19 +612,19 @@ extern "C" fn irq_handler() {
 
     let irq = read_reg_rf_irq_status();
 
-    if irq & FLD_RF_IRQ_MASK::IRQ_TX as u16 != 0 {
+    if irq & FLD_RF_IRQ_MASK::IRQ_TX.bits() != 0 {
         irq_light_slave_tx();
     }
 
-    if irq & FLD_RF_IRQ_MASK::IRQ_RX as u16 != 0 {
+    if irq & FLD_RF_IRQ_MASK::IRQ_RX.bits() != 0 {
         irq_light_slave_rx();
     }
 
     #[inline(never)]
     fn slow() {
         let irq_source = read_reg_irq_src();
-        if irq_source & FLD_IRQ::SYSTEM_TIMER as u32 != 0 {
-            write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER as u32);
+        if irq_source & FLD_IRQ::SYSTEM_TIMER.bits() != 0 {
+            write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits());
             let state = {
                 *P_ST_HANDLER.lock()
             };
@@ -639,8 +639,8 @@ extern "C" fn irq_handler() {
 
         // This timer is configured to run once per second to check if the internal clock has overflowed.
         // this is a workaround in case there are no 'clock_time64' calls between overflows
-        if irq_source & FLD_IRQ::TMR0_EN as u32 != 0 {
-            write_reg_tmr_sta(FLD_TMR_STA::TMR0 as u8);
+        if irq_source & FLD_IRQ::TMR0_EN.bits() != 0 {
+            write_reg_tmr_sta(FLD_TMR_STA::TMR0.bits());
 
             clock_time64();
 
@@ -655,8 +655,8 @@ extern "C" fn irq_handler() {
         }
 
         // This timer triggers the transition step of the light so that the transition is smooth
-        if irq_source & FLD_IRQ::TMR1_EN as u32 != 0 {
-            write_reg_tmr_sta(FLD_TMR_STA::TMR1 as u8);
+        if irq_source & FLD_IRQ::TMR1_EN.bits() != 0 {
+            write_reg_tmr_sta(FLD_TMR_STA::TMR1.bits());
 
             app().light_manager.transition_step();
         }

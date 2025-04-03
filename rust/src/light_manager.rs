@@ -176,7 +176,7 @@ impl LightManager {
 
             // Enable timer1
             write_reg_tmr1_tick(0);
-            write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN as u32);
+            write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
 
             // Run a single transition now to avoid anything bugging out
             self.transition_step();
@@ -202,7 +202,7 @@ impl LightManager {
 
         if self.current_light_state.timestamp == self.new_light_state.timestamp {
             // Disable timer1
-            write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !(FLD_TMR::TMR1_EN as u32));
+            write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !FLD_TMR::TMR1_EN.bits());
 
             // Save a computation
             self.current_light_state.cw = self.new_light_state.cw;

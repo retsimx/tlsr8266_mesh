@@ -93,7 +93,7 @@ impl OtaManager {
         flash_write_page(OtaManager::FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
         // Force reboot
-        write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot as u8);
+        write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot.bits());
 
         #[allow(clippy::empty_loop)]
         loop {}

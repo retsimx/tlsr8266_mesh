@@ -5,7 +5,7 @@ use crate::sdk::mcu::register::{
 
 #[inline(always)]
 pub fn mspi_high() {
-    write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS as u8);
+    write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits());
 }
 
 #[inline(always)]
@@ -20,7 +20,7 @@ pub fn mspi_write(c: u8) {
 
 #[inline(always)]
 pub fn mspi_wait() {
-    while read_reg_master_spi_ctrl() & (FLD_MASTER_SPI::BUSY as u8) != 0 {}
+    while read_reg_master_spi_ctrl() & (FLD_MASTER_SPI::BUSY.bits()) != 0 {}
 }
 
 #[inline(always)]

@@ -147,7 +147,7 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet)
 fn rf_link_slave_notify_req_mask(adr: u8)
 {
     if SLAVE_READ_STATUS_BUSY.get() != 0 && (DEVICE_ADDRESS.get() as u8 != adr || SLAVE_READ_STATUS_BUSY.get() == 0x21) {
-        if SLAVE_READ_STATUS_UNICAST_FLAG.get() == 0 {
+        if !SLAVE_READ_STATUS_UNICAST_FLAG.get() {
             if PKT_LIGHT_DATA.lock().att_cmd().value.val[8..0xd].iter().any(|v| *v == adr) {
                 return;
             }
@@ -882,6 +882,7 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
     return false;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_read_status_par_init()
 {
     SLAVE_STATUS_BUFFER_WPTR.set(0);
@@ -892,7 +893,7 @@ pub fn rf_link_slave_read_status_par_init()
 pub fn rf_link_slave_read_status_stop()
 {
     SLAVE_READ_STATUS_BUSY.set(0);
-    SLAVE_READ_STATUS_UNICAST_FLAG.set(0);
+    SLAVE_READ_STATUS_UNICAST_FLAG.set(false);
     SLAVE_DATA_VALID.set(0);
 
     rf_link_slave_read_status_par_init();

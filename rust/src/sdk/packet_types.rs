@@ -3,7 +3,7 @@ use crate::const_assert;
 use crate::sdk::light::{AdvRspPrivate, PKT_CMD_LEN};
 
 #[repr(C, align(4))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct RfPacketAdvIndModuleT {
     pub dma_len: u32,       // 0    //won't be a fixed number as previous, should adjust with the mouse package number
 

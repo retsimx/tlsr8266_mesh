@@ -246,6 +246,7 @@ fn flash_mspi_write_ram(
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
     flash_mspi_read_ram(FLASH_CMD::READ_CMD, addr, 1, 0, buf, len);
 }

@@ -307,7 +307,7 @@ const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
 ];
 
 pub fn cpu_wakeup_init() {
-    load_tbl_cmd_set(tbl_cpu_wakeup_init.as_ptr(), 0x13);
+    load_tbl_cmd_set(&tbl_cpu_wakeup_init);
 }
 
 // recover status before software reboot

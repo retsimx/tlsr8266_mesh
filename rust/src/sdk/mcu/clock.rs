@@ -70,6 +70,7 @@ pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn sleep_us(us: u32) {
     let t = clock_time();
     while !clock_time_exceed(t, us) {}

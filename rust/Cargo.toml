@@ -21,9 +21,10 @@ const_format = "0.2"
 num-derive = "0.4"
 num-traits = { version = "0.2", default-features = false }
 bytemuck = "1.15"
+bitflags = "2.9.0"
 
 [dev-dependencies]
-mry = "0.7.1"
+mry = "0.13.0"
 
 [features]
 # If enabled, use a 16MHz crystal.

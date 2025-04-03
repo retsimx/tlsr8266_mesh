@@ -9,7 +9,7 @@ use crate::app;
 use crate::BIT;
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_construct_packet, rf_link_get_op_para, rf_link_slave_pairing_enable, rf_link_slave_proc};
+use crate::sdk::ble_app::light_ll::{light_check_tick_per_us, mesh_construct_packet, parse_ble_packet_op_params, rf_link_slave_pairing_enable, rf_link_slave_proc};
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -214,6 +214,7 @@ pub async fn main_loop() {
 **@param: p_req: is pointer to request command
 Called to handle messages that require a response to be returned
 */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_response_callback(
 
     ppp: &mut PacketAttValue,
@@ -344,22 +345,12 @@ pub fn rf_link_response_callback(
 /*@brief: This function is called in IRQ state, use IRQ stack.
 Called to handle messages sent to us that don't require a response
 */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_data_callback(p: &Packet) {
     // p start from l2cap_len of RfPacketAttCmdT
-    let mut op_cmd: [u8; 3] = [0; 3];
-    let mut op_cmd_len: u8 = 0;
-    let mut params: [u8; 16] = [0; 16];
-    let mut params_len: u8 = 0;
-    rf_link_get_op_para(
-        p,
-        &mut op_cmd,
-        &mut op_cmd_len,
-        &mut params,
-        &mut params_len,
-        true,
-    );
-
-    if op_cmd_len != LightOpType::OpType3 as u8 {
+    // Use the updated function to extract operation parameters
+    let (_, op_cmd, op_cmd_len, params, _) = parse_ble_packet_op_params(p, true);
+    if !op_cmd_len != LightOpType::OpType3 as u8 {
         return;
     }
 

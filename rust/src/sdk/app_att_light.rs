@@ -1,5 +1,5 @@
 use core::cell::UnsafeCell;
-use core::ptr::{addr_of, null, null_mut};
+use core::ptr::{addr_of, null, null_mut, slice_from_raw_parts_mut};
 use core::slice;
 
 use crate::config::{DEVICE_NAME, MESH_NAME};
@@ -9,7 +9,7 @@ use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
 use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::light::*;
-use crate::sdk::packet_types::Packet;
+use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
@@ -194,11 +194,13 @@ fn mesh_status_write(p: &Packet) -> bool {
         return true;
     }
     unsafe {
-        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice( &p.att_write().value[0..4]);
+        let pktdata = &*slice_from_raw_parts_mut(addr_of!(p.att_write().value) as *mut u8, size_of::<PacketAttValue>());
+
+        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice( &pktdata[0..4]);
         if p.head().l2cap_len > (3 + 1) {
-            mesh_report_status_enable_mask(&p.att_write().value[0..p.head().l2cap_len as usize - 3]);
+            mesh_report_status_enable_mask(&pktdata[0..p.head().l2cap_len as usize - 3]);
         } else {
-            mesh_report_status_enable(p.att_write().value[0] != 0);
+            mesh_report_status_enable(pktdata[0] != 0);
         }
     }
     return true;

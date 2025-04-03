@@ -120,13 +120,13 @@ impl UartDriver {
         write_reg8(0x800507,0x00); //DMA1 mode to send
         Self::uart_irqsource_get(); //clear uart irq
         if en_rx_irq {
-            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_RX as u8); //open dma1 interrupt mask
+            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_RX.bits() as u8); //open dma1 interrupt mask
             write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN.bits()); //open dma interrupt mask
 
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(0));
         }
         if en_tx_irq {
-            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_TX as u8); //open dma1 interrupt mask
+            write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_TX.bits() as u8); //open dma1 interrupt mask
             write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::DMA_EN.bits()); //open dma interrupt mask
 
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(1));
@@ -179,7 +179,7 @@ impl UartDriver {
         write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
         // STARTTX;
-        write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX as u8); //trigger dma
+        write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8); //trigger dma
 
         return true;
     }
@@ -197,7 +197,7 @@ impl UartDriver {
             write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16); // packet data, start address is sendBuff+1
 
             // STARTTX;
-            write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX as u8); // trigger dma
+            write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8); // trigger dma
 
             return true;
         })

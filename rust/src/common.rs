@@ -27,6 +27,7 @@ pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
 
 pub const REGA_LIGHT_OFF: u8 = 0x3a;
 
+#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_flag(params: &[u8]) -> bool {
     DEV_ADDR_PAR_WITH_MAC == params[2]
 }

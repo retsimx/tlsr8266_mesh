@@ -23,7 +23,7 @@ use crate::common::{dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retri
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::{rf_link_get_op_para, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop};
+use crate::sdk::ble_app::light_ll::{parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_match_group_mac, rf_link_slave_add_status, rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop};
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
 use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set};
 use crate::sdk::common::crc::crc16;
@@ -188,7 +188,7 @@ pub fn blc_ll_init_basic_mcu()
     write_reg_system_tick_mode(read_reg_system_tick_mode() | 2);
 
     // Clear interrupt flags and reset RF interrupt status
-    write_reg_rf_irq_mask(0);
+    write_reg_rf_irq_mask(FLD_RF_IRQ_MASK::empty().bits());
     write_reg_rf_irq_status(0xfffe);
 
     // Configure RF interrupts for RX and TX events
@@ -241,39 +241,52 @@ fn rf_link_get_rsp_type(opcode: u8, param_val: u8) -> u8 {
 }
 
 /**
- * Initialize and prepare for a status read response
+ * Initializes a status read response operation for BLE mesh packets
  * 
- * This function prepares the BLE device for responding to status read requests by:
- * 1. Storing the current system tick for timeout tracking
- * 2. Determining the appropriate response type based on the request parameters
- * 3. Setting flags for unicast vs broadcast responses
- * 4. Initializing response buffer data structures
- * 5. Clearing any previous status records
+ * This function prepares the packet data structures needed to respond to a status
+ * read request from a remote device. It performs the following operations:
+ * 1. Records the current time as the start of the read operation
+ * 2. Determines the appropriate response type based on the packet's opcode and parameters
+ * 3. Sets unicast/broadcast flags based on the destination address
+ * 4. Clears specific packet fields based on packet type and addressing mode
+ * 5. Initializes status tracking data structures to store responses
  * 
- * Status reads are used in the mesh network to poll device state information.
+ * For unicast packets (directed to a specific device), destination-specific fields
+ * are cleared. For LGT_CMD_LIGHT_READ_STATUS packets, additional fields are zeroed
+ * and the status tick value is copied into the packet.
  * 
- * @param pkt_light_data - Pointer to the packet data structure containing the request details
+ * @param pkt_light_data - The packet to prepare for status response
  */
 fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
 {
     // Record the time when the status read operation started
     SLAVE_READ_STATUS_BUSY_TIME.set(read_reg_system_tick());
     
+    // Extract opcode and parameter for determining response type
+    let opcode = pkt_light_data.att_cmd().value.val[0] & 0x3f;
+    let param = pkt_light_data.att_cmd().value.val[4];
+    
     // Determine the appropriate response type based on the opcode and parameter
-    SLAVE_READ_STATUS_BUSY.set(rf_link_get_rsp_type(pkt_light_data.att_cmd_mut().value.val[0] & 0x3f, pkt_light_data.att_cmd_mut().value.val[4]));
+    SLAVE_READ_STATUS_BUSY.set(rf_link_get_rsp_type(opcode, param));
     
     // Check if this is a unicast (directed to a specific device) or broadcast request
-    SLAVE_READ_STATUS_UNICAST_FLAG.set((pkt_light_data.att_cmd_mut().value.dst[1] >> 7) == 0);
+    let is_unicast = (pkt_light_data.att_cmd().value.dst[1] & 0x80) == 0;
+    SLAVE_READ_STATUS_UNICAST_FLAG.set(is_unicast);
     
-    // For non-broadcast packets, clear fields for device-specific information
-    if (pkt_light_data.att_cmd_mut().value.dst[1] & 0x80) == 0 {
+    // For unicast packets, clear fields for device-specific information
+    if is_unicast {
         pkt_light_data.att_cmd_mut().value.val[8..8 + 4].fill(0);
-        pkt_light_data.att_cmd_mut().value.val[12] = u8::from(SLAVE_READ_STATUS_UNICAST_FLAG.get());
+        pkt_light_data.att_cmd_mut().value.val[12] = 1;
+    } else {
+        pkt_light_data.att_cmd_mut().value.val[12] = 0;
     }
     
     // Special handling for LGT_CMD_LIGHT_READ_STATUS
-    if pkt_light_data.att_cmd_mut().value.val[0] & 0x3f == LGT_CMD_LIGHT_READ_STATUS {
-       pkt_light_data.att_cmd_mut().value.val[4..8 + 4].fill(0);
+    if opcode == LGT_CMD_LIGHT_READ_STATUS {
+       // Clear parameter and destination info fields
+       pkt_light_data.att_cmd_mut().value.val[4..4 + 4 + 4].fill(0);
+       
+       // Store the status tick value
        pkt_light_data.att_cmd_mut().value.val[3] = SLAVE_STATUS_TICK.get();
     }
 
@@ -293,326 +306,252 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
 }
 
 /**
- * Validates an incoming packet
+ * Process an unencrypted BLE mesh packet for data transfer
  * 
- * Checks if the packet meets basic length requirements and whether
- * it has already been processed based on sequence number.
+ * This function handles received BLE mesh packets that don't require decryption
+ * (either they were already decrypted or are meant to be processed in raw form).
+ * It performs packet validation, sequence number checking, parameter extraction,
+ * and appropriate response handling based on the packet opcode.
  * 
- * @param data - The packet to validate
- * @param sno - The extracted sequence number from the packet
- * @return true if packet is valid and hasn't been processed yet, false otherwise
+ * Algorithm:
+ * 1. Validate packet length requirements (minimum size check)
+ * 2. Check if this is a duplicate packet by comparing sequence numbers
+ * 3. Extract operation parameters from the packet
+ * 4. Determine if packet targets this device (by group or direct addressing)
+ * 5. Process command based on opcode, with special handling for:
+ *    - Device address configuration
+ *    - Group operations
+ *    - Status read requests
+ *    - Notification commands
+ * 6. Update internal state based on the received command
+ * 7. Handle response packets for various command types
+ * 8. Set up notification structures for asynchronous responses
+ * 
+ * @param data - The BLE mesh packet to process
+ * @return true if packet was successfully processed or is a duplicate, false otherwise
  */
-fn validate_packet(data: &Packet, sno: &[u8; 3]) -> bool {
-    // Check packet length
+fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
+    // Validate minimum packet size requirement
+    // RF length must be at least 0x11 bytes for valid command packets
     if data.head().rf_len < 0x11 {
         return false;
     }
 
-    // Check for duplicate packet processing
-    if *sno == *SLAVE_SNO.lock() {
-        return true;  // Already processed this packet - return success without reprocessing
-    }
+    // Extract the sequence number from the packet
+    // The sequence number is used to detect duplicate packets and prevent reprocessing
+    let sno = data.att_write().value.sno;
     
-    return true;
-}
+    // Check if this is a duplicate packet (same sequence number as the last one)
+    // Return true for duplicates to avoid reprocessing the same command
+    if sno == *SLAVE_SNO.lock() {
+        return true;
+    }
 
-/**
- * Extracts operation and addressing information from a packet
- * 
- * Extracts command code, parameters, and checks if the packet matches
- * this device's address or group membership.
- * 
- * @param data - The packet to process
- * @return A tuple containing: 
- *         - Command opcode
- *         - Parameter vector
- *         - Addressing value
- *         - Whether the device matched
- *         - Whether the group matched
- */
-fn extract_packet_info(data: &Packet) -> (u8, [u8; 16], u32, bool, bool) {
-    // Extract operation command and parameters from the packet
-    let mut op_cmd: [u8; 3] = [0; 3];
-    let mut op_cmd_len: u8 = 0;
-    let mut params: [u8; 16] = [0; 16];
-    let mut params_len: u8 = 0;
-    rf_link_get_op_para(
-        data,
-        &mut op_cmd,
-        &mut op_cmd_len,
-        &mut params,
-        &mut params_len,
-        false,
-    );
+    // Extract operation command and parameters from the packet using the refactored function
+    let (success, op_cmd, op_cmd_len, params, params_len) = parse_ble_packet_op_params(data, false);
 
-    // Check if the packet matches this device's address or group
+    // Determine if this packet targets this device by checking:
+    // 1. If it matches one of the device's configured group addresses (group_match)
+    // 2. If it directly targets this device's address (device_match)
     let (group_match, device_match) = rf_link_match_group_mac(data);
     
-    // Extract operation code from command
+    // Extract the operation code (opcode) and destination address information
     let op = if op_cmd_len == 3 {
-        op_cmd[0] & 0x3f
+        op_cmd[0] & 0x3f  // Extract the lower 6 bits as the opcode (masking out flag bits)
     } else {
-        0
+        0  // Default opcode if no valid command found
     };
     
-    // Extract addressing information
-    let mut tmp = data.att_write().value[6] as u32;
+    // Extract destination address from the packet
+    // The destination high byte is at index 6 in the value array
+    let mut dst_addr = data.att_write().value.dst[1] as u32;
     
-    // Special handling for device address configuration command
-    if op == LGT_CMD_CONFIG_DEV_ADDR && ((tmp * 0x1000000) as i32) < 0 {
-        // Don't adjust tmp
+    // Special handling for device address configuration command targeting broadcast address
+    // The high bit of destination address indicates a special broadcast configuration
+    if op == LGT_CMD_CONFIG_DEV_ADDR && ((dst_addr * 0x1000000) as i32) < 0 {
+        // Validate mandatory parameter values for broadcast device address configuration
+        // Parameters 0 and 1 must be 0xFF for this command type
+        if params[0] != 0xff || params[1] != 0xff {
+            return false;
+        }
+        // Construct 16-bit destination address from bytes 5-6
+        dst_addr = (dst_addr << 8) | data.att_write().value.dst[0] as u32;
     } else {
-        // Process other commands
-        tmp = tmp << 8 | data.att_write().value[5] as u32;
-        // Special handling for ONOFF commands with specific addressing
-        if ((!tmp << 0x10) as i32) < 0 && op == LGT_CMD_LIGHT_ONOFF {
-            if tmp == 0 {
-                tmp = DEVICE_ADDRESS.get() as u32;
+        // For non-device-address commands, construct the destination address
+        dst_addr = (dst_addr << 8) | data.att_write().value.dst[0] as u32;
+        
+        // Special handling for light on/off commands with broadcast bit set
+        // The high bit of the 16-bit address indicates broadcast when set
+        let is_broadcast = ((!dst_addr << 0x10) as i32) < 0;
+        if is_broadcast && op == LGT_CMD_LIGHT_ONOFF {
+            // If destination is 0, use the device's own address for notification
+            if dst_addr == 0 {
+                dst_addr = DEVICE_ADDRESS.get() as u32;
             }
-            // Check for forced notifications
+            // Check if forced notification is required (stub implementation currently)
             uprintln!("stub: mesh_node_check_force_notify")
             // mesh_node_check_force_notify(uVar4, params[0]);
         }
     }
-    
-    (op, params, tmp, device_match, group_match)
-}
 
-/**
- * Prepares response packets for an incoming command
- * 
- * Sets up the header fields and basic structure for response packets.
- * 
- * @param data - The original packet
- * @param op - The command operation code
- * @return Tuple of prepared data and status packets
- */
-fn prepare_response_packets(data: &Packet, op: u8) -> (Packet, Packet) {
-    let mut pkt_light_data = PKT_LIGHT_DATA.lock().clone();
-    let mut pkt_light_status = PKT_LIGHT_STATUS.lock().clone();
+    // Lock the global packet buffers for response preparation
+    let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
+    let mut pkt_light_data = PKT_LIGHT_DATA.lock();
 
-    // Reset packet data structures for new response
+    // Reset the packet value fields to prepare for new data
     pkt_light_data.att_cmd_mut().value = PacketAttValue::default();
     pkt_light_status.att_cmd_mut().value = PacketAttValue::default();
 
-    // Copy received packet data to response packet
-    unsafe {
-        slice::from_raw_parts_mut(
-            addr_of_mut!(pkt_light_data) as *mut u8,
-            data.head().rf_len as usize + 0x11,
-        ).copy_from_slice(
-            slice::from_raw_parts(
-                addr_of!(*data) as *const u8,
-                data.head().rf_len as usize + 0x11,
-            )
-        )
-    }
-
-    // Set up header fields for response packet
-    pkt_light_data.head_mut().chan_id = 0xff03;   // Channel ID for mesh network
-    pkt_light_data.head_mut().dma_len = 0x27;     // Length for DMA transfer
-    pkt_light_data.head_mut().rf_len = 0x25;      // RF packet length
-    pkt_light_data.head_mut().l2cap_len = 0x21;   // L2CAP length field
-   
-    // Set this device's address in response packet
-    unsafe { *(addr_of_mut!(pkt_light_data.att_cmd_mut().opcode) as *mut u16) = DEVICE_ADDRESS.get() };
-    unsafe { *(addr_of_mut!(pkt_light_data.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
-
-    return (pkt_light_data, pkt_light_status);
-}
-
-/**
- * Determines data validity and response flags based on addressing and command type
- * 
- * Sets the appropriate response flags and validity timing based on the command
- * type and addressing information.
- * 
- * @param op - The command operation code
- * @param device_match - Whether the packet matches this device
- * @param tmp - The addressing value
- * @param params - The command parameters
- * @return Tuple containing (validity period, flag value)
- */
-fn determine_response_flags(op: u8, device_match: bool, tmp: u32, params: &[u8; 16]) -> (u32, u8) {
-    let mut validity: u32 = 0;
-    let mut flag: u8 = 0;
+    // Create a clone of the packet instead of using unsafe raw memory operations
+    // For efficient memory usage, we only clone the portion of the data we need
+    let copy_size = params_len as usize + 0x11;
     
-    // Set flag based on operation type
-    if op == LGT_CMD_LIGHT_GRP_REQ {
-        flag = params[1];
-    } else if op == LGT_CMD_LIGHT_CONFIG_GRP {
-        flag = 1;
-    } else {
-        if op == LGT_CMD_CONFIG_DEV_ADDR {
-            flag = 4;
-        }
-        if op == LGT_CMD_USER_NOTIFY_REQ {
-            flag = 7;
-        } else {
-            flag = 0;
-        }
-    }
-
-    // Complex handling of different commands based on addressing and operation type
-    // This section configures the response data flags and validity timing
-    if device_match == false || (tmp != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(params)) {
-        // Handle specific commands with parameters
-        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
-            // Set data validity timer based on parameter
-            validity = params[0] as u32 * 2 + 1;
-        } else if op != LGT_CMD_CONFIG_DEV_ADDR {
-            // Process other commands
-            if op != LGT_CMD_LIGHT_CONFIG_GRP {
-                // Set validity for bridge operations
-                validity = BRIDGE_MAX_CNT * 2 + 1;
-                flag = 1;
-            }
-        } else if dev_addr_with_mac_flag(params) == false {
-            // Handle device address configuration without MAC flag
-            validity = BRIDGE_MAX_CNT * 2 + 1;
-            flag = 4;
-        } else {
-            // Handle device address configuration with MAC flag
-            validity = params[3] as u32 * 2 + 1;
-            flag = 4;
-        }
-    }
+    // First clone the packet header which has the same structure
+    *pkt_light_data = data.clone();
     
-    return (validity, flag);
-}
+    // Configure the BLE packet headers for the response
+    // These values define the packet format according to the BLE specification
+    pkt_light_data.head_mut().chan_id = 0xff03;  // Vendor-specific channel ID
+    pkt_light_data.head_mut().dma_len = 0x27;    // DMA buffer length 
+    pkt_light_data.head_mut().rf_len = 0x25;     // RF packet length
+    pkt_light_data.head_mut().l2cap_len = 0x21;  // L2CAP layer length
 
-/**
- * Processes a status response for a matched device
- * 
- * Generates and adds the appropriate status response packet when
- * the command matches this device.
- * 
- * @param pkt_light_data - The data packet
- * @param pkt_light_status - The status packet to populate
- * @param data - The original received packet
- * @param device_match - Whether the packet matches this device
- * @param group_match - Whether the packet matches this device's group
- */
-fn process_status_response(pkt_light_data: &Packet, pkt_light_status: &mut Packet, 
-                         data: &Packet, device_match: bool, group_match: bool) {
-    if !device_match && !group_match {
-        return;
-    }
+    // Set the source device address in the packet using safe method
+    // This ensures the recipient knows which device sent the response
+    let device_addr = DEVICE_ADDRESS.get();
+    pkt_light_data.att_cmd_mut().opcode = device_addr as u8;
+    pkt_light_data.att_cmd_mut().value.src[0] = (device_addr & 0xFF) as u8;
+    pkt_light_data.att_cmd_mut().value.src[1] = ((device_addr >> 8) & 0xFF) as u8;
 
-    // Copy packet data to status response
-    let ptr = &pkt_light_data.att_cmd().value.val[3..];
-    pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
-
-    pkt_light_status.att_cmd_mut().value.sno = *SLAVE_SNO.lock();
-
-    unsafe { *(addr_of_mut!(pkt_light_status.att_cmd_mut().value.src) as *mut u16) = DEVICE_ADDRESS.get() };
-
-    // Create temporary packet for response callback
-    let mut tmp_pkt: PacketAttValue = PacketAttValue::default();
-
-    unsafe {
-        slice::from_raw_parts_mut(
-            addr_of_mut!(tmp_pkt) as *mut u8,
-            0x1e,
-        ).copy_from_slice(&data.att_write().value);
-    }
-
-    unsafe {
-        *(addr_of_mut!(tmp_pkt.src) as *mut u16) = DEVICE_ADDRESS.get();
-    }
-
-    // Process response through callback and add to status if successful
-    if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt) {
-        rf_link_slave_add_status(&*pkt_light_status);
-    }
-}
-
-/**
- * Process a received BLE packet without performing decryption
- * 
- * This function handles incoming packet data by:
- * 1. Validating packet length and sequence number to prevent duplicate processing
- * 2. Extracting operation commands and parameters from the packet
- * 3. Determining if the packet is addressed to this device or its group
- * 4. Processing device address configuration and light control commands
- * 5. Setting up appropriate response packets with status information
- * 6. Triggering status read operations when notification requests are received
- * 
- * This is a core function in the mesh network that manages command processing
- * and state transitions based on received instructions.
- * 
- * @param data - The received packet data
- * @return true if the packet was processed successfully, false otherwise
- */
-fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
-    // Extract sequence number for validation
-    let sno = &data.att_write().value[0..3];
-    let mut sno_arr = [0u8; 3];
-    sno_arr.copy_from_slice(sno);
-    
-    // Validate the packet
-    if !validate_packet(data, &sno_arr) {
-        return false;
-    }
-
-    // Extract command and addressing information
-    let (op, params, tmp, device_match, group_match) = extract_packet_info(data);
-    
-    // Prepare response packet buffers
-    let (mut pkt_light_data, mut pkt_light_status) = prepare_response_packets(data, op);
-
-    // Process packet data if it matches this device or its group
+    // Process the command data if this packet is intended for this device
+    // (either directly targeted or matches one of our group addresses)
     if device_match || group_match {
-        rf_link_data_callback(&pkt_light_data);
+        rf_link_data_callback(&*pkt_light_data);
     }
     
-    // Store sequence number to prevent duplicate processing
-    SLAVE_SNO.lock().copy_from_slice(sno);
+    // Update the stored sequence number with the one from this packet
+    // This prevents duplicate processing if the same packet is received again
+    *SLAVE_SNO.lock() = sno;
 
-    // Record the command operation for reference
+    // Store the command opcode for potential future reference
     SLAVE_LINK_CMD.set(op);
 
-    // For non-notification requests, stop any ongoing status read operation
+    // For non-notification commands, handle the command directly
     if !rf_link_is_notify_req(op) {
+        // If a status read operation was in progress, stop it
         if SLAVE_READ_STATUS_BUSY.get() != 0 {
             rf_link_slave_read_status_stop();
         }
         
-        // Set validity flag based on addressing
-        if device_match == false && unsafe { *(addr_of!(data.att_write().value[5]) as *const u16) } != 0 {
-            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT + 1);
+        // Extract the destination address from the packet in a safe way
+        let dst_addr_bytes = [data.att_write().value.dst[0], data.att_write().value.dst[1]];
+        let dst_addr_u16 = u16::from_le_bytes(dst_addr_bytes);
+        
+        // Set the data validity flag based on addressing mode
+        let needs_bridge_forwarding = !device_match && dst_addr_u16 != 0;
+        if needs_bridge_forwarding {
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT + 1);  // Needs bridge forwarding
         } else {
-            SLAVE_DATA_VALID.set(0);
+            SLAVE_DATA_VALID.set(0);  // No bridge forwarding needed
         }
         return true;
     }
 
-    // Initialize status response fields
+    // For notification request commands, prepare the status response
+    // Initialize status packet fields for the response
     pkt_light_status.att_cmd_mut().value.val[13] = 0;
     pkt_light_status.att_cmd_mut().value.val[14] = 0;
    
-    // Set connection interval in response
+    // Store the link interval in the packet (converted from microseconds to milliseconds)
     pkt_light_data.att_cmd_mut().value.val[16] = (SLAVE_LINK_INTERVAL.get() / (CLOCK_SYS_CLOCK_1US * 1000)) as u8;
     
-    // Determine response flags and validity period
-    let (validity, flag) = determine_response_flags(op, device_match, tmp, &params);
+    // Function to set response type in the packet based on command type
+    let set_response_type = |pkt: &mut Packet, cmd_op: u8, cmd_params: &[u8]| {
+        match cmd_op {
+            LGT_CMD_LIGHT_GRP_REQ => pkt.att_cmd_mut().value.val[15] = cmd_params[1],
+            LGT_CMD_LIGHT_CONFIG_GRP => pkt.att_cmd_mut().value.val[15] = 1,
+            LGT_CMD_CONFIG_DEV_ADDR => pkt.att_cmd_mut().value.val[15] = 4,
+            LGT_CMD_USER_NOTIFY_REQ => pkt.att_cmd_mut().value.val[15] = 7,
+            _ => pkt.att_cmd_mut().value.val[15] = 0,
+        };
+    };
     
-    // Set the determined flags
-    pkt_light_data.att_cmd_mut().value.val[15] = flag;
-    pkt_light_status.att_cmd_mut().value.val[15] = flag;
+    // Configure response parameters based on device matching and command type
+    let is_special_addr_config = dst_addr != 0 && op == LGT_CMD_CONFIG_DEV_ADDR && dev_addr_with_mac_flag(&params);
     
-    // Set validity period
-    SLAVE_DATA_VALID.set(validity);
+    if !device_match || is_special_addr_config {
+        // Handle specific request types that use parameter-based validation timing
+        if op == LGT_CMD_LIGHT_GRP_REQ || op == LGT_CMD_LIGHT_READ_STATUS || op == LGT_CMD_USER_NOTIFY_REQ {
+            // Set the validation flag using the parameter value for delay calculation
+            // The formula params[0] * 2 + 1 creates staggered response times based on the parameter
+            SLAVE_DATA_VALID.set(params[0] as u32 * 2 + 1);
+            
+            // Set appropriate response type indicator based on the command type
+            set_response_type(&mut pkt_light_data, op, &params);
+        } else if op != LGT_CMD_CONFIG_DEV_ADDR {
+            // Handle non-address-config commands with maximum bridge delay
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
+            pkt_light_data.att_cmd_mut().value.val[15] = 1;
+        } else if !dev_addr_with_mac_flag(&params) {
+            // Handle device address configuration without MAC flag
+            SLAVE_DATA_VALID.set(BRIDGE_MAX_CNT * 2 + 1);
+            pkt_light_data.att_cmd_mut().value.val[15] = 4;
+        } else {
+            // Handle device address configuration with MAC flag
+            // Use param[3] to calculate custom response timing
+            SLAVE_DATA_VALID.set(params[3] as u32 * 2 + 1);
+            pkt_light_data.att_cmd_mut().value.val[15] = 4;
+        }
+    } else {
+        // For direct device matches with no special handling needed
+        SLAVE_DATA_VALID.set(0);
+        
+        // Set response type indicator based on command type
+        set_response_type(&mut pkt_light_data, op, &params);
+    }
     
-    // Start status read response preparation
-    rf_link_slave_read_status_start(&mut pkt_light_data);
+    // Copy the response type indicator to the status packet
+    pkt_light_status.att_cmd_mut().value.val[15] = pkt_light_data.att_cmd_mut().value.val[15];
+    
+    // Initialize the status read response operation
+    // This sets up all necessary state for generating the status response
+    rf_link_slave_read_status_start(pkt_light_data.deref_mut());
 
-    // Store sequence number for status responses
-    SLAVE_STAT_SNO.lock().copy_from_slice(sno);
+    // Store the sequence number for status tracking
+    *SLAVE_STAT_SNO.lock() = sno;
 
-    // Generate actual response for matched devices
-    process_status_response(&pkt_light_data, &mut pkt_light_status, data, device_match, group_match);
+    // Process the response if this packet is for this device
+    if device_match || group_match {
+        // Copy command data to the status packet
+        let ptr = &pkt_light_data.att_cmd_mut().value.val[3..];
+        pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
 
+        // Set the sequence number in the status packet
+        pkt_light_status.att_cmd_mut().value.sno = *SLAVE_SNO.lock();
+
+        // Set this device's address as the source in the status packet using safe methods
+        // Instead of raw pointer casting
+        let device_addr = DEVICE_ADDRESS.get();
+        pkt_light_status.att_cmd_mut().value.src[0] = (device_addr & 0xFF) as u8;
+        pkt_light_status.att_cmd_mut().value.src[1] = ((device_addr >> 8) & 0xFF) as u8;
+
+        // Create a temporary packet for passing to the response callback
+        // Copy the original packet data to the temporary packet
+        let mut tmp_pkt = data.att_write().value.clone();
+
+        // Set this device's address as the source in the temporary packet
+        let device_addr = DEVICE_ADDRESS.get();
+        tmp_pkt.src[0] = (device_addr & 0xFF) as u8;
+        tmp_pkt.src[1] = ((device_addr >> 8) & 0xFF) as u8;
+
+        // Call the response callback to fill in application-specific status data
+        // If the callback returns true, add the status packet to the response queue
+        if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt) {
+            rf_link_slave_add_status(&*pkt_light_status);
+        }
+    }
+
+    // Return true to indicate successful packet processing
     return true;
 }
 
@@ -1112,8 +1051,11 @@ mod tests {
     use crate::sdk::mcu::register::*;
     use crate::sdk::mcu::analog::*;
     use crate::sdk::common::compat::*;
-    use crate::sdk::packet_types::RfPacketAdvIndModuleT;
+    use crate::sdk::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use crate::sdk::drivers::flash::mock_flash_read_page;
+    use crate::sdk::ble_app::light_ll::{mock_parse_ble_packet_op_params, mock_rf_link_match_group_mac, mock_rf_link_is_notify_req, mock_rf_link_slave_add_status, mock_rf_link_slave_read_status_stop};
+    use crate::common::mock_dev_addr_with_mac_flag;
+    use crate::main_light::{mock_rf_link_data_callback, mock_rf_link_response_callback};
     use super::*;
 
     #[test]
@@ -1806,7 +1748,7 @@ mod tests {
         
         // RF_TP_GAIN is calculated as ((RF_TP_BASE - power_settings[0x12]) << 8) / 80
         // With RF_TP_BASE = 0x25 and power_settings[0x12] = 0x10, we get:
-        // ((0x25 - 0x10) << 8) / 80 = (0x15 << 8) / 80 = 0x1500 / 80 = 67
+        // ((0x25 - 0x10) << 8) / 80 = (0x1500 / 80) = 67
         assert_eq!(RF_TP_GAIN.get(), 67);
         
         // Verify the function returns the deepsleep flag value
@@ -1941,7 +1883,7 @@ mod tests {
         // Verify that RF_TP_BASE was updated with the value from flash
         assert_eq!(RF_TP_BASE.get(), 0x29);
         
-        // RF_TP_GAIN is calculated as ((0x29 - 0x19) << 8) / 80 = (0x10 << 8) / 80 = 0x1000 / 80 = 51
+        // RF_TP_GAIN is calculated as ((0x29 - 0x19) << 8) / 80 = (0x1000 / 80) = 51
         assert_eq!(RF_TP_GAIN.get(), 51);
         
         // Verify the function returns the deepsleep flag value
@@ -2258,5 +2200,259 @@ mod tests {
         
         // Verify initialization function was called
         mock_rf_link_slave_read_status_par_init().assert_called(1);
+    }
+
+    #[test]
+    fn test_rf_link_slave_data_write_no_dec_invalid_length() {
+        // Create a packet with invalid length (< 0x11)
+        let packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead { rf_len: 0x10, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        
+        // Test the function
+        let result = rf_link_slave_data_write_no_dec(&packet);
+        
+        // Invalid packet length should return false
+        assert_eq!(result, false);
+    }
+    
+    #[test]
+    fn test_rf_link_slave_data_write_no_dec_duplicate_packet() {
+        // Create a packet with valid length
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead { rf_len: 0x11, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        
+        // Set sequence number
+        let sno = [1, 2, 3];
+        critical_section::with(|_| {
+            *SLAVE_SNO.lock() = sno;
+            packet.att_write_mut().value.sno = sno;
+        });
+        
+        // Test the function
+        let result = rf_link_slave_data_write_no_dec(&packet);
+        
+        // Duplicate packet should return true (successful but no processing)
+        assert_eq!(result, true);
+    }
+    
+    #[test]
+    #[mry::lock(parse_ble_packet_op_params)]
+    #[mry::lock(rf_link_match_group_mac)]
+    #[mry::lock(rf_link_is_notify_req)]
+    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(rf_link_slave_read_status_stop)]
+    fn test_rf_link_slave_data_write_no_dec_non_notification_direct_match() {
+        // Create a packet with valid length
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead { rf_len: 0x11, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        
+        // Set sequence number different from SLAVE_SNO
+        let sno = [1, 2, 3];
+        critical_section::with(|_| {
+            *SLAVE_SNO.lock() = [1, 2, 2];
+            packet.att_write_mut().value.sno = sno;
+        });
+        
+        // Mock op_cmd and params extraction
+        let op_cmd = [0x01, 0x02, 0x03];
+        let op_cmd_len = 3;
+        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params_len = 4;
+        
+        mock_parse_ble_packet_op_params(Any, Any)
+            .returns((true, op_cmd, op_cmd_len, params, params_len));
+        
+        // Mock group and device matching (direct match)
+        mock_rf_link_match_group_mac(Any).returns((false, true));
+        
+        // Mock notification detection (not a notification)
+        mock_rf_link_is_notify_req(Any).returns(false);
+        
+        // Mock data callback
+        mock_rf_link_data_callback(Any).returns(());
+        
+        // Mock read status stop if busy
+        mock_rf_link_slave_read_status_stop().returns(());
+        
+        // Test the function
+        let result = rf_link_slave_data_write_no_dec(&packet);
+        
+        // Should return true for successful processing
+        assert_eq!(result, true);
+        
+        // Verify callback was called
+        mock_rf_link_data_callback(Any).assert_called(1);
+        
+        // Verify sequence number was updated
+        assert_eq!(*SLAVE_SNO.lock(), sno);
+        
+        // Verify command opcode was stored
+        assert_eq!(SLAVE_LINK_CMD.get(), op_cmd[0] & 0x3f);
+        
+        // Verify data validity flag is 0 for direct match
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+    }
+    
+    #[test]
+    #[mry::lock(parse_ble_packet_op_params)]
+    #[mry::lock(rf_link_match_group_mac)]
+    #[mry::lock(rf_link_is_notify_req)]
+    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(rf_link_slave_read_status_stop)]
+    fn test_rf_link_slave_data_write_no_dec_non_notification_bridge() {
+        // Create a packet with valid length
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead { rf_len: 0x11, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        
+        // Set sequence number different from SLAVE_SNO
+        let sno = [1, 2, 3];
+        critical_section::with(|_| {
+            *SLAVE_SNO.lock() = [1, 2, 2];
+            packet.att_write_mut().value.sno = sno;
+        });
+        
+        // Set non-zero destination address for bridge forwarding
+        packet.att_write_mut().value.dst[0] = 0x34;
+        packet.att_write_mut().value.dst[1] = 0x12;
+        
+        // Mock op_cmd and params extraction
+        let op_cmd = [0x01, 0x02, 0x03];
+        let op_cmd_len = 3;
+        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params_len = 4;
+        
+        mock_parse_ble_packet_op_params(Any, Any)
+            .returns((true, op_cmd, op_cmd_len, params, params_len));
+        
+        // Mock group and device matching (no match)
+        mock_rf_link_match_group_mac(Any).returns((false, false));
+        
+        // Mock notification detection (not a notification)
+        mock_rf_link_is_notify_req(Any).returns(false);
+        
+        // Mock data callback
+        mock_rf_link_data_callback(Any).returns(());
+        
+        // Mock read status stop if busy
+        mock_rf_link_slave_read_status_stop().returns(());
+        
+        // Test the function
+        let result = rf_link_slave_data_write_no_dec(&packet);
+        
+        // Should return true for successful processing
+        assert_eq!(result, true);
+        
+        // Verify callback was NOT called (no match)
+        mock_rf_link_data_callback(Any).assert_called(0);
+        
+        // Verify sequence number was updated
+        assert_eq!(*SLAVE_SNO.lock(), sno);
+        
+        // Verify command opcode was stored
+        assert_eq!(SLAVE_LINK_CMD.get(), op_cmd[0] & 0x3f);
+        
+        // Verify data validity flag is set for bridge forwarding
+        assert_eq!(SLAVE_DATA_VALID.get(), BRIDGE_MAX_CNT + 1);
+    }
+    
+    #[test]
+    #[mry::lock(parse_ble_packet_op_params)]
+    #[mry::lock(rf_link_match_group_mac)]
+    #[mry::lock(rf_link_is_notify_req)]
+    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(rf_link_slave_read_status_par_init)]
+    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(rf_link_slave_add_status)]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_rf_link_slave_data_write_no_dec_notification_device_match() {
+        // Mock system tick reading
+        mock_read_reg_system_tick().returns(0xAABBCCDD);
+
+        // Create a packet with valid length
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead { rf_len: 0x11, ..Default::default() },
+                ..Default::default()
+            }
+        };
+        
+        // Set sequence number different from SLAVE_SNO
+        let sno = [1, 2, 3];
+        critical_section::with(|_| {
+            *SLAVE_SNO.lock() = [1, 2, 2];
+            packet.att_write_mut().value.sno = sno;
+        });
+        
+        // Mock op_cmd and params extraction
+        // Using LGT_CMD_LIGHT_READ_STATUS opcode (0x10)
+        let op_cmd = [0x10, 0x02, 0x03];
+        let op_cmd_len = 3;
+        let params = [0x05, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params_len = 4;
+        
+        mock_parse_ble_packet_op_params(Any, Any)
+            .returns((true, op_cmd, op_cmd_len, params, params_len));
+        
+        // Mock group and device matching (device match)
+        mock_rf_link_match_group_mac(Any).returns((false, true));
+        
+        // Mock notification detection (is notification)
+        mock_rf_link_is_notify_req(Any).returns(true);
+        
+        // Mock data callback
+        mock_rf_link_data_callback(Any).returns(());
+        
+        // Mock read status parameter initialization 
+        mock_rf_link_slave_read_status_par_init().returns(());
+        
+        // Mock response callback that returns true to add status
+        mock_rf_link_response_callback(Any, Any).returns(true);
+        
+        // Mock add status function
+        mock_rf_link_slave_add_status(Any).returns(());
+        
+        // Mock device address for packet response
+        DEVICE_ADDRESS.set(0x1234);
+        
+        // Set link interval for status packet
+        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
+        
+        // Test the function
+        let result = rf_link_slave_data_write_no_dec(&packet);
+        
+        // Should return true for successful processing
+        assert_eq!(result, true);
+        
+        // Verify callback was called
+        mock_rf_link_data_callback(Any).assert_called(1);
+        
+        // Verify sequence number was updated
+        assert_eq!(*SLAVE_SNO.lock(), sno);
+        
+        // Verify SLAVE_STATUS_TICK is now stored in stat_sno
+        assert_eq!(*SLAVE_STAT_SNO.lock(), sno);
+        
+        // Verify response callback and add status were called
+        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_rf_link_slave_add_status(Any).assert_called(1);
+        
+        // Verify data validity flag is 0 for direct match
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
     }
 }

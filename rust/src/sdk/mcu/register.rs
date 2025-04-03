@@ -1126,24 +1126,22 @@ regrw_copy!(reg_dma_rf_tx_ctrl, reg_dma3_ctrl, 16);
 
 bitflags! {
     pub struct FLD_DMA: u32 {
+        const ETH_RX = BIT!(0);
+        const ETH_TX = BIT!(1);
+        const RF_RX = BIT!(2);
+        const RF_TX = BIT!(3);
+
+        const RPTR_CLR = BIT!(4);
+        const RPTR_NEXT = BIT!(5);
+        const RPTR_SET = BIT!(6);
+
         const BUF_SIZE = BIT_RNG!(0, 7);
         const WR_MEM = BIT!(8);
         const PINGPONG_EN = BIT!(9);
         const FIFO_EN = BIT!(10);
         const AUTO_MODE = BIT!(11);
         const BYTE_MODE = BIT!(12);
-
-        const RPTR_CLR = BIT!(4);
-        const RPTR_NEXT = BIT!(5);
-        const RPTR_SET = BIT!(6);
     }
-}
-
-impl FLD_DMA {
-    pub const ETH_RX: u32 = BIT!(0);
-    pub const ETH_TX: u32 = BIT!(1);
-    pub const RF_RX: u32 = BIT!(2);
-    pub const RF_TX: u32 = BIT!(3);
 }
 
 //****************************************************
@@ -1882,7 +1880,7 @@ regrw!(reg_pwm_irq_sta, 0x7b1, 8);
 //    ```
 
 // RF TX/RX state machine control register
-regrw!(reg_rf_txrx_state, 0x00f02, 8);
+regrw!(reg_rf_txrx_state, 0xf02, 8);
 regrw!(reg_rf_mode_control, 0xf00, 8);
 regrw!(reg_rf_sn, 0xf01, 8);
 regrw!(reg_rf_tx_wail_settle_time, 0xf04, 32);

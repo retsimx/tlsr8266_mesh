@@ -126,7 +126,7 @@ pub struct PacketAttWrite {
     pub opcode: u8,
     pub handle: u8,
     pub handle1: u8,
-    pub value: [u8; 30], //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
+    pub value: PacketAttValue, //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
 #[repr(C, align(4))]

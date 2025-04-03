@@ -1,4 +1,4 @@
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
@@ -7,7 +7,7 @@ use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketL2capHead};
+use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
 use crate::state::{*, PairState};
 
 //------------------------------------------------------------------------------
@@ -86,21 +86,24 @@ pub fn pair_dec_packet(ps: &mut Packet) -> bool {
     if SECURITY_ENABLE.get() {
         let mut pair_ivm = PAIR_IVM.lock();
         // Extract sequence number from packet as part of IV
-        pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value[0..3]);
+        pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value.sno);
 
         // Extract source address from packet
-        let mut src: [u8; 2] = [0; 2];
-        src.copy_from_slice(&ps.att_write().value[3..3 + 2]);
+        let src = ps.att_write().value.src;
 
         let l2len = ps.head().l2cap_len as usize;
 
+        let data = slice_from_raw_parts_mut(addr_of_mut!(ps.att_write_mut().value.dst) as *mut u8, l2len - 8);
+        
         // Perform decryption using AES-CCM
-        aes_att_decryption_packet(
-            &PAIR_STATE.lock().pair_sk,
-            &*pair_ivm,
-            &src,
-            &mut ps.att_write_mut().value[5..5 + l2len - 8],
-        )
+        unsafe {
+            aes_att_decryption_packet(
+                &PAIR_STATE.lock().pair_sk,
+                &*pair_ivm,
+                &src,
+                &mut *data,
+            )
+        }
     } else {
         false
     }
@@ -606,9 +609,11 @@ pub fn pair_read(_: &Packet) -> bool
 /// @return Always returns true to indicate the command was processed
 pub fn pair_write(data: &Packet) -> bool
 {
+    let pktdata = unsafe { &*slice_from_raw_parts_mut(addr_of!(data.att_write().value) as *mut u8, size_of::<PacketAttValue>()) };
+
     // Extract the opcode and data from the packet
-    let opcode = data.att_write().value[0];
-    let src = &data.att_write().value[1..];
+    let opcode = pktdata[0];
+    let src = &pktdata[1..];
 
     let mut pair_state = PAIR_STATE.lock();
 
@@ -718,7 +723,7 @@ pub fn pair_write(data: &Packet) -> bool
                 BLE_PAIR_ST.set(PairState::ReceivingMeshLtk);
 
                 // Special handling for mesh network - check if mesh flag is set
-                if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && data.att_write().value[MESH_FLAG_OFFSET] != 0 {
+                if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && pktdata[MESH_FLAG_OFFSET] != 0 {
                     // This is a mesh LTK - decrypt and prepare for mesh mode
                     aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk_mesh);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
@@ -742,7 +747,7 @@ pub fn pair_write(data: &Packet) -> bool
             BLE_PAIR_ST.set(PairState::ReceivingMeshLtk);
             
             // Special handling for mesh network - check if mesh flag is set
-            if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && (((data.att_write().value[MESH_FLAG_OFFSET] as u32) << 0x1f) as i32) < 0 {
+            if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && (((pktdata[MESH_FLAG_OFFSET] as u32) << 0x1f) as i32) < 0 {
                 // This is a mesh LTK - store and prepare for mesh mode
                 pair_state.pair_ltk_mesh.copy_from_slice(&src[0..KEY_SIZE]);
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
@@ -818,7 +823,7 @@ pub fn pair_write(data: &Packet) -> bool
         
         // Secure mode: Encrypt the verification material and compare with client proof
         aes_att_encryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_work);
-        if &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE] == &data.att_write().value[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE] { u8::MAX } else { 0 }
+        if &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE] == &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE] { u8::MAX } else { 0 }
     };
     
     // Process verification result

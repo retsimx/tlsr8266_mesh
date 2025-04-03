@@ -1,5 +1,5 @@
 use core::cmp::min;
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -160,6 +160,7 @@ fn rf_link_slave_notify_req_mask(adr: u8)
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_add_status(packet: &Packet)
 {
     let mut buf_response = BUFF_RESPONSE.lock();
@@ -217,9 +218,11 @@ pub fn rf_link_slave_add_status(packet: &Packet)
 }
 
 pub fn rf_link_rc_data(packet: &mut Packet) {
+    let pktdata = unsafe { &*slice_from_raw_parts_mut(addr_of!(packet.att_write().value) as *mut u8, size_of::<PacketAttValue>()) };
+
     // Check if this is a node update packet (pkt adv status)
     if packet.head().chan_id == 0xffff {
-        if packet.att_write().value[24..28].iter().all(|v| *v == 0xa5) {
+        if pktdata[24..28].iter().all(|v| *v == 0xa5) {
             mesh_node_update_status(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().sno) as *const mesh_node_st_val_t, 0x1a / MESH_NODE_ST_VAL_LEN) });
         }
 
@@ -227,11 +230,8 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     }
 
     // Parse the opcode and parameters from the packet
-    let mut op_cmd: [u8; 3] = [0; 3];
-    let mut op_cmd_len: u8 = 0;
-    let mut params: [u8; 16] = [0; 16];
-    let mut params_len: u8 = 0;
-    if !rf_link_get_op_para(packet, &mut op_cmd, &mut op_cmd_len, &mut params, &mut params_len, true) {
+    let (success, mut op_cmd, mut op_cmd_len, mut params, mut params_len) = parse_ble_packet_op_params(packet, true);
+    if !success {
         return;
     }
 
@@ -737,12 +737,14 @@ pub fn mesh_send_online_status()
             opcode: 0,
             handle: 0,
             handle1: 0,
-            value: [0; 30],
+            value: PacketAttValue::default(),
         }
     };
 
+    let pktdata = unsafe { &mut *slice_from_raw_parts_mut(addr_of!(pkt_light_adv_status.att_write().value) as *mut u8, size_of::<PacketAttValue>()) };
+
     mesh_node_flush_status();
-    mesh_node_adv_status(&mut pkt_light_adv_status.att_write_mut().value[..24]);
+    mesh_node_adv_status(&mut pktdata[..24]);
 
     ADV_ST_SN.store(ADV_ST_SN.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     unsafe {
@@ -750,7 +752,7 @@ pub fn mesh_send_online_status()
         slice::from_raw_parts_mut(addr_of_mut!(pkt_light_adv_status.att_write_mut().opcode), 3).copy_from_slice(slice::from_raw_parts(addr_of!(val) as *const u8, 3))
     }
 
-    pkt_light_adv_status.att_write_mut().value[24..28].fill(0xa5);
+    pktdata[24..28].fill(0xa5);
 
     // todo: Perhaps this send count should be greater than 0 to improve reliability
     app().mesh_manager.add_send_mesh_msg(&pkt_light_adv_status, 0, 0);
@@ -765,6 +767,7 @@ pub fn back_to_rxmode_bridge()
     rf_set_rxmode();
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_is_notify_req(value: u8) -> bool
 {
     if !RF_SLAVE_OTA_BUSY.get() {
@@ -851,7 +854,12 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
                     opcode: 0,
                     handle: 0,
                     handle1: 0,
-                    value: [0; 30],
+                    value: PacketAttValue {
+                        sno: [0; 3],
+                        src: [0; 2],
+                        dst: [0; 2],
+                        val: [0; 23]
+                    },
                 }
             };
             BLT_FIFO_TX_PACKET_COUNT
@@ -890,6 +898,7 @@ pub fn rf_link_slave_read_status_par_init()
     *SLAVE_STAT_SNO.lock() = [0; 3];
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_read_status_stop()
 {
     SLAVE_READ_STATUS_BUSY.set(0);
@@ -915,6 +924,7 @@ pub fn rf_ota_save_data(data: &[u8]) -> OtaState
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool)
 {
     let mut group_match = false;
@@ -1036,44 +1046,345 @@ pub fn rf_link_delete_pair()
     PAIR_LOGIN_OK.set(false);
 }
 
-pub fn rf_link_get_op_para(packet: &Packet, p_op: &mut [u8], p_op_len: &mut u8, p_para: &mut [u8], p_para_len: &mut u8, mesh_flag: bool) -> bool
+/// Extracts operation codes and parameters from a BLE packet.
+///
+/// This function parses the given packet to extract operation codes and their associated parameters
+/// based on the BLE packet format. It handles different operation code lengths (1, 2, or 3 bytes)
+/// and processes parameters differently based on mesh/non-mesh mode.
+///
+/// # Arguments
+///
+/// * `packet` - A reference to the packet to parse
+/// * `mesh_flag` - A boolean flag indicating whether the packet is a mesh packet (affects parameter handling)
+///
+/// # Returns
+///
+/// A tuple containing:
+/// * `success` - Boolean indicating if parsing was successful
+/// * `op_codes` - Array of operation code bytes (up to 3 bytes)
+/// * `op_len` - Length of the operation code (1, 2, or 3 bytes)
+/// * `parameters` - Array of parameter bytes (up to 16 bytes)
+/// * `params_len` - Length of the extracted parameters
+///
+/// # Operation Code Format
+///
+/// The operation code length is determined by the MSB bits of the first byte:
+/// * If MSB is clear (0), the op code is 1 byte
+/// * If MSB is set (1) and bit 6 is clear (10), the op code is 2 bytes
+/// * If MSB is set (1) and bit 6 is set (11), the op code is 3 bytes
+///
+/// # Parameter Handling
+///
+/// Parameters are extracted differently based on:
+/// * The mesh_flag parameter
+/// * The operation code (special handling for op code 6)
+/// * Available packet length
+///
+#[cfg_attr(test, mry::mry)]
+pub fn parse_ble_packet_op_params(packet: &Packet, mesh_flag: bool) -> (bool, [u8; 3], u8, [u8; 16], u8)
 {
-    if ((packet.att_write().value[7] as u32 * 0x1000000) as i32) < 0 {
-        if packet.att_write().value[7] >> 6 == 3 {
-            *p_op_len = 3;
-        } else {
-            *p_op_len = 2;
-        }
-    } else {
-        *p_op_len = 1;
-    }
-    p_op[0..*p_op_len as usize].copy_from_slice(&packet.att_write().value[7..7 + *p_op_len as usize]);
-    let mut pkt_len = packet.head().l2cap_len - 10;
-    let pkt_len_delta;
-    let max_param_len;
-    if p_op[0] & 0x3f == 6 {
-        max_param_len = 0xf;
-        pkt_len_delta = 5;
-    } else {
-        max_param_len = 10;
-        pkt_len_delta = 0;
-    }
+    // Initialize return values
+    let mut op_codes = [0u8; 3];
+    let mut op_len = 0u8;
+    let mut parameters = [0u8; 16];
+    let mut params_len = 0u8;
 
+    // Access the value field directly through the att_cmd() accessor method
+    let val = &packet.att_cmd().value.val;
+    
+    // Determine the operation command length based on the bit patterns
+    let first_op_byte = val[0];
+    if first_op_byte & 0x80 != 0 {  // MSB is set
+        op_len = if first_op_byte & 0x40 != 0 { 3 } else { 2 };
+    } else {  // MSB is clear
+        op_len = 1;
+    }
+    
+    // Copy the operation code bytes
+    op_codes[0..op_len as usize].copy_from_slice(&val[0..op_len as usize]);
+
+    // Special handling for opcode 6 (more parameters allowed + delta offset adjustment)
+    let is_special_op = (first_op_byte & 0x3f) == 6;
+    let max_param_len = if is_special_op { 0xf } else { 10 };
+    let pkt_len_delta = if is_special_op { 5 } else { 0 };
+
+    // Calculate total available data space for parameters
+    let header_len: u16 = 10;
+    let mut packet_data_len = packet.head().l2cap_len - header_len;
+    
+    // Adjust for mesh vs non-mesh packet structures
     if mesh_flag {
-        pkt_len = pkt_len_delta + pkt_len - *p_op_len as u16 - 10;
+        packet_data_len = pkt_len_delta + packet_data_len - op_len as u16 - header_len;
     } else {
-        pkt_len = pkt_len - *p_op_len as u16;
+        packet_data_len = packet_data_len - op_len as u16;
     }
 
-    *p_para_len = pkt_len as u8;
+    params_len = packet_data_len as u8;
 
-    if pkt_len <= max_param_len {
-        p_para[0..pkt_len as usize].copy_from_slice(&packet.att_write().value[7 + *p_op_len as usize..7 + *p_op_len as usize + pkt_len as usize]);
+    // Check if parameters will fit within allowed limits
+    let success = packet_data_len <= max_param_len;
+    
+    if success {
+        // Copy parameter bytes from the packet
+        let param_start = op_len as usize;
+        let param_end = param_start + packet_data_len as usize;
+        parameters[0..packet_data_len as usize].copy_from_slice(&val[param_start..param_end]);
     } else {
-        *p_para_len = 0;
+        // If parameters are too long, set the length to 0
+        params_len = 0;
     }
 
-    return pkt_len <= max_param_len;
+    (success, op_codes, op_len, parameters, params_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::packet_types::*;
+    use core::mem::size_of;
+
+    #[test]
+    fn test_rf_link_get_op_para_one_byte_op() {
+        // Create a test packet with a 1-byte operation code
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 20, // l2cap_len = 20 (10 + op_len + params_len)
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code byte (not MSB set, so 1 byte op)
+        packet.att_cmd_mut().value.val[0] = 0x42; // Some op code without MSB set
+        
+        // Set some parameter bytes
+        packet.att_cmd_mut().value.val[1] = 0xA1;
+        packet.att_cmd_mut().value.val[2] = 0xB2;
+        packet.att_cmd_mut().value.val[3] = 0xC3;
+
+        // Call the function
+        let (success, op, op_len, params, params_len) = parse_ble_packet_op_params(&packet, false);
+
+        // Verify results
+        assert!(success);
+        assert_eq!(op[0], 0x42);
+        assert_eq!(op_len, 1);
+        assert_eq!(params[0], 0xA1);
+        assert_eq!(params[1], 0xB2);
+        assert_eq!(params[2], 0xC3);
+        assert_eq!(params_len, 9); // l2cap_len - 10 - op_len = 20 - 10 - 1 = 9
+    }
+
+    #[test]
+    fn test_rf_link_get_op_para_two_byte_op() {
+        // Create a test packet with a 2-byte operation code
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 21, // l2cap_len = 21 (10 + op_len + params_len)
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code bytes (MSB set but not 11 in top bits, so 2 byte op)
+        packet.att_cmd_mut().value.val[0] = 0x82; // 10... in top bits
+        packet.att_cmd_mut().value.val[1] = 0xAB;
+        
+        // Set some parameter bytes
+        packet.att_cmd_mut().value.val[2] = 0xC1;
+        packet.att_cmd_mut().value.val[3] = 0xD2;
+
+        // Call the function
+        let (success, op, op_len, params, params_len) = parse_ble_packet_op_params(&packet, false);
+
+        // Verify results
+        assert!(success);
+        assert_eq!(op[0], 0x82);
+        assert_eq!(op[1], 0xAB);
+        assert_eq!(op_len, 2);
+        assert_eq!(params[0], 0xC1);
+        assert_eq!(params[1], 0xD2);
+        assert_eq!(params_len, 9); // l2cap_len - 10 - op_len = 21 - 10 - 2 = 9
+    }
+
+    #[test]
+    fn test_rf_link_get_op_para_three_byte_op() {
+        // Create a test packet with a 3-byte operation code
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 22, // l2cap_len = 22 (10 + op_len + params_len)
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code bytes (MSB set with 11 in top bits, so 3 byte op)
+        packet.att_cmd_mut().value.val[0] = 0xC5; // 11... in top bits
+        packet.att_cmd_mut().value.val[1] = 0xAB;
+        packet.att_cmd_mut().value.val[2] = 0xCD;
+        
+        // Set some parameter bytes
+        packet.att_cmd_mut().value.val[3] = 0xE1;
+        packet.att_cmd_mut().value.val[4] = 0xF2;
+
+        // Call the function
+        let (success, op, op_len, params, params_len) = parse_ble_packet_op_params(&packet, false);
+
+        // Verify results
+        assert!(success);
+        assert_eq!(op[0], 0xC5);
+        assert_eq!(op[1], 0xAB);
+        assert_eq!(op[2], 0xCD);
+        assert_eq!(op_len, 3);
+        assert_eq!(params[0], 0xE1);
+        assert_eq!(params[1], 0xF2);
+        assert_eq!(params_len, 9); // l2cap_len - 10 - op_len = 22 - 10 - 3 = 9
+    }
+
+    #[test]
+    fn test_rf_link_get_op_para_special_op_code_6() {
+        // Create a test packet with op code that has 0x6 in the lower 6 bits
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 30, // l2cap_len = 30 (enough for larger parameters)
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code byte with 0x6 in the lower 6 bits
+        packet.att_cmd_mut().value.val[0] = 0x06; // 0x06 & 0x3f = 0x06
+        
+        // Set parameter bytes
+        for i in 0..15 {
+            packet.att_cmd_mut().value.val[i + 1] = i as u8;
+        }
+
+        // Call the function with mesh_flag = true to test special handling
+        let (success, op, op_len, params, params_len) = parse_ble_packet_op_params(&packet, true);
+
+        // Verify results
+        assert!(success);
+        assert_eq!(op[0], 0x06);
+        assert_eq!(op_len, 1);
+        // Check that we got the expected parameters with delta of 5
+        assert_eq!(params_len, 14); // With the special handling for op code 6 and mesh_flag=true
+        for i in 0..14 {
+            assert_eq!(params[i as usize], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_rf_link_get_op_para_too_long_params() {
+        // Create a test packet with parameters that are too long
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 30, // l2cap_len = 30 (makes params too long)
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code byte (not special case)
+        packet.att_cmd_mut().value.val[0] = 0x01;
+        
+        // Set many parameter bytes
+        for i in 0..20 {
+            packet.att_cmd_mut().value.val[i + 1] = i as u8;
+        }
+
+        // Call the function
+        let (success, op, op_len, params, params_len) = parse_ble_packet_op_params(&packet, false);
+
+        // Verify results
+        assert!(!success); // Should fail due to too-long parameters
+        assert_eq!(op[0], 0x01);
+        assert_eq!(op_len, 1);
+        assert_eq!(params_len, 0); // params_len should be set to 0 on failure
+    }
+
+    #[test]
+    fn test_rf_link_get_op_para_mesh_flag() {
+        // Create a test packet with mesh_flag = true and mesh_flag = false
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 21, // Reduced from 25 to ensure parameters don't exceed max length for non-mesh mode
+                    chan_id: 0xff03,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            }
+        };
+
+        // Set op code byte (1 byte op code)
+        packet.att_cmd_mut().value.val[0] = 0x42; // Op code without MSB set
+        
+        // Set parameter bytes (reduced number of parameters to fit within limits)
+        for i in 0..5 {
+            packet.att_cmd_mut().value.val[i + 1] = 0xA0 + i as u8;
+        }
+
+        // Test with mesh_flag = false
+        let (success_no_mesh, op_no_mesh, op_len_no_mesh, params_no_mesh, params_len_no_mesh) = 
+            parse_ble_packet_op_params(&packet, false);
+
+        // Test with mesh_flag = true
+        let (success_mesh, op_mesh, op_len_mesh, params_mesh, params_len_mesh) = 
+            parse_ble_packet_op_params(&packet, true);
+
+        // Verify results are different between mesh and non-mesh
+        assert!(success_no_mesh, "Non-mesh mode should succeed");
+        assert!(success_mesh, "Mesh mode should succeed");
+        assert_eq!(op_no_mesh, op_mesh); // Op code should be the same
+        assert_eq!(op_len_no_mesh, op_len_mesh); // Op length should be the same
+        assert_ne!(params_len_no_mesh, params_len_mesh); // Param lengths should differ
+    }
 }
 
 

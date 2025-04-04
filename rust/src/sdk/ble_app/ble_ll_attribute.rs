@@ -76,34 +76,227 @@ pub enum GattOp {
     AttOpWriteCmd = 0x52, // ATT Write Command
 }
 
+/// Searches for an attribute with the specified UUID within a range of handle values.
+///
+/// This function implements a key BLE ATT protocol operation for finding attributes by UUID.
+/// It's used extensively by the L2CAP attribute protocol handler to respond to client requests.
+///
+/// # Parameters
+///
+/// * `handle_start` - The starting handle value to begin searching from (inclusive)
+/// * `handle_end` - The ending handle value to search up to (inclusive)
+/// * `uuid` - The UUID to search for, as a byte slice (either 2 or 16 bytes long)
+///
+/// # Returns
+///
+/// * `Some((&[AttributeT], usize))` - A tuple containing a slice of the found attribute(s) 
+///   and the handle value where it was found
+/// * `None` - If no matching attribute was found in the specified range
+///
+/// # Algorithm
+///
+/// 1. Get the total attribute count from the first attribute in the table
+/// 2. Ensure we're not starting at or beyond the attribute count
+/// 3. Adjust the end handle if it exceeds the attribute count
+/// 4. Iterate through attributes in the specified range
+/// 5. Compare UUIDs based on their length (16-bit or 128-bit)
+/// 6. Return the attribute and its position if found
 pub fn l2cap_att_search(mut handle_start: usize, handle_end: usize, uuid: &[u8]) -> Option<(&[AttributeT], usize)>
 {
+    // The first attribute in the table contains the total number of attributes
     let att_num = get_gAttributes()[0].att_num as usize;
 
+    // If handle_start equals att_num, we've reached the end of the attribute table
     if att_num != handle_start {
-        let mut end = handle_end;
-        if att_num < handle_end {
-            end = att_num;
-        }
+        // Adjust end handle if it exceeds the total number of attributes
+        let end = handle_end.min(att_num);
 
-        for handle_start in handle_start..=end {
-            if get_gAttributes()[handle_start].uuid_len == 2 {
-                unsafe {
-                    if *(uuid.as_ptr() as *const u16) == *(get_gAttributes()[handle_start].uuid as *const u16) {
-                        return Some((&get_gAttributes()[handle_start..handle_start+2], handle_start));
-                    }
+        // Iterate through each handle in the specified range
+        for current_handle in handle_start..=end {
+            let current_attr = &get_gAttributes()[current_handle];
+            
+            // Check if the attribute has a 16-bit UUID (2 bytes)
+            if current_attr.uuid_len == 2 {
+                // Get the UUID bytes and compare with the target UUID
+                let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 2) };
+                if uuid == attr_uuid {
+                    // Return this attribute and the next one, along with the handle position
+                    return Some((&get_gAttributes()[current_handle..current_handle+2], current_handle));
                 }
             } else {
-                unsafe {
-                    if uuid == slice::from_raw_parts(get_gAttributes()[handle_start].uuid, 0x10) {
-                        return Some((&get_gAttributes()[handle_start..handle_start+2], handle_start));
-                    }
+                // Handle 128-bit UUID (16 bytes)
+                let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 0x10) };
+                if uuid == attr_uuid {
+                    // Return this attribute and the next one, along with the handle position
+                    return Some((&get_gAttributes()[current_handle..current_handle+2], current_handle));
                 }
             }
         }
     }
 
-    return None;
+    // No matching attribute found
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::app_att_light::{GATT_UUID_CHARACTER, GATT_UUID_PRIMARY_SERVICE, get_gAttributes, TELINK_SPP_DATA_SERVER2CLIENT_UUID};
+    
+    // Helper function to create UUID16 as a byte slice
+    fn uuid16_to_bytes(uuid: u16) -> [u8; 2] {
+        uuid.to_le_bytes()
+    }
+    
+    // Helper function to create a 128-bit UUID as a byte slice
+    fn create_uuid128(uuid16: u16) -> [u8; 16] {
+        let mut uuid = [0u8; 16];
+        uuid[0..2].copy_from_slice(&uuid16_to_bytes(uuid16));
+        uuid
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_not_found() {
+        // Search for UUID that doesn't exist in the attribute list
+        let uuid_bytes = uuid16_to_bytes(0xABCD); // Non-existent UUID
+        let result = l2cap_att_search(1, 28, &uuid_bytes);
+        assert!(result.is_none());
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_handle_start_equals_att_num() {
+        // The first attribute in gAttributes has its att_num set to the total number of attributes
+        // in our case, that's 28 (index 0-27)
+        let att_num = get_gAttributes()[0].att_num as usize;
+        
+        // Search with handle_start equal to att_num should return None
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+        let result = l2cap_att_search(att_num, att_num + 5, &uuid_bytes);
+        assert!(result.is_none());
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_handle_end_adjustment() {
+        // att_num is the total number of attributes
+        let att_num = get_gAttributes()[0].att_num as usize;
+        
+        // We know PRIMARY_SERVICE_UUID exists in the attribute table
+        // Search beyond att_num should be adjusted to att_num
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+        let result = l2cap_att_search(1, att_num + 10, &uuid_bytes);
+        
+        // Should find a match since PRIMARY_SERVICE_UUID exists
+        assert!(result.is_some());
+        // Handle should be less than or equal to att_num
+        let (_, handle) = result.unwrap();
+        assert!(handle <= att_num);
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_uuid16_match() {
+        // PRIMARY_SERVICE_UUID is a 16-bit UUID used in the attribute table
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+        let result = l2cap_att_search(1, 28, &uuid_bytes);
+        
+        // Should find a match
+        assert!(result.is_some());
+        
+        // Verify handle is in the expected range
+        let (found_attrs, handle) = result.unwrap();
+        assert!(handle >= 1);
+        assert!(handle <= 28);
+        
+        // Verify slice length
+        assert_eq!(found_attrs.len(), 2);
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_uuid128_match() {
+        // Get SPP service UUID from attribute 18 in the attribute table
+        // This is a 128-bit UUID (16 bytes)
+        let spp_service_handle = 18;
+        
+        // Use the actual 128-bit UUID directly from the attribute table
+        // TELINK_SPP_DATA_SERVER2CLIENT_UUID is defined in app_att_light.rs
+        let result = l2cap_att_search(1, 28, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
+        
+        // Should find a match
+        assert!(result.is_some());
+        
+        // Verify found handle is as expected
+        let (_, found_handle) = result.unwrap();
+        assert_eq!(found_handle, spp_service_handle);
+        
+        // Also verify that searching from the handle itself works
+        let result2 = l2cap_att_search(spp_service_handle, spp_service_handle, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
+        assert!(result2.is_some());
+        let (_, found_handle2) = result2.unwrap();
+        assert_eq!(found_handle2, spp_service_handle);
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_handle_range() {
+        // We know PRIMARY_SERVICE_UUID appears at multiple places in the attribute table
+        // First at index 1 (GAP service) and then at index 7 (Device Info service)
+        
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+        
+        // Search only in the range that includes the first occurrence (1-6)
+        let result1 = l2cap_att_search(1, 6, &uuid_bytes);
+        assert!(result1.is_some());
+        let (_, handle1) = result1.unwrap();
+        assert_eq!(handle1, 1); // Should find at index 1
+        
+        // Search only in the range that includes the second occurrence (7-15)
+        let result2 = l2cap_att_search(7, 15, &uuid_bytes);
+        assert!(result2.is_some());
+        let (_, handle2) = result2.unwrap();
+        assert_eq!(handle2, 7); // Should find at index 7
+        
+        // Search in a range that excludes any PRIMARY_SERVICE_UUID (2-6)
+        // (assuming there's no PRIMARY_SERVICE_UUID between index 2 and 6)
+        let result3 = l2cap_att_search(2, 6, &uuid_bytes);
+        assert!(result3.is_none()); // Should not find any
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_first_match() {
+        // We know CHARACTER_UUID appears multiple times in the attribute table
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_CHARACTER);
+        
+        // Search for the first occurrence
+        let result1 = l2cap_att_search(1, 28, &uuid_bytes);
+        assert!(result1.is_some());
+        let (_, handle1) = result1.unwrap();
+        
+        // Now search for the next occurrence, starting after the first one
+        let result2 = l2cap_att_search(handle1 + 1, 28, &uuid_bytes);
+        assert!(result2.is_some());
+        let (_, handle2) = result2.unwrap();
+        
+        // Verify that the second handle is greater than the first one
+        assert!(handle2 > handle1);
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_uuid16_no_match() {
+        // Search for a 16-bit UUID that doesn't exist in the attribute table
+        let uuid_bytes = uuid16_to_bytes(0xDEAD); // Non-existent UUID
+        let result = l2cap_att_search(1, 28, &uuid_bytes);
+        
+        // Should not find a match
+        assert!(result.is_none());
+    }
+    
+    #[test]
+    fn test_l2cap_att_search_uuid128_no_match() {
+        // Create a 128-bit UUID that doesn't exist in the attribute table
+        let uuid128 = create_uuid128(0xBEEF); // Non-existent UUID
+        let result = l2cap_att_search(1, 28, &uuid128);
+        
+        // Should not find a match
+        assert!(result.is_none());
+    }
 }
 
 pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet>

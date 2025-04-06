@@ -107,7 +107,7 @@ pub fn clock_time64() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mry::{self, Any};
+    use mry::{self};
     use crate::sdk::mcu::clock::mock_clock_time;
 
     // Helper function to reset static variables for testing without using unsafe

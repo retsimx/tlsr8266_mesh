@@ -2,22 +2,44 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_time::driver::{Driver, AlarmHandle};
 use crate::sdk::mcu::clock::clock_time;
 
+/// Custom time driver implementation for the embassy-time crate
+/// 
+/// This driver bridges the SDK's clock_time functionality with embassy's time system,
+/// providing a monotonic 64-bit timestamp counter even though the underlying
+/// hardware may have a 32-bit counter that wraps around.
 struct MyDriver {
-
+    // No fields needed as we use global state for time tracking
 }
 
+// Register our driver with the embassy-time framework
 embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{});
 
 impl Driver for MyDriver {
+    /// Returns the current monotonic timestamp in ticks
+    /// 
+    /// Uses clock_time64 to handle timer overflow and provide a continuous 64-bit counter
     fn now(&self) -> u64 {
         clock_time64()
     }
+
+    /// Allocates a new alarm handle
+    /// 
+    /// Currently only supports a single alarm with ID 0
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
         Option::from(AlarmHandle::new(0))
     }
-    fn set_alarm_callback(&self, _alarm: AlarmHandle, _callback: fn(*mut ()), _ctx: *mut ()) {
 
+    /// Sets the callback function for an alarm
+    /// 
+    /// Currently a no-op implementation as alarms are not fully supported
+    fn set_alarm_callback(&self, _alarm: AlarmHandle, _callback: fn(*mut ()), _ctx: *mut ()) {
+        // No-op: Alarm callbacks not implemented in this driver
     }
+
+    /// Sets an alarm to trigger at the specified timestamp
+    /// 
+    /// Returns true only if the timestamp is in the future
+    /// Note: This is a minimal implementation that doesn't actually schedule alarms
     fn set_alarm(&self, _alarm: AlarmHandle, _timestamp: u64) -> bool {
         _timestamp > self.now()
     }
@@ -28,38 +50,57 @@ static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 
-// Counts any clock_time overflows
+/// Provides a 64-bit monotonic clock based on the 32-bit clock_time()
+///
+/// This function extends the 32-bit hardware timer to a 64-bit logical timer by
+/// tracking overflows of the underlying 32-bit counter. It uses atomic operations
+/// to safely handle concurrent access without locks in the common case.
+/// 
+/// # Algorithm
+/// 1. Read current hardware time and previously seen time
+/// 2. If current time < last time, we may have an overflow
+/// 3. Use a critical section to safely update the upper 32 bits if overflow confirmed
+/// 4. Return a combined 64-bit timestamp (upper 32 bits | lower 32 bits)
 #[cfg_attr(test, mry::mry)]
 pub fn clock_time64() -> u64 {
+    // When not testing, these static variables are defined here
+    // When testing, they're defined at module level for test access
     #[cfg(not(test))]
     static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
     #[cfg(not(test))]
     static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 
+    // Get current hardware time
     let current_time = clock_time();
     let last_time = LAST_CLOCK_TIME.load(Ordering::Relaxed);
     
     // Only enter critical section if we suspect an overflow
+    // (current time is less than last seen time)
     if current_time < last_time {
         critical_section::with(|_| {
             // Re-check within critical section to avoid race conditions
+            // This prevents multiple threads from incrementing the upper bits
             let last_time_cs = LAST_CLOCK_TIME.load(Ordering::Relaxed);
             if current_time < last_time_cs {
                 // Overflow confirmed - increment upper bits
                 // Use load-modify-store instead of fetch_add since fetch_add might not be supported
+                // on all platforms or with all atomics implementations
                 let upper = CLOCK_TIME_UPPER.load(Ordering::Relaxed);
                 CLOCK_TIME_UPPER.store(upper + 1, Ordering::Relaxed);
             }
             
-            // Update last time seen
+            // Update last time seen within the critical section
             LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
         });
     } else {
-        // Normal case - just update the last seen time
+        // Normal case (no overflow) - just update the last seen time
+        // This fast path avoids the critical section in most calls
         LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
     }
     
-    // Combine upper and lower bits
+    // Combine upper and lower bits to form the 64-bit timestamp
+    // Upper 32 bits track number of overflows
+    // Lower 32 bits are the current hardware timer value
     (CLOCK_TIME_UPPER.load(Ordering::Relaxed) as u64) << 32 | current_time as u64
 }
 

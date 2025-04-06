@@ -1140,7 +1140,9 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
     let mut result;
     
     // Permission checks - skip for Client Characteristic Configuration Descriptor (0x2902)
-    if unsafe { *(get_gAttributes()[att_num].uuid as *const u16) } != GATT_UUID_CLIENT_CHAR_CFG {
+    // First check if uuid is not null before dereferencing
+    if get_gAttributes()[att_num].uuid.is_null() || 
+       unsafe { *(get_gAttributes()[att_num].uuid as *const u16) } != GATT_UUID_CLIENT_CHAR_CFG {
         if att_num < 2 {
             return None  // Can't write to handles 0 or 1
         }
@@ -2550,8 +2552,7 @@ mod tests {
         let _ = l2cap_att_handler(&packet);
         
         // Verify flag was not set
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false, 
-            "RF_SLAVE_OTA_TERMINATE_FLAG should remain false when OTA state is Continue");
+        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false);
         
         // Test case 2: OTA state is not Continue - flag should be set
         unsafe {
@@ -2562,8 +2563,7 @@ mod tests {
         let _ = l2cap_att_handler(&packet);
         
         // Verify flag was set
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), true, 
-            "RF_SLAVE_OTA_TERMINATE_FLAG should be set to true when OTA state is not Continue");
+        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), true);
         
         // Restore original attribute properties
         unsafe {
@@ -2626,8 +2626,7 @@ mod tests {
         
         // Verify OTA terminate flag was NOT set despite the OTA state condition being true
         // because the SEND_TO_MASTER condition should take precedence
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false, 
-            "RF_SLAVE_OTA_TERMINATE_FLAG should not be set when SEND_TO_MASTER condition is true");
+        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false);
         
         // Restore original attribute properties
         unsafe {
@@ -3623,5 +3622,28 @@ mod tests {
         assert_eq!(response2.att_read_rsp().opcode, GattOp::AttOpReadByGroupTypeRsp as u8);
     }
 
-    // ...existing code...
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_write_request_or_command_restricted_handles() {
+        setup_system_tick_mock();
+        
+        // Test write attempts to the restricted handles (0 and 1)
+        for handle in 0..2 {
+            // Create Write Request for a restricted handle
+            let mut data = [0; 23];
+            data[0] = GattOp::AttOpWriteReq as u8; // Opcode: Write Request
+            data[1] = handle;   // Handle 0 or 1 (restricted)
+            data[2] = 0;
+            data[3] = 0;        // High byte of handle (should be 0)
+            data[4] = 0xAA;     // Value to write
+            data[5] = 0xBB;
+            
+            let packet = create_att_packet(0, &data);
+            
+            let response = l2cap_att_handler(&packet);
+            
+            // Write to restricted handles should return None (blocked)
+            assert!(response.is_none());
+        }
+    }
 }

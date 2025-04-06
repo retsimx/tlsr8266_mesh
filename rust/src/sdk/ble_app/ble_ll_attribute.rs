@@ -709,6 +709,21 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
             // Set value[0] to bytes_read (length of each tuple)
             rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
         }
+        
+        // Return early here as we've already prepared a response for 128-bit UUID search
+        if bytes_read == 0 {
+            return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
+        } else {
+            // Finalize the response packet header
+            rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
+            rf_packet_att_rsp.head_mut()._type = 2;
+            rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
+            rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
+            rf_packet_att_rsp.head_mut().chan_id = 4;
+            rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
+            
+            return Some(rf_packet_att_rsp);
+        }
     } else {
         // 16-bit UUID search
         let mut uuid = [0; 2];
@@ -739,6 +754,21 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                 
                 // Set value[0] to bytes_read (length of each tuple)
                 rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
+            }
+            
+            // Return early here as we've already prepared a response for non-GATT Service Changed UUID
+            if bytes_read == 0 {
+                return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
+            } else {
+                // Finalize the response packet header
+                rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
+                rf_packet_att_rsp.head_mut()._type = 2;
+                rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
+                rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
+                rf_packet_att_rsp.head_mut().chan_id = 4;
+                rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
+                
+                return Some(rf_packet_att_rsp);
             }
         }
 
@@ -3299,5 +3329,172 @@ mod tests {
         assert_eq!(l2cap_len, expected_bytes_read as u16 + 2);
     }
 
-    // ...existing code...
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_by_type_request_loop_break_triggers() {
+        setup_system_tick_mock();
+        
+        // Create Read By Type Request for Characteristic UUID (0x2803)
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8; // Opcode: Read By Type Request
+        data[1] = 1;    // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 20;   // Ending Handle (little endian)
+        data[4] = 0;
+        
+        // UUID to find: Characteristic (0x2803)
+        data[5] = 0x03; 
+        data[6] = 0x28;
+        
+        // We need to modify an attribute to force a break condition
+        // Find a Characteristic attribute to modify
+        let mut char_attr_idx = 0;
+        for i in 1..get_gAttributes()[0].att_num as usize {
+            if get_gAttributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+                if attr_uuid == &uuid16_to_bytes(GATT_UUID_CHARACTER) {
+                    char_attr_idx = i;
+                    break;
+                }
+            }
+        }
+        
+        assert!(char_attr_idx > 0, "Failed to find a Characteristic attribute for test");
+        
+        // Save the original UUID length for restoration later
+        let original_uuid_len = get_gAttributes()[char_attr_idx + 1].uuid_len;
+        
+        // Case 1: Trigger break through inconsistent format
+        // Modify the UUID length of the next attribute to force format inconsistency
+        unsafe {
+            // First call should work and establish a format
+            // Then we modify the attribute to cause a break on the next match
+            (*(addr_of_mut!(get_gAttributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len =
+                if original_uuid_len == 2 { 16 } else { 2 };
+        }
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handler
+        let response = l2cap_att_handler(&packet).unwrap();
+        
+        // Verify we got a response that contains at least one characteristic
+        assert_eq!(response.att_read_rsp().opcode, GattOp::AttOpReadByTypeRsp as u8);
+        
+        // Check that at least one characteristic was found before the break
+        // Format byte should be > 0 and equal to uuid_len + 5
+        assert!(response.att_read_rsp().value[0] > 0);
+        
+        // Case 2: Trigger break through buffer space limitation
+        // Create an attribute with a very large UUID length to force a buffer space issue
+        let max_space_attr_idx = char_attr_idx + 2; // Another characteristic
+        let original_uuid_len2 = get_gAttributes()[max_space_attr_idx].uuid_len;
+        
+        unsafe {
+            // Restore the first modification
+            (*(addr_of_mut!(get_gAttributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len = original_uuid_len;
+            
+            // Modify another attribute to have a large UUID length
+            // This should cause bytes_read + found_attr[0].uuid_len >= 0x13
+            (*(addr_of_mut!(get_gAttributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len = 0x10;
+        }
+        
+        // Call the handler again
+        let response2 = l2cap_att_handler(&packet).unwrap();
+        
+        // Verify we got a response
+        assert_eq!(response2.att_read_rsp().opcode, GattOp::AttOpReadByTypeRsp as u8);
+        
+        // Restore the original attribute
+        unsafe {
+            (*(addr_of_mut!(get_gAttributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len = original_uuid_len2;
+        }
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_by_type_request_none_break_condition() {
+        setup_system_tick_mock();
+        
+        // Find a characteristic in the attribute table
+        let char_uuid = uuid16_to_bytes(GATT_UUID_CHARACTER);
+        let mut char_handle = 0;
+        
+        for i in 1..get_gAttributes()[0].att_num as usize {
+            if get_gAttributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+                if attr_uuid == &char_uuid {
+                    char_handle = i;
+                    break;
+                }
+            }
+        }
+        
+        assert!(char_handle > 0, "Failed to find a Characteristic attribute for test");
+        
+        // Create Read By Type Request specifically targeting the range where only one 
+        // characteristic exists - so that the next search returns None
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8;
+        data[1] = char_handle as u8;    // Start with the found characteristic
+        data[2] = 0;
+        data[3] = char_handle as u8;    // End at the same handle to force "None" on next search
+        data[4] = 0;
+        
+        // UUID to find: Characteristic (0x2803)
+        data[5] = 0x03; 
+        data[6] = 0x28;
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handler
+        let response = l2cap_att_handler(&packet).unwrap();
+        
+        // Verify we got exactly one characteristic in the response
+        // (This confirms the loop processed one characteristic and then broke on None)
+        assert_eq!(response.att_read_rsp().opcode, GattOp::AttOpReadByTypeRsp as u8);
+        
+        // Get the format byte (how many bytes per entry)
+        let format = response.att_read_rsp().value[0];
+        
+        // Calculate expected bytes_read from the number of characteristics
+        // One characteristic = format bytes total
+        let expected_bytes_read = format;
+        
+        // Verify packet has the right size for exactly one characteristic
+        let dma_len = response.head().dma_len;
+        assert_eq!(dma_len, expected_bytes_read as u32 + 8);
+        assert_eq!(response.head().rf_len, expected_bytes_read + 6);
+        let l2cap_len = response.head().l2cap_len;
+        assert_eq!(l2cap_len, expected_bytes_read as u16 + 2);
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_by_type_request_error_condition() {
+        setup_system_tick_mock();
+        
+        // Create Read By Type Request with handle range that will trigger a "None" return
+        // We'll use a characteristic UUID (0x2803) but with a handle range that doesn't contain
+        // any matching characteristics
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8;
+        data[1] = 28;    // Start handle - intentionally too high (beyond attribute table)
+        data[2] = 0;
+        data[3] = 30;    // End handle - also beyond attribute table
+        data[4] = 0;
+        
+        // UUID to find: Characteristic (0x2803)
+        data[5] = 0x03; 
+        data[6] = 0x28;
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handler - this should trigger l2cap_att_search() to return None
+        let response = l2cap_att_handler(&packet).unwrap();
+        
+        // Verify we got an error response with the correct parameters
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
+    }
 }

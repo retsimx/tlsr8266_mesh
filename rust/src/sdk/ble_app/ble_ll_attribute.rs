@@ -540,77 +540,87 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
     ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
     
     // Extract handle range and UUID from request
-    let mut start_handle = packet.l2cap_data().value[4] as usize;
+    let start_handle = packet.l2cap_data().value[4] as usize;
     let end_handle = packet.l2cap_data().value[6] as usize;
     
-    // Get the UUID to search for
+    // Extract UUID to search for (typically Primary Service UUID 0x2800)
     let mut uuid = [0; 2];
     uuid.copy_from_slice(&packet.l2cap_data().value[8..10]);
     
-    // Get the value to match against (the 16-bit service UUID we're looking for)
-    let mut tmp = [0u8; 2];
-    tmp.copy_from_slice(&packet.l2cap_data().value[10..12]);
-    let value: u16 = *bytemuck::from_bytes(&tmp);
+    // Extract value to match (typically a 16-bit service UUID)
+    let mut value_bytes = [0u8; 2];
+    value_bytes.copy_from_slice(&packet.l2cap_data().value[10..12]);
+    let target_value: u16 = *bytemuck::from_bytes(&value_bytes);
     
-    // Counter for tracking response pairs added
-    let mut counter = 0;
-
-    let mut rf_packet_att_rsp = create_att_response_template();
+    // Initialize response packet and counters
+    let mut response = create_att_response_template();
+    let mut handle_pairs_count = 0;
+    let max_handle_pairs = 9; // Max of 9 handle pairs to avoid overflow
+    let mut current_handle = start_handle;
     
-    // Search for attributes matching the specified criteria
-    loop {
+    // Search for matching attributes in the requested handle range
+    while current_handle <= end_handle && handle_pairs_count <= max_handle_pairs {
         // Find attribute with the requested UUID in the handle range
-        let handle = l2cap_att_search(start_handle, end_handle, &uuid);
+        let search_result = l2cap_att_search(current_handle, end_handle, &uuid);
         
-        // Break if no matching attribute found or reached max response entries (10)
-        if handle == None || 9 < counter {
+        // No more matching attributes found
+        if search_result.is_none() {
             break;
         }
         
-        let found_attr = &handle.unwrap().0[0];
-        let found_handle = handle.unwrap().1;
+        // Unpack search result
+        let (found_attr, found_handle) = search_result.unwrap();
+        let attr = &found_attr[0];
         
         // Check if attribute value matches the requested value
-        if found_attr.attr_len == 2 && unsafe { *(found_attr.p_attr_value as *const u16) } == value {
-            // Add the attribute handle to the response
-            rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2] = (found_handle & 0xff) as u8;
-            rf_packet_att_rsp.att_read_rsp_mut().value[counter * 2 + 1] = (found_handle >> 8) as u8;
+        let attr_value_matches = attr.attr_len == 2 && 
+                               unsafe { *(attr.p_attr_value as *const u16) } == target_value;
+        
+        if attr_value_matches {
+            // Calculate base offset for this handle pair in response buffer
+            // Each pair consists of 4 bytes: start handle (2) + end handle (2)
+            let offset = handle_pairs_count * 4;
             
-            // Calculate and add the group end handle based on the attribute's att_num field
-            start_handle = counter + 1;
-            rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2] = (found_attr.att_num as usize + (found_handle - 1) & 0xff) as u8;
-            rf_packet_att_rsp.att_read_rsp_mut().value[start_handle * 2 + 1] = (found_attr.att_num as usize + (found_handle - 1) >> 8) as u8;
+            // Add attribute handle to response (start handle)
+            response.att_read_rsp_mut().value[offset] = (found_handle & 0xff) as u8;
+            response.att_read_rsp_mut().value[offset + 1] = (found_handle >> 8) as u8;
             
-            counter = start_handle + 1;
-            start_handle = found_handle + found_attr.att_num as usize;
+            // Calculate end handle based on attribute's att_num field
+            let group_end_handle = found_attr[0].att_num as usize + (found_handle - 1);
+            
+            // Add end handle to response
+            response.att_read_rsp_mut().value[offset + 2] = (group_end_handle & 0xff) as u8;
+            response.att_read_rsp_mut().value[offset + 3] = (group_end_handle >> 8) as u8;
+            
+            // Update counter and move to next search position
+            handle_pairs_count += 1;
+            current_handle = found_handle + attr.att_num as usize;
         } else {
-            // Move to next attribute if no match
-            start_handle = found_handle + 1;
-        }
-
-        // Break if we've searched beyond the requested range
-        if start_handle > packet.l2cap_data().value[6] as usize {
-            break;
+            // Move to next attribute if current one doesn't match
+            current_handle = found_handle + 1;
         }
     }
     
-    // Return error if no matches found
-    if counter == 0 {
-        let mut err = PKT_ERR_RSP;
-        err.att_err_rsp_mut().err_opcode = GattOp::AttOpFindByTypeValueReq as u8;
-        err.att_err_rsp_mut().err_handle = start_handle as u16;
-        Some(err)
+    // Return appropriate response based on search results
+    if handle_pairs_count == 0 {
+        // No matches found - return error response
+        return prepare_error_response(GattOp::AttOpFindByTypeValueReq as u8, start_handle as u16);
     } else {
-        // Finalize the response packet with the found attributes
-        let c2 = counter * 2;
-        rf_packet_att_rsp.head_mut().dma_len = c2 as u32 + 7;
-        rf_packet_att_rsp.head_mut()._type = 2;
-        rf_packet_att_rsp.head_mut().rf_len = c2 as u8 + 5;
-        rf_packet_att_rsp.head_mut().l2cap_len = c2 as u16 + 1;
-        rf_packet_att_rsp.head_mut().chan_id = 4;
-        rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpFindByTypeValueRsp as u8;
+        // Matches found - calculate total response size
+        let total_bytes = handle_pairs_count * 4; // Each pair is 4 bytes (start handle + end handle)
+        
+        // Set packet header fields in a more structured way
+        let header = response.head_mut();
+        header.dma_len = total_bytes as u32 + 7;
+        header._type = 2;
+        header.rf_len = total_bytes as u8 + 5;
+        header.l2cap_len = total_bytes as u16 + 1;
+        header.chan_id = 4;
+        
+        // Set response opcode
+        response.att_read_rsp_mut().opcode = GattOp::AttOpFindByTypeValueRsp as u8;
 
-        Some(rf_packet_att_rsp)
+        Some(response)
     }
 }
 
@@ -796,10 +806,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     
     // Return error response if no matching attributes found
     if bytes_read == 0 {
-        let mut err = PKT_ERR_RSP;
-        err.att_err_rsp_mut().err_opcode = GattOp::AttOpReadByTypeReq as u8;
-        err.att_err_rsp_mut().err_handle = found_handle as u16;
-        Some(err)
+        return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, found_handle as u16);
     } else {
         // Finalize the response packet header
         rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
@@ -1025,10 +1032,7 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     
     // Return error if no matching attributes found
     if dest_ptr == 0 {
-        let mut err = PKT_ERR_RSP;
-        err.att_err_rsp_mut().err_opcode = GattOp::AttOpReadByGroupTypeReq as u8;
-        err.att_err_rsp_mut().err_handle = packet.l2cap_data().value[4] as u16;
-        Some(err)
+        return prepare_error_response(GattOp::AttOpReadByGroupTypeReq as u8, packet.l2cap_data().value[4] as u16);
     } else {
         // Finalize the response packet
         let mut rf_packet_att_rsp = create_att_response_template();
@@ -3070,5 +3074,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_l2cap_att_handler_find_by_type_value_req_handle_exceeds_range() {
+        setup_system_tick_mock();
+        
+        // Create Find By Type Value Request with a narrow handle range
+        let mut data = [0; 12];
+        data[0] = GattOp::AttOpFindByTypeValueReq as u8; // Opcode: Find By Type Value Request
+        
+        // Set a narrow range that should be easily exceeded after finding one match
+        data[1] = 1;    // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 2;    // Ending Handle (little endian) - deliberately small end handle
+        data[4] = 0;
+        
+        // UUID to find: Primary Service (0x2800)
+        data[5] = 0x00; 
+        data[6] = 0x28;
+        
+        // Value to match: GAP Service (0x1800)
+        data[7] = 0x00;
+        data[8] = 0x18;
+        
+        let packet = create_att_packet(0, &data);
+        
+        let response = l2cap_att_handler(&packet).unwrap();
+        
+        // The response should complete properly, even with the restricted range
+        // This implicitly tests that the loop terminates when start_handle > end_handle
+        
+        // We should have a proper response with at most 1 entry
+        // Calculate number of handle pairs from L2CAP length
+        let handle_pairs = (response.head().l2cap_len as usize - 1) / 4;
+        assert!(handle_pairs <= 1, "Should have found at most 1 service in the narrow range");
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_l2cap_att_handler_find_by_type_value_no_matches() {
+        setup_system_tick_mock();
+        
+        // Create Find By Type Value Request with UUID and value that won't match anything
+        let mut data = [0; 12];
+        data[0] = GattOp::AttOpFindByTypeValueReq as u8; // Opcode: Find By Type Value Request
+        data[1] = 1;    // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 20;   // Ending Handle (little endian)
+        data[4] = 0;
+        
+        // UUID to find: Primary Service (0x2800)
+        data[5] = 0x00; 
+        data[6] = 0x28;
+        
+        // Value to match: Non-existent service UUID (0xDEAD)
+        data[7] = 0xAD;
+        data[8] = 0xDE;
+        
+        let packet = create_att_packet(0, &data);
+        
+        let response = l2cap_att_handler(&packet).unwrap();
+        
+        // Verify that an error response is returned when no matches are found
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpFindByTypeValueReq as u8);
+        
+        // Error handle should be set to the start_handle value we were using
+        // when we determined there were no matches
+        assert_eq!(response.att_err_rsp().err_handle, 1);
     }
 }

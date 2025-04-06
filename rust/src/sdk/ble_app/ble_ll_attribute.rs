@@ -879,20 +879,33 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
 
         // Special case: handle SEND_TO_MASTER flag
         if get_gAttributes()[att_num].p_attr_value == unsafe { SEND_TO_MASTER.as_mut_ptr() } {
+            // Clear the SEND_TO_MASTER array after reading
             unsafe { SEND_TO_MASTER.fill(0); }
         } 
         // Special case: handle OTA termination flag for handle 0x18
         else if att_num == 0x18 && *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
+            // Mark OTA for termination
             RF_SLAVE_OTA_TERMINATE_FLAG.set(true);
         }
         
         // Prepare and return the response packet
-        rf_packet_att_rsp.head_mut().rf_len = get_gAttributes()[att_num].attr_len + 5;
-        rf_packet_att_rsp.head_mut().dma_len = rf_packet_att_rsp.head_mut().rf_len as u32 + 2;
+        let current_attr = &get_gAttributes()[att_num];
+        let attr_len = current_attr.attr_len;
+        
+        // Set packet header fields according to the ATT protocol requirements
+        // L2CAP header: rf_len = value_len + 5 bytes overhead
+        rf_packet_att_rsp.head_mut().rf_len = attr_len + 5;
+        // DMA length includes 2 additional bytes for radio hardware
+        rf_packet_att_rsp.head_mut().dma_len = (attr_len as u32) + 7;
+        // Packet type 2 = data packet
         rf_packet_att_rsp.head_mut()._type = 2;
-        rf_packet_att_rsp.head_mut().l2cap_len = get_gAttributes()[att_num].attr_len as u16 + 1;
+        // L2CAP length = value_len + 1 byte opcode
+        rf_packet_att_rsp.head_mut().l2cap_len = (attr_len as u16) + 1;
+        // ATT channel ID = 4
         rf_packet_att_rsp.head_mut().chan_id = 4;
-        rf_packet_att_rsp.att_read_rsp_mut().opcode = 0xb;
+        // 0x0B = Read Response opcode
+        rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadRsp as u8;
+        
         return Some(rf_packet_att_rsp)
     }
 

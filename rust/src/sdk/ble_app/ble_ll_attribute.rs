@@ -667,7 +667,8 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
     
     // Extract handle range from the request
-    let mut handle_start = packet.l2cap_data().value[4] as usize;
+    let original_handle_start = packet.l2cap_data().value[4] as usize;
+    let mut handle_start = original_handle_start;
     let handle_end = packet.l2cap_data().value[6] as usize;
     let mut bytes_read = 0;
     let mut uuid_len = 0;
@@ -691,11 +692,6 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
             bytes_read = 0;
         } else {
             let found_attr = &handle.unwrap().0[0];
-            
-            // UUID length must match what we're searching for
-            if (*found_attr).uuid_len != uuid_len {
-                return None
-            }
             
             found_handle = handle.unwrap().1;
             
@@ -729,11 +725,6 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                 bytes_read = 0;
             } else {
                 let found_attr = &handle.unwrap().0[0];
-                
-                // UUID length must match what we're searching for
-                if (*found_attr).uuid_len != uuid_len {
-                    return None
-                }
                 
                 found_handle = handle.unwrap().1;
                 
@@ -806,7 +797,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     
     // Return error response if no matching attributes found
     if bytes_read == 0 {
-        return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, found_handle as u16);
+        return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
     } else {
         // Finalize the response packet header
         rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
@@ -2317,8 +2308,8 @@ mod tests {
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
         
-        // Error handle should be set to the end handle from the request
-        assert_eq!(response.att_err_rsp().err_handle, 20);
+        // Error handle should be set to the start handle from the request
+        assert_eq!(response.att_err_rsp().err_handle, 1);
     }
     
     #[test]
@@ -3145,4 +3136,168 @@ mod tests {
         // when we determined there were no matches
         assert_eq!(response.att_err_rsp().err_handle, 1);
     }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_type_request_no_match() {
+        setup_system_tick_mock();
+        
+        // Create a Read By Type Request packet with a non-existent UUID
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8; // Opcode: Read By Type Request
+        data[1] = 1;    // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 20;   // Ending Handle (little endian)
+        data[4] = 0;
+        
+        // UUID to find: A non-existent UUID (0xDEAD)
+        data[5] = 0xAD; 
+        data[6] = 0xDE;
+        
+        let packet = create_att_packet(GattOp::AttOpReadByTypeReq as u8, &data);
+        
+        // Call the function directly to test the specific code path
+        let response = handle_read_by_type_request(&packet).unwrap();
+        
+        // Verify that an error response was generated
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
+        assert_eq!(response.att_err_rsp().err_handle, 1); // Should match the starting handle from request
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_type_request_uuid128_no_match() {
+        setup_system_tick_mock();
+        
+        // Create a Read By Type Request for a non-existent 128-bit UUID
+        let mut data = [0; 24];
+        data[0] = GattOp::AttOpReadByTypeReq as u8; // Opcode: Read By Type Request
+        data[1] = 1;    // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 28;   // Ending Handle (little endian)
+        data[4] = 0;
+        
+        // Create a non-existent 128-bit UUID
+        let non_existent_uuid = create_uuid128(0xDEAD);
+        data[5..21].copy_from_slice(&non_existent_uuid);
+        
+        let mut packet = create_att_packet(GattOp::AttOpReadByTypeReq as u8, &data);
+        packet.l2cap_data_mut().handle1 = 0x15; // Set handle1 to indicate 128-bit UUID search
+        
+        // Call the function directly to test the specific code path
+        let response = handle_read_by_type_request(&packet).unwrap();
+        
+        // Verify that an error response was generated
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
+        assert_eq!(response.att_err_rsp().err_handle, 1); // Should match the starting handle from request
+    }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_type_request_16bit_uuid_success_path() {
+        setup_system_tick_mock();
+        
+        // This test specifically focuses on the code block that handles
+        // successful 16-bit UUID lookup in handle_read_by_type_request
+        
+        // Instead of guessing handles, find an actual 16-bit UUID attribute in the table
+        // Find the Device Information Service UUID (0x180A) or any other 16-bit UUID
+        let mut target_uuid: [u8; 2] = [0x0A, 0x18]; // Device Information Service in little-endian
+        
+        // Find the actual handle range by scanning the attribute table
+        let mut start_handle = 1; // Default start from 1
+        let total_attrs = get_gAttributes()[0].att_num as usize;
+        let mut found_handle = 0;
+        
+        // Find an attribute with our target UUID to use in the test
+        for i in 1..total_attrs {
+            if get_gAttributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+                if attr_uuid == target_uuid {
+                    found_handle = i;
+                    start_handle = i;
+                    break;
+                }
+            }
+        }
+        
+        // If we didn't find our target UUID, fall back to finding any 16-bit UUID
+        if found_handle == 0 {
+            for i in 1..total_attrs {
+                if get_gAttributes()[i].uuid_len == 2 {
+                    found_handle = i;
+                    start_handle = i;
+                    break;
+                }
+            }
+            
+            // Get the actual UUID from the found attribute
+            if found_handle > 0 {
+                target_uuid.copy_from_slice(unsafe { 
+                    slice::from_raw_parts(get_gAttributes()[found_handle].uuid, 2) 
+                });
+            }
+        }
+        
+        // If we still don't have a valid handle, the test would fail, but at least
+        // we're not using hardcoded values that might be invalid
+        assert!(found_handle > 0, "Could not find any 16-bit UUID attribute for testing");
+        
+        // Define a reasonable end handle (a few handles after start, but not beyond total)
+        let end_handle = (start_handle + 10).min(total_attrs);
+        
+        // Create Read By Type Request for the found UUID
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8; // Read By Type Request
+        data[1] = start_handle as u8;    // Starting Handle - using the found handle
+        data[2] = 0;
+        data[3] = end_handle as u8;   // Ending Handle - a reasonable range after start
+        data[4] = 0;
+        
+        // UUID to find: Use the actual UUID we found
+        data[5] = target_uuid[0];
+        data[6] = target_uuid[1];
+        
+        // Call handle_read_by_type_request directly to test the specific block
+        let packet = create_att_packet(0, &data);
+        let response = handle_read_by_type_request(&packet).unwrap();
+        
+        // Verify it's a Read By Type Response
+        assert_eq!(response.att_read_rsp().opcode, GattOp::AttOpReadByTypeRsp as u8);
+        
+        // Find the expected attribute using l2cap_att_search with our actual handles
+        let handle = l2cap_att_search(start_handle, end_handle, &target_uuid).unwrap();
+        let found_attr = &handle.0[0];
+        let found_handle = handle.1;
+        
+        // Verify bytes_read was correctly calculated
+        // Should be attribute length + 2 (for handle)
+        let expected_bytes_read = found_attr.attr_len + 2;
+        assert_eq!(response.att_read_rsp().value[0], expected_bytes_read);
+        
+        // Verify the handle was correctly copied to response
+        assert_eq!(response.att_read_rsp().value[1], found_handle as u8);
+        assert_eq!(response.att_read_rsp().value[2], (found_handle >> 8) as u8);
+        
+        // Verify the attribute value was correctly copied 
+        let expected_value = unsafe {
+            slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
+        };
+        let actual_value = &response.att_read_rsp().value[3..3 + found_attr.attr_len as usize];
+        assert_eq!(actual_value, expected_value);
+        
+        // Verify the packet header fields were set correctly
+        assert_eq!(response.head()._type, 2);
+        let chan_id = response.head().chan_id;
+        assert_eq!(chan_id, 4);
+        let dma_len = response.head().dma_len;
+        assert_eq!(dma_len, expected_bytes_read as u32 + 8);
+        assert_eq!(response.head().rf_len, expected_bytes_read + 6);
+        let l2cap_len = response.head().l2cap_len;
+        assert_eq!(l2cap_len, expected_bytes_read as u16 + 2);
+    }
+
+    // ...existing code...
 }

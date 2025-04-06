@@ -670,175 +670,141 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     let original_handle_start = packet.l2cap_data().value[4] as usize;
     let mut handle_start = original_handle_start;
     let handle_end = packet.l2cap_data().value[6] as usize;
-    let mut bytes_read = 0;
-    let mut uuid_len = 0;
-    let mut found_handle = handle_end;
-
-    let mut rf_packet_att_rsp = create_att_response_template();
     
-    // Special case: 128-bit UUID search (handle1 = 0x15)
+    // Initialize response packet and tracking variables
+    let mut rf_packet_att_rsp = create_att_response_template();
+    let mut bytes_read = 0;
+
+    // ---- Handle selection based on UUID type (16-bit or 128-bit) ----
     if unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) } == 0x15 {
-        // Extract 128-bit UUID from the request
+        // ---- 128-bit UUID search ----
         let mut uuid = [0; 16];
         uuid.copy_from_slice(&packet.l2cap_data().value[8..8 + 0x10]);
-        uuid_len = 0x10;
         
-        // Search for the attribute with this UUID
-        let handle = l2cap_att_search(handle_start, handle_end, &uuid);
-        
-        if handle == None {
-            // No match found - prepare error response
-            rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
-            bytes_read = 0;
-        } else {
-            let found_attr = &handle.unwrap().0[0];
-            
-            found_handle = handle.unwrap().1;
-            
-            // Set bytes_read to attribute length + 2 (for handle)
-            bytes_read = found_attr.attr_len + 2;
-            
-            // Add handle to response
-            rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
-            rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
-            
-            // Copy attribute value to response
-            rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
-                .copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
-            
-            // Set value[0] to bytes_read (length of each tuple)
-            rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
-        }
-        
-        // Return early here as we've already prepared a response for 128-bit UUID search
-        if bytes_read == 0 {
-            return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
-        } else {
-            // Finalize the response packet header
-            rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
-            rf_packet_att_rsp.head_mut()._type = 2;
-            rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
-            rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
-            rf_packet_att_rsp.head_mut().chan_id = 4;
-            rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
-            
-            return Some(rf_packet_att_rsp);
+        match l2cap_att_search(handle_start, handle_end, &uuid) {
+            None => {
+                // No match found - prepare for error response
+                rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
+            },
+            Some((found_attrs, handle)) => {
+                let found_attr = &found_attrs[0];
+                
+                // Set bytes_read to attribute length + 2 (for handle)
+                bytes_read = found_attr.attr_len + 2;
+                
+                // Format response: handle (2 bytes) + attribute value
+                rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
+                rf_packet_att_rsp.att_read_rsp_mut().value[1] = handle as u8;
+                rf_packet_att_rsp.att_read_rsp_mut().value[2] = (handle >> 8) as u8;
+                
+                // Copy attribute value to response
+                rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                    .copy_from_slice(unsafe { 
+                        slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
+                    });
+            }
         }
     } else {
-        // 16-bit UUID search
+        // ---- 16-bit UUID search ----
         let mut uuid = [0; 2];
         uuid.copy_from_slice(&packet.l2cap_data().value[8..=9]);
         
-        // Special handling for non-GATT Service Changed characteristic UUID
-        if uuid[0] != 3 || uuid[1] != 0x28 {
-            // This is a regular 16-bit UUID search
-            uuid_len = 2;
-            let handle = l2cap_att_search(handle_start, handle_end, &uuid);
-            if handle == None {
-                // No match found
-                rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
-                bytes_read = 0;
-            } else {
-                let found_attr = &handle.unwrap().0[0];
-                
-                found_handle = handle.unwrap().1;
-                
-                // Set bytes_read to attribute length + 2 (for handle)
-                bytes_read = (*found_attr).attr_len + 2;
-                
-                // Add handle and value to response
-                rf_packet_att_rsp.att_read_rsp_mut().value[1] = found_handle as u8;
-                rf_packet_att_rsp.att_read_rsp_mut().value[2] = (found_handle >> 8) as u8;
-                rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
-                    .copy_from_slice(unsafe { slice::from_raw_parts((*found_attr).p_attr_value, (*found_attr).attr_len as usize) });
-                
-                // Set value[0] to bytes_read (length of each tuple)
-                rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
-            }
+        // Special handling for Characteristic UUID (0x2803)
+        if uuid[0] == 3 && uuid[1] == 0x28 {
+            // ---- Characteristic Declaration Search ----
+            let mut counter = 0; // Tracks UUID length for format consistency
             
-            // Return early here as we've already prepared a response for non-GATT Service Changed UUID
-            if bytes_read == 0 {
-                return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
-            } else {
-                // Finalize the response packet header
-                rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
-                rf_packet_att_rsp.head_mut()._type = 2;
-                rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
-                rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
-                rf_packet_att_rsp.head_mut().chan_id = 4;
-                rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
-                
-                return Some(rf_packet_att_rsp);
-            }
-        }
-
-        // For characteristic discovery (UUID 0x2803)
-        let mut counter = 0;
-        bytes_read = 0;
-
-        // Search for all matching characteristics in the range
-        loop {
-            let handle = l2cap_att_search(handle_start, handle_end, &uuid);
-            if handle == None {
-                break;
-            }
-            
-            let found_attr = handle.unwrap().0;
-            found_handle = handle.unwrap().1;
-            
-            // Check if this attribute has consistent format with previous ones
-            // and if we have enough buffer space left
-            if !((counter == 0 || found_attr[1].uuid_len == counter) && bytes_read + found_attr[0].uuid_len < 0x13) {
-                break;
-            }
-
-            // Add characteristic declaration handle
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8;
-            bytes_read = bytes_read + 1;
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
-            bytes_read = bytes_read + 1;
-            
-            // Add characteristic properties (from value byte 0)
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = unsafe { *(found_attr[0]).p_attr_value };
-            bytes_read = bytes_read + 1;
-            
-            // Add value handle (declaration handle + 1)
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = found_handle as u8 + 1;
-            bytes_read = bytes_read + 1;
-            handle_start = found_handle + 2;
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
-            bytes_read = bytes_read + 1;
-
-            // Add characteristic UUID
-            rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1..bytes_read as usize + 1 + (found_attr[1]).uuid_len as usize].copy_from_slice(
-                unsafe {
-                    slice::from_raw_parts(
-                        found_attr[1].uuid,
-                        found_attr[1].uuid_len as usize,
-                    )
+            // Search for all characteristics in the handle range
+            loop {
+                match l2cap_att_search(handle_start, handle_end, &uuid) {
+                    None => break, // No more characteristics found
+                    
+                    Some((found_attrs, handle)) => {
+                        // Enforce format consistency and buffer space limit
+                        if !((counter == 0 || found_attrs[1].uuid_len == counter) && 
+                             bytes_read + found_attrs[0].uuid_len < 0x13) {
+                            break;
+                        }
+                        
+                        // Format each characteristic entry:
+                        // 1. Declaration handle (2 bytes)
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = handle as u8;
+                        bytes_read += 1;
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
+                        bytes_read += 1;
+                        
+                        // 2. Characteristic properties (1 byte)
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = unsafe {
+                            *(found_attrs[0].p_attr_value) 
+                        };
+                        bytes_read += 1;
+                        
+                        // 3. Value handle (2 bytes) - always declaration handle + 1
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = handle as u8 + 1;
+                        bytes_read += 1;
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] = 0;
+                        bytes_read += 1;
+                        
+                        // 4. Characteristic UUID (variable length)
+                        rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1..(bytes_read as usize + 1 + found_attrs[1].uuid_len as usize)]
+                            .copy_from_slice(unsafe { 
+                                slice::from_raw_parts(found_attrs[1].uuid, found_attrs[1].uuid_len as usize)
+                            });
+                        
+                        // Update for next iteration
+                        counter = found_attrs[1].uuid_len;
+                        bytes_read += counter;
+                        handle_start = handle + 2; // Skip to next potential characteristic
+                    }
                 }
-            );
-
-            counter = found_attr[1].uuid_len;
-            bytes_read = counter + bytes_read;
+            }
+            
+            // Set format byte if characteristics were found
+            if counter > 0 {
+                // Format byte = UUID length + 5 (handle=2, properties=1, value handle=2)
+                rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter + 5;
+            }
+        } else {
+            // ---- Regular 16-bit UUID search ----
+            match l2cap_att_search(handle_start, handle_end, &uuid) {
+                None => {
+                    // No matching attributes found
+                    rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
+                },
+                Some((found_attrs, handle)) => {
+                    let found_attr = &found_attrs[0];
+                    
+                    // Format response: handle (2 bytes) + attribute value
+                    bytes_read = found_attr.attr_len + 2;
+                    
+                    rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
+                    rf_packet_att_rsp.att_read_rsp_mut().value[1] = handle as u8;
+                    rf_packet_att_rsp.att_read_rsp_mut().value[2] = (handle >> 8) as u8;
+                    
+                    // Copy attribute value to response
+                    rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                        .copy_from_slice(unsafe { 
+                            slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
+                        });
+                }
+            }
         }
-        rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter + 5;
     }
     
-    // Return error response if no matching attributes found
+    // Return error response if no matching attributes were found
     if bytes_read == 0 {
         return prepare_error_response(GattOp::AttOpReadByTypeReq as u8, original_handle_start as u16);
-    } else {
-        // Finalize the response packet header
-        rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
-        rf_packet_att_rsp.head_mut()._type = 2;
-        rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
-        rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
-        rf_packet_att_rsp.head_mut().chan_id = 4;
-        rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
-
-        Some(rf_packet_att_rsp)
     }
+    
+    // Finalize the response packet header
+    rf_packet_att_rsp.head_mut().dma_len = bytes_read as u32 + 8;
+    rf_packet_att_rsp.head_mut()._type = 2;
+    rf_packet_att_rsp.head_mut().rf_len = bytes_read + 6;
+    rf_packet_att_rsp.head_mut().l2cap_len = bytes_read as u16 + 2;
+    rf_packet_att_rsp.head_mut().chan_id = 4;
+    rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByTypeRsp as u8;
+    
+    Some(rf_packet_att_rsp)
 }
 
 /// Handles Read Request operations that return an attribute's value.

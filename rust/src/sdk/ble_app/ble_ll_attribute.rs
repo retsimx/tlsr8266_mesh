@@ -955,97 +955,131 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     // Mark service discovery as active
     ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
     
-    // Extract handle range from the request
-    let mut handle_start = packet.l2cap_data().value[4] as usize;
+    // Extract handle range and target UUID from the request
+    let start_handle = packet.l2cap_data().value[4] as usize;
     let handle_end = packet.l2cap_data().value[6] as usize;
+    let mut handle_start = start_handle;
     
-    // Get UUID to search for (typically Primary Service 0x2800)
+    // Extract UUID to search for (typically 0x2800 for Primary Service)
     let mut uuid = [0; 2];
     uuid.copy_from_slice(&packet.l2cap_data().value[8..=9]);
     
-    // Counters for tracking response construction
-    let mut dest_ptr = 0;  // Tracks position in the response buffer
-    let mut counter = 0;   // Tracks attribute content size for the response format byte
+    // Immediately check if request is valid, return error for invalid range
+    if start_handle == 0 || start_handle > handle_end {
+        return prepare_error_response(GattOp::AttOpReadByGroupTypeReq as u8, start_handle as u16);
+    }
     
-    // Search for all matching group declarations in the range
-    loop {
-        // Find attribute with the requested UUID
-        let handle = l2cap_att_search(handle_start, handle_end, &uuid);
-        if handle == None {
-            break;
-        }
-
-        let found_attr = &handle.unwrap().0[0];
-
-        // Process the attribute value size
-        let mut attr_len = 0;
-        if counter == 0 {
-            // First attribute sets the expected size for all entries
-            attr_len = found_attr.attr_len as usize;
-        } else {
-            attr_len = found_attr.attr_len as usize;
-            // All entries must have the same size in a response
-            if attr_len != counter {
-                break;
+    // Tracking variables for response construction
+    let mut dest_ptr = 0;        // Position in the response buffer
+    let mut format_length = 0;   // Expected size of each entry (for consistency checking)
+    
+    // Buffer for accumulating response data during search loop
+    let mut response = create_att_response_template();
+    
+    // Maximum buffer size to prevent overflow in response
+    const MAX_BUFFER_SIZE: usize = 0x13;
+    
+    // Search for matching group declarations within handle range
+    while handle_start <= handle_end {
+        // Find next attribute with the requested UUID
+        match l2cap_att_search(handle_start, handle_end, &uuid) {
+            None => break, // No more matching attributes found
+            
+            Some((found_attrs, current_handle)) => {
+                let found_attr = &found_attrs[0];
+                let attr_len = found_attr.attr_len as usize;
+                
+                // Format consistency check - all entries must have same size
+                if format_length != 0 && attr_len != format_length {
+                    break; // Inconsistent attribute sizes, can't include in same response
+                }
+                
+                // Check for buffer overflow - ensure we have enough space
+                if MAX_BUFFER_SIZE < attr_len + dest_ptr * 2 {
+                    break; // Not enough buffer space for this entry
+                }
+                
+                // Initialize format_length on first match
+                if format_length == 0 {
+                    format_length = attr_len;
+                }
+                
+                // Calculate handle positions for response construction
+                let next_ptr = dest_ptr + 1;
+                let value_ptr = next_ptr + 1;
+                
+                // Calculate end handle based on attribute's att_num field
+                let group_end_handle = ((current_handle - 1) + found_attr.att_num as usize) as u16;
+                
+                // Add start handle to response (2 bytes)
+                response.att_read_rsp_mut().value[dest_ptr * 2 + 1] = (current_handle & 0xff) as u8;
+                response.att_read_rsp_mut().value[dest_ptr * 2 + 2] = (current_handle >> 8) as u8;
+                
+                // Add end handle to response (2 bytes)
+                response.att_read_rsp_mut().value[next_ptr * 2 + 1] = (group_end_handle & 0xff) as u8;
+                response.att_read_rsp_mut().value[next_ptr * 2 + 2] = (group_end_handle >> 8) as u8;
+                
+                // Get attribute value as a slice for easier handling
+                let value_slice = unsafe {
+                    slice::from_raw_parts(
+                        found_attr.p_attr_value,
+                        found_attr.attr_len as usize,
+                    )
+                };
+                
+                // Add attribute value (service UUID) to response
+                response.att_read_rsp_mut().value[value_ptr * 2 + 1..value_ptr * 2 + value_slice.len() + 1]
+                    .copy_from_slice(value_slice);
+                
+                // Update pointers and counters for next iteration
+                dest_ptr = value_ptr + (found_attr.attr_len as usize / 2);
+                
+                // Move start handle beyond current group to search for next group
+                handle_start = current_handle + found_attr.att_num as usize;
+                
+                // Check if we've reached the end of the requested range
+                if handle_start > handle_end {
+                    break;
+                }
             }
-        }
-        
-        // Check if we have enough buffer space left
-        if 0x13 < attr_len + dest_ptr * 2 {
-            break;
-        }
-        
-        counter = handle.unwrap().1;
-        
-        // Add start handle
-        let mut rf_packet_att_rsp = create_att_response_template();
-        rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 1] = (counter & 0xff) as u8;
-        rf_packet_att_rsp.att_read_rsp_mut().value[dest_ptr * 2 + 2] = (counter >> 8) as u8;
-
-        // Add end handle (start + attribute count - 1)
-        handle_start = dest_ptr + 1;
-        rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1] = (((counter - 1) + (*found_attr).att_num as usize) & 0xff) as u8;
-        rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 2] = (((counter - 1) + (*found_attr).att_num as usize) >> 8) as u8;
-
-        // Add attribute value (service UUID)
-        handle_start = handle_start + 1;
-        rf_packet_att_rsp.att_read_rsp_mut().value[(handle_start * 2) + 1..(handle_start * 2) + (*found_attr).attr_len as usize + 1].copy_from_slice(
-            unsafe {
-                slice::from_raw_parts(
-                    found_attr.p_attr_value,
-                    found_attr.attr_len as usize,
-                )
-            }
-        );
-        
-        // Update pointers for next iteration
-        dest_ptr = handle_start + ((*found_attr).attr_len as usize / 2);
-        counter = counter + (*found_attr).att_num as usize;
-        handle_start = counter;
-        counter = attr_len;
-        
-        // Break if we've processed all attributes in the range
-        if handle_start > handle_end {
-            break;
         }
     }
     
-    // Return error if no matching attributes found
+    // If no matching attributes were found, return error response
     if dest_ptr == 0 {
-        return prepare_error_response(GattOp::AttOpReadByGroupTypeReq as u8, packet.l2cap_data().value[4] as u16);
-    } else {
-        // Finalize the response packet
-        let mut rf_packet_att_rsp = create_att_response_template();
-        rf_packet_att_rsp.head_mut().dma_len = (dest_ptr as u32 + 4) * 2;
-        rf_packet_att_rsp.head_mut()._type = 2;
-        rf_packet_att_rsp.head_mut().rf_len = rf_packet_att_rsp.head_mut().dma_len as u8 - 2;
-        rf_packet_att_rsp.head_mut().l2cap_len = rf_packet_att_rsp.head_mut().dma_len as u16 - 6;
-        rf_packet_att_rsp.head_mut().chan_id = 4;
-        rf_packet_att_rsp.att_read_rsp_mut().opcode = GattOp::AttOpReadByGroupTypeRsp as u8;
-        rf_packet_att_rsp.att_read_rsp_mut().value[0] = counter as u8 + 4;
-
-        Some(rf_packet_att_rsp)
+        return prepare_error_response(GattOp::AttOpReadByGroupTypeReq as u8, start_handle as u16);
     }
+    
+    // Prepare the final response packet
+    let mut response_packet = create_att_response_template();
+    
+    // Set packet header fields according to BLE ATT protocol requirements
+    response_packet.head_mut().chan_id = 4;  // ATT channel ID = 4
+    response_packet.head_mut()._type = 2;    // Type 2 = data packet
+    
+    // Calculate packet lengths based on data size
+    // Each handle pair is: 4 bytes (start handle + end handle) + format_length
+    // The packet needs: 
+    //   - dma_len: (dest_ptr as u32 + 4) * 2
+    //   - rf_len: dma_len - 2
+    //   - l2cap_len: dma_len - 6
+    let dma_len = (dest_ptr as u32 + 4) * 2;
+    response_packet.head_mut().dma_len = dma_len;
+    response_packet.head_mut().rf_len = dma_len as u8 - 2;
+    response_packet.head_mut().l2cap_len = dma_len as u16 - 6;
+    
+    // Set response opcode and format byte
+    // format byte = attribute value length + 4 (for start and end handles)
+    response_packet.att_read_rsp_mut().opcode = GattOp::AttOpReadByGroupTypeRsp as u8;
+    response_packet.att_read_rsp_mut().value[0] = format_length as u8 + 4;
+    
+    // Copy accumulated response data
+    if dest_ptr > 0 {
+        response_packet.att_read_rsp_mut().value[1..dest_ptr*2+1]
+            .copy_from_slice(&response.att_read_rsp().value[1..dest_ptr*2+1]);
+    }
+
+    Some(response_packet)
 }
 
 /// Handles Write Request and Write Command operations that update attribute values.
@@ -3476,4 +3510,118 @@ mod tests {
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
     }
+
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_group_type_request_zero_start_handle() {
+        setup_system_tick_mock();
+        
+        // Create Read By Group Type Request with start_handle = 0 (invalid)
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByGroupTypeReq as u8; // Opcode: Read By Group Type Request
+        data[1] = 0;    // Starting Handle = 0 (invalid)
+        data[2] = 0;
+        data[3] = 20;   // Ending Handle
+        data[4] = 0;
+        
+        // UUID to find: Primary Service (0x2800)
+        data[5] = 0x00; 
+        data[6] = 0x28;
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handle_read_by_group_type_request function directly
+        let response = handle_read_by_group_type_request(&packet).unwrap();
+        
+        // Verify that an error response is returned
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
+        assert_eq!(response.att_err_rsp().err_handle, 0); // Should match the invalid start_handle value
+        
+        // Also verify through the main handler
+        let response2 = l2cap_att_handler(&packet).unwrap();
+        
+        // Should also be an error response with same parameters
+        assert_eq!(response2.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response2.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
+        assert_eq!(response2.att_err_rsp().err_handle, 0);
+    }
+    
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_group_type_request_start_handle_greater_than_end_handle() {
+        setup_system_tick_mock();
+        
+        // Create Read By Group Type Request with start_handle > end_handle (invalid)
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByGroupTypeReq as u8; // Opcode: Read By Group Type Request
+        data[1] = 20;   // Starting Handle
+        data[2] = 0;
+        data[3] = 10;   // Ending Handle (smaller than start handle)
+        data[4] = 0;
+        
+        // UUID to find: Primary Service (0x2800)
+        data[5] = 0x00; 
+        data[6] = 0x28;
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handle_read_by_group_type_request function directly
+        let response = handle_read_by_group_type_request(&packet).unwrap();
+        
+        // Verify that an error response is returned
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
+        assert_eq!(response.att_err_rsp().err_handle, 20); // Should match the invalid start_handle value
+        
+        // Also verify through the main handler
+        let response2 = l2cap_att_handler(&packet).unwrap();
+        
+        // Should also be an error response with same parameters
+        assert_eq!(response2.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(response2.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
+        assert_eq!(response2.att_err_rsp().err_handle, 20);
+    }
+    
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_handle_read_by_group_type_request_valid_range() {
+        setup_system_tick_mock();
+        
+        // Create Read By Group Type Request with a valid handle range
+        // We need to ensure this handle range contains at least one primary service
+        // Most BLE devices have a Generic Access service at handle 1
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByGroupTypeReq as u8; // Opcode: Read By Group Type Request
+        data[1] = 1;    // Starting Handle
+        data[2] = 0;
+        data[3] = 10;   // Ending Handle
+        data[4] = 0;
+        
+        // UUID to find: Primary Service (0x2800)
+        data[5] = 0x00; 
+        data[6] = 0x28;
+        
+        let packet = create_att_packet(0, &data);
+        
+        // Call the handle_read_by_group_type_request function directly
+        let response = handle_read_by_group_type_request(&packet).unwrap();
+        
+        // For a valid range with primary services, we should get a Read By Group Type Response
+        // and not an error response
+        assert_eq!(response.att_read_rsp().opcode, GattOp::AttOpReadByGroupTypeRsp as u8);
+        
+        // The first byte of the value array should contain the format byte
+        // Format byte = attribute value length + 4 (for start and end handles)
+        // Primary service UUIDs are typically 2 bytes, so format byte should be 6
+        assert!(response.att_read_rsp().value[0] >= 4, "Format byte should be at least 4");
+        
+        // Also verify through the main handler
+        let response2 = l2cap_att_handler(&packet).unwrap();
+        
+        // Should also be a Read By Group Type Response
+        assert_eq!(response2.att_read_rsp().opcode, GattOp::AttOpReadByGroupTypeRsp as u8);
+    }
+
+    // ...existing code...
 }

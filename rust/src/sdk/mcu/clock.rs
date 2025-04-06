@@ -60,6 +60,7 @@ pub fn clock_init() {
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn clock_time() -> u32 {
     read_reg_system_tick()
 }

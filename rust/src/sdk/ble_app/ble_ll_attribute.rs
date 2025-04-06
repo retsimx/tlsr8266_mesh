@@ -564,7 +564,7 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
         let search_result = l2cap_att_search(current_handle, end_handle, &uuid);
         
         // No more matching attributes found
-        if search_result.is_none() {
+        if (search_result.is_none()) {
             break;
         }
         
@@ -1266,264 +1266,77 @@ mod tests {
 
     #[test]
     #[mry::lock(read_reg_system_tick)]
-    fn test_handle_mtu_exchange_response_handle_c() {
-        // Set up system tick mock
-        setup_system_tick_mock();
+    fn test_handle_mtu_exchange_response() {
+        // Test all MTU exchange response handle cases in a single test
         
-        // Reset ATT_SERVICE_DISCOVER_TICK before test
-        ATT_SERVICE_DISCOVER_TICK.set(0);
-        
-        // Create packet with handle 0xC
-        let packet = create_test_packet_with_handle(0x0C);
-        
-        // Call the function
-        let response = handle_mtu_exchange_response(&packet).unwrap();
-        
-        // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
-        assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679); // 0x12345678 | 1
-        
-        // Verify we received a version indication packet
-        assert_eq!(response.version_ind().opcode, 0x0C);
-        assert_eq!(response.version_ind()._type, 3);
-        assert_eq!(response.version_ind().rf_len, 6);
-        assert_eq!(response.version_ind().dma_len, 8);
-        assert_eq!(response.version_ind().vendor, VENDOR_ID);
-        assert_eq!(response.version_ind().main_ver, 0x08);
-        assert_eq!(response.version_ind().sub_ver, 0x08);
-    }
-    
-    #[test]
-    #[mry::lock(read_reg_system_tick)]
-    fn test_handle_mtu_exchange_response_handle_8() {
-        // Set up system tick mock
-        setup_system_tick_mock();
-        
-        // Reset ATT_SERVICE_DISCOVER_TICK before test
-        ATT_SERVICE_DISCOVER_TICK.set(0);
-        
-        // Create packet with handle 8
-        let packet = create_test_packet_with_handle(8);
-        
-        // Call the function
-        let response = handle_mtu_exchange_response(&packet).unwrap();
-        
-        // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
-        assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679); // 0x12345678 | 1
-        
-        // Verify we received a feature response packet
-        assert_eq!(response.feature_rsp().opcode, 0x09);
-        assert_eq!(response.feature_rsp()._type, 0x3);
-        assert_eq!(response.feature_rsp().rf_len, 0x09);
-        assert_eq!(response.feature_rsp().dma_len, 0x0b);
-        assert_eq!(response.feature_rsp().data[0], 1); // First flag byte is set
-        // Check remaining bytes are zero
-        for i in 1..8 {
-            assert_eq!(response.feature_rsp().data[i], 0);
-        }
-    }
-    
-    #[test]
-    fn test_handle_mtu_exchange_response_handle_2() {
-        // Reset SLAVE_LINK_TIME_OUT before test
-        SLAVE_LINK_TIME_OUT.set(0);
-        
-        // Create packet with handle 2
-        let packet = create_test_packet_with_handle(2);
-        
-        // Call the function
-        let response = handle_mtu_exchange_response(&packet);
-        
-        // Verify SLAVE_LINK_TIME_OUT was set correctly
-        assert_eq!(SLAVE_LINK_TIME_OUT.get(), 1000000);
-        
-        // Verify no response was returned
-        assert!(response.is_none());
-    }
-    
-    #[test]
-    fn test_handle_mtu_exchange_response_other_handles() {
-        // Test a few different handle values
-        for handle in [1, 3, 5, 7, 9, 10] {
-            // Create packet with the test handle
-            let packet = create_test_packet_with_handle(handle);
-            
-            // Call the function
+        // --- Test handle 0xC case (version indication) ---
+        {
+            setup_system_tick_mock();
+            ATT_SERVICE_DISCOVER_TICK.set(0);
+            let packet = create_test_packet_with_handle(0x0C);
             let response = handle_mtu_exchange_response(&packet).unwrap();
             
-            // Verify we received a control packet with the correct handle
-            assert_eq!(response.ctrl_unknown().opcode, 0x07);
-            assert_eq!(response.ctrl_unknown().data[0], handle); // Handle is included in data
-            assert_eq!(response.ctrl_unknown()._type, 0x03);
-            assert_eq!(response.ctrl_unknown().rf_len, 0x02);
-            assert_eq!(response.ctrl_unknown().dma_len, 0x04);
+            // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
+            assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679); // 0x12345678 | 1
+            
+            // Verify version indication packet
+            assert_eq!(response.version_ind().opcode, 0x0C);
+            assert_eq!(response.version_ind()._type, 3);
+            assert_eq!(response.version_ind().rf_len, 6);
+            assert_eq!(response.version_ind().dma_len, 8);
+            assert_eq!(response.version_ind().vendor, VENDOR_ID);
+            assert_eq!(response.version_ind().main_ver, 0x08);
+            assert_eq!(response.version_ind().sub_ver, 0x08);
         }
-    }
-    
-    #[test]
-    fn test_create_att_response_template() {
-        // Create template packet
-        let template = create_att_response_template();
         
-        // Verify all fields are zeroed
-        let dma_len = template.head().dma_len;
-        assert_eq!(dma_len, 0);
-        assert_eq!(template.head()._type, 0);
-        assert_eq!(template.head().rf_len, 0);
-        let l2cap_len = template.head().l2cap_len;
-        assert_eq!(l2cap_len, 0);
-        let chan_id = template.head().chan_id;
-        assert_eq!(chan_id, 0);
-        assert_eq!(template.att_read_rsp().opcode, 0);
-        
-        // Check all bytes in value array are zero
-        for byte in template.att_read_rsp().value.iter() {
-            assert_eq!(*byte, 0);
+        // --- Test handle 8 case (feature response) ---
+        {
+            setup_system_tick_mock();
+            ATT_SERVICE_DISCOVER_TICK.set(0);
+            let packet = create_test_packet_with_handle(8);
+            let response = handle_mtu_exchange_response(&packet).unwrap();
+            
+            // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
+            assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679);
+            
+            // Verify feature response packet
+            assert_eq!(response.feature_rsp().opcode, 0x09);
+            assert_eq!(response.feature_rsp()._type, 0x3);
+            assert_eq!(response.feature_rsp().rf_len, 0x09);
+            assert_eq!(response.feature_rsp().dma_len, 0x0b);
+            assert_eq!(response.feature_rsp().data[0], 1);
+            // Check remaining bytes are zero
+            for i in 1..8 {
+                assert_eq!(response.feature_rsp().data[i], 0);
+            }
         }
-    }
-
-    // Existing tests follow...
-    #[test]
-    fn test_l2cap_att_search_not_found() {
-        // Search for UUID that doesn't exist in the attribute list
-        let uuid_bytes = uuid16_to_bytes(0xABCD); // Non-existent UUID
-        let result = l2cap_att_search(1, 28, &uuid_bytes);
-        assert!(result.is_none());
-    }
-
-    // ... all existing tests remain unchanged ...
-    #[test]
-    fn test_l2cap_att_search_handle_start_equals_att_num() {
-        // The first attribute in gAttributes has its att_num set to the total number of attributes
-        // in our case, that's 28 (index 0-27)
-        let att_num = get_gAttributes()[0].att_num as usize;
-
-        // Search with handle_start equal to att_num should return None
-        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
-        let result = l2cap_att_search(att_num, att_num + 5, &uuid_bytes);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_l2cap_att_search_handle_end_adjustment() {
-        // att_num is the total number of attributes
-        let att_num = get_gAttributes()[0].att_num as usize;
-
-        // We know PRIMARY_SERVICE_UUID exists in the attribute table
-        // Search beyond att_num should be adjusted to att_num
-        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
-        let result = l2cap_att_search(1, att_num + 10, &uuid_bytes);
-
-        // Should find a match since PRIMARY_SERVICE_UUID exists
-        assert!(result.is_some());
-        // Handle should be less than or equal to att_num
-        let (_, handle) = result.unwrap();
-        assert!(handle <= att_num);
-    }
-
-    #[test]
-    fn test_l2cap_att_search_uuid16_match() {
-        // PRIMARY_SERVICE_UUID is a 16-bit UUID used in the attribute table
-        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
-        let result = l2cap_att_search(1, 28, &uuid_bytes);
-
-        // Should find a match
-        assert!(result.is_some());
-
-        // Verify handle is in the expected range
-        let (found_attrs, handle) = result.unwrap();
-        assert!(handle >= 1);
-        assert!(handle <= 28);
-
-        // Verify slice length
-        assert_eq!(found_attrs.len(), 2);
-    }
-
-    #[test]
-    fn test_l2cap_att_search_uuid128_match() {
-        // Get SPP service UUID from attribute 18 in the attribute table
-        // This is a 128-bit UUID (16 bytes)
-        let spp_service_handle = 18;
-
-        // Use the actual 128-bit UUID directly from the attribute table
-        // TELINK_SPP_DATA_SERVER2CLIENT_UUID is defined in app_att_light.rs
-        let result = l2cap_att_search(1, 28, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
-
-        // Should find a match
-        assert!(result.is_some());
-
-        // Verify found handle is as expected
-        let (_, found_handle) = result.unwrap();
-        assert_eq!(found_handle, spp_service_handle);
-
-        // Also verify that searching from the handle itself works
-        let result2 = l2cap_att_search(spp_service_handle, spp_service_handle, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
-        assert!(result2.is_some());
-        let (_, found_handle2) = result2.unwrap();
-        assert_eq!(found_handle2, spp_service_handle);
-    }
-
-    #[test]
-    fn test_l2cap_att_search_handle_range() {
-        // We know PRIMARY_SERVICE_UUID appears at multiple places in the attribute table
-        // First at index 1 (GAP service) and then at index 7 (Device Info service)
-
-        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
-
-        // Search only in the range that includes the first occurrence (1-6)
-        let result1 = l2cap_att_search(1, 6, &uuid_bytes);
-        assert!(result1.is_some());
-        let (_, handle1) = result1.unwrap();
-        assert_eq!(handle1, 1); // Should find at index 1
-
-        // Search only in the range that includes the second occurrence (7-15)
-        let result2 = l2cap_att_search(7, 15, &uuid_bytes);
-        assert!(result2.is_some());
-        let (_, handle2) = result2.unwrap();
-        assert_eq!(handle2, 7); // Should find at index 7
-
-        // Search in a range that excludes any PRIMARY_SERVICE_UUID (2-6)
-        // (assuming there's no PRIMARY_SERVICE_UUID between index 2 and 6)
-        let result3 = l2cap_att_search(2, 6, &uuid_bytes);
-        assert!(result3.is_none()); // Should not find any
-    }
-
-    #[test]
-    fn test_l2cap_att_search_first_match() {
-        // We know CHARACTER_UUID appears multiple times in the attribute table
-        let uuid_bytes = uuid16_to_bytes(GATT_UUID_CHARACTER);
-
-        // Search for the first occurrence
-        let result1 = l2cap_att_search(1, 28, &uuid_bytes);
-        assert!(result1.is_some());
-        let (_, handle1) = result1.unwrap();
-
-        // Now search for the next occurrence, starting after the first one
-        let result2 = l2cap_att_search(handle1 + 1, 28, &uuid_bytes);
-        assert!(result2.is_some());
-        let (_, handle2) = result2.unwrap();
-
-        // Verify that the second handle is greater than the first one
-        assert!(handle2 > handle1);
-    }
-
-    #[test]
-    fn test_l2cap_att_search_uuid16_no_match() {
-        // Search for a 16-bit UUID that doesn't exist in the attribute table
-        let uuid_bytes = uuid16_to_bytes(0xDEAD); // Non-existent UUID
-        let result = l2cap_att_search(1, 28, &uuid_bytes);
-
-        // Should not find a match
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_l2cap_att_search_uuid128_no_match() {
-        // Create a 128-bit UUID that doesn't exist in the attribute table
-        let uuid128 = create_uuid128(0xBEEF); // Non-existent UUID
-        let result = l2cap_att_search(1, 28, &uuid128);
-
-        // Should not find a match
-        assert!(result.is_none());
+        
+        // --- Test handle 2 case (link timeout) ---
+        {
+            SLAVE_LINK_TIME_OUT.set(0);
+            let packet = create_test_packet_with_handle(2);
+            let response = handle_mtu_exchange_response(&packet);
+            
+            // Verify timeout was set and no response
+            assert_eq!(SLAVE_LINK_TIME_OUT.get(), 1000000);
+            assert!(response.is_none());
+        }
+        
+        // --- Test other handle cases (control packet) ---
+        {
+            // Test several other handles to verify control packet response
+            for handle in [1, 3, 5, 7, 9, 10] {
+                let packet = create_test_packet_with_handle(handle);
+                let response = handle_mtu_exchange_response(&packet).unwrap();
+                
+                // Verify control packet with expected fields
+                assert_eq!(response.ctrl_unknown().opcode, 0x07);
+                assert_eq!(response.ctrl_unknown().data[0], handle);
+                assert_eq!(response.ctrl_unknown()._type, 0x03);
+                assert_eq!(response.ctrl_unknown().rf_len, 0x02);
+                assert_eq!(response.ctrl_unknown().dma_len, 0x04);
+            }
+        }
     }
 
     // Helper function to create a packet with the specified opcode and data
@@ -3655,6 +3468,142 @@ mod tests {
             
             // Write to restricted handles should return None (blocked)
             assert!(response.is_none());
+        }
+    }
+
+    #[test]
+    fn test_l2cap_att_search_functionality() {
+        // Test all attribute search functionality in a single parameterized test
+        
+        // ---- Case 1: Test UUID16 matching ----
+        {
+            // PRIMARY_SERVICE_UUID is a 16-bit UUID used in the attribute table
+            let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+            let result = l2cap_att_search(1, 28, &uuid_bytes);
+
+            // Should find a match
+            assert!(result.is_some());
+
+            // Verify handle is in the expected range
+            let (found_attrs, handle) = result.unwrap();
+            assert!(handle >= 1);
+            assert!(handle <= 28);
+
+            // Verify slice length
+            assert_eq!(found_attrs.len(), 2);
+        }
+        
+        // ---- Case 2: Test UUID128 matching ----
+        {
+            // Get SPP service UUID from attribute 18 in the attribute table
+            let spp_service_handle = 18;
+
+            // Use the actual 128-bit UUID directly from the attribute table
+            let result = l2cap_att_search(1, 28, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
+
+            // Should find a match
+            assert!(result.is_some());
+
+            // Verify found handle is as expected
+            let (_, found_handle) = result.unwrap();
+            assert_eq!(found_handle, spp_service_handle);
+
+            // Also verify that searching from the handle itself works
+            let result2 = l2cap_att_search(spp_service_handle, spp_service_handle, &TELINK_SPP_DATA_SERVER2CLIENT_UUID);
+            assert!(result2.is_some());
+            let (_, found_handle2) = result2.unwrap();
+            assert_eq!(found_handle2, spp_service_handle);
+        }
+        
+        // ---- Case 3: Test handle range restrictions ----
+        {
+            // We know PRIMARY_SERVICE_UUID appears at multiple places in the attribute table
+            // First at index 1 (GAP service) and then at index 7 (Device Info service)
+
+            let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+
+            // Search only in the range that includes the first occurrence (1-6)
+            let result1 = l2cap_att_search(1, 6, &uuid_bytes);
+            assert!(result1.is_some());
+            let (_, handle1) = result1.unwrap();
+            assert_eq!(handle1, 1); // Should find at index 1
+
+            // Search only in the range that includes the second occurrence (7-15)
+            let result2 = l2cap_att_search(7, 15, &uuid_bytes);
+            assert!(result2.is_some());
+            let (_, handle2) = result2.unwrap();
+            assert_eq!(handle2, 7); // Should find at index 7
+
+            // Search in a range that excludes any PRIMARY_SERVICE_UUID (2-6)
+            // (assuming there's no PRIMARY_SERVICE_UUID between index 2 and 6)
+            let result3 = l2cap_att_search(2, 6, &uuid_bytes);
+            assert!(result3.is_none()); // Should not find any
+        }
+        
+        // ---- Case 4: Test found in sequence ----
+        {
+            // We know CHARACTER_UUID appears multiple times in the attribute table
+            let uuid_bytes = uuid16_to_bytes(GATT_UUID_CHARACTER);
+
+            // Search for the first occurrence
+            let result1 = l2cap_att_search(1, 28, &uuid_bytes);
+            assert!(result1.is_some());
+            let (_, handle1) = result1.unwrap();
+
+            // Now search for the next occurrence, starting after the first one
+            let result2 = l2cap_att_search(handle1 + 1, 28, &uuid_bytes);
+            assert!(result2.is_some());
+            let (_, handle2) = result2.unwrap();
+
+            // Verify that the second handle is greater than the first one
+            assert!(handle2 > handle1);
+        }
+        
+        // ---- Case 5: Test handle range adjustment ----
+        {
+            // att_num is the total number of attributes
+            let att_num = get_gAttributes()[0].att_num as usize;
+
+            // We know PRIMARY_SERVICE_UUID exists in the attribute table
+            // Search beyond att_num should be adjusted to att_num
+            let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+            let result = l2cap_att_search(1, att_num + 10, &uuid_bytes);
+
+            // Should find a match since PRIMARY_SERVICE_UUID exists
+            assert!(result.is_some());
+            // Handle should be less than or equal to att_num
+            let (_, handle) = result.unwrap();
+            assert!(handle <= att_num);
+        }
+        
+        // ---- Case 6: Test no match found ----
+        {
+            // Search for UUID that doesn't exist in the attribute list
+            let uuid_bytes = uuid16_to_bytes(0xABCD); // Non-existent UUID
+            let result = l2cap_att_search(1, 28, &uuid_bytes);
+            assert!(result.is_none());
+            
+            // Search for a 16-bit UUID that doesn't exist in the attribute table
+            let uuid_bytes = uuid16_to_bytes(0xDEAD); // Non-existent UUID
+            let result = l2cap_att_search(1, 28, &uuid_bytes);
+            assert!(result.is_none());
+
+            // Create a 128-bit UUID that doesn't exist in the attribute table
+            let uuid128 = create_uuid128(0xBEEF); // Non-existent UUID
+            let result = l2cap_att_search(1, 28, &uuid128);
+            assert!(result.is_none());
+        }
+        
+        // ---- Case 7: Test handle_start = att_num edge case ----
+        {
+            // The first attribute in gAttributes has its att_num set to the total number of attributes
+            // in our case, that's 28 (index 0-27)
+            let att_num = get_gAttributes()[0].att_num as usize;
+
+            // Search with handle_start equal to att_num should return None
+            let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+            let result = l2cap_att_search(att_num, att_num + 5, &uuid_bytes);
+            assert!(result.is_none());
         }
     }
 }

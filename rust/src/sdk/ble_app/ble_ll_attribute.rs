@@ -1125,39 +1125,43 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
 /// * If the attribute value points to a memory address <= __RAM_START_ADDR, it's in ROM 
 ///   and can't be written to directly
 fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
-    let att_num = packet.l2cap_data().value[4] as usize;
+    // --- Extract attribute handle from request ---
+    let att_handle = packet.l2cap_data().value[4] as usize;
     
-    // Validate handle has zero in high byte
-    if packet.l2cap_data().value[5] != 0 {
-        return None
+    // --- Validate handle: check high byte and total attribute count ---
+    let high_byte_is_zero = packet.l2cap_data().value[5] == 0;
+    let handle_in_range = get_gAttributes()[0].att_num >= att_handle as u8;
+    
+    if !high_byte_is_zero || !handle_in_range {
+        return None;
     }
     
-    // Validate handle doesn't exceed total attribute count
-    if get_gAttributes()[0].att_num < att_num as u8 {
-        return None
-    }
+    // --- Get current attribute and check if it's a CCCD ---
+    let current_attr = &get_gAttributes()[att_handle];
+    let is_cccd = !current_attr.uuid.is_null() && 
+                 unsafe { *(current_attr.uuid as *const u16) == GATT_UUID_CLIENT_CHAR_CFG };
     
-    let mut result;
-    
-    // Permission checks - skip for Client Characteristic Configuration Descriptor (0x2902)
-    // First check if uuid is not null before dereferencing
-    if get_gAttributes()[att_num].uuid.is_null() || 
-       unsafe { *(get_gAttributes()[att_num].uuid as *const u16) } != GATT_UUID_CLIENT_CHAR_CFG {
-        if att_num < 2 {
-            return None  // Can't write to handles 0 or 1
+    // --- Apply permission checks (skip for CCCDs) ---
+    if !is_cccd {
+        // Reject writes to handles 0 and 1 (reserved attributes)
+        if att_handle < 2 {
+            return None;
         }
         
-        // Check if previous attribute (characteristic declaration) has write permission
-        if unsafe { *get_gAttributes()[att_num - 1].p_attr_value } & 0xc == 0 {
-            return None  // No write permission (bits 2-3 not set)
+        // Check characteristic declaration for write permission (bits 2-3)
+        let declaration_properties = unsafe { *get_gAttributes()[att_handle - 1].p_attr_value };
+        let write_permitted = declaration_properties & 0xc != 0;
+        
+        if !write_permitted {
+            return None;
         }
     }
 
-    // Prepare the response based on operation type
-    result = None;
-    if packet.l2cap_data().value[3] == GattOp::AttOpWriteReq as u8 {
-        // Only Write Request gets a response, Write Command doesn't
-        result = Some(
+    // --- Prepare response based on operation type ---
+    // Write Request (0x12) needs a response; Write Command (0x52) doesn't
+    let is_write_request = packet.l2cap_data().value[3] == GattOp::AttOpWriteReq as u8;
+    let response = if is_write_request {
+        Some(
             Packet {
                 att_write_rsp: PacketAttWriteRsp {
                     head: PacketL2capHead {
@@ -1171,46 +1175,53 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
                 }
             }
         )
-    }
+    } else {
+        None
+    };
 
-    // Handle the write operation
-    if get_gAttributes()[att_num].w.is_none() {
-        // No write callback - check if request has enough data
-        if unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) } < 3 {
-            return result;
+    // --- Process the write operation ---
+    if current_attr.w.is_none() {
+        // Handle case when no write callback is defined
+        
+        // Early return if request data is insufficient (handle too small)
+        let handle_value = unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) };
+        if handle_value < 3 {
+            return response;
         }
 
-        // Check if attribute value is writeable
-        if get_gAttributes()[att_num].p_attr_value as u32 <= unsafe { addr_of!(__RAM_START_ADDR) } as u32 {
-            return result;  // Value is in ROM, can't be written
+        // Check if attribute value is stored in RAM (not ROM)
+        let ram_start_addr = unsafe { addr_of!(__RAM_START_ADDR) } as u32;
+        let attr_addr = current_attr.p_attr_value as u32;
+        
+        if attr_addr <= ram_start_addr {
+            return response;
         }
 
-        // Get a mutable slice to the attribute value
-        let dest = unsafe {
+        // Get mutable slice of attribute value and incoming data
+        let attr_value_slice = unsafe {
             slice::from_raw_parts_mut(
-                get_gAttributes()[att_num].p_attr_value,
-                get_gAttributes()[att_num].attr_len as usize,
+                current_attr.p_attr_value,
+                current_attr.attr_len as usize,
+            )
+        };
+        
+        let incoming_value_slice = unsafe {
+            slice::from_raw_parts(
+                addr_of!(packet.l2cap_data().value[6]),
+                current_attr.attr_len as usize,
             )
         };
 
-        // Clear and update the attribute value
-        dest.fill(0);
-        dest.copy_from_slice(
-            unsafe {
-                slice::from_raw_parts(
-                    addr_of!(packet.l2cap_data().value[6]),
-                    get_gAttributes()[att_num].attr_len as usize,
-                )
-            }
-        );
-
-        return result;
+        // Update attribute value with incoming data
+        attr_value_slice.fill(0);
+        attr_value_slice.copy_from_slice(incoming_value_slice);
+    } else {
+        // Attribute has a write callback - invoke it
+        let write_callback = current_attr.w.unwrap();
+        write_callback(packet);
     }
 
-    // Call the attribute's write callback if it exists
-    get_gAttributes()[att_num].w.unwrap()(packet);
-
-    result
+    response
 }
 
 #[cfg(test)]

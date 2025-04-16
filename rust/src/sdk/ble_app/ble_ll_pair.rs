@@ -83,29 +83,39 @@ const LGT_CMD_PAIR_OK: u8 = 0xc5;    // Pairing successful
 /// @param ps The packet to decrypt
 /// @return true if decryption was successful, false otherwise
 pub fn pair_dec_packet(ps: &mut Packet) -> bool {
-    if SECURITY_ENABLE.get() {
-        let mut pair_ivm = PAIR_IVM.lock();
-        // Extract sequence number from packet as part of IV
-        pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value.sno);
+    // Early return if security is not enabled
+    if !SECURITY_ENABLE.get() {
+        return false;
+    }
 
-        // Extract source address from packet
-        let src = ps.att_write().value.src;
+    let mut pair_ivm = PAIR_IVM.lock();
+    
+    // Extract sequence number from packet as part of IV
+    pair_ivm[5..5 + 3].copy_from_slice(&ps.att_write().value.sno);
 
-        let l2len = ps.head().l2cap_len as usize;
+    // Extract source address from packet
+    let src = ps.att_write().value.src;
 
-        let data = slice_from_raw_parts_mut(addr_of_mut!(ps.att_write_mut().value.dst) as *mut u8, l2len - 8);
-        
-        // Perform decryption using AES-CCM
-        unsafe {
-            aes_att_decryption_packet(
-                &PAIR_STATE.lock().pair_sk,
-                &*pair_ivm,
-                &src,
-                &mut *data,
-            )
-        }
-    } else {
-        false
+    // Calculate data length from packet header
+    let l2len = ps.head().l2cap_len as usize;
+    
+    // Create a slice pointing to the payload data that needs decryption
+    let data_ptr = addr_of_mut!(ps.att_write_mut().value.dst) as *mut u8;
+    let data_len = l2len - 8;
+    
+    // Get current session key for decryption
+    let pair_sk = &PAIR_STATE.lock().pair_sk;
+    
+    // Perform decryption using AES-CCM
+    unsafe {
+        // Create data slice and decrypt in-place
+        let data = slice_from_raw_parts_mut(data_ptr, data_len);
+        aes_att_decryption_packet(
+            pair_sk,      // Session key
+            &*pair_ivm,   // IV modifier
+            &src,         // Expected MIC (Message Integrity Check)
+            &mut *data,   // Data to decrypt (in place)
+        )
     }
 }
 
@@ -118,28 +128,63 @@ pub fn pair_dec_packet(ps: &mut Packet) -> bool {
 /// @param ps The packet to encrypt
 pub fn pair_enc_packet(ps: &mut Packet)
 {
-    if SECURITY_ENABLE.get() && ps.head().chan_id == 4 && ps.ll_app().opcode == 0x1b && ps.ll_app().handle == 0x12 {
-        // Create a sequence number from system tick to prevent replay attacks
-        let tick = read_reg_system_tick();
-        ps.ll_app_mut().value.sno[0] = tick as u8;
-        ps.ll_app_mut().value.sno[1] = (tick >> 8) as u8;
-        ps.ll_app_mut().value.sno[2] = (tick >> 16) as u8;
-
-        let mut pair_ivs = PAIR_IVS.lock();
-
-        // Update initialization vector with sequence number and addressing information
-        pair_ivs[3..3 + 3].copy_from_slice(&ps.ll_app().value.sno);
-        pair_ivs[6] = ps.ll_app().value.src as u8;
-        pair_ivs[7] = (ps.ll_app().value.src >> 8) as u8;
-
-        // Perform encryption using AES-CCM
-        aes_att_encryption_packet(
-            &PAIR_STATE.lock().pair_sk,
-            &*pair_ivs,
-            unsafe { slice::from_raw_parts_mut(addr_of!(ps.ll_app().value.dst) as *mut u8, 2) },
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.ll_app_mut().value.op), ((ps.head().l2cap_len & 0xff) - 10) as usize) },
-        );
+    // Constants for encryption conditions and offsets
+    const ENCRYPTION_CHANNEL: u16 = 4;
+    const ENCRYPTION_OPCODE: u8 = 0x1b;
+    const ENCRYPTION_HANDLE: u8 = 0x12;
+    const SNO_LENGTH: usize = 3;
+    const IV_SEQ_OFFSET: usize = 3;
+    const IV_SRC_OFFSET: usize = 6;
+    const L2CAP_HEADER_LEN: u16 = 10;
+    
+    // Check if encryption is needed and packet meets encryption criteria
+    if !SECURITY_ENABLE.get() || 
+       ps.head().chan_id != ENCRYPTION_CHANNEL || 
+       ps.ll_app().opcode != ENCRYPTION_OPCODE || 
+       ps.ll_app().handle != ENCRYPTION_HANDLE {
+        return;
     }
+    
+    // Create a sequence number from system tick to prevent replay attacks
+    let tick = read_reg_system_tick();
+    
+    // Set sequence number in packet
+    let sno = &mut ps.ll_app_mut().value.sno;
+    sno[0] = tick as u8;
+    sno[1] = (tick >> 8) as u8;
+    sno[2] = (tick >> 16) as u8;
+    
+    // Update initialization vector with sequence number and source address
+    let mut pair_ivs = PAIR_IVS.lock();
+    pair_ivs[IV_SEQ_OFFSET..IV_SEQ_OFFSET + SNO_LENGTH].copy_from_slice(sno);
+    
+    // Extract source address (little-endian representation)
+    let src = ps.ll_app().value.src;
+    pair_ivs[IV_SRC_OFFSET] = src as u8;         // Low byte
+    pair_ivs[IV_SRC_OFFSET + 1] = (src >> 8) as u8;  // High byte
+    
+    // Get session key for encryption
+    let session_key = &PAIR_STATE.lock().pair_sk;
+    
+    // Calculate data length from L2CAP header length
+    let data_len = ((ps.head().l2cap_len & 0xff) - L2CAP_HEADER_LEN) as usize;
+    
+    // Create destination and payload slices for encryption
+    let dst_slice = unsafe { 
+        slice::from_raw_parts_mut(addr_of!(ps.ll_app().value.dst) as *mut u8, 2) 
+    };
+    
+    let data_slice = unsafe { 
+        slice::from_raw_parts_mut(addr_of_mut!(ps.ll_app_mut().value.op), data_len)
+    };
+    
+    // Perform encryption using AES-CCM
+    aes_att_encryption_packet(
+        session_key, // Session key
+        &*pair_ivs,  // IV modifier
+        dst_slice,   // Output buffer for the calculated MIC
+        data_slice,  // Data to encrypt (in place)
+    );
 }
 
 /// Decrypt a mesh network packet using the long-term key (LTK)
@@ -151,49 +196,54 @@ pub fn pair_enc_packet(ps: &mut Packet)
 /// @param ps The mesh packet to decrypt
 /// @return true if decryption was successful, false otherwise
 pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
-    let mut ltk = [0u8; 16];
-
-    // If security is not enabled, we consider packets as already decrypted
+    // Early return if security is disabled - we treat packets as already decrypted
     if !SECURITY_ENABLE.get() {
         return true;
     }
 
-    // Check if packet has the mesh encryption flag set
+    // Validate this packet has the encryption flag set
     if ps.head()._type & PACKET_TYPE_ENCRYPTED == 0 {
         return false;
     }
 
-    // Verify the packet length is within valid range for decryption
+    // Check if packet length is within valid range for decryption
     let rf_len = ps.head().rf_len;
-    if 0x13 < rf_len - 0x12 {
+    let payload_len = rf_len - 0x12;
+    if payload_len > 0x13 {
         return false;
     }
 
     // Get the long-term key for mesh decryption
-    ltk.copy_from_slice(&PAIR_STATE.lock().pair_ltk);
-
-    // Handle two types of mesh packets with different structures:
-    // 1. Broadcast packets (channel ID 0xFFFF)
-    // 2. Direct mesh packets (other channel IDs)
-    if ps.head().chan_id == MESH_BROADCAST_CHANNEL {
+    let ltk = &PAIR_STATE.lock().pair_ltk;
+    
+    // Decrypt the packet based on its type (broadcast vs directed)
+    let is_broadcast = ps.head().chan_id == MESH_BROADCAST_CHANNEL;
+    
+    if is_broadcast {
+        // Broadcast packet structure:
+        // - IV: first 8 bytes starting from rf_len
+        // - Expected MIC: 2 bytes from internal_par2[1]
+        // - Data: 0x1c bytes starting from sno field
         aes_att_decryption_packet(
-            &ltk,
-            unsafe { slice::from_raw_parts(addr_of!(ps.head().rf_len), 8) },
-            unsafe { slice::from_raw_parts(addr_of!(ps.mesh().internal_par2[1]), 2) },
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c) },
+            ltk, // Long-term key
+            unsafe { &*(addr_of!(ps.head().rf_len) as *const [u8; 8]) }, // IV
+            unsafe { slice::from_raw_parts(addr_of!(ps.mesh().internal_par2[1]), 2) }, // Expected MIC
+            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c) }, // Data
         )
     } else {
+        // Direct mesh packet structure:
+        // - IV: 8 bytes starting from handle1 field
+        // - Expected MIC: 4 bytes at position sno + (rf_len - 0xb)
+        // - Data: payload from op field with length (rf_len - 0x12)
         aes_att_decryption_packet(
-            &ltk,
-            unsafe { slice::from_raw_parts(addr_of!(ps.mesh().handle1), 8) },
-            unsafe { slice::from_raw_parts((addr_of!(ps.mesh().sno) as u32 + (rf_len as u32 - 0xb)) as *const u8, 4) },
-            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), rf_len as usize - 0x12) },
+            ltk, // Long-term key
+            unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) }, // IV
+            unsafe { slice::from_raw_parts((addr_of!(ps.mesh().sno) as u32 + (rf_len as u32 - 0xb)) as *const u8, 4) }, // Expected MIC
+            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len as usize) }, // Data
         )
     }
 }
 
-/// Encrypt a mesh network packet using the long-term key (LTK)
-/// 
 /// This function handles encryption of mesh packets before transmission.
 /// Similar to decryption, it uses the long-term key rather than the session key.
 ///
@@ -201,29 +251,53 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
 /// @return true if encryption was successful, false otherwise
 pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool
 {
+    // Only proceed with encryption if security is enabled
     if SECURITY_ENABLE.get() {
-        let mut pair_state = PAIR_STATE.lock();
-
-        // Handle two types of mesh packets with different structures
-        if ps.head().chan_id == MESH_BROADCAST_CHANNEL {
+        // Get access to the long-term key used for mesh encryption
+        let pair_ltk = &PAIR_STATE.lock().pair_ltk;
+        
+        // Determine encryption method based on packet type (broadcast vs direct)
+        let is_broadcast = ps.head().chan_id == MESH_BROADCAST_CHANNEL;
+        
+        if is_broadcast {
             // Broadcast packet encryption
-            aes_att_encryption_packet(
-                &pair_state.pair_ltk,
-                unsafe { slice::from_raw_parts(addr_of!(ps.head().rf_len), 8) },
-                unsafe { slice::from_raw_parts_mut(addr_of!(ps.mesh().internal_par2[1]) as *mut u8, 2) },
-                unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c) },
-            );
-
+            // - Use IV from packet header's rf_len field (8 bytes)
+            let iv = unsafe { &*(addr_of!(ps.head().rf_len) as *const [u8; 8]) };
+            
+            // - Use destination address from internal_par2[1] as the MIC output buffer (2 bytes)
+            let dst = unsafe { 
+                slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().internal_par2[1]), 2) 
+            };
+            
+            // - Encrypt payload starting from sno field (fixed size 0x1c bytes)
+            let payload = unsafe { 
+                slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c) 
+            };
+            
+            // Perform encryption using AES-CCM
+            aes_att_encryption_packet(pair_ltk, iv, dst, payload); // dst is the mic_output buffer
+            
             return true;
         } else {
             // Direct mesh packet encryption
-            aes_att_encryption_packet(
-                &pair_state.pair_ltk,
-                unsafe { slice::from_raw_parts(addr_of!(ps.mesh().handle1), 8) },
-                unsafe { slice::from_raw_parts_mut((addr_of!(ps.mesh().sno) as u32 + (ps.head().rf_len as u32 - 0xb)) as *mut u8, 4) },
-                unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), ps.head().rf_len as usize - 0x12) },
-            );
-
+            // - Use IV from packet's handle1 field (8 bytes)
+            let iv = unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) };
+            
+            // - Use destination address from position calculated based on rf_len as the MIC output buffer (4 bytes)
+            let dst_ptr = unsafe { 
+                (addr_of!(ps.mesh().sno) as u32 + (ps.head().rf_len as u32 - 0xb)) as *mut u8 
+            };
+            let dst = unsafe { slice::from_raw_parts_mut(dst_ptr, 4) };
+            
+            // - Encrypt payload starting from op field with length based on rf_len
+            let payload_len = ps.head().rf_len as usize - 0x12;
+            let payload = unsafe { 
+                slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len) 
+            };
+            
+            // Perform encryption using AES-CCM
+            aes_att_encryption_packet(pair_ltk, iv, dst, payload); // dst is the mic_output buffer
+            
             return true;
         }
     }
@@ -294,7 +368,7 @@ pub fn pair_save_key()
     pass = pair_state.pair_pass;
 
     // Encode password before saving to flash for security
-    encode_password(&mut pass);
+    pass = encode_password(&pass);
 
     // Save encoded password
     pair_flash_save_config(OFFSET_PASSWORD, &pass);
@@ -412,7 +486,8 @@ pub fn pair_proc() -> Option<Packet>
         if SECURITY_ENABLE.get() == false {
             pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_work[0..10])
         } else {
-            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work, &mut pkt_read_rsp.att_read_rsp_mut().value[1..]);
+            let encrypted_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_work);
         }
         BLE_PAIR_ST.set(PairState::Completed);  // Advance to completed state
     } else if BLE_PAIR_ST.get() == PairState::SessionKeyExchange {
@@ -438,7 +513,15 @@ pub fn pair_proc() -> Option<Packet>
             pair_state.pair_rands[0..4].copy_from_slice(bytemuck::bytes_of(&read_reg_system_tick()));
 
             // Generate session key using master and slave random values
-            aes_att_encryption(&pair_state.pair_randm.clone(), &pair_state.pair_rands.clone(), &mut pair_state.pair_sk);
+            // Pad randm and rands to 16 bytes for AES encryption
+            let mut key_padded = [0u8; KEY_SIZE];
+            key_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_randm);
+
+            let mut source_padded = [0u8; KEY_SIZE];
+            source_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
+
+            // Generate intermediate session key material using padded values
+            pair_state.pair_sk = aes_att_encryption(&key_padded, &source_padded);
             
             // Extract first half of encryption result as new slave random
             let mut tmp = [0; RANDOM_CHALLENGE_SIZE];
@@ -454,7 +537,7 @@ pub fn pair_proc() -> Option<Packet>
             }
 
             // Generate proof of possession by encrypting credentials with session key
-            aes_att_encryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_work);
+            pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
 
             // Pack slave random challenge and encrypted proof into response
             pkt_read_rsp.att_read_rsp_mut().value[1..1 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
@@ -471,7 +554,7 @@ pub fn pair_proc() -> Option<Packet>
             pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
             pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].copy_from_slice(&pair_rands);
 
-            aes_att_encryption(&pair_state.pair_work.clone(), &pair_state.pair_sk.clone(), &mut pair_state.pair_sk);
+            pair_state.pair_sk = aes_att_encryption(&pair_state.pair_work, &pair_state.pair_sk);
 
             // Set state to completed and enable encryption
             BLE_PAIR_ST.set(PairState::Completed);
@@ -499,7 +582,8 @@ pub fn pair_proc() -> Option<Packet>
             }
 
             // Encrypt the LTK with the derived key
-            aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk, &mut pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE]);
+            let encrypted_ltk = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk);
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_ltk);
             BLE_PAIR_ST.set(PairState::Completed);
 
             // Restore saved session key
@@ -645,7 +729,7 @@ pub fn pair_write(data: &Packet) -> bool
         } else if BLE_PAIR_ST.get() == PairState::Completed {
             // Secure mode: Decrypt the mesh name using the session key
             pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
-            aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_nn);
+            pair_state.pair_nn = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
 
             // Validate the mesh name has a valid length (with null terminator)
             let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
@@ -680,7 +764,7 @@ pub fn pair_write(data: &Packet) -> bool
             
             // Decrypt the password using the session key
             pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
-            aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_pass);
+            pair_state.pair_pass = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
         } else {
             // Simple mode: Only allow if already logged in
             if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
@@ -725,13 +809,13 @@ pub fn pair_write(data: &Packet) -> bool
                 // Special handling for mesh network - check if mesh flag is set
                 if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && pktdata[MESH_FLAG_OFFSET] != 0 {
                     // This is a mesh LTK - decrypt and prepare for mesh mode
-                    aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk_mesh);
+                    pair_state.pair_ltk_mesh = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
                     return true;
                 }
 
                 // Standard LTK - decrypt, save to flash, and notify application
-                aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk);
+                pair_state.pair_ltk = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                 rf_link_light_event_callback(LGT_CMD_PAIR_OK);
@@ -822,7 +906,7 @@ pub fn pair_write(data: &Packet) -> bool
         const CLIENT_PROOF_OFFSET: usize = 9;
         
         // Secure mode: Encrypt the verification material and compare with client proof
-        aes_att_encryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_work);
+        pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
         if &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE] == &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE] { u8::MAX } else { 0 }
     };
     
@@ -859,4 +943,728 @@ pub fn pair_write(data: &Packet) -> bool
     // Reset pairing on failure or completion
     pair_par_init();
     return true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mry::{self, Any};
+    use crate::sdk::mcu::crypto::mock_aes_att_decryption_packet;
+    use core::mem::size_of;
+    use mry::send_wrapper::SendWrapper;
+    use crate::sdk::packet_types::{PacketL2capData, PacketLlApp};
+
+    // Helper function to create a test packet with ATT write structure
+    fn create_test_packet() -> Packet {
+        let mut packet = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: 0,
+                chan_id: 0,
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            }
+        };
+        
+        // Set up the L2CAP header
+        packet.head_mut().l2cap_len = 16;
+        
+        // Set up the write value structure with test data
+        packet.att_write_mut().value.sno = [0x01, 0x02, 0x03]; // Sequence number
+        packet.att_write_mut().value.src = [0x34, 0x12]; // Source address
+        
+        packet
+    }
+
+    // Helper to set up global state for testing
+    fn setup_pair_state() {
+        // Set up security enable flag
+        SECURITY_ENABLE.set(true);
+        
+        // Initialize pair initialization vector
+        let mut pair_ivm = PAIR_IVM.lock();
+        pair_ivm.fill(0xAA); // Fill with recognizable pattern
+        
+        // Initialize session key
+        let mut pair_state = PAIR_STATE.lock();
+        pair_state.pair_sk.fill(0xBB); // Fill with recognizable pattern
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_security_disabled() {
+        // Arrange
+        SECURITY_ENABLE.set(false);
+        let mut packet = create_test_packet();
+        
+        // Act
+        let result = pair_dec_packet(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_security_enabled_success() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_packet();
+        
+        // Mock successful decryption with Any for all arguments
+        mock_aes_att_decryption_packet(Any, Any, Any, Any)
+            .returns(true);
+        
+        // Act
+        let result = pair_dec_packet(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        
+        // Verify the IV was updated with sequence number
+        let pair_ivm = PAIR_IVM.lock();
+        assert_eq!(pair_ivm[5], 0x01);
+        assert_eq!(pair_ivm[6], 0x02);
+        assert_eq!(pair_ivm[7], 0x03);
+        
+        // Verify mock was called with correct parameters
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_security_enabled_failure() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_packet();
+        
+        // Mock failed decryption with Any for all arguments
+        mock_aes_att_decryption_packet(Any, Any, Any, Any)
+            .returns(false);
+        
+        // Act
+        let result = pair_dec_packet(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_iv_updates() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_packet();
+        packet.att_write_mut().value.sno = [0xF1, 0xF2, 0xF3]; // Different sequence number
+        
+        // Mock decryption with Any for all arguments
+        mock_aes_att_decryption_packet(Any, Any, Any, Any)
+            .returns(true);
+        
+        // Act
+        let result = pair_dec_packet(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        
+        // Verify IV was updated with new sequence number
+        let pair_ivm = PAIR_IVM.lock();
+        assert_eq!(pair_ivm[5], 0xF1);
+        assert_eq!(pair_ivm[6], 0xF2);
+        assert_eq!(pair_ivm[7], 0xF3);
+        
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_parameter_passing() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_packet();
+        
+        // Setup expectation with parameter validation
+        mock_aes_att_decryption_packet(Any, Any, Any, Any)
+            .returns_with(move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+                // Validate session key
+                assert_eq!(sk, &[0xBB; 16]);
+                
+                // Validate IV (should include the sequence number from packet)
+                assert_eq!(iv[5], 0x01);
+                assert_eq!(iv[6], 0x02);
+                assert_eq!(iv[7], 0x03);
+                
+                // Validate source address from packet
+                assert_eq!(*src, [0x34, 0x12]); // Little endian representation of 0x1234
+                
+                // Payload data length check (not checking contents due to complexity)
+                assert_eq!(data.len(), packet.head().l2cap_len as usize - 8);
+                
+                true
+            });
+        
+        // Act
+        let result = pair_dec_packet(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+
+    use crate::sdk::mcu::crypto::mock_aes_att_encryption_packet;
+    use crate::sdk::mcu::register::mock_read_reg_system_tick;
+
+    // Helper function to create a test packet with LL app structure suitable for encryption
+    fn create_test_ll_packet() -> Packet {
+        let mut packet = Packet {
+            ll_app: PacketLlApp {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 20,
+                    chan_id: 4,
+                },
+                opcode: 0x1b,
+                handle: 0x12,
+                handle1: 0,
+                value: Default::default(),
+                rsv: [0; 10],
+            }
+        };
+        
+        // Set up source as a u16 value (little endian in memory)
+        packet.ll_app_mut().value.src = 0x1234;
+        
+        packet
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_security_disabled() {
+        // Arrange
+        SECURITY_ENABLE.set(false);
+        let mut packet = create_test_ll_packet();
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet, read_reg_system_tick)]
+    fn test_pair_enc_packet_security_enabled() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        
+        // Mock system tick to return a predictable value
+        let test_tick: u32 = 0x123456;
+        mock_read_reg_system_tick().returns(test_tick);
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        // Verify sequence number was set from system tick
+        assert_eq!(packet.ll_app().value.sno[0], (test_tick & 0xFF) as u8);        // 0x56
+        assert_eq!(packet.ll_app().value.sno[1], ((test_tick >> 8) & 0xFF) as u8); // 0x34
+        assert_eq!(packet.ll_app().value.sno[2], ((test_tick >> 16) & 0xFF) as u8); // 0x12
+        
+        // Verify encryption function was called
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet, read_reg_system_tick)]
+    fn test_pair_enc_packet_iv_updates() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        
+        // Set a known system tick value
+        let test_tick: u32 = 0xABCDEF;
+        mock_read_reg_system_tick().returns(test_tick);
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Fill PAIR_IVS with recognizable pattern for testing
+        PAIR_IVS.lock().fill(0xAA);
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        // Verify IV was updated with sequence number
+        let pair_ivs = PAIR_IVS.lock();
+        assert_eq!(pair_ivs[3], (test_tick & 0xFF) as u8);        // 0xEF
+        assert_eq!(pair_ivs[4], ((test_tick >> 8) & 0xFF) as u8); // 0xCD
+        assert_eq!(pair_ivs[5], ((test_tick >> 16) & 0xFF) as u8); // 0xAB
+        
+        // Verify IV was updated with source address
+        assert_eq!(pair_ivs[6], 0x34); // Low byte of 0x1234
+        assert_eq!(pair_ivs[7], 0x12); // High byte of 0x1234
+        
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet, read_reg_system_tick)]
+    fn test_pair_enc_packet_parameter_passing() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        
+        // Set a known system tick value
+        let test_tick: u32 = 0x123456;
+        mock_read_reg_system_tick().returns(test_tick);
+        
+        // Set recognizable session key pattern
+        PAIR_STATE.lock().pair_sk.fill(0xCC);
+        
+        // Setup encryption mock with parameter validation
+        mock_aes_att_encryption_packet(Any, Any, Any, Any)
+            .returns_with(move |sk: Vec<u8>, iv: Vec<u8>, dst: Vec<u8>, data: Vec<u8>| -> () {
+                // Validate session key
+                assert_eq!(sk, &[0xCC; 16]);
+                
+                // Validate IV (should include the sequence number and source from packet)
+                assert_eq!(iv[3], 0x56); // Low byte of tick
+                assert_eq!(iv[4], 0x34); // Middle byte of tick
+                assert_eq!(iv[5], 0x12); // High byte of tick
+                assert_eq!(iv[6], 0x34); // Low byte of source
+                assert_eq!(iv[7], 0x12); // High byte of source
+                
+                // Validate destination address buffer
+                assert_eq!(dst.len(), 2);
+                
+                // Validate data length (l2cap_len - 10)
+                assert_eq!(data.len(), (packet.head().l2cap_len - 10) as usize);
+            });
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_wrong_channel() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        packet.head_mut().chan_id = 5; // Different channel than required (4)
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_wrong_opcode() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        packet.ll_app_mut().opcode = 0x1c; // Different opcode than required (0x1b)
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_wrong_handle() {
+        // Arrange
+        setup_pair_state();
+        let mut packet = create_test_ll_packet();
+        packet.ll_app_mut().handle = 0x13; // Different handle than required (0x12)
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        pair_enc_packet(&mut packet);
+        
+        // Assert
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+
+    use crate::sdk::packet_types::{MeshPkt, PacketL2capHead};
+
+    // Helper function to create a test mesh packet
+    fn create_test_mesh_packet(is_broadcast: bool) -> Packet {
+        let mut packet = Packet {
+            mesh: MeshPkt {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: PACKET_TYPE_ENCRYPTED, // Set encrypted flag
+                    rf_len: 30,
+                    l2cap_len: 20,
+                    chan_id: if is_broadcast { MESH_BROADCAST_CHANNEL } else { 0x0001 },
+                },
+                src_tx: 0,
+                handle1: 0,
+                sno: [0; 3],
+                src_adr: 0,
+                op: 0,
+                vendor_id: 0,
+                par: [0; 10],
+                internal_par1: [0; 5],
+                ttl: 0,
+                internal_par2: [0; 4],
+                dst_adr: 0,
+                no_use: [0; 4],
+            }
+        };
+        packet
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_security_disabled() {
+        // Arrange
+        SECURITY_ENABLE.set(false);
+        let mut packet = create_test_mesh_packet(false);
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true); // Should return true when security is disabled
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_no_encryption_flag() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false);
+        packet.head_mut()._type = 0; // Clear encryption flag
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false); // Should return false when encryption flag is not set
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_invalid_length() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false);
+        packet.head_mut().rf_len = 0x26; // This makes rf_len - 0x12 > 0x13
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false); // Should return false for invalid length
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_broadcast_success() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(true); // Create broadcast packet
+        
+        // Set up pairing state with LTK
+        let mut pair_state = PAIR_STATE.lock();
+        pair_state.pair_ltk.fill(0xDD); // Recognizable pattern
+
+        // Mock successful decryption
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+            // Check LTK was passed correctly
+            assert_eq!(sk, &[0xDD; 16]);
+            // Check IV and src aren't empty (detailed checking is complex due to pointers)
+            assert_eq!(iv.is_empty(), false);
+            assert_eq!(src.is_empty(), false);
+            assert_eq!(data.is_empty(), false);
+            // Check data length for broadcast packets
+            assert_eq!(data.len(), 0x1c);
+            
+            true
+        });
+        
+        // Act
+        drop(pair_state); // Release the lock before calling the function
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        
+        // Verify mock was called with correct parameters
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1)
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_broadcast_failure() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(true); // Create broadcast packet
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xDD);
+        
+        // Mock failed decryption
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(false);
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_direct_success() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false); // Create direct packet
+        packet.head_mut().rf_len = 0x20; // Set suitable RF length for testing
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xEE);
+        
+        // Mock successful decryption
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+            // Check LTK was passed correctly
+            assert_eq!(sk, &[0xEE; 16]);
+            // Check IV and src aren't empty (detailed checking is complex due to pointers)
+            assert_eq!(iv.is_empty(), false);
+            assert_eq!(src.is_empty(), false);
+            assert_eq!(data.is_empty(), false);
+            // Check data length for broadcast packets
+            assert_eq!(data.len(), 0x20 - 0x12);
+
+            true
+        });
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        
+        // Verify mock was called with correct parameters for direct packets
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1)
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_direct_failure() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false); // Create direct packet
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xEE);
+        
+        // Mock failed decryption
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(false);
+        
+        // Act
+        let result = pair_dec_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_security_disabled() {
+        // Arrange
+        SECURITY_ENABLE.set(false);
+        let mut packet = create_test_mesh_packet(false);
+        
+        // Act
+        let result = pair_enc_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, false); // Should return false when security is disabled
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_broadcast() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(true); // Create broadcast packet
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xDD); // Recognizable pattern
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        let result = pair_enc_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_broadcast_parameter_passing() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(true); // Create broadcast packet
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xDD); // Recognizable pattern
+        
+        // Mock encryption function with parameter validation
+        mock_aes_att_encryption_packet(Any, Any, Any, Any)
+            .returns_with(move |sk: Vec<u8>, iv: Vec<u8>, dst: Vec<u8>, data: Vec<u8>| -> () {
+                // Check LTK was passed correctly
+                assert_eq!(sk, &[0xDD; 16]);
+                
+                // Check IV is not empty and has 8 bytes (detailed checking is complex due to pointers)
+                assert_eq!(iv.len(), 8);
+                
+                // Check destination is 2 bytes for broadcast packets
+                assert_eq!(dst.len(), 2);
+                
+                // Check data length for broadcast packets
+                assert_eq!(data.len(), 0x1c);
+            });
+        
+        // Act
+        let result = pair_enc_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_direct() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false); // Create direct packet
+        packet.head_mut().rf_len = 0x20; // Set specific RF length for testing
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xEE); // Different recognizable pattern
+        
+        // Mock encryption function
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
+        
+        // Act
+        let result = pair_enc_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_direct_parameter_passing() {
+        // Arrange
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(false); // Create direct packet
+        packet.head_mut().rf_len = 0x22; // Set specific RF length for testing
+        
+        // Set up pairing state with LTK
+        PAIR_STATE.lock().pair_ltk.fill(0xEE); // Different recognizable pattern
+        
+        // Mock encryption function with parameter validation
+        mock_aes_att_encryption_packet(Any, Any, Any, Any)
+            .returns_with(move |sk: Vec<u8>, iv: Vec<u8>, dst: Vec<u8>, data: Vec<u8>| -> () {
+                // Check LTK was passed correctly
+                assert_eq!(sk, &[0xEE; 16]);
+                
+                // Check IV is not empty and has 8 bytes
+                assert_eq!(iv.len(), 8);
+                
+                // Check destination is 4 bytes for direct packets
+                assert_eq!(dst.len(), 4);
+                
+                // Check data length for direct packets: rf_len - 0x12
+                assert_eq!(data.len(), 0x22 - 0x12);
+            });
+        
+        // Act
+        let result = pair_enc_packet_mesh(&mut packet);
+        
+        // Assert
+        assert_eq!(result, true);
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+    
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_varying_rf_lengths() {
+        // Test with different RF lengths to verify calculation of payload size
+        
+        // Test values: rf_len, expected payload size
+        let test_cases = [(0x15, 0x03), (0x18, 0x06), (0x1F, 0x0D)];
+
+        // Use an Arc<Mutex> to share the expected size between test iterations and mock callback
+        let expected_payload_size = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let expected_payload_size_clone = expected_payload_size.clone();
+
+        // Mock encryption function with parameter validation
+        mock_aes_att_encryption_packet(Any, Any, Any, Any)
+            .returns_with(move |_: Vec<u8>, _: Vec<u8>, _: Vec<u8>, data: Vec<u8>| -> () {
+                // Check data length calculation: rf_len - 0x12
+                let expected = *expected_payload_size_clone.lock().unwrap();
+                assert_eq!(data.len(), expected);
+            });
+
+        for (rf_len, expected_size) in test_cases {
+            // Update the expected size for the current iteration
+            *expected_payload_size.lock().unwrap() = expected_size;
+
+            // Arrange
+            SECURITY_ENABLE.set(true);
+            let mut packet = create_test_mesh_packet(false); // Create direct packet
+            packet.head_mut().rf_len = rf_len; // Set specific RF length for testing
+            
+            // Act
+            let result = pair_enc_packet_mesh(&mut packet);
+            
+            // Assert
+            assert_eq!(result, true);
+        }
+
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(3);
+    }
 }

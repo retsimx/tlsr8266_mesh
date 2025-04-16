@@ -200,7 +200,7 @@ pub fn kick_out(par: KickoutReason) {
         let mut buff: [u8; 16] = [0; 16];
         let len = min(MESH_PWD.len(), buff.len());
         buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-        encode_password(&mut buff);
+        buff = encode_password(&buff);
         flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
         let mut buff: [u8; 16] = [0; 16];

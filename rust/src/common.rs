@@ -220,11 +220,17 @@ pub fn pair_flash_config_init() -> bool
 
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32
 {
-    let mut destbuf = [0u8; 16];
+    // Ensure the input slices are copied into fixed-size arrays
+    let mut name_arr = [0u8; 16];
+    let mut pass_arr = [0u8; 16];
 
-    // todo: Why is this called twice? It's called twice in the original code...
-    aes_att_encryption(name, pass, &mut destbuf);
-    aes_att_encryption(name, pass, &mut destbuf);
+    // Copy the minimum of slice length or 16 bytes to avoid panic
+    let name_len = name.len().min(16);
+    let pass_len = pass.len().min(16);
+    name_arr[..name_len].copy_from_slice(&name[..name_len]);
+    pass_arr[..pass_len].copy_from_slice(&pass[..pass_len]);
+
+    let destbuf = aes_att_encryption(&name_arr, &pass_arr);
 
     let mut destbuf: [u32; 4] = bytemuck::cast(destbuf);
 
@@ -299,7 +305,7 @@ pub fn pair_load_key()
 
             let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };
             if pair_config_flag == PAIR_CONFIG_VALID_FLAG {
-                decode_password(&mut pair_state.pair_pass);
+                pair_state.pair_pass = decode_password(&pair_state.pair_pass);
             }
 
             pair_state.pair_ltk.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x30) as *const u8, 0x10) });

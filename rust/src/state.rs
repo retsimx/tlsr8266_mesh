@@ -75,7 +75,7 @@ pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> 
 pub static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> = CriticalSectionMutex::new(ePairState::PairSetted);
 pub static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> = CriticalSectionMutex::new(OtaState::Continue);
 pub static PAIR_IVM: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
-pub static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 17]> = CriticalSectionMutex::new([0; 17]);
+pub static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
 pub static PAIR_IVS: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0; 8]);
 pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
     [

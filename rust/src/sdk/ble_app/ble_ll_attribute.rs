@@ -1,4 +1,4 @@
-use core::ptr::{addr_of, addr_of_mut};
+use core::ptr::{addr_of, addr_of_mut, read_unaligned};
 use core::slice;
 
 use num_derive::FromPrimitive;
@@ -1139,7 +1139,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
     // --- Get current attribute and check if it's a CCCD ---
     let current_attr = &get_gAttributes()[att_handle];
     let is_cccd = !current_attr.uuid.is_null() && 
-                 unsafe { *(current_attr.uuid as *const u16) == GATT_UUID_CLIENT_CHAR_CFG };
+                        unsafe { read_unaligned(current_attr.uuid as *const u16) == GATT_UUID_CLIENT_CHAR_CFG };  
     
     // --- Apply permission checks (skip for CCCDs) ---
     if !is_cccd {

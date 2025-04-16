@@ -454,161 +454,9 @@ pub fn pair_proc() -> Option<Packet>
         }
     };
 
-    if BLE_PAIR_ST.get() == PairState::AwaitingRandom {
-        // Generate random challenge and move to next state
-        
-        // Validate security state or reset if needed
-        if SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
-            pair_par_init();
-            PAIR_ENC_ENABLE.set(false);
-            return None;
-        }
-        
-        // Send random challenge for authentication
-        pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_RANDOM;  // 8 bytes of random data + 2 header bytes
-        pkt_read_rsp.att_read_rsp_mut().value[1..1 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
-        BLE_PAIR_ST.set(PairState::RandomConfirmation);  // Advance to confirmation state
-    } else if BLE_PAIR_ST.get() == PairState::ReceivingMeshLtk {
-        // Compute mesh network keys - XOR network name, password, and LTK
-        
-        // Validate security state or reset if needed
-        if SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
-            pair_par_init();
-            PAIR_ENC_ENABLE.set(false);
-            return None;
-        }
-        
-        pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;  // 16 bytes of key data + 2 header bytes
-        
-        // Compute obfuscated key material by XORing identity values
-        for index in 0..KEY_SIZE {
-            pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_ltk[index];
-        }
-
-        // Either send as plaintext or encrypt based on security mode
-        if SECURITY_ENABLE.get() == false {
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_work)
-        } else {
-            let encrypted_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_work);
-        }
-        BLE_PAIR_ST.set(PairState::Completed);  // Advance to completed state
-    } else if BLE_PAIR_ST.get() == PairState::SessionKeyExchange {
-        // Different handling based on security mode enabled/disabled
-        
-        if SECURITY_ENABLE.get() == false {
-            // Simple mode: Just XOR network name and password
-            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
-            for index in 0..KEY_SIZE {
-                pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
-            }
-
-            // Send obfuscated credentials
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_work);
-
-            BLE_PAIR_ST.set(PairState::Completed);  // Advance to completed state
-            PAIR_ENC_ENABLE.set(false);
-        } else {
-            // Secure mode: Generate session key using AES
-            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
-            
-            // Generate random challenge using system tick
-            pair_state.pair_rands[0..4].copy_from_slice(bytemuck::bytes_of(&read_reg_system_tick()));
-
-            // Generate session key using master and slave random values
-            // Pad randm and rands to 16 bytes for AES encryption
-            let mut key_padded = [0u8; KEY_SIZE];
-            key_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_randm);
-
-            let mut source_padded = [0u8; KEY_SIZE];
-            source_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
-
-            // Generate intermediate session key material using padded values
-            pair_state.pair_sk = aes_att_encryption(&key_padded, &source_padded);
-            
-            // Extract first half of encryption result as new slave random
-            let mut tmp = [0; RANDOM_CHALLENGE_SIZE];
-            tmp.copy_from_slice(&pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE]);
-            pair_state.pair_rands.copy_from_slice(&tmp);
-
-            // Zero out second half of session key for security
-            pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
-
-            // Prepare work buffer with XORed credential data
-            for index in 0..KEY_SIZE {
-                pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
-            }
-
-            // Generate proof of possession by encrypting credentials with session key
-            pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
-
-            // Pack slave random challenge and encrypted proof into response
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
-            pkt_read_rsp.att_read_rsp_mut().value[9..9 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE]);
-
-            // Prepare work buffer again for session key derivation
-            for index in 0..KEY_SIZE {
-                pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
-            }
-
-            // Derive final session key using both random values and credential material
-            let pair_randm = pair_state.pair_randm;
-            let pair_rands = pair_state.pair_rands;
-            pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
-            pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].copy_from_slice(&pair_rands);
-
-            pair_state.pair_sk = aes_att_encryption(&pair_state.pair_work, &pair_state.pair_sk);
-
-            // Set state to completed and enable encryption
-            BLE_PAIR_ST.set(PairState::Completed);
-            PAIR_ENC_ENABLE.set(true);
-        }
-    } else if BLE_PAIR_ST.get() == PairState::RequestingLtk {
-        // Provide the LTK either directly or encrypted based on security mode
-        
-        pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
-        
-        if SECURITY_ENABLE.get() == false {
-            // Simple mode: Send LTK directly
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_ltk);
-        } else {
-            // Secure mode: Encrypt LTK with a derived key
-            
-            // Use master random as part of key derivation
-            let pair_randm = pair_state.pair_randm;
-            pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
-            pair_state.pair_work[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
-
-            // Create encryption key by XORing credentials with random material
-            for index in 0..KEY_SIZE {
-                pair_state.pair_sk[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_work[index];
-            }
-
-            // Encrypt the LTK with the derived key
-            let encrypted_ltk = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk);
-            pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_ltk);
-            BLE_PAIR_ST.set(PairState::Completed);
-
-            // Restore saved session key
-            pair_state.pair_sk = pair_state.pair_sk_copy;
-        }
-    } else if BLE_PAIR_ST.get() == PairState::DeletePairing {
-        // Remove pairing information and notify application
-        
-        pkt_read_rsp.head_mut().l2cap_len = HEADER_SIZE;
-        BLE_PAIR_ST.set(PairState::Idle);
-        
-        // Enable MAC address handling for mesh if needed
-        if MESH_PAIR_ENABLE.get() {
-            GET_MAC_EN.set(true);
-        }
-        
-        // Delete pairing data and notify application
-        rf_link_delete_pair();
-        rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
-    } else if BLE_PAIR_ST.get() == PairState::Init {
+    // Special case for Init state - has a different return path
+    if BLE_PAIR_ST.get() == PairState::Init {
         // Return status and reset state
-        
         pkt_read_rsp.head_mut().l2cap_len = HEADER_SIZE;
         pkt_read_rsp.head_mut().dma_len = 8;
         pkt_read_rsp.head_mut().rf_len = 0x6;
@@ -620,6 +468,161 @@ pub fn pair_proc() -> Option<Packet>
         BLE_PAIR_ST.set(PairState::Idle);
 
         return Some(pkt_read_rsp);
+    }
+
+    // Common security check for multiple states
+    let security_check_needed = BLE_PAIR_ST.get() == PairState::AwaitingRandom || 
+                               BLE_PAIR_ST.get() == PairState::ReceivingMeshLtk;
+                               
+    if security_check_needed && SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
+        pair_par_init();
+        PAIR_ENC_ENABLE.set(false);
+        return None;
+    }
+
+    // Process each state with its specific logic
+    match BLE_PAIR_ST.get() {
+        PairState::AwaitingRandom => {
+            // Send random challenge for authentication
+            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_RANDOM;
+            pkt_read_rsp.att_read_rsp_mut().value[1..1 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
+            BLE_PAIR_ST.set(PairState::RandomConfirmation);
+        },
+
+        PairState::ReceivingMeshLtk => {
+            // Compute mesh network keys - XOR network name, password, and LTK
+            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
+            
+            // Compute obfuscated key material by XORing identity values
+            for index in 0..KEY_SIZE {
+                pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_ltk[index];
+            }
+
+            // Either send as plaintext or encrypt based on security mode
+            if SECURITY_ENABLE.get() == false {
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_work);
+            } else {
+                let encrypted_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_work);
+            }
+            
+            BLE_PAIR_ST.set(PairState::Completed);
+        },
+
+        PairState::SessionKeyExchange => {
+            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
+            
+            if SECURITY_ENABLE.get() == false {
+                // Simple mode: Just XOR network name and password
+                for index in 0..KEY_SIZE {
+                    pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
+                }
+
+                // Send obfuscated credentials
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_work);
+                
+                BLE_PAIR_ST.set(PairState::Completed);
+                PAIR_ENC_ENABLE.set(false);
+            } else {
+                // Secure mode: Generate session key using AES
+                // Generate random challenge using system tick
+                pair_state.pair_rands[0..4].copy_from_slice(bytemuck::bytes_of(&read_reg_system_tick()));
+
+                // Prepare padded buffers for AES operations
+                let mut key_padded = [0u8; KEY_SIZE];
+                let mut source_padded = [0u8; KEY_SIZE];
+                key_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_randm);
+                source_padded[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
+
+                // Generate intermediate session key material using padded values
+                pair_state.pair_sk = aes_att_encryption(&key_padded, &source_padded);
+                
+                // Extract first half of encryption result as new slave random
+                let mut tmp = [0; RANDOM_CHALLENGE_SIZE];
+                tmp.copy_from_slice(&pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE]);
+                pair_state.pair_rands.copy_from_slice(&tmp);
+
+                // Zero out second half of session key for security
+                pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
+
+                // Prepare work buffer with XORed credential data
+                for index in 0..KEY_SIZE {
+                    pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
+                }
+
+                // Generate proof of possession by encrypting credentials with session key
+                pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
+
+                // Pack slave random challenge and encrypted proof into response
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_rands);
+                pkt_read_rsp.att_read_rsp_mut().value[9..9 + RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE]);
+
+                // Prepare work buffer again for session key derivation
+                for index in 0..KEY_SIZE {
+                    pair_state.pair_work[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index];
+                }
+
+                // Derive final session key using both random values
+                let pair_randm = pair_state.pair_randm;
+                let pair_rands = pair_state.pair_rands;
+                pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
+                pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].copy_from_slice(&pair_rands);
+
+                pair_state.pair_sk = aes_att_encryption(&pair_state.pair_work, &pair_state.pair_sk);
+
+                // Set state to completed and enable encryption
+                BLE_PAIR_ST.set(PairState::Completed);
+                PAIR_ENC_ENABLE.set(true);
+            }
+        },
+
+        PairState::RequestingLtk => {
+            // Provide the LTK either directly or encrypted based on security mode
+            pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
+            
+            if SECURITY_ENABLE.get() == false {
+                // Simple mode: Send LTK directly
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&pair_state.pair_ltk);
+            } else {
+                // Secure mode: Encrypt LTK with a derived key
+                // Use master random as part of key derivation
+                let pair_randm = pair_state.pair_randm;
+                pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
+                pair_state.pair_work[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
+
+                // Create encryption key by XORing credentials with random material
+                for index in 0..KEY_SIZE {
+                    pair_state.pair_sk[index] = pair_state.pair_nn[index] ^ pair_state.pair_pass[index] ^ pair_state.pair_work[index];
+                }
+
+                // Encrypt the LTK with the derived key
+                let encrypted_ltk = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_ltk);
+                pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE].copy_from_slice(&encrypted_ltk);
+                BLE_PAIR_ST.set(PairState::Completed);
+
+                // Restore saved session key
+                pair_state.pair_sk = pair_state.pair_sk_copy;
+            }
+        },
+
+        PairState::DeletePairing => {
+            // Remove pairing information and notify application
+            pkt_read_rsp.head_mut().l2cap_len = HEADER_SIZE;
+            BLE_PAIR_ST.set(PairState::Idle);
+            
+            // Enable MAC address handling for mesh if needed
+            if MESH_PAIR_ENABLE.get() {
+                GET_MAC_EN.set(true);
+            }
+            
+            // Delete pairing data and notify application
+            rf_link_delete_pair();
+            rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
+        },
+
+        _ => {
+            // For any other states, use default packet configuration
+        }
     }
 
     // Calculate packet length fields based on content
@@ -697,258 +700,253 @@ pub fn pair_read(_: &Packet) -> bool
 pub fn pair_write(data: &Packet) -> bool
 {
     let pktdata = &data.att_val().value;
-
-    // Extract the opcode and data from the packet
     let opcode = pktdata[0];
     let src = &pktdata[1..];
-
     let mut pair_state = PAIR_STATE.lock();
 
-    // PAIR_OP_EXCHANGE_RANDOM: Exchange random challenge for authentication
-    // Client sends its random challenge to begin the authentication process
-    if opcode == PAIR_OP_EXCHANGE_RANDOM {
-        // Store the master random challenge
-        pair_state.pair_randm.copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
-        
-        // Set state to await slave challenge response
-        BLE_PAIR_ST.set(PairState::AwaitingRandom);
-        return true;
-    }
+    // Process each opcode to handle pairing steps
+    match opcode {
+        // --- Step 1: Random Challenge Exchange ---
+        PAIR_OP_EXCHANGE_RANDOM => {
+            // Store the master random challenge and await slave response
+            pair_state.pair_randm.copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
+            BLE_PAIR_ST.set(PairState::AwaitingRandom);
+            return true;
+        },
 
-    // PAIR_OP_SET_MESH_NAME: Set mesh network name
-    // Set the mesh network name, with different behavior based on security mode
-    if opcode == PAIR_OP_SET_MESH_NAME {
-        if SECURITY_ENABLE.get() == false {
-            // Simple mode: Only allow if already logged in
-            if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::Completed {
-                // Set mesh name directly from plaintext
-                pair_state.pair_nn.copy_from_slice(&src[0..KEY_SIZE]);
-                // Mark pairing as in progress
-                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
-                // Advance to password reception state
-                BLE_PAIR_ST.set(PairState::ReceivingMeshName);
-                return true;
+        // --- Step 2: Network Provisioning - Set Network Name ---
+        PAIR_OP_SET_MESH_NAME => {
+            // Security Mode handling
+            if !SECURITY_ENABLE.get() {
+                // Simple mode: Must be logged in and in completed state
+                if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::Completed {
+                    pair_state.pair_nn.copy_from_slice(&src[0..KEY_SIZE]);
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+                    BLE_PAIR_ST.set(PairState::ReceivingMeshName);
+                    return true;
+                }
+            } else if BLE_PAIR_ST.get() == PairState::Completed {
+                // Secure mode: Decrypt and validate the mesh name
+                pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
+                pair_state.pair_nn = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
+
+                // Find name length (up to null terminator or full length)
+                let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
+                    Some(v) => v,
+                    None => pair_state.pair_nn.len()
+                };
+
+                // Only accept valid mesh names
+                if name_len <= MAX_MESH_NAME_LEN.get() {
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+                    BLE_PAIR_ST.set(PairState::ReceivingMeshName);
+                    return true;
+                }
             }
-        } else if BLE_PAIR_ST.get() == PairState::Completed {
-            // Secure mode: Decrypt the mesh name using the session key
-            pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
-            pair_state.pair_nn = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
 
-            // Validate the mesh name has a valid length (with null terminator)
-            let name_len = match pair_state.pair_nn.iter().position(|r| *r == 0) {
-                Some(v) => v,
-                None => pair_state.pair_nn.len()
+            // Invalid mesh name or state - reset pairing
+            pair_par_init();
+            PAIR_ENC_ENABLE.set(false);
+            return true;
+        },
+
+        // --- Step 3: Network Provisioning - Set Network Password ---
+        PAIR_OP_SET_MESH_PASSWORD => {
+            // Input validation based on security mode
+            let state_valid = if SECURITY_ENABLE.get() {
+                // Secure mode: Must be in ReceivingMeshName state
+                if BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
+                    pair_par_init();
+                    PAIR_ENC_ENABLE.set(false);
+                    return true;
+                }
+                
+                // Decrypt password using session key
+                pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
+                pair_state.pair_pass = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
+                true
+            } else {
+                // Simple mode: Must be logged in and in correct state
+                if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
+                    pair_par_init();
+                    PAIR_ENC_ENABLE.set(false);
+                    return true;
+                }
+
+                // Store plaintext password
+                pair_state.pair_pass.copy_from_slice(&src[0..KEY_SIZE]);
+                true
             };
 
-            // Only accept valid mesh names
-            if name_len <= MAX_MESH_NAME_LEN.get() {
-                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
-                BLE_PAIR_ST.set(PairState::ReceivingMeshName);
-                return true;
-            }
-        }
-
-        // Invalid mesh name or state - reset pairing
-        pair_par_init();
-        PAIR_ENC_ENABLE.set(false);
-        return true;
-    }
-    
-    // PAIR_OP_SET_MESH_PASSWORD: Set mesh network password
-    // Set the mesh network password, with different behavior based on security mode
-    if opcode == PAIR_OP_SET_MESH_PASSWORD {
-        if SECURITY_ENABLE.get() {
-            // Secure mode: Only allow in the correct state
-            if BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
-                pair_par_init();
-                PAIR_ENC_ENABLE.set(false);
-                return true;
-            }
-            
-            // Decrypt the password using the session key
-            pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
-            pair_state.pair_pass = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
-        } else {
-            // Simple mode: Only allow if already logged in
-            if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
-                pair_par_init();
-                PAIR_ENC_ENABLE.set(false);
-                return true;
+            // Set state and security checks
+            if state_valid {
+                // Advance to next state
+                BLE_PAIR_ST.set(PairState::ReceivingMeshPassword);
+                
+                // Security check: Password must differ from network name
+                if pair_state.pair_nn != pair_state.pair_pass {
+                    return true;
+                }
             }
 
-            // Set password directly from plaintext
-            pair_state.pair_pass.copy_from_slice(&src[0..KEY_SIZE]);
-        }
-
-        // Advance to LTK reception state
-        BLE_PAIR_ST.set(PairState::ReceivingMeshPassword);
-        
-        // Validate that password and name are not identical (security check)
-        let passwords_differ = pair_state.pair_nn != pair_state.pair_pass;
-        if passwords_differ {
+            // Password identical to name - security violation
+            pair_par_init();
+            PAIR_ENC_ENABLE.set(false);
             return true;
-        }
+        },
 
-        // Password identical to name - security violation, reset pairing
-        pair_par_init();
-        PAIR_ENC_ENABLE.set(false);
-        return true;
-    }
-    
-    // PAIR_OP_SET_MESH_LTK: Set long-term key for mesh encryption
-    // Set the long-term encryption key, with different behavior based on security mode
-    if opcode == PAIR_OP_SET_MESH_LTK {
-        // Mesh flag position in extended data
-        const MESH_FLAG_OFFSET: usize = 0x11;
-        // Minimum packet length for mesh flag
-        const MIN_PACKET_LEN_WITH_MESH: u16 = 0x14;
-        
-        if SECURITY_ENABLE.get() {
-            // Secure mode: Only allow in the correct state
-            if BLE_PAIR_ST.get() == PairState::ReceivingMeshPassword {
-                // Receive encrypted LTK and decrypt it
+        // --- Step 4: Network Provisioning - Set LTK ---
+        PAIR_OP_SET_MESH_LTK => {
+            // Constants for mesh flag parsing
+            const MESH_FLAG_OFFSET: usize = 0x11;
+            const MIN_PACKET_LEN_WITH_MESH: u16 = 0x14;
+            let has_mesh_flag = MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len;
+            
+            // Secure mode handling
+            if SECURITY_ENABLE.get() {
+                // Must be in correct state
+                if BLE_PAIR_ST.get() != PairState::ReceivingMeshPassword {
+                    pair_par_init();
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+                    PAIR_ENC_ENABLE.set(false);
+                    return true;
+                }
+
+                // Process encrypted LTK
                 pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
                 BLE_PAIR_ST.set(PairState::ReceivingMeshLtk);
 
-                // Special handling for mesh network - check if mesh flag is set
-                let l2cap_len = data.head().l2cap_len;
-                if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && pktdata[MESH_FLAG_OFFSET] != 0 {
-                    // This is a mesh LTK - decrypt and prepare for mesh mode
+                // Check for mesh network mode
+                if MESH_PAIR_ENABLE.get() && has_mesh_flag && pktdata[MESH_FLAG_OFFSET] != 0 {
+                    // Mesh mode: Decrypt mesh LTK
                     pair_state.pair_ltk_mesh = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
                     return true;
                 }
 
-                // Standard LTK - decrypt, save to flash, and notify application
+                // Regular mode: Decrypt standard LTK
                 pair_state.pair_ltk = aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                 rf_link_light_event_callback(LGT_CMD_PAIR_OK);
                 return true;
-            }
-        } else if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::ReceivingMeshPassword {
-            // Simple mode: Only allow if already logged in
-            
-            // Clear existing LTK
-            pair_state.pair_ltk.fill(0);
+            } 
+            // Simple mode handling
+            else if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::ReceivingMeshPassword {
+                // Clear and prepare LTK
+                pair_state.pair_ltk.fill(0);
+                BLE_PAIR_ST.set(PairState::ReceivingMeshLtk);
 
-            // Advance to next state
-            BLE_PAIR_ST.set(PairState::ReceivingMeshLtk);
-            
-            // Special handling for mesh network - check if mesh flag is set
-            if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && (pktdata[MESH_FLAG_OFFSET] & 0x80) != 0 {
-                // This is a mesh LTK - store and prepare for mesh mode
-                pair_state.pair_ltk_mesh.copy_from_slice(&src[0..KEY_SIZE]);
-                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+                // Check for mesh network mode
+                if MESH_PAIR_ENABLE.get() && has_mesh_flag && (pktdata[MESH_FLAG_OFFSET] & 0x80) != 0 {
+                    // Mesh mode: Store plaintext mesh LTK
+                    pair_state.pair_ltk_mesh.copy_from_slice(&src[0..KEY_SIZE]);
+                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+                    return true;
+                }
+
+                // Regular mode: Store plaintext standard LTK
+                pair_state.pair_ltk.copy_from_slice(&src[0..KEY_SIZE]);
+                pair_save_key();
+                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+                rf_link_light_event_callback(LGT_CMD_PAIR_OK);
                 return true;
             }
-
-            // Standard LTK - store, save to flash, and notify application
-            pair_state.pair_ltk.copy_from_slice(&src[0..KEY_SIZE]);
-            pair_save_key();
+            
+            // Invalid state - reset pairing
+            pair_par_init();
             *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-            rf_link_light_event_callback(LGT_CMD_PAIR_OK);
+            PAIR_ENC_ENABLE.set(false);
             return true;
-        }
-        
-        // Invalid state - reset pairing
-        pair_par_init();
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-        PAIR_ENC_ENABLE.set(false);
-        return true;
-    }
+        },
 
-    // Determine if we're handling GET_LTK or VERIFY_CREDENTIALS
-    let mut is_get_ltk = opcode == PAIR_OP_GET_MESH_LTK;
-    let is_verify = opcode == PAIR_OP_VERIFY_CREDENTIALS;
-    
-    // Check for maintenance opcodes
-    if !is_verify {
-        if !is_get_ltk {
-            // PAIR_OP_RESET_MESH: Reset mesh configuration to defaults
-            if opcode == PAIR_OP_RESET_MESH {
-                // Must track state transitions (no action here yet)
-                // is_get_ltk = false; // Not needed as already false
-            } else if opcode == PAIR_OP_DELETE_PAIRING {
-                // PAIR_OP_DELETE_PAIRING: Delete all pairing information
-                // Delete pairing information and reset
-                PAIR_ENC_ENABLE.set(false);
-                BLE_PAIR_ST.set(PairState::Idle);
-                return true;
-            }
+        // --- Step 5: Pair Maintenance - Delete Pairing ---
+        PAIR_OP_DELETE_PAIRING => {
+            PAIR_ENC_ENABLE.set(false);
+            BLE_PAIR_ST.set(PairState::Idle);
             return true;
-        }
-    } else if is_get_ltk {
-        // Save current session key for later restoration
-        pair_state.pair_sk_copy = pair_state.pair_sk;
-    }
-
-    // Common code for both PAIR_OP_GET_MESH_LTK and PAIR_OP_VERIFY_CREDENTIALS
-    // Both operations require credential verification
-    
-    // Store the master random challenge
-    pair_state.pair_randm.copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
-    let pair_randm = pair_state.pair_randm;
-    
-    // Generate session key from master random
-    pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&pair_randm);
-    pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
-
-    // Disable encryption during verification
-    PAIR_ENC_ENABLE.set(false);
-
-    // Create verification material by XORing network name and password
-    for index in 0..KEY_SIZE {
-        pair_state.pair_work[index] = pair_state.pair_pass[index] ^ pair_state.pair_nn[index];
-    }
-
-    // Verify the client's proof of knowledge based on security mode
-    let verification_succeeded = if !SECURITY_ENABLE.get() {
-        // Simple mode: Direct comparison of XORed credentials
-        pair_state.pair_work == src[RANDOM_CHALLENGE_SIZE..RANDOM_CHALLENGE_SIZE + KEY_SIZE]
-    } else {
-        // Position of client proof in the packet
-        const CLIENT_PROOF_OFFSET: usize = 9;
+        },
         
-        // Secure mode: Encrypt the verification material and compare with client proof
-        pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
-        &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE] == &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE]
-    };
-
-    
-    // Process verification result
-    if is_verify || PAIR_LOGIN_OK.get() {
-        if verification_succeeded {
-            // Verification succeeded - determine next action
-            if opcode == PAIR_OP_GET_MESH_LTK {
-                // Client verified, proceed to send the LTK
-                BLE_PAIR_ST.set(PairState::RequestingLtk);
-                return true;
+        // --- Step 5: Pair Maintenance - Reset Mesh ---
+        PAIR_OP_RESET_MESH => {
+            // No specific action yet for reset mesh
+            return true;
+        },
+        
+        // --- Combined handling for LTK Request and Credential Verification ---
+        PAIR_OP_GET_MESH_LTK | PAIR_OP_VERIFY_CREDENTIALS => {
+            let is_get_ltk = opcode == PAIR_OP_GET_MESH_LTK;
+            let is_verify = opcode == PAIR_OP_VERIFY_CREDENTIALS;
+            
+            // Save session key if this is a GET_LTK operation
+            if is_verify && is_get_ltk {
+                pair_state.pair_sk_copy = pair_state.pair_sk;
             }
             
-            // Handle credential verification
-            if !is_verify {
-                // Something unusual happened - verify flag is wrong
-                BLE_PAIR_ST.set(PairState::DeletePairing);
-                return true;
+            // Store master random and prepare session key
+            pair_state.pair_randm.copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
+            let randm = pair_state.pair_randm;
+            pair_state.pair_sk[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&randm);
+            pair_state.pair_sk[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0);
+            
+            // Disable encryption during verification
+            PAIR_ENC_ENABLE.set(false);
+            
+            // Create verification material by XORing network name and password
+            for index in 0..KEY_SIZE {
+                pair_state.pair_work[index] = pair_state.pair_pass[index] ^ pair_state.pair_nn[index];
             }
             
-            // Verification successful - mark as logged in
-            PAIR_LOGIN_OK.set(true);
-            BLE_PAIR_ST.set(PairState::SessionKeyExchange);
+            // Verify proof of knowledge based on security mode
+            let verification_succeeded = if !SECURITY_ENABLE.get() {
+                // Simple mode: Direct comparison of XORed credentials
+                pair_state.pair_work == src[RANDOM_CHALLENGE_SIZE..RANDOM_CHALLENGE_SIZE + KEY_SIZE]
+            } else {
+                // Secure mode: Encrypt and compare with client proof
+                const CLIENT_PROOF_OFFSET: usize = 9;
+                pair_state.pair_work = aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
+                &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE] == 
+                    &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE]
+            };
+            
+            // Only process if this is a verification request or user is already logged in
+            if is_verify || PAIR_LOGIN_OK.get() {
+                if verification_succeeded {
+                    if is_get_ltk {
+                        // LTK request succeeded
+                        BLE_PAIR_ST.set(PairState::RequestingLtk);
+                        return true;
+                    }
+                    
+                    if !is_verify {
+                        // Inconsistent state
+                        BLE_PAIR_ST.set(PairState::DeletePairing);
+                        return true;
+                    }
+                    
+                    // Verification succeeded - mark as logged in
+                    PAIR_LOGIN_OK.set(true);
+                    BLE_PAIR_ST.set(PairState::SessionKeyExchange);
+                    return true;
+                }
+                
+                // Verification failed - clear login status for verify operations
+                if is_verify {
+                    PAIR_LOGIN_OK.set(false);
+                }
+            }
+            
+            // Reset pairing on verification failure
+            pair_par_init();
+            return true;
+        },
+        
+        // --- Default: Unknown or unsupported opcode ---
+        _ => {
+            // No specific handling for unknown opcodes
             return true;
         }
-        
-        // Verification failed
-        if is_verify {
-            // For verification, clear login status
-            PAIR_LOGIN_OK.set(false);
-        }
     }
-    
-    // Reset pairing on failure or completion
-    pair_par_init();
-    return true;
 }
 
 #[cfg(test)]
@@ -1967,27 +1965,6 @@ mod tests {
         pair_state.pair_work.fill(0x00);  // Clear work buffer
     }
 
-    // Helper to create the expected base packet structure for pair_proc responses
-    fn expected_base_packet(pair_st: PairState) -> Packet {
-        Packet {
-            att_read_rsp: PacketAttReadRsp {
-                head: PacketL2capHead {
-                    dma_len: 0, // Will be set based on l2cap_len
-                    _type: 2,
-                    rf_len: 0, // Will be set based on l2cap_len
-                    l2cap_len: 0, // Will be set by the test
-                    chan_id: 0x4,
-                },
-                opcode: ATT_READ_RESPONSE_OPCODE,
-                value: {
-                    let mut val = [0u8; 22];
-                    val[0] = pair_st as u8; // First byte is always the state
-                    val
-                },
-            }
-        }
-    }
-
     // --- pair_proc Tests ---
 
     #[test]
@@ -2471,10 +2448,8 @@ mod tests {
         // In the current implementation, unhandled states fall through and return Some(pkt)
         // after clearing the PAIR_READ_PENDING flag.
         assert!(result.is_some()); // Changed from is_none()
-        if let Some(pkt) = result {
-            // Verify the state byte in the returned packet matches the initial state
-            assert_eq!(pkt.att_read_rsp().value[0], PairState::Completed as u8);
-        }
+        // Verify the state byte in the returned packet matches the initial state
+        assert_eq!(result.unwrap().att_read_rsp().value[0], PairState::Completed as u8);
         assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared
     }
 

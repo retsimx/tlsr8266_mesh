@@ -424,6 +424,7 @@ pub fn light_slave_tx_command(p_cmd: &[u8], para: u16, retransmit_count: u8, sen
     mesh_construct_packet(cmd_sno, dst, &cmd_op_para, retransmit_count, send_ack)
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {

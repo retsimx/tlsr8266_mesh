@@ -1033,6 +1033,7 @@ pub fn mesh_report_status_enable_mask(data: &[u8])
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_delete_pair()
 {
     let mut key = [0u8; 16 * 3];

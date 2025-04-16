@@ -123,7 +123,7 @@ pub enum LightOpType {
     OpType3 = 3,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ePairState {
     PairSetted = 0,
     PairSetting = 1,

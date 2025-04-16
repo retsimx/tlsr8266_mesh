@@ -131,6 +131,16 @@ pub struct PacketAttWrite {
 
 #[repr(C, align(4))]
 #[derive(Clone, Copy, Default)]
+pub struct PacketAttRawValue {
+    pub head: PacketL2capHead, // 0
+    pub opcode: u8,
+    pub handle: u8,
+    pub handle1: u8,
+    pub value: [u8; 30]
+}
+
+#[repr(C, align(4))]
+#[derive(Clone, Copy, Default)]
 pub struct PacketAttCmd {
     pub head: PacketL2capHead, // 0
     pub opcode: u8,     // 10
@@ -283,6 +293,7 @@ pub union Packet {
     pub att_write: PacketAttWrite,
     pub mesh: MeshPkt,
     pub att_cmd: PacketAttCmd,
+    pub att_val: PacketAttRawValue,
     pub ll_data: PacketLlData,
     pub ll_app: PacketLlApp,
     pub sig_conn_para_up_rsp: PktL2capSigConnParaUpRsp,
@@ -331,6 +342,14 @@ impl Packet {
 
     pub fn att_cmd_mut(&mut self) -> &mut PacketAttCmd {
         unsafe { &mut self.att_cmd }
+    }
+
+    pub fn att_val(&self) -> &PacketAttRawValue {
+        unsafe { &self.att_val }
+    }
+
+    pub fn att_val_mut(&mut self) -> &mut PacketAttRawValue {
+        unsafe { &mut self.att_val }
     }
 
     pub fn ll_data(&self) -> &PacketLlData {

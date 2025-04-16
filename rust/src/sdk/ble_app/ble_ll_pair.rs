@@ -313,6 +313,7 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool
 ///
 /// @param addr The offset within the pairing data structure
 /// @param data The data to save to flash
+#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_save_config(addr: u32, data: &[u8])
 {
     // Flash storage offset constants
@@ -949,10 +950,12 @@ pub fn pair_write(data: &Packet) -> bool
 mod tests {
     use super::*;
     use mry::{self, Any};
-    use crate::sdk::mcu::crypto::mock_aes_att_decryption_packet;
+    use crate::sdk::mcu::crypto::{mock_aes_att_decryption_packet, mock_aes_att_encryption_packet, mock_aes_att_encryption, mock_encode_password}; // Added mock_encode_password
     use core::mem::size_of;
     use mry::send_wrapper::SendWrapper;
-    use crate::sdk::packet_types::{PacketL2capData, PacketLlApp};
+    use crate::sdk::packet_types::{PacketL2capData, PacketLlApp, MeshPkt, PacketL2capHead};
+    use crate::sdk::mcu::register::mock_read_reg_system_tick;
+    use crate::common::{mock_pair_flash_clean, mock_save_pair_info, mock_pair_update_key, mock_pair_load_key}; // Ensure mock_pair_load_key is imported
 
     // Helper function to create a test packet with ATT write structure
     fn create_test_packet() -> Packet {
@@ -1113,9 +1116,6 @@ mod tests {
         assert_eq!(result, true);
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
-
-    use crate::sdk::mcu::crypto::mock_aes_att_encryption_packet;
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
 
     // Helper function to create a test packet with LL app structure suitable for encryption
     fn create_test_ll_packet() -> Packet {
@@ -1311,8 +1311,6 @@ mod tests {
         // Assert
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
     }
-
-    use crate::sdk::packet_types::{MeshPkt, PacketL2capHead};
 
     // Helper function to create a test mesh packet
     fn create_test_mesh_packet(is_broadcast: bool) -> Packet {
@@ -1666,5 +1664,271 @@ mod tests {
         }
 
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(3);
+    }
+
+    // Helper to set up global state for testing pair_flash_save_config
+    fn setup_flash_config_state(initial_idx: i32) {
+        ADR_FLASH_CFG_IDX.set(initial_idx);
+    }
+
+    #[test]
+    #[mry::lock(pair_flash_clean, save_pair_info)]
+    fn test_pair_flash_save_config_new_set() {
+        // Arrange
+        const OFFSET_HEADER: u32 = 0x00;
+        const SECTOR_SIZE: i32 = 0x40;
+        let initial_idx = 100; // Arbitrary initial index
+        setup_flash_config_state(initial_idx);
+        let test_addr = OFFSET_HEADER;
+        let test_data = [1, 2, 3, 4];
+
+        // Mock expectations
+        mock_pair_flash_clean().returns(());
+        mock_save_pair_info(Any, Any).returns(());
+
+        // Act
+        pair_flash_save_config(test_addr, &test_data);
+
+        // Assert
+        // Verify pair_flash_clean was called once
+        mock_pair_flash_clean().assert_called(1);
+
+        // Verify ADR_FLASH_CFG_IDX was incremented
+        assert_eq!(ADR_FLASH_CFG_IDX.get(), initial_idx + SECTOR_SIZE);
+
+        // Verify save_pair_info was called with correct parameters
+        mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(pair_flash_clean, save_pair_info)]
+    fn test_pair_flash_save_config_existing_set() {
+        // Arrange
+        const OFFSET_NAME: u32 = 0x10; // Use a non-header offset
+        let initial_idx = 200; // Arbitrary initial index
+        setup_flash_config_state(initial_idx);
+        let test_addr = OFFSET_NAME;
+        let test_data = [5, 6, 7, 8];
+
+        // Mock expectations
+        mock_pair_flash_clean().returns(()); // Expect it NOT to be called
+        mock_save_pair_info(Any, Any).returns(());
+
+        // Act
+        pair_flash_save_config(test_addr, &test_data);
+
+        // Assert
+        // Verify pair_flash_clean was NOT called
+        mock_pair_flash_clean().assert_called(0);
+
+        // Verify ADR_FLASH_CFG_IDX remained unchanged
+        assert_eq!(ADR_FLASH_CFG_IDX.get(), initial_idx);
+
+        // Verify save_pair_info was called with correct parameters
+        mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(save_pair_info)]
+    fn test_pair_flash_save_config_data_passing() {
+        // Arrange
+        const OFFSET_PASSWORD: u32 = 0x20;
+        setup_flash_config_state(0); // Index doesn't matter here
+        let test_addr = OFFSET_PASSWORD;
+        let test_data = vec![0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
+
+        // Mock expectations - focus on data passed to save_pair_info
+        mock_save_pair_info(Any, Any).returns_with(move |addr: u32, data: Vec<u8>| {
+            assert_eq!(addr, test_addr);
+            assert_eq!(data, test_data);
+        });
+
+        // Act
+        let data_slice = &[0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
+        pair_flash_save_config(test_addr, data_slice);
+
+        // Assert
+        // Verification happens within the mock closure
+        mock_save_pair_info(Any, Any).assert_called(1);
+    }
+
+    // Helper to set up global state for testing pair_save_key
+    fn setup_save_key_state(mesh_pair_enable: bool, get_mac_en: bool, nn: [u8; 16], pass: [u8; 16], ltk: [u8; 16]) {
+        MESH_PAIR_ENABLE.set(mesh_pair_enable);
+        GET_MAC_EN.set(get_mac_en);
+        let mut pair_state = PAIR_STATE.lock();
+        pair_state.pair_nn = nn;
+        pair_state.pair_pass = pass;
+        pair_state.pair_ltk = ltk;
+    }
+
+    #[test]
+    #[mry::lock(pair_flash_save_config, encode_password, pair_update_key)]
+    fn test_pair_save_key_mesh_enabled_mac_enabled() {
+        // Arrange
+        const OFFSET_HEADER: u32 = 0x00;
+        const OFFSET_NAME: u32 = 0x10;
+        const OFFSET_PASSWORD: u32 = 0x20;
+        const OFFSET_LTK: u32 = 0x30;
+        let test_nn = [0x11; 16];
+        let test_pass = [0x22; 16];
+        let test_ltk = [0x33; 16];
+        let encoded_pass = [0xEE; 16]; // Mock encoded password
+
+        setup_save_key_state(true, true, test_nn, test_pass, test_ltk);
+
+        // Mock expectations
+        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_pair_flash_save_config(Any, Any).returns(()); // General mock for all calls
+        mock_pair_update_key().returns(());
+
+        // Act
+        pair_save_key();
+
+        // Assert
+        // Verify encode_password call
+        mock_encode_password(test_pass.to_vec()).assert_called(1);
+
+        // Verify pair_flash_save_config calls
+        let mut expected_header = [0u8; 16];
+        expected_header[0] = PAIR_CONFIG_VALID_FLAG;
+        expected_header[15] = PAIR_CONFIG_VALID_FLAG;
+        expected_header[1] = 1; // MESH_PAIR_ENABLE=true, GET_MAC_EN=true
+        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+
+        // Verify pair_update_key call
+        mock_pair_update_key().assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(pair_flash_save_config, encode_password, pair_update_key)]
+    fn test_pair_save_key_mesh_enabled_mac_disabled() {
+        // Arrange
+        const OFFSET_HEADER: u32 = 0x00;
+        const OFFSET_NAME: u32 = 0x10;
+        const OFFSET_PASSWORD: u32 = 0x20;
+        const OFFSET_LTK: u32 = 0x30;
+        let test_nn = [0xAA; 16];
+        let test_pass = [0xBB; 16];
+        let test_ltk = [0xCC; 16];
+        let encoded_pass = [0xFF; 16]; // Mock encoded password
+
+        setup_save_key_state(true, false, test_nn, test_pass, test_ltk);
+
+        // Mock expectations
+        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_pair_flash_save_config(Any, Any).returns(());
+        mock_pair_update_key().returns(());
+
+        // Act
+        pair_save_key();
+
+        // Assert
+        mock_encode_password(test_pass.to_vec()).assert_called(1);
+
+        let mut expected_header = [0u8; 16];
+        expected_header[0] = PAIR_CONFIG_VALID_FLAG;
+        expected_header[15] = PAIR_CONFIG_VALID_FLAG;
+        expected_header[1] = 0; // MESH_PAIR_ENABLE=true, GET_MAC_EN=false
+        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+
+        mock_pair_update_key().assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(pair_flash_save_config, encode_password, pair_update_key)]
+    fn test_pair_save_key_mesh_disabled() {
+        // Arrange
+        const OFFSET_HEADER: u32 = 0x00;
+        const OFFSET_NAME: u32 = 0x10;
+        const OFFSET_PASSWORD: u32 = 0x20;
+        const OFFSET_LTK: u32 = 0x30;
+        let test_nn = [0x1A; 16];
+        let test_pass = [0x2B; 16];
+        let test_ltk = [0x3C; 16];
+        let encoded_pass = [0xDD; 16]; // Mock encoded password
+
+        setup_save_key_state(false, true, test_nn, test_pass, test_ltk); // GET_MAC_EN doesn't matter if mesh is disabled
+
+        // Mock expectations
+        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_pair_flash_save_config(Any, Any).returns(());
+        mock_pair_update_key().returns(());
+
+        // Act
+        pair_save_key();
+
+        // Assert
+        mock_encode_password(test_pass.to_vec()).assert_called(1);
+
+        let mut expected_header = [0u8; 16];
+        expected_header[0] = PAIR_CONFIG_VALID_FLAG;
+        expected_header[15] = PAIR_CONFIG_VALID_FLAG;
+        // expected_header[1] remains 0 as MESH_PAIR_ENABLE is false
+        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
+        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+
+        mock_pair_update_key().assert_called(1);
+    }
+
+    #[test]
+    fn test_pair_init() {
+        // Arrange
+        // Set initial non-default states
+        BLE_PAIR_ST.set(PairState::Completed);
+        PAIR_ENC_ENABLE.set(true);
+        MAC_ID.lock().copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        PAIR_IVM.lock().fill(0xFF);
+        PAIR_IVS.lock().fill(0xFF);
+        const MAC_ID_SIZE: usize = 4;
+
+        // Act
+        pair_init();
+
+        // Assert
+        // Check state reset
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
+        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+
+        // Check IV initialization from MAC ID
+        let mac_id = MAC_ID.lock();
+        let pair_ivm = PAIR_IVM.lock();
+        let pair_ivs = PAIR_IVS.lock();
+        assert_eq!(pair_ivm[0..MAC_ID_SIZE], mac_id[0..MAC_ID_SIZE]);
+        assert_eq!(pair_ivs[0..MAC_ID_SIZE], mac_id[0..MAC_ID_SIZE]);
+
+        // Check that the rest of the IVs are untouched (or verify if they should be zeroed)
+        // Assuming they should remain untouched based on the code:
+        // Assuming IVs are 8 bytes based on usage elsewhere and panic message
+        const IV_SIZE: usize = 8; 
+        assert_eq!(pair_ivm[MAC_ID_SIZE..IV_SIZE], [0xFF; IV_SIZE - MAC_ID_SIZE]);
+        assert_eq!(pair_ivs[MAC_ID_SIZE..IV_SIZE], [0xFF; IV_SIZE - MAC_ID_SIZE]);
+    }
+
+    #[test]
+    #[mry::lock(pair_load_key)]
+    fn test_pair_par_init() {
+        // Arrange
+        // Set initial state to something other than Init
+        BLE_PAIR_ST.set(PairState::Idle);
+        // Mock pair_load_key to do nothing but allow verification
+        mock_pair_load_key().returns(());
+
+        // Act
+        pair_par_init();
+
+        // Assert
+        // Check state is set to Init
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
+        // Verify pair_load_key was called
+        mock_pair_load_key().assert_called(1);
     }
 }

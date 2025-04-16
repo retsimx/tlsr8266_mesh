@@ -49,6 +49,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 // adr:0=flag 16=name 32=pwd 48=ltk
 // p:data
 // n:length
+#[cfg_attr(test, mry::mry)]
 pub fn save_pair_info(adr: u32, p: &[u8]) {
     flash_write_page(
         (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get() + adr as i32) as u32,
@@ -176,6 +177,7 @@ pub fn mesh_node_init()
     MESH_NODE_MAX.set(1);
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_clean()
 {
     let mut flash_dat_swap: [u8; 64] = [0; 64];
@@ -265,6 +267,7 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32
     destbuf[0]
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn pair_update_key()
 {
     let pair_state = PAIR_STATE.lock();
@@ -282,6 +285,7 @@ pub fn pair_update_key()
     rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn pair_load_key()
 {
     pair_flash_config_init();

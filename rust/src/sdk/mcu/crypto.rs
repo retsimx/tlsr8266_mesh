@@ -159,6 +159,7 @@ pub fn aes_att_decryption(key: &[u8; 16], source: &[u8; 16]) -> [u8; 16]
 ///
 /// # Returns
 /// A 16-byte array containing the encrypted password.
+#[cfg_attr(test, mry::mry)]
 pub fn encode_password(password: &[u8; 16]) -> [u8; 16]
 {
     // Lock the mutex protecting the global password encoding key.
@@ -180,6 +181,7 @@ pub fn encode_password(password: &[u8; 16]) -> [u8; 16]
 ///
 /// # Returns
 /// A 16-byte array containing the decrypted (plaintext) password.
+#[cfg_attr(test, mry::mry)]
 pub fn decode_password(password: &[u8; 16]) -> [u8; 16]
 {
     // Lock the mutex protecting the global password encoding/decoding key.

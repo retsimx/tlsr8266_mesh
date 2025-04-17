@@ -269,6 +269,115 @@ bitflags! {
 }
 
 //****************************************************
+// UART registers (0x090 - 0x09F)
+//****************************************************
+//
+// This section defines registers that control the UART (Universal Asynchronous Receiver-Transmitter)
+// peripheral, which handles serial communication with external devices.
+//
+// UART Features:
+// - Configurable baud rate generation
+// - Standard 8-bit data format
+// - Optional parity bit and flow control
+// - DMA integration for efficient data transfer
+// - Interrupt generation on TX/RX events
+//
+// Key Registers:
+// - reg_uart_clk_div: Controls UART clock divider for baud rate
+// - reg_uart_ctrl0: Main control register (bit width, DMA, etc.)
+// - reg_uart_ctrl1: Hardware flow control and parity settings
+// - reg_uart_rx_timeout: Timeout settings for receiving data
+// - reg_uart_rx_timeout_cnt: Timeout counter value
+// - reg_uart_status: UART status flags including error states
+//
+// Usage Examples:
+//
+// 1. Configuring UART for 115200 baud at 32MHz system clock:
+//    ```
+//    // Set UART clock divider (19) and enable UART clock
+//    write_reg_uart_clk_div(19 | 0x8000);
+//    
+//    // Set bit width parameter (13) and enable DMA for RX/TX
+//    write_reg_uart_ctrl0(0x30 | 13);
+//    
+//    // Configure timeout for high baud rate
+//    write_reg_uart_rx_timeout(0xff);
+//    write_reg_uart_rx_timeout_cnt(3);
+//    ```
+//
+// 2. Configuring UART for 9600 baud at 32MHz system clock:
+//    ```
+//    // Set UART clock divider (237) and enable UART clock
+//    write_reg_uart_clk_div(237 | 0x8000);
+//    
+//    // Set bit width parameter (13) and enable DMA for RX/TX
+//    write_reg_uart_ctrl0(0x30 | 13);
+//    
+//    // Configure timeout for low baud rate (one byte is 12 bits max)
+//    write_reg_uart_rx_timeout((13+1)*12);
+//    write_reg_uart_rx_timeout_cnt(1);
+//    ```
+//
+// 3. Checking UART errors:
+//    ```
+//    // Read UART status register
+//    let status = read_reg_uart_status();
+//    
+//    // Check if error flag is set
+//    if (status & (FLD_UART_STATUS::ERR_FLAG as u8)) != 0 {
+//        // UART error detected
+//        
+//        // Clear error by setting the error clear bit
+//        let mut clear_cmd = status;
+//        clear_cmd |= (FLD_UART_STATUS::ERR_CLR as u8);
+//        write_reg_uart_status(clear_cmd);
+//    }
+//    ```
+
+// UART registers
+regrw!(reg_uart_clk_div, 0x094, 16);   // Clock divider and enable bit
+regrw!(reg_uart_ctrl0, 0x096, 8);      // Control register 0 (bit width, etc.)
+regrw!(reg_uart_ctrl1, 0x097, 8);      // Flow control and parity
+regrw!(reg_uart_rx_timeout, 0x09a, 8); // RX timeout value
+regrw!(reg_uart_rx_timeout_cnt, 0x09b, 8); // RX timeout counter
+regrw!(reg_uart_status, 0x09d, 8);     // Status register
+
+// UART control bit fields
+bitflags! {
+    pub struct FLD_UART_CLK_DIV: u16 {
+        const DIV_VALUE = BIT_RNG!(0, 14);
+        const CLK_EN = BIT!(15);
+    }
+}
+
+bitflags! {
+    pub struct FLD_UART_CTRL0: u8 {
+        const BW_MUL = BIT_RNG!(0, 4);   // Bit width multiplier
+        const RX_DMA_EN = BIT!(4);       // Enable DMA for RX
+        const TX_DMA_EN = BIT!(5);       // Enable DMA for TX
+    }
+}
+
+bitflags! {
+    pub struct FLD_UART_CTRL1: u8 {
+        const CTS_EN = BIT!(1);          // Enable CTS flow control
+        const PARITY_EN = BIT!(2);       // Enable parity check
+        const PARITY_ODD = BIT!(3);      // 1: odd parity, 0: even parity
+        const STOP_BIT = BIT_RNG!(4, 5); // Stop bit configuration
+    }
+}
+
+bitflags! {
+    pub struct FLD_UART_STATUS: u8 {
+        const RBCNT = BIT_RNG!(0, 2);    // Count of bytes in RX buffer
+        const IRQ_O = BIT!(3);           // IRQ output status
+        const WBCNT = BIT_RNG!(4, 6);    // Count of bytes in TX buffer
+        const ERR_FLAG = BIT!(7);        // Error flag
+        const ERR_CLR = BIT!(6);         // Write 1 to clear error flag
+    }
+}
+
+//****************************************************
 // System reset and clock control registers (0x60 - 0x7F)
 //****************************************************
 //
@@ -1100,6 +1209,10 @@ regrw!(reg_dma4_addr, 0x510, 16);
 regrw!(reg_dma4_ctrl, 0x512, 16);
 regrw!(reg_dma5_addr, 0x514, 16);
 regrw!(reg_dma5_ctrl, 0x516, 16);
+
+// DMA mode registers
+regrw!(reg_dma0_mode, 0x503, 8);   // DMA0 mode register
+regrw!(reg_dma1_mode, 0x507, 8);   // DMA1 mode register
 
 // DMA control registers
 regrw!(reg_dma_chn_en, 0x520, 8);

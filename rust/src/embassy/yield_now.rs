@@ -29,6 +29,7 @@ use core::task::{Context, Poll};
 ///
 /// [`task::spawn_blocking`]: fn.spawn_blocking.html
 #[inline]
+#[cfg_attr(test, mry::mry)]
 pub async fn yield_now() {
     // Create and await a YieldNow future with initial state set to false
     YieldNow(false).await

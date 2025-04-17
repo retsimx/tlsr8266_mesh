@@ -762,6 +762,7 @@ pub fn gpio_init() {
     );
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn gpio_set_func(pin: u32, func: u8) {
     let bit: u8 = (pin & 0xff) as u8;
     if func == AS_GPIO {
@@ -792,6 +793,7 @@ pub fn gpio_set_output_en(mut pin: u32, value: u32) {
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn gpio_set_input_en(mut pin: u32, value: u32) {
     let bit = (pin & 0xff) as u8;
     pin = (pin >> 8) << 3;

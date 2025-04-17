@@ -66,6 +66,7 @@ pub fn clock_time() -> u32 {
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
     return (clock_time() - reference) as u32 > span_us * CLOCK_SYS_CLOCK_1US;
 }

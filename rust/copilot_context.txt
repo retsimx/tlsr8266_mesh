@@ -38,6 +38,46 @@ mod tests {
 }
 ```
 
+**Test Isolation** - Tests should be isolated because mock return values cannot be changed once set. Use the `mry` crate's locking mechanism to ensure each test has its own mock setup:
+
+```rust
+#[test]
+#[mry::lock(function1, function2)] // Lock the mocks for these functions
+fn test_isolated_function() {
+    // Setup mocks for this test only
+    mock_function1().returns(expected_value);
+    
+    // Test the function
+    let result = function_under_test();
+    
+    // Assertions
+    assert_eq!(result, expected_value);
+    
+    // Verify mock was called
+    mock_function1().assert_called(1);
+}
+```
+
+**Testing Async Functions** - When testing async functions, you must still use a synchronous test function (`#[test]`), but you can use the futures crate to execute the async function:
+
+```rust
+#[test]
+#[mry::lock(async_dependency1, async_dependency2)]
+fn test_async_function() {
+    // Setup mocks
+    mock_async_dependency1().returns(expected_value);
+    
+    // Execute the async function synchronously using block_on
+    let result = futures::executor::block_on(async_function_under_test());
+    
+    // Assertions
+    assert_eq!(result, expected_value);
+    
+    // Verify mocks were called
+    mock_async_dependency1().assert_called(1);
+}
+```
+
 ### Documentation Style
 
 **Function Documentation** - Use doc comments with this structure:

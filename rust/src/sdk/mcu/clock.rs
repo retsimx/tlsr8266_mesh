@@ -70,8 +70,9 @@ pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
     return (clock_time() - reference) as u32 > span_us * CLOCK_SYS_CLOCK_1US;
 }
 
-#[inline(always)]
+#[inline(never)]
 #[cfg_attr(test, mry::mry)]
+#[link_section = ".ram_code"]
 pub fn sleep_us(us: u32) {
     let t = clock_time();
     while !clock_time_exceed(t, us) {}

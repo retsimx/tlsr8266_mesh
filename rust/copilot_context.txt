@@ -1,0 +1,308 @@
+# TLSR8266 Mesh Light Project - Development Context
+
+## Hardware Platform
+
+**Target MCU:** Telink TLSR8266F512 BLE SoC
+- 32-bit RISC processor @ 32MHz (up to 48MHz)
+- Custom ARM core without ARMv6 features, only Thumb support, functionally equivalent to ARM920T
+- 16KB SRAM, 512KB Flash
+- Constraints: Limited memory requires careful resource management
+- Power modes: Active, Idle, Suspend, Deep Sleep (~1ms transition)
+
+**Wireless:**
+- BLE 4.2 transceiver (1Mbps standard, 2Mbps proprietary)
+- +7dBm output, -92dBm sensitivity
+
+**Key peripherals:**
+- GPIO: Up to 35 pins
+- Communication: UART, I2C, SPI, USB
+- ADC, PWM, Timers, KeyScan, AES engine
+
+## Project Coding Standards
+
+### Testing Style
+
+**Tests in Same File** - In Rust, it's idiomatic to include tests in the same file as the code they test. Place tests in a `mod tests` block at the end of the file:
+```rust
+// Implementation code here...
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_some_function() {
+        // Test implementation
+        assert_eq!(some_function(1), expected_result);
+    }
+}
+```
+
+### Documentation Style
+
+**Function Documentation** - Use doc comments with this structure:
+```rust
+/// Brief single-line description of function purpose.
+///
+/// More detailed explanation about what this function does.
+///
+/// # Parameters
+///
+/// * `param_name` - Description of parameter
+///
+/// # Returns
+///
+/// * Description of return value/type
+///
+/// # Notes
+///
+/// * Any special considerations or implementation details
+```
+
+**Enums** - Comment each variant:
+```rust
+enum GattOp {
+    AttOpErrorRsp = 0x01,     // Error Response op code
+    AttOpExchangeMtuReq = 0x02, // Exchange MTU Request op code
+}
+```
+
+**In-Code Comments:**
+1. Section headers:
+   ```rust
+   // --- Major section of code ---
+   ```
+
+2. Step-by-step annotations:
+   ```rust
+   // 1. First, retrieve the count
+   let count = get_count();
+   
+   // 2. Next, process each item
+   for item in items {
+       // ...
+   }
+   ```
+
+3. Aligned comments for clarity:
+   ```rust
+   data[0] = CMD_READ;    // Command byte
+   data[1] = 0x01;        // Address (low byte)
+   data[2] = 0x00;        // Address (high byte)
+   ```
+
+### Code Structure
+
+**File Organization:**
+- Imports and extern declarations at the top
+- Constants and public enums next
+- Public functions, then private functions
+- Tests in a module at the end with `#[cfg(test)]`
+
+**Test Documentation:**
+```rust
+#[test]
+fn test_feature_x() {
+    // This test verifies that feature X works correctly under Y conditions
+    
+    // Setup test environment
+    let input = setup_test_data();
+    
+    // Execute function under test
+    let result = function_to_test(input);
+    
+    // Verify expected outcomes
+    assert_eq!(result, expected_value, "Function should produce expected output");
+}
+```
+
+## BLE Implementation Notes
+
+- Project implements BLE mesh networking for lighting control
+- Attributes use 16-bit or 128-bit UUIDs
+- Handle ranges and attribute discovery follow BLE ATT protocol
+- Low memory requires efficient attribute search algorithms
+- L2CAP ATT handler is core component for BLE communication
+
+## Memory Considerations
+
+- 16KB SRAM restricts buffer sizes - use minimal sized buffers
+- Flash sector size is 4KB - align updates to these boundaries
+- When writing flash, organize data to minimize erase operations
+- Deep Sleep should be used whenever possible to extend battery life
+- Data structures should be memory-aligned for optimal access
+
+**Memory Map:**
+- SRAM: 0x808000 – 0x80BFFF
+- Register area: 0x800000 – 0x807FFF
+- Flash (mapped via SFC): 0x000000 – 0x07FFFF
+- Boot ROM: 0x70000 – 0x7FFFF
+
+## Common Patterns
+
+- Use `slice::from_raw_parts` carefully when working with raw pointers
+- For BLE operations, handle both 16-bit and 128-bit UUID cases
+- Check buffer sizes before operations to prevent overflows
+- Restore original values after modifying attributes in tests
+- Use `addr_of_mut!` macro when working with raw pointers to maintain safety
+
+## Testing with Mry
+
+### Mock Function Organization
+
+**Importing mock functions:** When testing with Mry, always import mock functions from their original source modules rather than defining new mock functions in tests. The original module is responsible for applying the `mry::mry` attribute:
+
+```rust
+// In the test module:
+use crate::sdk::drivers::spi::{
+    mock_mspi_ctrl_write, mock_mspi_get, mock_mspi_high, mock_mspi_low,
+    mock_mspi_read, mock_mspi_wait, mock_mspi_write,
+};
+use crate::sdk::mcu::clock::mock_sleep_us;
+use crate::sdk::mcu::irq_i::{mock_irq_disable, mock_irq_restore};
+```
+
+**Locking original functions:** In the `mry::lock` attribute, always lock the original functions (not the mock_ versions). Then use the mock_ prefixed functions in your test code to configure and verify behaviors:
+
+```rust
+// CORRECT: Lock original functions, use mock_ versions in test
+#[test]
+#[mry::lock(mspi_read, mspi_write)]  // Lock original functions
+fn test_my_function() {
+    // Configure the mocks
+    mock_mspi_read().returns(0x42);  // Use mock_ prefixed versions to configure
+    
+    // Call the function under test
+    my_function();
+    
+    // Verify using the mock_ versions
+    mock_mspi_read().assert_called(1);
+}
+```
+
+**Only lock used functions:** Only lock functions that are actually used in each test. It is invalid to lock functions that aren't called during the test. Every locked function must have return values set up before use.
+
+```rust
+// INCORRECT - locking function that isn't used
+#[mry::lock(mspi_read, mspi_write, mspi_wait)]  // mspi_wait not used
+
+// CORRECT - only lock functions actually called
+#[mry::lock(mspi_read, mspi_write)]  // only lock what's needed
+```
+
+### Basic Mocking
+
+**Basic function mocking:**
+```rust
+#[cfg_attr(test, mry::mry)]  // Apply mry to function only in test mode
+pub fn some_function(arg1: u32) -> bool {
+    // Real implementation
+    some_other_function(arg1)
+}
+
+#[test]
+#[mry::lock(some_other_function)]  // Lock the function for mocking in this test
+fn test_with_mock() {
+    // Mock the function
+    mock_some_other_function(42).returns(true);
+    
+    // Call and verify
+    assert_eq!(some_function(42), true);
+    
+    // Verify call count
+    mock_some_other_function(42).assert_called(1);
+}
+```
+
+### Parameter Matching
+
+**Using exact values:**
+```rust
+// Mock with specific parameters
+mock_function(5, "test").returns(true);
+
+// Mock with Any to match any parameter
+mock_function(5, Any).returns(false);
+
+// Call checking with specific parameters
+mock_function(5, "test").assert_called();
+```
+
+### Return Values
+
+**Simple return values:**
+```rust
+// Return void (no return value)
+mock_some_function().returns(())
+
+// Return a basic type (must implement Clone)
+mock_get_count().returns(42);
+
+// Return once (consumes the value, no Clone requirement)
+mock_find_item(Any).returns_once(item);
+
+// Return Option types
+mock_find_item(Any).returns(Some(item));
+mock_find_item("missing").returns(None);
+
+// Return Result types
+mock_process_data(Any).returns(Ok(result));
+mock_process_data("error").returns(Err(MyError::NotFound));
+
+// Call real implementation
+mock_process_data(special_case).calls_real_impl();
+```
+
+### Using returns_with and Closures
+
+**Returns_with for dynamic responses:**
+```rust
+// Using returns_with with a closure that checks parameters
+mock_validate_input(Any).returns_with(|input: String| -> bool {
+    input.len() > 5
+});
+
+// Complex logic with multiple parameters
+mock_process_data(Any, Any).returns_with(|data: Vec<u8>, flag: bool| -> Result<u32, Error> {
+    if flag && data.len() > 10 {
+        Ok(data.len() as u32)
+    } else {
+        Err(Error::InvalidInput)
+    }
+});
+
+// Capturing variables in closure
+let expected_value = 42;
+mock_transform(Any).returns_with(move |input: u32| -> u32 {
+    input + expected_value
+});
+```
+
+### Verifying Calls
+
+**Call count assertions:**
+```rust
+// Assert called at least once
+mock_function(Any).assert_called();
+
+// Assert called exactly n times
+mock_function(Any).assert_called(3);
+```
+
+### Mocking Functions with Complex Arguments
+
+**Type conversions for Vec and arrays:**
+```rust
+// For vector/array parameters
+mock_process_bytes([0x01, 0x02, 0x03].to_vec()).returns(true);
+
+// For slices, convert to Vec for comparison
+mock_process_slice(expected_slice.to_vec()).returns(true);
+```
+
+**Struct parameters:**
+```rust
+// Create a struct to match against
+let expected_config = Config { id: 1, name: "test".to_string() };
+mock_apply_config(expected_config).returns(true);
+```

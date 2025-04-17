@@ -7,6 +7,7 @@ use crate::{
 };
 
 //  watchdog use timer 2
+#[cfg_attr(test, mry::mry)]
 pub fn wd_set_interval(ms: u32) //  in ms
 {
     assert!((ms * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF) > 0);
@@ -23,6 +24,7 @@ pub fn wd_set_interval(ms: u32) //  in ms
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn wd_start() {
     let mut val = read_reg_tmr_ctrl();
     SET_FLD!(val, FLD_TMR::TMR_WD_EN.bits());
@@ -30,6 +32,7 @@ pub fn wd_start() {
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn wd_stop() {
     let mut val = read_reg_tmr_ctrl();
     CLR_FLD!(val, FLD_TMR::TMR_WD_EN.bits());
@@ -37,6 +40,7 @@ pub fn wd_stop() {
 }
 
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn wd_clear() {
     let mut val = read_reg_tmr_ctrl();
     SET_FLD!(val, FLD_TMR::CLR_WD.bits());

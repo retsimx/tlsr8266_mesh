@@ -18,22 +18,26 @@ pub const IRQ_INIT_VALUE: u32 = ((if IRQ_TIMER1_ENABLE {
     0
 }));
 
+#[cfg_attr(test, mry::mry)]
 pub fn irq_enable() -> u8 {
     let r = read_reg_irq_en(); // don't worry,  the compiler will optimize the return value if not used
     write_reg_irq_en(1);
     return r;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn irq_disable() -> u8 {
     let r = read_reg_irq_en(); // don't worry,  the compiler will optimize the return value if not used
     write_reg_irq_en(0);
     return r;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn irq_restore(en: u8) {
     write_reg_irq_en(en);
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn irq_init() {
     write_reg_irq_mask(IRQ_INIT_VALUE);
 }

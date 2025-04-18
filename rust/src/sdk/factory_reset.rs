@@ -7,9 +7,10 @@ use crate::config::{FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MES
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::crypto::encode_password;
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use critical_section;
 use crate::sdk::pm::light_sw_reboot;
 use crate::state::{*};
+use crate::sdk::mcu::irq_i::irq_disable;
 
 const SERIALS_CNT: u8 = 5; // must less than 7
 const FACTORY_RESET_SERIALS: [u8; (SERIALS_CNT * 2) as usize] = [
@@ -155,18 +156,17 @@ pub fn factory_reset_cnt_check() {
 }
 
 fn factory_reset() {
-    let r = irq_disable();
-    //clear_reset_cnt();
-    for i in 1..((FLASH_ADR_PAR_MAX - CFG_SECTOR_ADR_MAC_CODE) / 4096) {
-        let adr = CFG_SECTOR_ADR_MAC_CODE + i * 0x1000;
-        if FLASH_ADR_RESET_CNT != adr {
-            flash_erase_sector(adr);
+    critical_section::with(|_| {
+        //clear_reset_cnt();
+        for i in 1..((FLASH_ADR_PAR_MAX - CFG_SECTOR_ADR_MAC_CODE) / 4096) {
+            let adr = CFG_SECTOR_ADR_MAC_CODE + i * 0x1000;
+            if FLASH_ADR_RESET_CNT != adr {
+                flash_erase_sector(adr);
+            }
         }
-    }
 
-    flash_erase_sector(FLASH_ADR_RESET_CNT); // at last should be better, when power off during factory reset erase.
-
-    irq_restore(r);
+        flash_erase_sector(FLASH_ADR_RESET_CNT); // at last should be better, when power off during factory reset erase.
+    });
 }
 
 #[derive(PartialEq)]

@@ -2,7 +2,6 @@ use crate::sdk::drivers::spi::{
     mspi_ctrl_write, mspi_get, mspi_high, mspi_low, mspi_read, mspi_wait, mspi_write,
 };
 use crate::sdk::mcu::clock::sleep_us;
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::transmute;
 use core::ptr::{null, null_mut};
@@ -222,41 +221,38 @@ pub fn flash_send_addr(addr: u32) {
 #[cfg_attr(test, mry::mry)]
 #[link_section = ".ram_code"]
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
-    // Disable interrupts for atomic SPI operation
-    let r = irq_disable();
-
-    // Start transaction by sending read command
-    flash_send_cmd(FLASH_CMD::READ_CMD);
-    
-    // Send address (always required for flash_read_page)
-    flash_send_addr(addr);
-    
-    // Issue additional clock cycle to prepare for data reading
-    mspi_write(0x00);
-    mspi_wait();
-    
-    // Set SPI controller to auto mode (0x0a) for efficient reading
-    mspi_ctrl_write(0x0a);
-    mspi_wait();
-
-    // Read requested data bytes into the provided buffer using a safer pattern
-    // Still unsafe due to raw pointer usage, but more contained and idiomatic
-    unsafe {
-        // Create a slice to the uninitialized buffer for safer indexing
-        let buffer = core::slice::from_raw_parts_mut(buf, len as usize);
+    // Use critical section for atomic SPI operation
+    critical_section::with(|_| {
+        // Start transaction by sending read command
+        flash_send_cmd(FLASH_CMD::READ_CMD);
         
-        // Use iterator instead of raw pointer arithmetic
-        for i in 0..len as usize {
-            buffer[i] = mspi_get();
-            mspi_wait();
-        }
-    }
-    
-    // End SPI transaction
-    mspi_high();
+        // Send address (always required for flash_read_page)
+        flash_send_addr(addr);
+        
+        // Issue additional clock cycle to prepare for data reading
+        mspi_write(0x00);
+        mspi_wait();
+        
+        // Set SPI controller to auto mode (0x0a) for efficient reading
+        mspi_ctrl_write(0x0a);
+        mspi_wait();
 
-    // Restore interrupt state
-    irq_restore(r);
+        // Read requested data bytes into the provided buffer using a safer pattern
+        // Still unsafe due to raw pointer usage, but more contained and idiomatic
+        unsafe {
+            // Create a slice to the uninitialized buffer for safer indexing
+            let buffer = core::slice::from_raw_parts_mut(buf, len as usize);
+            
+            // Use iterator instead of raw pointer arithmetic
+            for i in 0..len as usize {
+                buffer[i] = mspi_get();
+                mspi_wait();
+            }
+        }
+        
+        // End SPI transaction
+        mspi_high();
+    });
 }
 
 /// Writes data or status to flash memory.
@@ -299,56 +295,53 @@ fn flash_mspi_write_ram(
     data: *const u8,
     data_len: u32,
 ) {
-    // Disable interrupts for atomic SPI operation
-    let r = irq_disable();
-
-    // Send write enable command (required before any write operation)
-    flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD);
-    
-    // Send the main write command
-    flash_send_cmd(cmd);
-    
-    // Send address
-    flash_send_addr(addr);
-    
-    // Send all data bytes from buffer - use a safer pattern if data is present
-    if !data.is_null() && data_len > 0 {
-        // Create a temporary slice from the raw pointer for safer access
-        let data_slice = unsafe { core::slice::from_raw_parts(data, data_len as usize) };
+    // Use critical section for atomic SPI operation
+    critical_section::with(|_| {
+        // Send write enable command (required before any write operation)
+        flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD);
         
-        // Use iterator for more idiomatic access
-        for &byte in data_slice {
-            mspi_write(byte);
-            mspi_wait();
-        }
-    }
-    
-    // End SPI transaction - initiates the internal write operation
-    mspi_high();
-    
-    // Wait for write operation to complete with timeout protection
-    // Initial delay to allow flash operation to start
-    sleep_us(100);
-    
-    // Send command to read flash status register
-    flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
-
-    // Poll busy flag with timeout protection using a more idiomatic approach
-    const BUSY_BIT: u8 = 0x01;
-    for _ in 0..FLASH_WAIT_ITERATIONS {
-        // Check if status bit is clear (not busy)
-        if mspi_read() & BUSY_BIT == 0 {
-            break; // Exit loop when flash is no longer busy
+        // Send the main write command
+        flash_send_cmd(cmd);
+        
+        // Send address
+        flash_send_addr(addr);
+        
+        // Send all data bytes from buffer - use a safer pattern if data is present
+        if !data.is_null() && data_len > 0 {
+            // Create a temporary slice from the raw pointer for safer access
+            let data_slice = unsafe { core::slice::from_raw_parts(data, data_len as usize) };
+            
+            // Use iterator for more idiomatic access
+            for &byte in data_slice {
+                mspi_write(byte);
+                mspi_wait();
+            }
         }
         
-        // No explicit delay here - reading takes time and prevents tight loop
-    }
-    
-    // Deactivate SPI chip select regardless of success/failure
-    mspi_high();// Use a more structured approach to waiting for completion
-    
-    // Restore interrupt state
-    irq_restore(r);
+        // End SPI transaction - initiates the internal write operation
+        mspi_high();
+        
+        // Wait for write operation to complete with timeout protection
+        // Initial delay to allow flash operation to start
+        sleep_us(100);
+        
+        // Send command to read flash status register
+        flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
+
+        // Poll busy flag with timeout protection using a more idiomatic approach
+        const BUSY_BIT: u8 = 0x01;
+        for _ in 0..FLASH_WAIT_ITERATIONS {
+            // Check if status bit is clear (not busy)
+            if mspi_read() & BUSY_BIT == 0 {
+                break; // Exit loop when flash is no longer busy
+            }
+            
+            // No explicit delay here - reading takes time and prevents tight loop
+        }
+        
+        // Deactivate SPI chip select regardless of success/failure
+        mspi_high();// Use a more structured approach to waiting for completion
+    });
 }
 
 /// Reads data from flash memory into a buffer.
@@ -515,7 +508,6 @@ mod tests {
         mock_mspi_read, mock_mspi_wait, mock_mspi_write,
     };
     use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::irq_i::{mock_irq_disable, mock_irq_restore};
     use crate::sdk::mcu::watchdog::mock_wd_clear;
 
     // This is required because we're working with raw pointers in our testing
@@ -554,11 +546,9 @@ mod tests {
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_get, 
                mspi_ctrl_write, mspi_high, mspi_low, mspi_wait,
-               irq_disable, irq_restore, sleep_us)]
+               sleep_us)]
     fn test_flash_read_page() {
         // Setup mock responses for SPI functions
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         
         // Simulate the busy bit being clear (not busy)
         mock_mspi_read().returns(0);
@@ -606,10 +596,6 @@ mod tests {
         // Verify SPI was set to auto mode for reading
         mock_mspi_ctrl_write(0x0a).assert_called(1);
         
-        // Verify proper interrupt handling
-        mock_irq_disable().assert_called(1);
-        mock_irq_restore(0).assert_called(1);
-        
         // Verify we waited for each operation with exact count
         mock_mspi_wait().assert_called(10);
         
@@ -640,11 +626,9 @@ mod tests {
     /// * Page size is 256 bytes for this device
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, irq_disable, irq_restore)]
+               sleep_us)]
     fn test_flash_write_page_small() {
         // Setup mock responses
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         
         // Simulate the busy bit being clear after a write
         mock_mspi_read().returns(0);
@@ -680,10 +664,6 @@ mod tests {
         // Verify proper command sequence for write with exact counts
         mock_mspi_high().assert_called(5);  // Initial + after WRITE_ENABLE + after WRITE + final
         mock_mspi_low().assert_called(3);   // For WRITE_ENABLE_CMD and WRITE_CMD
-        
-        // Verify interrupts were handled
-        mock_irq_disable().assert_called(1);
-        mock_irq_restore(0).assert_called(1);
         
         // Verify commands were sent
         mock_mspi_write(0x06).assert_called(1);  // WRITE_ENABLE_CMD
@@ -728,11 +708,9 @@ mod tests {
     /// * This test focuses specifically on the page-spanning behavior
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, irq_disable, irq_restore)]
+               sleep_us)]
     fn test_flash_write_page_cross_boundary() {
         // Setup mock responses
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         mock_mspi_read().returns(0); // Not busy
         
         // Setup other mocks needed for the write operation
@@ -776,10 +754,6 @@ mod tests {
         // Call function to write across page boundary
         flash_write_page(start_addr, 300, data_ptr);
         
-        // Verify we called write functions twice (once per page)
-        mock_irq_disable().assert_called(3);  // Once per write operation
-        mock_irq_restore(0).assert_called(3); // Once per write operation
-        
         // Verify high/low signals for chip select with exact counts
         mock_mspi_high().assert_called(15);  // 4 per page (2 pages)
         mock_mspi_low().assert_called(9);   // 2 per page (2 pages)
@@ -815,11 +789,9 @@ mod tests {
     /// * SPI protocol requires specific chip select sequence
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, irq_disable, irq_restore, wd_clear)]
+               sleep_us, wd_clear)]
     fn test_flash_erase_sector() {
         // Setup mock responses
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         mock_mspi_read().returns(0); // Not busy
         
         // Setup other required mocks
@@ -854,10 +826,6 @@ mod tests {
         mock_mspi_write(0x00).assert_called(2);  // addr[15:8] and addr[7:0]
         mock_mspi_write(0x05).assert_called(1);  // READ_STATUS_CMD_LOWBYTE 
 
-        // Verify interrupts handled
-        mock_irq_disable().assert_called(1);
-        mock_irq_restore(0).assert_called(1);
-        
         // Verify correct number of wait calls
         mock_mspi_wait().assert_called(6);  // Commands + addresses + additional waits
     }
@@ -921,11 +889,9 @@ mod tests {
     /// * The test uses a specific pattern of data to ensure proper write operations
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_get, mspi_ctrl_write, mspi_high, 
-                mspi_low, mspi_wait, sleep_us, irq_disable, irq_restore, wd_clear)]
+                mspi_low, mspi_wait, sleep_us, wd_clear)]
     fn test_flash_read_write_cycle() {
         // Setup mock responses
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         mock_mspi_read().returns(0); // Not busy
         
         // Setup other required mocks
@@ -1009,11 +975,9 @@ mod tests {
     /// 5. Verify mspi_read was called exactly FLASH_WAIT_ITERATIONS times
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, irq_disable, irq_restore)]
+               sleep_us)]
     fn test_flash_busy_flag_timeout() {
         // Setup mock responses
-        mock_irq_disable().returns(0);
-        mock_irq_restore(0).returns(());
         
         // Critical: Always return 1 to simulate flash never clearing the busy flag
         // This will force the polling loop to run for the full FLASH_WAIT_ITERATIONS
@@ -1079,7 +1043,7 @@ mod tests {
     /// * Prevents potential undefined behavior from null pointer operations
     #[test]
     #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, irq_disable, irq_restore)]
+               sleep_us)]
     fn test_flash_write_page_early_return() {
         // Create a valid test data buffer (won't be used with length 0)
         let data = vec![0x11, 0x22, 0x33, 0x44];
@@ -1093,10 +1057,6 @@ mod tests {
         
         // Verify that no SPI or interrupt functions were called
         // This confirms the early return is working correctly
-        
-        // Check interrupt functions weren't called
-        mock_irq_disable().assert_called(0);
-        mock_irq_restore(0).assert_called(0);
         
         // Check SPI control functions weren't called
         mock_mspi_high().assert_called(0);

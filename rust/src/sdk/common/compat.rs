@@ -260,15 +260,15 @@ pub async fn check_panic_info() {
 #[cfg(not(test))]
 #[panic_handler]
 pub fn panic(info: &PanicInfo) -> ! {
-    irq_disable();
+    critical_section::with(|_| {
+        let mut stream = UartStream::<256>::new();
 
-    let mut stream = UartStream::<256>::new();
+        let _ = write!(stream, "{}", info);
+        stream.send(true, false);
+        write_panic_info(&stream);
 
-    let _ = write!(stream, "{}", info);
-    stream.send(true, false);
-    write_panic_info(&stream);
-
-    light_sw_reboot();
+        light_sw_reboot();
+    });
 
     loop {}
 }

@@ -12,12 +12,12 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_writ
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
-use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{Packet, PacketAttData};
 use crate::sdk::pm::light_sw_reboot;
 use crate::state::{*};
+use crate::sdk::mcu::irq_i::irq_disable;
 
 pub struct OtaManager {
     ota_rcv_last_idx: u16,

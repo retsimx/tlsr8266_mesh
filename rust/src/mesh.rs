@@ -15,7 +15,7 @@ use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channe
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+use critical_section;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
 use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use crate::state::{*};
@@ -291,13 +291,13 @@ impl MeshManager {
         self.mesh_pair_complete_notify();
 
         // make sure not receive legacy mesh data from now on
-        let r = irq_disable();
-        pair_save_key();
-        rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
-        rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
-        sleep_us(1000);
-        write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits()); // clear current rx in buffer
-        irq_restore(r);
+        critical_section::with(|_| {
+            pair_save_key();
+            rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
+            rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
+            sleep_us(1000);
+            write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits()); // clear current rx in buffer
+        });
 
         self.safe_effect_new_mesh_finish();
     }

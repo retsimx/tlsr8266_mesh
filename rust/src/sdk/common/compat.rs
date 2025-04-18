@@ -9,7 +9,7 @@ use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::drivers::uart::{UART_DATA_LEN, UartDataT};
+use crate::sdk::drivers::uart::{UART_DATA_LEN, UartData};
 use crate::sdk::light::LGT_PANIC_MSG;
 use crate::sdk::mcu::analog::analog_write;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
@@ -149,7 +149,7 @@ impl<const size: usize> UartStream<size> {
         while !buffer.is_empty() {
             let len = min(UART_DATA_LEN - 3, buffer.len());
 
-            let mut msg = UartDataT {
+            let mut msg = UartData {
                 len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
             };
 
@@ -161,7 +161,7 @@ impl<const size: usize> UartStream<size> {
             if doasync {
                 app().uart_manager.send_message(&msg);
             } else {
-                app().uart_manager.driver.uart_send(&msg);
+                app().uart_manager.driver.send(&msg);
             }
 
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len) }

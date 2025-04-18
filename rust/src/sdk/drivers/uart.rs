@@ -26,32 +26,51 @@ pub const UART_DATA_LEN: usize = 44;      // data max 252
 /// 
 /// These bit flags can be used individually or combined to enable/disable
 /// specific UART interrupt sources in the interrupt controller.
-pub enum UARTIRQMASK {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UartIrqMask {
     /// Enable RX interrupts - triggered when data is received
-    RX      = BIT!(0),
+    Rx = BIT!(0),
     /// Enable TX interrupts - triggered when data transmission completes
-    TX      = BIT!(1),
-    /// Enable both RX and TX interrupts simultaneously
-    ALL     = UARTIRQMASK::RX as isize | UARTIRQMASK::TX as isize,
+    Tx = BIT!(1),
+}
+
+impl UartIrqMask {
+    /// Combines multiple interrupt mask flags
+    pub const fn bits(&self) -> u8 {
+        *self as u8
+    }
+    
+    /// Combines RX and TX mask flags
+    pub const fn all() -> u8 {
+        UartIrqMask::Rx as u8 | UartIrqMask::Tx as u8
+    }
 }
 
 /// Hardware control modes for UART communication.
 /// 
 /// These modes define various hardware flow control and parity options
 /// for the UART peripheral on the TLSR8266.
-enum HARDWARECONTROL {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardwareControl {
     /// Enable CTS hardware flow control with odd parity checking
-    CTSWODDPARITY = 0x0e,
+    CtsWithOddParity = 0x0e,
     /// Enable CTS hardware flow control with even parity checking
-    CTSWEVENPARITY = 0x06,
+    CtsWithEvenParity = 0x06,
     /// Enable CTS hardware flow control only (no parity)
-    CTSONLY = 0x02,
+    CtsOnly = 0x02,
     /// Enable odd parity checking without hardware flow control
-    ODDPARITY = 0x0C,
+    OddParity = 0x0C,
     /// Enable even parity checking without hardware flow control
-    EVENPARITY = 0x04,
+    EvenParity = 0x04,
     /// No hardware flow control or parity checking
-    NOCONTROL = 0x00,
+    NoControl = 0x00,
+}
+
+impl HardwareControl {
+    /// Gets the raw value for register configuration
+    pub const fn value(&self) -> u8 {
+        *self as u8
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +78,7 @@ enum HARDWARECONTROL {
 /// 
 /// This struct must be a multiple of 16 bytes in size to ensure proper
 /// DMA alignment for efficient data transfer.
-pub struct UartDataT {
+pub struct UartData {
     /// Length of valid data in the buffer (in bytes).
     /// Although the field is 32 bits, the maximum length is limited by UART_DATA_LEN.
     pub len: u32,
@@ -76,15 +95,15 @@ pub struct UartDataT {
 pub struct UartDriver {
     /// Internal buffer used for transmitting data.
     /// This buffer should not be accessed directly by users.
-    txdata_buf: UartDataT,
+    tx_data_buf: UartData,
 
     /// Buffer used to receive incoming UART data via DMA.
     /// Users should copy data from this buffer to their own memory,
     /// rather than using it directly, as it may be overwritten by new data.
-    pub rxdata_buf: UartDataT,
+    pub rx_data_buf: UartData,
 
     /// Flag indicating whether a transmission is currently in progress.
-    uart_tx_busy_flag: bool,
+    is_tx_busy: bool,
 }
 
 impl UartDriver {
@@ -99,12 +118,9 @@ impl UartDriver {
     /// * A new UartDriver instance with default settings
     pub const fn default() -> Self {
         Self {
-            txdata_buf: UartDataT {len: 0, data: [0; UART_DATA_LEN]}, // not for user
-
-            // data max 252, user must copy rxdata to other Ram,but not use directly
-            rxdata_buf: UartDataT {len: 0, data: [0; UART_DATA_LEN]},
-
-            uart_tx_busy_flag: false,
+            tx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
+            rx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
+            is_tx_busy: false,
         }
     }
 
@@ -114,8 +130,8 @@ impl UartDriver {
     /// 
     /// * `true` if a transmission is in progress
     /// * `false` if the transmitter is idle
-    pub fn tx_busy(&self) -> bool {
-        self.uart_tx_busy_flag
+    pub fn is_tx_busy(&self) -> bool {
+        self.is_tx_busy
     }
 
     /// Initializes the UART hardware with default settings.
@@ -142,11 +158,11 @@ impl UartDriver {
         gpio_set_input_en(GPIO_PIN_TYPE::GPIO_URX as u32, 1);
 
         // 3. Initialize DMA buffers for receiving data
-        self.uart_buff_init();
+        self.init_buffers();
 
         // 4. Initialize UART with default settings (115200 baud at 32MHz clock)
         // Parameters: clkdiv=69, bit width=3, RX IRQ=on, TX IRQ=on, no hardware control
-        self.uart_init(69, 3, true, true, HARDWARECONTROL::NOCONTROL);
+        self.uart_init(69, 3, true, true, HardwareControl::NoControl);
     }
 
     /// Initializes the UART hardware with specified settings.
@@ -159,9 +175,9 @@ impl UartDriver {
     ///
     /// * `uart_clkdiv` - UART clock divider value (affects baud rate)
     /// * `bwpc` - Bit width parameter (must be ≥3)
-    /// * `en_rx_irq` - Enable RX interrupts if true
-    /// * `en_tx_irq` - Enable TX interrupts if true
-    /// * `hdwC` - Hardware control mode for flow control and parity
+    /// * `enable_rx_irq` - Enable RX interrupts if true
+    /// * `enable_tx_irq` - Enable TX interrupts if true
+    /// * `hw_control` - Hardware control mode for flow control and parity
     ///
     /// # Returns
     ///
@@ -174,7 +190,7 @@ impl UartDriver {
     /// * For 32MHz system clock:
     ///   - 115200 baud: clkdiv=19, bwpc=13
     ///   - 9600 baud: clkdiv=237, bwpc=13
-    fn uart_init(&mut self, uart_clkdiv: u16, bwpc: u8, en_rx_irq: bool, en_tx_irq: bool, hdwC: HARDWARECONTROL) -> bool{
+    fn uart_init(&mut self, uart_clkdiv: u16, bwpc: u8, enable_rx_irq: bool, enable_tx_irq: bool, hw_control: HardwareControl) -> bool {
         // Validate bit width parameter - must be at least 3
         if bwpc < 3 {
             return false;
@@ -195,15 +211,14 @@ impl UartDriver {
         if baudrate > 100000 {          // For high baud rates (e.g., 115200)
             write_reg_uart_rx_timeout(0xff);  // Maximum timeout
             write_reg_uart_rx_timeout_cnt(3);  // Higher safety margin
-        }
-        else {                         // For low baud rates (e.g., 9600)
+        } else {                         // For low baud rates (e.g., 9600)
             // One byte includes 12 bits at most (start + 8 data + parity + stop)
             write_reg_uart_rx_timeout((bwpc+1)*12);  // Timeout based on bit width
             write_reg_uart_rx_timeout_cnt(1);       // Lower safety margin
         }
 
         // Set hardware control function (flow control and parity options)
-        write_reg_uart_ctrl1(hdwC as u8);
+        write_reg_uart_ctrl1(hw_control.value());
 
         // --- Configure DMA for UART ---
         
@@ -214,12 +229,12 @@ impl UartDriver {
         write_reg_dma1_mode(0x00);
         
         // Clear any pending UART interrupts
-        Self::uart_irqsource_get();
+        Self::get_and_clear_irq_source();
 
         // --- Configure Interrupt Handling ---
         
         // Setup RX interrupts if enabled
-        if en_rx_irq {
+        if enable_rx_irq {
             // Enable DMA channel 0 (RX) interrupt
             write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_RX.bits() as u8);
             // Enable DMA interrupt in global interrupt mask
@@ -229,7 +244,7 @@ impl UartDriver {
         }
         
         // Setup TX interrupts if enabled
-        if en_tx_irq {
+        if enable_tx_irq {
             // Enable DMA channel 1 (TX) interrupt
             write_reg_dma_chn_irq_msk(read_reg_dma_chn_irq_msk() | FLD_DMA::ETH_TX.bits() as u8);
             // Enable DMA interrupt in global interrupt mask
@@ -238,7 +253,7 @@ impl UartDriver {
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(1));
         }
         
-        return true;
+        true
     }
 
     /// Gets and clears the UART interrupt source flags.
@@ -257,18 +272,18 @@ impl UartDriver {
     ///
     /// * This function should be called in the interrupt handler to determine
     ///   the interrupt source and clear the pending interrupt flags.
-    /// * The returned value can be compared with UARTIRQMASK values to determine
+    /// * The returned value can be compared with UartIrqMask values to determine
     ///   which specific interrupts were triggered.
     #[inline(always)]
-    pub fn uart_irqsource_get() -> u8 {
+    pub fn get_and_clear_irq_source() -> u8 {
         // Read the current DMA RX ready status
-        let irq_s = read_reg_dma_rx_rdy0();
+        let irq_status = read_reg_dma_rx_rdy0();
         
         // Clear the interrupt flags by writing back the same value
-        write_reg_dma_rx_rdy0(irq_s);
+        write_reg_dma_rx_rdy0(irq_status);
         
         // Return only the UART-relevant bits (mask with ALL)
-        return irq_s & UARTIRQMASK::ALL as u8;
+        irq_status & UartIrqMask::all()
     }
 
     /// Clears the UART TX busy flag to indicate transmission completion.
@@ -282,8 +297,8 @@ impl UartDriver {
     /// * Might be called from a higher-level driver function that determines
     ///   when transmission is complete
     #[inline(always)]
-    pub fn uart_clr_tx_busy_flag(&mut self) {
-        self.uart_tx_busy_flag = false;
+    pub fn clear_tx_busy_flag(&mut self) {
+        self.is_tx_busy = false;
     }
 
     /// Checks if the UART transmitter is currently busy.
@@ -297,10 +312,10 @@ impl UartDriver {
     ///
     /// # Notes
     ///
-    /// * Internal method used by uart_send
+    /// * Internal method used by send
     #[inline(always)]
     fn uart_tx_is_busy(&self) -> bool {
-        return self.uart_tx_busy_flag;
+        return self.is_tx_busy;
     }
 
     /// Sends data asynchronously over UART using DMA.
@@ -320,29 +335,29 @@ impl UartDriver {
     /// # Notes
     ///
     /// * This function returns after initiating the transfer, not when the transfer completes
-    /// * The busy flag remains set until cleared by `uart_clr_tx_busy_flag`
+    /// * The busy flag remains set until cleared by `clear_tx_busy_flag`
     /// * Maximum wait time for previous transmission is 100ms
-    pub async fn uart_send_async(&mut self, msg: &UartDataT) -> bool {
+    pub async fn send_async(&mut self, msg: &UartData) -> bool {
         // Get current time for timeout calculation
         let t_timeout = clock_time();
         
         // Wait for any previous transmission to complete (with timeout)
         // Yields to async runtime while waiting to allow other tasks to run
-        while self.tx_busy() && !clock_time_exceed(t_timeout, 100*1000) {
+        while self.is_tx_busy() && !clock_time_exceed(t_timeout, 100*1000) {
             yield_now().await;
         }
 
         // Mark transmitter as busy and copy message to TX buffer
-        self.uart_set_tx_busy_flag();
-        self.txdata_buf = *msg;
+        self.set_tx_busy_flag();
+        self.tx_data_buf = *msg;
 
         // Configure DMA1 with address of TX buffer
-        write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16);
+        write_reg_dma1_addr(addr_of!(self.tx_data_buf) as u16);
 
         // Trigger DMA transfer to start transmission
         write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
 
-        return true;
+        true
     }
 
     /// Sends data synchronously over UART using DMA.
@@ -365,28 +380,28 @@ impl UartDriver {
     /// * Uses critical_section to prevent interrupts during the setup process
     /// * Maximum wait time for previous transmission is 10ms
     /// * Watchdog is kicked during waiting to prevent resets
-    pub fn uart_send(&mut self, msg: &UartDataT) -> bool {
+    pub fn send(&mut self, msg: &UartData) -> bool {
         critical_section::with(|_| {
             // Get current time for timeout calculation
             let t_timeout = clock_time();
             
             // Wait for any previous transmission to complete (with timeout)
             // Kick watchdog while waiting to prevent system reset
-            while self.uart_tx_is_busy() && !clock_time_exceed(t_timeout, 10 * 1000) {
+            while self.is_tx_busy() && !clock_time_exceed(t_timeout, 10 * 1000) {
                 wd_clear();
             }
 
             // Copy message to TX buffer
-            self.uart_set_tx_busy_flag();
-            self.txdata_buf = *msg;
+            self.set_tx_busy_flag();
+            self.tx_data_buf = *msg;
 
             // Configure DMA1 with address of TX buffer
-            write_reg_dma1_addr(addr_of!(self.txdata_buf) as u16);
+            write_reg_dma1_addr(addr_of!(self.tx_data_buf) as u16);
 
             // Trigger DMA transfer to start transmission
             write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
 
-            return true;
+            true
         })
     }
 
@@ -397,15 +412,15 @@ impl UartDriver {
     ///
     /// # Notes
     ///
-    /// * The buffer size is calculated as UartDataT size divided by 16
+    /// * The buffer size is calculated as UartData size divided by 16
     /// * Buffer must be properly aligned for DMA operations
     /// * Called internally during UART initialization
-    fn uart_buff_init(&mut self){
+    fn init_buffers(&mut self) {
         // Calculate buffer length in 16-byte units (DMA works with 16-byte blocks)
-        let buf_len = size_of::<UartDataT>() / 16;
+        let buf_len = size_of::<UartData>() / 16;
         
         // Configure DMA channel 0 with the address of the RX buffer
-        write_reg_dma0_addr(addr_of!(self.rxdata_buf) as u16);
+        write_reg_dma0_addr(addr_of!(self.rx_data_buf) as u16);
         
         // Set the size of the RX buffer for DMA transfers
         write_reg_dma0_ctrl(buf_len as u16);
@@ -418,9 +433,9 @@ impl UartDriver {
     ///
     /// # Notes
     ///
-    /// * Internal method used by uart_send and uart_send_async
-    fn uart_set_tx_busy_flag(&mut self) {
-        self.uart_tx_busy_flag = true;
+    /// * Internal method used by send and send_async
+    fn set_tx_busy_flag(&mut self) {
+        self.is_tx_busy = true;
     }
 
     /// Clears UART error conditions by checking and resetting the error flags.
@@ -448,7 +463,7 @@ impl UartDriver {
             write_reg_uart_status(state | FLD_UART_STATUS::ERR_CLR.bits());
             return true;
         }
-        return false;
+        false
     }
 }
 
@@ -489,21 +504,21 @@ mod tests {
         let driver = UartDriver::default();
         
         // Verify transmit buffer is initialized empty
-        assert_eq!(driver.txdata_buf.len, 0);
-        assert_eq!(driver.txdata_buf.data, [0; UART_DATA_LEN]);
+        assert_eq!(driver.tx_data_buf.len, 0);
+        assert_eq!(driver.tx_data_buf.data, [0; UART_DATA_LEN]);
         
         // Verify receive buffer is initialized empty
-        assert_eq!(driver.rxdata_buf.len, 0);
-        assert_eq!(driver.rxdata_buf.data, [0; UART_DATA_LEN]);
+        assert_eq!(driver.rx_data_buf.len, 0);
+        assert_eq!(driver.rx_data_buf.data, [0; UART_DATA_LEN]);
         
         // Verify transmit busy flag is initially false
-        assert_eq!(driver.uart_tx_busy_flag, false);
+        assert_eq!(driver.is_tx_busy, false);
     }
     
     /// Tests the tx_busy accessor method.
     ///
     /// This test verifies that the tx_busy method correctly:
-    /// - Returns the current state of the uart_tx_busy_flag
+    /// - Returns the current state of the is_tx_busy flag
     ///
     /// # Notes
     ///
@@ -514,13 +529,13 @@ mod tests {
         let mut driver = UartDriver::default();
         
         // Initially, the busy flag should be false
-        assert_eq!(driver.tx_busy(), false);
+        assert_eq!(driver.is_tx_busy(), false);
         
         // Set the busy flag to true
-        driver.uart_tx_busy_flag = true;
+        driver.is_tx_busy = true;
         
         // Now the busy flag should be true
-        assert_eq!(driver.tx_busy(), true);
+        assert_eq!(driver.is_tx_busy(), true);
     }
     
     /// Tests the UART initialization function.
@@ -638,7 +653,7 @@ mod tests {
         let mut driver = UartDriver::default();
         
         // Call uart_init with an invalid bit width (below minimum of 3)
-        let result = driver.uart_init(69, 2, true, true, HARDWARECONTROL::NOCONTROL);
+        let result = driver.uart_init(69, 2, true, true, HardwareControl::NoControl);
         
         // Verify the function returns false for invalid parameters
         assert_eq!(result, false);
@@ -646,7 +661,7 @@ mod tests {
     
     /// Tests the UART IRQ source and flag clearing functionality with no flags set.
     ///
-    /// This test verifies that the uart_irqsource_get method correctly:
+    /// This test verifies that the get_and_clear_irq_source method correctly:
     /// - Reads the DMA ready register to get interrupt status
     /// - Clears the interrupt flags by writing back the same value
     /// - Returns zero when no flags are set
@@ -654,18 +669,18 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Mock register access functions with no flags set
-    /// 2. Call the uart_irqsource_get method
+    /// 2. Call the get_and_clear_irq_source method
     /// 3. Verify the correct register is read
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value is zero
     #[test]
     #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
-    fn test_uart_irqsource_get_no_flags() {
+    fn test_get_and_clear_irq_source_no_flags() {
         // No interrupt flags set
         mock_read_reg_dma_rx_rdy0().returns(0);
         mock_write_reg_dma_rx_rdy0(0).returns(());
         
-        let result = UartDriver::uart_irqsource_get();
+        let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, 0);
         
         mock_read_reg_dma_rx_rdy0().assert_called(1);
@@ -674,7 +689,7 @@ mod tests {
     
     /// Tests the UART IRQ source and flag clearing functionality with RX flag set.
     ///
-    /// This test verifies that the uart_irqsource_get method correctly:
+    /// This test verifies that the get_and_clear_irq_source method correctly:
     /// - Reads the DMA ready register with RX flag set
     /// - Clears the interrupt flags by writing back the same value
     /// - Returns the RX flag value
@@ -682,27 +697,27 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Mock register access functions with RX flag set
-    /// 2. Call the uart_irqsource_get method
+    /// 2. Call the get_and_clear_irq_source method
     /// 3. Verify the correct register is read
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the RX flag
     #[test]
     #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
-    fn test_uart_irqsource_get_rx_flag() {
+    fn test_get_and_clear_irq_source_rx_flag() {
         // RX interrupt flag set
-        mock_read_reg_dma_rx_rdy0().returns(UARTIRQMASK::RX as u8);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::RX as u8).returns(());
+        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Rx.bits());
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::Rx.bits()).returns(());
         
-        let result = UartDriver::uart_irqsource_get();
-        assert_eq!(result, UARTIRQMASK::RX as u8);
+        let result = UartDriver::get_and_clear_irq_source();
+        assert_eq!(result, UartIrqMask::Rx.bits());
         
         mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::RX as u8).assert_called(1);
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::Rx.bits()).assert_called(1);
     }
     
     /// Tests the UART IRQ source and flag clearing functionality with TX flag set.
     ///
-    /// This test verifies that the uart_irqsource_get method correctly:
+    /// This test verifies that the get_and_clear_irq_source method correctly:
     /// - Reads the DMA ready register with TX flag set
     /// - Clears the interrupt flags by writing back the same value
     /// - Returns the TX flag value
@@ -710,27 +725,27 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Mock register access functions with TX flag set
-    /// 2. Call the uart_irqsource_get method
+    /// 2. Call the get_and_clear_irq_source method
     /// 3. Verify the correct register is read
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the TX flag
     #[test]
     #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
-    fn test_uart_irqsource_get_tx_flag() {
+    fn test_get_and_clear_irq_source_tx_flag() {
         // TX interrupt flag set
-        mock_read_reg_dma_rx_rdy0().returns(UARTIRQMASK::TX as u8);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::TX as u8).returns(());
+        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Tx.bits());
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::Tx.bits()).returns(());
         
-        let result = UartDriver::uart_irqsource_get();
-        assert_eq!(result, UARTIRQMASK::TX as u8);
+        let result = UartDriver::get_and_clear_irq_source();
+        assert_eq!(result, UartIrqMask::Tx.bits());
         
         mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::TX as u8).assert_called(1);
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::Tx.bits()).assert_called(1);
     }
     
     /// Tests the UART IRQ source and flag clearing functionality with both RX and TX flags set.
     ///
-    /// This test verifies that the uart_irqsource_get method correctly:
+    /// This test verifies that the get_and_clear_irq_source method correctly:
     /// - Reads the DMA ready register with both RX and TX flags set
     /// - Clears the interrupt flags by writing back the same value
     /// - Returns the combined flag value
@@ -738,27 +753,27 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Mock register access functions with both flags set
-    /// 2. Call the uart_irqsource_get method
+    /// 2. Call the get_and_clear_irq_source method
     /// 3. Verify the correct register is read
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the combined flags
     #[test]
     #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
-    fn test_uart_irqsource_get_all_flags() {
+    fn test_get_and_clear_irq_source_all_flags() {
         // Both RX and TX interrupt flags set
-        mock_read_reg_dma_rx_rdy0().returns(UARTIRQMASK::ALL as u8);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::ALL as u8).returns(());
+        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::all());
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::all()).returns(());
         
-        let result = UartDriver::uart_irqsource_get();
-        assert_eq!(result, UARTIRQMASK::ALL as u8);
+        let result = UartDriver::get_and_clear_irq_source();
+        assert_eq!(result, UartIrqMask::all());
         
         mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UARTIRQMASK::ALL as u8).assert_called(1);
+        mock_write_reg_dma_rx_rdy0(UartIrqMask::all()).assert_called(1);
     }
     
     /// Tests the UART IRQ source and flag clearing functionality with masking of irrelevant bits.
     ///
-    /// This test verifies that the uart_irqsource_get method correctly:
+    /// This test verifies that the get_and_clear_irq_source method correctly:
     /// - Reads the DMA ready register with extra irrelevant bits set
     /// - Clears the interrupt flags by writing back the same value
     /// - Returns only the relevant UART bits (masking out irrelevant bits)
@@ -766,20 +781,20 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Mock register access functions with both relevant and irrelevant bits set
-    /// 2. Call the uart_irqsource_get method
+    /// 2. Call the get_and_clear_irq_source method
     /// 3. Verify the correct register is read
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value has irrelevant bits masked out
     #[test]
     #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
-    fn test_uart_irqsource_get_with_masking() {
+    fn test_get_and_clear_irq_source_with_masking() {
         // Additional irrelevant bits set (should be masked out)
-        let raw_value = 0xF0 | UARTIRQMASK::RX as u8;
+        let raw_value = 0xF0 | UartIrqMask::Rx.bits();
         mock_read_reg_dma_rx_rdy0().returns(raw_value);
         mock_write_reg_dma_rx_rdy0(raw_value).returns(());
         
-        let result = UartDriver::uart_irqsource_get();
-        assert_eq!(result, UARTIRQMASK::RX as u8); // Should only have RX bit, others masked
+        let result = UartDriver::get_and_clear_irq_source();
+        assert_eq!(result, UartIrqMask::Rx.bits()); // Should only have RX bit, others masked
         
         mock_read_reg_dma_rx_rdy0().assert_called(1);
         mock_write_reg_dma_rx_rdy0(raw_value).assert_called(1);
@@ -787,8 +802,8 @@ mod tests {
     
     /// Tests the TX busy flag manipulation methods.
     ///
-    /// This test verifies that the uart_set_tx_busy_flag and uart_clr_tx_busy_flag methods:
-    /// - Properly set the uart_tx_busy_flag to true or false
+    /// This test verifies that the set_tx_busy_flag and clear_tx_busy_flag methods:
+    /// - Properly set the is_tx_busy flag to true or false
     /// - uart_tx_is_busy returns the current state of the flag
     ///
     /// # Notes
@@ -802,17 +817,17 @@ mod tests {
         assert_eq!(driver.uart_tx_is_busy(), false);
         
         // Set busy flag
-        driver.uart_set_tx_busy_flag();
+        driver.set_tx_busy_flag();
         assert_eq!(driver.uart_tx_is_busy(), true);
         
         // Clear busy flag
-        driver.uart_clr_tx_busy_flag();
+        driver.clear_tx_busy_flag();
         assert_eq!(driver.uart_tx_is_busy(), false);
     }
     
     /// Tests the synchronous UART data transmission function when the driver is not busy.
     ///
-    /// This test verifies that the uart_send method correctly:
+    /// This test verifies that the send method correctly:
     /// - Sets the busy flag
     /// - Copies message data to the internal TX buffer
     /// - Configures DMA with the buffer address
@@ -822,7 +837,7 @@ mod tests {
     ///
     /// 1. Setup mock responses for register access functions
     /// 2. Create test message data
-    /// 3. Call uart_send with test message
+    /// 3. Call send with test message
     /// 4. Verify DMA configuration and trigger
     /// 5. Verify no waiting was performed
     ///
@@ -835,7 +850,7 @@ mod tests {
         clock_time, clock_time_exceed, wd_clear,
         write_reg_dma1_addr, write_reg_dma_tx_rdy0
     )]
-    fn test_uart_send_not_busy() {
+    fn test_send_not_busy() {
         // Setup mock responses for timing functions
         mock_clock_time().returns(1000);
         mock_clock_time_exceed(1000, 10 * 1000).returns(false);
@@ -846,7 +861,7 @@ mod tests {
         mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
         
         // Create a test message
-        let mut msg = UartDataT {
+        let mut msg = UartData {
             len: 4,
             data: [0; UART_DATA_LEN],
         };
@@ -857,11 +872,11 @@ mod tests {
         
         // Driver is not busy
         let mut driver = UartDriver::default();
-        let result = driver.uart_send(&msg);
+        let result = driver.send(&msg);
         
         // Verify result and busy flag
         assert_eq!(result, true);
-        assert_eq!(driver.uart_tx_busy_flag, true);
+        assert_eq!(driver.is_tx_busy, true);
         
         // Verify DMA configuration
         mock_write_reg_dma1_addr(mry::Any).assert_called(1);
@@ -875,7 +890,7 @@ mod tests {
     
     /// Tests the synchronous UART data transmission function when the driver is busy.
     ///
-    /// This test verifies that the uart_send method correctly:
+    /// This test verifies that the send method correctly:
     /// - Waits for any previous transmission to complete
     /// - Kicks the watchdog during the wait
     /// - Sets the busy flag after waiting
@@ -888,7 +903,7 @@ mod tests {
     /// 1. Setup mock responses for register access and timing functions
     /// 2. Create test message data and a busy driver
     /// 3. Configure mocks to simulate the busy condition clearing after some time
-    /// 4. Call uart_send with test message
+    /// 4. Call send with test message
     /// 5. Verify DMA configuration and trigger
     /// 6. Verify proper waiting and watchdog handling
     ///
@@ -901,7 +916,7 @@ mod tests {
         clock_time, clock_time_exceed, wd_clear,
         write_reg_dma1_addr, write_reg_dma_tx_rdy0
     )]
-    fn test_uart_send_busy() {
+    fn test_send_busy() {
         // Setup mock responses for timing functions
         mock_clock_time().returns(2000);
         
@@ -920,7 +935,7 @@ mod tests {
         mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
         
         // Create a test message
-        let mut msg = UartDataT {
+        let mut msg = UartData {
             len: 4,
             data: [0; UART_DATA_LEN],
         };
@@ -931,13 +946,13 @@ mod tests {
         
         // Driver is initially busy
         let mut driver = UartDriver::default();
-        driver.uart_tx_busy_flag = true;
+        driver.is_tx_busy = true;
         
-        let result = driver.uart_send(&msg);
+        let result = driver.send(&msg);
         
         // Verify result and final busy state
         assert_eq!(result, true);
-        assert_eq!(driver.uart_tx_busy_flag, true);
+        assert_eq!(driver.is_tx_busy, true);
         
         // Verify DMA was configured
         mock_write_reg_dma1_addr(mry::Any).assert_called(1);
@@ -951,7 +966,7 @@ mod tests {
     
     /// Tests the asynchronous UART data transmission function when the driver is not busy.
     ///
-    /// This test verifies that the uart_send_async method correctly:
+    /// This test verifies that the send_async method correctly:
     /// - Sets the busy flag
     /// - Copies message data to the internal TX buffer
     /// - Configures DMA with the buffer address
@@ -962,7 +977,7 @@ mod tests {
     ///
     /// 1. Setup mock responses for register access functions
     /// 2. Create test message data
-    /// 3. Call uart_send_async with test message
+    /// 3. Call send_async with test message
     /// 4. Verify DMA configuration and trigger
     /// 5. Verify no yielding occurred
     ///
@@ -975,7 +990,7 @@ mod tests {
         clock_time, clock_time_exceed, yield_now,
         write_reg_dma1_addr, write_reg_dma_tx_rdy0
     )]
-    fn test_uart_send_async_not_busy() {
+    fn test_send_async_not_busy() {
         // Setup mock responses for timing functions
         mock_clock_time().returns(1000);
         mock_clock_time_exceed(1000, 100 * 1000).returns(false);
@@ -986,7 +1001,7 @@ mod tests {
         mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
         
         // Create a test message
-        let mut msg = UartDataT {
+        let mut msg = UartData {
             len: 4,
             data: [0; UART_DATA_LEN],
         };
@@ -997,11 +1012,11 @@ mod tests {
         
         // Driver is not busy
         let mut driver = UartDriver::default();
-        let result = futures::executor::block_on(driver.uart_send_async(&msg));
+        let result = futures::executor::block_on(driver.send_async(&msg));
         
         // Verify result and busy flag
         assert_eq!(result, true);
-        assert_eq!(driver.uart_tx_busy_flag, true);
+        assert_eq!(driver.is_tx_busy, true);
         
         // Verify DMA configuration
         mock_write_reg_dma1_addr(mry::Any).assert_called(1);
@@ -1015,7 +1030,7 @@ mod tests {
     
     /// Tests the asynchronous UART data transmission function when the driver is initially busy.
     ///
-    /// This test verifies that the uart_send_async method correctly:
+    /// This test verifies that the send_async method correctly:
     /// - Waits for any previous transmission to complete
     /// - Yields to the async runtime while waiting
     /// - Sets the busy flag after waiting
@@ -1028,7 +1043,7 @@ mod tests {
     /// 1. Setup mock responses for register access and timing functions
     /// 2. Create test message data and a busy driver
     /// 3. Configure mocks to simulate the busy condition clearing after yielding
-    /// 4. Call uart_send_async with test message
+    /// 4. Call send_async with test message
     /// 5. Verify DMA configuration and trigger
     /// 6. Verify proper yielding during waiting
     ///
@@ -1041,7 +1056,7 @@ mod tests {
         clock_time, clock_time_exceed, yield_now,
         write_reg_dma1_addr, write_reg_dma_tx_rdy0
     )]
-    fn test_uart_send_async_busy() {
+    fn test_send_async_busy() {
         // Setup mock responses for timing functions
         mock_clock_time().returns(2000);
         
@@ -1060,7 +1075,7 @@ mod tests {
         mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
         
         // Create a test message
-        let mut msg = UartDataT {
+        let mut msg = UartData {
             len: 4,
             data: [0; UART_DATA_LEN],
         };
@@ -1071,13 +1086,13 @@ mod tests {
         
         // Driver is initially busy
         let mut driver = UartDriver::default();
-        driver.uart_tx_busy_flag = true;
+        driver.is_tx_busy = true;
         
-        let result = futures::executor::block_on(driver.uart_send_async(&msg));
+        let result = futures::executor::block_on(driver.send_async(&msg));
         
         // Verify result and final busy state
         assert_eq!(result, true);
-        assert_eq!(driver.uart_tx_busy_flag, true);
+        assert_eq!(driver.is_tx_busy, true);
         
         // Verify DMA was configured
         mock_write_reg_dma1_addr(mry::Any).assert_called(1);
@@ -1092,7 +1107,7 @@ mod tests {
     /// Tests the DMA buffer initialization for UART reception.
     ///
     /// This test verifies that the uart_buff_init method correctly:
-    /// - Calculates the proper buffer size based on UartDataT structure
+    /// - Calculates the proper buffer size based on UartData structure
     /// - Configures DMA0 with the address of the RX buffer
     /// - Sets the DMA0 control register with the correct buffer size
     ///
@@ -1110,10 +1125,10 @@ mod tests {
         
         // Create a driver and call buffer initialization
         let mut driver = UartDriver::default();
-        driver.uart_buff_init();
+        driver.init_buffers();
         
         // Calculate expected buffer size
-        let expected_buf_len = size_of::<UartDataT>() / 16;
+        let expected_buf_len = size_of::<UartData>() / 16;
         
         // Verify DMA was configured correctly
         mock_write_reg_dma0_addr(mry::Any).assert_called(1);
@@ -1272,7 +1287,7 @@ mod tests {
         // Create a new driver and initialize UART with 9600 baud parameters
         // For 32MHz system clock, 9600 baud: clkdiv=237, bwpc=13
         let mut driver = UartDriver::default();
-        let result = driver.uart_init(237, 13, true, true, HARDWARECONTROL::NOCONTROL);
+        let result = driver.uart_init(237, 13, true, true, HardwareControl::NoControl);
         
         // Verify initialization succeeded
         assert_eq!(result, true);

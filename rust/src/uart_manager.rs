@@ -11,7 +11,7 @@ use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
-use crate::sdk::drivers::uart::{UART_DATA_LEN, UartDataT, UartDriver, UARTIRQMASK};
+use crate::sdk::drivers::uart::{UART_DATA_LEN, UartData, UartDriver, UartIrqMask};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{AppCmdValue, Packet};
@@ -44,7 +44,7 @@ pub fn light_mesh_rx_cb(data: &Packet) {
         return;
     }
 
-    let mut msg: UartDataT = UartDataT {
+    let mut msg: UartData = UartData {
         len: UART_DATA_LEN as u32,
         data: [0; UART_DATA_LEN]
     };
@@ -69,7 +69,7 @@ async fn uart_receiver() {
 
 #[embassy_executor::task]
 async fn node_report_task() {
-    let mut msg = UartDataT {
+    let mut msg = UartData {
         len: UART_DATA_LEN as u32,
         data: [0; UART_DATA_LEN]
     };
@@ -92,8 +92,8 @@ async fn node_report_task() {
 
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<UartDataT, 6>,
-    recv_channel: Deque<UartDataT, 6>,
+    send_channel: Deque<UartData, 6>,
+    recv_channel: Deque<UartData, 6>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
@@ -122,7 +122,7 @@ impl UartManager {
         self.driver.init();
     }
 
-    pub fn send_message(&mut self, msg: &UartDataT) -> bool {
+    pub fn send_message(&mut self, msg: &UartData) -> bool {
         critical_section::with(|_| {
             if !self.send_channel.is_full() {
                 let _ = self.send_channel.push_back(*msg);
@@ -135,30 +135,30 @@ impl UartManager {
 
     #[inline(always)]
     pub fn check_irq(&mut self) {
-        let irq_s = UartDriver::uart_irqsource_get();
-        if irq_s & UARTIRQMASK::RX as u8 != 0 {
-            self.handle_rx(self.driver.rxdata_buf);
+        let irq_s = UartDriver::get_and_clear_irq_source();
+        if irq_s & UartIrqMask::Rx as u8 != 0 {
+            self.handle_rx(self.driver.rx_data_buf);
         }
         
-        if irq_s & UARTIRQMASK::TX as u8 != 0 {
-            self.driver.uart_clr_tx_busy_flag();
+        if irq_s & UartIrqMask::Tx as u8 != 0 {
+            self.driver.clear_tx_busy_flag();
         }
     }
 
-    fn compute_crc(msg: &mut UartDataT) {
+    fn compute_crc(msg: &mut UartData) {
         let crc = crc16(&msg.data[0..42]);
         msg.data[42] = (crc & 0xff) as u8;
         msg.data[43] = ((crc >> 8) & 0xff) as u8;
     }
 
-    async fn ack_msg(&mut self, msg: &UartDataT, sno: &[u8]) {
+    async fn ack_msg(&mut self, msg: &UartData, sno: &[u8]) {
         // If data[1] is 0xff, it means this message is an ack from the client
         if msg.data[1] == UartMsg::Ack as u8 {
             self.last_ack = msg.data[0];
             return;
         }
 
-        let mut result = UartDataT {
+        let mut result = UartData {
             len: UART_DATA_LEN as u32,
             data: [0; UART_DATA_LEN]
         };
@@ -176,7 +176,7 @@ impl UartManager {
         Self::compute_crc(&mut result);
 
         // Send the ack
-        self.driver.uart_send_async(&result).await;
+        self.driver.send_async(&result).await;
     }
 
     pub async fn receiver(&mut self) {
@@ -248,7 +248,7 @@ impl UartManager {
 
             // Keep sending the message until we get an ack from the other side
             loop {
-                self.driver.uart_send_async(&msg).await;
+                self.driver.send_async(&msg).await;
 
                 // If 100ms passes without an ack from the other side, assume the send failed and try again
                 let t_timeout = clock_time();
@@ -267,7 +267,7 @@ impl UartManager {
         }
     }
 
-    pub fn handle_rx(&mut self, msg: UartDataT) {
+    pub fn handle_rx(&mut self, msg: UartData) {
         // Check the crc of the packet
         let crc = crc16(&msg.data[0..42]);
         if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {

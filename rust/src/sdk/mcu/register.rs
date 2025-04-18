@@ -73,6 +73,7 @@ pub const REG_BASE_ADDR: u32 = 0x800000;
 /// write_reg8(0x40d, 5);
 /// ```
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn write_reg8(addr: u32, v: u8) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u8, v) }
 }
@@ -83,6 +84,7 @@ pub fn write_reg8(addr: u32, v: u8) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 16-bit value to write
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn write_reg16(addr: u32, v: u16) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u16, v) }
 }
@@ -93,6 +95,7 @@ pub fn write_reg16(addr: u32, v: u16) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 32-bit value to write
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn write_reg32(addr: u32, v: u32) {
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
 }
@@ -111,6 +114,7 @@ pub fn write_reg32(addr: u32, v: u32) {
 /// let channel = read_reg8(0x40d);
 /// ```
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn read_reg8(addr: u32) -> u8 {
     return unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u8) };
 }
@@ -123,6 +127,7 @@ pub fn read_reg8(addr: u32) -> u8 {
 /// # Returns
 /// The 16-bit value read from the register
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn read_reg16(addr: u32) -> u16 {
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u16) }
 }
@@ -135,6 +140,7 @@ pub fn read_reg16(addr: u32) -> u16 {
 /// # Returns
 /// The 32-bit value read from the register
 #[cfg_attr(test, mry::mry)]
+#[coverage(off)]
 pub fn read_reg32(addr: u32) -> u32 {
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u32) }
 }

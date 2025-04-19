@@ -338,6 +338,7 @@ fn light_sw_reboot_ll()
     loop {}
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn light_sw_reboot()
 {
     irq_disable();

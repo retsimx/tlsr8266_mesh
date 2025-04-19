@@ -90,6 +90,7 @@ async fn node_report_task() {
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
     send_channel: Deque<UartData, 6>,
@@ -100,8 +101,23 @@ pub struct UartManager {
     sent: Deque<[u8; 15], 6>
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
 impl UartManager {
-    pub const fn default() -> Self {
+    #[cfg(not(test))]
+    pub const fn default_const() -> Self {
+        Self {
+            driver: UartDriver::default_const(),
+            send_channel: Deque::new(),
+            recv_channel: Deque::new(),
+            ack_counter: 0,
+            last_ack: 0,
+            sender_started: false,
+            sent: Deque::new()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn default() -> Self {
         Self {
             driver: UartDriver::default(),
             send_channel: Deque::new(),
@@ -109,7 +125,8 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
-            sent: Deque::new()
+            sent: Deque::new(),
+            mry: Default::default()
         }
     }
 

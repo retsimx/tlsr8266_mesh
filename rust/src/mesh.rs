@@ -86,6 +86,7 @@ struct SendPkt {
     pub send_count: u8
 }
 
+#[cfg_attr(test, mry::mry)]
 pub struct MeshManager {
     mesh_pair_start_time: u32,
     default_mesh_time: u32,
@@ -104,8 +105,10 @@ pub struct MeshManager {
     pkt_rcv_buf: Deque<Packet, 6>,
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const, send_mesh_message, mesh_pair_cb, mesh_cmd_notify)))]
 impl MeshManager {
-    pub const fn default() -> Self {
+    #[cfg(not(test))]
+    pub const fn default_const() -> Self {
         Self {
             mesh_pair_start_time: 0,
             default_mesh_time: 0,
@@ -122,6 +125,28 @@ impl MeshManager {
             mesh_pair_state: MeshPairState::MeshPairName1,
             pkt_send_buf: Vec::new(),
             pkt_rcv_buf: Deque::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn default() -> Self {
+        Self {
+            mesh_pair_start_time: 0,
+            default_mesh_time: 0,
+            default_mesh_effect_delay_ref: 0,
+            new_mesh_name: [0; 16],
+            new_mesh_pwd: [0; 16],
+            new_mesh_ltk: [0; 16],
+            default_mesh_time_ref: 0,
+            effect_new_mesh: 0,
+            effect_new_mesh_delay_time: 0,
+            mesh_pair_cmd_interval: 0,
+            mesh_pair_timeout: 0,
+            mesh_pair_time: 0,
+            mesh_pair_state: MeshPairState::MeshPairName1,
+            pkt_send_buf: Vec::new(),
+            pkt_rcv_buf: Deque::new(),
+            mry: Default::default(),
         }
     }
 

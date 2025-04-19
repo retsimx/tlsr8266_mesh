@@ -413,6 +413,7 @@ fn flash_mspi_write_ram(
 /// This function safely handles raw pointers by ensuring proper bounds checking
 /// and memory access within the constraints of flash page boundaries.
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
     // Early return if there's nothing to write
     if len == 0 || buf.is_null() {
@@ -488,6 +489,7 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
 /// Flash operations may fail under low voltage conditions which could corrupt data.
 /// Ensure proper power supply voltage before calling this function.
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn flash_erase_sector(addr: u32) {
     // Clear watchdog timer to prevent resets during long erase operation
     wd_clear();

@@ -19,6 +19,7 @@ use crate::sdk::pm::light_sw_reboot;
 use crate::state::{*};
 use crate::sdk::mcu::irq_i::irq_disable;
 
+#[cfg_attr(test, mry::mry)]
 pub struct OtaManager {
     ota_rcv_last_idx: u16,
     slave_ota_data_cache_idx: usize,
@@ -26,18 +27,31 @@ pub struct OtaManager {
     terminate_cnt: u8,
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
 impl OtaManager {
     pub const FLASH_ADR_OTA_READY_FLAG: u32 = 0x3F000;
     pub const FLASH_OTA_READY_FLAG: u8 = 0xa5;
     pub const FW_SIZE_MAX_K: u32 = 128;
     pub const ERASE_SECTORS_FOR_OTA: u32 = (OtaManager::FW_SIZE_MAX_K + 3) / 4;
 
-    pub const fn default() -> OtaManager {
+    #[cfg(not(test))]
+    pub const fn default_const() -> OtaManager {
         OtaManager {
             ota_rcv_last_idx: 0xffff,
             slave_ota_data_cache_idx: 0,
             rf_slave_ota_finished_time: 0,
             terminate_cnt: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn default() -> OtaManager {
+        OtaManager {
+            ota_rcv_last_idx: 0xffff,
+            slave_ota_data_cache_idx: 0,
+            rf_slave_ota_finished_time: 0,
+            terminate_cnt: 0,
+            mry: Default::default(),
         }
     }
 

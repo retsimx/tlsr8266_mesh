@@ -46,7 +46,8 @@ struct LumSaveT {
 }
 
 impl LightState {
-    pub const fn default() -> Self {
+    #[cfg(not(test))]
+    pub const fn default_const() -> Self {
         Self {
             cw: I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE)),
             ww: I16F16::lit(formatcp!("{}", 0u16)),
@@ -54,8 +55,19 @@ impl LightState {
             timestamp: Instant::from_ticks(0)
         }
     }
+   
+    #[cfg(test)]
+    pub fn default() -> Self {
+        Self {
+            cw: I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE)),
+            ww: I16F16::lit(formatcp!("{}", 0u16)),
+            brightness: I16F16::lit(formatcp!("{}", 0u16)),
+            timestamp: Instant::from_ticks(0),
+        }
+    }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub struct LightManager {
     channel: Deque<Message, 5>,
 
@@ -70,8 +82,23 @@ pub struct LightManager {
     brightness: u16
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const, run, get_current_light_state)))]
 impl LightManager {
-    pub const fn default() -> Self {
+    #[cfg(not(test))]
+    pub const fn default_const() -> Self {
+        Self {
+            channel: Deque::new(),
+            old_light_state: LightState::default_const(),
+            new_light_state: LightState::default_const(),
+            current_light_state: LightState::default_const(),
+            light_lum_addr: 0,
+            last_transition_time: 0,
+            brightness: MAX_LUM_BRIGHTNESS_VALUE
+        }
+    }
+
+    #[cfg(test)]
+    pub fn default() -> Self {
         Self {
             channel: Deque::new(),
             old_light_state: LightState::default(),
@@ -79,7 +106,8 @@ impl LightManager {
             current_light_state: LightState::default(),
             light_lum_addr: 0,
             last_transition_time: 0,
-            brightness: MAX_LUM_BRIGHTNESS_VALUE
+            brightness: MAX_LUM_BRIGHTNESS_VALUE,
+            mry: Default::default()
         }
     }
 
@@ -171,7 +199,7 @@ impl LightManager {
                 cw: I16F16::from_num(cw),
                 ww: I16F16::from_num(ww),
                 brightness: I16F16::from_num(brightness),
-                timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS)
+                timestamp: Instant::now() + Duration::from_millis(TRANSITION_TIME_MS),
             };
 
             // Enable timer1

@@ -78,6 +78,42 @@ fn test_async_function() {
 }
 ```
 
+### Mocking the App Struct
+
+**App Struct Pattern** - The application uses a global App instance accessed via the `app()` function. When testing modules that use the App struct, we need to mock the App instance and its methods:
+
+```rust
+#[test]
+#[mry::lock(factory_reset, flash_write_page, app_mocker)]  // Include app_mocker in the lock
+fn test_function_that_uses_app() {
+    // Set up initial state with a mock App instance
+    let mut app = App::default();
+    mock_app_mocker().returns(&mut app);
+    
+    // Set up mocks for App struct methods (e.g., on ota_manager)
+    app.ota_manager.mock_rf_led_ota_ok().returns(());
+    
+    // Set up other mocks as needed
+    mock_factory_reset().returns(());
+    
+    // Call function under test
+    function_that_uses_app();
+    
+    // Verify App struct methods were called
+    app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
+    
+    // Verify other mocks were called
+    mock_factory_reset().assert_called(1);
+}
+```
+
+**Key Points for App Struct Mocking:**
+- Always include `app_mocker` in the `mry::lock` attribute
+- Create an instance of App using `App::default()`
+- Configure the `app_mocker` to return your mock App instance
+- Mock methods on App components (like `ota_manager`) before calling the function under test
+- Verify that the expected App methods were called the correct number of times
+
 ### Documentation Style
 
 **Function Documentation** - Use doc comments with this structure:

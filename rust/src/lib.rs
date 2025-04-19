@@ -27,12 +27,35 @@ mod uart_manager;
 pub mod version;
 mod state;
 
-static mut APP: App = App::default();
+#[cfg(test)]
+use once_cell::sync::Lazy;
+
+#[cfg(not(test))]
+static mut APP: App = App::default_const();
+
+#[cfg(test)]
+static mut APP: Lazy<App> = Lazy::new(|| {
+    println!("Initializing...");
+    App::default() 
+});
+
 static mut SPAWNER: *const Spawner = null_mut();
 
+#[cfg(not(test))]
 pub fn app() -> &'static mut App {
     #[allow(static_mut_refs)]
     unsafe { &mut APP }
+}
+
+#[cfg(test)]
+#[cfg_attr(test, mry::mry)]
+pub fn app_mocker() -> *mut App {
+    unsafe { &mut *APP as *mut App }
+}
+
+#[cfg(test)]
+pub fn app<'a>() -> &'a mut App {
+    unsafe { __make_static(&mut *app_mocker()) }
 }
 
 unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {

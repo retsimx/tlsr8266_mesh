@@ -19,6 +19,7 @@ use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::uart_manager::UartManager;
 use crate::version::BUILD_VERSION;
 
+#[cfg_attr(test, mry::mry)]
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
@@ -26,13 +27,26 @@ pub struct App {
     pub uart_manager: UartManager
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const, run)))]
 impl App {
-    pub const fn default() -> App {
+    #[cfg(not(test))]
+    pub const fn default_const() -> App {
+        App {
+            ota_manager: OtaManager::default_const(),
+            mesh_manager: MeshManager::default_const(),
+            light_manager: LightManager::default_const(),
+            uart_manager: UartManager::default_const()
+        }
+    }
+  
+    #[cfg(test)]
+    pub fn default() -> App {
         App {
             ota_manager: OtaManager::default(),
             mesh_manager: MeshManager::default(),
             light_manager: LightManager::default(),
-            uart_manager: UartManager::default()
+            uart_manager: UartManager::default(),
+            mry: Default::default()
         }
     }
 

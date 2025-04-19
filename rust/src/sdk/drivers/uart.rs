@@ -92,6 +92,7 @@ pub struct UartData {
 /// This driver provides functionality for initializing, transmitting, and receiving
 /// data over UART using DMA for efficient transfers. It handles the low-level
 /// register access and timing requirements of the UART peripheral.
+#[cfg_attr(test, mry::mry)]
 pub struct UartDriver {
     /// Internal buffer used for transmitting data.
     /// This buffer should not be accessed directly by users.
@@ -106,6 +107,7 @@ pub struct UartDriver {
     is_tx_busy: bool,
 }
 
+#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
 impl UartDriver {
     /// Creates a new instance of the UART driver with default settings.
     /// 
@@ -116,7 +118,8 @@ impl UartDriver {
     /// # Returns
     /// 
     /// * A new UartDriver instance with default settings
-    pub const fn default() -> Self {
+    #[cfg(not(test))]
+    pub const fn default_const() -> Self {
         Self {
             tx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
             rx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
@@ -124,6 +127,15 @@ impl UartDriver {
         }
     }
 
+    #[cfg(test)]
+    pub fn default() -> Self {
+        Self {
+            tx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
+            rx_data_buf: UartData {len: 0, data: [0; UART_DATA_LEN]},
+            is_tx_busy: false,
+            mry: Default::default(),
+        }
+    }
     /// Checks if the UART transmitter is currently busy.
     /// 
     /// # Returns

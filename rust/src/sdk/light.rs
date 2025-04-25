@@ -157,7 +157,7 @@ pub struct AdvPrivate {
     pub mac_address: u32, // low 4 byte
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[repr(C, packed)]
 pub struct AdvRspPrivate {
     pub manufacture_id: u16,             // 0

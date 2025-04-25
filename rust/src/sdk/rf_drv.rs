@@ -122,6 +122,7 @@ pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
 ///
 /// # Arguments
 /// * `data` - The manufacturer-specific data to be set in the advertisement packet
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_set_adv_private_data(data: &[u8])
 {
     let mut dest_offset: usize = 0;

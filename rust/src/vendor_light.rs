@@ -7,36 +7,70 @@ use crate::sdk::light::AdvPrivate;
 use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
 use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 
+/// Configures and sets the advertisement data for the BLE mesh light device.
+///
+/// This function performs two primary operations:
+/// 1. Sets up the primary advertisement data (ADV_PRI_DATA) with device identification
+///    information including the MAC address, and sends this data to the RF driver.
+/// 2. Configures the scan response advertisement data (ADV_RSP_PRI_DATA) with additional
+///    device information.
+///
+/// # Implementation Details
+/// - Uses the global MAC_ID to identify this device in the mesh network
+/// - Configures the device as a CCT (Color-Correlated Temperature) light (product_uuid = 0x02)
+/// - Prepares reservation data in a sequential pattern (0..16)
+///
+/// # Hardware Context
+/// This function interacts with the TLSR8266's BLE transceiver through the SDK layer
+/// to establish the device's presence in the mesh network.
 pub fn vendor_set_adv_data() {
-    // config adv data
+    // Step 1: Configure and send primary advertisement data
+    // --------------------------------------------------
+    
+    // Get the MAC address for device identification
+    let mac_address = array4_to_int(&*MAC_ID.lock());
+    
+    // Lock and configure the primary advertisement data structure
     let mut adv_pri_data = ADV_PRI_DATA.lock();
-
-    adv_pri_data.mac_address = array4_to_int(&*MAC_ID.lock());
-
+    adv_pri_data.mac_address = mac_address;
+    
+    // Create a temporary copy of the data before serialization
     let tmp = *adv_pri_data;
-    rf_link_slave_set_adv_private_data(
-        unsafe {
-            slice::from_raw_parts(
-                addr_of!(tmp) as *const u8,
-                size_of::<AdvPrivate>(),
-            )
-        }
-    );
+    
+    // Serialize the AdvPrivate struct to bytes and send to the RF driver
+    // This makes the device visible/discoverable in the mesh network
+    let serialized_data = unsafe {
+        slice::from_raw_parts(
+            addr_of!(tmp) as *const u8,
+            size_of::<AdvPrivate>(),
+        )
+    };
+    rf_link_slave_set_adv_private_data(serialized_data);
 
+    // Step 2: Configure scan response advertisement data
+    // --------------------------------------------------
+    
+    // Lock and configure the scan response advertisement data structure
     let mut adv_rsp_pri_data = ADV_RSP_PRI_DATA.lock();
 
-    // Light mode CCT = 0x02
+    // Set product type to CCT (Color-Correlated Temperature) light mode (0x02)
+    // This defines the light's capabilities in the mesh network
+    // Other potential values include:
+    // - RGB light (0x01)
+    // - RGBW light (0x03)
+    // - etc.
     adv_rsp_pri_data.product_uuid = 0x02;
 
-    // config adv rsp data
-    adv_rsp_pri_data.mac_address = array4_to_int(&*MAC_ID.lock());
+    // Set the MAC address in the scan response data to match primary advertisement
+    // This provides consistent device identification across all BLE communications
+    adv_rsp_pri_data.mac_address = mac_address;
 
-    // set rsv to 0..16
-    adv_rsp_pri_data
-        .rsv
-        .iter_mut()
-        .enumerate()
-        .for_each(|(i, x)| *x = i as u8);
+    // Initialize reservation data array with sequential values (0..16)
+    // This space is used for device-specific data in the BLE protocol
+    // The sequential pattern helps with debugging and verification
+    for (index, value) in adv_rsp_pri_data.rsv.iter_mut().enumerate() {
+        *value = index as u8;
+    }
 }
 
 #[cfg(test)]

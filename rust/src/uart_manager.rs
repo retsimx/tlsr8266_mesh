@@ -2,14 +2,11 @@ use core::mem::size_of;
 use core::ptr::addr_of;
 use core::slice;
 
-use embassy_time::{Duration, Timer};
 use heapless::Deque;
 
 use crate::{app, SPAWNER, uprintln};
 use crate::embassy::yield_now::yield_now;
-use crate::mesh::MESH_NODE_ST_VAL_LEN;
 use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
-use crate::sdk::ble_app::ll_irq::mesh_node_report_status;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, UartData, UartDriver, UartIrqMask};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
@@ -67,29 +64,6 @@ async fn uart_receiver() {
     app().uart_manager.receiver().await;
 }
 
-#[embassy_executor::task]
-async fn node_report_task() {
-    let mut msg = UartData {
-        len: UART_DATA_LEN as u32,
-        data: [0; UART_DATA_LEN]
-    };
-
-    msg.data[2] = UartMsg::LightStatus as u8;
-
-    loop {
-        let mut data = [0; UART_DATA_LEN-5];
-
-        while mesh_node_report_status(&mut data, (UART_DATA_LEN-5) / MESH_NODE_ST_VAL_LEN) != 0 {
-            msg.data[3..UART_DATA_LEN-2].copy_from_slice(&data);
-            while !app().uart_manager.send_message(&msg) {
-                yield_now().await;
-            }
-        }
-
-        Timer::after(Duration::from_millis(200)).await;
-    }
-}
-
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
@@ -98,6 +72,7 @@ pub struct UartManager {
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
+    uart_status_reporting: bool,
     sent: Deque<[u8; 15], 6>
 }
 
@@ -112,6 +87,7 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
+            uart_status_reporting: false,
             sent: Deque::new()
         }
     }
@@ -125,6 +101,7 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
+            uart_status_reporting: false,
             sent: Deque::new(),
             mry: Default::default()
         }
@@ -132,6 +109,18 @@ impl UartManager {
 
     pub fn started(&self) -> bool {
         self.sender_started
+    }
+
+    pub fn enable_uart_status_reporting(&mut self) {
+        self.uart_status_reporting = true;
+    }
+
+    pub fn disable_uart_status_reporting(&mut self) {
+        self.uart_status_reporting = false;
+    }
+
+    pub fn uart_status_reporting_enabled(&self) -> bool {
+        self.uart_status_reporting
     }
 
     pub fn init(&mut self) {
@@ -229,6 +218,7 @@ impl UartManager {
 
             if msg.data[2] == UartMsg::LightStatus as u8 {
                 mesh_report_status_enable(true);
+                app().uart_manager.enable_uart_status_reporting();
             }
 
             // Finally ack the message once we've handled it
@@ -297,15 +287,13 @@ impl UartManager {
         if !self.sender_started {
             self.sender_started = true;
 
+            #[cfg(not(test))]
             unsafe {
                 // Start the receiver
                 (*SPAWNER).spawn(uart_receiver()).unwrap();
                 
                 // Start the sender
                 (*SPAWNER).spawn(uart_sender()).unwrap();
-                
-                // Start the node reporter
-                (*SPAWNER).spawn(node_report_task()).unwrap();
             }
 
             mesh_report_status_enable(true);
@@ -315,4 +303,514 @@ impl UartManager {
             uprintln!("uart rx handler recv_channel full");
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::packet_types::{PacketLlApp, PacketL2capHead};
+    use mry::*;
+    
+    /// Clear the UART manager state to ensure clean test environment
+    fn clear_uart_manager_state() {
+        critical_section::with(|_| {
+            app().uart_manager = UartManager::default();
+        });
+        // Also reset the global DEVICE_ADDRESS to ensure clean state
+        DEVICE_ADDRESS.set(0);
+    }
+    
+    /// Create a test packet with the given parameters
+    fn create_test_packet(sno: [u8; 3], src: u16, dst: u16, op: u8, vendor_id: u16, par: [u8; 10]) -> Packet {
+        Packet {
+            ll_app: PacketLlApp {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: AppCmdValue {
+                    sno,
+                    src,
+                    dst,
+                    op,
+                    vendor_id,
+                    par,
+                },
+                rsv: [0; 10],
+            }
+        }
+    }
+    
+    /// Tests the send_message method when the channel has space.
+    ///
+    /// This test verifies that send_message correctly adds a message to the send queue
+    /// when there's space available.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager with an empty send channel
+    /// 2. Create a test message
+    /// 3. Call send_message with the test message
+    /// 4. Verify the function returns true (message accepted)
+    #[test]
+    fn test_send_message_with_space() {
+        // Create a UartManager with empty queue
+        let mut manager = UartManager::default();
+        
+        // Create a test message
+        let msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN]
+        };
+        
+        // Send message
+        let result = manager.send_message(&msg);
+        
+        // Verify result
+        assert_eq!(result, true);
+        
+        // Verify channel has one message
+        critical_section::with(|_| {
+            assert_eq!(manager.send_channel.len(), 1);
+        });
+    }
+    
+    /// Tests the send_message method when the channel is full.
+    ///
+    /// This test verifies that send_message correctly rejects messages
+    /// when the send channel is full.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager
+    /// 2. Fill the send channel to capacity
+    /// 3. Try to send one more message
+    /// 4. Verify the function returns false (message rejected)
+    #[test]
+    fn test_send_message_when_full() {
+        // Create a UartManager
+        let mut manager = UartManager::default();
+        
+        // Create a test message
+        let msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN]
+        };
+        
+        // Fill the channel to capacity
+        let capacity = 6; // This should match the capacity in UartManager
+        for _ in 0..capacity {
+            let result = manager.send_message(&msg);
+            assert_eq!(result, true);
+        }
+        
+        // Try to send one more message
+        let result = manager.send_message(&msg);
+        
+        // Verify the message was rejected
+        assert_eq!(result, false);
+        
+        // Verify channel length is still at capacity
+        critical_section::with(|_| {
+            assert_eq!(manager.send_channel.len(), capacity);
+        });
+    }
+    
+    /// Tests the compute_crc method.
+    ///
+    /// This test verifies that the compute_crc method correctly calculates
+    /// and sets the CRC in the specified message.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a test message with known data
+    /// 2. Call compute_crc on the message
+    /// 3. Manually compute the expected CRC
+    /// 4. Verify the CRC in the message matches the expected value
+    #[test]
+    fn test_compute_crc() {
+        // Create a test message with known data
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN]
+        };
+        
+        // Fill with test pattern
+        for i in 0..42 {
+            msg.data[i] = i as u8;
+        }
+        
+        // Call compute_crc
+        UartManager::compute_crc(&mut msg);
+        
+        // Compute expected CRC
+        let expected_crc = crc16(&msg.data[0..42]);
+        let expected_crc_low = (expected_crc & 0xff) as u8;
+        let expected_crc_high = ((expected_crc >> 8) & 0xff) as u8;
+        
+        // Verify CRC in message
+        assert_eq!(msg.data[42], expected_crc_low);
+        assert_eq!(msg.data[43], expected_crc_high);
+    }
+    
+    /// Tests the handle_rx method with a valid CRC.
+    ///
+    /// This test verifies that handle_rx correctly processes messages
+    /// with valid CRC and adds them to the receive queue.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager
+    /// 2. Create a test message with valid CRC
+    /// 3. Call handle_rx with the test message
+    /// 4. Verify message was added to receive queue
+    #[test]
+    fn test_handle_rx_with_valid_crc() {
+        // Create a UartManager
+        let mut manager = UartManager::default();
+        manager.sender_started = false;
+        
+        // Create a test message with known data
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN]
+        };
+        
+        // Fill with test pattern
+        for i in 0..42 {
+            msg.data[i] = i as u8;
+        }
+        
+        // Set the CRC
+        UartManager::compute_crc(&mut msg);
+        
+        // Call handle_rx
+        manager.handle_rx(msg);
+        
+        // Verify message was added to receive queue
+        critical_section::with(|_| {
+            assert_eq!(manager.recv_channel.len(), 1);
+        });
+        
+        // Verify sender_started was set to true
+        assert_eq!(manager.sender_started, true);
+    }
+    
+    /// Tests the handle_rx method with an invalid CRC.
+    ///
+    /// This test verifies that handle_rx correctly rejects messages
+    /// with invalid CRC.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager
+    /// 2. Create a test message with invalid CRC
+    /// 3. Call handle_rx with the test message
+    /// 4. Verify message was not added to receive queue
+    #[test]
+    fn test_handle_rx_with_invalid_crc() {
+        // Create a UartManager
+        let mut manager = UartManager::default();
+        
+        // Create a test message with invalid CRC
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN]
+        };
+        
+        // Fill with test pattern
+        for i in 0..42 {
+            msg.data[i] = i as u8;
+        }
+        
+        // Set invalid CRC
+        msg.data[42] = 0;
+        msg.data[43] = 0;
+        
+        // Call handle_rx
+        manager.handle_rx(msg);
+        
+        // Verify message was not added to receive queue
+        critical_section::with(|_| {
+            assert_eq!(manager.recv_channel.len(), 0);
+        });
+    }
+    
+    /// Tests the started method.
+    ///
+    /// This test verifies that the started method correctly returns
+    /// the sender_started flag.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager with sender_started = false
+    /// 2. Verify started() returns false
+    /// 3. Set sender_started = true
+    /// 4. Verify started() returns true
+    #[test]
+    fn test_started() {
+        // Create a UartManager with sender_started = false
+        let mut manager = UartManager::default();
+        manager.sender_started = false;
+        
+        // Verify started() returns false
+        assert_eq!(manager.started(), false);
+        
+        // Set sender_started = true
+        manager.sender_started = true;
+        
+        // Verify started() returns true
+        assert_eq!(manager.started(), true);
+    }
+    
+    /// Tests the UartManager default constructor.
+    ///
+    /// This test verifies that the UartManager::default constructor
+    /// correctly initializes all fields with expected default values.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager using default()
+    /// 2. Verify all fields have expected default values
+    #[test]
+    fn test_uart_manager_default() {
+        let manager = UartManager::default();
+        
+        // Verify default values
+        assert_eq!(manager.ack_counter, 0);
+        assert_eq!(manager.last_ack, 0);
+        assert_eq!(manager.sender_started, false);
+        
+        // Verify channels are empty
+        critical_section::with(|_| {
+            assert_eq!(manager.send_channel.len(), 0);
+            assert_eq!(manager.recv_channel.len(), 0);
+            assert_eq!(manager.sent.len(), 0);
+        });
+    }
+    
+    /// Tests the light_mesh_rx_cb function when UART manager is not started.
+    ///
+    /// This test verifies that light_mesh_rx_cb correctly ignores messages
+    /// when the UART manager has not been started.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a test packet
+    /// 2. Ensure UART manager is not started
+    /// 3. Call light_mesh_rx_cb with the test packet
+    /// 4. Verify no message was sent to UART
+    #[test]
+    fn test_light_mesh_rx_cb_not_started() {
+        // Clear the UART manager state
+        clear_uart_manager_state();
+        
+        // Create a test packet
+        let packet = create_test_packet([1, 2, 3], 0x1234, 0x5678, 0x01, 0xABCD, [0; 10]);
+        
+        // Ensure UART manager is not started
+        app().uart_manager.sender_started = false;
+        
+        // Call the function
+        light_mesh_rx_cb(&packet);
+        
+        // Verify no message was sent to UART
+        critical_section::with(|_| {
+            assert_eq!(app().uart_manager.send_channel.len(), 0);
+        });
+    }
+    
+    /// Tests the light_mesh_rx_cb function when message is from our device.
+    ///
+    /// This test verifies that light_mesh_rx_cb correctly ignores messages
+    /// that were sent by our own device.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a test packet with our device address as source
+    /// 2. Start the UART manager
+    /// 3. Call light_mesh_rx_cb with the test packet
+    /// 4. Verify no message was sent to UART
+    #[test]
+    fn test_light_mesh_rx_cb_from_our_device() {
+        // Clear the UART manager state
+        clear_uart_manager_state();
+        
+        // Create a test packet with our device address as source
+        let packet = create_test_packet([1, 2, 3], DEVICE_ADDRESS.get(), 0x5678, 0x01, 0xABCD, [0; 10]);
+        
+        // Start the UART manager
+        app().uart_manager.sender_started = true;
+        
+        // Call the function
+        light_mesh_rx_cb(&packet);
+        
+        // Verify no message was sent to UART
+        critical_section::with(|_| {
+            assert_eq!(app().uart_manager.send_channel.len(), 0);
+        });
+    }
+    
+    /// Tests the light_mesh_rx_cb function when message is a duplicate.
+    ///
+    /// This test verifies that light_mesh_rx_cb correctly ignores messages
+    /// that have already been sent by our device (duplicate detection).
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a test packet
+    /// 2. Start the UART manager
+    /// 3. Add the message to the sent queue
+    /// 4. Call light_mesh_rx_cb with the test packet
+    /// 5. Verify no message was sent to UART
+    #[test]
+    fn test_light_mesh_rx_cb_duplicate_message() {
+        // Clear the UART manager state
+        clear_uart_manager_state();
+        
+        // Create a test packet
+        let packet = create_test_packet([1, 2, 3], 0x1234, 0x5678, 0x01, 0xABCD, [0; 10]);
+        
+        // Start the UART manager
+        app().uart_manager.sender_started = true;
+        
+        // Add the message to the sent queue (simulating we sent this message)
+        // The light_mesh_rx_cb function extracts data from offset 5 (dst) for 15 bytes
+        // This corresponds to: dst(2) + op(1) + vendor_id(2) + par(10) = 15 bytes
+        let msg_data = [0x78, 0x56, 0x01, 0xCD, 0xAB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        critical_section::with(|_| {
+            app().uart_manager.sent.push_back(msg_data).unwrap();
+        });
+        
+        // Call the function
+        light_mesh_rx_cb(&packet);
+        
+        // Verify no message was sent to UART
+        critical_section::with(|_| {
+            assert_eq!(app().uart_manager.send_channel.len(), 0);
+        });
+    }
+    
+    /// Tests the light_mesh_rx_cb function with a valid new message.
+    ///
+    /// This test verifies that light_mesh_rx_cb correctly processes
+    /// valid new messages and forwards them to the UART.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a test packet with valid data
+    /// 2. Start the UART manager
+    /// 3. Call light_mesh_rx_cb with the test packet
+    /// 4. Verify a message was sent to UART with correct format
+    #[test]
+    fn test_light_mesh_rx_cb_valid_message() {
+        // Clear the UART manager state
+        clear_uart_manager_state();
+        
+        // Create a test packet with valid data
+        let packet = create_test_packet([1, 2, 3], 0x1234, 0x5678, 0x01, 0xABCD, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0, 0, 0, 0, 0]);
+        
+        // Start the UART manager
+        app().uart_manager.sender_started = true;
+        
+        // Call the function
+        light_mesh_rx_cb(&packet);
+        
+        // Verify a message was sent to UART
+        critical_section::with(|_| {
+            assert_eq!(app().uart_manager.send_channel.len(), 1);
+            
+            // Get the sent message
+            let sent_msg = app().uart_manager.send_channel.front().unwrap();
+            
+            // Verify message format
+            assert_eq!(sent_msg.data[2], UartMsg::MeshMessage as u8);
+            
+            // Verify the AppCmdValue data was copied correctly
+            // sno (3 bytes)
+            assert_eq!(sent_msg.data[3], 1);
+            assert_eq!(sent_msg.data[4], 2);
+            assert_eq!(sent_msg.data[5], 3);
+            
+            // src (2 bytes) - little endian
+            assert_eq!(sent_msg.data[6], 0x34);
+            assert_eq!(sent_msg.data[7], 0x12);
+            
+            // dst (2 bytes) - little endian
+            assert_eq!(sent_msg.data[8], 0x78);
+            assert_eq!(sent_msg.data[9], 0x56);
+            
+            // op (1 byte)
+            assert_eq!(sent_msg.data[10], 0x01);
+            
+            // vendor_id (2 bytes) - little endian
+            assert_eq!(sent_msg.data[11], 0xCD);
+            assert_eq!(sent_msg.data[12], 0xAB);
+            
+            // par (10 bytes)
+            assert_eq!(sent_msg.data[13], 0xAA);
+            assert_eq!(sent_msg.data[14], 0xBB);
+            assert_eq!(sent_msg.data[15], 0xCC);
+            assert_eq!(sent_msg.data[16], 0xDD);
+            assert_eq!(sent_msg.data[17], 0xEE);
+            assert_eq!(sent_msg.data[18], 0);
+            assert_eq!(sent_msg.data[19], 0);
+            assert_eq!(sent_msg.data[20], 0);
+            assert_eq!(sent_msg.data[21], 0);
+            assert_eq!(sent_msg.data[22], 0);
+        });
+    }
+    
+    /// Tests the light_mesh_rx_cb function with different message types.
+    ///
+    /// This test verifies that light_mesh_rx_cb correctly processes
+    /// messages with different operation codes and parameters.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create test packets with different op codes and parameters
+    /// 2. Start the UART manager
+    /// 3. Call light_mesh_rx_cb with each test packet
+    /// 4. Verify messages were sent to UART with correct data
+    #[test]
+    fn test_light_mesh_rx_cb_different_message_types() {
+        // Clear the UART manager state
+        clear_uart_manager_state();
+        
+        // Start the UART manager
+        app().uart_manager.sender_started = true;
+        
+        // Test case 1: Light control message
+        let packet1 = create_test_packet([10, 20, 30], 0x1111, 0x2222, 0x02, 0x1111, [0x01, 0x02, 0x03, 0x04, 0x05, 0, 0, 0, 0, 0]);
+        
+        light_mesh_rx_cb(&packet1);
+        
+        // Test case 2: Status request message
+        let packet2 = create_test_packet([40, 50, 60], 0x3333, 0x4444, 0x03, 0x2222, [0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0, 0, 0, 0, 0]);
+        
+        light_mesh_rx_cb(&packet2);
+        
+        // Verify both messages were sent to UART
+        critical_section::with(|_| {
+            assert_eq!(app().uart_manager.send_channel.len(), 2);
+            
+            // Check first message by popping and checking
+            let msg1 = app().uart_manager.send_channel.pop_front().unwrap();
+            assert_eq!(msg1.data[2], UartMsg::MeshMessage as u8);
+            assert_eq!(msg1.data[10], 0x02); // op code
+            
+            // Check second message
+            let msg2 = app().uart_manager.send_channel.pop_front().unwrap();
+            assert_eq!(msg2.data[2], UartMsg::MeshMessage as u8);
+            assert_eq!(msg2.data[10], 0x03); // op code
+        });
+    }
+    
+
 }

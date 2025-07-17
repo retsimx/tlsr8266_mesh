@@ -314,7 +314,8 @@ pub fn irq_st_bridge()
     mesh_node_flush_status();
     if is_add_packet_buf_ready() && !app().uart_manager.started() {
         let mut data = [0u8; 20];
-        if mesh_node_report_status(&mut data, 10 / MESH_NODE_ST_VAL_LEN) != 0 {
+        let count = mesh_node_report_status(&mut data, 10 / MESH_NODE_ST_VAL_LEN);
+        if count != 0 {
             let mut pkt = Packet {
                 att_cmd: PacketAttCmd {
                     head: PacketL2capHead {
@@ -338,6 +339,21 @@ pub fn irq_st_bridge()
 
             pkt.att_cmd_mut().value.val[3..].copy_from_slice(&data);
             rf_link_add_tx_packet(&pkt);
+
+            // UART status reporting
+            if app().uart_manager.uart_status_reporting_enabled() {
+                use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
+                use crate::uart_manager::UartMsg;
+                use crate::mesh::MESH_NODE_ST_VAL_LEN;
+
+                let mut uart_msg = UartData {
+                    len: UART_DATA_LEN as u32,
+                    data: [0; UART_DATA_LEN],
+                };
+                uart_msg.data[2] = UartMsg::LightStatus as u8;
+                uart_msg.data[3..3 + count * MESH_NODE_ST_VAL_LEN].copy_from_slice(&data[..count * MESH_NODE_ST_VAL_LEN]);
+                let _ = app().uart_manager.send_message(&uart_msg);
+            }
         }
     }
 

@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
 use crate::main_light::rf_link_light_event_callback;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
 use crate::state::{*};
 
@@ -50,6 +50,184 @@ const BLE_HEADER_LEN: u8 = 6;         // BLE packet header length
 const DMA_HEADER_EXTRA: u32 = 8;      // Additional DMA buffer length beyond RF packet
 const MAX_ADV_DATA_LEN: u8 = 0x25;    // Maximum advertisement data length (37 bytes)
 
+/// Helper structure to track advertisement data field location
+#[derive(Debug)]
+struct AdvFieldLocation {
+    type_offset: usize,      // Offset to the length field
+    adv_type_offset: usize,  // Offset to the type field  
+    data_offset: usize,      // Offset to the data field
+}
+
+/// Helper function to check if advertisement data is empty
+fn is_adv_data_empty(pkt: &crate::sdk::packet_types::Packet) -> bool {
+    pkt.head().rf_len as i8 - (BLE_HEADER_LEN as i8) < 1
+}
+
+/// Iterator that yields advertisement data fields as (offset, length, type)
+fn adv_fields_iter(data: &[u8], max_len: usize) -> impl Iterator<Item = (usize, u8, u8)> + '_ {
+    (0..max_len)
+        .scan(0, move |offset, _| {
+            if *offset >= max_len {
+                return None;
+            }
+            
+            let field_len = data.get(*offset).copied().unwrap_or(0);
+            if field_len == 0 {
+                return None; // Malformed data
+            }
+            
+            let field_type = data.get(*offset + 1).copied().unwrap_or(0);
+            let current_offset = *offset;
+            
+            *offset += field_len as usize + 1; // Move to next field
+            Some((current_offset, field_len, field_type))
+        })
+}
+
+/// Helper function to find or allocate space for an advertisement field type
+fn find_or_allocate_adv_field(pkt: &mut crate::sdk::packet_types::Packet, field_type: u8) -> AdvFieldLocation {
+    if is_adv_data_empty(pkt) {
+        return AdvFieldLocation {
+            type_offset: 0,
+            adv_type_offset: 1,
+            data_offset: 2,
+        };
+    }
+
+    let adv_data_len = (pkt.head().rf_len as i8 - BLE_HEADER_LEN as i8) as usize;
+    let data = &pkt.adv_ind_module().data;
+    
+    // Use iterator to find existing field
+    adv_fields_iter(data, adv_data_len)
+        .find(|(_, _, type_val)| *type_val == field_type)
+        .map(|(offset, _, _)| AdvFieldLocation {
+            type_offset: offset,
+            adv_type_offset: offset + 1,
+            data_offset: offset + 2,
+        })
+        .unwrap_or_else(|| {
+            // Field not found, calculate end position
+            let type_offset = adv_fields_iter(data, adv_data_len)
+                .last()
+                .map(|(offset, len, _)| offset + len as usize + 1)
+                .unwrap_or(0);
+            
+            AdvFieldLocation {
+                type_offset,
+                adv_type_offset: type_offset + 1,
+                data_offset: type_offset + 2,
+            }
+        })
+}
+
+/// Helper function to update packet length fields
+fn update_packet_lengths(pkt: &mut crate::sdk::packet_types::Packet, total_data_len: usize) {
+    pkt.head_mut().rf_len = (total_data_len + BLE_HEADER_LEN as usize) as u8;
+    pkt.head_mut().dma_len = (total_data_len + DMA_HEADER_EXTRA as usize) as u32;
+}
+
+/// Helper function to clear all groups from memory
+fn clear_all_groups_from_memory() -> bool {
+    critical_section::with(|_| {
+        let mut groups = GROUP_ADDRESS.lock();
+        let had_groups = groups.iter().any(|&addr| addr != 0);
+        
+        groups.iter_mut().for_each(|addr| *addr = 0);
+        
+        had_groups
+    })
+}
+
+/// Helper function to clear specific group from memory
+fn clear_specific_group_from_memory(group_id: u16) -> bool {
+    critical_section::with(|_| {
+        GROUP_ADDRESS.lock()
+            .iter_mut()
+            .find(|addr| **addr == group_id)
+            .map(|addr| { *addr = 0; true })
+            .unwrap_or(false)
+    })
+}
+
+/// Helper function to delete groups from flash storage
+fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> bool {
+    let initial_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
+    let zero_short = 0u16;
+    
+    // Create iterator over flash positions in reverse order (newest to oldest)
+    let flash_positions = (0..initial_pos).step_by(2).rev();
+    
+    let mut groups_deleted = 0;
+    let mut found_any = false;
+    
+    for pos in flash_positions {
+        let flash_addr = FLASH_ADR_DEV_GRP_ADR + pos as u32;
+        
+        // Read group address from flash
+        let group_address = {
+            let mut bytes = [0u8; 2];
+            unsafe {
+                flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
+            }
+            u16::from_le_bytes(bytes)
+        };
+        
+        // Check if this is a group address (not device address)
+        let is_group_address = group_address & !DEVICE_ADDR_MASK_DEFAULT != 0;
+        
+        if is_group_address {
+            let should_delete = delete_all || group_address == group_id;
+            
+            if should_delete {
+                unsafe {
+                    flash_write_page(flash_addr, DEVICE_ADDR_SIZE, addr_of!(zero_short) as *const u8);
+                }
+                found_any = true;
+                groups_deleted += 1;
+                
+                // Early termination conditions
+                match (delete_all, groups_deleted) {
+                    (true, count) if count > 7 => return true,  // Delete-all limit
+                    (false, _) => return true,                   // Found specific group
+                    _ => continue,
+                }
+            }
+        }
+    }
+    
+    found_any
+}
+
+/// Helper function to compact advertisement data by removing invalid manufacturer data
+/// Returns the new end position for the compacted data
+fn compact_adv_data_removing_invalid_manufacturer(pkt: &mut crate::sdk::packet_types::Packet) -> usize {
+    if is_adv_data_empty(pkt) {
+        return 0;
+    }
+
+    let adv_data_len = (pkt.head().rf_len as i8 - BLE_HEADER_LEN as i8) as usize;
+    let data = &pkt.adv_ind_module().data;
+    
+    // Process fields in-place using functional iterator patterns
+    let data_clone = pkt.adv_ind_module().data.clone();
+    let mut write_pos = 0;
+    
+    // Use iterator to process non-manufacturer fields
+    for (read_offset, field_len, _field_type) in adv_fields_iter(&data_clone, adv_data_len)
+        .filter(|(_, _, field_type)| *field_type != ADV_TYPE_MANUFACTURER)
+    {
+        let field_size = field_len as usize + 1;
+        
+        // Copy field to compacted position
+        pkt.adv_ind_module_mut().data[write_pos..write_pos + field_size]
+            .copy_from_slice(&data_clone[read_offset..read_offset + field_size]);
+        
+        write_pos += field_size;
+    }
+    
+    write_pos
+}
+
 /// Sets the mesh name in advertisement packets
 /// 
 /// The function locates the position of the Complete Local Name field (type 9)
@@ -60,58 +238,21 @@ const MAX_ADV_DATA_LEN: u8 = 0x25;    // Maximum advertisement data length (37 b
 /// * `name` - The mesh name to be set in the advertisement packet
 pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
 {
-    let mut data_offset = 0;
-    let mut type_offset;
-    let mut adv_type_offset;
-
     let mut pkt_adv = PKT_ADV.lock();
-
-    if pkt_adv.head().rf_len as i8 - (BLE_HEADER_LEN as i8) < 1 {
-        // Empty advertisement data section, initialize new structure
-        adv_type_offset = 1;
-        data_offset = 2;
-        type_offset = 0;
-    } else {
-        // Search for existing Complete Local Name field (type 9)
-        type_offset = 0;
-        let mut found = false;
-        
-        loop {
-            adv_type_offset = type_offset + 1;
-            
-            // Found existing Complete Local Name field
-            if pkt_adv.adv_ind_module().data[type_offset + 1] == ADV_TYPE_MESH_NAME {
-                data_offset = type_offset + 2;
-                found = true;
-                break;
-            }
-            
-            // Skip to next AD structure
-            type_offset = pkt_adv.adv_ind_module().data[type_offset] as usize + 1 + type_offset;
-            
-            // End of advertisement data reached
-            if type_offset as i8 >= pkt_adv.head().rf_len as i8 - (BLE_HEADER_LEN as i8) {
-                break;
-            }
-        }
-        
-        if !found {
-            // No Complete Local Name field found, append at current position
-            data_offset = type_offset + 2;
-            adv_type_offset = type_offset + 1;
-        }
-    }
-
+    
+    // Find or allocate space for mesh name field
+    let location = find_or_allocate_adv_field(&mut pkt_adv, ADV_TYPE_MESH_NAME);
+    
     // Copy mesh name data to advertisement packet
-    pkt_adv.adv_ind_module_mut().data[data_offset..data_offset + name.len()].copy_from_slice(name);
+    pkt_adv.adv_ind_module_mut().data[location.data_offset..location.data_offset + name.len()].copy_from_slice(name);
 
     // Set length and type fields
-    pkt_adv.adv_ind_module_mut().data[type_offset] = name.len() as u8 + 1;
-    pkt_adv.adv_ind_module_mut().data[adv_type_offset] = ADV_TYPE_MESH_NAME;
+    pkt_adv.adv_ind_module_mut().data[location.type_offset] = name.len() as u8 + 1;
+    pkt_adv.adv_ind_module_mut().data[location.adv_type_offset] = ADV_TYPE_MESH_NAME;
     
     // Update packet length fields
-    pkt_adv.head_mut().dma_len = (type_offset + name.len() + 2 + DMA_HEADER_EXTRA as usize) as u32;
-    pkt_adv.head_mut().rf_len = (type_offset + name.len() + 2 + BLE_HEADER_LEN as usize) as u8;
+    let total_data_len = location.type_offset + name.len() + 2;
+    update_packet_lengths(&mut pkt_adv, total_data_len);
 }
 
 /// Sets manufacturer-specific data in advertisement packets
@@ -125,63 +266,26 @@ pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_set_adv_private_data(data: &[u8])
 {
-    let mut dest_offset: usize = 0;
-    let mut type_offset: usize = 0;
-    let mut adv_type_offset: usize = 0;
-
     let mut pkt_adv = PKT_ADV.lock();
-
-    let rf_len = pkt_adv.head().rf_len;
-    if rf_len as i8 - (BLE_HEADER_LEN as i8) < 1 {
-        // Empty advertisement data section, initialize new structure
-        adv_type_offset = 1;
-        dest_offset = 2;
-        type_offset = 0;
-    } else {
-        // Copy existing data while searching for manufacturer data
-        dest_offset = 0;
-        type_offset = 0;
-        
-        loop {
-            let current_len = pkt_adv.adv_ind_module().data[type_offset] + 1;
-            let adv_data = pkt_adv.adv_ind_module().data.clone();
-            
-            // Copy current AD structure to destination
-            pkt_adv.adv_ind_module_mut().data[dest_offset..dest_offset + current_len as usize]
-                .copy_from_slice(&adv_data[type_offset..type_offset + current_len as usize]);
-            
-            // Check if this is manufacturer-specific data field and has expected length
-            if pkt_adv.adv_ind_module().data[type_offset + 1] == ADV_TYPE_MANUFACTURER {
-                if current_len == 10 {
-                    break;
-                }
-            } else {
-                // Move destination offset for next AD structure
-                dest_offset = dest_offset + current_len as usize;
-            }
-            
-            // Move to next AD structure
-            type_offset = type_offset + current_len as usize;
-            
-            // End of advertisement data reached
-            if type_offset as i8 >= rf_len as i8 - (BLE_HEADER_LEN as i8) {
-                break;
-            }
-        }
-        
-        dest_offset = dest_offset + 2;
-        adv_type_offset = dest_offset - 1;
-    }
+    
+    // Compact existing data by removing invalid manufacturer data
+    let compacted_len = compact_adv_data_removing_invalid_manufacturer(&mut pkt_adv);
+    
+    // Calculate offsets to match original algorithm exactly
+    let type_offset = compacted_len;
+    let adv_type_offset = compacted_len + 1;
+    let data_offset = compacted_len + 2;
     
     // Copy manufacturer data to advertisement packet
-    pkt_adv.adv_ind_module_mut().data[dest_offset..dest_offset + data.len()].copy_from_slice(data);
+    pkt_adv.adv_ind_module_mut().data[data_offset..data_offset + data.len()].copy_from_slice(data);
 
     // Set length and type fields
     pkt_adv.adv_ind_module_mut().data[type_offset] = data.len() as u8 + 1;
     pkt_adv.adv_ind_module_mut().data[adv_type_offset] = ADV_TYPE_MANUFACTURER;
     
-    // Update total length
-    let total_len = data.len() + 2 + dest_offset;
+    // Update packet length to match original calculation exactly
+    // Original: total_len = data.len() + 2 + dest_offset, where dest_offset = data_offset
+    let total_len = data.len() + 2 + data_offset;
     pkt_adv.head_mut().dma_len = total_len as u32 + DMA_HEADER_EXTRA;
     pkt_adv.head_mut().rf_len = total_len as u8 + BLE_HEADER_LEN;
 }
@@ -198,45 +302,52 @@ pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
     let mut pkt_adv = PKT_ADV.lock();
     let rf_len = pkt_adv.head().rf_len as usize;
     
-    // Check if new UUID data would exceed maximum advertisement data length
-    if uuid_data.len() as i8 <= MAX_ADV_DATA_LEN as i8 - (rf_len as i8) {
-        let mut tmp_data = [0u8; 31]; // Temporary buffer for data rearrangement
-        
-        if SET_UUID_FLAG.get() == false {
-            // First time setting UUID - insert at position 3 and shift existing data
-            let payload_len = rf_len - 9;
+    // Early return pattern with guard clause
+    let would_exceed_max = uuid_data.len() as i8 > MAX_ADV_DATA_LEN as i8 - (rf_len as i8);
+    if would_exceed_max {
+        return;
+    }
+    
+    const UUID_INSERT_POSITION: usize = 3;
+    let mut temp_buffer = [0u8; 31];
+    
+    match SET_UUID_FLAG.get() {
+        false => {
+            // First time: insert and shift existing data  
+            let existing_payload_len = if rf_len >= 9 { rf_len - 9 } else { 0 };
             
-            // Save existing payload
-            tmp_data[0..payload_len].copy_from_slice(&pkt_adv.adv_ind_module().data[3..3 + payload_len]);
-
-            // Insert UUID data at position 3
-            pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
+            // Functional approach to data manipulation
+            let (save_range, insert_range, restore_range) = {
+                let save_start = UUID_INSERT_POSITION;
+                let save_end = save_start + existing_payload_len;
+                let insert_start = UUID_INSERT_POSITION;
+                let insert_end = insert_start + uuid_data.len();
+                let restore_start = insert_end;
+                let restore_end = restore_start + existing_payload_len;
+                
+                (save_start..save_end, insert_start..insert_end, restore_start..restore_end)
+            };
             
-            // Restore saved payload after UUID
-            pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + payload_len]
-                .copy_from_slice(&tmp_data[0..payload_len]);
+            // Save existing data that will be shifted
+            temp_buffer[0..existing_payload_len]
+                .copy_from_slice(&pkt_adv.adv_ind_module().data[save_range]);
+            
+            // Insert new UUID data and restore shifted data
+            pkt_adv.adv_ind_module_mut().data[insert_range].copy_from_slice(uuid_data);
+            pkt_adv.adv_ind_module_mut().data[restore_range]
+                .copy_from_slice(&temp_buffer[0..existing_payload_len]);
 
             SET_UUID_FLAG.set(true);
             
-            // Update packet length fields
-            pkt_adv.head_mut().rf_len += uuid_data.len() as u8;
-            pkt_adv.head_mut().dma_len += uuid_data.len() as u32;
-        } else {
-            // UUID already set - replace existing UUID
-            let uuid_section_len = uuid_data.len() + 3;
-            let remaining_len = (rf_len - BLE_HEADER_LEN as usize) - uuid_section_len;
-            
-            // Save beginning of the advertisement data including UUID headers
-            tmp_data[0..uuid_section_len].copy_from_slice(&pkt_adv.adv_ind_module().data[0..uuid_section_len]);
-
-            // Replace UUID data at position 3
-            pkt_adv.adv_ind_module_mut().data[3..3 + uuid_data.len()].copy_from_slice(uuid_data);
-            
-            // Restore remaining data after UUID
-            if remaining_len > 0 {
-                pkt_adv.adv_ind_module_mut().data[3 + uuid_data.len()..3 + uuid_data.len() + remaining_len]
-                    .copy_from_slice(&tmp_data[0..remaining_len]);
-            }
+            // Update packet lengths
+            let length_increase = uuid_data.len();
+            pkt_adv.head_mut().rf_len += length_increase as u8;
+            pkt_adv.head_mut().dma_len += length_increase as u32;
+        },
+        true => {
+            // Replace existing UUID data in place
+            let replace_range = UUID_INSERT_POSITION..UUID_INSERT_POSITION + uuid_data.len();
+            pkt_adv.adv_ind_module_mut().data[replace_range].copy_from_slice(uuid_data);
         }
     }
 }
@@ -351,91 +462,30 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
 ///
 /// # Returns
 /// * `true` if any group address was successfully removed, `false` otherwise
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_del_group(group_id: u16) -> bool
 {
-    let mut grp_next_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
-    let mut group_index = 0;
-    let mut result = false;
-    let mut delete_mode = 0;
+    let grp_next_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
     
-    // Only proceed if we have any group addresses stored
-    if grp_next_pos != 0 {
-        // First, update in-memory group addresses
-        let mut current_group: usize = 0;
-        let mut found_any = 0;
-        let mut should_break = false;
-        
-        // Check each in-memory group address (max 8 groups)
-        while current_group != MAX_GROUP_COUNT as usize {
-            delete_mode = found_any;
-            
-            // Handle special case: delete all groups
-            if group_id == GROUP_DELETE_ALL {
-                GROUP_ADDRESS.lock()[group_index] = 0;
-                delete_mode = 1;
-                current_group += 1;
-                group_index += 1;
-                found_any = 1;
-                
-                if current_group == MAX_GROUP_COUNT as usize {
-                    should_break = true;
-                    break;
-                }
-                
-                delete_mode = found_any;
-            }
-            
-            if should_break {
-                break;
-            }
-            
-            // Check for specific group match
-            if GROUP_ADDRESS.lock()[group_index] == group_id {
-                GROUP_ADDRESS.lock()[current_group] = 0;
-                delete_mode = 2;  // Found specific group
-                break;
-            }
-            
-            current_group += 1;
-            group_index += 1;
-            found_any = delete_mode;
-        }
-        
-        // Now update flash storage
-        let zero_short = 0u16;
-        let mut groups_deleted = 0;
-        result = false;
-        
-        // Iterate through the flash storage in reverse order (newest to oldest)
-        while grp_next_pos >= 0 {
-            grp_next_pos -= 2;  // Move to previous group address
-            
-            let p_group_address = (FLASH_ADR_DEV_GRP_ADR + grp_next_pos as u32) as *const u16;
-            unsafe {
-                // Only process entries that are group addresses (not device addresses)
-                if *p_group_address & !DEVICE_ADDR_MASK_DEFAULT != 0 {
-                    // Delete all groups mode
-                    if delete_mode == 1 {
-                        flash_write_page(p_group_address as u32, DEVICE_ADDR_SIZE, addr_of!(zero_short) as *const u8);
-                        result = true;
-                        groups_deleted += 1;
-                        
-                        // Exit after deleting 8 groups
-                        if groups_deleted > 7 {
-                            return true;
-                        }
-                    } 
-                    // Delete specific group mode
-                    else if *p_group_address == group_id && delete_mode != 0 {
-                        flash_write_page(p_group_address as u32, DEVICE_ADDR_SIZE, addr_of!(zero_short) as *const u8);
-                        return true;
-                    }
-                }
-            }
-        }
+    // Early exit if no groups are stored
+    if grp_next_pos == 0 {
+        return false;
     }
     
-    return result;
+    let is_delete_all = group_id == GROUP_DELETE_ALL;
+    
+    // Clear groups from memory
+    let memory_cleared = if is_delete_all {
+        clear_all_groups_from_memory()
+    } else {
+        clear_specific_group_from_memory(group_id)
+    };
+    
+    // Clear groups from flash storage
+    let flash_cleared = delete_groups_from_flash(group_id, is_delete_all);
+    
+    // Return true if either memory or flash was modified
+    memory_cleared || flash_cleared
 }
 
 /// Adds a new group address to the mesh network
@@ -454,7 +504,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
     
     // Validate group ID: must be in valid group address range
-    if (group_id + 0x8000) < 0x7fff {
+    if group_id.wrapping_add(0x8000) < 0x7fff {
         // Clean up flash if needed
         dev_grp_flash_clean();
         
@@ -515,5 +565,750 @@ pub fn rf_link_add_group(group_id: u16) -> bool
     }
     
     return false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page};
+    use crate::main_light::mock_rf_link_light_event_callback;
+    use super::mock_rf_link_del_group;
+    use mry::send_wrapper::SendWrapper;
+    
+    /// Helper function to reset global state for clean test environment
+    fn reset_test_state() {
+        // Reset all global state variables
+        DEVICE_ADDRESS.set(0);
+        DEV_ADDRESS_NEXT_POS.set(0);
+        DEV_GRP_NEXT_POS.set(0);
+        SET_UUID_FLAG.set(false);
+        
+        // Clear group addresses
+        critical_section::with(|_| {
+            GROUP_ADDRESS.lock().iter_mut().for_each(|addr| *addr = 0);
+        });
+        
+        // Reset PKT_ADV to a clean state
+        critical_section::with(|_| {
+            let mut pkt = PKT_ADV.lock();
+            pkt.head_mut().dma_len = DMA_HEADER_EXTRA;
+            pkt.head_mut().rf_len = BLE_HEADER_LEN;
+            pkt.adv_ind_module_mut().data.iter_mut().for_each(|b| *b = 0);
+        });
+    }
+    
+    /// Helper function to create a test advertisement packet with specific data
+    fn create_test_adv_packet(initial_data: &[u8]) {
+        critical_section::with(|_| {
+            let mut pkt = PKT_ADV.lock();
+            pkt.head_mut().rf_len = BLE_HEADER_LEN + initial_data.len() as u8;
+            pkt.head_mut().dma_len = DMA_HEADER_EXTRA + initial_data.len() as u32;
+            pkt.adv_ind_module_mut().data[0..initial_data.len()].copy_from_slice(initial_data);
+        });
+    }
+    
+    /// Tests the RfPower enum values
+    ///
+    /// Verifies that RF power levels have the expected numeric values
+    /// for proper hardware configuration.
+    #[test]
+    fn test_rf_power_enum_values() {
+        assert_eq!(RfPower::Power8dBm as u8, 0);
+        assert_eq!(RfPower::Power4dBm as u8, 1);
+        assert_eq!(RfPower::Power0dBm as u8, 2);
+        assert_eq!(RfPower::PowerNeg4dBm as u8, 3);
+        assert_eq!(RfPower::PowerNeg10dBm as u8, 4);
+        assert_eq!(RfPower::PowerNeg14dBm as u8, 5);
+        assert_eq!(RfPower::PowerNeg20dBm as u8, 6);
+        assert_eq!(RfPower::PowerNeg24dBm as u8, 8);
+        assert_eq!(RfPower::PowerNeg28dBm as u8, 9);
+        assert_eq!(RfPower::PowerNeg30dBm as u8, 10);
+        assert_eq!(RfPower::PowerNeg37dBm as u8, 11);
+        assert_eq!(RfPower::PowerOff as u8, 16);
+    }
+    
+    /// Tests rf_link_slave_set_adv_mesh_name with empty advertisement data
+    ///
+    /// Verifies that the function correctly initializes a new Complete Local Name
+    /// field when the advertisement data section is empty.
+    #[test]
+    fn test_set_adv_mesh_name_empty_data() {
+        reset_test_state();
+        
+        let mesh_name = b"TestMesh";
+        rf_link_slave_set_adv_mesh_name(mesh_name);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check packet length is updated correctly
+            let rf_len = pkt.head().rf_len;
+            let dma_len = pkt.head().dma_len;
+            assert_eq!(rf_len, BLE_HEADER_LEN + mesh_name.len() as u8 + 2);
+            assert_eq!(dma_len, DMA_HEADER_EXTRA + mesh_name.len() as u32 + 2);
+            
+            // Check AD structure format
+            assert_eq!(pkt.adv_ind_module().data[0], mesh_name.len() as u8 + 1); // Length
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MESH_NAME); // Type
+            
+            // Check mesh name data
+            assert_eq!(&pkt.adv_ind_module().data[2..2 + mesh_name.len()], mesh_name);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_mesh_name with existing mesh name
+    ///
+    /// Verifies that the function correctly replaces an existing Complete Local Name
+    /// field with new data.
+    #[test]
+    fn test_set_adv_mesh_name_replace_existing() {
+        reset_test_state();
+        
+        // Set up initial advertisement data with existing mesh name
+        let initial_data = [0x05, ADV_TYPE_MESH_NAME, b'O', b'l', b'd', b'1'];
+        create_test_adv_packet(&initial_data);
+        
+        let new_mesh_name = b"NewMesh";
+        rf_link_slave_set_adv_mesh_name(new_mesh_name);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check packet length is updated correctly
+            assert_eq!(pkt.head().rf_len, BLE_HEADER_LEN + new_mesh_name.len() as u8 + 2);
+            
+            // Check AD structure format
+            assert_eq!(pkt.adv_ind_module().data[0], new_mesh_name.len() as u8 + 1); // Length
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MESH_NAME); // Type
+            
+            // Check new mesh name data
+            assert_eq!(&pkt.adv_ind_module().data[2..2 + new_mesh_name.len()], new_mesh_name);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_mesh_name with existing non-mesh data
+    ///
+    /// Verifies that the function correctly appends a Complete Local Name field
+    /// when other advertisement data exists but no mesh name is present.
+    #[test]
+    fn test_set_adv_mesh_name_with_other_data() {
+        reset_test_state();
+        
+        // Set up initial advertisement data with manufacturer data
+        let initial_data = [0x05, ADV_TYPE_MANUFACTURER, 0x01, 0x02, 0x03, 0x04];
+        create_test_adv_packet(&initial_data);
+        
+        let mesh_name = b"Test";
+        rf_link_slave_set_adv_mesh_name(mesh_name);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check that original data is preserved
+            assert_eq!(pkt.adv_ind_module().data[0], 0x05);
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MANUFACTURER);
+            
+            // Check new mesh name is appended
+            let mesh_start = 6; // After the initial data
+            assert_eq!(pkt.adv_ind_module().data[mesh_start], mesh_name.len() as u8 + 1);
+            assert_eq!(pkt.adv_ind_module().data[mesh_start + 1], ADV_TYPE_MESH_NAME);
+            assert_eq!(&pkt.adv_ind_module().data[mesh_start + 2..mesh_start + 2 + mesh_name.len()], mesh_name);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_private_data with empty advertisement data
+    ///
+    /// Verifies that the function correctly initializes manufacturer-specific data
+    /// when the advertisement data section is empty.
+    #[test]
+    fn test_set_adv_private_data_empty() {
+        reset_test_state();
+        
+        let private_data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        rf_link_slave_set_adv_private_data(&private_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check packet length is updated correctly
+            let rf_len = pkt.head().rf_len;
+            let dma_len = pkt.head().dma_len;
+            assert_eq!(rf_len, BLE_HEADER_LEN + private_data.len() as u8 + 4); // +2 for header + 2 for dest_offset
+            assert_eq!(dma_len, DMA_HEADER_EXTRA + private_data.len() as u32 + 4); // +2 for header + 2 for dest_offset
+            
+            // Check AD structure format
+            assert_eq!(pkt.adv_ind_module().data[0], private_data.len() as u8 + 1); // Length
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MANUFACTURER); // Type
+            
+            // Check private data
+            assert_eq!(&pkt.adv_ind_module().data[2..2 + private_data.len()], &private_data);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_private_data with existing manufacturer data
+    ///
+    /// Verifies that the function correctly replaces existing manufacturer data
+    /// with the expected length (10 bytes total including type).
+    #[test]
+    fn test_set_adv_private_data_replace_existing() {
+        reset_test_state();
+        
+        // Set up existing manufacturer data with correct length (9 data + 1 type = 10 total)
+        let initial_data = [0x09, ADV_TYPE_MANUFACTURER, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
+        create_test_adv_packet(&initial_data);
+        
+        let new_private_data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+        rf_link_slave_set_adv_private_data(&new_private_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check AD structure format
+            assert_eq!(pkt.adv_ind_module().data[0], new_private_data.len() as u8 + 1); // Length
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MANUFACTURER); // Type
+            
+            // Check new private data
+            assert_eq!(&pkt.adv_ind_module().data[2..2 + new_private_data.len()], &new_private_data);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_private_data preserving other data
+    ///
+    /// Verifies that the function preserves other advertisement data structures
+    /// while updating only the manufacturer-specific data.
+    #[test]
+    fn test_set_adv_private_data_preserve_other() {
+        reset_test_state();
+        
+        // Set up data with mesh name and wrong-length manufacturer data
+        let initial_data = [
+            0x05, ADV_TYPE_MESH_NAME, b'T', b'e', b's', b't',  // Mesh name
+            0x03, ADV_TYPE_MANUFACTURER, 0xAA, 0xBB  // Short manufacturer data (will be filtered out)
+        ];
+        create_test_adv_packet(&initial_data);
+        
+        let private_data = [0x01, 0x02, 0x03, 0x04];
+        rf_link_slave_set_adv_private_data(&private_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check that mesh name is preserved
+            assert_eq!(pkt.adv_ind_module().data[0], 0x05);
+            assert_eq!(pkt.adv_ind_module().data[1], ADV_TYPE_MESH_NAME);
+            assert_eq!(&pkt.adv_ind_module().data[2..6], b"Test");
+            
+            // Check new manufacturer data is appended
+            assert_eq!(pkt.adv_ind_module().data[6], private_data.len() as u8 + 1);
+            assert_eq!(pkt.adv_ind_module().data[7], ADV_TYPE_MANUFACTURER);
+            assert_eq!(&pkt.adv_ind_module().data[8..8 + private_data.len()], &private_data);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_uuid_data first time setting
+    ///
+    /// Verifies that UUID data is correctly inserted at position 3 and existing
+    /// payload is shifted when UUID is set for the first time.
+    #[test]
+    fn test_set_adv_uuid_data_first_time() {
+        reset_test_state();
+        
+        // Set up existing advertisement data
+        let initial_data = [0x05, ADV_TYPE_MESH_NAME, b'T', b'e', b's', b't'];
+        create_test_adv_packet(&initial_data);
+        
+        let uuid_data = [0x01, 0x02, 0x03, 0x04];
+        rf_link_slave_set_adv_uuid_data(&uuid_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check UUID flag is set
+            assert_eq!(SET_UUID_FLAG.get(), true);
+            
+            // Check packet length is updated
+            assert_eq!(pkt.head().rf_len, BLE_HEADER_LEN + initial_data.len() as u8 + uuid_data.len() as u8);
+            
+            // Check that first 3 bytes are preserved
+            assert_eq!(&pkt.adv_ind_module().data[0..3], &initial_data[0..3]);
+            
+            // Check UUID data is inserted at position 3
+            assert_eq!(&pkt.adv_ind_module().data[3..3 + uuid_data.len()], &uuid_data);
+            
+            // Check that remaining data is shifted
+            let remaining_start = 3 + uuid_data.len();
+            assert_eq!(&pkt.adv_ind_module().data[remaining_start..remaining_start + 3], &initial_data[3..6]);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_uuid_data replacing existing UUID
+    ///
+    /// Verifies that existing UUID data is correctly replaced when UUID flag
+    /// is already set.
+    #[test]
+    fn test_set_adv_uuid_data_replace_existing() {
+        reset_test_state();
+        SET_UUID_FLAG.set(true);
+        
+        // Set up data with existing UUID section
+        let initial_data = [0x05, 0x09, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];  // UUID at position 3-8
+        create_test_adv_packet(&initial_data);
+        
+        let new_uuid_data = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        rf_link_slave_set_adv_uuid_data(&new_uuid_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // Check that first 3 bytes are preserved
+            assert_eq!(&pkt.adv_ind_module().data[0..3], &initial_data[0..3]);
+            
+            // Check new UUID data replaces old
+            assert_eq!(&pkt.adv_ind_module().data[3..3 + new_uuid_data.len()], &new_uuid_data);
+        });
+    }
+    
+    /// Tests rf_link_slave_set_adv_uuid_data exceeding maximum length
+    ///
+    /// Verifies that the function correctly handles cases where adding UUID data
+    /// would exceed the maximum advertisement data length.
+    #[test]
+    fn test_set_adv_uuid_data_max_length_exceeded() {
+        reset_test_state();
+        
+        // Create data that would exceed max length when UUID is added
+        let large_data = [0x42; 28]; // Close to max length (31 - 3 = 28 to leave room for UUID header)
+        create_test_adv_packet(&large_data);
+        
+        let uuid_data = [0x01, 0x02, 0x03, 0x04, 0x05];
+        rf_link_slave_set_adv_uuid_data(&uuid_data);
+        
+        critical_section::with(|_| {
+            let pkt = PKT_ADV.lock();
+            
+            // UUID flag should not be set
+            assert_eq!(SET_UUID_FLAG.get(), false);
+            
+            // Data should remain unchanged
+            assert_eq!(pkt.head().rf_len, BLE_HEADER_LEN + large_data.len() as u8);
+            assert_eq!(&pkt.adv_ind_module().data[0..large_data.len()], &large_data);
+        });
+    }
+    
+    /// Tests dev_grp_flash_clean when cleanup is not needed
+    ///
+    /// Verifies that flash cleanup is skipped when position pointers
+    /// are within acceptable limits.
+    #[test]
+    #[mry::lock(flash_erase_sector, flash_write_page)]
+    fn test_dev_grp_flash_clean_no_cleanup_needed() {
+        reset_test_state();
+        
+        // Set positions well within limits
+        DEV_GRP_NEXT_POS.set(100);
+        DEV_ADDRESS_NEXT_POS.set(200);
+        
+        // Mock flash operations - these should not be called
+        mock_flash_erase_sector(mry::Any).returns(());
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        
+        // Call function
+        dev_grp_flash_clean();
+        
+        // Verify positions unchanged (no cleanup occurred)
+        assert_eq!(DEV_GRP_NEXT_POS.get(), 100);
+        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), 200);
+        
+        // Verify flash functions were not called
+        mock_flash_erase_sector(mry::Any).assert_called(0);
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(0);
+    }
+    
+    /// Tests dev_grp_flash_clean when cleanup is needed
+    ///
+    /// Verifies that flash cleanup correctly erases sector and rewrites data
+    /// when position pointers exceed maximum values.
+    #[test]
+    #[mry::lock(flash_erase_sector, flash_write_page)]
+    fn test_dev_grp_flash_clean_cleanup_needed() {
+        reset_test_state();
+        
+        // Set positions beyond limits to trigger cleanup
+        DEV_GRP_NEXT_POS.set((MAX_FLASH_ADDR_OFFSET + 1) as u16);
+        DEV_ADDRESS_NEXT_POS.set(100);
+        
+        // Set some test group addresses and device address
+        critical_section::with(|_| {
+            GROUP_ADDRESS.lock()[0] = 0x1234;
+            GROUP_ADDRESS.lock()[1] = 0x5678;
+        });
+        DEVICE_ADDRESS.set(0xABCD);
+        
+        // Mock flash operations
+        mock_flash_erase_sector(FLASH_ADR_DEV_GRP_ADR).returns(());
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        
+        // Call function
+        dev_grp_flash_clean();
+        
+        // Verify positions are reset
+        assert_eq!(DEV_GRP_NEXT_POS.get(), INITIAL_ADDR_OFFSET as u16);
+        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), INITIAL_ADDR_OFFSET as u16);
+        
+        // Verify flash operations were called
+        mock_flash_erase_sector(FLASH_ADR_DEV_GRP_ADR).assert_called(1);
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(2); // Group + device address
+    }
+    
+    /// Tests rf_link_add_dev_addr with valid device ID
+    ///
+    /// Verifies that a valid device address is correctly added to both
+    /// memory and flash storage.
+    #[test]
+    #[mry::lock(flash_write_page, rf_link_light_event_callback)]
+    fn test_add_dev_addr_valid() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        mock_rf_link_light_event_callback(mry::Any).returns(());
+        
+        let dev_id = 0x1234;
+        let result = rf_link_add_dev_addr(dev_id);
+        
+        // Verify function returns true
+        assert_eq!(result, true);
+        
+        // Verify device address is set in memory
+        assert_eq!(DEVICE_ADDRESS.get(), dev_id);
+        
+        // Verify position pointers are updated
+        assert_eq!(DEV_GRP_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
+        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
+        
+        // Verify flash write was called
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        // Verify callback was called
+        mock_rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+    }
+    
+    /// Tests rf_link_add_dev_addr with invalid device ID (zero)
+    ///
+    /// Verifies that zero device addresses are rejected.
+    #[test]
+    fn test_add_dev_addr_zero() {
+        reset_test_state();
+        
+        let result = rf_link_add_dev_addr(0);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+        
+        // Verify device address remains unchanged
+        assert_eq!(DEVICE_ADDRESS.get(), 0);
+    }
+    
+    /// Tests rf_link_add_dev_addr with invalid device ID (mask violation)
+    ///
+    /// Verifies that device addresses violating the device address mask are rejected.
+    #[test]
+    fn test_add_dev_addr_mask_violation() {
+        reset_test_state();
+        
+        // Device ID that violates DEVICE_ADDR_MASK_DEFAULT
+        let invalid_dev_id = 0x8000; // This should violate the mask
+        let result = rf_link_add_dev_addr(invalid_dev_id);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+        
+        // Verify device address remains unchanged
+        assert_eq!(DEVICE_ADDRESS.get(), 0);
+    }
+    
+    /// Tests rf_link_add_dev_addr with same device ID
+    ///
+    /// Verifies that setting the same device address is rejected.
+    #[test]
+    fn test_add_dev_addr_same_id() {
+        reset_test_state();
+        
+        let dev_id = 0x1234;
+        DEVICE_ADDRESS.set(dev_id);
+        
+        let result = rf_link_add_dev_addr(dev_id);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+    }
+    
+    /// Tests rf_link_add_dev_addr replacing existing address
+    ///
+    /// Verifies that replacing an existing device address correctly
+    /// clears the old address in flash.
+    #[test]
+    #[mry::lock(flash_write_page, rf_link_light_event_callback)]
+    fn test_add_dev_addr_replace_existing() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        mock_rf_link_light_event_callback(mry::Any).returns(());
+        
+        // Set up existing address
+        DEVICE_ADDRESS.set(0x1111);
+        DEV_GRP_NEXT_POS.set(10);
+        DEV_ADDRESS_NEXT_POS.set(5);
+        
+        let new_dev_id = 0x2222;
+        let result = rf_link_add_dev_addr(new_dev_id);
+        
+        // Verify function returns true
+        assert_eq!(result, true);
+        
+        // Verify new device address is set
+        assert_eq!(DEVICE_ADDRESS.get(), new_dev_id);
+        
+        // Verify position pointers are updated
+        assert_eq!(DEV_GRP_NEXT_POS.get(), 12); // 10 + DEVICE_ADDR_SIZE
+        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), 12);
+        
+        // Verify flash operations: clear old + write new
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(2);
+        // Verify callback was called
+        mock_rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+    }
+    
+    /// Tests rf_link_del_group with no groups stored
+    ///
+    /// Verifies that the function correctly handles the case where
+    /// no group addresses are stored.
+    #[test]
+    fn test_del_group_no_groups() {
+        reset_test_state();
+        
+        let result = rf_link_del_group(0x1234);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+    }
+    
+    /// Tests rf_link_del_group deleting all groups
+    ///
+    /// Verifies that GROUP_DELETE_ALL correctly removes all group addresses
+    /// from both memory and flash.
+    #[test]
+    #[mry::lock(flash_write_page, flash_read_page)]
+    fn test_del_group_delete_all() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        // Mock flash read to return group addresses (simulate valid group data in flash)
+        mock_flash_read_page(mry::Any, mry::Any, mry::Any).returns_with(|_addr, _len, buf: SendWrapper<*mut u8>| {
+            unsafe {
+                // Write a group address pattern (high bit set to distinguish from device addresses)
+                let group_bytes = 0x8001u16.to_le_bytes();
+                core::ptr::copy_nonoverlapping(group_bytes.as_ptr(), *buf, 2);
+            }
+        });
+        
+        // Set up some group addresses
+        critical_section::with(|_| {
+            GROUP_ADDRESS.lock()[0] = 0x8001;
+            GROUP_ADDRESS.lock()[1] = 0x8002;
+            GROUP_ADDRESS.lock()[2] = 0x8003;
+        });
+        DEV_GRP_NEXT_POS.set(6); // 3 groups * 2 bytes each
+        
+        let result = rf_link_del_group(GROUP_DELETE_ALL);
+        
+        // Verify function returns true (flash operations find valid group addresses)
+        assert_eq!(result, true);
+        
+        // Verify all groups are cleared in memory
+        critical_section::with(|_| {
+            for i in 0..3 {
+                assert_eq!(GROUP_ADDRESS.lock()[i], 0);
+            }
+        });
+    }
+    
+    /// Tests rf_link_del_group deleting specific group
+    ///
+    /// Verifies that a specific group address is correctly removed
+    /// from both memory and flash.
+    #[test]
+    #[mry::lock(flash_write_page, flash_read_page)]
+    fn test_del_group_specific() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        // Mock flash read to return the target group address we want to delete
+        mock_flash_read_page(mry::Any, mry::Any, mry::Any).returns_with(|_addr, _len, buf: SendWrapper<*mut u8>| {
+            unsafe {
+                // Write the target group address we're trying to delete
+                let group_bytes = 0x8002u16.to_le_bytes();
+                core::ptr::copy_nonoverlapping(group_bytes.as_ptr(), *buf, 2);
+            }
+        });
+        
+        // Set up group addresses
+        critical_section::with(|_| {
+            GROUP_ADDRESS.lock()[0] = 0x8001;
+            GROUP_ADDRESS.lock()[1] = 0x8002;
+            GROUP_ADDRESS.lock()[2] = 0x8003;
+        });
+        DEV_GRP_NEXT_POS.set(6);
+        
+        let result = rf_link_del_group(0x8002);
+        
+        // Verify function returns true (found and deleted the target group)
+        assert_eq!(result, true);
+        
+        // Verify specific group is cleared (the one that matches)
+        critical_section::with(|_| {
+            // The function clears the first match it finds
+            assert_eq!(GROUP_ADDRESS.lock()[1], 0);
+        });
+    }
+    
+    /// Tests rf_link_add_group with valid group ID
+    ///
+    /// Verifies that a valid group address is correctly added to both
+    /// memory and flash storage.
+    #[test]
+    #[mry::lock(flash_write_page)]
+    fn test_add_group_valid() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        
+        let group_id = 0x8001; // Valid group ID that passes validation
+        let result = rf_link_add_group(group_id);
+        
+        // Verify function returns true
+        assert_eq!(result, true);
+        
+        // Verify group is added to memory
+        critical_section::with(|_| {
+            assert_eq!(GROUP_ADDRESS.lock()[0], group_id);
+        });
+        
+        // Verify position pointer is updated
+        assert_eq!(DEV_GRP_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
+        
+        // Verify flash write was called
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+    }
+    
+    /// Tests rf_link_add_group with invalid group ID
+    ///
+    /// Verifies that invalid group addresses (outside valid range) are rejected.
+    #[test]
+    fn test_add_group_invalid() {
+        reset_test_state();
+        
+        // Invalid group ID (outside valid range)
+        let invalid_group_id = 0x7FFF;
+        let result = rf_link_add_group(invalid_group_id);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+        
+        // Verify no group is added
+        critical_section::with(|_| {
+            assert_eq!(GROUP_ADDRESS.lock()[0], 0);
+        });
+    }
+    
+    /// Tests rf_link_add_group with duplicate group ID
+    ///
+    /// Verifies that duplicate group addresses are rejected.
+    #[test]
+    fn test_add_group_duplicate() {
+        reset_test_state();
+        
+        let group_id = 0x1234;
+        
+        // Add group first time
+        rf_link_add_group(group_id);
+        
+        // Try to add same group again
+        let result = rf_link_add_group(group_id);
+        
+        // Verify function returns false
+        assert_eq!(result, false);
+    }
+    
+    /// Tests rf_link_add_group with full group slots using rotation policy
+    ///
+    /// Verifies that when all group slots are full, the oldest group
+    /// is replaced using the rotation policy.
+    #[test]
+    #[mry::lock(flash_write_page, rf_link_del_group)]
+    fn test_add_group_rotation_policy() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        mock_rf_link_del_group(mry::Any).returns(true);
+        
+        // Fill all group slots with valid group IDs
+        for i in 0..crate::sdk::light::MAX_GROUP_COUNT as u16 {
+            critical_section::with(|_| {
+                GROUP_ADDRESS.lock()[i as usize] = 0x8001 + i; // Valid group IDs
+            });
+        }
+        DEV_GRP_NEXT_POS.set(10); // Non-zero to avoid first-group path
+        
+        let new_group_id = 0x8010; // Valid group ID
+        let result = rf_link_add_group(new_group_id);
+        
+        // Verify function returns true
+        assert_eq!(result, true);
+        
+        // Verify oldest group is replaced (first one due to rotation)
+        critical_section::with(|_| {
+            assert_eq!(GROUP_ADDRESS.lock()[0], new_group_id);
+        });
+    }
+    
+    /// Tests rf_link_add_group with empty slot available
+    ///
+    /// Verifies that when empty slots are available, new groups
+    /// are added to the first available slot.
+    #[test]
+    #[mry::lock(flash_write_page)]
+    fn test_add_group_empty_slot() {
+        reset_test_state();
+        
+        // Mock flash operations
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+        
+        // Set up some existing groups with empty slots
+        critical_section::with(|_| {
+            GROUP_ADDRESS.lock()[0] = 0x8001; // Valid group ID
+            GROUP_ADDRESS.lock()[1] = 0; // Empty slot
+            GROUP_ADDRESS.lock()[2] = 0x8002; // Valid group ID
+        });
+        DEV_GRP_NEXT_POS.set(4); // Non-zero to avoid first-group path
+        
+        let new_group_id = 0x8003; // Valid group ID
+        let result = rf_link_add_group(new_group_id);
+        
+        // Verify function returns true
+        assert_eq!(result, true);
+        
+        // Verify group is added to first empty slot
+        critical_section::with(|_| {
+            assert_eq!(GROUP_ADDRESS.lock()[1], new_group_id);
+        });
+        
+        // Verify flash write was called
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+    }
 }
 

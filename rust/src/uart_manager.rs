@@ -4,7 +4,9 @@ use core::slice;
 
 use heapless::Deque;
 
-use crate::{app, SPAWNER, uprintln};
+use crate::{app, uprintln};
+#[cfg(not(test))]
+use crate::SPAWNER;
 use crate::embassy::yield_now::yield_now;
 use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
 use crate::sdk::common::crc::crc16;
@@ -309,7 +311,7 @@ impl UartManager {
 mod tests {
     use super::*;
     use crate::sdk::packet_types::{PacketLlApp, PacketL2capHead};
-    use mry::*;
+
     
     /// Clear the UART manager state to ensure clean test environment
     fn clear_uart_manager_state() {

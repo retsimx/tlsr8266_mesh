@@ -313,7 +313,7 @@ pub fn cpu_wakeup_init() {
 
 // recover status before software reboot
 fn light_sw_reboot_callback() {
-    if RF_SLAVE_OTA_BUSY.get() || RF_SLAVE_OTA_BUSY_MESH.get() {
+    if OTA_UPDATE_IN_PROGRESS.get() || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,

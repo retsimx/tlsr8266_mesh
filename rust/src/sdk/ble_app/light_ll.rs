@@ -147,13 +147,13 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet)
 fn rf_link_slave_notify_req_mask(adr: u8)
 {
     if SLAVE_READ_STATUS_BUSY.get() != 0 && (DEVICE_ADDRESS.get() as u8 != adr || SLAVE_READ_STATUS_BUSY.get() == 0x21) {
-        if !SLAVE_READ_STATUS_UNICAST_FLAG.get() {
+        if !DEVICE_STATUS_READ_UNICAST_MODE.get() {
             if PKT_LIGHT_DATA.lock().att_cmd().value.val[8..0xd].iter().any(|v| *v == adr) {
                 return;
             }
 
-            PKT_LIGHT_DATA.lock().att_cmd_mut().value.val[(NOTIFY_REQ_MASK_IDX.get() + 8) as usize] = adr;
-            NOTIFY_REQ_MASK_IDX.set((NOTIFY_REQ_MASK_IDX.get() + 1) % 5);
+            PKT_LIGHT_DATA.lock().att_cmd_mut().value.val[(NOTIFICATION_REQUEST_MASK_INDEX.get() + 8) as usize] = adr;
+            NOTIFICATION_REQUEST_MASK_INDEX.set((NOTIFICATION_REQUEST_MASK_INDEX.get() + 1) % 5);
         } else {
             SLAVE_DATA_VALID.set(0);
         }
@@ -167,7 +167,7 @@ pub fn rf_link_slave_add_status(packet: &Packet)
 
     let mut result = false;
 
-    if SLAVE_STATUS_RECORD_IDX.get() != 0 {
+    if DEVICE_STATUS_RECORD_INDEX.get() != 0 {
         for st_rec in *SLAVE_STATUS_RECORD.lock() {
             if packet.mesh().src_adr as u8 == st_rec.adr[0] {
                 rf_link_slave_notify_req_mask(packet.mesh().src_adr as u8);
@@ -177,14 +177,14 @@ pub fn rf_link_slave_add_status(packet: &Packet)
     }
 
     result = false;
-    if (SLAVE_STATUS_BUFFER_WPTR.get() + 1) % BUFF_RESPONSE_PACKET_COUNT != SLAVE_STATUS_BUFFER_RPTR.get() && SLAVE_STATUS_RECORD_IDX.get() < MESH_NODE_MAX_NUM {
-        SLAVE_STATUS_RECORD.lock()[SLAVE_STATUS_RECORD_IDX.get()].adr[0] = packet.mesh().src_adr as u8;
-        SLAVE_STATUS_RECORD_IDX.inc();
+    if (DEVICE_STATUS_BUFFER_WRITE_POINTER.get() + 1) % BUFF_RESPONSE_PACKET_COUNT != DEVICE_STATUS_BUFFER_READ_POINTER.get() && DEVICE_STATUS_RECORD_INDEX.get() < MESH_NODE_MAX_NUM {
+        SLAVE_STATUS_RECORD.lock()[DEVICE_STATUS_RECORD_INDEX.get()].adr[0] = packet.mesh().src_adr as u8;
+        DEVICE_STATUS_RECORD_INDEX.inc();
         rf_link_slave_notify_req_mask(packet.mesh().src_adr as u8);
 
         // Update the buffer write pointer
-        let index = SLAVE_STATUS_BUFFER_WPTR.get();
-        SLAVE_STATUS_BUFFER_WPTR.set((index + 1) % BUFF_RESPONSE_PACKET_COUNT);
+        let index = DEVICE_STATUS_BUFFER_WRITE_POINTER.get();
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set((index + 1) % BUFF_RESPONSE_PACKET_COUNT);
 
         let st_ptr = &mut buf_response[index];
         st_ptr.head_mut().dma_len = 0x1d;
@@ -241,7 +241,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         op = op_cmd[0] & 0x3f;
     }
 
-    let not_slave_message = packet.att_cmd().value.sno != *SLAVE_SNO.lock();
+    let not_slave_message = packet.att_cmd().value.sno != *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock();
 
     // If we've already seen this packet, then there is nothing else to do
     if is_exist_in_rc_pkt_buf(op, packet) {
@@ -257,8 +257,8 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     // If the slave link is connected (Android) and the dest address is us, then we should forward
     // the packet on to the slave link if the opcode is a response opcode and the slave (Android) is waiting
     // for a response
-    if rf_link_is_notify_rsp(op) && packet.mesh().dst_adr == DEVICE_ADDRESS.get() && SLAVE_LINK_CONNECTED.get() {
-        if SLAVE_READ_STATUS_BUSY.get() != op || packet.att_cmd().value.sno != *SLAVE_STAT_SNO.lock() {
+    if rf_link_is_notify_rsp(op) && packet.mesh().dst_adr == DEVICE_ADDRESS.get() && BLE_PERIPHERAL_CONNECTION_ACTIVE.get() {
+        if SLAVE_READ_STATUS_BUSY.get() != op || packet.att_cmd().value.sno != *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() {
             return;
         }
         rf_link_slave_add_status(packet);
@@ -287,7 +287,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
                 pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
             }
 
-            if not_slave_message || SLAVE_LINK_CMD.get() != op {
+            if not_slave_message || BLE_PERIPHERAL_LINK_COMMAND.get() != op {
                 pkt_light_status.att_cmd_mut().value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().src_adr) as *const u8, 2) });
 
                 pkt_light_status.att_cmd_mut().value.dst = packet.att_cmd().value.src;
@@ -323,11 +323,11 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     packet.head_mut().dma_len = (packet.head().l2cap_len as u32 + 6) & 0xffffff;
     packet.head_mut().rf_len = packet.head().l2cap_len as u8 + 4;
 
-    if not_slave_message || SLAVE_LINK_CMD.get() != op {
+    if not_slave_message || BLE_PERIPHERAL_LINK_COMMAND.get() != op {
         packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
 
-        *SLAVE_SNO.lock() = packet.att_cmd().value.sno;
-        SLAVE_LINK_CMD.set(op);
+        *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = packet.att_cmd().value.sno;
+        BLE_PERIPHERAL_LINK_COMMAND.set(op);
     }
 
     if rf_link_is_notify_req(op) && slave_read_status_response {
@@ -361,7 +361,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
         }
 
-        if (not_slave_message || SLAVE_LINK_CMD.get() != op) || params[1] != 0 {
+        if (not_slave_message || BLE_PERIPHERAL_LINK_COMMAND.get() != op) || params[1] != 0 {
             pkt_light_status.att_cmd_mut().value.src.copy_from_slice(unsafe { slice::from_raw_parts(addr_of!(packet.mesh().src_adr) as *const u8, 2) });
 
             if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &packet.att_cmd().value) {
@@ -378,7 +378,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         packet.head_mut()._type |= BIT!(7);
 
         let mut delay = 100;
-        if !SLAVE_LINK_CONNECTED.get() {
+        if !BLE_PERIPHERAL_CONNECTION_ACTIVE.get() {
             // Random delay to avoid congestion between 0us and 8ms
             delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 16) * 500);
         }
@@ -409,8 +409,8 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
             }
         } else {
             if packet.head()._type & 3 == 3 && packet.head().l2cap_len & 0xff == 1 {
-                SLAVE_TIMING_UPDATE.set(1);
-                SLAVE_INSTANT_NEXT.set(((packet.ll_data().sno as u16) << 8) | packet.ll_data().hh as u16);
+                BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(1);
+                BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(((packet.ll_data().sno as u16) << 8) | packet.ll_data().hh as u16);
                 SLAVE_CHN_MAP.lock().iter_mut().enumerate().for_each(|(i, v)| {
                     *v = unsafe { *(addr_of!(packet.head().l2cap_len) as *const u8).offset(i as isize + 1) };
                 });
@@ -419,10 +419,10 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
             }
 
             if rf_len == 0xc && packet.head()._type & 3 == 3 && packet.head().l2cap_len & 0xff == 0 {
-                SLAVE_INTERVAL_OLD.set(SLAVE_LINK_INTERVAL.get());
-                SLAVE_INSTANT_NEXT.set(packet.ll_data().group);
+                BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.set(SLAVE_LINK_INTERVAL.get());
+                BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(packet.ll_data().group);
                 SLAVE_WINDOW_SIZE_UPDATE.set(((packet.head().l2cap_len >> 8) as u32 * 1250 + 1300) * CLOCK_SYS_CLOCK_1US);
-                SLAVE_TIMING_UPDATE.set(2);
+                BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
                 BLE_CONN_INTERVAL.set(CLOCK_SYS_CLOCK_1US * 1250 * unsafe { (*addr_of!(packet.ll_data().att) as *const u16) } as u32);
                 BLE_CONN_OFFSET.set(packet.head().chan_id as u32 * CLOCK_SYS_CLOCK_1US * 1250);
                 BLE_CONN_TIMEOUT.set(packet.ll_data().nid as u32 * 10000);
@@ -440,11 +440,11 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
 
 pub fn rf_link_timing_adjust(time: u32)
 {
-    if SLAVE_TIMING_ADJUST_ENABLE.get() {
-        SLAVE_TIMING_ADJUST_ENABLE.set(false);
-        if time - SLAVE_TICK_BRX.get() < CLOCK_SYS_CLOCK_1US * 700 {
+    if BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get() {
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(false);
+        if time - BRIDGE_RECEIVE_TIMING_TICK.get() < CLOCK_SYS_CLOCK_1US * 700 {
             SLAVE_NEXT_CONNECT_TICK.set(SLAVE_NEXT_CONNECT_TICK.get() - CLOCK_SYS_CLOCK_1US * 200);
-        } else if CLOCK_SYS_CLOCK_1US * 1100 < time - SLAVE_TICK_BRX.get() {
+        } else if CLOCK_SYS_CLOCK_1US * 1100 < time - BRIDGE_RECEIVE_TIMING_TICK.get() {
             SLAVE_NEXT_CONNECT_TICK.set(SLAVE_NEXT_CONNECT_TICK.get() + CLOCK_SYS_CLOCK_1US * 200);
         }
     }
@@ -470,15 +470,15 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
     CONN_UPDATE_SUCCESSED.set(false);
     CONN_UPDATE_CNT.set(0);
 
-    if SLAVE_CONNECTION_ENABLE.get() || packet.ll_init().scan_a == packet.ll_init().adv_a {
+    if BLE_PERIPHERAL_CONNECTION_ENABLED.get() || packet.ll_init().scan_a == packet.ll_init().adv_a {
         if check_par_con(packet) == false {
             rf_stop_trx();
 
-            SLAVE_WINDOW_OFFSET.set(CLOCK_SYS_CLOCK_1US * 1250 * (packet.ll_init().woffset as u32 + 1));
+            BLE_PERIPHERAL_WINDOW_OFFSET.set(CLOCK_SYS_CLOCK_1US * 1250 * (packet.ll_init().woffset as u32 + 1));
 
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick());
             write_reg_irq_src(0x100000);
-            write_reg_system_tick_irq(time + SLAVE_WINDOW_OFFSET.get() + CLOCK_SYS_CLOCK_1US * (0 - if packet.ll_init().woffset == 0 { 500 } else { 700 }));
+            write_reg_system_tick_irq(time + BLE_PERIPHERAL_WINDOW_OFFSET.get() + CLOCK_SYS_CLOCK_1US * (0 - if packet.ll_init().woffset == 0 { 500 } else { 700 }));
             if 0x80000000 < read_reg_system_tick_irq() - read_reg_system_tick() {
                 write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 10 + read_reg_system_tick());
             }
@@ -486,10 +486,10 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
             LIGHT_CONN_SN_MASTER.set(0x80);
             SLAVE_CONNECTED_TICK.set(read_reg_system_tick());
             if SECURITY_ENABLE.get() {
-                SLAVE_FIRST_CONNECTED_TICK.set(SLAVE_CONNECTED_TICK.get());
+                BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(SLAVE_CONNECTED_TICK.get());
             }
 
-            SLAVE_STATUS_TICK.set(((packet.ll_init().interval as u32 * 5) >> 2) as u8);
+            DEVICE_STATUS_TICK_COUNTER.set(((packet.ll_init().interval as u32 * 5) >> 2) as u8);
             SLAVE_LINK_INTERVAL.set(packet.ll_init().interval as u32 * CLOCK_SYS_CLOCK_1US * 1250);
             SLAVE_WINDOW_SIZE.set((packet.ll_init().wsize as u32 * 1250 + 1100) * CLOCK_SYS_CLOCK_1US);
 
@@ -498,7 +498,7 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
                 SLAVE_WINDOW_SIZE.set(tmp);
             }
 
-            SLAVE_LINK_TIME_OUT.set(packet.ll_init().timeout as u32 * 10000);
+            BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(packet.ll_init().timeout as u32 * 10000);
             PKT_INIT.lock().ll_init_mut().clone_from(&PacketLlInit {
                 dma_len: 0x24,
                 _type: 0x5,
@@ -514,10 +514,10 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
             write_reg_rf_crc(((crcinit[1] as u32) << 8) | ((crcinit[2] as u32) << 0x10) | crcinit[0] as u32);
             rf_reset_sn();
 
-            SLAVE_INSTANT.set(0);
-            SLAVE_TIMING_UPDATE2_FLAG.set(false);
-            SLAVE_INTERVAL_OLD.set(0);
-            SLAVE_TIMING_UPDATE2_OK_TIME.set(0);
+            BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(false);
+            BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.set(0);
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.set(0);
             SLAVE_WINDOW_SIZE_UPDATE.set(0);
 
             pair_init();
@@ -528,7 +528,7 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
 
             *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
             NEED_UPDATE_CONNECT_PARA.set(true);
-            ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+            GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
             write_reg8(0x00800f04, 0x67);  // tx wail & settle time
 
@@ -541,18 +541,18 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
 pub fn light_check_tick_per_us(ticks: u32)
 {
     if ticks == 0x10 {
-        T_SCAN_RSP_INTVL.set(0);
+        BLE_SCAN_RESPONSE_INTERVAL_US.set(0);
     } else if ticks == 0x20 || ticks != 0x30 {
-        T_SCAN_RSP_INTVL.set(0x92);
+        BLE_SCAN_RESPONSE_INTERVAL_US.set(0x92);
     } else {
-        T_SCAN_RSP_INTVL.set(0x93);
+        BLE_SCAN_RESPONSE_INTERVAL_US.set(0x93);
     }
 }
 
 pub fn rf_link_slave_pairing_enable(enable: bool)
 {
-    SLAVE_CONNECTION_ENABLE.set(enable);
-    SLAVE_ADV_ENABLE.set(enable);
+    BLE_PERIPHERAL_CONNECTION_ENABLED.set(enable);
+    BLE_PERIPHERAL_ADVERTISING_ENABLED.set(enable);
 }
 
 // param st is 2bytes = lumen% + rsv(0xFF)  // rf pkt : device_address+sn+lumen+rsv);
@@ -602,10 +602,10 @@ pub fn setup_ble_parameter_start(mut interval_min: u16, mut interval_max: u16, t
 fn update_connect_para()
 {
     if NEED_UPDATE_CONNECT_PARA.get() {
-        if ATT_SERVICE_DISCOVER_TICK.get() != 0 {
-            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - ATT_SERVICE_DISCOVER_TICK.get() {
+        if GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get() != 0 {
+            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get() {
                 NEED_UPDATE_CONNECT_PARA.set(false);
-                ATT_SERVICE_DISCOVER_TICK.set(0);
+                GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
 
                 update_ble_parameter_cb();
             }
@@ -763,14 +763,14 @@ pub fn back_to_rxmode_bridge()
     rf_set_tx_rx_off();
     rf_set_ble_access_code(PAIR_AC.get());
     rf_set_ble_crc_adv();
-    rf_set_ble_channel(SYS_CHN_LISTEN[(ST_BRIGE_NO.get() as usize % SYS_CHN_LISTEN.len()) >> 1]);
+    rf_set_ble_channel(SYS_CHN_LISTEN[(BRIDGE_SEQUENCE_NUMBER.get() as usize % SYS_CHN_LISTEN.len()) >> 1]);
     rf_set_rxmode();
 }
 
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_is_notify_req(value: u8) -> bool
 {
-    if !RF_SLAVE_OTA_BUSY.get() {
+    if !OTA_UPDATE_IN_PROGRESS.get() {
         return [
             LGT_CMD_LIGHT_READ_STATUS,
             LGT_CMD_LIGHT_GRP_REQ,
@@ -821,11 +821,11 @@ pub fn tx_packet_bridge()
     rf_set_ble_crc_adv();
 
     let tick = read_reg_system_tick();
-    if SLAVE_LISTEN_INTERVAL.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
+    if MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000 < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
         TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
         mesh_send_online_status();
     }
-    app_bridge_cmd_handle(T_BRIDGE_CMD.get());
+    app_bridge_cmd_handle(BRIDGE_COMMAND_TIMESTAMP.get());
 }
 
 pub fn rf_link_slave_proc() {
@@ -893,16 +893,16 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_read_status_par_init()
 {
-    SLAVE_STATUS_BUFFER_WPTR.set(0);
-    SLAVE_STATUS_BUFFER_RPTR.set(0);
-    *SLAVE_STAT_SNO.lock() = [0; 3];
+    DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+    DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+    *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0; 3];
 }
 
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_read_status_stop()
 {
     SLAVE_READ_STATUS_BUSY.set(0);
-    SLAVE_READ_STATUS_UNICAST_FLAG.set(false);
+    DEVICE_STATUS_READ_UNICAST_MODE.set(false);
     SLAVE_DATA_VALID.set(0);
 
     rf_link_slave_read_status_par_init();
@@ -910,14 +910,14 @@ pub fn rf_link_slave_read_status_stop()
 
 pub fn rf_ota_save_data(data: &[u8]) -> OtaState
 {
-    let addr = CUR_OTA_FLASH_ADDR.get() + FLASH_ADR_LIGHT_NEW_FW;
+    let addr = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + FLASH_ADR_LIGHT_NEW_FW;
     flash_write_page(addr, data.len() as u32, data.as_ptr());
 
     let mut tmp = [0u8; 0x10];
     flash_read_page(addr, data.len() as u32, tmp.as_mut_ptr());
 
     if data == &tmp[..data.len()] {
-        CUR_OTA_FLASH_ADDR.set(CUR_OTA_FLASH_ADDR.get() + data.len() as u32);
+        OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + data.len() as u32);
         return OtaState::Continue;
     } else {
         return OtaState::Error;

@@ -175,7 +175,7 @@ pub fn l2cap_att_search(mut handle_start: usize, handle_end: usize, uuid: &[u8])
 ///
 /// # Notes
 ///
-/// * The handler updates global state such as `ATT_SERVICE_DISCOVER_TICK` and `SLAVE_LINK_TIME_OUT` 
+/// * The handler updates global state such as `GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP` and `BLE_PERIPHERAL_CONNECTION_TIMEOUT_US` 
 ///   during service discovery and connection management.
 /// * For attributes with read/write callbacks, the callback function is responsible for processing 
 ///   the request and generating any response.
@@ -246,7 +246,7 @@ fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
     // Special case for handle 0xC - handle connection setup
     if handle == 0xc {
         // Set discovery tick to mark connection established (OR with 1 to ensure non-zero)
-        ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+        GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
         // Return version information packet to identify the device
         return Some(
@@ -268,7 +268,7 @@ fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
     if handle != 8 {
         // Special case for handle 2 - set timeout for slave link
         if handle == 2 {
-            SLAVE_LINK_TIME_OUT.set(1000000);
+            BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000000);
             return None
         }
 
@@ -287,7 +287,7 @@ fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
     }
 
     // Handle 8 case - mark service discovery as active
-    ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
     // Return feature response packet with flags
     Some(
@@ -412,7 +412,7 @@ fn handle_exchange_mtu_request() -> Option<Packet> {
 ///   - 0x02: All UUIDs are 128-bit
 fn handle_find_info_request(packet: &Packet) -> Option<Packet> {
     // Mark service discovery as active
-    ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
     
     // Extract handle range from the request
     let mut start_handle = packet.l2cap_data().value[4] as usize;
@@ -537,7 +537,7 @@ fn prepare_error_response(err_opcode: u8, err_handle: u16) -> Option<Packet> {
 /// * Primarily used in service discovery to locate specific services by UUID
 fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
     // Mark service discovery as active
-    ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
     
     // Extract handle range and UUID from request
     let start_handle = packet.l2cap_data().value[4] as usize;
@@ -664,7 +664,7 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
 /// * The response is limited to avoid packet fragmentation
 fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     // Mark service discovery as active
-    ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
     
     // Extract handle range from the request
     let original_handle_start = packet.l2cap_data().value[4] as usize;
@@ -839,7 +839,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 /// * **SEND_TO_MASTER**: If the attribute's value pointer is SEND_TO_MASTER, 
 ///   clear the SEND_TO_MASTER array after reading
 /// * **OTA Termination**: If reading attribute 0x18 and OTA state is not "Continue",
-///   set RF_SLAVE_OTA_TERMINATE_FLAG to trigger OTA termination
+///   set OTA_UPDATE_TERMINATION_REQUESTED to trigger OTA termination
 ///
 /// # Notes
 ///
@@ -885,7 +885,7 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
         // Special case: handle OTA termination flag for handle 0x18
         else if att_num == 0x18 && *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             // Mark OTA for termination
-            RF_SLAVE_OTA_TERMINATE_FLAG.set(true);
+            OTA_UPDATE_TERMINATION_REQUESTED.set(true);
         }
         
         // Prepare and return the response packet
@@ -953,7 +953,7 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
 /// * Primarily used during service discovery to locate service declarations
 fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     // Mark service discovery as active
-    ATT_SERVICE_DISCOVER_TICK.set(read_reg_system_tick() | 1);
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
     
     // Extract handle range and target UUID from the request
     let start_handle = packet.l2cap_data().value[4] as usize;
@@ -1244,7 +1244,7 @@ mod tests {
         uuid
     }
 
-    // Helper function to set up mocks for operations that use ATT_SERVICE_DISCOVER_TICK
+    // Helper function to set up mocks for operations that use GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP
     fn setup_system_tick_mock() {
         mock_read_reg_system_tick().returns(0x12345678);
     }
@@ -1272,12 +1272,12 @@ mod tests {
         // --- Test handle 0xC case (version indication) ---
         {
             setup_system_tick_mock();
-            ATT_SERVICE_DISCOVER_TICK.set(0);
+            GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
             let packet = create_test_packet_with_handle(0x0C);
             let response = handle_mtu_exchange_response(&packet).unwrap();
             
-            // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
-            assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679); // 0x12345678 | 1
+            // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set correctly
+            assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), 0x12345679); // 0x12345678 | 1
             
             // Verify version indication packet
             assert_eq!(response.version_ind().opcode, 0x0C);
@@ -1292,12 +1292,12 @@ mod tests {
         // --- Test handle 8 case (feature response) ---
         {
             setup_system_tick_mock();
-            ATT_SERVICE_DISCOVER_TICK.set(0);
+            GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
             let packet = create_test_packet_with_handle(8);
             let response = handle_mtu_exchange_response(&packet).unwrap();
             
-            // Verify ATT_SERVICE_DISCOVER_TICK was set correctly
-            assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), 0x12345679);
+            // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set correctly
+            assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), 0x12345679);
             
             // Verify feature response packet
             assert_eq!(response.feature_rsp().opcode, 0x09);
@@ -1313,12 +1313,12 @@ mod tests {
         
         // --- Test handle 2 case (link timeout) ---
         {
-            SLAVE_LINK_TIME_OUT.set(0);
+            BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(0);
             let packet = create_test_packet_with_handle(2);
             let response = handle_mtu_exchange_response(&packet);
             
             // Verify timeout was set and no response
-            assert_eq!(SLAVE_LINK_TIME_OUT.get(), 1000000);
+            assert_eq!(BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get(), 1000000);
             assert!(response.is_none());
         }
         
@@ -1661,17 +1661,17 @@ mod tests {
     fn test_l2cap_att_handler_exchange_mtu_rsp_handle_2() {
         setup_system_tick_mock();
         
-        // Test case: handle == 2 should set SLAVE_LINK_TIME_OUT and return None
+        // Test case: handle == 2 should set BLE_PERIPHERAL_CONNECTION_TIMEOUT_US and return None
         let mut packet = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
         packet.l2cap_data_mut().handle1 = 0x02;
         
-        // Verify SLAVE_LINK_TIME_OUT is not set to 1000000 before
-        SLAVE_LINK_TIME_OUT.set(1000);
+        // Verify BLE_PERIPHERAL_CONNECTION_TIMEOUT_US is not set to 1000000 before
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000);
         
         let response = l2cap_att_handler(&packet);
         
         // Verify the timeout was set
-        assert_eq!(SLAVE_LINK_TIME_OUT.get(), 1000000);
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get(), 1000000);
         
         // Should return None
         assert!(response.is_none());
@@ -1701,10 +1701,10 @@ mod tests {
     fn test_l2cap_att_handler_exchange_mtu_rsp_handle_8() {
         setup_system_tick_mock();
         
-        // Reset ATT_SERVICE_DISCOVER_TICK
-        ATT_SERVICE_DISCOVER_TICK.set(0);
+        // Reset GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP
+        GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
         
-        // Test case: handle == 8 should set ATT_SERVICE_DISCOVER_TICK and return PacketFeatureRsp
+        // Test case: handle == 8 should set GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP and return PacketFeatureRsp
         let mut packet = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
         packet.l2cap_data_mut().handle1 = 0x08;
         
@@ -1713,8 +1713,8 @@ mod tests {
         
         let response = l2cap_att_handler(&packet).unwrap();
         
-        // Verify ATT_SERVICE_DISCOVER_TICK was set
-        assert_eq!(ATT_SERVICE_DISCOVER_TICK.get(), expected_tick_value);
+        // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set
+        assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), expected_tick_value);
         
         // Should return PacketFeatureRsp
         assert_eq!(response.feature_rsp().opcode, 0x09);
@@ -2351,7 +2351,7 @@ mod tests {
     #[test]
     fn test_l2cap_att_handler_read_req_ota_terminate() {
         // This test verifies that reading attribute 0x18 when OTA state is not Continue
-        // results in RF_SLAVE_OTA_TERMINATE_FLAG being set to true
+        // results in OTA_UPDATE_TERMINATION_REQUESTED being set to true
         
         // Save original attribute properties
         let temp_attr_idx = 0x18;
@@ -2376,7 +2376,7 @@ mod tests {
         let _ = l2cap_att_handler(&packet);
         
         // Verify flag was not set
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false);
+        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), false);
         
         // Test case 2: OTA state is not Continue - flag should be set
         unsafe {
@@ -2387,7 +2387,7 @@ mod tests {
         let _ = l2cap_att_handler(&packet);
         
         // Verify flag was set
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), true);
+        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), true);
         
         // Restore original attribute properties
         unsafe {
@@ -2395,7 +2395,7 @@ mod tests {
         }
         
         // Reset flags
-        RF_SLAVE_OTA_TERMINATE_FLAG.set(false);
+        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
         unsafe {
             *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
         }
@@ -2433,7 +2433,7 @@ mod tests {
         data[3] = 0;
         
         // Set initial state of flags
-        RF_SLAVE_OTA_TERMINATE_FLAG.set(false);
+        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
         unsafe {
             *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok; // Not Continue
         }
@@ -2450,7 +2450,7 @@ mod tests {
         
         // Verify OTA terminate flag was NOT set despite the OTA state condition being true
         // because the SEND_TO_MASTER condition should take precedence
-        assert_eq!(RF_SLAVE_OTA_TERMINATE_FLAG.get(), false);
+        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), false);
         
         // Restore original attribute properties
         unsafe {
@@ -2460,7 +2460,7 @@ mod tests {
         }
         
         // Reset flags
-        RF_SLAVE_OTA_TERMINATE_FLAG.set(false);
+        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
         unsafe {
             *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
         }

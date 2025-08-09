@@ -51,22 +51,22 @@ use crate::state::{*};
 ///   must update its frequency hopping table at the specified instant
 ///
 /// ## Update Types:
-/// - `SLAVE_TIMING_UPDATE == 1`: Channel map update (frequency hopping table)
-/// - `SLAVE_TIMING_UPDATE == 2`: Connection parameter update (interval, timeout, window)
+/// - `BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP == 1`: Channel map update (frequency hopping table)
+/// - `BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP == 2`: Connection parameter update (interval, timeout, window)
 ///
 /// ## Timing Synchronization:
-/// Updates are applied when `SLAVE_INSTANT_NEXT` matches `SLAVE_INSTANT`, ensuring
+/// Updates are applied when `BLE_PERIPHERAL_NEXT_UPDATE_INSTANT` matches `BLE_PERIPHERAL_CONNECTION_INSTANT`, ensuring
 /// both master and slave apply changes at the same connection event for synchronization.
 fn handle_ble_connection_parameter_updates()
 {
     // Increment the connection event counter - this tracks which connection event we're in
     // This is essential for BLE timing synchronization between master and slave
-    SLAVE_INSTANT.inc();
+    BLE_PERIPHERAL_CONNECTION_INSTANT.inc();
     
     // Handle Channel Map Update (LL_CHANNEL_MAP_IND procedure)
-    if SLAVE_TIMING_UPDATE.get() == 1 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
+    if BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get() == 1 && BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.get() == BLE_PERIPHERAL_CONNECTION_INSTANT.get() {
         // Clear the update flag since we're processing it now
-        SLAVE_TIMING_UPDATE.set(0);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
         
         // Get the new channel map that was received from the master
         let chn_map = SLAVE_CHN_MAP.lock().clone();
@@ -80,13 +80,13 @@ fn handle_ble_connection_parameter_updates()
         PKT_INIT.lock().ll_init_mut().chm = chn_map;
     } else {
         // Handle Connection Parameter Update (LL_CONNECTION_UPDATE_IND procedure)
-        if SLAVE_TIMING_UPDATE.get() == 2 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
+        if BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get() == 2 && BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.get() == BLE_PERIPHERAL_CONNECTION_INSTANT.get() {
             // Clear the update flag since we're processing it now
-            SLAVE_TIMING_UPDATE.set(0);
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
             
             // Calculate the exact time when the new parameters take effect
             // This includes the connection offset to maintain precise timing
-            SLAVE_TIMING_UPDATE2_OK_TIME.set(BLE_CONN_OFFSET.get() + SLAVE_NEXT_CONNECT_TICK.get());
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.set(BLE_CONN_OFFSET.get() + SLAVE_NEXT_CONNECT_TICK.get());
             
             // Apply the new connection parameters that were received from the master:
             
@@ -94,10 +94,10 @@ fn handle_ble_connection_parameter_updates()
             SLAVE_LINK_INTERVAL.set(BLE_CONN_INTERVAL.get());
             
             // Update supervision timeout (max time before connection is considered lost)
-            SLAVE_LINK_TIME_OUT.set(BLE_CONN_TIMEOUT.get());
+            BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(BLE_CONN_TIMEOUT.get());
             
             // Set flag indicating timing update is in progress
-            SLAVE_TIMING_UPDATE2_FLAG.set(true);
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(true);
             
             // Calculate new window size: connection interval minus a fixed offset (0x4e2 * 1µs)
             // Window size determines how long the slave listens for packets in each connection event
@@ -110,7 +110,7 @@ fn handle_ble_connection_parameter_updates()
             }
             
             // Update the next connection event time to use the new timing
-            SLAVE_NEXT_CONNECT_TICK.set(SLAVE_TIMING_UPDATE2_OK_TIME.get());
+            SLAVE_NEXT_CONNECT_TICK.set(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get());
         }
     }
 }
@@ -124,7 +124,7 @@ fn handle_ble_connection_parameter_updates()
 /// ## Mesh Network Context:
 /// - Uses special mesh access codes for packet filtering
 /// - Cycles through predefined listening channels to discover mesh traffic
-/// - Sets the device into a listening state (SLAVE_LINK_STATE = 4)
+/// - Sets the device into a listening state (BLE_PERIPHERAL_LINK_STATE = 4)
 ///
 /// ## RF Configuration:
 /// - **Access Code**: Uses pairing access code for mesh packet identification
@@ -145,14 +145,14 @@ fn configure_rf_for_mesh_listening()
 
     // Select the mesh listening channel in round-robin fashion
     // This cycles through predefined channels to discover mesh network activity
-    rf_set_ble_channel(SYS_CHN_LISTEN[ST_LISTEN_NO.get() as usize % SYS_CHN_LISTEN.len()]);
+    rf_set_ble_channel(SYS_CHN_LISTEN[MESH_LISTEN_CYCLE_COUNT.get() as usize % SYS_CHN_LISTEN.len()]);
     
     // Enable receive mode to start listening for packets
     rf_set_rxmode();
 
     // Set the link state to indicate we're in mesh listening mode
     // State 4 = mesh listening state
-    SLAVE_LINK_STATE.set(4);
+    BLE_PERIPHERAL_LINK_STATE.set(4);
 }
 
 /// Processes queued status response packets and sends them to the master.
@@ -173,10 +173,10 @@ fn configure_rf_for_mesh_listening()
 fn process_queued_status_responses()
 {
     // Get the current read pointer from the status buffer
-    let mut rptr = SLAVE_STATUS_BUFFER_RPTR.get();
+    let mut rptr = DEVICE_STATUS_BUFFER_READ_POINTER.get();
     
     // Process all queued response packets
-    while SLAVE_STATUS_BUFFER_WPTR.get() != rptr {
+    while DEVICE_STATUS_BUFFER_WRITE_POINTER.get() != rptr {
         // Ensure read pointer stays within buffer bounds
         rptr = rptr % BUFF_RESPONSE_PACKET_COUNT;
         
@@ -191,8 +191,8 @@ fn process_queued_status_responses()
 
         // Advance the read pointer to the next packet
         // Use atomic update to prevent race conditions
-        rptr = ((SLAVE_STATUS_BUFFER_RPTR.get() + 1) % BUFF_RESPONSE_PACKET_COUNT);
-        SLAVE_STATUS_BUFFER_RPTR.set(rptr);
+        rptr = ((DEVICE_STATUS_BUFFER_READ_POINTER.get() + 1) % BUFF_RESPONSE_PACKET_COUNT);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(rptr);
     }
 }
 
@@ -310,7 +310,7 @@ pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize
 pub fn handle_mesh_listening_state()
 {
     // Set the link state to listening mode (state 4)
-    SLAVE_LINK_STATE.set(4);
+    BLE_PERIPHERAL_LINK_STATE.set(4);
 
     // Stop any ongoing radio operations
     rf_stop_trx();
@@ -323,10 +323,10 @@ pub fn handle_mesh_listening_state()
             configure_rf_for_mesh_listening();
 
     // Schedule the next listening interval
-    write_reg_system_tick_irq(read_reg_system_tick() + SLAVE_LISTEN_INTERVAL.get());
+    write_reg_system_tick_irq(read_reg_system_tick() + MESH_LISTEN_INTERVAL_US.get());
     
     // If advertising is requested, switch to advertisement mode immediately
-    if ADV_FLAG.get() {
+    if BLE_ADVERTISING_ENABLED.get() {
         // Set a shorter interval for advertisement timing (7ms)
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 7000 + read_reg_system_tick());
         *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
@@ -334,20 +334,20 @@ pub fn handle_mesh_listening_state()
     }
     
     // Handle periodic advertising and online status reporting
-    if !ONLINE_ST_FLAG.get() {
+    if !MESH_DEVICE_ONLINE_STATUS.get() {
         // Increment the listen counter for interval calculations
-        ST_LISTEN_NO.inc();
+        MESH_LISTEN_CYCLE_COUNT.inc();
         
         // Determine if we should advertise based on the listen interval ratio
         // This creates a pattern where advertising happens periodically during listening
-        ADV_FLAG.set(ST_LISTEN_NO.get() % ADV_INTERVAL2LISTEN_INTERVAL as u32 != 0);
+        BLE_ADVERTISING_ENABLED.set(MESH_LISTEN_CYCLE_COUNT.get() % ADV_INTERVAL2LISTEN_INTERVAL as u32 != 0);
         
         // Determine if we should send online status based on the interval ratio
         // This ensures the device periodically reports its presence to the mesh
-        ONLINE_ST_FLAG.set(ST_LISTEN_NO.get() % ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 != 0);
+        MESH_DEVICE_ONLINE_STATUS.set(MESH_LISTEN_CYCLE_COUNT.get() % ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 != 0);
         
         // If advertising is now scheduled, add randomization to prevent collisions
-        if ADV_FLAG.get() {
+        if BLE_ADVERTISING_ENABLED.get() {
             // Use XOR with random number to create pseudo-random timing offset
             // The 0x7fff mask limits the randomization to prevent excessive delays
             write_reg_system_tick_irq((((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff) * CLOCK_SYS_CLOCK_1US + read_reg_system_tick_irq()));
@@ -356,7 +356,7 @@ pub fn handle_mesh_listening_state()
         }
         
         // If no online status is scheduled, continue listening
-        if !ONLINE_ST_FLAG.get() {
+        if !MESH_DEVICE_ONLINE_STATUS.get() {
             return;
         }
     }
@@ -415,18 +415,18 @@ pub fn handle_ble_advertisement_state()
     rf_stop_trx();
 
     // Set link state to advertisement mode (state 1)
-    SLAVE_LINK_STATE.set(1);
+    BLE_PERIPHERAL_LINK_STATE.set(1);
 
     // Check if advertisement sequence is complete or not requested
-    if !ADV_FLAG.get() || get_ble_advertisement_channel_count() <= ST_PNO.load(Ordering::Relaxed) {
+    if !BLE_ADVERTISING_ENABLED.get() || get_ble_advertisement_channel_count() <= ST_PNO.load(Ordering::Relaxed) {
         // Advertisement sequence is complete, clean up and transition
         
         // Clear advertisement flag and reset channel counter
-        ADV_FLAG.set(false);
+        BLE_ADVERTISING_ENABLED.set(false);
         ST_PNO.store(0, Ordering::Relaxed);
         
         // Handle online status reporting if scheduled
-        if ONLINE_ST_FLAG.get() {
+        if MESH_DEVICE_ONLINE_STATUS.get() {
             // Send mesh online status packet to inform network of our presence
             mesh_send_online_status();
             // Short delay before returning to listening (100µs)
@@ -437,7 +437,7 @@ pub fn handle_ble_advertisement_state()
         }
         
         // Clear online status flag since we've handled it
-        ONLINE_ST_FLAG.set(false);
+        MESH_DEVICE_ONLINE_STATUS.set(false);
         
         // Transition back to listening state
         *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
@@ -477,7 +477,7 @@ pub fn handle_ble_advertisement_state()
         if get_ble_advertisement_channel_count() <= ST_PNO.load(Ordering::Relaxed) {
             // Reset counter and clear advertisement flag for next sequence
             ST_PNO.store(0, Ordering::Relaxed);
-            ADV_FLAG.set(false);
+            BLE_ADVERTISING_ENABLED.set(false);
         }
 
         // Set next state to listening (will be processed after advertisement completes)
@@ -512,7 +512,7 @@ fn cleanup_ble_disconnection() {
     write_reg_dma_tx_rptr(0x10);
     
     // Clear connection and pairing state flags
-    SLAVE_LINK_CONNECTED.set(false);
+    BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
     PAIR_LOGIN_OK.set(false);
 
     // Handle security-specific cleanup
@@ -521,7 +521,7 @@ fn cleanup_ble_disconnection() {
         mesh_report_status_enable(false);
     } else {
         // Security enabled: additional cleanup required
-        SLAVE_FIRST_CONNECTED_TICK.set(0);  // Clear first connection timestamp
+        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0);  // Clear first connection timestamp
         PAIR_LOGIN_OK.set(false);           // Ensure pairing state is cleared
         mesh_report_status_enable(false);   // Disable mesh status reporting
     }
@@ -551,7 +551,7 @@ fn cleanup_ble_disconnection() {
     }
 
     // Reset connection parameter update state
-    ATT_SERVICE_DISCOVER_TICK.set(0);      // Clear service discovery timestamp
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);      // Clear service discovery timestamp
     NEED_UPDATE_CONNECT_PARA.set(false);   // Clear connection parameter update flag
 }
 
@@ -570,7 +570,7 @@ fn cleanup_ble_disconnection() {
 /// - **Bridge Operations**: Handles command bridging between BLE and mesh networks
 ///
 /// ## State Management:
-/// - Maintains connection state (SLAVE_LINK_STATE = 5)
+/// - Maintains connection state (BLE_PERIPHERAL_LINK_STATE = 5)
 /// - Tracks OTA operation timeouts
 /// - Manages connection parameter updates
 /// - Coordinates mesh status reporting
@@ -585,10 +585,10 @@ pub fn handle_ble_connected_state()
     static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
 
     // Set link state to bridge mode (state 5) - active BLE connection
-    SLAVE_LINK_STATE.set(5);
+    BLE_PERIPHERAL_LINK_STATE.set(5);
 
     // Increment bridge operation counter for statistics/debugging
-    ST_BRIGE_NO.inc();
+    BRIDGE_SEQUENCE_NUMBER.inc();
     
     // Clear RF status and stop any ongoing radio operations
     write_reg8(0x50f, 0);
@@ -605,11 +605,11 @@ pub fn handle_ble_connected_state()
     // Check for BLE connection supervision timeout
     // Per BLE specification, if no communication occurs within the supervision timeout,
     // the connection must be considered lost and terminated
-    if SLAVE_LINK_TIME_OUT.get() * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - SLAVE_CONNECTED_TICK.get() {
+    if BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get() * CLOCK_SYS_CLOCK_1US < read_reg_system_tick() - SLAVE_CONNECTED_TICK.get() {
         // Connection has timed out - handle cleanup
         
         // If OTA is in progress, notify OTA manager of the error
-        if RF_SLAVE_OTA_BUSY.get() {
+        if OTA_UPDATE_IN_PROGRESS.get() {
             app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
         }
 
@@ -621,12 +621,12 @@ pub fn handle_ble_connected_state()
 
     // Handle status read operation timeout
     // If a status read operation has been running too long, stop it to prevent hanging
-    if SLAVE_READ_STATUS_BUSY.get() != 0 && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - SLAVE_READ_STATUS_BUSY_TIME.get() {
+    if SLAVE_READ_STATUS_BUSY.get() != 0 && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000 < read_reg_system_tick() - DEVICE_STATUS_READ_BUSY_TIMESTAMP.get() {
         rf_link_slave_read_status_stop();
     }
 
     // Handle active OTA (Over-The-Air) update operations
-    if RF_SLAVE_OTA_BUSY.get() {
+    if OTA_UPDATE_IN_PROGRESS.get() {
         // Process any pending OTA operations
         app().ota_manager.rf_link_slave_ota_finish_handle();
 
@@ -637,11 +637,11 @@ pub fn handle_ble_connected_state()
             RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
             
             // Decrement timeout counter if active
-            if RF_SLAVE_OTA_TIMEOUT_S.get() != 0 {
-                RF_SLAVE_OTA_TIMEOUT_S.dec();
+            if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
+                OTA_UPDATE_TIMEOUT_SECONDS.dec();
                 
                 // If timeout reached zero, abort OTA with error
-                if RF_SLAVE_OTA_TIMEOUT_S.get() == 0 {
+                if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
                     app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
                 }
             }
@@ -655,13 +655,13 @@ pub fn handle_ble_connected_state()
 
     // Set bridge command timeout (200µs from now)
     // This provides a time window for processing bridge commands
-    T_BRIDGE_CMD.set(CLOCK_SYS_CLOCK_1US * 200 + read_reg_system_tick());
+    BRIDGE_COMMAND_TIMESTAMP.set(CLOCK_SYS_CLOCK_1US * 200 + read_reg_system_tick());
 
     // Transmit bridge packets under specific conditions:
     // 1. Connection interval > 10ms AND no old interval pending, OR
     // 2. Connection parameter update is not at the target instant yet
     // This prevents transmission during critical timing updates
-    if CLOCK_SYS_CLOCK_1US * 10000 < SLAVE_LINK_INTERVAL.get() && SLAVE_INTERVAL_OLD.get() == 0 || SLAVE_INSTANT_NEXT.get() != SLAVE_INSTANT.get() {
+    if CLOCK_SYS_CLOCK_1US * 10000 < SLAVE_LINK_INTERVAL.get() && BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.get() == 0 || BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.get() != BLE_PERIPHERAL_CONNECTION_INSTANT.get() {
         tx_packet_bridge();
     }
 
@@ -750,12 +750,12 @@ pub fn handle_ble_connected_state()
         
         // Handle connection parameter update completion
         // When the instant matches and we have an old interval, the update is complete
-        if SLAVE_INTERVAL_OLD.get() != 0 && SLAVE_INSTANT_NEXT.get() == SLAVE_INSTANT.get() {
+        if BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.get() != 0 && BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.get() == BLE_PERIPHERAL_CONNECTION_INSTANT.get() {
             // Check for time overflow (0x3fffffff is a large positive number check)
             if 0x3fffffff >= cur_interval {
                 cur_interval = 0;  // Force immediate processing
             }
-            SLAVE_INTERVAL_OLD.set(0);  // Clear old interval flag
+            BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.set(0);  // Clear old interval flag
         }
 
         // If we're within the connection interval window, exit loop
@@ -811,7 +811,7 @@ pub fn configure_ble_receive_state()
     rf_stop_trx();
 
     // Set link state to BLE receive mode (state 7)
-    SLAVE_LINK_STATE.set(7);
+    BLE_PERIPHERAL_LINK_STATE.set(7);
 
     // Configure RF timing: TX wait and settle time for optimal performance
     write_reg8(0x00800f04, 0x67);
@@ -836,7 +836,7 @@ pub fn configure_ble_receive_state()
     SLAVE_NEXT_CONNECT_TICK.set(SLAVE_LINK_INTERVAL.get() + read_reg_system_tick_irq());
     
     // Configure interrupt timing based on operational mode
-    if RF_SLAVE_OTA_BUSY.get() == false {
+    if OTA_UPDATE_IN_PROGRESS.get() == false {
         // Normal operation: use window size or minimum timing (0xed8 = ~3.8ms)
         if SLAVE_WINDOW_SIZE.get() == 0 || SLAVE_WINDOW_SIZE.get() <= CLOCK_SYS_CLOCK_1US * 0xed8 {
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());
@@ -852,13 +852,13 @@ pub fn configure_ble_receive_state()
     *P_ST_HANDLER.lock() = IrqHandlerStatus::Bridge;
     
     // Configure buffered receive timing (start in 100µs)
-    SLAVE_TICK_BRX.set(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
+    BRIDGE_RECEIVE_TIMING_TICK.set(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     
     // Enable timing adjustment for connection synchronization
-    SLAVE_TIMING_ADJUST_ENABLE.set(true);
+    BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(true);
     
     // Start buffered receive mode with empty packet buffer
-    rf_start_brx(addr_of!(PKT_EMPTY) as u32, SLAVE_TICK_BRX.get());
+    rf_start_brx(addr_of!(PKT_EMPTY) as u32, BRIDGE_RECEIVE_TIMING_TICK.get());
     
     // Short delay to ensure radio configuration is stable
     sleep_us(2);
@@ -910,8 +910,8 @@ fn handle_rf_packet_reception()
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
 
     // Get current receive buffer index and advance write pointer
-    let rx_index = LIGHT_RX_WPTR.get();
-    LIGHT_RX_WPTR.set((rx_index + 1) % LIGHT_RX_BUFF_COUNT);
+    let rx_index = LIGHT_RX_BUFFER_WRITE_POINTER.get();
+    LIGHT_RX_BUFFER_WRITE_POINTER.set((rx_index + 1) % LIGHT_RX_BUFF_COUNT);
 
     // Check RF receive status - 0x0b indicates reception error
     if read_reg_rf_rx_status() == 0x0b {
@@ -924,7 +924,7 @@ fn handle_rf_packet_reception()
     let mut light_rx_buff = LIGHT_RX_BUFF.lock();
 
     // Configure DMA for next reception using the new write pointer
-    write_reg_dma2_addr(addr_of!(light_rx_buff[LIGHT_RX_WPTR.get()]) as u16);
+    write_reg_dma2_addr(addr_of!(light_rx_buff[LIGHT_RX_BUFFER_WRITE_POINTER.get()]) as u16);
     
     // Clear RF interrupt status to acknowledge reception
     write_reg_rf_irq_status(1);
@@ -984,10 +984,10 @@ fn handle_rf_packet_reception()
             let cmd = entry.sno[0] & 0xf;
             
             // Store packet reception timestamp for timing calculations and debugging
-            RCV_PKT_TIME.set(rx_time);
+            LAST_PACKET_RECEIVED_TIMESTAMP.set(rx_time);
             
-            // Handle packets when in advertisement state (SLAVE_LINK_STATE == 1)
-            if SLAVE_LINK_STATE.get() == 1 {
+            // Handle packets when in advertisement state (BLE_PERIPHERAL_LINK_STATE == 1)
+            if BLE_PERIPHERAL_LINK_STATE.get() == 1 {
                 // Command 3: BLE Scan Request - Generate and send scan response
                 if cmd == 3 {
                     // Verify the scan request is addressed to this device by checking MAC address
@@ -996,8 +996,8 @@ fn handle_rf_packet_reception()
                         rf_stop_trx();
                         
                         // Schedule the scan response transmission after the required interval
-                        // T_SCAN_RSP_INTVL defines the BLE-mandated delay before responding
-                        write_reg_rf_sched_tick(rx_time + T_SCAN_RSP_INTVL.get() * CLOCK_SYS_CLOCK_1US);
+                        // BLE_SCAN_RESPONSE_INTERVAL_US defines the BLE-mandated delay before responding
+                        write_reg_rf_sched_tick(rx_time + BLE_SCAN_RESPONSE_INTERVAL_US.get() * CLOCK_SYS_CLOCK_1US);
                         
                         // Configure RF for single transmission mode (0x85)
                         write_reg_rf_mode_control(0x85);
@@ -1043,7 +1043,7 @@ fn handle_rf_packet_reception()
             }
 
             // Process mesh network packets (when not in OTA mode and not in active BLE RX state)
-            if !RF_SLAVE_OTA_BUSY.get() && SLAVE_LINK_STATE.get() != 7 {
+            if !OTA_UPDATE_IN_PROGRESS.get() && BLE_PERIPHERAL_LINK_STATE.get() != 7 {
                 // Create a mutable copy of the packet for decryption and processing
                 let mut packet = *packet;
 
@@ -1057,7 +1057,7 @@ fn handle_rf_packet_reception()
                 /// - Command parsing and opcode extraction
                 let mut pkt_valid = || {
                     // For connected devices, validate timing to prevent stale packet processing
-                    if SLAVE_LINK_CONNECTED.get() {
+                    if BLE_PERIPHERAL_CONNECTION_ACTIVE.get() {
                         // Check if the interrupt timing is too far in the future (>1ms + large offset)
                         // This prevents processing packets that arrived too late in the connection window
                         if 0x3fffffffi32 < (read_reg_system_tick_irq() as i32 - read_reg_system_tick() as i32) - (CLOCK_SYS_CLOCK_1US * 1000) as i32 {
@@ -1131,7 +1131,7 @@ fn handle_rf_packet_reception()
                 SLAVE_CONNECTED_TICK.set(read_reg_system_tick());
                 
                 // Mark the device as connected to a BLE master
-                SLAVE_LINK_CONNECTED.set(true);
+                BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
 
                 // Process the connection data packet (may contain connection parameters,
                 // L2CAP data, or other BLE protocol information)
@@ -1141,15 +1141,15 @@ fn handle_rf_packet_reception()
             // Handle connection window size management for timing synchronization
             if SLAVE_WINDOW_SIZE.get() != 0 {
                 // Check if connection parameter update timing is in progress
-                if SLAVE_TIMING_UPDATE2_FLAG.get() {
+                if BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get() {
                     // Verify that the timing update window has passed
                     // 0x40000001 is a large value check to handle timer wraparound
-                    if 0x40000001 > SLAVE_TIMING_UPDATE2_OK_TIME.get() - read_reg_system_tick() {
+                    if 0x40000001 > BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get() - read_reg_system_tick() {
                         return;
                     }
 
                     // Clear the timing update flag as the window has completed
-                    SLAVE_TIMING_UPDATE2_FLAG.set(false);
+                    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(false);
                 }
                 
                 // Reset window size to 0 indicating we've received a packet in this window
@@ -1165,7 +1165,7 @@ fn handle_rf_packet_reception()
         }
 
         // Handle cleanup when in BLE receive state (state 7) but packet was invalid
-        if SLAVE_LINK_STATE.get() == 7 {
+        if BLE_PERIPHERAL_LINK_STATE.get() == 7 {
             // Clear RF interrupt status and stop radio operations
             // This handles the case where we were expecting a BLE packet but received invalid data
             write_reg8(0x80050f, 0);
@@ -1306,10 +1306,10 @@ extern "C" fn irq_handler() {
             clock_time64();
 
             // Handle mesh OTA timeout countdown
-            if RF_SLAVE_OTA_BUSY_MESH.get() {
-                if RF_SLAVE_OTA_TIMEOUT_S.get() != 0 {
-                    RF_SLAVE_OTA_TIMEOUT_S.dec();
-                    if RF_SLAVE_OTA_TIMEOUT_S.get() == 0 {
+            if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+                if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
+                    OTA_UPDATE_TIMEOUT_SECONDS.dec();
+                    if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
                         // OTA timeout reached: finish with current status
                         app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(*RF_SLAVE_OTA_FINISHED_FLAG.lock());
                     }
@@ -1345,13 +1345,13 @@ mod tests {
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
     fn reset_global_state() {
-        SLAVE_INSTANT.set(0);
-        SLAVE_TIMING_UPDATE.set(0);
-        SLAVE_INSTANT_NEXT.set(0);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(0);
         SLAVE_LINK_INTERVAL.set(0x9c400); // Default value
-        SLAVE_LINK_TIME_OUT.set(0);
-        SLAVE_TIMING_UPDATE2_FLAG.set(false);
-        SLAVE_TIMING_UPDATE2_OK_TIME.set(0);
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(0);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(false);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.set(0);
         SLAVE_NEXT_CONNECT_TICK.set(0);
         SLAVE_WINDOW_SIZE.set(0);
         SLAVE_WINDOW_SIZE_UPDATE.set(0);
@@ -1376,16 +1376,16 @@ mod tests {
         reset_global_state();
         
         // Setup: Reset connection event counter to known value
-        SLAVE_INSTANT.set(100);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(100);
         
         // Ensure no updates are pending to focus on counter increment only
-        SLAVE_TIMING_UPDATE.set(0);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
         
         // Execute function
         handle_ble_connection_parameter_updates();
         
         // Verify: Connection event counter incremented
-        assert_eq!(SLAVE_INSTANT.get(), 101, 
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 101, 
             "Connection event counter must increment on every call per BLE specification");
     }
 
@@ -1402,9 +1402,9 @@ mod tests {
         reset_global_state();
         
         // Setup: Configure for channel map update at specific instant
-        SLAVE_TIMING_UPDATE.set(1);        // Type 1 = Channel Map Update
-        SLAVE_INSTANT.set(50);             // Current instant
-        SLAVE_INSTANT_NEXT.set(51);        // Update should apply at instant 51
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(1);        // Type 1 = Channel Map Update
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(50);             // Current instant
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(51);        // Update should apply at instant 51
         
         // Setup new channel map (enable channels 0, 2, 4, 6, 8 - selective hopping)
         let test_channel_map = [0x55, 0x55, 0x55, 0x55, 0x15]; // Binary: 01010101...
@@ -1420,8 +1420,8 @@ mod tests {
         handle_ble_connection_parameter_updates();
         
         // Verify: Channel map update was processed correctly
-        assert_eq!(SLAVE_INSTANT.get(), 51, "Instant should be incremented");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag should be cleared after processing");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 51, "Instant should be incremented");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 0, "Update flag should be cleared after processing");
         
         // Verify: Channel table was rebuilt with correct parameters
         mock_ble_ll_build_available_channel_table(test_channel_map.to_vec(), false)
@@ -1438,16 +1438,16 @@ mod tests {
     /// Tests that channel map updates only occur at the correct instant.
     ///
     /// Per BLE specification, timing updates must be synchronized between master and slave.
-    /// The update should only be applied when SLAVE_INSTANT_NEXT matches SLAVE_INSTANT.
+    /// The update should only be applied when BLE_PERIPHERAL_NEXT_UPDATE_INSTANT matches BLE_PERIPHERAL_CONNECTION_INSTANT.
     #[test]
     #[mry::lock(ble_ll_build_available_channel_table)]
     fn test_channel_map_update_instant_synchronization() {
         reset_global_state();
         
         // Setup: Channel map update scheduled for future instant
-        SLAVE_TIMING_UPDATE.set(1);        // Channel map update pending
-        SLAVE_INSTANT.set(10);             // Current instant
-        SLAVE_INSTANT_NEXT.set(15);        // Update scheduled for instant 15
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(1);        // Channel map update pending
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(10);             // Current instant
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(15);        // Update scheduled for instant 15
         
         // Setup mock (should not be called since instant doesn't match)
         mock_ble_ll_build_available_channel_table(Any, Any).returns(());
@@ -1456,8 +1456,8 @@ mod tests {
         handle_ble_connection_parameter_updates();
         
         // Verify: Instant incremented but update not processed
-        assert_eq!(SLAVE_INSTANT.get(), 11, "Instant should increment");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 1, "Update flag should remain set");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 11, "Instant should increment");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 1, "Update flag should remain set");
         
         // Verify: Channel table rebuild was not called
         mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
@@ -1468,8 +1468,8 @@ mod tests {
         }
         
         // Verify: Now at instant 15, update should be processed
-        assert_eq!(SLAVE_INSTANT.get(), 15);
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update should now be processed");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 15);
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 0, "Update should now be processed");
         mock_ble_ll_build_available_channel_table(Any, Any).assert_called(1);
     }
 
@@ -1485,9 +1485,9 @@ mod tests {
         reset_global_state();
         
         // Setup: Configure for connection parameter update
-        SLAVE_TIMING_UPDATE.set(2);        // Type 2 = Connection Parameter Update
-        SLAVE_INSTANT.set(25);             // Current instant  
-        SLAVE_INSTANT_NEXT.set(26);        // Update at instant 26
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);        // Type 2 = Connection Parameter Update
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(25);             // Current instant  
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(26);        // Update at instant 26
         
         // Setup new connection parameters (realistic BLE values)
         BLE_CONN_INTERVAL.set(32 * CLOCK_SYS_CLOCK_1US);    // 32ms interval (25.6 connection intervals)
@@ -1503,23 +1503,23 @@ mod tests {
         handle_ble_connection_parameter_updates();
         
         // Verify: Instant incremented and update flag cleared
-        assert_eq!(SLAVE_INSTANT.get(), 26, "Instant should increment to trigger update");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag should be cleared");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 26, "Instant should increment to trigger update");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 0, "Update flag should be cleared");
         
         // Verify: Connection parameters applied correctly
         assert_eq!(SLAVE_LINK_INTERVAL.get(), 32 * CLOCK_SYS_CLOCK_1US,
             "Connection interval should be updated to new value");
-        assert_eq!(SLAVE_LINK_TIME_OUT.get(), 4000 * CLOCK_SYS_CLOCK_1US,
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get(), 4000 * CLOCK_SYS_CLOCK_1US,
             "Supervision timeout should be updated to new value");
         
         // Verify: Timing calculations per BLE specification
-        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), expected_update_time,
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get(), expected_update_time,
             "Update timing should include connection offset");
         assert_eq!(SLAVE_NEXT_CONNECT_TICK.get(), expected_update_time,
             "Next connection tick should use new timing");
         
         // Verify: Update flag is set for timing coordination
-        assert_eq!(SLAVE_TIMING_UPDATE2_FLAG.get(), true,
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get(), true,
             "Timing update flag should be set during parameter transition");
     }
 
@@ -1534,9 +1534,9 @@ mod tests {
         reset_global_state();
         
         // Test Case 1: Master's window size is smaller (should use master's size)
-        SLAVE_TIMING_UPDATE.set(2);
-        SLAVE_INSTANT.set(0);
-        SLAVE_INSTANT_NEXT.set(1);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(1);
         
         BLE_CONN_INTERVAL.set(50000 * CLOCK_SYS_CLOCK_1US);    // 50000ms interval (large enough to avoid underflow)
         SLAVE_WINDOW_SIZE_UPDATE.set(10 * CLOCK_SYS_CLOCK_1US); // Master wants 10ms window
@@ -1550,9 +1550,9 @@ mod tests {
             "Should use master's smaller window size");
         
         // Test Case 2: Calculated size is smaller (should use calculated size)
-        SLAVE_TIMING_UPDATE.set(2);
-        SLAVE_INSTANT.set(1);
-        SLAVE_INSTANT_NEXT.set(2);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(1);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(2);
         
         BLE_CONN_INTERVAL.set(10 * CLOCK_SYS_CLOCK_1US);    // 10ms interval
         SLAVE_WINDOW_SIZE_UPDATE.set(50 * CLOCK_SYS_CLOCK_1US); // Master wants 50ms (too big)
@@ -1574,9 +1574,9 @@ mod tests {
     fn test_minimum_connection_interval_window_calculation() {
         reset_global_state();
         
-        SLAVE_TIMING_UPDATE.set(2);
-        SLAVE_INSTANT.set(0);
-        SLAVE_INSTANT_NEXT.set(1);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(1);
         
         // Test with very small interval (smaller than the 0x4e2 offset)
         BLE_CONN_INTERVAL.set(CLOCK_SYS_CLOCK_1US * 1000);  // 1ms interval (below BLE minimum)
@@ -1602,13 +1602,13 @@ mod tests {
         reset_global_state();
         
         // Setup: Updates pending but instants don't match
-        SLAVE_TIMING_UPDATE.set(1);        // Channel map update pending
-        SLAVE_INSTANT.set(5);              // Current instant
-        SLAVE_INSTANT_NEXT.set(10);        // Update scheduled for instant 10
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(1);        // Channel map update pending
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(5);              // Current instant
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(10);        // Update scheduled for instant 10
         
         // Store original values to verify they don't change
         let original_interval = SLAVE_LINK_INTERVAL.get();
-        let original_timeout = SLAVE_LINK_TIME_OUT.get();
+        let original_timeout = BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get();
         
         mock_ble_ll_build_available_channel_table(Any, Any).returns(());
         
@@ -1616,10 +1616,10 @@ mod tests {
         handle_ble_connection_parameter_updates();
         
         // Verify: No updates applied
-        assert_eq!(SLAVE_INSTANT.get(), 6, "Only instant should increment");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 1, "Update flag should remain set");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 6, "Only instant should increment");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 1, "Update flag should remain set");
         assert_eq!(SLAVE_LINK_INTERVAL.get(), original_interval, "Interval unchanged");
-        assert_eq!(SLAVE_LINK_TIME_OUT.get(), original_timeout, "Timeout unchanged");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get(), original_timeout, "Timeout unchanged");
         
         // Verify: No channel operations called
         mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
@@ -1630,35 +1630,35 @@ mod tests {
     /// The function must correctly distinguish between:
     /// - Type 1: Channel Map Update (LL_CHANNEL_MAP_IND)
     /// - Type 2: Connection Parameter Update (LL_CONNECTION_UPDATE_IND)
-    /// - No update: SLAVE_TIMING_UPDATE = 0
+    /// - No update: BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP = 0
     #[test]
     #[mry::lock(ble_ll_build_available_channel_table)]
     fn test_update_type_detection() {
         reset_global_state();
         
         // Test Case 1: No update pending
-        SLAVE_TIMING_UPDATE.set(0);
-        SLAVE_INSTANT.set(0);
-        SLAVE_INSTANT_NEXT.set(1);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(1);
         
         let original_interval = SLAVE_LINK_INTERVAL.get();
         mock_ble_ll_build_available_channel_table(Any, Any).returns(());
         
         handle_ble_connection_parameter_updates();
         
-        assert_eq!(SLAVE_INSTANT.get(), 1, "Instant should still increment");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 1, "Instant should still increment");
         assert_eq!(SLAVE_LINK_INTERVAL.get(), original_interval, "No parameter changes");
         mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
         
         // Test Case 2: Invalid update type
-        SLAVE_TIMING_UPDATE.set(99);       // Invalid type
-        SLAVE_INSTANT.set(1);
-        SLAVE_INSTANT_NEXT.set(2);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(99);       // Invalid type
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(1);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(2);
         
         handle_ble_connection_parameter_updates();
         
-        assert_eq!(SLAVE_INSTANT.get(), 2, "Instant should increment");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 99, "Invalid type should remain unchanged");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 2, "Instant should increment");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 99, "Invalid type should remain unchanged");
         mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
     }
 
@@ -1673,9 +1673,9 @@ mod tests {
         reset_global_state();
         
         // Setup realistic BLE connection scenario
-        SLAVE_TIMING_UPDATE.set(2);
-        SLAVE_INSTANT.set(42);             // Current connection event
-        SLAVE_INSTANT_NEXT.set(43);        // Update at next event
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(42);             // Current connection event
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(43);        // Update at next event
         
         // BLE-compliant parameter values
         BLE_CONN_INTERVAL.set(24 * CLOCK_SYS_CLOCK_1US);    // 24ms (19.2 intervals)
@@ -1685,19 +1685,19 @@ mod tests {
         SLAVE_WINDOW_SIZE_UPDATE.set(3 * CLOCK_SYS_CLOCK_1US);     // 3ms window
         
         // Record pre-update state
-        let pre_update_flags = SLAVE_TIMING_UPDATE2_FLAG.get();
+        let pre_update_flags = BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get();
         
         // Execute update
         handle_ble_connection_parameter_updates();
         
         // Verify BLE specification compliance
-        assert_eq!(SLAVE_INSTANT.get(), 43, "Update must occur at specified instant");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag must be cleared");
-        assert_eq!(SLAVE_TIMING_UPDATE2_FLAG.get(), true, "Timing flag must be set");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), 43, "Update must occur at specified instant");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), 0, "Update flag must be cleared");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get(), true, "Timing flag must be set");
         
         // Verify timing calculations
         let expected_timing = BLE_CONN_OFFSET.get() + 50000 * CLOCK_SYS_CLOCK_1US;
-        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), expected_timing,
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get(), expected_timing,
             "Update timing must include connection offset per BLE spec");
         assert_eq!(SLAVE_NEXT_CONNECT_TICK.get(), expected_timing,
             "Next connection event must use updated timing");
@@ -1722,9 +1722,9 @@ mod tests {
         reset_global_state();
         
         // Setup initial state
-        SLAVE_TIMING_UPDATE.set(2);
-        SLAVE_INSTANT.set(10);
-        SLAVE_INSTANT_NEXT.set(11);
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(2);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(10);
+        BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(11);
         
         // Set consistent parameter values
         BLE_CONN_INTERVAL.set(20 * CLOCK_SYS_CLOCK_1US);
@@ -1738,11 +1738,11 @@ mod tests {
         
         // Capture state after first update
         let interval_after = SLAVE_LINK_INTERVAL.get();
-        let timeout_after = SLAVE_LINK_TIME_OUT.get();
-        let timing_after = SLAVE_TIMING_UPDATE2_OK_TIME.get();
+        let timeout_after = BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get();
+        let timing_after = BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get();
         let window_after = SLAVE_WINDOW_SIZE.get();
-        let instant_after = SLAVE_INSTANT.get();
-        let update_flag_after = SLAVE_TIMING_UPDATE.get();
+        let instant_after = BLE_PERIPHERAL_CONNECTION_INSTANT.get();
+        let update_flag_after = BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get();
         
         // Verify update was applied
         assert_eq!(instant_after, 11);
@@ -1753,11 +1753,11 @@ mod tests {
         handle_ble_connection_parameter_updates();
         
         // Verify state consistency: only instant should change
-        assert_eq!(SLAVE_INSTANT.get(), instant_after + 1, "Only instant should increment");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_INSTANT.get(), instant_after + 1, "Only instant should increment");
         assert_eq!(SLAVE_LINK_INTERVAL.get(), interval_after, "Interval should be stable");
-        assert_eq!(SLAVE_LINK_TIME_OUT.get(), timeout_after, "Timeout should be stable");
-        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), timing_after, "Timing should be stable");
+        assert_eq!(BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get(), timeout_after, "Timeout should be stable");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.get(), timing_after, "Timing should be stable");
         assert_eq!(SLAVE_WINDOW_SIZE.get(), window_after, "Window should be stable");
-        assert_eq!(SLAVE_TIMING_UPDATE.get(), update_flag_after, "Update flag should remain clear");
+        assert_eq!(BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(), update_flag_after, "Update flag should remain clear");
     }
 }

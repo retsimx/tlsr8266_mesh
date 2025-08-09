@@ -195,7 +195,7 @@ impl MeshManager {
         if MESH_PAIR_ENABLE.get() {
             let mut data: [u8; 1] = [0];
             flash_write_page(
-                (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get() + 1) as u32,
+                (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get() + 1) as u32,
                 1,
                 data.as_mut_ptr(),
             );
@@ -238,7 +238,7 @@ impl MeshManager {
 
     fn mesh_cmd_notify(&self, op: u8, p: &[u8], dev_adr: u16) -> i32 {
         let mut err = -1;
-        if SLAVE_LINK_CONNECTED.get() && PAIR_LOGIN_OK.get() {
+        if BLE_PERIPHERAL_CONNECTION_ACTIVE.get() && PAIR_LOGIN_OK.get() {
             if p.len() > 10 {
                 //max length of par is 10
                 return -1;

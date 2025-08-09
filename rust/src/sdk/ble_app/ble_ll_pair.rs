@@ -325,8 +325,8 @@ pub fn pair_flash_save_config(addr: u32, data: &[u8])
     // For a new config set (addr=0), clean the old sector and increment the index
     if addr == OFFSET_HEADER {
         pair_flash_clean();
-        // Cast to i32 to match ADR_FLASH_CFG_IDX type
-        ADR_FLASH_CFG_IDX.set(ADR_FLASH_CFG_IDX.get() + SECTOR_SIZE);
+        // Cast to i32 to match FLASH_CONFIGURATION_INDEX type
+        FLASH_CONFIGURATION_INDEX.set(FLASH_CONFIGURATION_INDEX.get() + SECTOR_SIZE);
     }
 
     // Save the data to flash at the calculated address
@@ -1673,7 +1673,7 @@ mod tests {
 
     // Helper to set up global state for testing pair_flash_save_config
     fn setup_flash_config_state(initial_idx: i32) {
-        ADR_FLASH_CFG_IDX.set(initial_idx);
+        FLASH_CONFIGURATION_INDEX.set(initial_idx);
     }
 
     #[test]
@@ -1698,8 +1698,8 @@ mod tests {
         // Verify pair_flash_clean was called once
         mock_pair_flash_clean().assert_called(1);
 
-        // Verify ADR_FLASH_CFG_IDX was incremented
-        assert_eq!(ADR_FLASH_CFG_IDX.get(), initial_idx + SECTOR_SIZE);
+        // Verify FLASH_CONFIGURATION_INDEX was incremented
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx + SECTOR_SIZE);
 
         // Verify save_pair_info was called with correct parameters
         mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);
@@ -1726,8 +1726,8 @@ mod tests {
         // Verify pair_flash_clean was NOT called
         mock_pair_flash_clean().assert_called(0);
 
-        // Verify ADR_FLASH_CFG_IDX remained unchanged
-        assert_eq!(ADR_FLASH_CFG_IDX.get(), initial_idx);
+        // Verify FLASH_CONFIGURATION_INDEX remained unchanged
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx);
 
         // Verify save_pair_info was called with correct parameters
         mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);

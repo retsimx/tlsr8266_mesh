@@ -151,7 +151,7 @@ fn clear_specific_group_from_memory(group_id: u16) -> bool {
 
 /// Helper function to delete groups from flash storage
 fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> bool {
-    let initial_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
+    let initial_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
     let zero_short = 0u16;
     
     // Create iterator over flash positions in reverse order (newest to oldest)
@@ -405,7 +405,7 @@ const EVENT_DEVICE_ADDR_CHANGED: u8 = 0xC6;  // Event code for address changed e
 pub fn compact_flash_storage()
 {
     // Check if either address pointer has reached maximum allowed value
-    if MAX_FLASH_ADDR_OFFSET < DEV_GRP_NEXT_POS.get() as usize || MAX_FLASH_ADDR_OFFSET < DEV_ADDRESS_NEXT_POS.get() as usize {
+    if MAX_FLASH_ADDR_OFFSET < MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize || MAX_FLASH_ADDR_OFFSET < MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as usize {
         // Erase the entire flash sector
         flash_erase_sector(FLASH_ADR_DEV_GRP_ADR);
         
@@ -425,8 +425,8 @@ pub fn compact_flash_storage()
         );
         
         // Reset position pointers
-        DEV_ADDRESS_NEXT_POS.set(INITIAL_ADDR_OFFSET as u16);
-        DEV_GRP_NEXT_POS.set(INITIAL_ADDR_OFFSET as u16);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(INITIAL_ADDR_OFFSET as u16);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(INITIAL_ADDR_OFFSET as u16);
     }
 }
 
@@ -461,14 +461,14 @@ pub fn add_device_address(dev_id: u16) -> bool
         // Clean up flash if needed
         compact_flash_storage();
         
-        let flash_pos = DEV_GRP_NEXT_POS.get();
+        let flash_pos = MESH_GROUP_ADDRESS_NEXT_POSITION.get();
         
         // If flash has been previously used, clear previous address
-        if flash_pos != 0 && DEV_ADDRESS_NEXT_POS.get() != 0 {
+        if flash_pos != 0 && MESH_DEVICE_ADDRESS_NEXT_POSITION.get() != 0 {
             // Write zero to previous address location 
             let zero_data = 0u16;
             flash_write_page(
-                FLASH_ADR_DEV_GRP_ADR - 2 + DEV_ADDRESS_NEXT_POS.get() as u32, 
+                FLASH_ADR_DEV_GRP_ADR - 2 + MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as u32, 
                 DEVICE_ADDR_SIZE, 
                 addr_of!(zero_data) as *const u8
             );
@@ -484,8 +484,8 @@ pub fn add_device_address(dev_id: u16) -> bool
         
         // Update position pointers
         // Convert to u16 after adding to ensure correct type
-        DEV_GRP_NEXT_POS.set((flash_pos as usize + DEVICE_ADDR_SIZE as usize) as u16);
-        DEV_ADDRESS_NEXT_POS.set(DEV_GRP_NEXT_POS.get());
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set((flash_pos as usize + DEVICE_ADDR_SIZE as usize) as u16);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(MESH_GROUP_ADDRESS_NEXT_POSITION.get());
         
         // Notify application of address change
         rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED);
@@ -518,7 +518,7 @@ pub fn add_device_address(dev_id: u16) -> bool
 #[cfg_attr(test, mry::mry)]
 pub fn remove_group(group_id: u16) -> bool
 {
-    let grp_next_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
+    let grp_next_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
     
     // Early exit if no groups are stored
     if grp_next_pos == 0 {
@@ -578,7 +578,7 @@ pub fn add_group(group_id: u16) -> bool
         compact_flash_storage();
         
         // If this is the first group, add to first position
-        if DEV_GRP_NEXT_POS.get() == 0 {
+        if MESH_GROUP_ADDRESS_NEXT_POSITION.get() == 0 {
             GROUP_ADDRESS.lock()[0] = group_id;
         } else {
             // Check existing groups
@@ -594,13 +594,13 @@ pub fn add_group(group_id: u16) -> bool
                     
                     // Write to flash
                     flash_write_page(
-                        DEV_GRP_NEXT_POS.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 
+                        MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 
                         DEVICE_ADDR_SIZE, 
                         addr_of!(group_id) as *const u8
                     );
                     
                     // Update position pointer
-                    DEV_GRP_NEXT_POS.set((DEV_GRP_NEXT_POS.get() as usize + DEVICE_ADDR_SIZE as usize) as u16);
+                    MESH_GROUP_ADDRESS_NEXT_POSITION.set((MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize + DEVICE_ADDR_SIZE as usize) as u16);
                     return true;
                 }
             }
@@ -623,13 +623,13 @@ pub fn add_group(group_id: u16) -> bool
         
         // Write group address to flash
         flash_write_page(
-            DEV_GRP_NEXT_POS.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 
+            MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + FLASH_ADR_DEV_GRP_ADR, 
             DEVICE_ADDR_SIZE, 
             addr_of!(group_id) as *const u8
         );
         
         // Update position pointer
-        DEV_GRP_NEXT_POS.set((DEV_GRP_NEXT_POS.get() as usize + DEVICE_ADDR_SIZE as usize) as u16);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set((MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize + DEVICE_ADDR_SIZE as usize) as u16);
         return true;
     }
     
@@ -648,8 +648,8 @@ mod tests {
     fn reset_test_state() {
         // Reset all global state variables
         DEVICE_ADDRESS.set(0);
-        DEV_ADDRESS_NEXT_POS.set(0);
-        DEV_GRP_NEXT_POS.set(0);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(0);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(0);
         SET_UUID_FLAG.set(false);
         
         // Clear group addresses
@@ -974,8 +974,8 @@ mod tests {
         reset_test_state();
         
         // Set positions well within limits
-        DEV_GRP_NEXT_POS.set(100);
-        DEV_ADDRESS_NEXT_POS.set(200);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(100);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(200);
         
         // Mock flash operations - these should not be called
         mock_flash_erase_sector(mry::Any).returns(());
@@ -985,8 +985,8 @@ mod tests {
         compact_flash_storage();
         
         // Verify positions unchanged (no cleanup occurred)
-        assert_eq!(DEV_GRP_NEXT_POS.get(), 100);
-        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), 200);
+        assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), 100);
+        assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), 200);
         
         // Verify flash functions were not called
         mock_flash_erase_sector(mry::Any).assert_called(0);
@@ -1003,8 +1003,8 @@ mod tests {
         reset_test_state();
         
         // Set positions beyond limits to trigger cleanup
-        DEV_GRP_NEXT_POS.set((MAX_FLASH_ADDR_OFFSET + 1) as u16);
-        DEV_ADDRESS_NEXT_POS.set(100);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set((MAX_FLASH_ADDR_OFFSET + 1) as u16);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(100);
         
         // Set some test group addresses and device address
         critical_section::with(|_| {
@@ -1021,8 +1021,8 @@ mod tests {
         compact_flash_storage();
         
         // Verify positions are reset
-        assert_eq!(DEV_GRP_NEXT_POS.get(), INITIAL_ADDR_OFFSET as u16);
-        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), INITIAL_ADDR_OFFSET as u16);
+        assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), INITIAL_ADDR_OFFSET as u16);
+        assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), INITIAL_ADDR_OFFSET as u16);
         
         // Verify flash operations were called
         mock_flash_erase_sector(FLASH_ADR_DEV_GRP_ADR).assert_called(1);
@@ -1052,8 +1052,8 @@ mod tests {
         assert_eq!(DEVICE_ADDRESS.get(), dev_id);
         
         // Verify position pointers are updated
-        assert_eq!(DEV_GRP_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
-        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
+        assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), DEVICE_ADDR_SIZE as u16);
+        assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), DEVICE_ADDR_SIZE as u16);
         
         // Verify flash write was called
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
@@ -1126,8 +1126,8 @@ mod tests {
         
         // Set up existing address
         DEVICE_ADDRESS.set(0x1111);
-        DEV_GRP_NEXT_POS.set(10);
-        DEV_ADDRESS_NEXT_POS.set(5);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(10);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(5);
         
         let new_dev_id = 0x2222;
         let result = add_device_address(new_dev_id);
@@ -1139,8 +1139,8 @@ mod tests {
         assert_eq!(DEVICE_ADDRESS.get(), new_dev_id);
         
         // Verify position pointers are updated
-        assert_eq!(DEV_GRP_NEXT_POS.get(), 12); // 10 + DEVICE_ADDR_SIZE
-        assert_eq!(DEV_ADDRESS_NEXT_POS.get(), 12);
+        assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), 12); // 10 + DEVICE_ADDR_SIZE
+        assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), 12);
         
         // Verify flash operations: clear old + write new
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(2);
@@ -1188,7 +1188,7 @@ mod tests {
             GROUP_ADDRESS.lock()[1] = 0x8002;
             GROUP_ADDRESS.lock()[2] = 0x8003;
         });
-        DEV_GRP_NEXT_POS.set(6); // 3 groups * 2 bytes each
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(6); // 3 groups * 2 bytes each
         
         let result = remove_group(GROUP_DELETE_ALL);
         
@@ -1229,7 +1229,7 @@ mod tests {
             GROUP_ADDRESS.lock()[1] = 0x8002;
             GROUP_ADDRESS.lock()[2] = 0x8003;
         });
-        DEV_GRP_NEXT_POS.set(6);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(6);
         
         let result = remove_group(0x8002);
         
@@ -1267,7 +1267,7 @@ mod tests {
         });
         
         // Verify position pointer is updated
-        assert_eq!(DEV_GRP_NEXT_POS.get(), DEVICE_ADDR_SIZE as u16);
+        assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), DEVICE_ADDR_SIZE as u16);
         
         // Verify flash write was called
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
@@ -1331,7 +1331,7 @@ mod tests {
                 GROUP_ADDRESS.lock()[i as usize] = 0x8001 + i; // Valid group IDs
             });
         }
-        DEV_GRP_NEXT_POS.set(10); // Non-zero to avoid first-group path
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(10); // Non-zero to avoid first-group path
         
         let new_group_id = 0x8010; // Valid group ID
         let result = add_group(new_group_id);
@@ -1363,7 +1363,7 @@ mod tests {
             GROUP_ADDRESS.lock()[1] = 0; // Empty slot
             GROUP_ADDRESS.lock()[2] = 0x8002; // Valid group ID
         });
-        DEV_GRP_NEXT_POS.set(4); // Non-zero to avoid first-group path
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(4); // Non-zero to avoid first-group path
         
         let new_group_id = 0x8003; // Valid group ID
         let result = add_group(new_group_id);

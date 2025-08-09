@@ -149,17 +149,17 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota(&mut self, data: &Packet) {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || RF_SLAVE_OTA_BUSY_MESH.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
             return;
         }
 
-        if !RF_SLAVE_OTA_BUSY.get() {
+        if !OTA_UPDATE_IN_PROGRESS.get() {
             if !PAIR_LOGIN_OK.get()
             {
                 return;
             }
 
-            RF_SLAVE_OTA_BUSY.set(true);
+            OTA_UPDATE_IN_PROGRESS.set(true);
             if SLAVE_READ_STATUS_BUSY.get() != 0 {
                 rf_link_slave_read_status_stop();
             }
@@ -171,7 +171,7 @@ impl OtaManager {
     }
 
     pub fn rf_mesh_data_ota(&mut self, pkt_data: &[u8], last: bool) -> u16 {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || RF_SLAVE_OTA_BUSY.get() || !RF_SLAVE_OTA_BUSY_MESH.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || OTA_UPDATE_IN_PROGRESS.get() || !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
             return u16::MAX;
         }
 
@@ -190,10 +190,10 @@ impl OtaManager {
 
             self.rf_link_slave_data_ota_save();
 
-            RF_SLAVE_OTA_TIMEOUT_S.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
+            OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
 
             if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
-                RF_SLAVE_OTA_TIMEOUT_S.set(4);
+                OTA_UPDATE_TIMEOUT_SECONDS.set(4);
             }
         }
 
@@ -201,16 +201,16 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
-        let packet_len = if RF_SLAVE_OTA_BUSY_MESH.get() { 8 } else { 16 };
+        let packet_len = if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() { 8 } else { 16 };
 
         let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
             let p = BUFF_RESPONSE.lock()[i];
             let n_data_len = (p.head().l2cap_len - 7) as usize;
 
-            if RF_SLAVE_OTA_BUSY_MESH.get() || crc16(&p.att_data().dat[0..n_data_len + 2]) == p.att_data().dat[n_data_len + 2] as u16 | (p.att_data().dat[n_data_len + 3] as u16) << 8
+            if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() || crc16(&p.att_data().dat[0..n_data_len + 2]) == p.att_data().dat[n_data_len + 2] as u16 | (p.att_data().dat[n_data_len + 3] as u16) << 8
             {
-                RF_SLAVE_OTA_TIMEOUT_S.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
+                OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
 
                 let cur_idx = p.att_data().dat[0] as u16 | (p.att_data().dat[1] as u16) << 8;
                 if n_data_len == 0 {
@@ -219,7 +219,7 @@ impl OtaManager {
                     let ota_pkt_total = ((array4_to_int(&ota_pkt_total) + (packet_len - 1)) / packet_len) as u16;
                     if ota_pkt_total < 3 {
                         // invalid fw
-                        CUR_OTA_FLASH_ADDR.set(0);
+                        OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                         self.ota_rcv_last_idx = 0;
                         reset_flag = OtaState::Error;
                     } else if cur_idx == self.ota_rcv_last_idx + 1 && cur_idx == ota_pkt_total {
@@ -227,16 +227,16 @@ impl OtaManager {
                         reset_flag = OtaState::Ok;
                     } else {
                         // ota err
-                        CUR_OTA_FLASH_ADDR.set(0);
+                        OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                         self.ota_rcv_last_idx = 0;
                         reset_flag = OtaState::Error;
                     }
                 } else {
                     if cur_idx == 0 {
                         // start ota
-                        if CUR_OTA_FLASH_ADDR.get() != 0 {
+                        if OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() != 0 {
                             // 0x10000 should be 0x00
-                            CUR_OTA_FLASH_ADDR.set(0);
+                            OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                             self.ota_rcv_last_idx = 0;
                             reset_flag = OtaState::Error;
                         } else {
@@ -244,7 +244,7 @@ impl OtaManager {
                         }
                     } else if cur_idx == self.ota_rcv_last_idx + 1 {
                         if reset_flag != OtaState::Error {
-                            if CUR_OTA_FLASH_ADDR.get() + packet_len > (OtaManager::FW_SIZE_MAX_K * 1024) {
+                            if OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + packet_len > (OtaManager::FW_SIZE_MAX_K * 1024) {
                                 // !is_valid_fw_len()
                                 reset_flag = OtaState::Error;
                             } else {
@@ -253,7 +253,7 @@ impl OtaManager {
                         }
                     } else {
                         // error, ota failed
-                        CUR_OTA_FLASH_ADDR.set(0);
+                        OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                         self.ota_rcv_last_idx = 0;
                         reset_flag = OtaState::Error;
                     }
@@ -262,7 +262,7 @@ impl OtaManager {
                 }
             } else {
                 // error, ota failed
-                CUR_OTA_FLASH_ADDR.set(0);
+                OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                 self.ota_rcv_last_idx = 0;
                 reset_flag = OtaState::Error;
             }
@@ -368,7 +368,7 @@ impl OtaManager {
 
         if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             let mut reboot_flag = false;
-            if 0 == self.terminate_cnt && RF_SLAVE_OTA_TERMINATE_FLAG.get() && is_add_packet_buf_ready() {
+            if 0 == self.terminate_cnt && OTA_UPDATE_TERMINATION_REQUESTED.get() && is_add_packet_buf_ready() {
                 self.terminate_cnt = 6;
                 rf_link_add_tx_packet(&PKT_TERMINATE);
             }
@@ -380,10 +380,10 @@ impl OtaManager {
                 }
             }
 
-            if !RF_SLAVE_OTA_TERMINATE_FLAG.get()
+            if !OTA_UPDATE_TERMINATION_REQUESTED.get()
                 && clock_time_exceed(self.rf_slave_ota_finished_time, 2000 * 1000)
             {
-                RF_SLAVE_OTA_TERMINATE_FLAG.set(true); // for ios: no last read command
+                OTA_UPDATE_TERMINATION_REQUESTED.set(true); // for ios: no last read command
             }
 
             if clock_time_exceed(self.rf_slave_ota_finished_time, 4000 * 1000) {

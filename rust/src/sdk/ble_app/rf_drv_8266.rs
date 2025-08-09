@@ -177,7 +177,7 @@ pub fn blc_ll_init_basic_mcu()
     write_reg_rf_sys_timer_config(700);
     
     // Set up DMA address for packet reception
-    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock()[LIGHT_RX_WPTR.get()]) as u16);
+    write_reg_dma2_addr(addr_of!(LIGHT_RX_BUFF.lock()[LIGHT_RX_BUFFER_WRITE_POINTER.get()]) as u16);
 
     // Configure DMA2 control register for packet reception
     write_reg_dma2_ctrl(0x104);
@@ -260,7 +260,7 @@ fn rf_link_get_rsp_type(opcode: u8, param_val: u8) -> u8 {
 fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
 {
     // Record the time when the status read operation started
-    SLAVE_READ_STATUS_BUSY_TIME.set(read_reg_system_tick());
+    DEVICE_STATUS_READ_BUSY_TIMESTAMP.set(read_reg_system_tick());
     
     // Extract opcode and parameter for determining response type
     let opcode = pkt_light_data.att_cmd().value.val[0] & 0x3f;
@@ -271,7 +271,7 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
     
     // Check if this is a unicast (directed to a specific device) or broadcast request
     let is_unicast = (pkt_light_data.att_cmd().value.dst[1] & 0x80) == 0;
-    SLAVE_READ_STATUS_UNICAST_FLAG.set(is_unicast);
+    DEVICE_STATUS_READ_UNICAST_MODE.set(is_unicast);
     
     // For unicast packets, clear fields for device-specific information
     if is_unicast {
@@ -287,7 +287,7 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
        pkt_light_data.att_cmd_mut().value.val[4..4 + 4 + 4].fill(0);
        
        // Store the status tick value
-       pkt_light_data.att_cmd_mut().value.val[3] = SLAVE_STATUS_TICK.get();
+       pkt_light_data.att_cmd_mut().value.val[3] = DEVICE_STATUS_TICK_COUNTER.get();
     }
 
     // Initialize parameters for status response handling
@@ -297,12 +297,12 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet)
     BUFF_RESPONSE.lock().fill(Packet { att_data: PacketAttData::default() });
 
     // Reset status record tracking indices
-    SLAVE_STATUS_RECORD_IDX.set(0);
+    DEVICE_STATUS_RECORD_INDEX.set(0);
     SLAVE_STATUS_RECORD.lock().fill(
         StatusRecord { adr: [0; 1], alarm_id: 0 }
     );
 
-    NOTIFY_REQ_MASK_IDX.set(0);
+    NOTIFICATION_REQUEST_MASK_INDEX.set(0);
 }
 
 /**
@@ -343,7 +343,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     
     // Check if this is a duplicate packet (same sequence number as the last one)
     // Return true for duplicates to avoid reprocessing the same command
-    if sno == *SLAVE_SNO.lock() {
+    if sno == *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() {
         return true;
     }
 
@@ -431,10 +431,10 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     
     // Update the stored sequence number with the one from this packet
     // This prevents duplicate processing if the same packet is received again
-    *SLAVE_SNO.lock() = sno;
+    *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = sno;
 
     // Store the command opcode for potential future reference
-    SLAVE_LINK_CMD.set(op);
+    BLE_PERIPHERAL_LINK_COMMAND.set(op);
 
     // For non-notification commands, handle the command directly
     if !rf_link_is_notify_req(op) {
@@ -518,7 +518,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     rf_link_slave_read_status_start(pkt_light_data.deref_mut());
 
     // Store the sequence number for status tracking
-    *SLAVE_STAT_SNO.lock() = sno;
+    *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = sno;
 
     // Process the response if this packet is for this device
     if device_match || group_match {
@@ -527,7 +527,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
         pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
 
         // Set the sequence number in the status packet
-        pkt_light_status.att_cmd_mut().value.sno = *SLAVE_SNO.lock();
+        pkt_light_status.att_cmd_mut().value.sno = *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock();
 
         // Set this device's address as the source in the status packet using safe methods
         // Instead of raw pointer casting
@@ -632,8 +632,8 @@ pub fn rf_link_slave_init(interval: u32)
         *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
         
         // Initialize link state and timing parameters
-        SLAVE_LINK_STATE.set(0);
-        SLAVE_LISTEN_INTERVAL.set(interval * CLOCK_SYS_CLOCK_1US);
+        BLE_PERIPHERAL_LINK_STATE.set(0);
+        MESH_LISTEN_INTERVAL_US.set(interval * CLOCK_SYS_CLOCK_1US);
 
         // Configure connection timer tick
         SLAVE_CONNECTED_TICK.set(CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick());
@@ -710,7 +710,7 @@ pub fn rf_link_slave_init(interval: u32)
         PKT_LIGHT_STATUS.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
 
         // Enable advertising
-        SLAVE_ADV_ENABLE.set(true);
+        BLE_PERIPHERAL_ADVERTISING_ENABLED.set(true);
 
         // Load device group addresses from flash memory
         retrieve_dev_grp_address();
@@ -2021,7 +2021,7 @@ mod tests {
         // Setup test state - we need to know the expected DMA address
         critical_section::with(|_| {
             // Set the receive buffer write pointer to a specific value for testing
-            LIGHT_RX_WPTR.set(2); 
+            LIGHT_RX_BUFFER_WRITE_POINTER.set(2); 
             
             // Call the function under test
             blc_ll_init_basic_mcu();
@@ -2055,19 +2055,19 @@ mod tests {
         test_packet.att_cmd_mut().value.dst[1] = 0x42; // Not broadcast (MSB not set)
         
         // Set status tick to a known value
-        SLAVE_STATUS_TICK.set(0x55);
+        DEVICE_STATUS_TICK_COUNTER.set(0x55);
         
         // Call the function under test
         rf_link_slave_read_status_start(&mut test_packet);
         
         // Verify system tick was recorded
-        assert_eq!(SLAVE_READ_STATUS_BUSY_TIME.get(), 0x12345678);
+        assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0x12345678);
         
         // Verify busy status was set from the opcode (mapped through rf_link_get_rsp_type)
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_LIGHT_STATUS);
         
         // Verify unicast flag is set for a non-broadcast address
-        assert_eq!(SLAVE_READ_STATUS_UNICAST_FLAG.get(), true);
+        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), true);
         
         // Verify destination specific info fields have been cleared
         assert_eq!(test_packet.att_cmd().value.val[8], 0);
@@ -2087,16 +2087,16 @@ mod tests {
         assert_eq!(test_packet.att_cmd().value.val[9], 0);
         assert_eq!(test_packet.att_cmd().value.val[10], 0);
         assert_eq!(test_packet.att_cmd().value.val[11], 0);
-        assert_eq!(test_packet.att_cmd().value.val[3], 0x55); // Should contain SLAVE_STATUS_TICK
+        assert_eq!(test_packet.att_cmd().value.val[3], 0x55); // Should contain DEVICE_STATUS_TICK_COUNTER
         
         // Verify initialization function was called
         mock_rf_link_slave_read_status_par_init().assert_called(1);
         
         // Verify status record variables were reset
-        assert_eq!(SLAVE_STATUS_RECORD_IDX.get(), 0);
+        assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
         
         // Verify notify request mask index was reset
-        assert_eq!(NOTIFY_REQ_MASK_IDX.get(), 0);
+        assert_eq!(NOTIFICATION_REQUEST_MASK_INDEX.get(), 0);
     }
     
     #[test]
@@ -2123,14 +2123,14 @@ mod tests {
         rf_link_slave_read_status_start(&mut test_packet);
         
         // Verify system tick was recorded
-        assert_eq!(SLAVE_READ_STATUS_BUSY_TIME.get(), 0x87654321);
+        assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0x87654321);
         
         // Verify busy status was set from the opcode and parameter via rf_link_get_rsp_type
         // For LGT_CMD_LIGHT_GRP_REQ with GET_GROUP2, should be LGT_CMD_LIGHT_GRP_RSP2
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_LIGHT_GRP_RSP2);
         
         // Verify unicast flag is cleared for a broadcast address
-        assert_eq!(SLAVE_READ_STATUS_UNICAST_FLAG.get(), false);
+        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), false);
         
         // Broadcast packets don't have the destination fields cleared
         // and don't have special fields set
@@ -2139,10 +2139,10 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().assert_called(1);
         
         // Verify status record variables were reset
-        assert_eq!(SLAVE_STATUS_RECORD_IDX.get(), 0);
+        assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
         
         // Verify notify request mask index was reset
-        assert_eq!(NOTIFY_REQ_MASK_IDX.get(), 0);
+        assert_eq!(NOTIFICATION_REQUEST_MASK_INDEX.get(), 0);
     }
     
     #[test]
@@ -2174,14 +2174,14 @@ mod tests {
         rf_link_slave_read_status_start(&mut test_packet);
         
         // Verify system tick was recorded
-        assert_eq!(SLAVE_READ_STATUS_BUSY_TIME.get(), 0xAABBCCDD);
+        assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0xAABBCCDD);
         
         // Verify busy status was set from the opcode via rf_link_get_rsp_type
         // For LGT_CMD_CONFIG_DEV_ADDR, should be LGT_CMD_DEV_ADDR_RSP
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_DEV_ADDR_RSP);
         
         // Verify unicast flag is set for a non-broadcast address
-        assert_eq!(SLAVE_READ_STATUS_UNICAST_FLAG.get(), true);
+        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), true);
         
         // Verify destination specific info fields have been cleared
         assert_eq!(test_packet.att_cmd().value.val[8], 0);
@@ -2232,7 +2232,7 @@ mod tests {
         // Set sequence number
         let sno = [1, 2, 3];
         critical_section::with(|_| {
-            *SLAVE_SNO.lock() = sno;
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = sno;
             packet.att_write_mut().value.sno = sno;
         });
         
@@ -2258,10 +2258,10 @@ mod tests {
             }
         };
         
-        // Set sequence number different from SLAVE_SNO
+        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
         let sno = [1, 2, 3];
         critical_section::with(|_| {
-            *SLAVE_SNO.lock() = [1, 2, 2];
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
             packet.att_write_mut().value.sno = sno;
         });
         
@@ -2296,10 +2296,10 @@ mod tests {
         mock_rf_link_data_callback(Any).assert_called(1);
         
         // Verify sequence number was updated
-        assert_eq!(*SLAVE_SNO.lock(), sno);
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
         
         // Verify command opcode was stored
-        assert_eq!(SLAVE_LINK_CMD.get(), op_cmd[0] & 0x3f);
+        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), op_cmd[0] & 0x3f);
         
         // Verify data validity flag is 0 for direct match
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -2320,10 +2320,10 @@ mod tests {
             }
         };
         
-        // Set sequence number different from SLAVE_SNO
+        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
         let sno = [1, 2, 3];
         critical_section::with(|_| {
-            *SLAVE_SNO.lock() = [1, 2, 2];
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
             packet.att_write_mut().value.sno = sno;
         });
         
@@ -2362,10 +2362,10 @@ mod tests {
         mock_rf_link_data_callback(Any).assert_called(0);
         
         // Verify sequence number was updated
-        assert_eq!(*SLAVE_SNO.lock(), sno);
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
         
         // Verify command opcode was stored
-        assert_eq!(SLAVE_LINK_CMD.get(), op_cmd[0] & 0x3f);
+        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), op_cmd[0] & 0x3f);
         
         // Verify data validity flag is set for bridge forwarding
         assert_eq!(SLAVE_DATA_VALID.get(), BRIDGE_MAX_CNT + 1);
@@ -2392,10 +2392,10 @@ mod tests {
             }
         };
         
-        // Set sequence number different from SLAVE_SNO
+        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
         let sno = [1, 2, 3];
         critical_section::with(|_| {
-            *SLAVE_SNO.lock() = [1, 2, 2];
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
             packet.att_write_mut().value.sno = sno;
         });
         
@@ -2443,10 +2443,10 @@ mod tests {
         mock_rf_link_data_callback(Any).assert_called(1);
         
         // Verify sequence number was updated
-        assert_eq!(*SLAVE_SNO.lock(), sno);
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
         
-        // Verify SLAVE_STATUS_TICK is now stored in stat_sno
-        assert_eq!(*SLAVE_STAT_SNO.lock(), sno);
+        // Verify DEVICE_STATUS_TICK_COUNTER is now stored in stat_sno
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
         
         // Verify response callback and add status were called
         mock_rf_link_response_callback(Any, Any).assert_called(1);

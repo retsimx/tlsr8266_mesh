@@ -49,7 +49,7 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
 
 fn cfg_led_event(e: u32) {
-    LED_EVENT_PENDING.set(e);
+    LED_CONTROLLER.event_pending.set(e);
 }
 
 pub fn light_hw_timer_config() {
@@ -130,53 +130,53 @@ pub fn user_init() {
 }
 
 fn proc_led() {
-    if LED_COUNT.get() == 0 && LED_EVENT_PENDING.get() == 0 {
+    if LED_CONTROLLER.blink_count.get() == 0 && LED_CONTROLLER.event_pending.get() == 0 {
         return; //led flash finished
     }
 
-    if LED_EVENT_PENDING.get() != 0 {
+    if LED_CONTROLLER.event_pending.get() != 0 {
         // new event
-        LED_TON.set((LED_EVENT_PENDING.get() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        LED_TOFF.set(((LED_EVENT_PENDING.get() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        LED_COUNT.set((LED_EVENT_PENDING.get() >> 16) & 0xff);
-        LED_SEL.set(LED_EVENT_PENDING.get() >> 24);
+        LED_CONTROLLER.on_duration_us.set((LED_CONTROLLER.event_pending.get() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER.off_duration_us.set(((LED_CONTROLLER.event_pending.get() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER.blink_count.set((LED_CONTROLLER.event_pending.get() >> 16) & 0xff);
+        LED_CONTROLLER.led_selection_mask.set(LED_CONTROLLER.event_pending.get() >> 24);
 
-        LED_EVENT_PENDING.set(0);
-        LED_TICK.set(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
-        LED_NO.set(0);
-        LED_IS_ON.set(0);
+        LED_CONTROLLER.event_pending.set(0);
+        LED_CONTROLLER.timing_tick.set(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER.pattern_number.set(0);
+        LED_CONTROLLER.is_on.set(0);
     }
 
-    if clock_time() - LED_TICK.get()
-        >= (if LED_IS_ON.get() != 0 {
-        LED_TON.get()
+    if clock_time() - LED_CONTROLLER.timing_tick.get()
+        >= (if LED_CONTROLLER.is_on.get() != 0 {
+        LED_CONTROLLER.on_duration_us.get()
     } else {
-        LED_TOFF.get()
+        LED_CONTROLLER.off_duration_us.get()
     })
     {
-        LED_TICK.set(clock_time());
-        let led_off = (LED_IS_ON.get() != 0 || LED_TON.get() == 0) && LED_TOFF.get() != 0;
-        let led_on = LED_IS_ON.get() == 0 && LED_TON.get() != 0;
+        LED_CONTROLLER.timing_tick.set(clock_time());
+        let led_off = (LED_CONTROLLER.is_on.get() != 0 || LED_CONTROLLER.on_duration_us.get() == 0) && LED_CONTROLLER.off_duration_us.get() != 0;
+        let led_on = LED_CONTROLLER.is_on.get() == 0 && LED_CONTROLLER.on_duration_us.get() != 0;
 
-        LED_IS_ON.set(!LED_IS_ON.get());
-        if LED_IS_ON.get() != 0 {
-            LED_NO.inc();
-            if LED_NO.get() - 1 == LED_COUNT.get() {
-                LED_COUNT.set(0);
-                LED_NO.set(0);
+        LED_CONTROLLER.is_on.set(!LED_CONTROLLER.is_on.get());
+        if LED_CONTROLLER.is_on.get() != 0 {
+            LED_CONTROLLER.pattern_number.inc();
+            if LED_CONTROLLER.pattern_number.get() - 1 == LED_CONTROLLER.blink_count.get() {
+                LED_CONTROLLER.blink_count.set(0);
+                LED_CONTROLLER.pattern_number.set(0);
                 app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
-            if LED_SEL.get() & BIT!(0) != 0 {
+            if LED_CONTROLLER.led_selection_mask.get() & BIT!(0) != 0 {
                 app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
-            if LED_SEL.get() & BIT!(1) != 0 {
+            if LED_CONTROLLER.led_selection_mask.get() & BIT!(1) != 0 {
                 app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
             }
-            if LED_SEL.get() & BIT!(5) != 0 {}
+            if LED_CONTROLLER.led_selection_mask.get() & BIT!(5) != 0 {}
         }
     }
 }
@@ -184,11 +184,11 @@ fn proc_led() {
 fn light_auth_check() {
     if SECURITY_ENABLE.get()
         && !PAIR_LOGIN_OK.get()
-        && SLAVE_FIRST_CONNECTED_TICK.get() != 0
-        && clock_time_exceed(SLAVE_FIRST_CONNECTED_TICK.get(), AUTH_TIME * 1000 * 1000)
+        && BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get() != 0
+        && clock_time_exceed(BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(), AUTH_TIME * 1000 * 1000)
     {
         //rf_link_slave_disconnect(); // must login in 60s after connected, if need
-        SLAVE_FIRST_CONNECTED_TICK.set(0);
+        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0);
     }
 }
 
@@ -318,7 +318,7 @@ pub fn rf_link_response_callback(
             ppp.val[5] = (BUILD_VERSION >> 16) as u8;
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
-            RF_SLAVE_OTA_BUSY_MESH.set(true);
+            OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
         }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;

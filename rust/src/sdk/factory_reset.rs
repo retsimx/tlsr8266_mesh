@@ -70,7 +70,7 @@
 //! ### Flash Sector Management
 //!
 //! ```text
-//! Address: FLASH_ADR_RESET_CNT + index
+//! Address: FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + index
 //! 
 //! [0x0000] 0xB8  ← Invalidated sequence (step 3 failed)
 //! [0x0001] 0xBC  ← Invalidated sequence (step 2 failed)  
@@ -88,9 +88,9 @@
 //!
 //! The algorithm operates as a state machine with these states:
 //!
-//! - **CLEAR_ST = 0**: No timing check active
-//! - **CLEAR_ST = 1**: Checking minimum time requirement
-//! - **CLEAR_ST = 2**: Checking maximum time limit
+//! - **FACTORY_RESET_STATE.clear_state = 0**: No timing check active
+//! - **FACTORY_RESET_STATE.clear_state = 1**: Checking minimum time requirement
+//! - **FACTORY_RESET_STATE.clear_state = 2**: Checking maximum time limit
 //!
 //! ## Error Handling
 //!
@@ -360,7 +360,7 @@ fn write_reset_sequence(step: u8) {
     let reset_step = ResetStep::from_step_number(step);
     
     // Get current value at the reset counter location
-    let current_addr = FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get();
+    let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let current_value = read_flash_byte(current_addr);
     
     // Calculate new value by applying the step's bitmask
@@ -375,12 +375,12 @@ fn write_reset_sequence(step: u8) {
     // Check if this sequence is complete (reset flag written)
     if reset_step.is_sequence_complete() {
         // Move to next location for the next factory reset sequence
-        ADR_RESET_CNT_IDX.inc();
+        FACTORY_RESET_STATE.flash_address_index.inc();
         
         // Check if we're at the end of the sector
-        if ADR_RESET_CNT_IDX.get() >= 4096 {
+        if FACTORY_RESET_STATE.flash_address_index.get() >= 4096 {
             flash_erase_sector(FLASH_ADR_RESET_CNT);
-            ADR_RESET_CNT_IDX.set(0);
+            FACTORY_RESET_STATE.flash_address_index.set(0);
         }
     }
 }
@@ -407,7 +407,7 @@ fn read_flash_byte(addr: u32) -> u8 {
 #[cfg_attr(test, mry::mry)]
 fn read_reset_sequence() -> u8 {
     // Read the current value from flash at the current sequence location
-    let current_addr = FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get();
+    let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let flash_value = read_flash_byte(current_addr);
     
     // Convert flash bitmask value back to step number
@@ -432,7 +432,7 @@ fn read_reset_sequence() -> u8 {
 #[cfg_attr(test, mry::mry)]
 fn clear_reset_sequence() {
     // Invalidate current sequence by clearing bit 6 (invalidation flag)
-    let current_addr = FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get();
+    let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let current_value = read_flash_byte(current_addr);
     
     // Only invalidate if there's actually a sequence to invalidate
@@ -443,12 +443,12 @@ fn clear_reset_sequence() {
     }
     
     // Move to next location for fresh sequence
-    ADR_RESET_CNT_IDX.inc();
+    FACTORY_RESET_STATE.flash_address_index.inc();
     
     // Check if we're at the end of the sector
-    if ADR_RESET_CNT_IDX.get() >= 4096 {
+    if FACTORY_RESET_STATE.flash_address_index.get() >= 4096 {
         flash_erase_sector(FLASH_ADR_RESET_CNT);
-        ADR_RESET_CNT_IDX.set(0);
+        FACTORY_RESET_STATE.flash_address_index.set(0);
     }
 }
 
@@ -466,12 +466,12 @@ fn clear_reset_sequence() {
 /// # Notes
 ///
 /// * Scans flash memory to find the latest reset sequence step
-/// * Sets up ADR_RESET_CNT_IDX for subsequent operations
+/// * Sets up FACTORY_RESET_STATE.flash_address_index for subsequent operations
 /// * Skips invalidated sequences (bit 6 = 0)
 #[cfg_attr(test, mry::mry)]
 fn init_reset_sequence() {
     // Start scanning from the beginning of the sector
-    ADR_RESET_CNT_IDX.set(0);
+    FACTORY_RESET_STATE.flash_address_index.set(0);
     
     // Scan through flash sector to find the latest valid reset sequence entry
     let mut latest_idx = 0;
@@ -479,7 +479,7 @@ fn init_reset_sequence() {
     
     // Scan through the entire 4KB sector
     for i in 0..4096 {
-        let value = read_flash_byte(FLASH_ADR_RESET_CNT + i);
+        let value = read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + i);
         
         // Skip erased locations and invalidated sequences
         if value != 0xFF && !ResetStep::is_flash_value_invalidated(value) {
@@ -493,12 +493,12 @@ fn init_reset_sequence() {
     }
     
     // Set the index to the latest valid entry (or 0 if all erased/invalid)
-    ADR_RESET_CNT_IDX.set(latest_idx);
+    FACTORY_RESET_STATE.flash_address_index.set(latest_idx);
     
     // Convert the flash value to step number and update global state
     let reset_step = ResetStep::from_flash_value(latest_value);
     let step_number = reset_step.step_number();
-    RESET_CNT.set(step_number);
+    FACTORY_RESET_STATE.consecutive_reset_count.set(step_number);
 }
 
 /// Handle the factory reset process on device boot
@@ -538,12 +538,12 @@ pub fn factory_reset_handle() {
         ResetStep::Clear => {
             // No reset sequence in progress, initialize step 1
             let next_step = ResetStep::Step1;
-            RESET_CNT.set(next_step.step_number());
-            CLEAR_ST.set(1);
+            FACTORY_RESET_STATE.consecutive_reset_count.set(next_step.step_number());
+            FACTORY_RESET_STATE.clear_state.set(1);
             
             // Set up timing check for the first step
             if let Some((min_time, _)) = next_step.timing_window() {
-                RESET_CHECK_TIME.set(min_time as u32);
+                FACTORY_RESET_STATE.timing_check_timestamp.set(min_time as u32);
             }
             
             // Record the first step in flash
@@ -560,12 +560,12 @@ pub fn factory_reset_handle() {
                     light_sw_reboot();
                 } else {
                     // Continue with the next step
-                    RESET_CNT.set(next_step.step_number());
-                    CLEAR_ST.set(1);
+                    FACTORY_RESET_STATE.consecutive_reset_count.set(next_step.step_number());
+                    FACTORY_RESET_STATE.clear_state.set(1);
                     
                     // Set up timing check for this step
                     if let Some((min_time, _)) = next_step.timing_window() {
-                        RESET_CHECK_TIME.set(min_time as u32);
+                        FACTORY_RESET_STATE.timing_check_timestamp.set(min_time as u32);
                     }
                     
                     // Record the next step in flash
@@ -591,10 +591,10 @@ pub fn factory_reset_handle() {
 ///
 /// # Algorithm
 ///
-/// 1. If CLEAR_ST is 0, no timing check is active, exit early
-/// 2. If CLEAR_ST is 1, check if the minimum time has elapsed:
+/// 1. If FACTORY_RESET_STATE.clear_state is 0, no timing check is active, exit early
+/// 2. If FACTORY_RESET_STATE.clear_state is 1, check if the minimum time has elapsed:
 ///    - If passed, move to state 2 and set maximum time limit
-/// 3. If CLEAR_ST is 2, check if the maximum time has been exceeded:
+/// 3. If FACTORY_RESET_STATE.clear_state is 2, check if the maximum time has been exceeded:
 ///    - If exceeded, abort the sequence
 ///
 /// # Notes
@@ -604,53 +604,53 @@ pub fn factory_reset_handle() {
 /// * If any timing window is not followed correctly, the entire sequence is reset
 pub fn factory_reset_cnt_check() {
     // If no timing check is active, exit early
-    if CLEAR_ST.get() == 0 {
+    if FACTORY_RESET_STATE.clear_state.get() == 0 {
         return;
     }
     
     // Get the current step in the reset sequence
-    let current_step_number = RESET_CNT.get();
+    let current_step_number = FACTORY_RESET_STATE.consecutive_reset_count.get();
     let current_step = ResetStep::from_step_number(current_step_number);
     
     // Validate the current step
     if current_step_number == 0 || current_step_number > POWER_CYCLE_COUNT {
         // Invalid state, clear the sequence
         clear_reset_sequence();
-        CLEAR_ST.set(0);
+        FACTORY_RESET_STATE.clear_state.set(0);
         return;
     }
     
     // Get the timing window for this step
     if let Some((min_time, max_time)) = current_step.timing_window() {
-        match CLEAR_ST.get() {
+        match FACTORY_RESET_STATE.clear_state.get() {
             1 => {
                 // State 1: Check if minimum time has elapsed
                 if clock_time_exceed(0, min_time as u32 * 1000 * 1000) {
                     // Minimum time elapsed, move to state 2
-                    CLEAR_ST.set(2);
+                    FACTORY_RESET_STATE.clear_state.set(2);
                     
                     // Set up the maximum time limit
-                    RESET_CHECK_TIME.set(max_time as u32);
+                    FACTORY_RESET_STATE.timing_check_timestamp.set(max_time as u32);
                 }
             }
             2 => {
                 // State 2: Check if maximum time has been exceeded
-                if clock_time_exceed(0, RESET_CHECK_TIME.get() * 1000 * 1000) {
+                if clock_time_exceed(0, FACTORY_RESET_STATE.timing_check_timestamp.get() * 1000 * 1000) {
                     // Maximum time exceeded, abort the sequence
                     clear_reset_sequence();
-                    CLEAR_ST.set(0);
+                    FACTORY_RESET_STATE.clear_state.set(0);
                 }
             }
             _ => {
                 // Invalid clear state
                 clear_reset_sequence();
-                CLEAR_ST.set(0);
+                FACTORY_RESET_STATE.clear_state.set(0);
             }
         }
     } else {
         // No timing window defined for this step, invalid state
         clear_reset_sequence();
-        CLEAR_ST.set(0);
+        FACTORY_RESET_STATE.clear_state.set(0);
     }
 }
 
@@ -682,7 +682,7 @@ fn factory_reset() {
             
             // Skip the reset counter sector to preserve it during the main erase process
             // This enhances reliability if power is lost during the reset process
-            if FLASH_ADR_RESET_CNT != adr {
+            if FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() != adr {
                 // Erase the current sector to clear all configuration data
                 flash_erase_sector(adr);
             }
@@ -691,7 +691,7 @@ fn factory_reset() {
         // Finally, erase the reset counter sector
         // We do this last to ensure other sectors are erased first
         // If power is lost during reset, we can still recover from partial reset
-        flash_erase_sector(FLASH_ADR_RESET_CNT); // at last should be better, when power off during factory reset erase.
+        flash_erase_sector(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()); // at last should be better, when power off during factory reset erase.
     });
 }
 
@@ -863,7 +863,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Set up ADR_RESET_CNT_IDX to point to a valid location
+    /// 1. Set up FACTORY_RESET_STATE.flash_address_index to point to a valid location
     /// 2. Set up read_flash_byte to return 0xFF (erased)
     /// 3. Call read_reset_sequence()
     /// 4. Verify it returns RESET_SEQUENCE_CLEAR
@@ -871,10 +871,10 @@ mod tests {
     #[mry::lock(read_flash_byte)]
     fn test_read_reset_sequence_when_erased() {
         // Set up initial state
-        ADR_RESET_CNT_IDX.set(10);
+        FACTORY_RESET_STATE.flash_address_index.set(10);
         
         // Set up read_flash_byte to return 0xFF (erased value)
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 10).returns(0xFF);
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()).returns(0xFF);
         
         // Call function under test
         let result = read_reset_sequence();
@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(result, RESET_SEQUENCE_CLEAR);
         
         // Verify read_flash_byte was called with the correct address
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 10).assert_called(1);
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()).assert_called(1);
     }
 
     /// Tests the read_reset_sequence function when a valid bitmask sequence is in progress.
@@ -893,7 +893,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Set up ADR_RESET_CNT_IDX to point to a valid location
+    /// 1. Set up FACTORY_RESET_STATE.flash_address_index to point to a valid location
     /// 2. Set up read_flash_byte to return a valid bitmask value (e.g., 0xF8 = step 3)
     /// 3. Call read_reset_sequence()
     /// 4. Verify it returns the correct step number
@@ -901,10 +901,10 @@ mod tests {
     #[mry::lock(read_flash_byte)]
     fn test_read_reset_sequence_with_bitmask_sequence() {
         // Set up initial state (sequence index at position 10)
-        ADR_RESET_CNT_IDX.set(10);
+        FACTORY_RESET_STATE.flash_address_index.set(10);
         
         // Set up read_flash_byte to return step 3 bitmask value
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 10).returns(ResetStep::Step3.flash_value()); // 0xF8
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()).returns(ResetStep::Step3.flash_value()); // 0xF8
         
         // Call function under test
         let result = read_reset_sequence();
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(result, 3);
         
         // Verify read_flash_byte was called with the correct address
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 10).assert_called(1);
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()).assert_called(1);
     }
 
     /// Tests the read_reset_sequence function when an invalidated sequence is present.
@@ -923,7 +923,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Set up ADR_RESET_CNT_IDX to point to a valid location
+    /// 1. Set up FACTORY_RESET_STATE.flash_address_index to point to a valid location
     /// 2. Set up read_flash_byte to return an invalidated value (e.g., 0xB8 = invalidated step 3)
     /// 3. Call read_reset_sequence()
     /// 4. Verify it returns RESET_SEQUENCE_CLEAR
@@ -931,11 +931,11 @@ mod tests {
     #[mry::lock(read_flash_byte)]
     fn test_read_reset_sequence_with_invalidated_sequence() {
         // Set up initial state
-        ADR_RESET_CNT_IDX.set(10);
+        FACTORY_RESET_STATE.flash_address_index.set(10);
         
         // Set up read_flash_byte to return invalidated step 3
         let invalidated_step3 = ResetStep::invalidate_flash_value(ResetStep::Step3.flash_value()); // 0xB8
-        let expected_addr = FLASH_ADR_RESET_CNT + 10;
+        let expected_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         mock_read_flash_byte(expected_addr).returns(invalidated_step3);
         
         // Call function under test
@@ -966,21 +966,21 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_write_reset_sequence_bitmask_step() {
         // Set up initial state
-        ADR_RESET_CNT_IDX.set(10);
-        let current_addr = FLASH_ADR_RESET_CNT + 10;
+        FACTORY_RESET_STATE.flash_address_index.set(10);
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         
         // Mock current flash value as step 1 (0xFE)
         mock_read_flash_byte(current_addr).returns(ResetStep::Step1.flash_value()); // 0xFE
         
         // Set up expectations
         mock_flash_write_page(current_addr, 1, mry::Any).returns(());
-        mock_flash_erase_sector(mry::Any).returns(());
+        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).returns(());
         
         // Call function under test with step 2
         write_reset_sequence(2);
         
         // Verify index was NOT incremented (only happens for factory reset)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 10);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 10);
         
         // Verify flash_write_page was called at same address
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
@@ -1005,8 +1005,8 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_write_reset_sequence_factory_reset_flag() {
         // Set up initial state
-        ADR_RESET_CNT_IDX.set(100);
-        let current_addr = FLASH_ADR_RESET_CNT + 100;
+        FACTORY_RESET_STATE.flash_address_index.set(100);
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         
         // Mock current flash value as step 5 (0xE0)
         mock_read_flash_byte(current_addr).returns(ResetStep::Step5.flash_value()); // 0xE0
@@ -1019,7 +1019,7 @@ mod tests {
         write_reset_sequence(FACTORY_RESET_FLAG);
         
         // Verify index was incremented (moves to next sequence location)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 101);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 101);
         
         // Verify flash_write_page was called
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
@@ -1045,8 +1045,8 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_write_reset_sequence_near_sector_end() {
         // Set up initial state near the end of the sector
-        ADR_RESET_CNT_IDX.set(4095);
-        let current_addr = FLASH_ADR_RESET_CNT + 4095;
+        FACTORY_RESET_STATE.flash_address_index.set(4095);
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         
         // Mock current flash value as step 5 (0xE0)
         mock_read_flash_byte(current_addr).returns(ResetStep::Step5.flash_value()); // 0xE0
@@ -1059,7 +1059,7 @@ mod tests {
         write_reset_sequence(FACTORY_RESET_FLAG);
         
         // Verify index was reset to 0 after sector erase (4095 + 1 = 4096 triggers cleanup)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 0);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
         
         // Verify flash_write_page was called first (bitmask operation)
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
@@ -1077,7 +1077,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Set up ADR_RESET_CNT_IDX and mock current flash value  
+    /// 1. Set up FACTORY_RESET_STATE.flash_address_index and mock current flash value  
     /// 2. Set up expectations for read and write operations
     /// 3. Call clear_reset_sequence()
     /// 4. Verify the invalidation mask was applied correctly
@@ -1085,15 +1085,15 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_clear_reset_sequence() {
         // Set up initial state
-        ADR_RESET_CNT_IDX.set(100);
-        let current_addr = FLASH_ADR_RESET_CNT + 100;
+        FACTORY_RESET_STATE.flash_address_index.set(100);
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         
         // Mock current flash value as step 3 (0xF8)
         mock_read_flash_byte(current_addr).returns(ResetStep::Step3.flash_value()); // 0xF8
         
         // Set up expectations
         mock_flash_write_page(current_addr, 1, mry::Any).returns(());
-        mock_flash_erase_sector(mry::Any).returns(());
+        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).returns(());
         
         // Call function under test
         clear_reset_sequence();
@@ -1102,11 +1102,11 @@ mod tests {
         // The value should be ResetStep::Step3.flash_value() & INVALIDATION_MASK = 0xF8 & 0xBF = 0xB8
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
         
-        // Verify no sector erase was triggered
-        mock_flash_erase_sector(mry::Any).assert_called(0);
+        // Verify sector erase was not triggered (index 101 < 4096)
+        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(0);
         
-        // Verify index was incremented
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 101);
+        // Verify index was incremented to 101
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 101);
     }
     
     /// Tests the init_reset_sequence function.
@@ -1114,21 +1114,21 @@ mod tests {
     /// This test verifies that init_reset_sequence correctly:
     /// - Scans through flash memory to find the latest valid sequence entry
     /// - Skips invalidated sequences (bit 6 cleared)
-    /// - Updates ADR_RESET_CNT_IDX with the position of the latest entry
-    /// - Updates RESET_CNT with the step value of the latest entry
+    /// - Updates FACTORY_RESET_STATE.flash_address_index with the position of the latest entry
+    /// - Updates FACTORY_RESET_STATE.consecutive_reset_count with the step value of the latest entry
     ///
     /// # Algorithm
     ///
     /// 1. Set up read_flash_byte to return specific bitmask values at different addresses
     /// 2. Include invalidated sequences to test they are skipped
     /// 3. Call init_reset_sequence()
-    /// 4. Verify ADR_RESET_CNT_IDX and RESET_CNT were updated correctly
+    /// 4. Verify FACTORY_RESET_STATE.flash_address_index and FACTORY_RESET_STATE.consecutive_reset_count were updated correctly
     #[test]
     #[mry::lock(read_flash_byte)]
     fn test_init_reset_sequence() {
         // Initial state
-        ADR_RESET_CNT_IDX.set(0);
-        RESET_CNT.set(0);
+        FACTORY_RESET_STATE.flash_address_index.set(0);
+        FACTORY_RESET_STATE.consecutive_reset_count.set(0);
         
         // Set up read_flash_byte to handle different addresses using a closure
         mock_read_flash_byte(mry::Any).returns_with(|addr: u32| {
@@ -1153,12 +1153,12 @@ mod tests {
         // Call function under test
         init_reset_sequence();
         
-        // Verify ADR_RESET_CNT_IDX was updated to the position of the factory reset flag
+        // Verify FACTORY_RESET_STATE.flash_address_index was updated to the position of the factory reset flag
         // which has the highest priority and appears last in the scan
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 300);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 300);
         
-        // Verify RESET_CNT was updated with the correct step value (factory reset flag)
-        assert_eq!(RESET_CNT.get(), FACTORY_RESET_FLAG);
+        // Verify FACTORY_RESET_STATE.consecutive_reset_count was updated with the correct step value (factory reset flag)
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), FACTORY_RESET_FLAG);
     }
     
     /// Tests the init_reset_sequence function with a mix of valid, invalid, and erased entries.
@@ -1166,26 +1166,26 @@ mod tests {
     /// This test verifies that init_reset_sequence correctly:
     /// - Finds the latest valid sequence entry among mixed entries
     /// - Skips invalidated and erased entries
-    /// - Sets ADR_RESET_CNT_IDX to the position of the latest valid entry
-    /// - Updates RESET_CNT with the step value of the latest valid entry
+    /// - Sets FACTORY_RESET_STATE.flash_address_index to the position of the latest valid entry
+    /// - Updates FACTORY_RESET_STATE.consecutive_reset_count with the step value of the latest valid entry
     ///
     /// # Algorithm
     ///
     /// 1. Set up read_flash_byte to return specific values for mixed entries
     /// 2. Call init_reset_sequence()
-    /// 3. Verify ADR_RESET_CNT_IDX and RESET_CNT were updated to the latest valid entry
+    /// 3. Verify FACTORY_RESET_STATE.flash_address_index and FACTORY_RESET_STATE.consecutive_reset_count were updated to the latest valid entry
     #[test]
     #[mry::lock(read_flash_byte)]
     fn test_init_reset_sequence_mixed_valid_invalid() {
         // Test initialization with mix of valid, invalid, and erased entries
         
         // Set up a complex scenario in flash
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 0).returns(0xFF); // Erased
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 1).returns(0xFE); // Valid Step1
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 2).returns(0xBE); // Invalidated Step1
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 3).returns(0xFC); // Valid Step2
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 4).returns(0x55); // Corrupted
-        mock_read_flash_byte(FLASH_ADR_RESET_CNT + 5).returns(0xF8); // Valid Step3 (latest)
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 0).returns(0xFF); // Erased
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 1).returns(0xFE); // Valid Step1
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 2).returns(0xBE); // Invalidated Step1
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 3).returns(0xFC); // Valid Step2
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 4).returns(0x55); // Corrupted
+        mock_read_flash_byte(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get() + 5).returns(0xF8); // Valid Step3 (latest)
         
         // Set up remaining addresses as erased
         for i in 6..4096 {
@@ -1196,8 +1196,8 @@ mod tests {
         init_reset_sequence();
         
         // Verify latest valid entry was found (index 5, Step3)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 5);
-        assert_eq!(RESET_CNT.get(), 3); // Step3
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 5);
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 3); // Step3
     }
     
     /// Tests the init_reset_sequence function when all entries are invalid or erased.
@@ -1205,14 +1205,14 @@ mod tests {
     /// This test verifies that init_reset_sequence correctly:
     /// - Defaults to index 0 and clear step when all entries are invalidated or erased
     /// - Skips over invalidated and erased entries
-    /// - Sets ADR_RESET_CNT_IDX to 0
-    /// - Sets RESET_CNT to 0 (clear step)
+    /// - Sets FACTORY_RESET_STATE.flash_address_index to 0
+    /// - Sets FACTORY_RESET_STATE.consecutive_reset_count to 0 (clear step)
     ///
     /// # Algorithm
     ///
     /// 1. Set up read_flash_byte to return invalidated or erased values
     /// 2. Call init_reset_sequence()
-    /// 3. Verify ADR_RESET_CNT_IDX is 0 and RESET_CNT is 0 (clear step)
+    /// 3. Verify FACTORY_RESET_STATE.flash_address_index is 0 and FACTORY_RESET_STATE.consecutive_reset_count is 0 (clear step)
     #[test]
     #[mry::lock(read_flash_byte)]
     fn test_init_reset_sequence_all_invalid() {
@@ -1233,8 +1233,8 @@ mod tests {
         init_reset_sequence();
         
         // Verify defaults were set (index 0, Clear step)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 0);
-        assert_eq!(RESET_CNT.get(), 0); // Clear
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 0); // Clear
     }
     
     /// Tests the factory_reset_handle function when a factory reset flag is set.
@@ -1310,9 +1310,9 @@ mod tests {
         mock_write_reset_sequence(1).assert_called(1);
         
         // Verify global state was updated correctly
-        assert_eq!(RESET_CNT.get(), 1);
-        assert_eq!(CLEAR_ST.get(), 1);
-        assert_eq!(RESET_CHECK_TIME.get(), POWER_CYCLE_TIMING[0].0 as u32);
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 1);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 1);
+        assert_eq!(FACTORY_RESET_STATE.timing_check_timestamp.get(), POWER_CYCLE_TIMING[0].0 as u32);
     }
     
     /// Tests the factory_reset_handle function when continuing an existing sequence.
@@ -1347,12 +1347,12 @@ mod tests {
         mock_write_reset_sequence(3).assert_called(1);
         
         // Verify global state was updated correctly for next step
-        assert_eq!(RESET_CNT.get(), 3);
-        assert_eq!(CLEAR_ST.get(), 1);
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 3);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 1);
         
         // Timing index for step 3 (index 2) 
         let timing_idx = 2;
-        assert_eq!(RESET_CHECK_TIME.get(), POWER_CYCLE_TIMING[timing_idx].0 as u32);
+        assert_eq!(FACTORY_RESET_STATE.timing_check_timestamp.get(), POWER_CYCLE_TIMING[timing_idx].0 as u32);
     }
     
     /// Tests the factory_reset_handle function when all sequence steps are completed.
@@ -1425,43 +1425,43 @@ mod tests {
     /// Tests the factory_reset_cnt_check function when no timing check is active.
     ///
     /// This test verifies that factory_reset_cnt_check correctly:
-    /// - Exits early when CLEAR_ST is 0 (no timing check active)
+    /// - Exits early when FACTORY_RESET_STATE.clear_state is 0 (no timing check active)
     /// - Does not modify any state
     ///
     /// # Algorithm
     ///
-    /// 1. Set up initial state with CLEAR_ST=0
+    /// 1. Set up initial state with FACTORY_RESET_STATE.clear_state=0
     /// 2. Call factory_reset_cnt_check()
     /// 3. Verify function returns early without changing state
     #[test]
     fn test_factory_reset_cnt_check_no_active_check() {
         // Set up initial state
-        CLEAR_ST.set(0); // No active timing check
+        FACTORY_RESET_STATE.clear_state.set(0); // No active timing check
         
         // Remember initial state to verify no changes
-        let initial_reset_cnt = RESET_CNT.get();
-        let initial_clear_st = CLEAR_ST.get();
+        let initial_reset_cnt = FACTORY_RESET_STATE.consecutive_reset_count.get();
+        let initial_clear_st = FACTORY_RESET_STATE.clear_state.get();
         
         // Call function under test
         factory_reset_cnt_check();
         
         // Verify state remains unchanged
-        assert_eq!(RESET_CNT.get(), initial_reset_cnt);
-        assert_eq!(CLEAR_ST.get(), initial_clear_st);
+        assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), initial_reset_cnt);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), initial_clear_st);
     }
     
     /// Tests the factory_reset_cnt_check function when timing check state is invalid.
     ///
     /// This test verifies that factory_reset_cnt_check correctly:
-    /// - Clears the sequence when RESET_CNT is 0 or beyond valid range
-    /// - Resets CLEAR_ST to 0
+    /// - Clears the sequence when FACTORY_RESET_STATE.consecutive_reset_count is 0 or beyond valid range
+    /// - Resets FACTORY_RESET_STATE.clear_state to 0
     ///
     /// # Algorithm
     ///
-    /// 1. Set up initial state with CLEAR_ST=1 and invalid RESET_CNT
+    /// 1. Set up initial state with FACTORY_RESET_STATE.clear_state=1 and invalid FACTORY_RESET_STATE.consecutive_reset_count
     /// 2. Lock clear_reset_sequence for mocking
     /// 3. Call factory_reset_cnt_check()
-    /// 4. Verify sequence was cleared and CLEAR_ST was reset
+    /// 4. Verify sequence was cleared and FACTORY_RESET_STATE.clear_state was reset
     #[test]
     #[mry::lock(clear_reset_sequence, clock_time_exceed)]
     fn test_factory_reset_cnt_check_invalid_reset_cnt() {
@@ -1469,30 +1469,30 @@ mod tests {
         mock_clear_reset_sequence().returns(());
         mock_clock_time_exceed(mry::Any, mry::Any).returns(false); // Don't let time checks interfere
         
-        // Set up initial state with active timing check but invalid RESET_CNT
-        CLEAR_ST.set(1);
-        RESET_CNT.set(POWER_CYCLE_COUNT + 1); // Invalid value (6, when max is 5)
+        // Set up initial state with active timing check but invalid FACTORY_RESET_STATE.consecutive_reset_count
+        FACTORY_RESET_STATE.clear_state.set(1);
+        FACTORY_RESET_STATE.consecutive_reset_count.set(POWER_CYCLE_COUNT + 1); // Invalid value (6, when max is 5)
         
         // Call function under test
         factory_reset_cnt_check();
         
-        // Verify sequence was cleared and CLEAR_ST was reset
+        // Verify sequence was cleared and FACTORY_RESET_STATE.clear_state was reset
         mock_clear_reset_sequence().assert_called(1);
-        assert_eq!(CLEAR_ST.get(), 0);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
     }
     
     /// Tests the factory_reset_cnt_check function when min time has elapsed in state 1.
     ///
     /// This test verifies that factory_reset_cnt_check correctly:
     /// - Transitions from state 1 to state 2 when min time has elapsed
-    /// - Updates RESET_CHECK_TIME with the max time for the current step
+    /// - Updates FACTORY_RESET_STATE.timing_check_timestamp with the max time for the current step
     ///
     /// # Algorithm
     ///
-    /// 1. Set up initial state with CLEAR_ST=1, valid RESET_CNT
+    /// 1. Set up initial state with FACTORY_RESET_STATE.clear_state=1, valid FACTORY_RESET_STATE.consecutive_reset_count
     /// 2. Set up clock_time_exceed to indicate min time has passed
     /// 3. Call factory_reset_cnt_check()
-    /// 4. Verify state transition to CLEAR_ST=2 and updated time limit
+    /// 4. Verify state transition to FACTORY_RESET_STATE.clear_state=2 and updated time limit
     #[test]
     #[mry::lock(clock_time_exceed, clear_reset_sequence)]
     fn test_factory_reset_cnt_check_min_time_elapsed() {
@@ -1501,18 +1501,18 @@ mod tests {
         mock_clear_reset_sequence().returns(());
         
         // Set up initial state - first step, waiting for min time
-        CLEAR_ST.set(1);
-        RESET_CNT.set(1);
-        RESET_CHECK_TIME.set(POWER_CYCLE_TIMING[0].0 as u32); // Min time for step 1
+        FACTORY_RESET_STATE.clear_state.set(1);
+        FACTORY_RESET_STATE.consecutive_reset_count.set(1);
+        FACTORY_RESET_STATE.timing_check_timestamp.set(POWER_CYCLE_TIMING[0].0 as u32); // Min time for step 1
         
         // Call function under test
         factory_reset_cnt_check();
         
         // Verify state transition and updated time
-        assert_eq!(CLEAR_ST.get(), 2);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 2);
         
         // Max time for step 1 is the second element of the tuple
-        assert_eq!(RESET_CHECK_TIME.get(), POWER_CYCLE_TIMING[0].1 as u32);
+        assert_eq!(FACTORY_RESET_STATE.timing_check_timestamp.get(), POWER_CYCLE_TIMING[0].1 as u32);
         
         // Verify clear_reset_sequence was not called
         mock_clear_reset_sequence().assert_called(0);
@@ -1522,14 +1522,14 @@ mod tests {
     ///
     /// This test verifies that factory_reset_cnt_check correctly:
     /// - Aborts the sequence when max time has been exceeded in state 2
-    /// - Resets CLEAR_ST to 0
+    /// - Resets FACTORY_RESET_STATE.clear_state to 0
     ///
     /// # Algorithm
     ///
-    /// 1. Set up initial state with CLEAR_ST=2, valid RESET_CNT
+    /// 1. Set up initial state with FACTORY_RESET_STATE.clear_state=2, valid FACTORY_RESET_STATE.consecutive_reset_count
     /// 2. Set up clock_time_exceed to indicate max time has been exceeded
     /// 3. Call factory_reset_cnt_check()
-    /// 4. Verify sequence was cleared and CLEAR_ST was reset
+    /// 4. Verify sequence was cleared and FACTORY_RESET_STATE.clear_state was reset
     #[test]
     #[mry::lock(clock_time_exceed, clear_reset_sequence)]
     fn test_factory_reset_cnt_check_max_time_exceeded() {
@@ -1538,16 +1538,16 @@ mod tests {
         mock_clear_reset_sequence().returns(());
         
         // Set up initial state - first step, max time check
-        CLEAR_ST.set(2);
-        RESET_CNT.set(1); // Valid step number
-        RESET_CHECK_TIME.set(POWER_CYCLE_TIMING[0].1 as u32); // Max time for step 1
+        FACTORY_RESET_STATE.clear_state.set(2);
+        FACTORY_RESET_STATE.consecutive_reset_count.set(1); // Valid step number
+        FACTORY_RESET_STATE.timing_check_timestamp.set(POWER_CYCLE_TIMING[0].1 as u32); // Max time for step 1
         
         // Call function under test
         factory_reset_cnt_check();
         
-        // Verify sequence was cleared and CLEAR_ST was reset
+        // Verify sequence was cleared and FACTORY_RESET_STATE.clear_state was reset
         mock_clear_reset_sequence().assert_called(1);
-        assert_eq!(CLEAR_ST.get(), 0);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
     }
     
     /// Tests the factory_reset function.
@@ -1907,9 +1907,9 @@ mod tests {
     #[test]
     #[mry::lock(clear_reset_sequence)]
     fn test_factory_reset_cnt_check_invalid_clear_state() {
-        // Test handling of invalid CLEAR_ST values
-        CLEAR_ST.set(99); // Invalid clear state
-        RESET_CNT.set(3); // Valid reset count
+        // Test handling of invalid FACTORY_RESET_STATE.clear_state values
+        FACTORY_RESET_STATE.clear_state.set(99); // Invalid clear state
+        FACTORY_RESET_STATE.consecutive_reset_count.set(3); // Valid reset count
         mock_clear_reset_sequence().returns(());
         
         // Call function under test
@@ -1917,15 +1917,15 @@ mod tests {
         
         // Verify invalid clear state triggers sequence clearing
         mock_clear_reset_sequence().assert_called(1);
-        assert_eq!(CLEAR_ST.get(), 0); // Should be reset
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0); // Should be reset
     }
     
     #[test]
     #[mry::lock(clear_reset_sequence)]
     fn test_factory_reset_cnt_check_step_without_timing() {
         // Test handling of step that has no timing window (edge case)
-        CLEAR_ST.set(1);
-        RESET_CNT.set(0); // Clear step which has no timing window
+        FACTORY_RESET_STATE.clear_state.set(1);
+        FACTORY_RESET_STATE.consecutive_reset_count.set(0); // Clear step which has no timing window
         
         // Ensure clear_reset_sequence is called
         mock_clear_reset_sequence().returns(());
@@ -1935,7 +1935,7 @@ mod tests {
         
         // Verify steps without timing windows trigger sequence clearing
         mock_clear_reset_sequence().assert_called(1);
-        assert_eq!(CLEAR_ST.get(), 0);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
     }
     
     /// Tests the write_reset_sequence function when no change is needed.
@@ -1946,7 +1946,7 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page)]
     fn test_write_reset_sequence_no_change_needed() {
         // Test when flash already has the correct value (no write needed)
-        let current_addr = FLASH_ADR_RESET_CNT + ADR_RESET_CNT_IDX.get();
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         
         // Set up mock to return value that won't change with Step2 bitmask
         mock_read_flash_byte(current_addr).returns(0xFC); // Step2 value
@@ -1970,7 +1970,7 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_clear_reset_sequence_already_erased() {
         // Test clearing when flash is already erased (no write needed)
-        ADR_RESET_CNT_IDX.set(0); // Start at index 0
+        FACTORY_RESET_STATE.flash_address_index.set(0); // Start at index 0
         let current_addr = FLASH_ADR_RESET_CNT + 0;
         
         mock_read_flash_byte(current_addr).returns(0xFF); // Already erased
@@ -1985,7 +1985,7 @@ mod tests {
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(0);
         
         // Verify index was incremented (from 0 to 1)
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 1);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 1);
         
         // Verify no sector erase was called (not at boundary)
         mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(0);
@@ -1995,9 +1995,9 @@ mod tests {
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_write_reset_sequence_exactly_at_sector_boundary() {
         // Test behavior when exactly at sector boundary (4096)
-        ADR_RESET_CNT_IDX.set(4095); // At the last valid position
+        FACTORY_RESET_STATE.flash_address_index.set(4095); // At the last valid position
         
-        let current_addr = FLASH_ADR_RESET_CNT + 4095;
+        let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
         mock_read_flash_byte(current_addr).returns(ResetStep::Step5.flash_value()); // 0xE0
         mock_flash_write_page(current_addr, 1, mry::Any).returns(());
         mock_flash_erase_sector(FLASH_ADR_RESET_CNT).returns(());
@@ -2009,15 +2009,15 @@ mod tests {
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
         
         // Verify index was incremented to 4096, which triggers reset to 0 after sector erase
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 0);
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
+        mock_flash_erase_sector(FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get()).assert_called(1);
     }
     
     #[test]
     #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
     fn test_clear_reset_sequence_exactly_at_sector_boundary() {
         // Test clear behavior when exactly at sector boundary
-        ADR_RESET_CNT_IDX.set(4095); // At the last valid position
+        FACTORY_RESET_STATE.flash_address_index.set(4095); // At the last valid position
         
         let current_addr = FLASH_ADR_RESET_CNT + 4095;
         mock_read_flash_byte(current_addr).returns(ResetStep::Step3.flash_value()); // 0xF8
@@ -2031,7 +2031,7 @@ mod tests {
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
         
         // Verify index wrapped and sector was erased
-        assert_eq!(ADR_RESET_CNT_IDX.get(), 0); // Reset to 0
+        assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0); // Reset to 0
         mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
     }
     
@@ -2049,7 +2049,6 @@ mod tests {
         factory_reset();
         
         // Verify reset counter sector was erased last
-        let last_call_addr = FLASH_ADR_RESET_CNT;
-        mock_flash_erase_sector(last_call_addr).assert_called(1);
+        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
     }
 }

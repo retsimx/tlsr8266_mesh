@@ -139,13 +139,13 @@ pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MA
 /// Queue of up to 20 packet buffers containing operation codes and sequence numbers.
 pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> = CriticalSectionMutex::new(Deque::new());
 
-/// Sequence number for slave status messages.
+/// Sequence number for device status messages.
 /// 3-byte counter used to ensure message ordering and detect duplicates in status reports.
-pub static SLAVE_STAT_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static STATUS_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 
-/// General sequence number for slave transmissions.
+/// General sequence number for all device transmissions.
 /// 3-byte counter used to track and order outgoing mesh messages from this device.
-pub static SLAVE_SNO: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static GENERAL_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
 
 /// Device MAC address used for network identification.
 /// 6-byte IEEE MAC address uniquely identifying this device in the mesh network.
@@ -364,7 +364,7 @@ pub static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Write pointer for the light receive buffer circular queue.
 /// Points to the next available slot for storing incoming light control packets.
-pub static LIGHT_RX_WPTR: AtomicUsize = AtomicUsize::new(0);
+pub static LIGHT_RX_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Unique 16-bit address assigned to this device within the mesh network.
 /// Used for addressing and routing messages to/from this specific device.
@@ -386,25 +386,25 @@ pub static RF_TP_BASE: AtomicU32 = AtomicU32::new(0x1D);
 /// Additional gain control applied on top of the base power setting.
 pub static RF_TP_GAIN: AtomicU32 = AtomicU32::new(0xC);
 
-/// Scan response interval timing control for BLE advertising.
+/// BLE scan response interval timing control.
 /// Determines the delay between receiving scan requests and sending responses.
-pub static T_SCAN_RSP_INTVL: AtomicU32 = AtomicU32::new(0x92);
+pub static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
 
-/// Current state of the slave BLE connection link.
+/// Current state of the BLE connection as a peripheral device.
 /// Tracks connection status, advertising state, and link layer operations.
-pub static SLAVE_LINK_STATE: AtomicU8 = AtomicU8::new(0);
+pub static BLE_PERIPHERAL_LINK_STATE: AtomicU8 = AtomicU8::new(0);
 
 /// Timestamp of the last received packet for timeout detection.
 /// Used to detect communication timeouts and trigger reconnection procedures.
-pub static RCV_PKT_TIME: AtomicU32 = AtomicU32::new(0);
+pub static LAST_PACKET_RECEIVED_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
 /// Global security enable flag for mesh communications.
 /// When true, all mesh packets are encrypted before transmission.
 pub static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
 
-/// Counter for the number of listen cycles performed.
+/// Counter for the number of mesh listen cycles performed.
 /// Used for timing and synchronization of mesh listening periods.
-pub static ST_LISTEN_NO: AtomicU32 = AtomicU32::new(0);
+pub static MESH_LISTEN_CYCLE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Sequence number for light connection messages from master.
 /// Tracks message ordering in master-slave light control communications.
@@ -416,7 +416,7 @@ pub static SLAVE_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating whether a BLE slave connection is currently active.
 /// Set to true when connected to a central device, false when disconnected.
-pub static SLAVE_LINK_CONNECTED: AtomicBool = AtomicBool::new(false);
+pub static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// BLE connection interval in microseconds for slave connections.
 /// Determines how frequently connection events occur between central and peripheral.
@@ -430,25 +430,17 @@ pub static SLAVE_WINDOW_SIZE: AtomicU32 = AtomicU32::new(0);
 /// New window size that will be applied after connection parameter update.
 pub static SLAVE_WINDOW_SIZE_UPDATE: AtomicU32 = AtomicU32::new(0);
 
-/// Flag indicating a second-stage timing update is in progress.
-/// Used for complex connection parameter update procedures.
-pub static SLAVE_TIMING_UPDATE2_FLAG: AtomicBool = AtomicBool::new(false);
-
-/// Timestamp when the second timing update completed successfully.
-/// Marks completion of connection parameter update sequence.
-pub static SLAVE_TIMING_UPDATE2_OK_TIME: AtomicU32 = AtomicU32::new(0);
-
 /// Scheduled timestamp for the next connection event.
 /// Used for precise timing of BLE connection intervals.
 pub static SLAVE_NEXT_CONNECT_TICK: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating OTA update is busy with mesh operations.
 /// Prevents mesh interference during firmware update process.
-pub static RF_SLAVE_OTA_BUSY_MESH: AtomicBool = AtomicBool::new(false);
+pub static OTA_UPDATE_MESH_OPERATIONS_BLOCKED: AtomicBool = AtomicBool::new(false);
 
 /// Flag indicating OTA update is currently in progress.
 /// Blocks other RF operations during firmware update.
-pub static RF_SLAVE_OTA_BUSY: AtomicBool = AtomicBool::new(false);
+pub static OTA_UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Current maximum number of active nodes in the mesh network.
 /// Dynamically tracks the highest node count for optimization.
@@ -473,37 +465,44 @@ pub static SET_UUID_FLAG: AtomicBool = AtomicBool::new(false);
 /// Maximum allowed length for mesh network names.
 /// Enforces string length limits for mesh configuration.
 pub static MAX_MESH_NAME_LEN: AtomicUsize = AtomicUsize::new(16);
-/// Bitmask of pending LED events waiting to be processed.
-/// Each bit represents a different LED control event type.
-pub static LED_EVENT_PENDING: AtomicU32 = AtomicU32::new(0);
+/// LED controller state managing all LED operations.
+/// Encapsulates timing, patterns, and current state for LED control.
+pub struct LedControllerState {
+    /// Bitmask of pending LED events waiting to be processed
+    pub event_pending: AtomicU32,
+    /// Counter for LED blink cycles in current sequence
+    pub blink_count: AtomicU32,
+    /// LED on-time duration in microseconds for blink patterns
+    pub on_duration_us: AtomicU32,
+    /// LED off-time duration in microseconds for blink patterns
+    pub off_duration_us: AtomicU32,
+    /// LED selection mask indicating which LEDs are active
+    pub led_selection_mask: AtomicU32,
+    /// Current timestamp for LED timing control
+    pub timing_tick: AtomicU32,
+    /// LED pattern number or sequence identifier
+    pub pattern_number: AtomicU32,
+    /// Current LED state: 1 for on, 0 for off
+    pub is_on: AtomicU32,
+}
 
-/// Counter for LED blink cycles in current sequence.
-/// Tracks how many blinks have been completed in the current pattern.
-pub static LED_COUNT: AtomicU32 = AtomicU32::new(0);
+impl LedControllerState {
+    pub const fn new() -> Self {
+        Self {
+            event_pending: AtomicU32::new(0),
+            blink_count: AtomicU32::new(0),
+            on_duration_us: AtomicU32::new(0),
+            off_duration_us: AtomicU32::new(0),
+            led_selection_mask: AtomicU32::new(0),
+            timing_tick: AtomicU32::new(0),
+            pattern_number: AtomicU32::new(0),
+            is_on: AtomicU32::new(0),
+        }
+    }
+}
 
-/// LED on-time duration in microseconds for blink patterns.
-/// Defines how long the LED stays lit during each blink cycle.
-pub static LED_TON: AtomicU32 = AtomicU32::new(0);
-
-/// LED off-time duration in microseconds for blink patterns.
-/// Defines how long the LED stays off between blink cycles.
-pub static LED_TOFF: AtomicU32 = AtomicU32::new(0);
-
-/// LED selection mask indicating which LEDs are active.
-/// Bitmask selecting which of multiple LEDs to control.
-pub static LED_SEL: AtomicU32 = AtomicU32::new(0);
-
-/// Current timestamp for LED timing control.
-/// Used for precise timing of LED blink sequences and patterns.
-pub static LED_TICK: AtomicU32 = AtomicU32::new(0);
-
-/// LED pattern number or sequence identifier.
-/// Selects which predefined LED pattern to execute.
-pub static LED_NO: AtomicU32 = AtomicU32::new(0);
-
-/// Current LED state: 1 for on, 0 for off.
-/// Tracks the current on/off state of the LED.
-pub static LED_IS_ON: AtomicU32 = AtomicU32::new(0);
+/// Global LED controller state for device status indication.
+pub static LED_CONTROLLER: LedControllerState = LedControllerState::new();
 /// Flag enabling MAC address retrieval operations.
 /// When true, allows reading and updating device MAC address.
 pub static GET_MAC_EN: AtomicBool = AtomicBool::new(false);
@@ -515,25 +514,33 @@ pub static BLE_LL_CHANNEL_NUM: AtomicUsize = AtomicUsize::new(0);
 /// Last unmapped channel in the BLE channel hopping sequence.
 /// Used for channel selection algorithm and interference avoidance.
 pub static BLE_LL_LAST_UNMAPPED_CH: AtomicUsize = AtomicUsize::new(0);
-/// Timestamp for ATT service discovery timeout tracking.
+/// GATT service discovery timeout tracking timestamp.
 /// Used to detect when GATT service discovery has taken too long.
-pub static ATT_SERVICE_DISCOVER_TICK: AtomicU32 = AtomicU32::new(0);
+pub static GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
-/// Slave connection timeout value in microseconds.
+/// BLE peripheral connection timeout value in microseconds.
 /// Maximum time to wait before considering the connection lost.
-pub static SLAVE_LINK_TIME_OUT: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_CONNECTION_TIMEOUT_US: AtomicU32 = AtomicU32::new(0);
 
-/// Timestamp for slave timing update procedures.
+/// Timestamp for BLE peripheral timing update procedures.
 /// Tracks when connection parameter updates were initiated.
-pub static SLAVE_TIMING_UPDATE: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
-/// Next instant value for connection parameter updates.
+/// Flag indicating timing update timestamp 2 is active.
+/// Used for secondary timing update coordination.
+pub static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Timestamp for secondary timing update procedure OK time.
+/// Tracks when secondary timing updates were confirmed.
+pub static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME: AtomicU32 = AtomicU32::new(0);
+
+/// Next instant value for BLE connection parameter updates.
 /// BLE connection event number when new parameters take effect.
-pub static SLAVE_INSTANT_NEXT: AtomicU16 = AtomicU16::new(0);
+pub static BLE_PERIPHERAL_NEXT_UPDATE_INSTANT: AtomicU16 = AtomicU16::new(0);
 
 /// Previous connection interval before parameter update.
 /// Stored for rollback in case of parameter update failure.
-pub static SLAVE_INTERVAL_OLD: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL: AtomicU32 = AtomicU32::new(0);
 /// BLE connection supervision timeout in 10ms units.
 /// Maximum time between successful communication before connection is dropped.
 pub static BLE_CONN_TIMEOUT: AtomicU32 = AtomicU32::new(0);
@@ -545,54 +552,65 @@ pub static BLE_CONN_INTERVAL: AtomicU32 = AtomicU32::new(0);
 /// BLE connection offset timing adjustment.
 /// Fine-tuning for connection event timing synchronization.
 pub static BLE_CONN_OFFSET: AtomicU32 = AtomicU32::new(0);
-/// Flash address index for reset counter storage.
-/// Points to location in flash where reset count is persisted.
-pub static ADR_RESET_CNT_IDX: AtomicU32 = AtomicU32::new(0);
+/// Factory reset detection state manager.
+/// Tracks reset counts and timing for factory reset sequence detection.
+pub struct FactoryResetState {
+    /// Flash address index for reset counter storage
+    pub flash_address_index: AtomicU32,
+    /// Number of consecutive resets for factory reset detection
+    pub consecutive_reset_count: AtomicU8,
+    /// Clear state counter for reset sequence tracking
+    pub clear_state: AtomicU8,
+    /// Timestamp for reset counter timeout checking
+    pub timing_check_timestamp: AtomicU32,
+}
 
-/// Number of consecutive resets for factory reset detection.
-/// Incremented on each reset, cleared on successful operation.
-pub static RESET_CNT: AtomicU8 = AtomicU8::new(0);
+impl FactoryResetState {
+    pub const fn new() -> Self {
+        Self {
+            flash_address_index: AtomicU32::new(0),
+            consecutive_reset_count: AtomicU8::new(0),
+            clear_state: AtomicU8::new(3),
+            timing_check_timestamp: AtomicU32::new(0),
+        }
+    }
+}
 
-/// Clear state counter for reset sequence tracking.
-/// Used in factory reset detection algorithm.
-pub static CLEAR_ST: AtomicU8 = AtomicU8::new(3);
-
-/// Timestamp for reset counter timeout checking.
-/// Used to reset the reset counter after stable operation.
-pub static RESET_CHECK_TIME: AtomicU32 = AtomicU32::new(0);
+/// Global factory reset detection state.
+pub static FACTORY_RESET_STATE: FactoryResetState = FactoryResetState::new();
 
 /// Timestamp of the first successful slave connection.
 /// Used for connection establishment timing and statistics.
-pub static SLAVE_FIRST_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 /// Device node sequence number for mesh communication.
 /// Incremental counter used for message sequencing and duplicate detection.
 pub static DEVICE_NODE_SN: AtomicU8 = AtomicU8::new(1);
 
 /// Next position index for device group address allocation.
 /// Points to the next available slot in the group address table.
-pub static DEV_GRP_NEXT_POS: AtomicU16 = AtomicU16::new(0);
+pub static MESH_GROUP_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0);
 
 /// Flash configuration index for persistent storage operations.
 /// Current position in flash memory for configuration data.
-pub static ADR_FLASH_CFG_IDX: AtomicI32 = AtomicI32::new(0);
+pub static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
 
 /// Status indicating slave is busy reading mesh node states.
 /// Prevents concurrent status reading operations.
 pub static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
 /// Current flash address for OTA firmware update operations.
 /// Points to the next location where firmware data will be written.
-pub static CUR_OTA_FLASH_ADDR: AtomicU32 = AtomicU32::new(0);
+pub static OTA_UPDATE_CURRENT_FLASH_ADDRESS: AtomicU32 = AtomicU32::new(0);
 
 /// Flag to terminate ongoing OTA update process.
 /// Set to abort firmware update and return to normal operation.
-pub static RF_SLAVE_OTA_TERMINATE_FLAG: AtomicBool = AtomicBool::new(false);
+pub static OTA_UPDATE_TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// OTA operation timeout in seconds (default 30 seconds).
 /// Maximum time allowed for firmware update operations.
-pub static RF_SLAVE_OTA_TIMEOUT_S: AtomicU16 = AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+pub static OTA_UPDATE_TIMEOUT_SECONDS: AtomicU16 = AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
 /// Next position for device address allocation in mesh network.
 /// Used for assigning unique addresses to new mesh devices.
-pub static DEV_ADDRESS_NEXT_POS: AtomicU16 = AtomicU16::new(0);
+pub static MESH_DEVICE_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0);
 
 /// Flag indicating connection parameters need to be updated.
 /// Set when BLE connection parameters require modification.
@@ -611,76 +629,76 @@ pub static SLAVE_DATA_VALID: AtomicU32 = AtomicU32::new(0);
 
 /// Timestamp for bridge command operations.
 /// Used for timing bridge/relay operations in mesh network.
-pub static T_BRIDGE_CMD: AtomicU32 = AtomicU32::new(0);
+pub static BRIDGE_COMMAND_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
-/// Bridge status number for mesh relay operations.
+/// Bridge sequence number for mesh relay operations.
 /// Tracks the current bridge/relay state and operation count.
-pub static ST_BRIGE_NO: AtomicU32 = AtomicU32::new(0);
-/// Write pointer for the slave status buffer circular queue.
+pub static BRIDGE_SEQUENCE_NUMBER: AtomicU32 = AtomicU32::new(0);
+/// Write pointer for the device status buffer circular queue.
 /// Points to the next position for storing incoming status data.
-pub static SLAVE_STATUS_BUFFER_WPTR: AtomicUsize = AtomicUsize::new(0);
+pub static DEVICE_STATUS_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Read pointer for the slave status buffer circular queue.
+/// Read pointer for the device status buffer circular queue.
 /// Points to the next status entry to be processed.
-pub static SLAVE_STATUS_BUFFER_RPTR: AtomicUsize = AtomicUsize::new(0);
+pub static DEVICE_STATUS_BUFFER_READ_POINTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Flag indicating unicast status reading is active.
 /// When true, status reads are directed to specific devices rather than broadcast.
-pub static SLAVE_READ_STATUS_UNICAST_FLAG: AtomicBool = AtomicBool::new(false);
-/// Flag enabling automatic slave timing adjustment.
-/// When true, slave adjusts its timing to maintain synchronization.
-pub static SLAVE_TIMING_ADJUST_ENABLE: AtomicBool = AtomicBool::new(false);
+pub static DEVICE_STATUS_READ_UNICAST_MODE: AtomicBool = AtomicBool::new(false);
+/// Flag enabling automatic peripheral timing adjustment.
+/// When true, peripheral device adjusts its timing to maintain synchronization.
+pub static BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Slave timing tick for BRX (bridge receive) operations.
+/// Device timing tick for bridge receive operations.
 /// Timestamp used for mesh bridge receive timing coordination.
-pub static SLAVE_TICK_BRX: AtomicU32 = AtomicU32::new(0);
+pub static BRIDGE_RECEIVE_TIMING_TICK: AtomicU32 = AtomicU32::new(0);
 
-/// Window offset for slave connection timing.
+/// Window offset for BLE peripheral connection timing.
 /// Adjustment applied to connection window for timing synchronization.
-pub static SLAVE_WINDOW_OFFSET: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_WINDOW_OFFSET: AtomicU32 = AtomicU32::new(0);
 
-/// Current instant value for slave connection events.
+/// Current instant value for BLE peripheral connection events.
 /// BLE connection event counter for timing coordination.
-pub static SLAVE_INSTANT: AtomicU16 = AtomicU16::new(0);
+pub static BLE_PERIPHERAL_CONNECTION_INSTANT: AtomicU16 = AtomicU16::new(0);
 
-/// Status tick counter for slave state machine.
-/// Used for timing slave status operations and state transitions.
-pub static SLAVE_STATUS_TICK: AtomicU8 = AtomicU8::new(0);
+/// Status tick counter for device state machine.
+/// Used for timing device status operations and state transitions.
+pub static DEVICE_STATUS_TICK_COUNTER: AtomicU8 = AtomicU8::new(0);
 
-/// Current command state for slave link operations.
-/// Tracks which command is being processed by the slave.
-pub static SLAVE_LINK_CMD: AtomicU8 = AtomicU8::new(0);
+/// Current command state for BLE peripheral link operations.
+/// Tracks which command is being processed by the peripheral device.
+pub static BLE_PERIPHERAL_LINK_COMMAND: AtomicU8 = AtomicU8::new(0);
 
-/// Current index into the slave status record table.
+/// Current index into the device status record table.
 /// Points to the active entry in the status tracking array.
-pub static SLAVE_STATUS_RECORD_IDX: AtomicUsize = AtomicUsize::new(0);
+pub static DEVICE_STATUS_RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
 
-/// Bit mask index for notification request tracking.
+/// Notification request mask index for tracking pending requests.
 /// Used to track which devices have pending notification requests.
-pub static NOTIFY_REQ_MASK_IDX: AtomicU8 = AtomicU8::new(0);
+pub static NOTIFICATION_REQUEST_MASK_INDEX: AtomicU8 = AtomicU8::new(0);
 /// Flag controlling BLE advertising state.
 /// When true, device actively advertises its presence for discovery.
-pub static ADV_FLAG: AtomicBool = AtomicBool::new(true);
+pub static BLE_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Flag indicating device online status in mesh network.
 /// When true, device is considered active and reachable by other nodes.
-pub static ONLINE_ST_FLAG: AtomicBool = AtomicBool::new(true);
+pub static MESH_DEVICE_ONLINE_STATUS: AtomicBool = AtomicBool::new(true);
 
-/// Timestamp when slave became busy reading status information.
+/// Timestamp when device became busy reading status information.
 /// Used to detect and timeout stuck status reading operations.
-pub static SLAVE_READ_STATUS_BUSY_TIME: AtomicU32 = AtomicU32::new(0);
+pub static DEVICE_STATUS_READ_BUSY_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
-/// Listen interval for slave mesh operations in microseconds.
-/// Defines how often the slave listens for mesh network traffic.
-pub static SLAVE_LISTEN_INTERVAL: AtomicU32 = AtomicU32::new(0);
+/// Listen interval for mesh operations in microseconds.
+/// Defines how often the device listens for mesh network traffic.
+pub static MESH_LISTEN_INTERVAL_US: AtomicU32 = AtomicU32::new(0);
 
-/// Flag enabling slave BLE advertising functionality.
-/// Controls whether the slave can advertise for BLE connections.
-pub static SLAVE_ADV_ENABLE: AtomicBool = AtomicBool::new(false);
+/// Flag enabling BLE peripheral advertising functionality.
+/// Controls whether the peripheral device can advertise for BLE connections.
+pub static BLE_PERIPHERAL_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Flag enabling slave BLE connection acceptance.
-/// When true, slave accepts incoming BLE connection requests.
-pub static SLAVE_CONNECTION_ENABLE: AtomicBool = AtomicBool::new(false);
+/// Flag enabling BLE peripheral connection acceptance.
+/// When true, peripheral device accepts incoming BLE connection requests.
+pub static BLE_PERIPHERAL_CONNECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub trait SimplifyLS<T> {
     fn get(&self) -> T;

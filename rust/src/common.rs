@@ -52,7 +52,7 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 #[cfg_attr(test, mry::mry)]
 pub fn save_pair_info(adr: u32, p: &[u8]) {
     flash_write_page(
-        (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get() + adr as i32) as u32,
+        (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get() + adr as i32) as u32,
         p.len() as u32,
         p.as_ptr()
     );
@@ -129,29 +129,29 @@ pub fn rf_update_conn_para(p: &Packet) -> u8 {
 pub fn retrieve_dev_grp_address()
 {
     let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
-    let mut addr_next_pos = DEV_ADDRESS_NEXT_POS.get();
+    let mut addr_next_pos = MESH_DEVICE_ADDRESS_NEXT_POSITION.get();
     let mut grp_next_pos = 0;
     let mut dest_addr_index = 0;
     let mut grp_addr_ptr = FLASH_ADR_DEV_GRP_ADR;
     loop {
-        DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
-        DEV_GRP_NEXT_POS.set(grp_next_pos);
+        MESH_DEVICE_ADDRESS_NEXT_POSITION.set(addr_next_pos);
+        MESH_GROUP_ADDRESS_NEXT_POSITION.set(grp_next_pos);
         let grp_addr;
         unsafe { grp_addr = *(grp_addr_ptr as *const u16); }
 
         grp_next_pos += 2;
         if grp_addr == 0xffff { break; }
         if grp_addr == 0 {
-            DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
+            MESH_DEVICE_ADDRESS_NEXT_POSITION.set(addr_next_pos);
         } else if grp_addr & !dev_mask == 0 {
             DEVICE_ADDRESS.set(grp_addr & dev_mask);
             addr_next_pos = grp_next_pos;
-            DEV_GRP_NEXT_POS.set(addr_next_pos);
-            DEV_ADDRESS_NEXT_POS.set(addr_next_pos);
+            MESH_GROUP_ADDRESS_NEXT_POSITION.set(addr_next_pos);
+            MESH_DEVICE_ADDRESS_NEXT_POSITION.set(addr_next_pos);
         } else {
             unsafe { *((GROUP_ADDRESS.lock().as_ptr() as u32 + (dest_addr_index & 7) * 2) as *mut u16) = grp_addr; }
             dest_addr_index += 1;
-            DEV_GRP_NEXT_POS.set(grp_next_pos);
+            MESH_GROUP_ADDRESS_NEXT_POSITION.set(grp_next_pos);
         }
         grp_addr_ptr += 2;
         if grp_next_pos == 0x1000 {
@@ -183,13 +183,13 @@ pub fn pair_flash_clean()
     let mut flash_dat_swap: [u8; 64] = [0; 64];
     let flash_dat_swap_len = flash_dat_swap.len();
 
-    if ADR_FLASH_CFG_IDX.get() >= 0xeff {
-        let src_addr = (FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get()) as *const u8;
+    if FLASH_CONFIGURATION_INDEX.get() >= 0xeff {
+        let src_addr = (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get()) as *const u8;
         unsafe { flash_dat_swap.copy_from_slice(slice::from_raw_parts(src_addr, flash_dat_swap_len)); }
 
         flash_erase_sector(FLASH_ADR_PAIRING);
         flash_write_page(FLASH_ADR_PAIRING, flash_dat_swap_len as u32, flash_dat_swap.as_ptr());
-        ADR_FLASH_CFG_IDX.set(0);
+        FLASH_CONFIGURATION_INDEX.set(0);
     }
 }
 
@@ -209,11 +209,11 @@ pub fn pair_flash_config_init() -> bool
                     break;
                 }
             };
-            ADR_FLASH_CFG_IDX.set(index as i32 + -0x40);
+            FLASH_CONFIGURATION_INDEX.set(index as i32 + -0x40);
             pair_flash_clean();
             result = true;
         } else {
-            ADR_FLASH_CFG_IDX.set(-0x41);
+            FLASH_CONFIGURATION_INDEX.set(-0x41);
             result = false;
         }
     }
@@ -290,9 +290,9 @@ pub fn pair_load_key()
 {
     pair_flash_config_init();
 
-    let pairing_addr = FLASH_ADR_PAIRING as i32 + ADR_FLASH_CFG_IDX.get();
+    let pairing_addr = FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get();
 
-    if -1 < ADR_FLASH_CFG_IDX.get() && pairing_addr != 0x0 {
+    if -1 < FLASH_CONFIGURATION_INDEX.get() && pairing_addr != 0x0 {
         {
             let mut pair_state = PAIR_STATE.lock();
 

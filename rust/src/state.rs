@@ -392,7 +392,8 @@ pub static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
 
 /// Current state of the BLE connection as a peripheral device.
 /// Tracks connection status, advertising state, and link layer operations.
-pub static BLE_PERIPHERAL_LINK_STATE: AtomicU8 = AtomicU8::new(0);
+pub static BLE_PERIPHERAL_LINK_STATE: crate::sdk::light::AtomicBlePeripheralLinkState = 
+    crate::sdk::light::AtomicBlePeripheralLinkState::new(crate::sdk::light::BlePeripheralLinkState::Disconnected);
 
 /// Timestamp of the last received packet for timeout detection.
 /// Used to detect communication timeouts and trigger reconnection procedures.

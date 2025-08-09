@@ -5,7 +5,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU8, Ordering};
-use crate::sdk::ble_app::ll_irq::IrqTracker;
+use crate::sdk::ble_app::irq::IrqTracker;
 
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 

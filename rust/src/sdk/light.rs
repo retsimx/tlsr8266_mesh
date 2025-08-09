@@ -217,7 +217,118 @@ pub const SEND_MESH_STATUS_INTERVAL_MS: u32 = 200;
 pub const INTERNAL_PAR_RETRANSMIT_COUNT: usize = 2;
 pub const INTERNAL_PAR_SEND_ACK: usize = 3;
 
-#[derive(PartialEq, Copy, Clone)]
+/// BLE peripheral connection link states.
+///
+/// This enum represents the different operational states of the BLE peripheral
+/// connection state machine. Each state corresponds to a specific mode of operation
+/// in the BLE protocol stack and mesh networking system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BlePeripheralLinkState {
+    /// Device is disconnected and idle.
+    /// 
+    /// In this state, the device is not actively communicating via BLE
+    /// and may be in a low-power mode or preparing for other operations.
+    Disconnected = 0,
+    
+    /// Device is actively advertising for BLE connections.
+    /// 
+    /// The device broadcasts advertisement packets to allow central devices
+    /// to discover and connect to it. Responds to scan requests and connection requests.
+    Advertising = 1,
+    
+    /// Device is operating in mesh networking mode.
+    /// 
+    /// Processing and forwarding mesh network packets, participating in 
+    /// the mesh topology, and handling mesh-specific protocol operations.
+    Mesh = 4,
+    
+    /// Device has an active BLE connection (bridge mode).
+    /// 
+    /// Connected to a central device and actively processing BLE connection
+    /// events, handling data exchange, and maintaining connection timing.
+    Connected = 5,
+    
+    /// Device is in BLE receive mode.
+    /// 
+    /// Actively listening for incoming BLE packets from the connected central device.
+    /// This state is used during connection event processing.
+    Receiving = 7,
+}
+
+impl BlePeripheralLinkState {
+    /// Creates a BlePeripheralLinkState from a raw u8 value.
+    /// 
+    /// Returns None if the value doesn't correspond to a valid state.
+    /// This is useful for safely converting from hardware register values.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Disconnected),
+            1 => Some(Self::Advertising),
+            4 => Some(Self::Mesh),
+            5 => Some(Self::Connected),
+            7 => Some(Self::Receiving),
+            _ => None,
+        }
+    }
+    
+    /// Returns the raw u8 value for this state.
+    /// 
+    /// This is useful when interfacing with hardware registers or
+    /// legacy code that expects numeric values.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+    
+    /// Returns true if the device is in a state where it can accept connections.
+    pub fn can_accept_connections(self) -> bool {
+        matches!(self, Self::Advertising)
+    }
+    
+    /// Returns true if the device has an active BLE connection.
+    pub fn is_connected(self) -> bool {
+        matches!(self, Self::Connected | Self::Receiving)
+    }
+    
+    /// Returns true if the device is actively processing mesh operations.
+    pub fn is_mesh_active(self) -> bool {
+        matches!(self, Self::Mesh)
+    }
+}
+
+/// Atomic wrapper for BLE peripheral link state.
+/// 
+/// This provides atomic access to the BLE peripheral link state with
+/// type-safe enum operations while maintaining the underlying atomic u8 storage.
+pub struct AtomicBlePeripheralLinkState {
+    inner: core::sync::atomic::AtomicU8,
+}
+
+impl AtomicBlePeripheralLinkState {
+    /// Creates a new atomic BLE peripheral link state with the given initial value.
+    pub const fn new(state: BlePeripheralLinkState) -> Self {
+        Self {
+            inner: core::sync::atomic::AtomicU8::new(state as u8),
+        }
+    }
+    
+    /// Loads the current state.
+    pub fn get(&self) -> BlePeripheralLinkState {
+        let value = self.inner.load(core::sync::atomic::Ordering::Relaxed);
+        BlePeripheralLinkState::from_u8(value)
+            .unwrap_or_else(|| {
+                // Log error or handle invalid state - for now, default to Disconnected
+                BlePeripheralLinkState::Disconnected
+            })
+    }
+    
+    /// Stores a new state.
+    pub fn set(&self, state: BlePeripheralLinkState) {
+        self.inner.store(state as u8, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum IrqHandlerStatus {
     None,
     Adv,

@@ -613,6 +613,7 @@ fn update_connect_para()
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_flush_status()
 {
     static TICK_NODE_REPORT: AtomicU32 = AtomicU32::new(0);
@@ -758,6 +759,7 @@ pub fn mesh_send_online_status()
     app().mesh_manager.add_send_mesh_msg(&pkt_light_adv_status, 0, 0);
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn back_to_rxmode_bridge()
 {
     rf_set_tx_rx_off();
@@ -809,6 +811,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn tx_packet_bridge()
 {
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);
@@ -833,11 +836,13 @@ pub fn rf_link_slave_proc() {
     update_connect_para();
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn is_add_packet_buf_ready() -> bool
 {
     return (read_reg_dma_tx_wptr() - read_reg_dma_tx_rptr() & 7) < 3;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
 {
     static BLT_TX_FIFO: CriticalSectionMutex<[Packet; BLT_FIFO_TX_PACKET_COUNT]> = Mutex::new(
@@ -907,6 +912,8 @@ pub fn rf_link_slave_read_status_stop()
 
     rf_link_slave_read_status_par_init();
 }
+
+
 
 pub fn rf_ota_save_data(data: &[u8]) -> OtaState
 {
@@ -998,6 +1005,7 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8], retransmit_
     Packet { mesh: pkt }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_report_status_enable(enable: bool)
 {
     let mut mesh_node_mask = MESH_NODE_MASK.lock();

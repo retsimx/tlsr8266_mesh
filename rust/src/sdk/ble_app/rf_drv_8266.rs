@@ -127,6 +127,7 @@ pub fn rf_drv_init(enable: bool) -> u8
  * This function stops any ongoing RF operations by setting the RF mode control 
  * register to the stop mode (0x80).
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_stop_trx() {
     write_reg_rf_mode_control(0x80);            // stop
 }
@@ -632,7 +633,7 @@ pub fn rf_link_slave_init(interval: u32)
         *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
         
         // Initialize link state and timing parameters
-        BLE_PERIPHERAL_LINK_STATE.set(0);
+        BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
         MESH_LISTEN_INTERVAL_US.set(interval * CLOCK_SYS_CLOCK_1US);
 
         // Configure connection timer tick

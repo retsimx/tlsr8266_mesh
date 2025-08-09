@@ -10,7 +10,7 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::packet_types::Packet;
-use crate::sdk::rf_drv::{rf_link_slave_set_adv_mesh_name, rf_link_slave_set_adv_private_data};
+use crate::sdk::rf_drv::{set_advertisement_mesh_name, set_advertisement_manufacturer_data};
 use crate::state::{*};
 
 const UPDATE_CONN_PARA_CNT: usize = 4;
@@ -280,9 +280,9 @@ pub fn pair_update_key()
 
     let name_len = min(MAX_MESH_NAME_LEN.get(), name_len);
 
-    rf_link_slave_set_adv_mesh_name(&pair_state.pair_nn[0..name_len]);
+    set_advertisement_mesh_name(&pair_state.pair_nn[0..name_len]);
     let tmp = *ADV_PRI_DATA.lock();
-    rf_link_slave_set_adv_private_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
+    set_advertisement_manufacturer_data(unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) });
 }
 
 #[cfg_attr(test, mry::mry)]

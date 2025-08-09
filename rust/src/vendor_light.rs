@@ -4,7 +4,7 @@ use core::slice;
 
 use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::light::AdvPrivate;
-use crate::sdk::rf_drv::rf_link_slave_set_adv_private_data;
+use crate::sdk::rf_drv::set_advertisement_manufacturer_data;
 use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 
 /// Configures and sets the advertisement data for the BLE mesh light device.
@@ -45,7 +45,7 @@ pub fn vendor_set_adv_data() {
             size_of::<AdvPrivate>(),
         )
     };
-    rf_link_slave_set_adv_private_data(serialized_data);
+    set_advertisement_manufacturer_data(serialized_data);
 
     // Step 2: Configure scan response advertisement data
     // --------------------------------------------------
@@ -77,7 +77,7 @@ pub fn vendor_set_adv_data() {
 mod tests {
     use super::*;
     use crate::sdk::light::AdvRspPrivate;
-    use crate::sdk::rf_drv::mock_rf_link_slave_set_adv_private_data;
+    use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;
     use mry::Any;
     use core::cell::RefCell;
     
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_link_slave_set_adv_private_data)]
+    #[mry::lock(set_advertisement_manufacturer_data)]
     fn test_vendor_set_adv_data() {
         // Setup test MAC_ID
         let test_mac = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
@@ -117,7 +117,7 @@ mod tests {
         *ADV_RSP_PRI_DATA.lock() = test_adv_rsp_pri_data;
         
         // Mock rf_link_slave_set_adv_private_data to verify it's called with correct data
-        mock_rf_link_slave_set_adv_private_data(Any).returns_with(|data: Vec<u8>| {
+        mock_set_advertisement_manufacturer_data(Any).returns_with(|data: Vec<u8>| {
             // Verify data contains the expected structs
             assert_eq!(data.len(), size_of::<AdvPrivate>());
         });
@@ -151,11 +151,11 @@ mod tests {
         }
         
         // Verify mock was called the expected number of times
-        mock_rf_link_slave_set_adv_private_data(Any).assert_called(1);
+        mock_set_advertisement_manufacturer_data(Any).assert_called(1);
     }
     
     #[test]
-    #[mry::lock(rf_link_slave_set_adv_private_data)]
+    #[mry::lock(set_advertisement_manufacturer_data)]
     fn test_vendor_set_adv_data_with_zero_mac() {
         // Setup mock MAC_ID with zeros
         let test_mac = [0x00, 0x00, 0x00, 0x00, 0x05, 0x06];
@@ -185,7 +185,7 @@ mod tests {
         *ADV_RSP_PRI_DATA.lock() = test_adv_rsp_pri_data;
         
         // Mock function calls
-        mock_rf_link_slave_set_adv_private_data(Any).returns(());
+        mock_set_advertisement_manufacturer_data(Any).returns(());
         
         // Call function under test
         vendor_set_adv_data();
@@ -215,10 +215,10 @@ mod tests {
     }
     
     #[test]
-    #[mry::lock(rf_link_slave_set_adv_private_data)]
+    #[mry::lock(set_advertisement_manufacturer_data)]
     fn test_adv_data_serialization() {
         // This test verifies that the data is properly serialized 
-        // when passed to rf_link_slave_set_adv_private_data
+        // when passed to set_advertisement_manufacturer_data
         
         let test_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
         // Calculate expected MAC integer using the real function
@@ -256,7 +256,7 @@ mod tests {
         });
         
         // Capture the actual data sent to the rf_link function using thread-local storage
-        mock_rf_link_slave_set_adv_private_data(Any).returns_with(|data: Vec<u8>| {
+        mock_set_advertisement_manufacturer_data(Any).returns_with(|data: Vec<u8>| {
             ACTUAL_SERIALIZED.with(|cell| {
                 let mut actual = cell.borrow_mut();
                 actual.clear();

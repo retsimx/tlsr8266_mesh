@@ -228,18 +228,23 @@ fn compact_adv_data_removing_invalid_manufacturer(pkt: &mut crate::sdk::packet_t
     write_pos
 }
 
-/// Sets the mesh name in advertisement packets
+/// Sets the mesh network name in BLE advertisement packets
 /// 
-/// The function locates the position of the Complete Local Name field (type 9)
-/// in the advertisement packet, or creates it if not found, and updates it with
-/// the provided name.
+/// This function manages the Complete Local Name field (BLE type 0x09) in advertisement
+/// packets. It will either update an existing mesh name field or create a new one if
+/// none exists, preserving other advertisement data.
 ///
 /// # Arguments
-/// * `name` - The mesh name to be set in the advertisement packet
-pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
+/// * `name` - The mesh network name as a byte slice (typically UTF-8 encoded)
+///
+/// # Behavior
+/// - Finds existing mesh name field or allocates space for a new one
+/// - Updates packet length fields automatically
+/// - Preserves other advertisement data structures
+pub fn set_advertisement_mesh_name(name: &[u8])
 {
     let mut pkt_adv = PKT_ADV.lock();
-    
+
     // Find or allocate space for mesh name field
     let location = find_or_allocate_adv_field(&mut pkt_adv, ADV_TYPE_MESH_NAME);
     
@@ -255,16 +260,25 @@ pub fn rf_link_slave_set_adv_mesh_name(name: &[u8])
     update_packet_lengths(&mut pkt_adv, total_data_len);
 }
 
-/// Sets manufacturer-specific data in advertisement packets
+/// Sets manufacturer-specific data in BLE advertisement packets
 /// 
-/// The function locates the position for manufacturer-specific data (type 0xFF)
-/// in the advertisement packet, preserving other fields, and updates it with
-/// the provided data.
+/// This function manages the Manufacturer Specific Data field (BLE type 0xFF) in 
+/// advertisement packets. It removes any existing manufacturer data and replaces
+/// it with the provided data, preserving all other advertisement fields.
 ///
 /// # Arguments
-/// * `data` - The manufacturer-specific data to be set in the advertisement packet
+/// * `data` - The manufacturer-specific payload data (without length/type headers)
+///
+/// # Behavior
+/// - Removes any existing manufacturer data fields
+/// - Compacts remaining advertisement data
+/// - Appends new manufacturer data with proper BLE formatting
+/// - Updates packet length fields automatically
+///
+/// # BLE Format
+/// The data is formatted as: [Length][Type=0xFF][Data...]
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_slave_set_adv_private_data(data: &[u8])
+pub fn set_advertisement_manufacturer_data(data: &[u8])
 {
     let mut pkt_adv = PKT_ADV.lock();
     
@@ -290,14 +304,24 @@ pub fn rf_link_slave_set_adv_private_data(data: &[u8])
     pkt_adv.head_mut().rf_len = total_len as u8 + BLE_HEADER_LEN;
 }
 
-/// Sets the UUID data in advertisement packets
+/// Sets UUID data in BLE advertisement packets at a fixed position
 /// 
-/// This function inserts UUID data at a specific position in the advertisement packet,
-/// preserving the structure of other data. It handles both initial and subsequent updates.
+/// This function inserts UUID data at byte position 3 in the advertisement packet,
+/// which is a protocol-specific requirement for this mesh implementation. It handles
+/// both first-time insertion (shifting existing data) and replacement of existing UUID data.
 ///
 /// # Arguments
-/// * `uuid_data` - The UUID data to be set in the advertisement packet
-pub fn rf_link_slave_set_adv_uuid_data(uuid_data: &[u8])
+/// * `uuid_data` - The UUID payload data to insert
+///
+/// # Behavior
+/// - First time: Inserts at position 3, shifts existing data rightward
+/// - Subsequent calls: Replaces existing UUID data in-place
+/// - Validates that insertion won't exceed maximum advertisement length
+/// - Updates packet length fields for first insertion only
+///
+/// # Protocol Note
+/// The fixed position 3 is required by the mesh networking protocol specification.
+pub fn set_advertisement_uuid(uuid_data: &[u8])
 {
     let mut pkt_adv = PKT_ADV.lock();
     let rf_len = pkt_adv.head().rf_len as usize;
@@ -360,12 +384,25 @@ const INITIAL_ADDR_OFFSET: usize = 0x12;     // Initial address offset for stora
 const GROUP_DELETE_ALL: u16 = 0xFFFF;        // Special value to delete all groups
 const EVENT_DEVICE_ADDR_CHANGED: u8 = 0xC6;  // Event code for address changed event
 
-/// Cleans up the flash storage for device/group addresses when needed
+/// Compacts flash storage when address storage space is nearly exhausted
 ///
-/// If the storage pointers have reached their limit, this function will erase
-/// the flash sector and rewrite the current group addresses and device address
-/// at the beginning of the sector, then reset the pointers.
-pub fn dev_grp_flash_clean()
+/// This function performs flash garbage collection when either the device address
+/// or group address storage pointers approach their maximum values. It erases the
+/// flash sector and rewrites all current addresses at the beginning, effectively
+/// defragmenting the storage space.
+///
+/// # Behavior
+/// - Checks if storage pointers have reached maximum allowed values
+/// - Erases the entire flash sector if cleanup is needed
+/// - Rewrites current group addresses to the beginning of the sector
+/// - Rewrites current device address after group addresses
+/// - Resets storage pointers to the beginning
+///
+/// # Flash Layout After Cleanup
+/// ```
+/// [Group Addresses: 16 bytes][Device Address: 2 bytes][Free Space...]
+/// ```
+pub fn compact_flash_storage()
 {
     // Check if either address pointer has reached maximum allowed value
     if MAX_FLASH_ADDR_OFFSET < DEV_GRP_NEXT_POS.get() as usize || MAX_FLASH_ADDR_OFFSET < DEV_ADDRESS_NEXT_POS.get() as usize {
@@ -395,15 +432,22 @@ pub fn dev_grp_flash_clean()
 
 /// Adds a new device address to the mesh network
 ///
-/// This function validates the device address according to the device address mask,
-/// stores it in flash memory, and updates the current device address.
+/// This function validates a device address and stores it both in memory and persistent
+/// flash storage. It ensures the address conforms to the device address mask and differs
+/// from the current address before updating. It also triggers system event callbacks.
 ///
 /// # Arguments
-/// * `dev_id` - The device address to add
+/// * `dev_id` - The device address to set (must be non-zero and conform to device mask)
 ///
 /// # Returns
-/// * `true` if the device address was successfully added, `false` otherwise
-pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
+/// * `true` if the device address was successfully added and stored
+/// * `false` if validation failed or the address is already current
+///
+/// # Validation Rules
+/// - Address must be non-zero
+/// - Address must conform to `DEVICE_ADDR_MASK_DEFAULT`
+/// - Address must differ from current device address
+pub fn add_device_address(dev_id: u16) -> bool
 {
     // Validate the device ID
     let mut result = false;
@@ -415,7 +459,7 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
        DEVICE_ADDRESS.get() != dev_id {
         
         // Clean up flash if needed
-        dev_grp_flash_clean();
+        compact_flash_storage();
         
         let flash_pos = DEV_GRP_NEXT_POS.get();
         
@@ -455,15 +499,24 @@ pub fn rf_link_add_dev_addr(dev_id: u16) -> bool
 /// Removes a group address from the mesh network
 ///
 /// This function removes a specific group address, or all group addresses if GROUP_DELETE_ALL
-/// is specified, from both memory and flash storage.
+/// from both memory and persistent flash storage. It processes addresses in reverse order
+/// (newest to oldest) and limits bulk deletion to prevent excessive flash operations.
 ///
 /// # Arguments
-/// * `group_id` - The group address to remove, or GROUP_DELETE_ALL to remove all groups
+/// * `group_id` - The specific group address to remove, or `GROUP_DELETE_ALL` (0xFFFF) to remove all
 ///
 /// # Returns
-/// * `true` if any group address was successfully removed, `false` otherwise
+/// * `true` if any group address was successfully removed from memory or flash
+/// * `false` if no matching addresses were found or storage was empty
+///
+/// # Behavior
+/// - Clears matching addresses from in-memory group table
+/// - Searches flash storage from newest to oldest entries
+/// - For specific group: removes first matching entry and returns
+/// - For delete-all: removes up to 8 group entries to prevent excessive flash wear
+/// - Only processes entries identified as group addresses (not device addresses)
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_del_group(group_id: u16) -> bool
+pub fn remove_group(group_id: u16) -> bool
 {
     let grp_next_pos: i16 = DEV_GRP_NEXT_POS.get().try_into().unwrap();
     
@@ -488,17 +541,33 @@ pub fn rf_link_del_group(group_id: u16) -> bool
     memory_cleared || flash_cleared
 }
 
-/// Adds a new group address to the mesh network
+/// Adds a new group address to the mesh network with rotation policy
 ///
-/// This function validates and adds a group address to both memory and flash storage.
-/// If all group slots are filled, it will apply a rotation policy to replace the oldest group.
+/// This function validates a group address and adds it to both memory and persistent
+/// flash storage. When the group table is full, it applies a rotation policy to replace
+/// the oldest group address, ensuring the device can always join new groups.
 ///
 /// # Arguments
-/// * `group_id` - The group address to add
+/// * `group_id` - The group address to add (must be in valid group address range)
 ///
 /// # Returns
-/// * `true` if the group address was successfully added, `false` otherwise
-pub fn rf_link_add_group(group_id: u16) -> bool
+/// * `true` if the group address was successfully added or updated
+/// * `false` if validation failed (invalid group address range)
+///
+/// # Validation
+/// - Group ID must pass: `group_id.wrapping_add(0x8000) < 0x7fff`
+/// - This ensures the address is in the valid group address space
+///
+/// # Rotation Policy
+/// - If group table is full (8 entries), replaces the oldest entry
+/// - Tracks oldest position using internal static counter
+/// - Ensures device can always join new groups without manual cleanup
+///
+/// # Storage
+/// - Updates in-memory group table immediately
+/// - Appends to flash storage log for persistence
+/// - Triggers flash compaction if storage space is low
+pub fn add_group(group_id: u16) -> bool
 {
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
@@ -506,7 +575,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
     // Validate group ID: must be in valid group address range
     if group_id.wrapping_add(0x8000) < 0x7fff {
         // Clean up flash if needed
-        dev_grp_flash_clean();
+        compact_flash_storage();
         
         // If this is the first group, add to first position
         if DEV_GRP_NEXT_POS.get() == 0 {
@@ -543,7 +612,7 @@ pub fn rf_link_add_group(group_id: u16) -> bool
             
             // Remove the oldest group
             let oldest_index = OLDEST_POS.load(Ordering::Relaxed);
-            rf_link_del_group(GROUP_ADDRESS.lock()[oldest_index]);
+            remove_group(GROUP_ADDRESS.lock()[oldest_index]);
             
             // Add new group in its place
             GROUP_ADDRESS.lock()[oldest_index] = group_id;
@@ -572,7 +641,7 @@ mod tests {
     use super::*;
     use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page};
     use crate::main_light::mock_rf_link_light_event_callback;
-    use super::mock_rf_link_del_group;
+    use super::mock_remove_group;
     use mry::send_wrapper::SendWrapper;
     
     /// Helper function to reset global state for clean test environment
@@ -627,7 +696,7 @@ mod tests {
         assert_eq!(RfPower::PowerOff as u8, 16);
     }
     
-    /// Tests rf_link_slave_set_adv_mesh_name with empty advertisement data
+    /// Tests set_advertisement_mesh_name with empty advertisement data
     ///
     /// Verifies that the function correctly initializes a new Complete Local Name
     /// field when the advertisement data section is empty.
@@ -636,7 +705,7 @@ mod tests {
         reset_test_state();
         
         let mesh_name = b"TestMesh";
-        rf_link_slave_set_adv_mesh_name(mesh_name);
+        set_advertisement_mesh_name(mesh_name);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -656,7 +725,7 @@ mod tests {
         });
     }
     
-    /// Tests rf_link_slave_set_adv_mesh_name with existing mesh name
+    /// Tests set_advertisement_mesh_name with existing mesh name
     ///
     /// Verifies that the function correctly replaces an existing Complete Local Name
     /// field with new data.
@@ -669,7 +738,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let new_mesh_name = b"NewMesh";
-        rf_link_slave_set_adv_mesh_name(new_mesh_name);
+        set_advertisement_mesh_name(new_mesh_name);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -686,7 +755,7 @@ mod tests {
         });
     }
     
-    /// Tests rf_link_slave_set_adv_mesh_name with existing non-mesh data
+    /// Tests set_advertisement_mesh_name with existing non-mesh data
     ///
     /// Verifies that the function correctly appends a Complete Local Name field
     /// when other advertisement data exists but no mesh name is present.
@@ -699,7 +768,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let mesh_name = b"Test";
-        rf_link_slave_set_adv_mesh_name(mesh_name);
+        set_advertisement_mesh_name(mesh_name);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -725,7 +794,7 @@ mod tests {
         reset_test_state();
         
         let private_data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-        rf_link_slave_set_adv_private_data(&private_data);
+        set_advertisement_manufacturer_data(&private_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -758,7 +827,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let new_private_data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
-        rf_link_slave_set_adv_private_data(&new_private_data);
+        set_advertisement_manufacturer_data(&new_private_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -788,7 +857,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let private_data = [0x01, 0x02, 0x03, 0x04];
-        rf_link_slave_set_adv_private_data(&private_data);
+        set_advertisement_manufacturer_data(&private_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -818,7 +887,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let uuid_data = [0x01, 0x02, 0x03, 0x04];
-        rf_link_slave_set_adv_uuid_data(&uuid_data);
+        set_advertisement_uuid(&uuid_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -855,7 +924,7 @@ mod tests {
         create_test_adv_packet(&initial_data);
         
         let new_uuid_data = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        rf_link_slave_set_adv_uuid_data(&new_uuid_data);
+        set_advertisement_uuid(&new_uuid_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -881,7 +950,7 @@ mod tests {
         create_test_adv_packet(&large_data);
         
         let uuid_data = [0x01, 0x02, 0x03, 0x04, 0x05];
-        rf_link_slave_set_adv_uuid_data(&uuid_data);
+        set_advertisement_uuid(&uuid_data);
         
         critical_section::with(|_| {
             let pkt = PKT_ADV.lock();
@@ -913,7 +982,7 @@ mod tests {
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         
         // Call function
-        dev_grp_flash_clean();
+        compact_flash_storage();
         
         // Verify positions unchanged (no cleanup occurred)
         assert_eq!(DEV_GRP_NEXT_POS.get(), 100);
@@ -949,7 +1018,7 @@ mod tests {
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         
         // Call function
-        dev_grp_flash_clean();
+        compact_flash_storage();
         
         // Verify positions are reset
         assert_eq!(DEV_GRP_NEXT_POS.get(), INITIAL_ADDR_OFFSET as u16);
@@ -974,7 +1043,7 @@ mod tests {
         mock_rf_link_light_event_callback(mry::Any).returns(());
         
         let dev_id = 0x1234;
-        let result = rf_link_add_dev_addr(dev_id);
+        let result = add_device_address(dev_id);
         
         // Verify function returns true
         assert_eq!(result, true);
@@ -999,7 +1068,7 @@ mod tests {
     fn test_add_dev_addr_zero() {
         reset_test_state();
         
-        let result = rf_link_add_dev_addr(0);
+        let result = add_device_address(0);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1017,7 +1086,7 @@ mod tests {
         
         // Device ID that violates DEVICE_ADDR_MASK_DEFAULT
         let invalid_dev_id = 0x8000; // This should violate the mask
-        let result = rf_link_add_dev_addr(invalid_dev_id);
+        let result = add_device_address(invalid_dev_id);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1036,7 +1105,7 @@ mod tests {
         let dev_id = 0x1234;
         DEVICE_ADDRESS.set(dev_id);
         
-        let result = rf_link_add_dev_addr(dev_id);
+        let result = add_device_address(dev_id);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1061,7 +1130,7 @@ mod tests {
         DEV_ADDRESS_NEXT_POS.set(5);
         
         let new_dev_id = 0x2222;
-        let result = rf_link_add_dev_addr(new_dev_id);
+        let result = add_device_address(new_dev_id);
         
         // Verify function returns true
         assert_eq!(result, true);
@@ -1087,7 +1156,7 @@ mod tests {
     fn test_del_group_no_groups() {
         reset_test_state();
         
-        let result = rf_link_del_group(0x1234);
+        let result = remove_group(0x1234);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1121,7 +1190,7 @@ mod tests {
         });
         DEV_GRP_NEXT_POS.set(6); // 3 groups * 2 bytes each
         
-        let result = rf_link_del_group(GROUP_DELETE_ALL);
+        let result = remove_group(GROUP_DELETE_ALL);
         
         // Verify function returns true (flash operations find valid group addresses)
         assert_eq!(result, true);
@@ -1162,7 +1231,7 @@ mod tests {
         });
         DEV_GRP_NEXT_POS.set(6);
         
-        let result = rf_link_del_group(0x8002);
+        let result = remove_group(0x8002);
         
         // Verify function returns true (found and deleted the target group)
         assert_eq!(result, true);
@@ -1187,7 +1256,7 @@ mod tests {
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         
         let group_id = 0x8001; // Valid group ID that passes validation
-        let result = rf_link_add_group(group_id);
+        let result = add_group(group_id);
         
         // Verify function returns true
         assert_eq!(result, true);
@@ -1213,7 +1282,7 @@ mod tests {
         
         // Invalid group ID (outside valid range)
         let invalid_group_id = 0x7FFF;
-        let result = rf_link_add_group(invalid_group_id);
+        let result = add_group(invalid_group_id);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1234,10 +1303,10 @@ mod tests {
         let group_id = 0x1234;
         
         // Add group first time
-        rf_link_add_group(group_id);
+        add_group(group_id);
         
         // Try to add same group again
-        let result = rf_link_add_group(group_id);
+        let result = add_group(group_id);
         
         // Verify function returns false
         assert_eq!(result, false);
@@ -1248,13 +1317,13 @@ mod tests {
     /// Verifies that when all group slots are full, the oldest group
     /// is replaced using the rotation policy.
     #[test]
-    #[mry::lock(flash_write_page, rf_link_del_group)]
+    #[mry::lock(flash_write_page, remove_group)]
     fn test_add_group_rotation_policy() {
         reset_test_state();
         
         // Mock flash operations
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        mock_rf_link_del_group(mry::Any).returns(true);
+        mock_remove_group(mry::Any).returns(true);
         
         // Fill all group slots with valid group IDs
         for i in 0..crate::sdk::light::MAX_GROUP_COUNT as u16 {
@@ -1265,7 +1334,7 @@ mod tests {
         DEV_GRP_NEXT_POS.set(10); // Non-zero to avoid first-group path
         
         let new_group_id = 0x8010; // Valid group ID
-        let result = rf_link_add_group(new_group_id);
+        let result = add_group(new_group_id);
         
         // Verify function returns true
         assert_eq!(result, true);
@@ -1297,7 +1366,7 @@ mod tests {
         DEV_GRP_NEXT_POS.set(4); // Non-zero to avoid first-group path
         
         let new_group_id = 0x8003; // Valid group ID
-        let result = rf_link_add_group(new_group_id);
+        let result = add_group(new_group_id);
         
         // Verify function returns true
         assert_eq!(result, true);

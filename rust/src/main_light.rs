@@ -368,12 +368,12 @@ pub fn rf_link_data_callback(p: &Packet) {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
                 LIGHT_DEL_GRP_PARAM => {
-                    if rf_link_del_group(val) {
+                    if remove_group(val) {
                         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
                 LIGHT_ADD_GRP_PARAM => {
-                    if rf_link_add_group(val) {
+                    if add_group(val) {
                         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
@@ -382,7 +382,7 @@ pub fn rf_link_data_callback(p: &Packet) {
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
-            if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params)) && rf_link_add_dev_addr(val) {
+            if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params)) && add_device_address(val) {
                 app().mesh_manager.mesh_pair_proc_get_mac_flag();
             }
         }

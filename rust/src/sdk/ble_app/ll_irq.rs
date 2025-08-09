@@ -101,7 +101,7 @@ fn handle_ble_connection_parameter_updates()
             
             // Calculate new window size: connection interval minus a fixed offset (0x4e2 * 1µs)
             // Window size determines how long the slave listens for packets in each connection event
-            SLAVE_WINDOW_SIZE.set(BLE_CONN_INTERVAL.get() - CLOCK_SYS_CLOCK_1US * 0x4e2);
+            SLAVE_WINDOW_SIZE.set(BLE_CONN_INTERVAL.get().saturating_sub(CLOCK_SYS_CLOCK_1US * 0x4e2));
             
             // Use the smaller of the calculated window size or the master's requested window size
             // This ensures we don't exceed the master's expected listening window
@@ -1331,4 +1331,433 @@ extern "C" fn irq_handler() {
 
     // Process lower-priority interrupts
     slow();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mry::Any;
+    
+    // Import mock functions from their original modules
+    use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_build_available_channel_table;
+    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+
+    /// Helper function to reset global state to known values for test isolation.
+    /// This ensures each test starts with a clean state.
+    fn reset_global_state() {
+        SLAVE_INSTANT.set(0);
+        SLAVE_TIMING_UPDATE.set(0);
+        SLAVE_INSTANT_NEXT.set(0);
+        SLAVE_LINK_INTERVAL.set(0x9c400); // Default value
+        SLAVE_LINK_TIME_OUT.set(0);
+        SLAVE_TIMING_UPDATE2_FLAG.set(false);
+        SLAVE_TIMING_UPDATE2_OK_TIME.set(0);
+        SLAVE_NEXT_CONNECT_TICK.set(0);
+        SLAVE_WINDOW_SIZE.set(0);
+        SLAVE_WINDOW_SIZE_UPDATE.set(0);
+        BLE_CONN_INTERVAL.set(0);
+        BLE_CONN_TIMEOUT.set(0);
+        BLE_CONN_OFFSET.set(0);
+        
+        // Reset channel map to known state
+        {
+            let mut chn_map = SLAVE_CHN_MAP.lock();
+            *chn_map = [0xff, 0xff, 0xff, 0xff, 0x1f]; // Default all channels enabled
+        }
+    }
+
+    /// Tests that the connection event counter is incremented on every call.
+    ///
+    /// This test verifies BLE specification compliance for connection event tracking.
+    /// Per BLE Core Spec v5.4, Section 4.5.1: "connEventCount shall be incremented
+    /// for each connection event regardless of whether the slave receives a packet."
+    #[test]
+    fn test_connection_event_counter_increment() {
+        reset_global_state();
+        
+        // Setup: Reset connection event counter to known value
+        SLAVE_INSTANT.set(100);
+        
+        // Ensure no updates are pending to focus on counter increment only
+        SLAVE_TIMING_UPDATE.set(0);
+        
+        // Execute function
+        handle_ble_connection_parameter_updates();
+        
+        // Verify: Connection event counter incremented
+        assert_eq!(SLAVE_INSTANT.get(), 101, 
+            "Connection event counter must increment on every call per BLE specification");
+    }
+
+    /// Tests Channel Map Update procedure (LL_CHANNEL_MAP_IND) per BLE specification.
+    ///
+    /// This test verifies compliance with BLE Core Spec v5.4, Section 5.1.12:
+    /// - Channel map updates are applied at the specified instant
+    /// - The channel table is rebuilt with the new channel map
+    /// - The update flag is cleared after processing
+    /// - The packet initialization structure is updated
+    #[test]
+    #[mry::lock(ble_ll_build_available_channel_table)]
+    fn test_channel_map_update_ble_specification_compliance() {
+        reset_global_state();
+        
+        // Setup: Configure for channel map update at specific instant
+        SLAVE_TIMING_UPDATE.set(1);        // Type 1 = Channel Map Update
+        SLAVE_INSTANT.set(50);             // Current instant
+        SLAVE_INSTANT_NEXT.set(51);        // Update should apply at instant 51
+        
+        // Setup new channel map (enable channels 0, 2, 4, 6, 8 - selective hopping)
+        let test_channel_map = [0x55, 0x55, 0x55, 0x55, 0x15]; // Binary: 01010101...
+        {
+            let mut chn_map = SLAVE_CHN_MAP.lock();
+            *chn_map = test_channel_map;
+        }
+        
+        // Setup mock for channel table building
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        
+        // Execute: This should increment instant to 51 and trigger channel map update
+        handle_ble_connection_parameter_updates();
+        
+        // Verify: Channel map update was processed correctly
+        assert_eq!(SLAVE_INSTANT.get(), 51, "Instant should be incremented");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag should be cleared after processing");
+        
+        // Verify: Channel table was rebuilt with correct parameters
+        mock_ble_ll_build_available_channel_table(test_channel_map.to_vec(), false)
+            .assert_called(1);
+        
+        // Verify: Packet initialization structure was updated
+        {
+            let pkt_init = PKT_INIT.lock();
+            assert_eq!(pkt_init.ll_init().chm, test_channel_map, 
+                "Packet init channel map should match new channel map");
+        }
+    }
+
+    /// Tests that channel map updates only occur at the correct instant.
+    ///
+    /// Per BLE specification, timing updates must be synchronized between master and slave.
+    /// The update should only be applied when SLAVE_INSTANT_NEXT matches SLAVE_INSTANT.
+    #[test]
+    #[mry::lock(ble_ll_build_available_channel_table)]
+    fn test_channel_map_update_instant_synchronization() {
+        reset_global_state();
+        
+        // Setup: Channel map update scheduled for future instant
+        SLAVE_TIMING_UPDATE.set(1);        // Channel map update pending
+        SLAVE_INSTANT.set(10);             // Current instant
+        SLAVE_INSTANT_NEXT.set(15);        // Update scheduled for instant 15
+        
+        // Setup mock (should not be called since instant doesn't match)
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        
+        // Execute: Should increment instant but not apply update
+        handle_ble_connection_parameter_updates();
+        
+        // Verify: Instant incremented but update not processed
+        assert_eq!(SLAVE_INSTANT.get(), 11, "Instant should increment");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 1, "Update flag should remain set");
+        
+        // Verify: Channel table rebuild was not called
+        mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
+        
+        // Execute again multiple times to reach the target instant
+        for _ in 0..4 {
+            handle_ble_connection_parameter_updates();
+        }
+        
+        // Verify: Now at instant 15, update should be processed
+        assert_eq!(SLAVE_INSTANT.get(), 15);
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update should now be processed");
+        mock_ble_ll_build_available_channel_table(Any, Any).assert_called(1);
+    }
+
+    /// Tests Connection Parameter Update procedure (LL_CONNECTION_UPDATE_IND) per BLE specification.
+    ///
+    /// This test verifies compliance with BLE Core Spec v5.4, Section 5.1.11:
+    /// - Connection parameters are updated at the specified instant
+    /// - All timing calculations follow BLE specification formulas
+    /// - Window size is calculated correctly with master's constraints
+    /// - Update flags and timing are managed properly
+    #[test]
+    fn test_connection_parameter_update_ble_specification_compliance() {
+        reset_global_state();
+        
+        // Setup: Configure for connection parameter update
+        SLAVE_TIMING_UPDATE.set(2);        // Type 2 = Connection Parameter Update
+        SLAVE_INSTANT.set(25);             // Current instant  
+        SLAVE_INSTANT_NEXT.set(26);        // Update at instant 26
+        
+        // Setup new connection parameters (realistic BLE values)
+        BLE_CONN_INTERVAL.set(32 * CLOCK_SYS_CLOCK_1US);    // 32ms interval (25.6 connection intervals)
+        BLE_CONN_TIMEOUT.set(4000 * CLOCK_SYS_CLOCK_1US);   // 4 second supervision timeout
+        BLE_CONN_OFFSET.set(1000 * CLOCK_SYS_CLOCK_1US);    // 1ms offset
+        SLAVE_NEXT_CONNECT_TICK.set(10000 * CLOCK_SYS_CLOCK_1US); // Next event at 10ms
+        SLAVE_WINDOW_SIZE_UPDATE.set(5 * CLOCK_SYS_CLOCK_1US);     // 5ms window from master
+        
+        // Calculate expected timing before calling the function
+        let expected_update_time = BLE_CONN_OFFSET.get() + SLAVE_NEXT_CONNECT_TICK.get();
+        
+        // Execute: Should increment instant and apply connection parameter update
+        handle_ble_connection_parameter_updates();
+        
+        // Verify: Instant incremented and update flag cleared
+        assert_eq!(SLAVE_INSTANT.get(), 26, "Instant should increment to trigger update");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag should be cleared");
+        
+        // Verify: Connection parameters applied correctly
+        assert_eq!(SLAVE_LINK_INTERVAL.get(), 32 * CLOCK_SYS_CLOCK_1US,
+            "Connection interval should be updated to new value");
+        assert_eq!(SLAVE_LINK_TIME_OUT.get(), 4000 * CLOCK_SYS_CLOCK_1US,
+            "Supervision timeout should be updated to new value");
+        
+        // Verify: Timing calculations per BLE specification
+        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), expected_update_time,
+            "Update timing should include connection offset");
+        assert_eq!(SLAVE_NEXT_CONNECT_TICK.get(), expected_update_time,
+            "Next connection tick should use new timing");
+        
+        // Verify: Update flag is set for timing coordination
+        assert_eq!(SLAVE_TIMING_UPDATE2_FLAG.get(), true,
+            "Timing update flag should be set during parameter transition");
+    }
+
+    /// Tests window size calculation according to BLE specification.
+    ///
+    /// Window size calculation must follow BLE Core Spec requirements:
+    /// - Base window size = connection interval - fixed offset (0x4e2 µs ≈ 1.25ms)
+    /// - Final window size = min(calculated_size, master_requested_size)
+    /// - Window size must never exceed connection interval
+    #[test]
+    fn test_window_size_calculation_ble_specification() {
+        reset_global_state();
+        
+        // Test Case 1: Master's window size is smaller (should use master's size)
+        SLAVE_TIMING_UPDATE.set(2);
+        SLAVE_INSTANT.set(0);
+        SLAVE_INSTANT_NEXT.set(1);
+        
+        BLE_CONN_INTERVAL.set(50000 * CLOCK_SYS_CLOCK_1US);    // 50000ms interval (large enough to avoid underflow)
+        SLAVE_WINDOW_SIZE_UPDATE.set(10 * CLOCK_SYS_CLOCK_1US); // Master wants 10ms window
+        BLE_CONN_OFFSET.set(0);
+        SLAVE_NEXT_CONNECT_TICK.set(0);
+        
+        handle_ble_connection_parameter_updates();
+        
+        // Calculated window = 50000ms - 1.25ms = 49998.75ms, but master wants 10ms
+        assert_eq!(SLAVE_WINDOW_SIZE.get(), 10 * CLOCK_SYS_CLOCK_1US,
+            "Should use master's smaller window size");
+        
+        // Test Case 2: Calculated size is smaller (should use calculated size)
+        SLAVE_TIMING_UPDATE.set(2);
+        SLAVE_INSTANT.set(1);
+        SLAVE_INSTANT_NEXT.set(2);
+        
+        BLE_CONN_INTERVAL.set(10 * CLOCK_SYS_CLOCK_1US);    // 10ms interval
+        SLAVE_WINDOW_SIZE_UPDATE.set(50 * CLOCK_SYS_CLOCK_1US); // Master wants 50ms (too big)
+        
+        handle_ble_connection_parameter_updates();
+        
+        // Calculated window = 10ms - 1.25ms = 8.75ms, master wants 50ms
+        let expected_window = (10 * CLOCK_SYS_CLOCK_1US).saturating_sub(CLOCK_SYS_CLOCK_1US * 0x4e2);
+        assert_eq!(SLAVE_WINDOW_SIZE.get(), expected_window,
+            "Should use calculated size when master requests too large window");
+    }
+
+    /// Tests edge case where connection interval is very small.
+    ///
+    /// This tests BLE specification edge cases for minimum connection intervals.
+    /// Per BLE spec, minimum connection interval is 7.5ms, but we test smaller
+    /// values to ensure robust window size calculation.
+    #[test]
+    fn test_minimum_connection_interval_window_calculation() {
+        reset_global_state();
+        
+        SLAVE_TIMING_UPDATE.set(2);
+        SLAVE_INSTANT.set(0);
+        SLAVE_INSTANT_NEXT.set(1);
+        
+        // Test with very small interval (smaller than the 0x4e2 offset)
+        BLE_CONN_INTERVAL.set(CLOCK_SYS_CLOCK_1US * 1000);  // 1ms interval (below BLE minimum)
+        SLAVE_WINDOW_SIZE_UPDATE.set(CLOCK_SYS_CLOCK_1US * 2000); // 2ms window request
+        BLE_CONN_OFFSET.set(0);
+        SLAVE_NEXT_CONNECT_TICK.set(0);
+        
+        handle_ble_connection_parameter_updates();
+        
+        // Window calculation: 1ms - 1.25ms = negative, saturating_sub gives 0
+        // Since calculated window (0) < master's window (2000), use calculated window (0)
+        assert_eq!(SLAVE_WINDOW_SIZE.get(), 0,
+            "Should handle underflow gracefully by using calculated window of 0");
+    }
+
+    /// Tests that updates don't occur when instant synchronization is off.
+    ///
+    /// This verifies the critical BLE requirement that parameter updates must be
+    /// synchronized between master and slave at the exact same connection event.
+    #[test]
+    #[mry::lock(ble_ll_build_available_channel_table)]
+    fn test_no_update_when_instant_mismatch() {
+        reset_global_state();
+        
+        // Setup: Updates pending but instants don't match
+        SLAVE_TIMING_UPDATE.set(1);        // Channel map update pending
+        SLAVE_INSTANT.set(5);              // Current instant
+        SLAVE_INSTANT_NEXT.set(10);        // Update scheduled for instant 10
+        
+        // Store original values to verify they don't change
+        let original_interval = SLAVE_LINK_INTERVAL.get();
+        let original_timeout = SLAVE_LINK_TIME_OUT.get();
+        
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        
+        // Execute function
+        handle_ble_connection_parameter_updates();
+        
+        // Verify: No updates applied
+        assert_eq!(SLAVE_INSTANT.get(), 6, "Only instant should increment");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 1, "Update flag should remain set");
+        assert_eq!(SLAVE_LINK_INTERVAL.get(), original_interval, "Interval unchanged");
+        assert_eq!(SLAVE_LINK_TIME_OUT.get(), original_timeout, "Timeout unchanged");
+        
+        // Verify: No channel operations called
+        mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
+    }
+
+    /// Tests connection parameter update type detection.
+    ///
+    /// The function must correctly distinguish between:
+    /// - Type 1: Channel Map Update (LL_CHANNEL_MAP_IND)
+    /// - Type 2: Connection Parameter Update (LL_CONNECTION_UPDATE_IND)
+    /// - No update: SLAVE_TIMING_UPDATE = 0
+    #[test]
+    #[mry::lock(ble_ll_build_available_channel_table)]
+    fn test_update_type_detection() {
+        reset_global_state();
+        
+        // Test Case 1: No update pending
+        SLAVE_TIMING_UPDATE.set(0);
+        SLAVE_INSTANT.set(0);
+        SLAVE_INSTANT_NEXT.set(1);
+        
+        let original_interval = SLAVE_LINK_INTERVAL.get();
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        
+        handle_ble_connection_parameter_updates();
+        
+        assert_eq!(SLAVE_INSTANT.get(), 1, "Instant should still increment");
+        assert_eq!(SLAVE_LINK_INTERVAL.get(), original_interval, "No parameter changes");
+        mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
+        
+        // Test Case 2: Invalid update type
+        SLAVE_TIMING_UPDATE.set(99);       // Invalid type
+        SLAVE_INSTANT.set(1);
+        SLAVE_INSTANT_NEXT.set(2);
+        
+        handle_ble_connection_parameter_updates();
+        
+        assert_eq!(SLAVE_INSTANT.get(), 2, "Instant should increment");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 99, "Invalid type should remain unchanged");
+        mock_ble_ll_build_available_channel_table(Any, Any).assert_called(0);
+    }
+
+    /// Tests BLE specification timing requirements for parameter updates.
+    ///
+    /// Per BLE Core Spec v5.4:
+    /// - Updates must be applied at the exact connection event specified
+    /// - Timing calculations must account for connection offset
+    /// - Window sizing must respect both calculated and master-requested limits
+    #[test]
+    fn test_ble_timing_specification_compliance() {
+        reset_global_state();
+        
+        // Setup realistic BLE connection scenario
+        SLAVE_TIMING_UPDATE.set(2);
+        SLAVE_INSTANT.set(42);             // Current connection event
+        SLAVE_INSTANT_NEXT.set(43);        // Update at next event
+        
+        // BLE-compliant parameter values
+        BLE_CONN_INTERVAL.set(24 * CLOCK_SYS_CLOCK_1US);    // 24ms (19.2 intervals)
+        BLE_CONN_TIMEOUT.set(6000 * CLOCK_SYS_CLOCK_1US);   // 6 second timeout
+        BLE_CONN_OFFSET.set(500 * CLOCK_SYS_CLOCK_1US);     // 500µs offset
+        SLAVE_NEXT_CONNECT_TICK.set(50000 * CLOCK_SYS_CLOCK_1US); // 50ms base time
+        SLAVE_WINDOW_SIZE_UPDATE.set(3 * CLOCK_SYS_CLOCK_1US);     // 3ms window
+        
+        // Record pre-update state
+        let pre_update_flags = SLAVE_TIMING_UPDATE2_FLAG.get();
+        
+        // Execute update
+        handle_ble_connection_parameter_updates();
+        
+        // Verify BLE specification compliance
+        assert_eq!(SLAVE_INSTANT.get(), 43, "Update must occur at specified instant");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), 0, "Update flag must be cleared");
+        assert_eq!(SLAVE_TIMING_UPDATE2_FLAG.get(), true, "Timing flag must be set");
+        
+        // Verify timing calculations
+        let expected_timing = BLE_CONN_OFFSET.get() + 50000 * CLOCK_SYS_CLOCK_1US;
+        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), expected_timing,
+            "Update timing must include connection offset per BLE spec");
+        assert_eq!(SLAVE_NEXT_CONNECT_TICK.get(), expected_timing,
+            "Next connection event must use updated timing");
+        
+        // Verify window size follows BLE specification formula
+        let calculated_window = BLE_CONN_INTERVAL.get().saturating_sub(CLOCK_SYS_CLOCK_1US * 0x4e2);
+        let expected_window = if SLAVE_WINDOW_SIZE_UPDATE.get() < calculated_window {
+            SLAVE_WINDOW_SIZE_UPDATE.get()
+        } else {
+            calculated_window
+        };
+        assert_eq!(SLAVE_WINDOW_SIZE.get(), expected_window,
+            "Window size must follow BLE specification: min(calculated, master_requested)");
+    }
+
+    /// Tests state consistency during parameter updates.
+    ///
+    /// Ensures that all global state variables remain consistent during updates
+    /// and that the function is idempotent when called multiple times.
+    #[test]
+    fn test_state_consistency_during_updates() {
+        reset_global_state();
+        
+        // Setup initial state
+        SLAVE_TIMING_UPDATE.set(2);
+        SLAVE_INSTANT.set(10);
+        SLAVE_INSTANT_NEXT.set(11);
+        
+        // Set consistent parameter values
+        BLE_CONN_INTERVAL.set(20 * CLOCK_SYS_CLOCK_1US);
+        BLE_CONN_TIMEOUT.set(3000 * CLOCK_SYS_CLOCK_1US);
+        BLE_CONN_OFFSET.set(100 * CLOCK_SYS_CLOCK_1US);
+        SLAVE_NEXT_CONNECT_TICK.set(5000 * CLOCK_SYS_CLOCK_1US);
+        SLAVE_WINDOW_SIZE_UPDATE.set(10 * CLOCK_SYS_CLOCK_1US);
+        
+        // Execute first update
+        handle_ble_connection_parameter_updates();
+        
+        // Capture state after first update
+        let interval_after = SLAVE_LINK_INTERVAL.get();
+        let timeout_after = SLAVE_LINK_TIME_OUT.get();
+        let timing_after = SLAVE_TIMING_UPDATE2_OK_TIME.get();
+        let window_after = SLAVE_WINDOW_SIZE.get();
+        let instant_after = SLAVE_INSTANT.get();
+        let update_flag_after = SLAVE_TIMING_UPDATE.get();
+        
+        // Verify update was applied
+        assert_eq!(instant_after, 11);
+        assert_eq!(update_flag_after, 0);
+        assert_eq!(interval_after, 20 * CLOCK_SYS_CLOCK_1US);
+        
+        // Execute function again (should only increment instant)
+        handle_ble_connection_parameter_updates();
+        
+        // Verify state consistency: only instant should change
+        assert_eq!(SLAVE_INSTANT.get(), instant_after + 1, "Only instant should increment");
+        assert_eq!(SLAVE_LINK_INTERVAL.get(), interval_after, "Interval should be stable");
+        assert_eq!(SLAVE_LINK_TIME_OUT.get(), timeout_after, "Timeout should be stable");
+        assert_eq!(SLAVE_TIMING_UPDATE2_OK_TIME.get(), timing_after, "Timing should be stable");
+        assert_eq!(SLAVE_WINDOW_SIZE.get(), window_after, "Window should be stable");
+        assert_eq!(SLAVE_TIMING_UPDATE.get(), update_flag_after, "Update flag should remain clear");
+    }
 }

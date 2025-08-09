@@ -18,6 +18,7 @@ use crate::state::{*};
 /// In BLE, there are 40 channels (0-39), with channels 37, 38, and 39 reserved for advertising.
 /// This function handles data channels (0-36) which are used for communication after connection
 /// establishment.
+#[cfg_attr(test, mry::mry)]
 pub fn ble_ll_build_available_channel_table(channel: &[u8], reset: bool)
 {
     // Reset the channel counter

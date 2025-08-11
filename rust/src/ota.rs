@@ -32,7 +32,7 @@ impl OtaManager {
     pub const FLASH_ADR_OTA_READY_FLAG: u32 = 0x3F000;
     pub const FLASH_OTA_READY_FLAG: u8 = 0xa5;
     pub const FW_SIZE_MAX_K: u32 = 128;
-    pub const ERASE_SECTORS_FOR_OTA: u32 = (OtaManager::FW_SIZE_MAX_K + 3) / 4;
+    pub const ERASE_SECTORS_FOR_OTA: u32 = OtaManager::FW_SIZE_MAX_K.div_ceil(4);
 
     #[cfg(not(test))]
     pub const fn default_const() -> OtaManager {
@@ -216,7 +216,7 @@ impl OtaManager {
                 if n_data_len == 0 {
                     let mut ota_pkt_total = [0u8; 4];
                     flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 0x18, 4, ota_pkt_total.as_mut_ptr());
-                    let ota_pkt_total = ((array4_to_int(&ota_pkt_total) + (packet_len - 1)) / packet_len) as u16;
+                    let ota_pkt_total = array4_to_int(&ota_pkt_total).div_ceil(packet_len) as u16;
                     if ota_pkt_total < 3 {
                         // invalid fw
                         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);

@@ -83,7 +83,7 @@ mod tests {
     
     // Thread-local storage for test data
     thread_local! {
-        static ACTUAL_SERIALIZED: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+        static ACTUAL_SERIALIZED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
 
     #[test]

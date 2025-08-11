@@ -137,7 +137,7 @@ impl UartManager {
                 return true;
             }
             
-            return false;
+            false
         })
     }
 
@@ -215,7 +215,7 @@ impl UartManager {
                 self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..18]).unwrap()).unwrap();
 
                 // Send the message in to the mesh
-                sno = app().mesh_manager.send_mesh_message(&data, destination, msg.data[18], if msg.data[19] != 0 { true } else { false });
+                sno = app().mesh_manager.send_mesh_message(&data, destination, msg.data[18], msg.data[19] != 0);
             }
 
             if msg.data[2] == UartMsg::LightStatus as u8 {
@@ -375,7 +375,7 @@ mod tests {
         let result = manager.send_message(&msg);
         
         // Verify result
-        assert_eq!(result, true);
+        assert!(result);
         
         // Verify channel has one message
         critical_section::with(|_| {
@@ -409,14 +409,14 @@ mod tests {
         let capacity = 6; // This should match the capacity in UartManager
         for _ in 0..capacity {
             let result = manager.send_message(&msg);
-            assert_eq!(result, true);
+            assert!(result);
         }
         
         // Try to send one more message
         let result = manager.send_message(&msg);
         
         // Verify the message was rejected
-        assert_eq!(result, false);
+        assert!(!result);
         
         // Verify channel length is still at capacity
         critical_section::with(|_| {
@@ -501,7 +501,7 @@ mod tests {
         });
         
         // Verify sender_started was set to true
-        assert_eq!(manager.sender_started, true);
+        assert!(manager.sender_started);
     }
     
     /// Tests the handle_rx method with an invalid CRC.
@@ -562,13 +562,13 @@ mod tests {
         manager.sender_started = false;
         
         // Verify started() returns false
-        assert_eq!(manager.started(), false);
+        assert!(!manager.started());
         
         // Set sender_started = true
         manager.sender_started = true;
         
         // Verify started() returns true
-        assert_eq!(manager.started(), true);
+        assert!(manager.started());
     }
     
     /// Tests the UartManager default constructor.
@@ -587,7 +587,7 @@ mod tests {
         // Verify default values
         assert_eq!(manager.ack_counter, 0);
         assert_eq!(manager.last_ack, 0);
-        assert_eq!(manager.sender_started, false);
+        assert!(!manager.sender_started);
         
         // Verify channels are empty
         critical_section::with(|_| {

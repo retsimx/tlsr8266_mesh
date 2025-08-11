@@ -104,7 +104,7 @@ mod tests {
         // Get a reference to the future to check its state after polling
         // (avoiding the borrow conflict)
         let yield_now_after_poll = Pin::into_inner(pinned.as_mut());
-        assert_eq!(yield_now_after_poll.0, true); // Internal state should be changed
+        assert!(yield_now_after_poll.0); // Internal state should be changed
         
         // Second poll should return Ready
         assert!(matches!(pinned.poll(&mut cx), Poll::Ready(())));

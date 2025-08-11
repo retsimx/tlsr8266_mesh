@@ -16,7 +16,6 @@ use crate::sdk::ble_app::rf_drv_8266::{rf_set_ble_access_code, rf_set_ble_channe
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed, sleep_us};
-use critical_section;
 use crate::sdk::mcu::register::{FLD_RF_IRQ_MASK, read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status};
 use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use crate::state::{*};
@@ -175,7 +174,7 @@ impl MeshManager {
             self.add_send_mesh_msg(&pkt, 0, pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]);
         }
 
-        return pkt.mesh().sno;
+        pkt.mesh().sno
     }
 
     pub fn mesh_pair_init(&mut self) {
@@ -513,17 +512,15 @@ impl MeshManager {
     pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64, send_count: u8) {
         // If we sent the message, and we are sending the message back to ourselves - just report the packet over uart
         if packet.ll_app().value.src == DEVICE_ADDRESS.get() && packet.ll_app().value.dst == DEVICE_ADDRESS.get(){
-            light_mesh_rx_cb(&*packet);
-        } else {
-            if self.pkt_send_buf.push(
-                SendPkt {
-                    delay,
-                    pkt: *packet,
-                    send_count
-                }
-            ).is_err() {
-                uprintln!("pkt send buf is full, dropping packet...");
+            light_mesh_rx_cb(packet);
+        } else if self.pkt_send_buf.push(
+            SendPkt {
+                delay,
+                pkt: *packet,
+                send_count
             }
+        ).is_err() {
+            uprintln!("pkt send buf is full, dropping packet...");
         }
     }
 
@@ -532,7 +529,7 @@ impl MeshManager {
             yield_now().await;
 
             let result = critical_section::with(|_| {
-                let found = self.pkt_send_buf.iter().enumerate().filter(|(_, elem)| clock_time64() > elem.delay).next();
+                let found = self.pkt_send_buf.iter().enumerate().find(|(_, elem)| clock_time64() > elem.delay);
 
                 let (index, _) = found?;
 

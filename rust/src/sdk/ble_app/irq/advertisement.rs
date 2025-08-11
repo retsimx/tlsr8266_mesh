@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::common::SYS_CHN_ADV;
 use crate::sdk::ble_app::light_ll::mesh_send_online_status;
 use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::light::IrqHandlerStatus;
+use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::{*};
 use crate::state::{*};
@@ -95,7 +95,7 @@ pub fn handle_ble_advertisement_state()
         MESH_DEVICE_ONLINE_STATUS.set(false);
         
         // Transition back to listening state
-        *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
+        *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
         
         // Clear RF interrupt status
         write_reg_rf_irq_status(1);
@@ -136,7 +136,7 @@ pub fn handle_ble_advertisement_state()
         }
 
         // Set next state to listening (will be processed after advertisement completes)
-        *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
+        *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
     }
 }
 
@@ -165,7 +165,7 @@ mod tests {
         BLE_ADVERTISING_ENABLED.set(false);
         BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
         MESH_DEVICE_ONLINE_STATUS.set(false);
-        *P_ST_HANDLER.lock() = IrqHandlerStatus::Listen;
+        *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
     }
     
     /// Helper function to reset the internal ST_PNO static counter in handle_ble_advertisement_state.
@@ -174,7 +174,7 @@ mod tests {
         // Save current state
         let saved_adv_enabled = BLE_ADVERTISING_ENABLED.get();
         let saved_online_status = MESH_DEVICE_ONLINE_STATUS.get();
-        let saved_handler_state = *P_ST_HANDLER.lock();
+        let saved_handler_state = *CURRENT_RF_STATE.lock();
         
         // Set state to trigger the completion path (line 76-81) which resets ST_PNO to 0
         BLE_ADVERTISING_ENABLED.set(false);
@@ -186,7 +186,7 @@ mod tests {
         // Restore original state
         BLE_ADVERTISING_ENABLED.set(saved_adv_enabled);
         MESH_DEVICE_ONLINE_STATUS.set(saved_online_status);
-        *P_ST_HANDLER.lock() = saved_handler_state;
+        *CURRENT_RF_STATE.lock() = saved_handler_state;
     }
 
     /// Helper function to set up all the mocks needed for RF BLE functions.
@@ -288,7 +288,7 @@ mod tests {
             "Online status flag should be cleared after handling");
         
         // Verify state transitions to Listen
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Listen,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::MeshListening,
             "State should transition to Listen mode");
         
         // Verify RF interrupt status is cleared - called during both reset and test
@@ -344,7 +344,7 @@ mod tests {
             "Online status flag should remain cleared");
         
         // Verify state transitions to Listen
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Listen,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::MeshListening,
             "State should transition to Listen mode");
     }
 
@@ -416,7 +416,7 @@ mod tests {
         mock_write_reg_rf_mode_control(0x87).assert_called(1);
         
         // Verify state transitions to Listen for next iteration
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Listen,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::MeshListening,
             "State should transition to Listen mode");
         
         // Verify RF interrupt status is cleared - called during both reset and test
@@ -469,7 +469,7 @@ mod tests {
             "Advertisement flag should remain true after processing first channel");
         
         // Verify state transitions to Listen
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Listen,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::MeshListening,
             "State should be in Listen mode");
     }
 
@@ -554,7 +554,7 @@ mod tests {
         }
         
         // Verify final state is consistent
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Listen,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::MeshListening,
             "Final state should be Listen mode");
     }
 }

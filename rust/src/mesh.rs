@@ -2,6 +2,7 @@ use core::ptr::addr_of;
 
 use embassy_time::{Duration, Timer};
 use heapless::{Deque, Vec};
+use bytemuck::{Pod, Zeroable};
 
 use crate::{app, BIT, uprintln};
 use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
@@ -71,6 +72,13 @@ pub struct mesh_node_st_val_t {
     // don't change include type
     pub par: [u8; MESH_NODE_ST_PAR_LEN], //lumen-rsv,
 }
+
+// SAFETY: This struct is safe to use with bytemuck because:
+// 1. It's #[repr(C, packed)] so it has a stable memory layout
+// 2. All fields are u8 which are safe to transmute
+// 3. The struct size is fixed and known at compile time
+unsafe impl Pod for mesh_node_st_val_t {}
+unsafe impl Zeroable for mesh_node_st_val_t {}
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]

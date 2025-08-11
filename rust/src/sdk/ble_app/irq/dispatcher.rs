@@ -12,7 +12,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::embassy::time_driver::clock_time64;
-use crate::sdk::light::IrqHandlerStatus;
+use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::register::{*};
 use crate::state::{*};
 use crate::{app};
@@ -134,14 +134,14 @@ fn handle_system_interrupts() {
         
         // Get current BLE state and dispatch to appropriate handler
         let state = {
-            *P_ST_HANDLER.lock()
+            *CURRENT_RF_STATE.lock()
         };
         match state {
-            IrqHandlerStatus::Adv => handle_ble_advertisement_state(),        // Advertisement state
-            IrqHandlerStatus::Bridge => handle_ble_connected_state(),   // Connected bridge state
-            IrqHandlerStatus::Rx => configure_ble_receive_state(),      // BLE receive state
-            IrqHandlerStatus::Listen => handle_mesh_listening_state(),   // Mesh listening state
-            IrqHandlerStatus::None => {}                   // Idle state
+            RfOperationState::Advertising => handle_ble_advertisement_state(),        // Advertisement state
+            RfOperationState::Connected => handle_ble_connected_state(),   // Connected bridge state
+            RfOperationState::Receiving => configure_ble_receive_state(),      // BLE receive state
+            RfOperationState::MeshListening => handle_mesh_listening_state(),   // Mesh listening state
+            RfOperationState::Idle => {}                   // Idle state
         }
     }
 

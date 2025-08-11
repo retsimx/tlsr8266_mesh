@@ -526,7 +526,7 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
 
             MESH_NODE_MASK.lock().fill(0);
 
-            *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
+            *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
             NEED_UPDATE_CONNECT_PARA.set(true);
             GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
@@ -788,6 +788,7 @@ pub fn rf_link_is_notify_req(value: u8) -> bool
     return false;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
 {
     let mut pkt_light_data = PKT_LIGHT_DATA.lock();

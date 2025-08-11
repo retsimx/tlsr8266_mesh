@@ -84,9 +84,9 @@ pub static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> = CriticalSectio
 /// Each bit represents one channel; used for adaptive frequency hopping.
 pub static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::new([0; 5]);
 
-/// Current interrupt handler status indicating which RF operation is active.
-/// Tracks whether the device is in advertising, bridge, RX, listen, or idle state.
-pub static P_ST_HANDLER: CriticalSectionMutex<IrqHandlerStatus> = CriticalSectionMutex::new(IrqHandlerStatus::None);
+/// Current RF operation state indicating which mode is active.
+/// Tracks whether the device is in advertising, connected, receiving, mesh listening, or idle state.
+pub static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> = CriticalSectionMutex::new(RfOperationState::Idle);
 
 /// Mesh network name used for pairing and access control.
 /// 16-byte string identifier that devices must match to join the mesh network.

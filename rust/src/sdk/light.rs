@@ -329,10 +329,10 @@ impl AtomicBlePeripheralLinkState {
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
-pub enum IrqHandlerStatus {
-    None,
-    Adv,
-    Bridge,
-    Rx,
-    Listen
+pub enum RfOperationState {
+    Idle,
+    Advertising,
+    Connected,
+    Receiving,
+    MeshListening
 }

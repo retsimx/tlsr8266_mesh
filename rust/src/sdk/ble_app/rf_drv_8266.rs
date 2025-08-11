@@ -139,6 +139,7 @@ pub fn rf_stop_trx() {
  * 1. Enabling the RF receiver in the RF_TRX_MODE register
  * 2. Setting the RF state machine to receive mode
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_rxmode()
 {
     write_reg_rf_rx_mode((FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits());  // rx enable
@@ -630,7 +631,7 @@ pub fn rf_link_slave_init(interval: u32)
         blc_ll_init_basic_mcu();
         
         // Set up interrupt handler status for advertisement mode
-        *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
+        *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
         
         // Initialize link state and timing parameters
         BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
@@ -795,6 +796,7 @@ struct ChannelParams {
  * 
  * @param chn - The BLE channel number to use (0-61)
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_channel(chn: u8) {
     // Set the RF channel control register
     write_reg_rf_channel(chn);
@@ -969,6 +971,7 @@ pub fn rf_start_stx2rx(addr: u32, tick: u32)
  * @param addr - The address in memory where received data should be stored
  * @param tick - The system tick time when the transition should occur
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_start_brx(addr: u32, tick: u32)
 {
     write_reg32(0xf28, 0xffffffff);                              // Clear pending events
@@ -1013,6 +1016,7 @@ pub fn rf_set_ble_crc(crc: &[u8])
  * Configures the RF hardware with the standard CRC initialization value (0x555555)
  * that is used for BLE advertising packets according to the specification.
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_crc_adv()
 {
     write_reg_rf_crc(0x555555);  // Standard BLE advertising CRC init value
@@ -1027,6 +1031,7 @@ pub fn rf_set_ble_crc_adv()
  * 
  * @param ac - The 32-bit access code value
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_access_code(ac: u32)
 {
     write_reg_rf_access_code(ac.swap_bytes());  // Swap byte order for hardware compatibility

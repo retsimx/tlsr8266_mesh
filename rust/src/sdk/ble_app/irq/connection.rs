@@ -14,7 +14,7 @@ use crate::embassy::time_driver::clock_time64;
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
 use crate::sdk::ble_app::light_ll::{*};
 use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::light::{IrqHandlerStatus, ePairState, OtaState, BlePeripheralLinkState, SLAVE_READ_STATUS_BUSY_TIMEOUT, BUFF_RESPONSE_PACKET_COUNT};
+use crate::sdk::light::{RfOperationState, ePairState, OtaState, BlePeripheralLinkState, SLAVE_READ_STATUS_BUSY_TIMEOUT, BUFF_RESPONSE_PACKET_COUNT};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::{*};
 use crate::state::{*};
@@ -39,6 +39,7 @@ use crate::{app};
 /// ## Timing Synchronization:
 /// Updates are applied when `BLE_PERIPHERAL_NEXT_UPDATE_INSTANT` matches `BLE_PERIPHERAL_CONNECTION_INSTANT`, ensuring
 /// both master and slave apply changes at the same connection event for synchronization.
+#[cfg_attr(test, mry::mry)]
 pub fn handle_ble_connection_parameter_updates()
 {
     // Increment the connection event counter - this tracks which connection event we're in
@@ -119,7 +120,7 @@ pub fn handle_ble_connection_parameter_updates()
 pub fn cleanup_ble_disconnection() {
     // Schedule transition to advertisement state with short delay (100µs)
     write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
-    *P_ST_HANDLER.lock() = IrqHandlerStatus::Adv;
+    *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
     
     // Reset DMA transmission pointer to clear any pending transmissions
     write_reg_dma_tx_rptr(0x10);
@@ -302,7 +303,7 @@ fn handle_ota_operations() -> bool {
 
         // During OTA, schedule next connection event and return to RX state
         write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
-        *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
+        *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
         return true;
     }
     false
@@ -480,7 +481,7 @@ fn schedule_next_connection_event() {
     write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
     
     // Transition to receive state to listen for the next packet from master
-    *P_ST_HANDLER.lock() = IrqHandlerStatus::Rx;
+            *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
 }
 
 /// Handles the BLE bridge state interrupt for connected operation.
@@ -1065,7 +1066,7 @@ mod tests {
         mock_write_reg_system_tick_irq(expected_irq_time).assert_called(1);
         
         // Verify state handler is set to advertisement
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Adv, 
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::Advertising, 
             "Should schedule transition to advertisement state");
         
         // Verify DMA transmission pointer is reset
@@ -1370,7 +1371,7 @@ mod tests {
             "Connection parameter update flag should be false");
         assert_eq!(SLAVE_DATA_VALID.get(), 0, 
             "Data validity should be cleared");
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Adv, 
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::Advertising, 
             "Handler state should be set to advertisement");
     }
 
@@ -1674,7 +1675,7 @@ mod tests {
         // Verify OTA handling
         assert_eq!(result, true, "Should return true when OTA is active");
         mock_write_reg_system_tick_irq(15000).assert_called(1);
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Rx,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::Receiving,
             "Should transition to RX state during OTA");
     }
 
@@ -1801,7 +1802,7 @@ mod tests {
         mock_write_reg_system_tick_irq(25000).assert_called(1);
         
         // Verify state transition
-        assert_eq!(*P_ST_HANDLER.lock(), IrqHandlerStatus::Rx,
+        assert_eq!(*CURRENT_RF_STATE.lock(), RfOperationState::Receiving,
             "Should transition to RX state to listen for next packet");
     }
 

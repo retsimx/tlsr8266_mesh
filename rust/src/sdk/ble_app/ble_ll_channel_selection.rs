@@ -69,6 +69,7 @@ pub fn ble_ll_build_available_channel_table(channel: &[u8], reset: bool)
 /// This implements a modified version of the "Channel Selection Algorithm #1" from the BLE spec.
 /// The algorithm ensures that if a channel is masked out in the channel_map, it gets remapped
 /// to a valid channel from the channel table.
+#[cfg_attr(test, mry::mry)]
 pub fn ble_ll_select_next_data_channel(channel_map: &[u8], hop: u8) -> u32
 {
     // Calculate the next unmapped channel index

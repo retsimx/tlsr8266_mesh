@@ -954,6 +954,7 @@ pub fn rf_start_srx2tx(addr: u32, tick: u32)
  * @param addr - The address in memory where received data should be stored
  * @param tick - The system tick time when the transition should occur
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_start_stx2rx(addr: u32, tick: u32)
 {
     write_reg_rf_sched_tick(tick);                                // Setting schedule trigger time

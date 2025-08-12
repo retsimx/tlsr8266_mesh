@@ -195,6 +195,7 @@ pub fn pair_enc_packet(ps: &mut Packet)
 ///
 /// @param ps The mesh packet to decrypt
 /// @return true if decryption was successful, false otherwise
+#[cfg_attr(test, mry::mry)]
 pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
     // Early return if security is disabled - we treat packets as already decrypted
     if !SECURITY_ENABLE.get() {

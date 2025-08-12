@@ -92,6 +92,7 @@ fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
     return 1;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn is_exist_in_rc_pkt_buf(opcode: u8, cmd_pkt: &Packet) -> bool
 {
     RC_PKT_BUF.lock().iter().any(|v| v.op == opcode && v.sno == cmd_pkt.att_cmd().value.sno)
@@ -387,6 +388,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
     let rf_len: u8 = packet.head().rf_len;
     let chanid: u16 = packet.head().chan_id;
@@ -438,6 +440,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
     return false;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_timing_adjust(time: u32)
 {
     if BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get() {
@@ -465,6 +468,7 @@ fn check_par_con(packet: &Packet) -> bool
     return true;
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
 {
     CONN_UPDATE_SUCCESSED.set(false);

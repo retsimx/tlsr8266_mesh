@@ -388,6 +388,7 @@ pub fn pair_save_key()
 /// This function resets the pairing state and prepares initialization vectors
 /// for a new BLE connection. It uses the device's MAC address as part of the
 /// initialization vectors for encryption.
+#[cfg_attr(test, mry::mry)]
 pub fn pair_init()
 {
     // Reset pairing state to initial value

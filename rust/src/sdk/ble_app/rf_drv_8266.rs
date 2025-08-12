@@ -156,6 +156,7 @@ pub fn rf_set_rxmode()
  * 2. Disabling the RF receiver
  * 3. Resetting the RF state machine
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_tx_rx_off()
 {
     write_reg_rf_mode(0x29);                     // Set specific RF mode
@@ -993,6 +994,7 @@ pub fn rf_start_brx(addr: u32, tick: u32)
  * 
  * The sequence number is used to identify and order packets in a transmission sequence.
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_reset_sn()
 {
     write_reg_rf_sn(0x3f);  // Write specific reset value

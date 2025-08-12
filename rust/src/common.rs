@@ -78,6 +78,7 @@ pub fn save_pair_info(adr: u32, p: &[u8]) {
     interval_min + 20 ms <= interval_max <= 2second
     timeout <= 6second
 */
+#[cfg_attr(test, mry::mry)]
 pub fn update_ble_parameter_cb() {
     if !CONN_UPDATE_SUCCESSED.get() {
         setup_ble_parameter_start(

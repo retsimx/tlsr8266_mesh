@@ -726,8 +726,8 @@ impl SimplifyLS<u8> for AtomicU8 {
     fn set(&self, val: u8) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get() + 1); }
-    fn dec(&self) { self.set(self.get() - 1); }
+    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
+    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
 }
 
 impl SimplifyLS<u16> for AtomicU16 {
@@ -737,8 +737,8 @@ impl SimplifyLS<u16> for AtomicU16 {
     fn set(&self, val: u16) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get() + 1); }
-    fn dec(&self) { self.set(self.get() - 1); }
+    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
+    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
 }
 
 impl SimplifyLS<u32> for AtomicU32 {
@@ -748,8 +748,8 @@ impl SimplifyLS<u32> for AtomicU32 {
     fn set(&self, val: u32) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get() + 1); }
-    fn dec(&self) { self.set(self.get() - 1); }
+    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
+    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
 }
 
 impl SimplifyLS<usize> for AtomicUsize {
@@ -759,8 +759,8 @@ impl SimplifyLS<usize> for AtomicUsize {
     fn set(&self, val: usize) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get() + 1); }
-    fn dec(&self) { self.set(self.get() - 1); }
+    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
+    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
 }
 
 impl SimplifyLS<i32> for AtomicI32 {
@@ -770,8 +770,8 @@ impl SimplifyLS<i32> for AtomicI32 {
     fn set(&self, val: i32) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get() + 1); }
-    fn dec(&self) { self.set(self.get() - 1); }
+    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
+    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
 }
 
 /// Represents the current state of the BLE pairing process

@@ -15,7 +15,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
-use crate::sdk::ble_app::light_ll::{*};
+use crate::sdk::ble_app::light_ll::packet_processing::{parse_ble_packet_op_params, is_exist_in_rc_pkt_buf, rf_link_slave_data};
+use crate::sdk::ble_app::light_ll::connection_management::{rf_link_slave_connect, rf_link_timing_adjust};
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::{LIGHT_RX_BUFF_COUNT, LightRxBuff, AdvRspPrivate};
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
@@ -380,12 +381,12 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::{
         mock_rf_stop_trx, mock_rf_start_stx2rx
     };
-    use crate::sdk::ble_app::light_ll::{
-        mock_rf_link_slave_connect, mock_rf_link_timing_adjust, mock_rf_link_slave_data
+    use crate::sdk::ble_app::light_ll::connection_management::{
+        mock_rf_link_slave_connect, mock_rf_link_timing_adjust
     };
     use crate::sdk::ble_app::ble_ll_pair::mock_pair_dec_packet_mesh;
-    use crate::sdk::ble_app::light_ll::{
-        mock_parse_ble_packet_op_params, mock_is_exist_in_rc_pkt_buf
+    use crate::sdk::ble_app::light_ll::packet_processing::{
+        mock_parse_ble_packet_op_params, mock_is_exist_in_rc_pkt_buf, mock_rf_link_slave_data
     };
     use crate::{app_mocker, mock_app_mocker};
     use crate::sdk::mcu::register::{

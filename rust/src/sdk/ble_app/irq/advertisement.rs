@@ -13,7 +13,7 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::common::SYS_CHN_ADV;
-use crate::sdk::ble_app::light_ll::mesh_send_online_status;
+use crate::sdk::ble_app::light_ll::mesh_management::mesh_send_online_status;
 use crate::sdk::ble_app::rf_drv_8266::{*};
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;

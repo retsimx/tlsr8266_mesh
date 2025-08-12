@@ -8,7 +8,7 @@ use crate::{app, uprintln};
 #[cfg(not(test))]
 use crate::SPAWNER;
 use crate::embassy::yield_now::yield_now;
-use crate::sdk::ble_app::light_ll::mesh_report_status_enable;
+use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UART_DATA_LEN, UartData, UartDriver, UartIrqMask};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};

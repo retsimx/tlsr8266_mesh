@@ -6,7 +6,7 @@ use crate::config::{DEVICE_NAME, MESH_NAME};
 use crate::ota::rf_link_slave_data_ota;
 use crate::pub_mut;
 use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
-use crate::sdk::ble_app::light_ll::{mesh_report_status_enable, mesh_report_status_enable_mask};
+use crate::sdk::ble_app::light_ll::mesh_management::{mesh_report_status_enable, mesh_report_status_enable_mask};
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::light::*;
 use crate::sdk::packet_types::{Packet, PacketAttValue};

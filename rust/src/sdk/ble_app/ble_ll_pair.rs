@@ -3,7 +3,7 @@ use core::slice;
 
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
 use crate::main_light::rf_link_light_event_callback;
-use crate::sdk::ble_app::light_ll::rf_link_delete_pair;
+use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair;
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, encode_password};
 use crate::sdk::mcu::register::read_reg_system_tick;
@@ -961,7 +961,7 @@ mod tests {
     use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use crate::common::{mock_pair_flash_clean, mock_save_pair_info, mock_pair_update_key, mock_pair_load_key}; // Ensure mock_pair_load_key is imported
     use crate::main_light::mock_rf_link_light_event_callback; // Added mock for callback
-    use crate::sdk::ble_app::light_ll::mock_rf_link_delete_pair; // Added mock for delete pair
+    use crate::sdk::ble_app::light_ll::pairing_management::mock_rf_link_delete_pair; // Added mock for delete pair
 
     // Helper function to create a test packet with ATT write structure
     fn create_test_packet() -> Packet {

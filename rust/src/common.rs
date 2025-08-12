@@ -5,7 +5,7 @@ use core::slice;
 
 use crate::app;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::setup_ble_parameter_start;
+use crate::sdk::ble_app::light_ll::connection_management::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};

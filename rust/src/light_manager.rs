@@ -12,7 +12,7 @@ use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
-use crate::sdk::ble_app::light_ll::ll_device_status_update;
+use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::pwm_set_cmp;
 use crate::sdk::light::{LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK, RecoverStatus};

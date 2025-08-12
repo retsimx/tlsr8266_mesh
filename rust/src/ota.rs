@@ -4,7 +4,9 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::app;
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
-use crate::sdk::ble_app::light_ll::{is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_read_status_stop, rf_ota_save_data};
+use crate::sdk::ble_app::light_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
+use crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop;
+use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::common::crc::crc16;

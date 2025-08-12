@@ -40,6 +40,7 @@ use crate::state::{*};
 /// ## Channel Hopping:
 /// - Selects next channel using BLE frequency hopping algorithm
 /// - Uses connection-specific channel map and hop increment
+#[cfg_attr(test, mry::mry)]
 pub fn configure_ble_receive_state()
 {
     // Clear RF interrupt status and stop current radio operations

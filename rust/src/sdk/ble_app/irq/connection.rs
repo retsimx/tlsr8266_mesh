@@ -501,6 +501,7 @@ fn schedule_next_connection_event() {
 /// - Implements supervision timeout according to BLE specification
 /// - Maintains connection event timing for reliable communication
 /// - Handles connection parameter update procedures
+#[cfg_attr(test, mry::mry)]
 pub fn handle_ble_connected_state() {
     // 1. Initialize hardware and registers for active connection
     initialize_connection_hardware();

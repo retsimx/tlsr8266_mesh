@@ -168,6 +168,7 @@ pub fn configure_rf_for_mesh_listening()
 /// - Processes bridge commands that may have been received
 /// - Rotates through listening channels for comprehensive coverage
 /// - Handles periodic online status broadcasts
+#[cfg_attr(test, mry::mry)]
 pub fn handle_mesh_listening_state()
 {
     // Set the link state to listening mode (state 4)

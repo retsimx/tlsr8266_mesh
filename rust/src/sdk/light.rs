@@ -132,8 +132,8 @@ pub enum ePairState {
     PairSetMeshRxDone = 4, // received all mesh nodes' ac, send cmd to switch to new mesh
 }
 
-#[derive(PartialEq, Clone, Copy)]
 #[repr(C)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum OtaState {
     Continue = 0,
     // must zero

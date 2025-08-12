@@ -60,6 +60,7 @@ pub fn get_ble_advertisement_channel_count() -> u32
 /// - Uses precise timing for advertisement intervals (1200µs = 0x4b0)
 /// - Short delays for status reporting (100µs) vs listening (500µs)
 /// - Enables STX2RX mode for potential scan response reception
+#[cfg_attr(test, mry::mry)]
 pub fn handle_ble_advertisement_state()
 {
     // Static counter to track which advertisement channel we're currently using

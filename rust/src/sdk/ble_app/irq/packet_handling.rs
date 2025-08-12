@@ -33,6 +33,7 @@ use crate::{app};
 /// - Clears bit 2 of RF interrupt status (TX complete)
 /// - Allows the system to proceed with next operations
 /// - Minimal processing to maintain real-time performance
+#[cfg_attr(test, mry::mry)]
 pub fn handle_rf_transmission_complete()
 {
     // Clear RF interrupt status bit 2 (transmission complete)
@@ -61,6 +62,7 @@ pub fn handle_rf_transmission_complete()
 /// - Minimal processing in fast path
 /// - Delegates complex processing to separate function
 #[inline(always)]
+#[cfg_attr(test, mry::mry)]
 pub fn handle_rf_packet_reception()
 {
     // Static variable to track last received packet time (duplicate detection)

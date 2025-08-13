@@ -30,6 +30,11 @@ PAIR_OP_SET_MESH_LTK = 0x06        # Set long-term key
 PAIR_OP_GET_MESH_LTK = 0x08        # Request long-term key
 PAIR_OP_VERIFY_CREDENTIALS = 0x0C  # Verify credentials (12)
 
+# Pairing state constants (from Rust MeshPairState enum)
+PAIR_STATE_MESH_EFFECT = 7         # MeshPairEffect state - nearly complete
+PAIR_STATE_PAIRING_COMPLETE = 8    # MeshPairDefaultMesh state - pairing complete
+PAIR_STATE_REQUESTING_LTK = 9      # RequestingLtk state - device returned LTK
+
 # Common constants for firmware updates
 VERSION_MASK = 0x7FFFFFFF  # Mask to extract version number
 VERSION_16MHZ = 0x80000000 # Flag indicating 16MHz variant
@@ -38,6 +43,16 @@ VERSION_16MHZ = 0x80000000 # Flag indicating 16MHz variant
 KEY_SIZE = 16                      # Size of cryptographic keys (16 bytes)
 RANDOM_CHALLENGE_SIZE = 8          # Size of random challenge values (8 bytes)
 MESH_FLAG = 0x01                   # Flag indicating this is a mesh LTK
+
+# Default LTK (from Rust config.rs MESH_LTK)
+DEFAULT_LTK = [
+    0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 
+    0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf
+]
+
+# Default credentials for unprovisioned devices (from Rust config.rs)
+DEFAULT_MESH_NAME = "out_of_mesh"
+DEFAULT_MESH_PASSWORD = "123"
 
 def crc16(packet, length=None):
     """

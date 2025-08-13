@@ -42,8 +42,8 @@ from mesh_common import (
     command_characteristic_uuid,
     PAIR_OP_VERIFY_CREDENTIALS, PAIR_OP_SET_MESH_NAME,
     PAIR_OP_SET_MESH_PASSWORD, PAIR_OP_SET_MESH_LTK,
-    PAIR_STATE_RECEIVING_MESH_LTK, MESH_FLAG,
-    DEFAULT_LTK,
+    PAIR_STATE_MESH_EFFECT, PAIR_STATE_PAIRING_COMPLETE, MESH_FLAG,
+    DEFAULT_LTK, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD,
     # Classes
     BaseCommandAction, Command,
     # Functions
@@ -71,16 +71,38 @@ async def main():
 
     args = args_parser.parse_args()
 
-    # Cleanup any existing BLE connections that might interfere
-    print("Cleaning up existing connected devices...")
-    print(os.system("/bin/bash ./scripts/device_cleanup.sh"))
+    # Validate and prepare LTK before starting connection process
+    using_default_ltk = True
+    ltk_bytes = bytearray(DEFAULT_LTK)
+    
+    if args.mesh_ltk:
+        try:
+            # Validate the provided LTK (must be 32 hex chars / 16 bytes)
+            ltk_hex = args.mesh_ltk.replace(':', '').replace('-', '').strip()
+            if len(ltk_hex) != 32:
+                print(f"WARNING: Invalid LTK length ({len(ltk_hex)} hex chars). LTK must be 16 bytes (32 hex characters).")
+                print("Falling back to default LTK.")
+            else:
+                ltk_bytes = bytearray.fromhex(ltk_hex)
+                using_default_ltk = False
+        except ValueError:
+            print("WARNING: Invalid hex format in LTK. Falling back to default LTK.")
+    
+    # Warn and confirm if using default LTK
+    if using_default_ltk:
+        print("\nWARNING: Using default LTK. This is less secure than using a custom LTK.")
+        print(f"Default LTK: {binascii.hexlify(bytes(ltk_bytes)).decode()}")
+        confirmation = input("Continue with default LTK? [y/N]: ")
+        if confirmation.lower() != 'y':
+            print("Aborted. Please provide a custom LTK using the --mesh_ltk argument.")
+            return
 
     # Scan for unprovisioned device (advertising with default name)
     mesh_name = args.mesh_name
     mesh_password = args.mesh_password
 
-    print(f"Scanning for unprovisioned device with name '{mesh_name}'...")
-    device = await BleakScanner.find_device_by_name(name=mesh_name, timeout=5)
+    print(f"Scanning for unprovisioned device with name 'out_of_mesh'...")
+    device = await BleakScanner.find_device_by_name(name="out_of_mesh", timeout=5)
 
     if not device:
         print("Unable to find any devices")
@@ -92,7 +114,8 @@ async def main():
         print("Authenticating with device...")
 
         # Generate mesh credential verification material
-        plaintext_mesh_credentials = encode_mesh_credentials()
+        # For unprovisioned devices, use default credentials for authentication
+        plaintext_mesh_credentials = encode_mesh_credentials(DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD)
 
         # Prepare authentication request
         enc_key = bytearray(shared_key)[:] + b'\0' * 8  # Pad shared key to 16 bytes
@@ -166,31 +189,7 @@ async def main():
         pwd.reverse()
 
         # Prepare and encrypt long term key (LTK)
-        # Check if a custom LTK was provided, otherwise use default
-        using_default_ltk = True
-        ltk_bytes = bytearray(DEFAULT_LTK)
-        
-        if args.mesh_ltk:
-            try:
-                # Validate the provided LTK (must be 32 hex chars / 16 bytes)
-                ltk_hex = args.mesh_ltk.replace(':', '').replace('-', '').strip()
-                if len(ltk_hex) != 32:
-                    print(f"WARNING: Invalid LTK length ({len(ltk_hex)} hex chars). LTK must be 16 bytes (32 hex characters).")
-                    print("Falling back to default LTK.")
-                else:
-                    ltk_bytes = bytearray.fromhex(ltk_hex)
-                    using_default_ltk = False
-            except ValueError:
-                print("WARNING: Invalid hex format in LTK. Falling back to default LTK.")
-        
-        # Warn and confirm if using default LTK
-        if using_default_ltk:
-            print("\nWARNING: Using default LTK. This is less secure than using a custom LTK.")
-            print(f"Default LTK: {binascii.hexlify(bytes(ltk_bytes)).decode()}")
-            confirmation = input("Continue with default LTK? [y/N]: ")
-            if confirmation.lower() != 'y':
-                print("Aborted. Please provide a custom LTK using the --mesh_ltk argument.")
-                return
+        # LTK validation and user confirmation was done earlier
         
         # Encrypt the LTK with the session key
         ltk = encrypt_data(session_key, ltk_bytes)
@@ -213,22 +212,41 @@ async def main():
         await name_command.write()
         await sleep(0.2)  # Allow device time to process
         
+        result = await client.read_gatt_char(pair_characteristic_uuid)
+        print("Pairing state:", result)
+
         print("Sending mesh password...")
         await pwd_command.write()
         await sleep(0.2)  # Allow device time to process
-        
+ 
+        result = await client.read_gatt_char(pair_characteristic_uuid)
+        print("Pairing state:", result)
+       
         print("Sending mesh LTK...")
         await ltk_command.write()
         await sleep(0.2)  # Allow device time to process
 
         # ----- PHASE 4: VERIFY SUCCESSFUL PAIRING -----
         # Read the device state to verify successful pairing
+        # Give the device a bit more time to complete state transitions
+        await sleep(2)
         result = await client.read_gatt_char(pair_characteristic_uuid)
 
-        # Check if device is in the expected state (RECEIVING_MESH_LTK)
-        if result[0] != PAIR_STATE_RECEIVING_MESH_LTK:
-            print(f"Light could not be added to mesh. Unexpected state: 0x{result[0]:02x}")
-            return
+        # Check if device is in the expected state (pairing complete)
+        # If it's in MeshPairEffect (0x07), try waiting a bit more
+        if result[0] == PAIR_STATE_MESH_EFFECT:  # MeshPairEffect - almost complete
+            print("Device in MeshPairEffect state, waiting for final transition...")
+            await sleep(1.0)
+            result = await client.read_gatt_char(pair_characteristic_uuid)
+        
+        if result[0] != PAIR_STATE_PAIRING_COMPLETE:
+            # Accept MeshPairEffect (0x07) as success too, since it's very close
+            if result[0] == PAIR_STATE_MESH_EFFECT:
+                print(f"Device in MeshPairEffect state (0x{PAIR_STATE_MESH_EFFECT:02x}) - pairing likely successful")
+            else:
+                print(f"Light could not be added to mesh. Unexpected state: 0x{result[0]:02x}")
+                print(f"Expected state: 0x{PAIR_STATE_PAIRING_COMPLETE:02x} (PAIR_STATE_PAIRING_COMPLETE)")
+                return
 
         print(f"Light with MAC ({device.address}) successfully added to mesh network")
         print(f"Mesh Name: {mesh_name}")

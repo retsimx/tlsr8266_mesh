@@ -111,7 +111,7 @@ fn check_par_con(packet: &Packet) -> bool
        packet.ll_init().timeout > 10 && 
        packet.ll_init().timeout <= 3200 && 
        packet.ll_init().woffset <= packet.ll_init().interval && 
-       packet.ll_init().hop != 0 && packet.ll_init().hop <= 16 &&
+       (packet.ll_init().hop & 0x1F) != 0 && (packet.ll_init().hop & 0x1F) <= 16 &&
        packet.ll_init().chm.iter().any(|v| { *v != 0 }) {
         
         // Accept connections with reasonable latency
@@ -200,8 +200,12 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool
     CONN_UPDATE_SUCCESSED.set(false);
     CONN_UPDATE_CNT.set(0);
 
-    // Pre-connection validation: check if connections are enabled and addresses match
-    if BLE_PERIPHERAL_CONNECTION_ENABLED.get() && packet.ll_init().scan_a == packet.ll_init().adv_a {
+    // Pre-connection validation: check if connections are enabled and advertiser address matches our device
+    let our_mac = MAC_ID.lock();
+    // Compare full 6-byte MAC address (adv_a is set to full MAC_ID in advertisements)
+    let adv_matches = packet.ll_init().adv_a == *our_mac;
+    
+    if BLE_PERIPHERAL_CONNECTION_ENABLED.get() && adv_matches {
         // Validate connection parameters
         if check_par_con(packet) == true {
             // Stop any ongoing RF operations to prepare for connection setup

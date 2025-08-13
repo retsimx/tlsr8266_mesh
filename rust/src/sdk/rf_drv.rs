@@ -555,8 +555,8 @@ pub fn remove_group(group_id: u16) -> bool
 /// * `false` if validation failed (invalid group address range)
 ///
 /// # Validation
-/// - Group ID must pass: `group_id.wrapping_add(0x8000) < 0x7fff`
-/// - This ensures the address is in the valid group address space
+/// - Group ID must pass `is_valid_group_id()` check (>= 0x8000 and != 0xFFFF)
+/// - This ensures the address is in the valid group address space (MSB set, but not the special delete-all value)
 ///
 /// # Rotation Policy
 /// - If group table is full (8 entries), replaces the oldest entry
@@ -572,8 +572,8 @@ pub fn add_group(group_id: u16) -> bool
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
     
-    // Validate group ID: must be in valid group address range
-    if group_id.wrapping_add(0x8000) < 0x7fff {
+    // Validate group ID: must be in valid group address range (MSB set, but not delete-all value)
+    if group_id >= 0x8000 && group_id != GROUP_DELETE_ALL {
         // Clean up flash if needed
         compact_flash_storage();
         

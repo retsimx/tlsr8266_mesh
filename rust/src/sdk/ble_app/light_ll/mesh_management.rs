@@ -108,6 +108,7 @@ use crate::state::{*};
 /// # Algorithm Complexity
 /// * Time: O(n*m) where n=nodes in packet, m=nodes in table
 /// * Space: O(1) additional space beyond existing node table
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
 {
     let mut mesh_node_st = MESH_NODE_ST.lock();

@@ -373,7 +373,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     
     // Special handling for device address configuration command targeting broadcast address
     // The high bit of destination address indicates a special broadcast configuration
-    if op == LGT_CMD_CONFIG_DEV_ADDR && ((dst_addr * 0x1000000) as i32) < 0 {
+    if op == LGT_CMD_CONFIG_DEV_ADDR && (dst_addr & 0x80) != 0 {
         // Validate mandatory parameter values for broadcast device address configuration
         // Parameters 0 and 1 must be 0xFF for this command type
         if params[0] != 0xff || params[1] != 0xff {

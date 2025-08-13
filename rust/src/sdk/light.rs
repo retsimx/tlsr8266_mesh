@@ -214,8 +214,15 @@ pub const ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL: u16 = 8;
 
 pub const SEND_MESH_STATUS_INTERVAL_MS: u32 = 200;
 
+// Internal parameter array indices for mesh packet processing
+pub const INTERNAL_PAR_STATUS_DATA: usize = 0;
+pub const INTERNAL_PAR_PACKET_FORMAT_MODE: usize = 1;
 pub const INTERNAL_PAR_RETRANSMIT_COUNT: usize = 2;
 pub const INTERNAL_PAR_SEND_ACK: usize = 3;
+
+// Packet formatting modes for internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE]
+// Note: Only format mode 0 is actually used - all packets initialize with internal_par1: [0; 5]
+pub const PACKET_FORMAT_STANDARD_PARAMS: u8 = 0;      // Copy specific parameter values to response (only format actually used)
 
 /// BLE peripheral connection link states.
 ///

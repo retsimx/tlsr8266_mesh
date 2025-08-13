@@ -268,6 +268,23 @@ pub struct PktBuf {
     pub notify_ok_flag: bool,
 }
 
+/// BLE Channel Map Update packet structure for type 3 control packets.
+/// 
+/// This packet type handles BLE connection channel map updates, which occur when
+/// the central device needs to change the frequency hopping sequence used in the connection.
+/// The 5-byte channel map data starts 1 byte into the l2cap_len field (at the high byte)
+/// and extends 4 more bytes beyond it, as defined by the BLE specification.
+#[repr(C, align(4))]
+#[derive(Clone, Copy)]
+pub struct PacketChannelMapUpdate {
+    pub dma_len: u32,           // 0 - DMA length field  
+    pub _type: u8,              // 4 - Packet type (should be 3 for channel map update)
+    pub rf_len: u8,             // 5 - RF packet length
+    pub l2cap_len_low: u8,      // 6 - Low byte of L2CAP length (should be 1)
+    pub channel_map: [u8; 5],   // 7 - 5-byte channel map starting at l2cap_len high byte
+    pub remaining_data: [u8; 36], // 12 - Rest of packet data including timing information
+}
+
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct ScanRspData {
@@ -305,6 +322,7 @@ pub union Packet {
     pub att_err_rsp: PacketAttErrRsp,
     pub att_read_rsp: PacketAttReadRsp,
     pub att_write_rsp: PacketAttWriteRsp,
+    pub channel_map_update: PacketChannelMapUpdate,
     pub adv_ind_module: RfPacketAdvIndModuleT,
     pub scan_rsp: PacketScanRsp,
     pub ll_init: PacketLlInit,
@@ -470,6 +488,14 @@ impl Packet {
 
     pub fn l2cap_data_mut(&mut self) -> &mut PacketL2capData {
         unsafe { &mut self.l2cap_data }
+    }
+
+    pub fn channel_map_update(&self) -> &PacketChannelMapUpdate {
+        unsafe { &self.channel_map_update }
+    }
+
+    pub fn channel_map_update_mut(&mut self) -> &mut PacketChannelMapUpdate {
+        unsafe { &mut self.channel_map_update }
     }
 }
 

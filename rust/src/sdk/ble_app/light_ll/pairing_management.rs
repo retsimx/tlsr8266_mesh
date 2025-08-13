@@ -145,3 +145,31 @@ pub fn rf_link_delete_pair()
     // Immediately revoke authentication status to prevent further network access
     PAIR_LOGIN_OK.set(false);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::ble_app::ble_ll_pair::{mock_pair_set_key, mock_pair_save_key};
+    use mry::Any;
+
+    #[test]
+    #[mry::lock(pair_set_key, pair_save_key)]
+    fn test_rf_link_delete_pair() {
+        // Setup test state
+        PAIR_CONFIG_MESH_NAME.lock()[..4].copy_from_slice(b"Test");
+        PAIR_CONFIG_MESH_PWD.lock()[..4].copy_from_slice(b"Pass");
+        PAIR_LOGIN_OK.set(true);
+
+        // Setup mocks
+        mock_pair_set_key(Any).returns(());
+        mock_pair_save_key().returns(());
+
+        // Execute function
+        rf_link_delete_pair();
+
+        // Verify results
+        assert!(!PAIR_LOGIN_OK.get());
+        mock_pair_set_key(Any).assert_called(1);
+        mock_pair_save_key().assert_called(1);
+    }
+}

@@ -645,6 +645,7 @@ pub fn pair_proc() -> Option<Packet>
 ///
 /// @param key Buffer containing the mesh network name (16 bytes), password (16 bytes),
 ///            and long-term key (16 bytes)
+#[cfg_attr(test, mry::mry)]
 pub fn pair_set_key(key: &[u8])
 {
     {

@@ -4,7 +4,7 @@ use heapless::Deque;
 
 use crate::config::VENDOR_ID;
 use crate::embassy::sync::mutex::CriticalSectionMutex;
-use crate::mesh::{MESH_NODE_ST_PAR_LEN, mesh_node_st_t, mesh_node_st_val_t};
+use crate::mesh::{MESH_NODE_ST_PAR_LEN, MeshNodeStT, MeshNodeStValT};
 use crate::sdk::light::{*};
 use crate::sdk::packet_types::{*};
 
@@ -35,11 +35,11 @@ pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COU
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
 /// Used to track online status, last communication timestamp, and node-specific data.
-pub static MESH_NODE_ST: CriticalSectionMutex<[mesh_node_st_t; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
+pub static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
     [
-        mesh_node_st_t {
+        MeshNodeStT {
             tick: 0,
-            val: mesh_node_st_val_t {
+            val: MeshNodeStValT {
                 dev_adr: 0,
                 sn: 0,
                 par: [0; MESH_NODE_ST_PAR_LEN],

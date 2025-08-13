@@ -83,7 +83,7 @@ use crate::common::rf_update_conn_para;
 use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
+use crate::mesh::{MESH_NODE_ST_VAL_LEN, MeshNodeStValT};
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet};
 use crate::sdk::ble_app::rf_drv_8266::{*};
@@ -725,7 +725,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             // Ensure we have the right number of bytes for the conversion
             let bytes_needed = status_entries * MESH_NODE_ST_VAL_LEN;
             let status_bytes = &status_data[0..bytes_needed];
-            let status_slice = bytemuck::cast_slice::<u8, mesh_node_st_val_t>(status_bytes);
+            let status_slice = bytemuck::cast_slice::<u8, MeshNodeStValT>(status_bytes);
             mesh_node_update_status(status_slice);
         }
         // Status packets require no further processing

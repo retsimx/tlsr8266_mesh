@@ -48,7 +48,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::{app, BIT, uprintln};
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MESH_NODE_ST_VAL_LEN, mesh_node_st_val_t};
+use crate::mesh::{MESH_NODE_ST_VAL_LEN, MeshNodeStValT};
 use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{read_reg_system_tick};
 use crate::sdk::packet_types::{*};
@@ -109,7 +109,7 @@ use crate::state::{*};
 /// * Time: O(n*m) where n=nodes in packet, m=nodes in table
 /// * Space: O(1) additional space beyond existing node table
 #[cfg_attr(test, mry::mry)]
-pub fn mesh_node_update_status(pkt: &[mesh_node_st_val_t]) -> u32
+pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
 {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
@@ -624,6 +624,7 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
 /// * Queues packet for mesh network transmission  
 /// * Updates network-wide topology knowledge
 /// * May trigger retransmissions by other nodes
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_send_online_status()
 {
     static ADV_ST_SN: AtomicU32 = AtomicU32::new(0);
@@ -1121,7 +1122,7 @@ mod tests {
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
     use crate::embassy::time_driver::mock_clock_time64;
     use crate::main_light::{mock_rf_link_data_callback, mock_rf_link_response_callback};
-    use crate::mesh::{mesh_node_st_val_t, mesh_node_st_t, MESH_NODE_ST_PAR_LEN};
+    use crate::mesh::{MeshNodeStValT, MeshNodeStT, MESH_NODE_ST_PAR_LEN};
     use crate::sdk::light::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
     use super::{mock_mesh_node_flush_status, mock_mesh_node_adv_status};
     
@@ -1135,9 +1136,9 @@ mod tests {
         // Clear the mesh node status table
         let mut mesh_node_st = MESH_NODE_ST.lock();
         for i in 0..mesh_node_st.len() {
-            mesh_node_st[i] = mesh_node_st_t {
+            mesh_node_st[i] = MeshNodeStT {
                 tick: 0,
-                val: mesh_node_st_val_t {
+                val: MeshNodeStValT {
                     dev_adr: if i == 0 { DEVICE_ADDRESS.get() as u8 } else { 0 }, // Set device address for index 0
                     sn: 0,
                     par: [0; MESH_NODE_ST_PAR_LEN],
@@ -1148,8 +1149,8 @@ mod tests {
     }
     
     /// Helper function to create test mesh node status data  
-    fn create_test_mesh_node(dev_adr: u8, sn: u32, val: &[u8]) -> mesh_node_st_val_t {
-        let mut node = mesh_node_st_val_t {
+    fn create_test_mesh_node(dev_adr: u8, sn: u32, val: &[u8]) -> MeshNodeStValT {
+        let mut node = MeshNodeStValT {
             dev_adr,
             sn: sn as u8, // Convert u32 to u8 for sn field
             par: [0; MESH_NODE_ST_PAR_LEN],
@@ -1175,7 +1176,7 @@ mod tests {
         
         reset_mesh_state();
         
-        let empty_packet: Vec<mesh_node_st_val_t> = vec![];
+        let empty_packet: Vec<MeshNodeStValT> = vec![];
         let result = mesh_node_update_status(&empty_packet);
         
         // Should return 1 for successful packet processing (even if empty)

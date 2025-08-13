@@ -65,7 +65,7 @@ impl TryFrom<u8> for MeshPairState {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
-pub struct mesh_node_st_val_t {
+pub struct MeshNodeStValT {
     pub dev_adr: u8,
     // don't change include type
     pub sn: u8,
@@ -77,15 +77,15 @@ pub struct mesh_node_st_val_t {
 // 1. It's #[repr(C, packed)] so it has a stable memory layout
 // 2. All fields are u8 which are safe to transmute
 // 3. The struct size is fixed and known at compile time
-unsafe impl Pod for mesh_node_st_val_t {}
-unsafe impl Zeroable for mesh_node_st_val_t {}
+unsafe impl Pod for MeshNodeStValT {}
+unsafe impl Zeroable for MeshNodeStValT {}
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
-pub struct mesh_node_st_t {
+pub struct MeshNodeStT {
     pub tick: u16,
     // don't change include type
-    pub val: mesh_node_st_val_t,
+    pub val: MeshNodeStValT,
 }
 
 struct SendPkt {
@@ -493,9 +493,9 @@ impl MeshManager {
     }
 
     pub fn mesh_node_buf_init(&self) {
-        MESH_NODE_ST.lock().fill(mesh_node_st_t {
+        MESH_NODE_ST.lock().fill(MeshNodeStT {
             tick: 0,
-            val: mesh_node_st_val_t {
+            val: MeshNodeStValT {
                 dev_adr: 0,
                 sn: 0,
                 par: [0; MESH_NODE_ST_PAR_LEN],

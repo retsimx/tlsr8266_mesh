@@ -233,7 +233,7 @@ pub fn handle_mesh_listening_state()
 mod tests {
     use super::*;
     use mry::Any;
-    use crate::mesh::{mesh_node_st_t, mesh_node_st_val_t, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
+    use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
     use crate::sdk::light::{BlePeripheralLinkState, RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL};
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use crate::common::SYS_CHN_LISTEN;
@@ -273,9 +273,9 @@ mod tests {
         
         let mut mesh_node_st = MESH_NODE_ST.lock();
         for i in 0..mesh_node_st.len() {
-            mesh_node_st[i] = mesh_node_st_t {
+            mesh_node_st[i] = MeshNodeStT {
                 tick: 0,
-                val: mesh_node_st_val_t {
+                val: MeshNodeStValT {
                     dev_adr: 0,
                     sn: 0,
                     par: [0; MESH_NODE_ST_PAR_LEN],
@@ -295,9 +295,9 @@ mod tests {
         mesh_node_mask[mask_index] |= 1 << mask_bit;
         
         // Set the node status data
-        mesh_node_st[idx] = mesh_node_st_t {
+        mesh_node_st[idx] = MeshNodeStT {
             tick,
-            val: mesh_node_st_val_t {
+            val: MeshNodeStValT {
                 dev_adr,
                 sn,
                 par,

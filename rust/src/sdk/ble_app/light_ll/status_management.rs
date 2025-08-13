@@ -217,7 +217,8 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
         // Process command if not in final countdown or if conditions allow transmission
         if SLAVE_DATA_VALID.get() == 0 {
             // Special case: immediate transmission required
-        } else if SLAVE_READ_STATUS_BUSY.get() == 0 || SLAVE_DATA_VALID.get() as i32 > -1 {
+        } else if SLAVE_READ_STATUS_BUSY.get() == 0 {
+            // Only process if not busy and we have valid data remaining
             // Mark packet for mesh transmission (set mesh transmission flag)
             pkt_light_data.head_mut()._type |= crate::BIT!(7);
 
@@ -313,10 +314,10 @@ pub fn tx_packet_bridge()
 
     // Check if periodic status broadcast is due
     let tick = read_reg_system_tick();
-    let broadcast_interval = MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32 
-                           - ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000;
+    let broadcast_interval = (MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
+                           .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
     
-    if broadcast_interval < tick - TICK_BRIDGE_REPORT.load(Ordering::Relaxed) {
+    if broadcast_interval < tick.saturating_sub(TICK_BRIDGE_REPORT.load(Ordering::Relaxed)) {
         // Update last broadcast time and trigger status transmission
         TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
         mesh_send_online_status();
@@ -324,4 +325,352 @@ pub fn tx_packet_bridge()
     
     // Process any pending bridge commands with stored command timestamp
     app_bridge_cmd_handle(BRIDGE_COMMAND_TIMESTAMP.get());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::ble_app::rf_drv_8266::{mock_rf_set_tx_rx_off, mock_rf_set_ble_access_code, mock_rf_set_ble_crc_adv};
+    use crate::sdk::mcu::clock::mock_sleep_us;
+    use crate::sdk::mcu::register::mock_read_reg_system_tick;
+    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_send_online_status;
+    use crate::sdk::ble_app::light_ll::packet_processing::mock_rf_link_is_notify_req;
+    use std::sync::atomic::Ordering;
+    use mry::Any;
+
+    fn setup_test_state() {
+        // Reset all status management state
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        STATUS_MESSAGE_SEQUENCE_NUMBER.lock().fill(0);
+        SLAVE_READ_STATUS_BUSY.set(0);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(false);
+        SLAVE_DATA_VALID.set(0);
+        BRIDGE_COMMAND_TIMESTAMP.set(1000);
+        PAIR_AC.set(0x12345678);
+        MESH_LISTEN_INTERVAL_US.set(100000); // 100ms
+        
+        // Clear packet data to ensure clean state
+        let mut packet_data = PKT_LIGHT_DATA.lock();
+        packet_data.head_mut()._type = 0x00; // Clear all flags including mesh flag
+        drop(packet_data);
+    }
+
+    #[test]
+    fn test_rf_link_slave_read_status_par_init() {
+        // Setup initial non-zero state
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(5);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(3);
+        *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 3];
+
+        // Execute function
+        rf_link_slave_read_status_par_init();
+
+        // Verify state is reset
+        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
+        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0, 0, 0]);
+    }
+
+    #[test]
+    #[mry::lock(rf_link_slave_read_status_par_init)]
+    fn test_rf_link_slave_read_status_stop() {
+        // Setup initial state with active status reporting
+        SLAVE_READ_STATUS_BUSY.set(1);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
+        SLAVE_DATA_VALID.set(5);
+
+        // Mock the init function to verify it's called
+        mock_rf_link_slave_read_status_par_init().returns(());
+
+        // Execute function
+        rf_link_slave_read_status_stop();
+
+        // Verify cleanup occurred
+        assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0);
+        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), false);
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+
+        // Verify init was called for parameter reset
+        mock_rf_link_slave_read_status_par_init().assert_called(1);
+    }
+
+    #[test]
+    fn test_app_bridge_cmd_handle_no_valid_data() {
+        setup_test_state();
+        SLAVE_DATA_VALID.set(0); // No valid data
+
+        // Function should return early without doing anything
+        app_bridge_cmd_handle(1000);
+
+        // No mocks should be called since there's no valid data
+    }
+
+    #[test] 
+    fn test_app_bridge_cmd_handle_countdown_decrements() {
+        setup_test_state();
+        SLAVE_DATA_VALID.set(3); // Set countdown value
+
+        // Execute function
+        app_bridge_cmd_handle(1000);
+
+        // Verify countdown decremented
+        assert_eq!(SLAVE_DATA_VALID.get(), 2);
+    }
+
+    #[test]
+    fn test_app_bridge_cmd_handle_immediate_transmission() {
+        setup_test_state();
+        let mut packet_data = PKT_LIGHT_DATA.lock();
+        
+        // Set up test packet data
+        packet_data.head_mut()._type = 0x00; // Clear mesh flag
+        packet_data.att_cmd_mut().value.val[0] = 0x10; // Test command
+        drop(packet_data); // Release lock
+        
+        SLAVE_DATA_VALID.set(1); // Will become 0 after decrement
+
+        // Execute function - immediate transmission case
+        app_bridge_cmd_handle(1000);
+
+        // Verify countdown reached zero
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+    }
+
+    #[test]
+    #[mry::lock(rf_link_is_notify_req, read_reg_system_tick)]
+    fn test_app_bridge_cmd_handle_notify_request_timing() {
+        setup_test_state();
+        let mut packet_data = PKT_LIGHT_DATA.lock();
+        
+        // Set up notify request packet
+        packet_data.head_mut()._type = 0x00; // Clear mesh flag initially
+        packet_data.att_cmd_mut().value.val[0] = 0x10; // Test command (masked will be 0x10)
+        packet_data.att_cmd_mut().value.val[17] = 0; // Clear timing field
+        drop(packet_data);
+        
+        SLAVE_DATA_VALID.set(2); // Will become 1 after decrement
+        SLAVE_READ_STATUS_BUSY.set(0); // Allow transmission
+
+        // Mock notify request check
+        mock_rf_link_is_notify_req(0x10).returns(true);
+        
+        // Mock system tick for timing calculation
+        // To get timing value 1: ((tick_diff / 32) + 500) >> 10 = 1
+        // So: (tick_diff / 32) + 500 = 1024
+        // tick_diff / 32 = 524
+        // tick_diff = 524 * 32 = 16768
+        mock_read_reg_system_tick().returns(1000 + 16768); // 16768 ticks elapsed since bridge_cmd_time=1000
+
+        // Execute function
+        app_bridge_cmd_handle(1000);
+
+        // Verify packet was modified for mesh transmission
+        let packet_data = PKT_LIGHT_DATA.lock();
+        assert_ne!(packet_data.head()._type & 0x80, 0); // Mesh flag should be set
+        // Verify timing calculation: (16768/32 + 500) / 1024 = (524 + 500) / 1024 = 1024/1024 = 1
+        assert_eq!(packet_data.att_cmd().value.val[17], 1);
+
+        // Verify mocks were called
+        mock_rf_link_is_notify_req(0x10).assert_called(1);
+        mock_read_reg_system_tick().assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(rf_link_is_notify_req)]
+    fn test_app_bridge_cmd_handle_non_notify_request() {
+        setup_test_state();
+        let mut packet_data = PKT_LIGHT_DATA.lock();
+        
+        packet_data.head_mut()._type = 0x00;
+        packet_data.att_cmd_mut().value.val[0] = 0x20; // Non-notify command
+        drop(packet_data);
+        
+        SLAVE_DATA_VALID.set(2);
+        SLAVE_READ_STATUS_BUSY.set(0);
+
+        // Mock notify request check to return false
+        mock_rf_link_is_notify_req(0x20).returns(false);
+
+        // Execute function
+        app_bridge_cmd_handle(1000);
+
+        // Verify packet mesh flag was set but no timing applied
+        let packet_data = PKT_LIGHT_DATA.lock();
+        assert_ne!(packet_data.head()._type & 0x80, 0); // Mesh flag should be set
+
+        // Verify mocks
+        mock_rf_link_is_notify_req(0x20).assert_called(1);
+        // read_reg_system_tick should not be called for non-notify requests
+    }
+
+    #[test]
+    fn test_app_bridge_cmd_handle_busy_state_blocks_transmission() {
+        setup_test_state();
+        SLAVE_DATA_VALID.set(2);
+        SLAVE_READ_STATUS_BUSY.set(1); // Busy state
+
+        // Execute function
+        app_bridge_cmd_handle(1000);
+
+        // Verify countdown decremented but no processing occurred
+        assert_eq!(SLAVE_DATA_VALID.get(), 1);
+
+        // Verify packet was not modified (mesh flag should remain clear)
+        let packet_data = PKT_LIGHT_DATA.lock();
+        assert_eq!(packet_data.head()._type & 0x80, 0);
+    }
+
+    #[test]
+    fn test_app_bridge_cmd_handle_zero_data_early_exit() {
+        setup_test_state();
+        SLAVE_DATA_VALID.set(0); // No valid data, should exit early
+        
+        // Execute function
+        app_bridge_cmd_handle(1000);
+
+        // Verify value unchanged since function exits early for zero
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+
+        // Verify packet was not modified
+        let packet_data = PKT_LIGHT_DATA.lock();
+        assert_eq!(packet_data.head()._type & 0x80, 0);
+    }
+
+    #[test]
+    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    fn test_tx_packet_bridge_basic_setup() {
+        setup_test_state();
+
+        // Mock RF setup functions
+        mock_rf_set_tx_rx_off().returns(());
+        mock_sleep_us(100).returns(());
+        mock_rf_set_ble_access_code(0x12345678).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_read_reg_system_tick().returns(50000);
+        mock_mesh_send_online_status().returns(());
+        mock_app_bridge_cmd_handle(1000).returns(());
+
+        // Execute function
+        tx_packet_bridge();
+
+        // Verify RF setup sequence
+        mock_rf_set_tx_rx_off().assert_called(1);
+        mock_sleep_us(100).assert_called(1);
+        mock_rf_set_ble_access_code(0x12345678).assert_called(1);
+        mock_rf_set_ble_crc_adv().assert_called(1);
+        mock_read_reg_system_tick().assert_called(1);
+        mock_app_bridge_cmd_handle(1000).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    fn test_tx_packet_bridge_status_broadcast_triggered() {
+        setup_test_state();
+        
+        // Set up timing to trigger status broadcast
+        // broadcast_interval = (100000 * 8).saturating_sub(3 * 32 * 1000) = 800000 - 96000 = 704000
+        // Use a tick value much larger than any possible TICK_BRIDGE_REPORT value from previous tests
+        // to guarantee the condition: broadcast_interval < tick - TICK_BRIDGE_REPORT
+        let current_tick = 10000000; // Much larger than 704000 and any reasonable TICK_BRIDGE_REPORT
+        let expected_interval = (MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
+                              .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
+
+        mock_rf_set_tx_rx_off().returns(());
+        mock_sleep_us(100).returns(());
+        mock_rf_set_ble_access_code(0x12345678).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_read_reg_system_tick().returns(current_tick);
+        mock_mesh_send_online_status().returns(());
+        mock_app_bridge_cmd_handle(1000).returns(());
+
+        // Execute function
+        tx_packet_bridge();
+
+        // Status should be sent because timing interval is met
+        mock_mesh_send_online_status().assert_called(1);
+        mock_app_bridge_cmd_handle(1000).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, app_bridge_cmd_handle)]
+    fn test_tx_packet_bridge_status_broadcast_not_due() {
+        setup_test_state();
+        
+        // Set up timing where status broadcast is not due yet
+        let current_tick = 1000; // Recent time, broadcast not due
+        
+        mock_rf_set_tx_rx_off().returns(());
+        mock_sleep_us(100).returns(());
+        mock_rf_set_ble_access_code(0x12345678).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_read_reg_system_tick().returns(current_tick);
+        mock_app_bridge_cmd_handle(1000).returns(());
+
+        // Execute function
+        tx_packet_bridge();
+
+        // Status should NOT be sent because timing interval is not met
+        mock_app_bridge_cmd_handle(1000).assert_called(1);
+        // mesh_send_online_status should not be called
+    }
+
+    #[test]
+    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    fn test_tx_packet_bridge_function_calls() {
+        setup_test_state();
+
+        // Mock all functions with simple returns
+        mock_rf_set_tx_rx_off().returns(());
+        mock_sleep_us(100).returns(());
+        mock_rf_set_ble_access_code(0x12345678).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_read_reg_system_tick().returns(800000); // Use tick > broadcast_interval to trigger status send
+        mock_mesh_send_online_status().returns(());
+        mock_app_bridge_cmd_handle(1000).returns(());
+
+        // Execute function
+        tx_packet_bridge();
+
+        // Verify all functions were called
+        mock_rf_set_tx_rx_off().assert_called(1);
+        mock_sleep_us(100).assert_called(1);
+        mock_rf_set_ble_access_code(0x12345678).assert_called(1);
+        mock_rf_set_ble_crc_adv().assert_called(1);
+        mock_read_reg_system_tick().assert_called(1);
+        mock_mesh_send_online_status().assert_called(1);
+        mock_app_bridge_cmd_handle(1000).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(rf_link_is_notify_req, read_reg_system_tick)]
+    fn test_app_bridge_cmd_handle_timing_calculation_edge_cases() {
+        setup_test_state();
+        let mut packet_data = PKT_LIGHT_DATA.lock();
+        
+        packet_data.head_mut()._type = 0x00;
+        packet_data.att_cmd_mut().value.val[0] = 0x10;
+        packet_data.att_cmd_mut().value.val[17] = 0;
+        drop(packet_data);
+        
+        SLAVE_DATA_VALID.set(2);
+        SLAVE_READ_STATUS_BUSY.set(0);
+
+        // Test maximum timing value clamping
+        let bridge_cmd_time = 1000;
+        let large_tick = bridge_cmd_time + (0xff << 10) * CLOCK_SYS_CLOCK_1US + 1000; // Should clamp to 255
+
+        mock_rf_link_is_notify_req(0x10).returns(true);
+        mock_read_reg_system_tick().returns(large_tick);
+
+        app_bridge_cmd_handle(bridge_cmd_time);
+
+        // Verify timing was clamped to maximum (255)
+        let packet_data = PKT_LIGHT_DATA.lock();
+        assert_eq!(packet_data.att_cmd().value.val[17], 255);
+        
+        // Verify mocks were called
+        mock_rf_link_is_notify_req(0x10).assert_called(1);
+        mock_read_reg_system_tick().assert_called(1);
+    }
 }

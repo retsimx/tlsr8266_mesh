@@ -69,7 +69,7 @@ async fn uart_receiver() {
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<UartData, 6>,
+    send_channel: Deque<UartData, 20>,
     recv_channel: Deque<UartData, 6>,
     ack_counter: u8,
     last_ack: u8,

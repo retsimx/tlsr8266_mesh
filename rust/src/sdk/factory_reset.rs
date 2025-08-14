@@ -797,7 +797,7 @@ pub fn kick_out(par: KickoutReason) {
         // If mesh pairing is enabled, set additional flag and enable MAC address retrieval
         if MESH_PAIR_ENABLE.get() {
             // Enable MAC address retrieval for mesh reconnection
-            GET_MAC_EN.set(true);
+            MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
             // Set bit 1 to indicate mesh pairing is enabled
             buff[1] = 1;
         }
@@ -1652,8 +1652,8 @@ mod tests {
         // Verify pairing config flags were written at base address
         mock_flash_write_page(FLASH_ADR_PAIRING, 16, mry::Any).assert_called(1);
         
-        // Verify GET_MAC_EN was set to true
-        assert_eq!(GET_MAC_EN.get(), true);
+        // Verify device address validation pending flag was set to true
+        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), true);
         
         // Verify rf_led_ota_ok was called
         app.ota_manager.mock_rf_led_ota_ok().assert_called(1);

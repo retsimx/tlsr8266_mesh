@@ -27,7 +27,7 @@ use crate::sdk::ble_app::light_ll::packet_processing::{parse_ble_packet_op_param
 use crate::sdk::ble_app::light_ll::mesh_management::rf_link_match_group_mac;
 use crate::sdk::ble_app::light_ll::status_management::{rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop};
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::common::compat::{array4_to_int, load_tbl_cmd_set};
+use crate::sdk::common::compat::load_tbl_cmd_set;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{*};
@@ -685,7 +685,7 @@ pub fn rf_link_slave_init(interval: u32)
             
             // Configure mesh pair enable if requested
             if MESH_PAIR_ENABLE.get() {
-                GET_MAC_EN.set(true);
+                MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
                 buff[1] = 1;
             }
             
@@ -725,7 +725,9 @@ pub fn rf_link_slave_init(interval: u32)
 
         // Write device identification info to system memory
         // This includes MAC address, firmware version, and data integrity check
-        write_reg32(0x808004, array4_to_int(&*MAC_ID.lock()));
+        let mac_id = MAC_ID.lock();
+        let mac_as_u32 = u32::from_le_bytes([mac_id[0], mac_id[1], mac_id[2], mac_id[3]]);
+        write_reg32(0x808004, mac_as_u32);
         write_reg32(0x808008, BUILD_VERSION);
         write_reg16(0x80800c, crc16(&slice::from_raw_parts(0x808004 as *const u8, 8)));
     }

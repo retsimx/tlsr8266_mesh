@@ -352,7 +352,7 @@ pub fn rf_link_data_callback(p: &Packet) {
     // p start from l2cap_len of RfPacketAttCmdT
     // Use the updated function to extract operation parameters
     let (_, op_cmd, op_cmd_len, params, _) = parse_ble_packet_op_params(p, true);
-    if !op_cmd_len != LightOpType::OpType3 as u8 {
+    if op_cmd_len != LightOpType::OpType3 as u8 {
         return;
     }
 
@@ -385,7 +385,7 @@ pub fn rf_link_data_callback(p: &Packet) {
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
             if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params)) && add_device_address(val) {
-                app().mesh_manager.mesh_pair_proc_get_mac_flag();
+                app().mesh_manager.mesh_device_address_validation_completed();
             }
         }
         LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),

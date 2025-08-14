@@ -123,21 +123,53 @@ def send_enable_uart():
     """
     global connection
     
-    # Create ENABLE_UART packet
-    packet = [0] * PACKET_LENGTH
-    packet[0] = 0  # counter
-    packet[1] = 0  # command type (not ACK)
-    packet[2] = ENABLE_UART  # command code
+    if not connection or not connection.is_open:
+        return False
     
-    # Calculate and add CRC
-    crc = crc16(packet, PACKET_LENGTH - 2)
-    packet[CRC_OFFSET] = crc & 0xFF
-    packet[CRC_OFFSET + 1] = (crc >> 8) & 0xFF
+    try:
+        # Create ENABLE_UART packet
+        packet = [0] * PACKET_LENGTH
+        packet[0] = 0  # counter
+        packet[1] = 0  # command type (not ACK)
+        packet[2] = ENABLE_UART  # command code
+        
+        # Calculate and add CRC
+        crc = crc16(packet, PACKET_LENGTH - 2)
+        packet[CRC_OFFSET] = crc & 0xFF
+        packet[CRC_OFFSET + 1] = (crc >> 8) & 0xFF
+        
+        # Send packet
+        connection.write(packet)
+        connection.flush()
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"[Monitor] Failed to send ENABLE_UART: {e}")
+        return False
+
+
+def enable_uart_thread():
+    """
+    Thread function that periodically sends ENABLE_UART commands.
     
-    # Send packet
-    connection.write(packet)
-    connection.flush()
-    print("[Monitor] Sent ENABLE_UART command")
+    This ensures the device stays in UART monitoring mode even after reboots
+    or other state changes that might disable UART output.
+    """
+    global running
+    
+    first_send = True
+    
+    while running:
+        if send_enable_uart():
+            if first_send or verbose:
+                print("[Monitor] Sent ENABLE_UART command")
+                first_send = False
+        
+        # Wait 1 second before sending next command
+        for _ in range(10):  # Sleep in 0.1s increments to be responsive to shutdown
+            if not running:
+                break
+            sleep(0.1)
 
 
 def format_timestamp():
@@ -178,19 +210,37 @@ def decode_mesh_message(payload):
     """
     Decode a MESH_MESSAGE payload.
     
+    The payload contains an AppCmdValue structure:
+    [0-2]   sno (3 bytes)
+    [3-4]   src (2 bytes, little-endian)  
+    [5-6]   dst (2 bytes, little-endian)
+    [7]     op (1 byte)
+    [8-9]   vendor_id (2 bytes, little-endian)
+    [10-19] par (10 bytes)
+    
     Args:
-        payload (bytes): Message payload
+        payload (bytes): Message payload containing AppCmdValue
         
     Returns:
         str: Human-readable mesh message information
     """
     try:
-        if len(payload) >= 4:
-            src_addr = struct.unpack("<H", payload[0:2])[0]
-            dst_addr = struct.unpack("<H", payload[2:4])[0]
-            msg_type = payload[4] if len(payload) > 4 else 0
+        if len(payload) >= 10:  # Need at least sno + src + dst + op + vendor_id
+            # Extract addresses (little-endian u16) - display as hex
+            src_addr = struct.unpack("<H", payload[3:5])[0]
+            dst_addr = struct.unpack("<H", payload[5:7])[0]
             
-            return f"Src: {src_addr}, Dst: {dst_addr}, Type: 0x{msg_type:02X}, Data: {payload[5:].hex()}"
+            # Extract operation code
+            op = payload[7]
+            
+            # Extract vendor ID (little-endian u16)
+            vendor_id = struct.unpack("<H", payload[8:10])[0]
+            
+            # Extract parameter data (up to 10 bytes)
+            params = payload[10:20] if len(payload) >= 20 else payload[10:]
+            params_hex = params.hex() if params else "(no params)"
+            
+            return f"Src: 0x{src_addr:04X}, Dst: 0x{dst_addr:04X}, Op: 0x{op:02X}, Vendor: 0x{vendor_id:04X}, Params: {params_hex}"
         else:
             return f"Raw data: {payload.hex()}"
     except Exception as e:
@@ -311,12 +361,12 @@ def process_packet(packet):
             
     elif cmd_code == LIGHT_STATUS:
         # Light status message
-        status_info = decode_light_status(payload_clean)
+        status_info = decode_light_status(payload)
         print(f"[{timestamp}] LIGHT_STATUS: {status_info}")
         
     elif cmd_code == MESH_MESSAGE:
         # Mesh network message
-        mesh_info = decode_mesh_message(payload_clean)
+        mesh_info = decode_mesh_message(payload)
         print(f"[{timestamp}] MESH_MSG: {mesh_info}")
         
     elif cmd_type == ACK:
@@ -466,8 +516,14 @@ Examples:
         recv_thread_handle = threading.Thread(target=recv_thread, daemon=True)
         recv_thread_handle.start()
         
-        # Send UART enable command
-        sleep(0.1)  # Brief pause to let connection settle
+        # Start UART enable thread (sends enable command every second)
+        enable_thread_handle = threading.Thread(target=enable_uart_thread, daemon=True)
+        enable_thread_handle.start()
+        
+        print("[Monitor] Started periodic ENABLE_UART sender (every 1 second)")
+        
+        # Brief pause to let connection settle, then send initial command
+        sleep(0.1)
         send_enable_uart()
         
         # Keep main thread alive until interrupted

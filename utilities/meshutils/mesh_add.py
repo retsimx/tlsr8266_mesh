@@ -212,16 +212,10 @@ async def main():
         await name_command.write()
         await sleep(0.2)  # Allow device time to process
         
-        result = await client.read_gatt_char(pair_characteristic_uuid)
-        print("Pairing state:", result)
-
         print("Sending mesh password...")
         await pwd_command.write()
         await sleep(0.2)  # Allow device time to process
  
-        result = await client.read_gatt_char(pair_characteristic_uuid)
-        print("Pairing state:", result)
-       
         print("Sending mesh LTK...")
         await ltk_command.write()
         await sleep(0.2)  # Allow device time to process

@@ -2,7 +2,6 @@ use core::mem::size_of;
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::light::AdvPrivate;
 use crate::sdk::rf_drv::set_advertisement_manufacturer_data;
 use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
@@ -28,7 +27,9 @@ pub fn vendor_set_adv_data() {
     // --------------------------------------------------
     
     // Get the MAC address for device identification
-    let mac_address = array4_to_int(&*MAC_ID.lock());
+    let mac_address = u32::from_le_bytes([
+        MAC_ID.lock()[0], MAC_ID.lock()[1], MAC_ID.lock()[2], MAC_ID.lock()[3]
+    ]);
     
     // Lock and configure the primary advertisement data structure
     let mut adv_pri_data = ADV_PRI_DATA.lock();
@@ -92,7 +93,7 @@ mod tests {
         // Setup test MAC_ID
         let test_mac = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
         // Calculate expected MAC integer using the real function
-        let expected_mac_int = array4_to_int(&test_mac[0..4]);
+        let expected_mac_int = u32::from_le_bytes([test_mac[0], test_mac[1], test_mac[2], test_mac[3]]);
         
         // Create test instances
         let test_adv_pri_data = AdvPrivate {
@@ -160,7 +161,7 @@ mod tests {
         // Setup mock MAC_ID with zeros
         let test_mac = [0x00, 0x00, 0x00, 0x00, 0x05, 0x06];
         // Calculate expected MAC integer using the real function
-        let expected_mac_int = array4_to_int(&test_mac[0..4]);
+        let expected_mac_int = u32::from_le_bytes([test_mac[0], test_mac[1], test_mac[2], test_mac[3]]);
         
         // Create test instances with values to be overwritten
         let test_adv_pri_data = AdvPrivate {
@@ -222,7 +223,7 @@ mod tests {
         
         let test_mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
         // Calculate expected MAC integer using the real function
-        let expected_mac_int = array4_to_int(&test_mac[0..4]);
+        let expected_mac_int = u32::from_le_bytes([test_mac[0], test_mac[1], test_mac[2], test_mac[3]]);
         
         // Create a specific AdvPrivate instance we can verify
         let test_adv_pri_data = AdvPrivate {

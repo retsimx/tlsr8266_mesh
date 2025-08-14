@@ -1477,9 +1477,9 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool
 #[cfg_attr(test, mry::mry)]
 pub fn parse_ble_packet_op_params(packet: &Packet, mesh_flag: bool) -> (bool, [u8; 3], u8, [u8; 16], u8)
 {
-    // Access the value field directly through the att_cmd() accessor method
-    let val = &packet.att_cmd().value.val;
-    
+    // Access the value field directly through the att_write() accessor method
+    let val = &packet.att_write().value.val;
+
     // Determine the operation command length based on the bit patterns
     // Only support 1-byte and 3-byte opcodes (2-byte opcodes are not used)
     let first_op_byte = val[0];

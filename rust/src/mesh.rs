@@ -31,7 +31,7 @@ pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum MeshPairState {
     MeshPairName1 = 0,
     MeshPairName2,
@@ -198,8 +198,11 @@ impl MeshManager {
         }
     }
 
-    pub fn mesh_pair_proc_get_mac_flag(&mut self) {
-        GET_MAC_EN.set(false); // set success
+    /// Marks device address configuration as successfully validated.
+    /// Called when LGT_CMD_CONFIG_DEV_ADDR is processed and device address is accepted.
+    /// Sets the validation flag to false, allowing mesh credentials to be saved.
+    pub fn mesh_device_address_validation_completed(&mut self) {
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false); // validation completed successfully
         if MESH_PAIR_ENABLE.get() {
             let mut data: [u8; 1] = [0];
             flash_write_page(
@@ -295,7 +298,10 @@ impl MeshManager {
     }
 
     fn save_effect_new_mesh(&mut self) {
-        if self.default_mesh_time_ref != 0 || GET_MAC_EN.get() {
+        // Only skip saving if either:
+        // 1. We're in a default mesh timeout period, OR 
+        // 2. Device address validation is still pending (not yet completed)
+        if self.default_mesh_time_ref != 0 || MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get() {
             self.mesh_pair_complete_notify();
             sleep_us(1000);
             /* Switch to normal mesh */
@@ -340,7 +346,6 @@ impl MeshManager {
         self.default_mesh_time = delay_s as u32 * 1000;
 
         /* Only change AC and LTK */
-        uprintln!("pairac c");
         PAIR_AC.set(access_code(
             &*PAIR_CONFIG_MESH_NAME.lock(),
             &*PAIR_CONFIG_MESH_PWD.lock(),
@@ -404,7 +409,8 @@ impl MeshManager {
             return;
         }
 
-        if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxStart
+        // TODO REMOVE THIS FALSE
+        if false && *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxStart
             && self.mesh_pair_state == MeshPairState::MeshPairName1
             && self.get_online_node_cnt() == 1
         {

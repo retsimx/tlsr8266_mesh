@@ -39,8 +39,8 @@ pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
 
 pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
     if params[0] == 0xff && params[1] == 0xff {
-        // get
-        GET_MAC_EN.get()
+        // get - return current validation pending state
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get()
     } else {
         return params[0..6] == *MAC_ID.lock();
     }
@@ -305,7 +305,7 @@ pub fn pair_load_key()
             pair_state.pair_pass.copy_from_slice(unsafe { slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10) });
 
             if MESH_PAIR_ENABLE.get() {
-                GET_MAC_EN.set(unsafe { *(pairing_addr as *const bool).offset(0x1) });
+                MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(unsafe { *(pairing_addr as *const bool).offset(0x1) });
             }
 
             let pair_config_flag = unsafe { *(pairing_addr as *const u8).offset(0xf) };

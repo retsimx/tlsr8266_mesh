@@ -356,7 +356,7 @@ pub fn pair_save_key()
 
     // Store mesh MAC address configuration if mesh pairing is enabled
     if MESH_PAIR_ENABLE.get() {
-        pass[1] = if GET_MAC_EN.get() { 1 } else { 0 };
+        pass[1] = if MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get() { 1 } else { 0 };
     }
 
     let mut pair_state = PAIR_STATE.lock();
@@ -614,12 +614,18 @@ pub fn pair_proc() -> Option<Packet>
             
             // Enable MAC address handling for mesh if needed
             if MESH_PAIR_ENABLE.get() {
-                GET_MAC_EN.set(true);
+                MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
             }
             
             // Delete pairing data and notify application
             rf_link_delete_pair();
             rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
+        },
+
+        PairState::Completed => {
+            // For completed state, send a simple status response
+            pkt_read_rsp.head_mut().l2cap_len = HEADER_SIZE;
+            // State will be set below in the common code
         },
 
         _ => {
@@ -1761,9 +1767,9 @@ mod tests {
     }
 
     // Helper to set up global state for testing pair_save_key
-    fn setup_save_key_state(mesh_pair_enable: bool, get_mac_en: bool, nn: [u8; 16], pass: [u8; 16], ltk: [u8; 16]) {
+    fn setup_save_key_state(mesh_pair_enable: bool, device_addr_validation_pending: bool, nn: [u8; 16], pass: [u8; 16], ltk: [u8; 16]) {
         MESH_PAIR_ENABLE.set(mesh_pair_enable);
-        GET_MAC_EN.set(get_mac_en);
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(device_addr_validation_pending);
         let mut pair_state = PAIR_STATE.lock();
         pair_state.pair_nn = nn;
         pair_state.pair_pass = pass;
@@ -1801,7 +1807,7 @@ mod tests {
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
         expected_header[15] = PAIR_CONFIG_VALID_FLAG;
-        expected_header[1] = 1; // MESH_PAIR_ENABLE=true, GET_MAC_EN=true
+        expected_header[1] = 1; // MESH_PAIR_ENABLE=true, MESH_DEVICE_ADDRESS_VALIDATION_PENDING=true
         mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
         mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
         mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
@@ -1840,7 +1846,7 @@ mod tests {
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
         expected_header[15] = PAIR_CONFIG_VALID_FLAG;
-        expected_header[1] = 0; // MESH_PAIR_ENABLE=true, GET_MAC_EN=false
+        expected_header[1] = 0; // MESH_PAIR_ENABLE=true, MESH_DEVICE_ADDRESS_VALIDATION_PENDING=false
         mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
         mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
         mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
@@ -1862,7 +1868,7 @@ mod tests {
         let test_ltk = [0x3C; 16];
         let encoded_pass = [0xDD; 16]; // Mock encoded password
 
-        setup_save_key_state(false, true, test_nn, test_pass, test_ltk); // GET_MAC_EN doesn't matter if mesh is disabled
+        setup_save_key_state(false, true, test_nn, test_pass, test_ltk); // MESH_DEVICE_ADDRESS_VALIDATION_PENDING doesn't matter if mesh is disabled
 
         // Mock expectations
         mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
@@ -1947,14 +1953,14 @@ mod tests {
         security_enable: bool,
         login_ok: bool,
         mesh_pair_enable: bool,
-        get_mac_en: bool,
+        device_addr_validation_pending: bool,
     ) {
         BLE_PAIR_ST.set(pair_st);
         PAIR_READ_PENDING.set(read_pending);
         SECURITY_ENABLE.set(security_enable);
         PAIR_LOGIN_OK.set(login_ok);
         MESH_PAIR_ENABLE.set(mesh_pair_enable);
-        GET_MAC_EN.set(get_mac_en);
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(device_addr_validation_pending);
 
         // Reset relevant parts of PAIR_STATE if needed for specific tests
         let mut pair_state = PAIR_STATE.lock();
@@ -2370,7 +2376,7 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(GET_MAC_EN.get(), false); // Should not be set if mesh disabled
+        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), false); // Should not be set if mesh disabled
         assert_eq!(PAIR_READ_PENDING.get(), false);
     }
 
@@ -2378,7 +2384,7 @@ mod tests {
     #[mry::lock(rf_link_delete_pair, rf_link_light_event_callback)]
     fn test_pair_proc_delete_pairing_mesh_enabled() {
         // Arrange
-        setup_proc_state(PairState::DeletePairing, true, true, true, true, false); // Mesh enabled, GET_MAC_EN initially false
+        setup_proc_state(PairState::DeletePairing, true, true, true, true, false); // Mesh enabled, MESH_DEVICE_ADDRESS_VALIDATION_PENDING initially false
         mock_rf_link_delete_pair().returns(());
         mock_rf_link_light_event_callback(LGT_CMD_DEL_PAIR).returns(());
 
@@ -2404,7 +2410,7 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(GET_MAC_EN.get(), true); // Should be set if mesh enabled
+        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), true); // Should be set if mesh enabled
         assert_eq!(PAIR_READ_PENDING.get(), false);
     }
 

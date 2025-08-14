@@ -2,7 +2,7 @@ use core::mem;
 use crate::const_assert;
 use crate::sdk::light::{AdvRspPrivate, PKT_CMD_LEN};
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct RfPacketAdvIndModuleT {
     pub dma_len: u32,       // 0    //won't be a fixed number as previous, should adjust with the mouse package number
@@ -35,7 +35,7 @@ pub struct PacketL2capHead {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct PacketL2capData {
     pub l2cap_len: u16,
     pub chan_id: u16,
@@ -45,7 +45,7 @@ pub struct PacketL2capData {
     pub value: [u8; 30],
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketLlData {
     pub head: PacketL2capHead, // 0
@@ -71,7 +71,7 @@ pub struct AppCmdValue {
     pub par: [u8; 10],   // 10   23
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketLlApp {
     pub head: PacketL2capHead, // 0
@@ -82,7 +82,7 @@ pub struct PacketLlApp {
     pub rsv: [u8; 10],
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketAttReadRsp {
     pub head: PacketL2capHead, // 0
@@ -90,7 +90,7 @@ pub struct PacketAttReadRsp {
     pub value: [u8; 22] // 11
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketLlInit {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
@@ -109,7 +109,7 @@ pub struct PacketLlInit {
     pub hop: u8,				//sca(3)_hop(5)
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PktL2capSigConnParaUpRsp {
     pub head: PacketL2capHead, // 0
@@ -119,7 +119,7 @@ pub struct PktL2capSigConnParaUpRsp {
     pub result: u16,
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketAttWrite {
     pub head: PacketL2capHead, // 0
@@ -129,7 +129,7 @@ pub struct PacketAttWrite {
     pub value: PacketAttValue, //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketAttRawValue {
     pub head: PacketL2capHead, // 0
@@ -139,7 +139,7 @@ pub struct PacketAttRawValue {
     pub value: [u8; 30]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketAttCmd {
     pub head: PacketL2capHead, // 0
@@ -149,7 +149,7 @@ pub struct PacketAttCmd {
     pub value: PacketAttValue //sno[3],src[2],dst[2],op[1~3],params[0~10],mac-app[5],ttl[1],mac-net[4]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 pub struct PacketAttData {
     pub head: PacketL2capHead, // 0
@@ -164,7 +164,7 @@ pub struct PacketAttData {
 }
 
 #[derive(Clone, Copy, Default)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct MeshPkt {
     pub head: PacketL2capHead, // 0
     pub src_tx: u16,            // 10
@@ -178,12 +178,12 @@ pub struct MeshPkt {
     pub internal_par1: [u8; 5], // 33
     pub ttl: u8,                // 38
     pub internal_par2: [u8; 4], // 39
-    pub no_use: [u8; 4]         // 43 size must 48, when is set to be rf tx address.
+    pub no_use: [u8; 5]         // 43 size must 48, when is set to be rf tx address.
 }
 
 const_assert!(mem::size_of::<MeshPkt>() == 48);
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketAttMtu {
     pub head: PacketL2capHead, // 0
@@ -191,7 +191,7 @@ pub struct PacketAttMtu {
     pub mtu: [u8; 2]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketAttErrRsp {
     pub head: PacketL2capHead, // 0
@@ -201,7 +201,7 @@ pub struct PacketAttErrRsp {
     pub err_reason: u8
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketLlDataRsp {
     pub head: PacketL2capHead, // 0
@@ -213,7 +213,7 @@ pub struct PacketLlDataRsp {
     pub dat: [u8; 14]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketVersionInd {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
@@ -225,7 +225,7 @@ pub struct PacketVersionInd {
     pub sub_ver: u16
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketFeatureRsp {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
@@ -235,7 +235,7 @@ pub struct PacketFeatureRsp {
     pub data: [u8; 8]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketCtrlUnknown {
     pub dma_len: u32,            //won't be a fixed number as previous, should adjust with the mouse package number
@@ -245,15 +245,14 @@ pub struct PacketCtrlUnknown {
     pub data: [u8; 1]
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketLlWriteRsp {
     pub head: PacketL2capHead, // 0
-
     pub	op: u16
 }
 
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketAttWriteRsp {
     pub head: PacketL2capHead, // 0
@@ -274,7 +273,7 @@ pub struct PktBuf {
 /// the central device needs to change the frequency hopping sequence used in the connection.
 /// The 5-byte channel map data starts 1 byte into the l2cap_len field (at the high byte)
 /// and extends 4 more bytes beyond it, as defined by the BLE specification.
-#[repr(C, align(4))]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct PacketChannelMapUpdate {
     pub dma_len: u32,           // 0 - DMA length field  
@@ -293,7 +292,7 @@ pub struct ScanRspData {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, align(4))]
+#[repr(C, packed)]
 pub struct PacketScanRsp {
     pub dma_len: u32,       // 0     //won't be a fixed number as previous, should adjust with the mouse package number
 

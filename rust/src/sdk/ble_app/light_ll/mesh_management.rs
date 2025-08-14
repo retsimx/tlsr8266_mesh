@@ -45,7 +45,7 @@ use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::{app, BIT, uprintln};
+use crate::{app, BIT};
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::mesh::{MESH_NODE_ST_VAL_LEN, MeshNodeStValT};
@@ -783,7 +783,7 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8], retransmit_
         internal_par1: [0; 5],     // Internal parameters
         ttl: 0,                    // Time-to-live hop counter
         internal_par2: [0; 4],     // Additional internal parameters
-        no_use: [0; 4],            // Reserved/unused bytes
+        no_use: [0; 5],            // Reserved/unused bytes
     };
 
     // Convert 32-bit sequence number to 24-bit little-endian format

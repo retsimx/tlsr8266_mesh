@@ -504,9 +504,12 @@ impl LedControllerState {
 
 /// Global LED controller state for device status indication.
 pub static LED_CONTROLLER: LedControllerState = LedControllerState::new();
-/// Flag enabling MAC address retrieval operations.
-/// When true, allows reading and updating device MAC address.
-pub static GET_MAC_EN: AtomicBool = AtomicBool::new(false);
+
+/// Flag indicating mesh device address configuration is pending MAC validation.
+/// When true: Device address configuration requires MAC address validation before completion.
+/// When false: MAC address validation completed successfully, device address is configured.
+/// Used during mesh pairing to track the device address configuration state.
+pub static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Current BLE Link Layer channel number for communication.
 /// Tracks which of the 37 BLE channels is currently in use.

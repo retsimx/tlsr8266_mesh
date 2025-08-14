@@ -30,10 +30,10 @@ PAIR_OP_SET_MESH_LTK = 0x06        # Set long-term key
 PAIR_OP_GET_MESH_LTK = 0x08        # Request long-term key
 PAIR_OP_VERIFY_CREDENTIALS = 0x0C  # Verify credentials (12)
 
-# Pairing state constants (from Rust MeshPairState enum)
-PAIR_STATE_MESH_EFFECT = 7         # MeshPairEffect state - nearly complete
-PAIR_STATE_PAIRING_COMPLETE = 8    # MeshPairDefaultMesh state - pairing complete
-PAIR_STATE_REQUESTING_LTK = 9      # RequestingLtk state - device returned LTK
+# Pairing state constants (from Rust PairState enum)
+PAIR_STATE_MESH_EFFECT = 0x07      # ReceivingMeshLtk state - nearly complete
+PAIR_STATE_PAIRING_COMPLETE = 0x0F # Completed state - pairing complete
+PAIR_STATE_REQUESTING_LTK = 0x09   # RequestingLtk state - device returned LTK
 
 # Common constants for firmware updates
 VERSION_MASK = 0x7FFFFFFF  # Mask to extract version number

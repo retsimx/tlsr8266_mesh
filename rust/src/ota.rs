@@ -8,7 +8,6 @@ use crate::sdk::ble_app::light_ll::packet_processing::{is_add_packet_buf_ready, 
 use crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop;
 use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
 use crate::sdk::common::bit::ONES_32;
-use crate::sdk::common::compat::array4_to_int;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
 use crate::sdk::light::*;
@@ -218,7 +217,7 @@ impl OtaManager {
                 if n_data_len == 0 {
                     let mut ota_pkt_total = [0u8; 4];
                     flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 0x18, 4, ota_pkt_total.as_mut_ptr());
-                    let ota_pkt_total = array4_to_int(&ota_pkt_total).div_ceil(packet_len) as u16;
+                    let ota_pkt_total = u32::from_le_bytes(ota_pkt_total).div_ceil(packet_len) as u16;
                     if ota_pkt_total < 3 {
                         // invalid fw
                         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);

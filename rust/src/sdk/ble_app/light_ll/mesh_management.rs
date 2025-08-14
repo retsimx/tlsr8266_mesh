@@ -1549,10 +1549,13 @@ mod tests {
         assert_eq!(l2cap_len, 0x21);
         assert_eq!(chan_id, 0xff03);
         
-        // Verify addressing
-        assert_eq!(mesh_pkt.src_tx, DEVICE_ADDRESS.get());
-        assert_eq!(mesh_pkt.src_adr, DEVICE_ADDRESS.get());
-        assert_eq!(mesh_pkt.dst_adr, dst);
+        // Verify addressing (copy packed fields to avoid alignment issues)
+        let src_tx = mesh_pkt.src_tx;
+        let src_adr = mesh_pkt.src_adr;
+        let dst_adr = mesh_pkt.dst_adr;
+        assert_eq!(src_tx, DEVICE_ADDRESS.get());
+        assert_eq!(src_adr, DEVICE_ADDRESS.get());
+        assert_eq!(dst_adr, dst);
         
         // Verify sequence number (24-bit little-endian)
         assert_eq!(mesh_pkt.sno[0], (sno & 0xFF) as u8); // LSB
@@ -1701,10 +1704,13 @@ mod tests {
             let packet = mesh_construct_packet(0x123, dst_addr, &cmd_op_para, 2, true);
             let mesh_pkt = unsafe { packet.mesh };
             
-            // Both src_tx and src_adr should be set to device address
-            assert_eq!(mesh_pkt.src_tx, device_addr);
-            assert_eq!(mesh_pkt.src_adr, device_addr);
-            assert_eq!(mesh_pkt.dst_adr, dst_addr);
+            // Both src_tx and src_adr should be set to device address (copy packed fields)
+            let src_tx = mesh_pkt.src_tx;
+            let src_adr = mesh_pkt.src_adr;
+            let dst_adr_val = mesh_pkt.dst_adr;
+            assert_eq!(src_tx, device_addr);
+            assert_eq!(src_adr, device_addr);
+            assert_eq!(dst_adr_val, dst_addr);
         }
     }
 

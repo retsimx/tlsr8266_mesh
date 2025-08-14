@@ -706,6 +706,9 @@ mod tests {
         MESH_NODE_MASK.lock().fill(0);
         // Reset PKT_INIT to a known state
         *PKT_INIT.lock() = create_test_packet();
+        
+        // Set MAC_ID to match test packet's address for successful connection tests
+        *MAC_ID.lock() = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
     }
 
     // ================================================================================
@@ -909,13 +912,21 @@ mod tests {
     ///
     /// Connection should be rejected if scan address doesn't match advertiser address.
     #[test]
-    #[mry::lock(rf_stop_trx, read_reg_system_tick, write_reg_system_tick_irq, write_reg_irq_src)]
+    #[mry::lock(rf_stop_trx, read_reg_system_tick, read_reg_system_tick_irq, write_reg_system_tick_irq, 
+               write_reg_irq_src, write_reg_rf_crc, ble_ll_build_available_channel_table,
+               rf_reset_sn, pair_init, write_reg8)]
     fn test_rf_link_slave_connect_address_mismatch() {
         // Setup mocks
         mock_rf_stop_trx().returns(());
         mock_read_reg_system_tick().returns(50000);
+        mock_read_reg_system_tick_irq().returns(50000);
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_write_reg_irq_src(Any).returns(());
+        mock_write_reg_rf_crc(Any).returns(());
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        mock_rf_reset_sn().returns(());
+        mock_pair_init().returns(());
+        mock_write_reg8(Any, Any).returns(());
         reset_global_state();
         
         let mut packet = create_test_packet();
@@ -923,7 +934,7 @@ mod tests {
         
         // Enable peripheral connections but create address mismatch
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(true);
-        packet.ll_init.scan_a = [0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]; // Different from adv_a
+        packet.ll_init.adv_a = [0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]; // Different from MAC_ID
         
         let result = rf_link_slave_connect(&packet, time);
         assert_eq!(result, false, "Should reject connection with mismatched addresses");
@@ -933,13 +944,21 @@ mod tests {
     ///
     /// Connection should be rejected if check_par_con returns false.
     #[test]
-    #[mry::lock(rf_stop_trx, read_reg_system_tick, write_reg_system_tick_irq, write_reg_irq_src)]
+    #[mry::lock(rf_stop_trx, read_reg_system_tick, read_reg_system_tick_irq, write_reg_system_tick_irq, 
+               write_reg_irq_src, write_reg_rf_crc, ble_ll_build_available_channel_table,
+               rf_reset_sn, pair_init, write_reg8)]
     fn test_rf_link_slave_connect_invalid_parameters() {
         // Setup mocks
         mock_rf_stop_trx().returns(());
         mock_read_reg_system_tick().returns(50000);
+        mock_read_reg_system_tick_irq().returns(50000);
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_write_reg_irq_src(Any).returns(());
+        mock_write_reg_rf_crc(Any).returns(());
+        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
+        mock_rf_reset_sn().returns(());
+        mock_pair_init().returns(());
+        mock_write_reg8(Any, Any).returns(());
         reset_global_state();
         
         let mut packet = create_test_packet();

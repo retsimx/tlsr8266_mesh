@@ -21,6 +21,12 @@ use crate::uart_manager::UartMsg;
 #[cfg(test)]
 use mry::mry;
 
+// UART packet structure constants
+// Packet layout: [counter(1)][cmd_type(1)][cmd_code(1)][payload(39)][crc(2)] = 44 bytes total
+const UART_PAYLOAD_OFFSET: usize = 3;  // Payload starts at index 3
+const UART_CRC_OFFSET: usize = 42;     // CRC starts at index 42
+const UART_PAYLOAD_MAX_SIZE: usize = UART_CRC_OFFSET - UART_PAYLOAD_OFFSET; // 39 bytes
+
 struct TlsrCriticalSection;
 critical_section::set_impl!(TlsrCriticalSection);
 
@@ -147,7 +153,8 @@ impl<const size: usize> UartStream<size> {
     pub fn send(&self, is_panic: bool, doasync: bool) {
         let mut buffer = unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) };
         while !buffer.is_empty() {
-            let len = min(UART_DATA_LEN - 3, buffer.len());
+            // Use the correct payload size to avoid overwriting CRC
+            let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
 
             let mut msg = UartData {
                 len: UART_DATA_LEN as u32, data: [0; UART_DATA_LEN]
@@ -155,7 +162,7 @@ impl<const size: usize> UartStream<size> {
 
             msg.data[2] = if is_panic {UartMsg::PanicMessage} else {UartMsg::PrintMessage} as u8;
             for i in 0..len {
-                msg.data[3 + i] = buffer[i];
+                msg.data[UART_PAYLOAD_OFFSET + i] = buffer[i];
             }
 
             if doasync {

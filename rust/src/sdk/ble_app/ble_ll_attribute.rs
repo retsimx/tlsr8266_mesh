@@ -1279,14 +1279,18 @@ mod tests {
             // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set correctly
             assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), 0x12345679); // 0x12345678 | 1
             
-            // Verify version indication packet
-            assert_eq!(response.version_ind().opcode, 0x0C);
-            assert_eq!(response.version_ind()._type, 3);
-            assert_eq!(response.version_ind().rf_len, 6);
-            assert_eq!(response.version_ind().dma_len, 8);
-            assert_eq!(response.version_ind().vendor, VENDOR_ID);
-            assert_eq!(response.version_ind().main_ver, 0x08);
-            assert_eq!(response.version_ind().sub_ver, 0x08);
+            // Verify version indication packet (copy packed fields)
+            let version_ind = response.version_ind();
+            assert_eq!(version_ind.opcode, 0x0C);
+            assert_eq!(version_ind._type, 3);
+            assert_eq!(version_ind.rf_len, 6);
+            let dma_len = version_ind.dma_len;
+            let vendor = version_ind.vendor;
+            let sub_ver = version_ind.sub_ver;
+            assert_eq!(dma_len, 8);
+            assert_eq!(vendor, VENDOR_ID);
+            assert_eq!(version_ind.main_ver, 0x08);
+            assert_eq!(sub_ver, 0x08);
         }
         
         // --- Test handle 8 case (feature response) ---
@@ -1299,11 +1303,13 @@ mod tests {
             // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set correctly
             assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), 0x12345679);
             
-            // Verify feature response packet
-            assert_eq!(response.feature_rsp().opcode, 0x09);
-            assert_eq!(response.feature_rsp()._type, 0x3);
-            assert_eq!(response.feature_rsp().rf_len, 0x09);
-            assert_eq!(response.feature_rsp().dma_len, 0x0b);
+            // Verify feature response packet (copy packed fields)
+            let feature_rsp = response.feature_rsp();
+            assert_eq!(feature_rsp.opcode, 0x09);
+            assert_eq!(feature_rsp._type, 0x3);
+            assert_eq!(feature_rsp.rf_len, 0x09);
+            let dma_len = feature_rsp.dma_len;
+            assert_eq!(dma_len, 0x0b);
             assert_eq!(response.feature_rsp().data[0], 1);
             // Check remaining bytes are zero
             for i in 1..8 {
@@ -1329,12 +1335,14 @@ mod tests {
                 let packet = create_test_packet_with_handle(handle);
                 let response = handle_mtu_exchange_response(&packet).unwrap();
                 
-                // Verify control packet with expected fields
-                assert_eq!(response.ctrl_unknown().opcode, 0x07);
-                assert_eq!(response.ctrl_unknown().data[0], handle);
-                assert_eq!(response.ctrl_unknown()._type, 0x03);
-                assert_eq!(response.ctrl_unknown().rf_len, 0x02);
-                assert_eq!(response.ctrl_unknown().dma_len, 0x04);
+                // Verify control packet with expected fields (copy packed fields)
+                let ctrl_unknown = response.ctrl_unknown();
+                assert_eq!(ctrl_unknown.opcode, 0x07);
+                assert_eq!(ctrl_unknown.data[0], handle);
+                assert_eq!(ctrl_unknown._type, 0x03);
+                assert_eq!(ctrl_unknown.rf_len, 0x02);
+                let dma_len = ctrl_unknown.dma_len;
+                assert_eq!(dma_len, 0x04);
             }
         }
     }
@@ -1394,9 +1402,11 @@ mod tests {
         
         let response = l2cap_att_handler(&packet).unwrap();
         
-        // Should return Version Indication response
-        assert_eq!(response.version_ind().opcode, 0x0C);
-        assert_eq!(response.version_ind().vendor, VENDOR_ID);
+        // Should return Version Indication response (copy packed fields)
+        let version_ind = response.version_ind();
+        assert_eq!(version_ind.opcode, 0x0C);
+        let vendor = version_ind.vendor;
+        assert_eq!(vendor, VENDOR_ID);
     }
     
     #[test]
@@ -1688,12 +1698,14 @@ mod tests {
         
         let response = l2cap_att_handler(&packet).unwrap();
         
-        // Should return PacketCtrlUnknown with opcode 0x07
-        assert_eq!(response.ctrl_unknown().opcode, 0x07);
-        assert_eq!(response.ctrl_unknown().data[0], 0x05); // Should include the handle value
-        assert_eq!(response.ctrl_unknown()._type, 0x03);
-        assert_eq!(response.ctrl_unknown().rf_len, 0x02);
-        assert_eq!(response.ctrl_unknown().dma_len, 0x04);
+        // Should return PacketCtrlUnknown with opcode 0x07 (copy packed fields)
+        let ctrl_unknown = response.ctrl_unknown();
+        assert_eq!(ctrl_unknown.opcode, 0x07);
+        assert_eq!(ctrl_unknown.data[0], 0x05); // Should include the handle value
+        assert_eq!(ctrl_unknown._type, 0x03);
+        assert_eq!(ctrl_unknown.rf_len, 0x02);
+        let dma_len = ctrl_unknown.dma_len;
+        assert_eq!(dma_len, 0x04);
     }
     
     #[test]
@@ -1716,11 +1728,13 @@ mod tests {
         // Verify GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP was set
         assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), expected_tick_value);
         
-        // Should return PacketFeatureRsp
-        assert_eq!(response.feature_rsp().opcode, 0x09);
-        assert_eq!(response.feature_rsp()._type, 0x3);
-        assert_eq!(response.feature_rsp().rf_len, 0x09);
-        assert_eq!(response.feature_rsp().dma_len, 0x0b);
+        // Should return PacketFeatureRsp (copy packed fields)
+        let feature_rsp = response.feature_rsp();
+        assert_eq!(feature_rsp.opcode, 0x09);
+        assert_eq!(feature_rsp._type, 0x3);
+        assert_eq!(feature_rsp.rf_len, 0x09);
+        let dma_len = feature_rsp.dma_len;
+        assert_eq!(dma_len, 0x0b);
         // Check first byte of data array which is set to 1
         assert_eq!(response.feature_rsp().data[0], 1);
     }
@@ -2173,12 +2187,14 @@ mod tests {
         // Call the handler
         let response = l2cap_att_handler(&packet).unwrap();
         
-        // Verify the response is an Error Response
-        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
-        assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
+        // Verify the response is an Error Response (copy packed fields)
+        let att_err_rsp = response.att_err_rsp();
+        assert_eq!(att_err_rsp.opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(att_err_rsp.err_opcode, GattOp::AttOpReadByTypeReq as u8);
         
         // Error handle should be set to the start handle from the request
-        assert_eq!(response.att_err_rsp().err_handle, 1);
+        let err_handle = att_err_rsp.err_handle;
+        assert_eq!(err_handle, 1);
     }
     
     #[test]
@@ -2550,7 +2566,7 @@ mod tests {
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
         
         // Verify that the error handle is set to the starting handle from the request
-        assert_eq!(response.att_err_rsp().err_handle, 1);
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 1);
     }
     
     #[test]
@@ -2596,7 +2612,7 @@ mod tests {
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
 
         // Verify that the error handle is set to the starting handle from the request
-        assert_eq!(response.att_err_rsp().err_handle, 1);
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 1);
 
         // Restore original attribute length
         unsafe {
@@ -3000,7 +3016,7 @@ mod tests {
         
         // Error handle should be set to the start_handle value we were using
         // when we determined there were no matches
-        assert_eq!(response.att_err_rsp().err_handle, 1);
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 1);
     }
 
     #[test]
@@ -3028,7 +3044,7 @@ mod tests {
         // Verify that an error response was generated
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
-        assert_eq!(response.att_err_rsp().err_handle, 1); // Should match the starting handle from request
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 1); // Should match the starting handle from request
     }
 
     #[test]
@@ -3057,7 +3073,7 @@ mod tests {
         // Verify that an error response was generated
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByTypeReq as u8);
-        assert_eq!(response.att_err_rsp().err_handle, 1); // Should match the starting handle from request
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 1); // Should match the starting handle from request
     }
 
     #[test]
@@ -3359,7 +3375,7 @@ mod tests {
         // Verify that an error response is returned
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
-        assert_eq!(response.att_err_rsp().err_handle, 0); // Should match the invalid start_handle value
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 0); // Should match the invalid start_handle value
         
         // Also verify through the main handler
         let response2 = l2cap_att_handler(&packet).unwrap();
@@ -3367,7 +3383,7 @@ mod tests {
         // Should also be an error response with same parameters
         assert_eq!(response2.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response2.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
-        assert_eq!(response2.att_err_rsp().err_handle, 0);
+        let err_handle2 = response2.att_err_rsp().err_handle; assert_eq!(err_handle2, 0);
     }
     
     #[test]
@@ -3395,7 +3411,7 @@ mod tests {
         // Verify that an error response is returned
         assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
-        assert_eq!(response.att_err_rsp().err_handle, 20); // Should match the invalid start_handle value
+        let err_handle = response.att_err_rsp().err_handle; assert_eq!(err_handle, 20); // Should match the invalid start_handle value
         
         // Also verify through the main handler
         let response2 = l2cap_att_handler(&packet).unwrap();
@@ -3403,7 +3419,7 @@ mod tests {
         // Should also be an error response with same parameters
         assert_eq!(response2.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
         assert_eq!(response2.att_err_rsp().err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
-        assert_eq!(response2.att_err_rsp().err_handle, 20);
+        let err_handle2 = response2.att_err_rsp().err_handle; assert_eq!(err_handle2, 20);
     }
     
     #[test]

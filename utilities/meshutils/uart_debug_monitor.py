@@ -166,7 +166,7 @@ def enable_uart_thread():
                 first_send = False
         
         # Wait 1 second before sending next command
-        for _ in range(10):  # Sleep in 0.1s increments to be responsive to shutdown
+        for _ in range(5):  # Sleep in 0.1s increments to be responsive to shutdown
             if not running:
                 break
             sleep(0.1)

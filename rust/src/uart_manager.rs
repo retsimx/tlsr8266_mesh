@@ -69,7 +69,7 @@ async fn uart_receiver() {
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<UartData, 20>,
+    send_channel: Deque<UartData, 6>,
     recv_channel: Deque<UartData, 6>,
     ack_counter: u8,
     last_ack: u8,
@@ -406,7 +406,7 @@ mod tests {
         };
         
         // Fill the channel to capacity
-        let capacity = 6; // This should match the capacity in UartManager
+        let capacity = 6; // This matches the capacity in UartManager (Deque<UartData, 6>)
         for _ in 0..capacity {
             let result = manager.send_message(&msg);
             assert!(result);

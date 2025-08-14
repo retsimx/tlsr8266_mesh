@@ -1348,7 +1348,7 @@ mod tests {
                 ttl: 0,
                 internal_par2: [0; 4],
                 dst_adr: 0,
-                no_use: [0; 4],
+                no_use: [0; 5],
             }
         };
         packet

@@ -1038,8 +1038,11 @@ pub fn kick_out(par: KickoutReason) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::slice;
+    use mry::send_wrapper::SendWrapper;
     use crate::sdk::drivers::flash::{mock_flash_write_page, mock_flash_erase_sector};
     use crate::sdk::mcu::clock::mock_clock_time_exceed;
+    use crate::sdk::mcu::crypto::mock_encode_password;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::pm::mock_light_sw_reboot;
     use crate::{mock_app_mocker, app_mocker, App};
@@ -1646,6 +1649,32 @@ mod tests {
         assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 16); // Incremented
     }
 
+    /// Test timing check remains pending when minimum time has not elapsed
+    #[test]
+    #[mry::lock(clock_time_exceed, write_timing_validation, flash_write_page)]
+    fn test_factory_reset_cnt_check_min_time_not_elapsed() {
+        // Set up state 1 for step 4 (requires timing validation)
+        FACTORY_RESET_STATE.consecutive_reset_count.set(4);
+        FACTORY_RESET_STATE.clear_state.set(1);
+        FACTORY_RESET_STATE.flash_address_index.set(25);
+        let sentinel_timestamp = 1234;
+        FACTORY_RESET_STATE.timing_check_timestamp.set(sentinel_timestamp);
+
+        let min_time_us = (POWER_CYCLE_TIMING[3].0 as u32) * 1_000_000;
+
+        mock_clock_time_exceed(0, min_time_us).returns(false);
+        mock_write_timing_validation().returns(());
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+
+        factory_reset_cnt_check();
+
+        mock_clock_time_exceed(0, min_time_us).assert_called(1);
+        mock_write_timing_validation().assert_called(0);
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(0);
+        assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 1);
+        assert_eq!(FACTORY_RESET_STATE.timing_check_timestamp.get(), sentinel_timestamp);
+    }
+
     /// Test factory_reset_cnt_check timing state machine
     #[test]
     #[mry::lock(clock_time_exceed, read_flash_byte, flash_write_page)]
@@ -1780,5 +1809,70 @@ mod tests {
         // Verify other configuration sectors were also erased
         // (The exact number depends on the configuration, but there should be multiple calls)
         // We can't easily get a call count with mry, so we just verify the reset sector was called
+    }
+
+    /// Test that kick_out writes default credentials and pairing flags to flash
+    #[test]
+    #[mry::lock(flash_erase_sector, flash_write_page, encode_password, app_mocker)]
+    fn test_kick_out_out_of_mesh_writes_credentials_and_flags() {
+        // Ensure a known LTK is stored before invoking kick_out
+        let expected_ltk = [0xAAu8; 16];
+        {
+            let mut ltk = PAIR_CONFIG_MESH_LTK.lock();
+            *ltk = expected_ltk;
+        }
+
+        // Configure mesh pairing state to enable pairing flag path
+        MESH_PAIR_ENABLE.set(true);
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+
+        let encoded_password = [0x5Au8; 16];
+        mock_encode_password(mry::Any).returns(encoded_password);
+
+        let mut expected_name = [0u8; 16];
+        let name_bytes = OUT_OF_MESH.as_bytes();
+        let copy_len = name_bytes.len().min(expected_name.len());
+        expected_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        let mut expected_flags = [0u8; 16];
+        expected_flags[0] = PAIR_VALID_FLAG;
+        expected_flags[15] = PAIR_VALID_FLAG;
+        expected_flags[1] = 1; // Mesh pairing enabled flag
+
+        let pairing_addr = FLASH_ADR_PAIRING;
+
+        mock_flash_erase_sector(mry::Any).returns(());
+
+        let expected_flags_closure = expected_flags;
+        let expected_name_closure = expected_name;
+        let expected_ltk_closure = expected_ltk;
+        let encoded_password_closure = encoded_password;
+
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns_with(move |addr: u32, len: u32, buf: SendWrapper<*const u8>| {
+            assert_eq!(len, 16);
+            let data = unsafe { slice::from_raw_parts(*buf, len as usize) };
+            match addr {
+                a if a == pairing_addr + 48 => assert_eq!(data, &expected_ltk_closure),
+                a if a == pairing_addr + 32 => assert_eq!(data, &encoded_password_closure),
+                a if a == pairing_addr + 16 => assert_eq!(data, &expected_name_closure),
+                a if a == pairing_addr => assert_eq!(data, &expected_flags_closure),
+                a => panic!("unexpected flash write address: 0x{:x}", a),
+            }
+        });
+
+        let mut app = App::default();
+        app.ota_manager.mock_rf_led_ota_ok().returns(());
+        mock_app_mocker().returns(&mut app);
+
+        kick_out(KickoutReason::OutOfMesh);
+
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(4);
+        mock_encode_password(mry::Any).assert_called(1);
+        assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
+        app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
+
+        // Restore mesh pairing flags for other tests
+        MESH_PAIR_ENABLE.set(false);
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
     }
 }

@@ -1,4 +1,6 @@
+use core::convert::{TryFrom, TryInto};
 use core::mem::size_of;
+use core::ops::Range;
 use core::ptr::addr_of;
 use core::slice;
 
@@ -14,8 +16,23 @@ use crate::sdk::drivers::uart::{UART_DATA_LEN, UartData, UartDriver, UartIrqMask
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{AppCmdValue, Packet};
+
+const MSG_TYPE_INDEX: usize = 2;
+const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;
+const CTRL_PAYLOAD_RANGE: Range<usize> = 5..18;
+const CTRL_FINGERPRINT_RANGE: Range<usize> = 3..18;
+const CTRL_RETRANSMIT_INDEX: usize = 18;
+const CTRL_ACK_FLAG_INDEX: usize = 19;
+const OUTGOING_FINGERPRINT_RANGE: Range<usize> = 7..22;
+const CRC_RANGE: Range<usize> = 0..42;
+const SNO_RANGE: Range<usize> = 2..5;
+const CTRL_PAYLOAD_LEN: usize = CTRL_PAYLOAD_RANGE.end - CTRL_PAYLOAD_RANGE.start;
+const CTRL_FINGERPRINT_LEN: usize = CTRL_FINGERPRINT_RANGE.end - CTRL_FINGERPRINT_RANGE.start;
+
+type Fingerprint = [u8; CTRL_FINGERPRINT_LEN];
 use crate::state::{DEVICE_ADDRESS, SimplifyLS};
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UartMsg {
     //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
     LightCtrl = 0x02,       // Sent by the client to control the mesh
@@ -24,6 +41,35 @@ pub enum UartMsg {
     PanicMessage = 0x05,    // Sent by us to provide details of a panic
     PrintMessage = 0x06,    // Sent by us to provide print output
     Ack = 0xff
+}
+
+impl From<UartMsg> for u8 {
+    fn from(value: UartMsg) -> Self {
+        match value {
+            UartMsg::LightCtrl => 0x02,
+            UartMsg::LightStatus => 0x03,
+            UartMsg::MeshMessage => 0x04,
+            UartMsg::PanicMessage => 0x05,
+            UartMsg::PrintMessage => 0x06,
+            UartMsg::Ack => 0xff,
+        }
+    }
+}
+
+impl TryFrom<u8> for UartMsg {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x02 => Ok(UartMsg::LightCtrl),
+            0x03 => Ok(UartMsg::LightStatus),
+            0x04 => Ok(UartMsg::MeshMessage),
+            0x05 => Ok(UartMsg::PanicMessage),
+            0x06 => Ok(UartMsg::PrintMessage),
+            0xff => Ok(UartMsg::Ack),
+            _ => Err(()),
+        }
+    }
 }
 
 // AppCmdValueT
@@ -48,7 +94,7 @@ pub fn light_mesh_rx_cb(data: &Packet) {
         data: [0; UART_DATA_LEN]
     };
 
-    msg.data[2] = UartMsg::MeshMessage as u8;
+    msg.data[2] = u8::from(UartMsg::MeshMessage);
     for i in 0..size_of::<AppCmdValue>() {
         unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.add(i) };
     }
@@ -75,10 +121,24 @@ pub struct UartManager {
     last_ack: u8,
     sender_started: bool,
     uart_status_reporting: bool,
-    sent: Deque<[u8; 15], 6>
+    sent: Deque<Fingerprint, 6>
 }
 
-#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
+#[cfg_attr(
+    test,
+    mry::mry(skip_fns(
+        default_const,
+        wait_for_message,
+        wait_for_received_message,
+        wait_for_outgoing_message,
+        record_sent_fingerprint,
+        process_received_message,
+        prepare_outgoing_message,
+        send_with_retry,
+        handle_light_ctrl,
+        handle_light_status
+    ))
+)]
 impl UartManager {
     #[cfg(not(test))]
     pub const fn default_const() -> Self {
@@ -154,14 +214,14 @@ impl UartManager {
     }
 
     fn compute_crc(msg: &mut UartData) {
-        let crc = crc16(&msg.data[0..42]);
+        let crc = crc16(&msg.data[CRC_RANGE]);
         msg.data[42] = (crc & 0xff) as u8;
         msg.data[43] = ((crc >> 8) & 0xff) as u8;
     }
 
     async fn ack_msg(&mut self, msg: &UartData, sno: &[u8]) {
         // If data[1] is 0xff, it means this message is an ack from the client
-        if msg.data[1] == UartMsg::Ack as u8 {
+        if msg.data[1] == u8::from(UartMsg::Ack) {
             self.last_ack = msg.data[0];
             return;
         }
@@ -178,7 +238,7 @@ impl UartManager {
         result.data[1] = 0xff;
 
         // Set the sno
-        result.data[2..2+3].copy_from_slice(sno);
+        result.data[SNO_RANGE].copy_from_slice(sno);
 
         // Set the crc16
         Self::compute_crc(&mut result);
@@ -202,61 +262,101 @@ impl UartManager {
         }
     }
 
-    async fn wait_for_received_message(&mut self) -> UartData {
-        while self.recv_channel.is_empty() {
+    async fn wait_for_message<F, P>(&mut self, is_empty: F, mut pop: P) -> UartData
+    where
+        F: Fn(&Self) -> bool,
+        P: FnMut(&mut Self) -> Option<UartData>,
+    {
+        while is_empty(self) {
             yield_now().await;
         }
 
-        critical_section::with(|_| self.recv_channel.pop_front().unwrap())
+        critical_section::with(|_| pop(self)).expect("message should be available")
+    }
+
+    async fn wait_for_received_message(&mut self) -> UartData {
+        self
+            .wait_for_message(
+                |this| this.recv_channel.is_empty(),
+                |this| this.recv_channel.pop_front(),
+            )
+            .await
     }
 
     async fn wait_for_outgoing_message(&mut self) -> UartData {
-        while self.send_channel.is_empty() {
-            yield_now().await;
-        }
-
-        critical_section::with(|_| self.send_channel.pop_front().unwrap())
+        self
+            .wait_for_message(
+                |this| this.send_channel.is_empty(),
+                |this| this.send_channel.pop_front(),
+            )
+            .await
     }
 
-    fn record_sent_fingerprint(&mut self, fingerprint: [u8; 15]) {
+    fn record_sent_fingerprint(&mut self, fingerprint: Fingerprint) {
         critical_section::with(|_| {
             if self.sent.is_full() {
                 self.sent.pop_front();
             }
 
-            self.sent.push_back(fingerprint).unwrap();
+            let push_result = self.sent.push_back(fingerprint);
+            debug_assert!(push_result.is_ok());
+            let _ = push_result;
         });
     }
 
-    fn mesh_send_message(&mut self, data: &[u8; 13], destination: u16, retransmit_count: u8, send_ack: bool) -> [u8; 3] {
+    fn mesh_send_message(
+        &mut self,
+        data: &[u8; CTRL_PAYLOAD_LEN],
+        destination: u16,
+        retransmit_count: u8,
+        send_ack: bool,
+    ) -> [u8; 3] {
         app().mesh_manager.send_mesh_message(data, destination, retransmit_count, send_ack)
     }
 
     fn process_received_message(&mut self, msg: &UartData) -> [u8; 3] {
-        let mut sno = [0u8; 3];
-
-        if msg.data[2] == UartMsg::LightCtrl as u8 {
-            let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
-
-            let mut data = [0; 13];
-            data.copy_from_slice(&msg.data[5..18]);
-
-            let fingerprint = <[u8; 15]>::try_from(&msg.data[3..18]).unwrap();
-            self.record_sent_fingerprint(fingerprint);
-
-            sno = self.mesh_send_message(&data, destination, msg.data[18], msg.data[19] != 0);
+        match UartMsg::try_from(msg.data[MSG_TYPE_INDEX]) {
+            Ok(UartMsg::LightCtrl) => self.handle_light_ctrl(msg),
+            Ok(UartMsg::LightStatus) => {
+                self.handle_light_status();
+                [0; 3]
+            }
+            _ => [0; 3],
         }
+    }
 
-        if msg.data[2] == UartMsg::LightStatus as u8 {
-            mesh_report_status_enable(true);
-            self.enable_uart_status_reporting();
-        }
+    fn handle_light_ctrl(&mut self, msg: &UartData) -> [u8; 3] {
+        let destination = u16::from_le_bytes(
+            msg.data[CTRL_DESTINATION_RANGE]
+                .try_into()
+                .expect("destination bytes"),
+        );
 
-        sno
+        let mut data = [0u8; CTRL_PAYLOAD_LEN];
+        data.copy_from_slice(&msg.data[CTRL_PAYLOAD_RANGE]);
+
+        let fingerprint: Fingerprint = msg.data[CTRL_FINGERPRINT_RANGE]
+            .try_into()
+            .expect("fingerprint slice");
+        self.record_sent_fingerprint(fingerprint);
+
+        self.mesh_send_message(
+            &data,
+            destination,
+            msg.data[CTRL_RETRANSMIT_INDEX],
+            msg.data[CTRL_ACK_FLAG_INDEX] != 0,
+        )
+    }
+
+    fn handle_light_status(&mut self) {
+        mesh_report_status_enable(true);
+        self.enable_uart_status_reporting();
     }
 
     fn prepare_outgoing_message(&mut self, msg: &mut UartData) {
-        let fingerprint = <[u8; 15]>::try_from(&msg.data[7..22]).unwrap();
+        let fingerprint: Fingerprint = msg.data[OUTGOING_FINGERPRINT_RANGE]
+            .try_into()
+            .expect("outgoing fingerprint slice");
         self.record_sent_fingerprint(fingerprint);
 
         self.ack_counter = self.ack_counter.wrapping_add(1);
@@ -286,7 +386,7 @@ impl UartManager {
 
     pub fn handle_rx(&mut self, msg: UartData) {
         // Check the crc of the packet
-        let crc = crc16(&msg.data[0..42]);
+        let crc = crc16(&msg.data[CRC_RANGE]);
         if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
             // CRC is invalid, drop the packet
             return;
@@ -318,10 +418,16 @@ impl UartManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU8, Ordering};
+    use core::future::Future;
     use futures::executor::block_on;
+    use futures::task::noop_waker;
     use mry::Any;
+    use mry::send_wrapper::SendWrapper;
+    use std::task::{Context, Poll};
     use crate::sdk::packet_types::{PacketLlApp, PacketL2capHead};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
+    use crate::sdk::mcu::watchdog::mock_wd_clear;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
 
     
@@ -362,6 +468,89 @@ mod tests {
     }
 
     #[test]
+    fn test_uart_msg_try_from() {
+        let cases = [
+            (UartMsg::LightCtrl, 0x02),
+            (UartMsg::LightStatus, 0x03),
+            (UartMsg::MeshMessage, 0x04),
+            (UartMsg::PanicMessage, 0x05),
+            (UartMsg::PrintMessage, 0x06),
+            (UartMsg::Ack, 0xff),
+        ];
+
+        for (variant, byte) in cases.iter() {
+            assert_eq!(u8::from(*variant), *byte);
+            assert_eq!(UartMsg::try_from(*byte).unwrap(), *variant);
+        }
+
+        assert!(UartMsg::try_from(0x11).is_err());
+    }
+
+    #[test]
+    fn test_wait_for_received_message_returns_message() {
+        let mut manager = UartManager::default();
+        let mut msg = UartData {
+            len: 1,
+            data: [0; UART_DATA_LEN],
+        };
+        msg.data[0] = 0xAA;
+        let expected_len = msg.len;
+        let expected_data = msg.data;
+        critical_section::with(|_| manager.recv_channel.push_back(msg).unwrap());
+
+        let result = block_on(manager.wait_for_received_message());
+
+        assert_eq!(result.len, expected_len);
+        assert_eq!(result.data, expected_data);
+    }
+
+    #[test]
+    fn test_wait_for_outgoing_message_returns_message() {
+        let mut manager = UartManager::default();
+        let mut msg = UartData {
+            len: 2,
+            data: [0; UART_DATA_LEN],
+        };
+        msg.data[0] = 0xAB;
+        msg.data[1] = 0xCD;
+        let expected_len = msg.len;
+        let expected_data = msg.data;
+        critical_section::with(|_| manager.send_channel.push_back(msg).unwrap());
+
+        let result = block_on(manager.wait_for_outgoing_message());
+
+        assert_eq!(result.len, expected_len);
+        assert_eq!(result.data, expected_data);
+    }
+
+    #[test]
+    fn test_wait_for_outgoing_message_waits_until_message_available() {
+        let mut manager = UartManager::default();
+        let mut manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
+        let future = manager.wait_for_outgoing_message();
+        futures::pin_mut!(future);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        msg.data[0] = 0xEF;
+        unsafe {
+            (*(*manager_ptr)).send_channel.push_back(msg).unwrap();
+        }
+
+        let poll_result = future.as_mut().poll(&mut cx);
+        assert!(matches!(poll_result, Poll::Ready(_)), "future should be ready after message enqueued");
+        let Poll::Ready(result) = poll_result else { unreachable!() };
+        assert_eq!(result.data[0], 0xEF);
+    }
+
+    #[test]
     fn test_process_received_message_light_ctrl_records_message_and_calls_mesh() {
         let mut manager = UartManager::default();
 
@@ -370,21 +559,14 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
 
-        msg.data[2] = UartMsg::LightCtrl as u8;
-        msg.data[3] = 0x34;
-        msg.data[4] = 0x12;
-        msg.data[18] = 2; // retransmit count
-        msg.data[19] = 1; // send ack
-        for (idx, byte) in msg.data[5..18].iter_mut().enumerate() {
+        msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::LightCtrl);
+        let destination = u16::to_le_bytes(0x1234);
+        msg.data[CTRL_DESTINATION_RANGE].copy_from_slice(&destination);
+        msg.data[CTRL_RETRANSMIT_INDEX] = 2; // retransmit count
+        msg.data[CTRL_ACK_FLAG_INDEX] = 1; // send ack
+        for (idx, byte) in msg.data[CTRL_PAYLOAD_RANGE].iter_mut().enumerate() {
             *byte = (idx as u8) + 1;
         }
-
-        manager
-            .mock_process_received_message(Any)
-            .calls_real_impl();
-        manager
-            .mock_record_sent_fingerprint(Any)
-            .calls_real_impl();
         manager
             .mock_mesh_send_message(Any, Any, Any, Any)
             .returns([1, 2, 3]);
@@ -393,11 +575,27 @@ mod tests {
 
         assert_eq!(sno, [1, 2, 3]);
 
-        let expected_fingerprint = <[u8; 15]>::try_from(&msg.data[3..18]).unwrap();
+        let expected_fingerprint: Fingerprint = msg.data[CTRL_FINGERPRINT_RANGE]
+            .try_into()
+            .expect("fingerprint slice");
         critical_section::with(|_| {
             assert_eq!(manager.sent.len(), 1);
             assert_eq!(manager.sent.front().unwrap(), &expected_fingerprint);
         });
+    }
+
+    #[test]
+    fn test_process_received_message_unknown_type_returns_zero() {
+        let mut manager = UartManager::default();
+        let msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0x99; UART_DATA_LEN],
+        };
+
+        let sno = manager.process_received_message(&msg);
+
+        assert_eq!(sno, [0; 3]);
+        critical_section::with(|_| assert!(manager.sent.is_empty()));
     }
 
     #[test]
@@ -410,22 +608,13 @@ mod tests {
             len: UART_DATA_LEN as u32,
             data: [0; UART_DATA_LEN],
         };
-        msg.data[2] = UartMsg::LightStatus as u8;
+        msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::LightStatus);
 
-        manager
-            .mock_process_received_message(Any)
-            .calls_real_impl();
-        manager
-            .mock_enable_uart_status_reporting()
-            .calls_real_impl();
         mock_mesh_report_status_enable(true).returns(());
 
         let sno = manager.process_received_message(&msg);
 
         assert_eq!(sno, [0, 0, 0]);
-        manager
-            .mock_uart_status_reporting_enabled()
-            .calls_real_impl();
         assert!(manager.uart_status_reporting_enabled());
         mock_mesh_report_status_enable(true).assert_called(1);
     }
@@ -440,26 +629,21 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
 
-        for (idx, byte) in msg.data[7..22].iter_mut().enumerate() {
+        for (idx, byte) in msg.data[OUTGOING_FINGERPRINT_RANGE].iter_mut().enumerate() {
             *byte = (idx as u8) ^ 0xAA;
         }
-
-        manager
-            .mock_prepare_outgoing_message(Any)
-            .calls_real_impl();
-        manager
-            .mock_record_sent_fingerprint(Any)
-            .calls_real_impl();
         manager.prepare_outgoing_message(&mut msg);
 
         assert_eq!(manager.ack_counter, 1);
         assert_eq!(msg.data[0], 1);
 
-        let expected_crc = crc16(&msg.data[0..42]);
+        let expected_crc = crc16(&msg.data[CRC_RANGE]);
         assert_eq!(msg.data[42], (expected_crc & 0xff) as u8);
         assert_eq!(msg.data[43], ((expected_crc >> 8) & 0xff) as u8);
 
-        let expected_fingerprint = <[u8; 15]>::try_from(&msg.data[7..22]).unwrap();
+        let expected_fingerprint: Fingerprint = msg.data[OUTGOING_FINGERPRINT_RANGE]
+            .try_into()
+            .expect("fingerprint slice");
         critical_section::with(|_| {
             assert_eq!(manager.sent.len(), 1);
             assert_eq!(manager.sent.front().unwrap(), &expected_fingerprint);
@@ -467,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time, clock_time_exceed)]
+    #[mry::lock(clock_time, clock_time_exceed, wd_clear)]
     fn test_send_with_retry_exits_when_ack_already_received() {
         let mut manager = UartManager::default();
         manager.ack_counter = 5;
@@ -478,18 +662,79 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
 
-        manager
-            .mock_send_with_retry(Any)
-            .calls_real_impl();
-        manager
-            .mock_driver_send_async(Any)
-            .returns(true);
+        manager.mock_driver_send_async(Any).returns(true);
+        mock_wd_clear().returns(());
         mock_clock_time().returns(10);
         mock_clock_time_exceed(10, 100 * 1000).returns(false);
 
         block_on(manager.send_with_retry(&msg));
 
         manager.mock_driver_send_async(Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(clock_time, clock_time_exceed, wd_clear)]
+    fn test_send_with_retry_retries_until_ack_is_received() {
+        let mut manager = UartManager::default();
+        manager.ack_counter = 1;
+        manager.last_ack = 0;
+
+        let msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        let mut manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
+        let send_calls = AtomicU8::new(0);
+        manager
+            .mock_driver_send_async(Any)
+            .returns_with(move |_| {
+                let count = send_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if count == 2 {
+                    unsafe {
+                        let manager_ref: &mut UartManager = &mut *(*manager_ptr);
+                        manager_ref.last_ack = manager_ref.ack_counter;
+                    }
+                }
+                true
+            });
+        mock_wd_clear().returns(());
+
+        // First check should continue waiting, second indicates timeout and then we mark the ack.
+        let exceed_calls = AtomicU8::new(0);
+        mock_clock_time().returns(10);
+        mock_clock_time_exceed(Any, Any).returns_with(move |_, _| {
+            let count = exceed_calls.fetch_add(1, Ordering::SeqCst);
+            count >= 1
+        });
+
+        block_on(manager.send_with_retry(&msg));
+
+        manager.mock_driver_send_async(Any).assert_called(2);
+    }
+
+    #[test]
+    fn test_record_sent_fingerprint_evicts_oldest_when_full() {
+        let mut manager = UartManager::default();
+
+        critical_section::with(|_| {
+            for value in 0..6u8 {
+                manager
+                    .sent
+                    .push_back([value; CTRL_FINGERPRINT_LEN])
+                    .unwrap();
+            }
+        });
+
+        let new_fingerprint = [0xAA; CTRL_FINGERPRINT_LEN];
+
+        manager.record_sent_fingerprint(new_fingerprint);
+
+        critical_section::with(|_| {
+            assert_eq!(manager.sent.len(), 6);
+            assert_eq!(manager.sent.front().unwrap(), &[1u8; CTRL_FINGERPRINT_LEN]);
+            assert_eq!(manager.sent.back().unwrap(), &new_fingerprint);
+        });
     }
     
     /// Tests the send_message method when the channel has space.
@@ -875,7 +1120,7 @@ mod tests {
             let sent_msg = app().uart_manager.send_channel.front().unwrap();
             
             // Verify message format
-            assert_eq!(sent_msg.data[2], UartMsg::MeshMessage as u8);
+            assert_eq!(sent_msg.data[2], u8::from(UartMsg::MeshMessage));
             
             // Verify the AppCmdValue data was copied correctly
             // sno (3 bytes)
@@ -947,12 +1192,12 @@ mod tests {
             
             // Check first message by popping and checking
             let msg1 = app().uart_manager.send_channel.pop_front().unwrap();
-            assert_eq!(msg1.data[2], UartMsg::MeshMessage as u8);
+            assert_eq!(msg1.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg1.data[10], 0x02); // op code
             
             // Check second message
             let msg2 = app().uart_manager.send_channel.pop_front().unwrap();
-            assert_eq!(msg2.data[2], UartMsg::MeshMessage as u8);
+            assert_eq!(msg2.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg2.data[10], 0x03); // op code
         });
     }

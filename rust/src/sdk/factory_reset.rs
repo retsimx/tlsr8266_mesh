@@ -454,8 +454,6 @@ fn write_reset_sequence(step: u8) {
         new_value = reset_step.flash_value(); // Use the step's base value with bit 5 = 1
     }
     
-    uprintln!("FACTORY_RESET: Writing step {} - current=0x{:02x}, new=0x{:02x}", 
-              step, current_value, new_value);
     
     // Only write if we're actually changing bits (1→0 transitions)
     if new_value != current_value {
@@ -490,12 +488,9 @@ fn write_timing_validation() {
     let current_value = read_flash_byte(current_addr);
     let current_step_number = FACTORY_RESET_STATE.consecutive_reset_count.get();
     
-    uprintln!("FACTORY_RESET: Marking timing validated for step {} - addr=0x{:x}, current=0x{:02x}", 
-              current_step_number, current_addr, current_value);
     
     // Check if this step requires timing validation
     if !ResetStep::step_requires_timing(current_step_number) {
-        uprintln!("FACTORY_RESET: No timing validation needed for step {}", current_step_number);
         return;
     }
     
@@ -505,14 +500,11 @@ fn write_timing_validation() {
     if validated_value != current_value {
         let data = [validated_value];
         flash_write_page(current_addr, 1, data.as_ptr());
-        uprintln!("FACTORY_RESET: Timing validation written: 0x{:02x}", validated_value);
         
         // Check if this completes the factory reset sequence
         if ResetStep::should_factory_reset(validated_value) {
-            uprintln!("FACTORY_RESET: ALL REQUIREMENTS MET! Factory reset ready");
         }
     } else {
-        uprintln!("FACTORY_RESET: Timing already validated");
     }
 }
 
@@ -541,15 +533,11 @@ fn read_reset_sequence() -> u8 {
     let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let flash_value = read_flash_byte(current_addr);
     
-    uprintln!("FACTORY_RESET: Reading sequence - addr=0x{:x}, flash_value=0x{:02x}, index={}", 
-             current_addr, flash_value, FACTORY_RESET_STATE.flash_address_index.get());
     
     // Convert flash bitmask value back to step number
     let reset_step = ResetStep::from_flash_value(flash_value);
     let step_number = reset_step.step_number();
     
-    uprintln!("FACTORY_RESET: Converted to step_number={}, reset_step={:?}", 
-             step_number, reset_step);
     
     step_number
 }
@@ -574,25 +562,20 @@ fn clear_reset_sequence() {
     let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let current_value = read_flash_byte(current_addr);
     
-    uprintln!("FACTORY_RESET: Clearing sequence - addr=0x{:x}, current_value=0x{:02x}", 
-              current_addr, current_value);
     
     // Only invalidate if there's actually a sequence to invalidate
     if current_value != 0xFF {
         let invalidated_value = ResetStep::invalidate_flash_value(current_value);
         let invalidation_data = [invalidated_value];
-        uprintln!("FACTORY_RESET: Invalidating sequence - writing 0x{:02x}", invalidated_value);
         flash_write_page(current_addr, 1, invalidation_data.as_ptr());
     }
     
     // Move to next location for fresh sequence
     FACTORY_RESET_STATE.flash_address_index.inc();
     
-    uprintln!("FACTORY_RESET: Moved to next flash index: {}", FACTORY_RESET_STATE.flash_address_index.get());
     
     // Check if we're at the end of the sector
     if FACTORY_RESET_STATE.flash_address_index.get() >= 4096 {
-        uprintln!("FACTORY_RESET: End of sector reached - erasing sector");
         flash_erase_sector(FLASH_ADR_RESET_CNT);
         FACTORY_RESET_STATE.flash_address_index.set(0);
     }
@@ -619,7 +602,6 @@ fn init_reset_sequence() {
     // Start scanning from the beginning of the sector
     FACTORY_RESET_STATE.flash_address_index.set(0);
     
-    uprintln!("FACTORY_RESET: Scanning flash sector for reset sequence...");
     
     // Scan through flash sector to find the latest reset sequence entry
     let mut latest_idx = 0;
@@ -632,7 +614,6 @@ fn init_reset_sequence() {
         
         // Skip completely erased locations
         if value != 0xFF {
-            uprintln!("FACTORY_RESET: Found non-erased entry at index {}: value=0x{:02x}", i, value);
             
             // This is the latest used position regardless of whether it's valid or invalidated
             latest_idx = i;
@@ -647,21 +628,15 @@ fn init_reset_sequence() {
             // Latest sequence was invalidated, move to next position
             latest_idx += 1;
             latest_value = 0xFF; // Next position should be erased
-            uprintln!("FACTORY_RESET: Latest sequence was invalidated, advancing to index {}", latest_idx);
         } else {
             // Latest sequence is still valid, continue from there
-            uprintln!("FACTORY_RESET: Latest sequence is valid, continuing from index {}", latest_idx);
         }
     } else {
-        uprintln!("FACTORY_RESET: No sequences found, starting from index 0");
     }
     
-    uprintln!("FACTORY_RESET: Setting flash_address_index to {}, latest_value=0x{:02x}", 
-             latest_idx, latest_value);
     
     // Check if we're at the end of the sector or no erased space left
     if latest_idx >= 4095 {
-        uprintln!("FACTORY_RESET: Sector full (at index {}), erasing and resetting index", latest_idx);
         flash_erase_sector(FLASH_ADR_RESET_CNT);
         latest_idx = 0;
         latest_value = 0xFF;
@@ -696,11 +671,9 @@ pub fn factory_reset_handle() {
     let current_addr = FLASH_ADR_RESET_CNT + FACTORY_RESET_STATE.flash_address_index.get();
     let flash_value = read_flash_byte(current_addr);
     
-    uprintln!("FACTORY_RESET: Starting handle - flash_value=0x{:02x}", flash_value);
     
     // Check for factory reset condition BEFORE any other processing
     if ResetStep::should_factory_reset(flash_value) {
-        uprintln!("FACTORY_RESET: Factory reset condition detected (0x80) - TRIGGERING FACTORY RESET!");
         
         // Disable interrupts to ensure the reset process isn't interrupted
         irq_disable();
@@ -718,11 +691,9 @@ pub fn factory_reset_handle() {
     // If we reach here, no factory reset needed - process normal step advancement
     let current_step = ResetStep::from_flash_value(flash_value);
     
-    uprintln!("FACTORY_RESET: Current step: {:?}", current_step);
     
     match current_step {
         ResetStep::Clear => {
-            uprintln!("FACTORY_RESET: Starting new sequence - marking Step1 complete");
             
             // Start sequence by marking Step 1 as complete
             FACTORY_RESET_STATE.consecutive_reset_count.set(1);
@@ -730,7 +701,6 @@ pub fn factory_reset_handle() {
             
             // Set up timing check for Step 1 (though it has no minimum time)
             if let Some((min_time, max_time)) = ResetStep::Step1.timing_window() {
-                uprintln!("FACTORY_RESET: Step1 timing window: {}s-{}s", min_time, max_time);
                 FACTORY_RESET_STATE.timing_check_timestamp.set(min_time as u32);
             }
             
@@ -739,16 +709,13 @@ pub fn factory_reset_handle() {
             let new_value = ResetStep::Step1.flash_value();
             let data = [new_value];
             flash_write_page(current_addr, 1, data.as_ptr());
-            uprintln!("FACTORY_RESET: Step1 marked complete: 0x{:02x}", new_value);
         }
         step => {
-            uprintln!("FACTORY_RESET: Found existing step {:?} - advancing sequence", step);
             
             // For existing steps, advance to the next step by clearing the next completion bit
             let next_step_number = step.step_number() + 1;
             
             if next_step_number <= POWER_CYCLE_COUNT {
-                uprintln!("FACTORY_RESET: Advancing to step {}", next_step_number);
                 
                 // Set up state for the new step
                 FACTORY_RESET_STATE.consecutive_reset_count.set(next_step_number);
@@ -757,8 +724,6 @@ pub fn factory_reset_handle() {
                 // Set up timing check
                 let next_step = ResetStep::from_step_number(next_step_number);
                 if let Some((min_time, max_time)) = next_step.timing_window() {
-                    uprintln!("FACTORY_RESET: Step{} timing window: {}s-{}s", 
-                              next_step_number, min_time, max_time);
                     FACTORY_RESET_STATE.timing_check_timestamp.set(min_time as u32);
                 }
                 
@@ -770,14 +735,11 @@ pub fn factory_reset_handle() {
                 if new_value != current_value {
                     let data = [new_value];
                     flash_write_page(current_addr, 1, data.as_ptr());
-                    uprintln!("FACTORY_RESET: Step{} marked complete: 0x{:02x}", next_step_number, new_value);
                 }
             } else {
-                uprintln!("FACTORY_RESET: All steps completed, but timing validation may be pending");
             }
         }
         step if step.step_number() == POWER_CYCLE_COUNT => {
-            uprintln!("FACTORY_RESET: Final step reached! Setting factory reset flag");
             
             // All steps completed successfully, set the factory reset flag
             write_reset_sequence(FACTORY_RESET_FLAG);
@@ -786,7 +748,6 @@ pub fn factory_reset_handle() {
             light_sw_reboot();
         }
         _ => {
-            uprintln!("FACTORY_RESET: Invalid state detected - clearing sequence");
             
             // Invalid state, clear the sequence
             clear_reset_sequence();
@@ -822,7 +783,6 @@ pub fn factory_reset_cnt_check() {
     
     // Validate the current step
     if current_step_number == 0 || current_step_number > POWER_CYCLE_COUNT {
-        uprintln!("FACTORY_RESET_CHECK: Invalid step number {} - clearing sequence", current_step_number);
         // Invalid state, clear the sequence
         clear_reset_sequence();
         FACTORY_RESET_STATE.clear_state.set(0);
@@ -837,7 +797,6 @@ pub fn factory_reset_cnt_check() {
         1 => {
             // State 1: Check if minimum time has elapsed
             if clock_time_exceed(0, min_time as u32 * 1000 * 1000) {
-                uprintln!("FACTORY_RESET_CHECK: Min time elapsed - marking timing validated");
                 
                 // Mark timing validation in flash (only for steps that require it)
                 if ResetStep::step_requires_timing(current_step_number) {
@@ -854,7 +813,6 @@ pub fn factory_reset_cnt_check() {
         2 => {
             // State 2: Check if maximum time has been exceeded
             if clock_time_exceed(0, FACTORY_RESET_STATE.timing_check_timestamp.get() * 1000 * 1000) {
-                uprintln!("FACTORY_RESET_CHECK: Max time exceeded - invalidating sequence");
                 // Maximum time exceeded, invalidate the sequence
                 clear_reset_sequence();
                 FACTORY_RESET_STATE.clear_state.set(0);
@@ -862,7 +820,6 @@ pub fn factory_reset_cnt_check() {
             // Note: No else clause - we just wait for user to power cycle or max time to exceed
         }
         _ => {
-            uprintln!("FACTORY_RESET_CHECK: Invalid clear state {} - clearing sequence", clear_state);
             // Invalid clear state
             clear_reset_sequence();
             FACTORY_RESET_STATE.clear_state.set(0);

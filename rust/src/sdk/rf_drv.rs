@@ -675,6 +675,14 @@ mod tests {
             pkt.adv_ind_module_mut().data[0..initial_data.len()].copy_from_slice(initial_data);
         });
     }
+
+    /// Tests that `adv_fields_iter` stops iterating when a zero-length field is encountered.
+    #[test]
+    fn test_adv_fields_iter_early_termination_on_zero_length() {
+        let data = [0u8; 5];
+        let mut iter = adv_fields_iter(&data, data.len());
+        assert!(iter.next().is_none());
+    }
     
     /// Tests the RfPower enum values
     ///
@@ -1297,19 +1305,25 @@ mod tests {
     ///
     /// Verifies that duplicate group addresses are rejected.
     #[test]
+    #[mry::lock(flash_write_page)]
     fn test_add_group_duplicate() {
         reset_test_state();
         
-        let group_id = 0x1234;
-        
+        // Mock flash write for initial insertion
+        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
+
+        let group_id = 0x8001; // Valid group ID that should succeed initially
+
         // Add group first time
-        add_group(group_id);
+        assert_eq!(add_group(group_id), true);
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
         
         // Try to add same group again
         let result = add_group(group_id);
         
-        // Verify function returns false
+        // Verify function returns false and no additional flash write occurs
         assert_eq!(result, false);
+        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
     }
     
     /// Tests rf_link_add_group with full group slots using rotation policy

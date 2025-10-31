@@ -831,3 +831,151 @@ impl AtomicPairState {
         self.0.store(value as u8, Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+
+    #[test]
+    fn test_led_controller_state_new_initializes_zero() {
+        let state = LedControllerState::new();
+
+        assert_eq!(state.event_pending.load(Ordering::Relaxed), 0);
+        assert_eq!(state.blink_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.on_duration_us.load(Ordering::Relaxed), 0);
+        assert_eq!(state.off_duration_us.load(Ordering::Relaxed), 0);
+        assert_eq!(state.led_selection_mask.load(Ordering::Relaxed), 0);
+        assert_eq!(state.timing_tick.load(Ordering::Relaxed), 0);
+        assert_eq!(state.pattern_number.load(Ordering::Relaxed), 0);
+        assert_eq!(state.is_on.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_factory_reset_state_new_defaults() {
+        let state = FactoryResetState::new();
+
+        assert_eq!(state.flash_address_index.load(Ordering::Relaxed), 0);
+        assert_eq!(state.consecutive_reset_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.clear_state.load(Ordering::Relaxed), 3);
+        assert_eq!(state.timing_check_timestamp.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not valid for bool")]
+    fn test_simplifyls_bool_inc_panics() {
+        use super::SimplifyLS;
+
+        let flag = AtomicBool::new(false);
+        flag.inc();
+    }
+
+    #[test]
+    #[should_panic(expected = "Not valid for bool")]
+    fn test_simplifyls_bool_dec_panics() {
+        use super::SimplifyLS;
+
+        let flag = AtomicBool::new(false);
+        flag.dec();
+    }
+
+    #[test]
+    fn test_simplifyls_u8_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU8::new(0);
+        value.set(10);
+        assert_eq!(value.get(), 10);
+
+        value.set(u8::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u8::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_u16_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU16::new(0);
+        value.set(42);
+        assert_eq!(value.get(), 42);
+
+        value.set(u16::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u16::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_u32_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU32::new(0);
+        value.set(100);
+        assert_eq!(value.get(), 100);
+
+        value.set(u32::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u32::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_usize_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicUsize::new(0);
+        value.set(7);
+        assert_eq!(value.get(), 7);
+
+        value.set(usize::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), usize::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_i32_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicI32::new(0);
+        value.set(-12);
+        assert_eq!(value.get(), -12);
+
+        value.set(i32::MAX);
+        value.inc();
+        assert_eq!(value.get(), i32::MIN);
+
+        value.set(i32::MIN);
+        value.dec();
+        assert_eq!(value.get(), i32::MAX);
+    }
+
+    #[test]
+    fn test_pair_state_from_known_values() {
+        assert_eq!(PairState::from(0x0A), PairState::ResetMesh);
+        assert_eq!(PairState::from(0xFF), PairState::Idle);
+    }
+
+    #[test]
+    fn test_atomic_pair_state_get_set() {
+        let state = AtomicPairState::new(PairState::Init);
+        assert_eq!(state.get(), PairState::Init);
+
+        state.set(PairState::Completed);
+        assert_eq!(state.get(), PairState::Completed);
+    }
+}

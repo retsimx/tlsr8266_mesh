@@ -189,89 +189,97 @@ impl UartManager {
 
     pub async fn receiver(&mut self) {
         loop {
-            while self.recv_channel.is_empty() {
-                yield_now().await;
-            }
-
-            let msg = critical_section::with(|_| {
-                self.recv_channel.pop_front().unwrap()
-            });
-
-            let mut sno = [0u8; 3];
-
-            // Light ctrl
-            if msg.data[2] == UartMsg::LightCtrl as u8 {
-                // p_cmd : cmd[3]+para[10]
-                let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
-
-                let mut data = [0; 13];
-                data.copy_from_slice(&msg.data[5..18]);
-
-                // Record the message
-                if self.sent.is_full() {
-                    self.sent.pop_front();
-                }
-
-                self.sent.push_back(<[u8; 15]>::try_from(&msg.data[3..18]).unwrap()).unwrap();
-
-                // Send the message in to the mesh
-                sno = app().mesh_manager.send_mesh_message(&data, destination, msg.data[18], msg.data[19] != 0);
-            }
-
-            if msg.data[2] == UartMsg::LightStatus as u8 {
-                mesh_report_status_enable(true);
-                app().uart_manager.enable_uart_status_reporting();
-            }
-
-            // Finally ack the message once we've handled it
+            let msg = self.wait_for_received_message().await;
+            let sno = self.process_received_message(&msg);
             self.ack_msg(&msg, &sno).await;
         }
     }
     pub async fn sender(&mut self) {
         loop {
-            // Wait for a message to send
-            while self.send_channel.is_empty() {
+            let mut msg = self.wait_for_outgoing_message().await;
+            self.prepare_outgoing_message(&mut msg);
+            self.send_with_retry(&msg).await;
+        }
+    }
+
+    async fn wait_for_received_message(&mut self) -> UartData {
+        while self.recv_channel.is_empty() {
+            yield_now().await;
+        }
+
+        critical_section::with(|_| self.recv_channel.pop_front().unwrap())
+    }
+
+    async fn wait_for_outgoing_message(&mut self) -> UartData {
+        while self.send_channel.is_empty() {
+            yield_now().await;
+        }
+
+        critical_section::with(|_| self.send_channel.pop_front().unwrap())
+    }
+
+    fn record_sent_fingerprint(&mut self, fingerprint: [u8; 15]) {
+        critical_section::with(|_| {
+            if self.sent.is_full() {
+                self.sent.pop_front();
+            }
+
+            self.sent.push_back(fingerprint).unwrap();
+        });
+    }
+
+    fn mesh_send_message(&mut self, data: &[u8; 13], destination: u16, retransmit_count: u8, send_ack: bool) -> [u8; 3] {
+        app().mesh_manager.send_mesh_message(data, destination, retransmit_count, send_ack)
+    }
+
+    fn process_received_message(&mut self, msg: &UartData) -> [u8; 3] {
+        let mut sno = [0u8; 3];
+
+        if msg.data[2] == UartMsg::LightCtrl as u8 {
+            let destination = msg.data[3] as u16 | (msg.data[4] as u16) << 8;
+
+            let mut data = [0; 13];
+            data.copy_from_slice(&msg.data[5..18]);
+
+            let fingerprint = <[u8; 15]>::try_from(&msg.data[3..18]).unwrap();
+            self.record_sent_fingerprint(fingerprint);
+
+            sno = self.mesh_send_message(&data, destination, msg.data[18], msg.data[19] != 0);
+        }
+
+        if msg.data[2] == UartMsg::LightStatus as u8 {
+            mesh_report_status_enable(true);
+            self.enable_uart_status_reporting();
+        }
+
+        sno
+    }
+
+    fn prepare_outgoing_message(&mut self, msg: &mut UartData) {
+        let fingerprint = <[u8; 15]>::try_from(&msg.data[7..22]).unwrap();
+        self.record_sent_fingerprint(fingerprint);
+
+        self.ack_counter = self.ack_counter.wrapping_add(1);
+        msg.data[0] = self.ack_counter;
+        Self::compute_crc(msg);
+    }
+
+    async fn driver_send_async(&mut self, msg: &UartData) -> bool {
+        self.driver.send_async(msg).await
+    }
+
+    async fn send_with_retry(&mut self, msg: &UartData) {
+        loop {
+            self.driver_send_async(msg).await;
+
+            let t_timeout = clock_time();
+            while self.last_ack != self.ack_counter && !clock_time_exceed(t_timeout, 100 * 1000) {
+                wd_clear();
                 yield_now().await;
             }
 
-            let mut msg = critical_section::with(|_| {
-                self.send_channel.pop_front().unwrap()
-            });
-
-            let mymsg = unsafe {slice::from_raw_parts((addr_of!(msg.data) as u32 + 7) as *const u8, 20-5)};
-            critical_section::with(|_| {
-                // Record the message
-                if self.sent.is_full() {
-                    self.sent.pop_front();
-                }
-
-                self.sent.push_back(<[u8; 15]>::try_from(mymsg).unwrap()).unwrap();
-            });
-
-            // Set the counter
-            self.ack_counter += 1;
-            msg.data[0] = self.ack_counter;
-
-            // Set the CRC
-            Self::compute_crc(&mut msg);
-
-            // Keep sending the message until we get an ack from the other side
-            loop {
-                self.driver.send_async(&msg).await;
-
-                // If 100ms passes without an ack from the other side, assume the send failed and try again
-                let t_timeout = clock_time();
-                while self.last_ack != self.ack_counter && !clock_time_exceed(t_timeout, 100 * 1000) {
-                    wd_clear();
-
-                    yield_now().await;
-                }
-
-                // Did we get an ack?
-                if self.last_ack == self.ack_counter {
-                    // Yes, sending the message was successful
-                    break;
-                }
+            if self.last_ack == self.ack_counter {
+                break;
             }
         }
     }
@@ -310,7 +318,11 @@ impl UartManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
+    use mry::Any;
     use crate::sdk::packet_types::{PacketLlApp, PacketL2capHead};
+    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
+    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
 
     
     /// Clear the UART manager state to ensure clean test environment
@@ -347,6 +359,137 @@ mod tests {
                 rsv: [0; 10],
             }
         }
+    }
+
+    #[test]
+    fn test_process_received_message_light_ctrl_records_message_and_calls_mesh() {
+        let mut manager = UartManager::default();
+
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        msg.data[2] = UartMsg::LightCtrl as u8;
+        msg.data[3] = 0x34;
+        msg.data[4] = 0x12;
+        msg.data[18] = 2; // retransmit count
+        msg.data[19] = 1; // send ack
+        for (idx, byte) in msg.data[5..18].iter_mut().enumerate() {
+            *byte = (idx as u8) + 1;
+        }
+
+        manager
+            .mock_process_received_message(Any)
+            .calls_real_impl();
+        manager
+            .mock_record_sent_fingerprint(Any)
+            .calls_real_impl();
+        manager
+            .mock_mesh_send_message(Any, Any, Any, Any)
+            .returns([1, 2, 3]);
+
+        let sno = manager.process_received_message(&msg);
+
+        assert_eq!(sno, [1, 2, 3]);
+
+        let expected_fingerprint = <[u8; 15]>::try_from(&msg.data[3..18]).unwrap();
+        critical_section::with(|_| {
+            assert_eq!(manager.sent.len(), 1);
+            assert_eq!(manager.sent.front().unwrap(), &expected_fingerprint);
+        });
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_process_received_message_light_status_enables_reporting() {
+        let mut manager = UartManager::default();
+        manager.disable_uart_status_reporting();
+
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        msg.data[2] = UartMsg::LightStatus as u8;
+
+        manager
+            .mock_process_received_message(Any)
+            .calls_real_impl();
+        manager
+            .mock_enable_uart_status_reporting()
+            .calls_real_impl();
+        mock_mesh_report_status_enable(true).returns(());
+
+        let sno = manager.process_received_message(&msg);
+
+        assert_eq!(sno, [0, 0, 0]);
+        manager
+            .mock_uart_status_reporting_enabled()
+            .calls_real_impl();
+        assert!(manager.uart_status_reporting_enabled());
+        mock_mesh_report_status_enable(true).assert_called(1);
+    }
+
+    #[test]
+    fn test_prepare_outgoing_message_updates_counter_crc_and_fingerprint() {
+        let mut manager = UartManager::default();
+        manager.ack_counter = 0;
+
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        for (idx, byte) in msg.data[7..22].iter_mut().enumerate() {
+            *byte = (idx as u8) ^ 0xAA;
+        }
+
+        manager
+            .mock_prepare_outgoing_message(Any)
+            .calls_real_impl();
+        manager
+            .mock_record_sent_fingerprint(Any)
+            .calls_real_impl();
+        manager.prepare_outgoing_message(&mut msg);
+
+        assert_eq!(manager.ack_counter, 1);
+        assert_eq!(msg.data[0], 1);
+
+        let expected_crc = crc16(&msg.data[0..42]);
+        assert_eq!(msg.data[42], (expected_crc & 0xff) as u8);
+        assert_eq!(msg.data[43], ((expected_crc >> 8) & 0xff) as u8);
+
+        let expected_fingerprint = <[u8; 15]>::try_from(&msg.data[7..22]).unwrap();
+        critical_section::with(|_| {
+            assert_eq!(manager.sent.len(), 1);
+            assert_eq!(manager.sent.front().unwrap(), &expected_fingerprint);
+        });
+    }
+
+    #[test]
+    #[mry::lock(clock_time, clock_time_exceed)]
+    fn test_send_with_retry_exits_when_ack_already_received() {
+        let mut manager = UartManager::default();
+        manager.ack_counter = 5;
+        manager.last_ack = 5;
+
+        let msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        manager
+            .mock_send_with_retry(Any)
+            .calls_real_impl();
+        manager
+            .mock_driver_send_async(Any)
+            .returns(true);
+        mock_clock_time().returns(10);
+        mock_clock_time_exceed(10, 100 * 1000).returns(false);
+
+        block_on(manager.send_with_retry(&msg));
+
+        manager.mock_driver_send_async(Any).assert_called(1);
     }
     
     /// Tests the send_message method when the channel has space.

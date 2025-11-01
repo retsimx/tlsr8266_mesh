@@ -1,6 +1,8 @@
 use crate::sdk::common::compat::TBLCMDSET;
 
-pub const TBL_AGC: [u32; 7] = [0x30333231, 0x182C3C38, 0xC0C1C, 0x0, 0x1B150F0A, 0x322E2721, 0x3E38];
+pub const TBL_AGC: [u32; 7] = [
+    0x30333231, 0x182C3C38, 0xC0C1C, 0x0, 0x1B150F0A, 0x322E2721, 0x3E38,
+];
 
 pub const TBL_RF_INI: [TBLCMDSET; 61] = [
     TBLCMDSET {
@@ -288,28 +290,30 @@ pub const TBL_RF_INI: [TBLCMDSET; 61] = [
         dat: 0x06,
         cmd: 0xc3,
     },
-
     // Enable these for BLE to work with 16mhz xtal
     TBLCMDSET {
         adr: 0x4eb,
         dat: 0x60,
         cmd: 0xc3,
     },
-    TBLCMDSET {     // gauss filter sel: 16M
+    TBLCMDSET {
+        // gauss filter sel: 16M
         adr: 0x99,
         dat: 0x31,
         cmd: 0xc8,
     },
-    TBLCMDSET {     //enable rxadc clock
+    TBLCMDSET {
+        //enable rxadc clock
         adr: 0x82,
         dat: 0x34,
         cmd: 0xc8,
     },
-    TBLCMDSET {     //reg_dc_mod (500K)
+    TBLCMDSET {
+        //reg_dc_mod (500K)
         adr: 0x9e,
         dat: 0x41,
         cmd: 0xc8,
-    }
+    },
 ];
 
 /**
@@ -319,10 +323,10 @@ pub const TBL_RF_INI: [TBLCMDSET; 61] = [
  */
 #[repr(C, packed)]
 pub struct TblRfPowerT {
-    pub a: u8,  // Value for analog register 0xa2
-    pub b: u8,  // Value for analog register 0x4
-    pub c: u8,  // Value for analog register 0xa7
-    pub d: u8,  // Value for analog register 0x8d
+    pub a: u8, // Value for analog register 0xa2
+    pub b: u8, // Value for analog register 0x4
+    pub c: u8, // Value for analog register 0xa7
+    pub d: u8, // Value for analog register 0x8d
 }
 
 // Table of predefined RF power settings in descending order from highest to lowest power
@@ -399,5 +403,5 @@ pub const TBL_RF_POWER: [TblRfPowerT; 12] = [
         b: 0x64,
         c: 0xcb,
         d: 0x61,
-    }
+    },
 ];

@@ -1,7 +1,7 @@
 //! Clock management and timing utilities for TLSR8266 SoC.
 //!
 //! This module provides functions for initializing and managing the system clock,
-//! timing operations, and sleep functionality. It interfaces directly with the 
+//! timing operations, and sleep functionality. It interfaces directly with the
 //! hardware timer registers of the Telink TLSR8266F512 BLE SoC.
 //!
 //! The system operates at 32MHz by default, derived from a 192MHz PLL clock
@@ -84,17 +84,17 @@ pub fn clock_init() {
     // 1. Reset clock registers and enable USB clock if configured
     write_reg_rst_clk0(
         0xff000000  // Reset value with upper bits set
-            | FLD_CLK_EN::USB_EN.bits()  // Enable USB clock
+            | FLD_CLK_EN::USB_EN.bits(), // Enable USB clock
     );
 
     // 2. Configure clock source and divider
     //    - Use high-speed divider (SEL_HS_DIV) as clock source
     //    - Divide PLL clock (192MHz) by 6 to get 32MHz system clock
     write_reg_clk_sel(MASK_VAL!(
-        FLD_CLK_SEL::DIV.bits() as u32,           // Set the clock divider field
-        (CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S) as u32,  // Divider value (192MHz/32MHz = 6)
-        FLD_CLK_SEL::SRC.bits() as u32,           // Set the clock source field
-        CLOCK_SEL::SEL_HS_DIV as u32              // Use HS divider as clock source
+        FLD_CLK_SEL::DIV.bits() as u32, // Set the clock divider field
+        (CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S) as u32, // Divider value (192MHz/32MHz = 6)
+        FLD_CLK_SEL::SRC.bits() as u32, // Set the clock source field
+        CLOCK_SEL::SEL_HS_DIV as u32    // Use HS divider as clock source
     ) as u8);
 
     // 3. Configure system timer and watchdog
@@ -103,11 +103,11 @@ pub fn clock_init() {
     //    - Enable watchdog timer
     //reg_clk_en = 0xff | CLK_EN_TYPE;
     write_reg_tmr_ctrl(MASK_VAL!(
-        FLD_TMR::TMR0_EN.bits(),         // Enable Timer0
+        FLD_TMR::TMR0_EN.bits(), // Enable Timer0
         1,
-        FLD_TMR::TMR_WD_CAPT.bits(),     // Configure watchdog capture value
-        WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF,  // Convert ms to watchdog units
-        FLD_TMR::TMR_WD_EN.bits(),       // Enable watchdog timer
+        FLD_TMR::TMR_WD_CAPT.bits(), // Configure watchdog capture value
+        WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF, // Convert ms to watchdog units
+        FLD_TMR::TMR_WD_EN.bits(), // Enable watchdog timer
         1
     ))
 }
@@ -187,7 +187,7 @@ pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
 pub fn sleep_us(us: u32) {
     // Record starting time
     let t = clock_time();
-    
+
     // Busy-wait until the specified time has elapsed
     while !clock_time_exceed(t, us) {}
 }
@@ -195,7 +195,7 @@ pub fn sleep_us(us: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Import mock functions from register module for testing
     use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use crate::sdk::mcu::register::mock_write_reg_clk_sel;
@@ -226,29 +226,31 @@ mod tests {
     fn test_clock_init() {
         // Setup expected values
         let expected_rst_clk0 = 0xff000000 | FLD_CLK_EN::USB_EN.bits();
-        
+
         let expected_clk_sel = MASK_VAL!(
             FLD_CLK_SEL::DIV.bits() as u32,
             (CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S) as u32,
             FLD_CLK_SEL::SRC.bits() as u32,
             CLOCK_SEL::SEL_HS_DIV as u32
         ) as u8;
-        
+
         let expected_tmr_ctrl = MASK_VAL!(
-            FLD_TMR::TMR0_EN.bits(), 1,
-            FLD_TMR::TMR_WD_CAPT.bits(), 
+            FLD_TMR::TMR0_EN.bits(),
+            1,
+            FLD_TMR::TMR_WD_CAPT.bits(),
             WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF,
-            FLD_TMR::TMR_WD_EN.bits(), 1
+            FLD_TMR::TMR_WD_EN.bits(),
+            1
         );
-        
+
         // Setup mock behaviors
         mock_write_reg_rst_clk0(expected_rst_clk0).returns(());
         mock_write_reg_clk_sel(expected_clk_sel).returns(());
         mock_write_reg_tmr_ctrl(expected_tmr_ctrl).returns(());
-        
+
         // Call the function being tested
         clock_init();
-        
+
         // Verify each register was written exactly once with correct values
         mock_write_reg_rst_clk0(expected_rst_clk0).assert_called(1);
         mock_write_reg_clk_sel(expected_clk_sel).assert_called(1);
@@ -276,16 +278,16 @@ mod tests {
     fn test_clock_time() {
         // Setup expected tick value
         let expected_tick = 0x12345678;
-        
+
         // Setup mock behavior for register read
         mock_read_reg_system_tick().returns(expected_tick);
-        
+
         // Call the function being tested
         let result = clock_time();
-        
+
         // Verify register was read exactly once
         mock_read_reg_system_tick().assert_called(1);
-        
+
         // Verify returned value matches expected tick
         assert_eq!(result, expected_tick);
     }
@@ -310,21 +312,24 @@ mod tests {
     fn test_clock_time_exceed_not_elapsed() {
         // Reference time
         let reference_time = 0x10000000;
-        
+
         // Setup current time slightly ahead but not enough to exceed the span
         // Current is 1000 ticks ahead, requesting 50us = 32*50 = 1600 ticks
         mock_clock_time().returns(reference_time + 1000);
-        
+
         // Time span of 50us (should be 1600 ticks at 32MHz)
         let result = clock_time_exceed(reference_time, 50);
-        
+
         // Should return false because not enough time has elapsed
-        assert_eq!(result, false, "Should return false when time has not elapsed");
-        
+        assert_eq!(
+            result, false,
+            "Should return false when time has not elapsed"
+        );
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed function when the time span has elapsed.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -345,21 +350,21 @@ mod tests {
     fn test_clock_time_exceed_elapsed() {
         // Reference time
         let reference_time = 0x10000000;
-        
+
         // Setup current time significantly ahead
         // Current is 2000 ticks ahead, requesting 50us = 32*50 = 1600 ticks
         mock_clock_time().returns(reference_time + 2000);
-        
+
         // Time span of 50us (should be 1600 ticks at 32MHz)
         let result = clock_time_exceed(reference_time, 50);
-        
+
         // Should return true because enough time has elapsed
         assert_eq!(result, true, "Should return true when time has elapsed");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed function with timer overflow.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -380,17 +385,17 @@ mod tests {
     fn test_clock_time_exceed_overflow() {
         // Reference time
         let reference_time = 0x10000000;
-        
+
         // Setup case where timer has wrapped around (appears less but actually more)
         // 0xFFFFFFFE - 0x10000000 + 2 = 0xEFFFFFFE (large positive difference due to wraparound)
         mock_clock_time().returns(0xFFFFFFFE);
-        
+
         // Check for 10ms elapsed time (should be true when wrapped around)
         let result = clock_time_exceed(reference_time, 10000);
-        
+
         // Should return true because of wraparound arithmetic
         assert_eq!(result, true, "Should correctly handle timer overflow");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
@@ -420,7 +425,7 @@ mod tests {
         // Setup a fixed starting time
         let start_time = 0x12345678;
         mock_clock_time().returns(start_time);
-        
+
         // Setup clock_time_exceed to initially return false (time not elapsed)
         // then return true after 3 calls (time has elapsed)
         let mut exceed_call_count = 0;
@@ -428,13 +433,13 @@ mod tests {
             exceed_call_count += 1;
             exceed_call_count > 3 // Return true after 3 calls to exit the loop
         });
-        
+
         // Call the function being tested - sleep for 100us
         sleep_us(100);
-        
+
         // Verify clock_time was called exactly once to record start time
         mock_clock_time().assert_called(1);
-        
+
         // Verify clock_time_exceed was called 4 times:
         // 3 times returning false (continuing the loop)
         // 1 time returning true (exiting the loop)
@@ -458,17 +463,17 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_zero_duration() {
         let reference_time = 1000;
-        
+
         // Any elapsed time should exceed a zero duration
         mock_clock_time().returns(reference_time + 1);
-        
+
         let result = clock_time_exceed(reference_time, 0);
         assert_eq!(result, true, "Zero duration should always be exceeded");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed with minimum duration (1us) - not yet exceeded.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -488,18 +493,21 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_not_exceeded() {
         let reference_time = 1000;
-        
+
         // 1 us at 32MHz = 32 ticks
         // Current time is 31 ticks ahead (not enough)
         mock_clock_time().returns(reference_time + 31);
-        
+
         let result = clock_time_exceed(reference_time, 1);
-        assert_eq!(result, false, "1 microsecond should require 32 ticks at 32MHz");
-        
+        assert_eq!(
+            result, false,
+            "1 microsecond should require 32 ticks at 32MHz"
+        );
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed with minimum duration (1us) - exactly met.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -519,17 +527,20 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_exact() {
         let reference_time = 1000;
-        
+
         // Now advance one more tick (exactly enough)
         mock_clock_time().returns(reference_time + 32);
-        
+
         let result = clock_time_exceed(reference_time, 1);
-        assert_eq!(result, false, "32 ticks should match exactly 1us (not exceed)");
-        
+        assert_eq!(
+            result, false,
+            "32 ticks should match exactly 1us (not exceed)"
+        );
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed with minimum duration (1us) - exceeded.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -549,17 +560,17 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_exceeded() {
         let reference_time = 1000;
-        
+
         // Now advance one more tick (just enough to exceed)
         mock_clock_time().returns(reference_time + 33);
-        
+
         let result = clock_time_exceed(reference_time, 1);
         assert_eq!(result, true, "33 ticks should exceed 1us requirement");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed with very large duration - not exceeded.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -579,21 +590,21 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_max_duration_not_exceeded() {
         let reference_time = 1000;
-        
+
         // Test with a large but valid duration (close to max representable)
         let large_us = CLOCK_MAX_US - 1000;
         let large_ticks = large_us * CLOCK_SYS_CLOCK_1US;
-        
+
         // Set current time to be less than required
         mock_clock_time().returns(reference_time + large_ticks - 1);
-        
+
         let result = clock_time_exceed(reference_time, large_us);
         assert_eq!(result, false, "Large duration should not be exceeded yet");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }
-    
+
     /// Tests clock_time_exceed with very large duration - exceeded.
     ///
     /// This test verifies that the clock_time_exceed function correctly:
@@ -613,17 +624,17 @@ mod tests {
     #[mry::lock(clock_time)]
     fn test_clock_time_exceed_max_duration_exceeded() {
         let reference_time = 1000;
-        
+
         // Test with a large but valid duration (close to max representable)
         let large_us = CLOCK_MAX_US - 1000;
         let large_ticks = large_us * CLOCK_SYS_CLOCK_1US;
-        
+
         // Set current time to be more than required
         mock_clock_time().returns(reference_time + large_ticks + 1);
-        
+
         let result = clock_time_exceed(reference_time, large_us);
         assert_eq!(result, true, "Large duration should now be exceeded");
-        
+
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
     }

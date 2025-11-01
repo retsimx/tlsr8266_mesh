@@ -42,7 +42,7 @@ pub const IRQ_INIT_VALUE: u32 = FLD_IRQ::TMR1_EN.bits() | FLD_IRQ::ZB_RT_EN.bits
 pub fn irq_enable() -> u8 {
     // Step 1: Read current interrupt enable state before modification
     let r = read_reg_irq_en(); // don't worry, the compiler will optimize the return value if not used
-    // Step 2: Enable global interrupts by writing 1 to enable register
+                               // Step 2: Enable global interrupts by writing 1 to enable register
     write_reg_irq_en(1);
     // Step 3: Return previous state so it can be restored later
     return r;
@@ -70,7 +70,7 @@ pub fn irq_enable() -> u8 {
 pub fn irq_disable() -> u8 {
     // Step 1: Read current interrupt enable state before modification
     let r = read_reg_irq_en(); // don't worry, the compiler will optimize the return value if not used
-    // Step 2: Disable global interrupts by writing 0 to enable register
+                               // Step 2: Disable global interrupts by writing 0 to enable register
     write_reg_irq_en(0);
     // Step 3: Return previous state so it can be restored later
     return r;
@@ -121,10 +121,10 @@ pub fn irq_init() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mry::Any;
     use crate::sdk::mcu::register::{
-        mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask
+        mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask,
     };
+    use mry::Any;
 
     /// Tests enabling global interrupts.
     ///
@@ -134,7 +134,7 @@ mod tests {
     /// - Returns the previous state
     ///
     /// # Algorithm
-    /// 
+    ///
     /// 1. Mock the read_reg_irq_en function to return a known value (0)
     /// 2. Mock the write_reg_irq_en function (no return value needed)
     /// 3. Call irq_enable()
@@ -151,17 +151,20 @@ mod tests {
         mock_read_reg_irq_en().returns(0);
         // Step 2: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 3: Call the function being tested
         let previous_state = irq_enable();
-        
+
         // Step 4: Verify the previous state is returned correctly
-        assert_eq!(previous_state, 0, "irq_enable should return the previous state (0)");
-        
+        assert_eq!(
+            previous_state, 0,
+            "irq_enable should return the previous state (0)"
+        );
+
         // Step 5: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(1).assert_called(1);
     }
-    
+
     /// Tests enabling global interrupts when already enabled.
     ///
     /// This test verifies that irq_enable correctly:
@@ -188,17 +191,20 @@ mod tests {
         mock_read_reg_irq_en().returns(1);
         // Step 2: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 3: Call the function being tested
         let previous_state = irq_enable();
-        
+
         // Step 4: Verify the previous state is returned correctly
-        assert_eq!(previous_state, 1, "irq_enable should return the previous state (1)");
-        
+        assert_eq!(
+            previous_state, 1,
+            "irq_enable should return the previous state (1)"
+        );
+
         // Step 5: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(1).assert_called(1);
     }
-    
+
     /// Tests disabling global interrupts.
     ///
     /// This test verifies that irq_disable correctly:
@@ -224,17 +230,20 @@ mod tests {
         mock_read_reg_irq_en().returns(1);
         // Step 2: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 3: Call the function being tested
         let previous_state = irq_disable();
-        
+
         // Step 4: Verify the previous state is returned correctly
-        assert_eq!(previous_state, 1, "irq_disable should return the previous state (1)");
-        
+        assert_eq!(
+            previous_state, 1,
+            "irq_disable should return the previous state (1)"
+        );
+
         // Step 5: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(0).assert_called(1);
     }
-    
+
     /// Tests disabling global interrupts when already disabled.
     ///
     /// This test verifies that irq_disable correctly:
@@ -261,17 +270,20 @@ mod tests {
         mock_read_reg_irq_en().returns(0);
         // Step 2: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 3: Call the function being tested
         let previous_state = irq_disable();
-        
+
         // Step 4: Verify the previous state is returned correctly
-        assert_eq!(previous_state, 0, "irq_disable should return the previous state (0)");
-        
+        assert_eq!(
+            previous_state, 0,
+            "irq_disable should return the previous state (0)"
+        );
+
         // Step 5: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(0).assert_called(1);
     }
-    
+
     /// Tests restoring global interrupts to enabled state.
     ///
     /// This test verifies that irq_restore correctly:
@@ -291,14 +303,14 @@ mod tests {
     fn test_irq_restore_to_enabled() {
         // Step 1: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 2: Call the function being tested
         irq_restore(1);
-        
+
         // Step 3: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(1).assert_called(1);
     }
-    
+
     /// Tests restoring global interrupts to disabled state.
     ///
     /// This test verifies that irq_restore correctly:
@@ -318,14 +330,14 @@ mod tests {
     fn test_irq_restore_to_disabled() {
         // Step 1: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 2: Call the function being tested
         irq_restore(0);
-        
+
         // Step 3: Verify write_reg_irq_en was called with the correct parameter
         mock_write_reg_irq_en(0).assert_called(1);
     }
-    
+
     /// Tests initializing the interrupt system.
     ///
     /// This test verifies that irq_init correctly:
@@ -345,14 +357,14 @@ mod tests {
     fn test_irq_init() {
         // Step 1: Mock write_reg_irq_mask (void function)
         mock_write_reg_irq_mask(Any).returns(());
-        
+
         // Step 2: Call the function being tested
         irq_init();
-        
+
         // Step 3: Verify write_reg_irq_mask was called with the correct parameter
         mock_write_reg_irq_mask(IRQ_INIT_VALUE).assert_called(1);
     }
-    
+
     /// Tests a typical critical section pattern using the interrupt functions.
     ///
     /// This test verifies the typical usage pattern:
@@ -378,15 +390,15 @@ mod tests {
         mock_read_reg_irq_en().returns(1);
         // Step 2: Mock write_reg_irq_en (void function)
         mock_write_reg_irq_en(Any).returns(());
-        
+
         // Step 3: Call irq_disable() to start critical section
         let previous_state = irq_disable();
-        
+
         // Simulate some operations in the critical section...
-        
+
         // Step 4: Call irq_restore() to end critical section
         irq_restore(previous_state);
-        
+
         // Step 5: Verify write_reg_irq_en was called correctly for both operations
         mock_write_reg_irq_en(0).assert_called(1); // First call with 0 to disable interrupts
         mock_write_reg_irq_en(1).assert_called(1); // Second call with 1 to restore enabled state

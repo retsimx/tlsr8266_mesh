@@ -1,18 +1,17 @@
 #![allow(dead_code)]
 
+use crate::sdk::ble_app::irq::IrqTracker;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU8, Ordering};
-use crate::sdk::ble_app::irq::IrqTracker;
 
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 
 /// NB: Poisoning is not required for the TLSR8266 because if a panic occurs while the lock is held
 /// then the entire chip will reboot anyway. So using a mutex after a panic is impossible. Due to
 /// this the poisoning code has been removed to reduce code size and execution overheads
-
 
 /// Raw mutex trait.
 ///
@@ -48,7 +47,7 @@ pub unsafe trait RawMutex {
 
 pub struct CriticalSectionRawMutex {
     _phantom: PhantomData<()>,
-    _restore_state: AtomicU8
+    _restore_state: AtomicU8,
 }
 
 unsafe impl Send for CriticalSectionRawMutex {}
@@ -57,7 +56,10 @@ unsafe impl Sync for CriticalSectionRawMutex {}
 impl CriticalSectionRawMutex {
     /// Create a new `CriticalSectionRawMutex`.
     pub const fn new() -> Self {
-        Self { _phantom: PhantomData, _restore_state: AtomicU8::new(0) }
+        Self {
+            _phantom: PhantomData,
+            _restore_state: AtomicU8::new(0),
+        }
     }
 }
 
@@ -80,7 +82,6 @@ unsafe impl RawMutex for CriticalSectionRawMutex {
     }
 }
 
-
 /// A "mutex" that only allows borrowing from thread mode.
 ///
 /// # Safety
@@ -98,7 +99,9 @@ unsafe impl Sync for ThreadModeRawMutex {}
 impl ThreadModeRawMutex {
     /// Create a new `ThreadModeRawMutex`.
     pub const fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -107,7 +110,10 @@ unsafe impl RawMutex for ThreadModeRawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        assert!(!in_irq_mode(), "ThreadModeMutex can only be locked from thread mode.");
+        assert!(
+            !in_irq_mode(),
+            "ThreadModeMutex can only be locked from thread mode."
+        );
     }
 
     #[inline(always)]
@@ -149,7 +155,9 @@ unsafe impl Sync for IrqModeRawMutex {}
 impl IrqModeRawMutex {
     /// Create a new `IrqModeRawMutex`.
     pub const fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -158,7 +166,10 @@ unsafe impl RawMutex for IrqModeRawMutex {
 
     #[inline(always)]
     fn lock(&self) {
-        assert!(!in_irq_mode(), "IrqModeMutex can only be locked from Irq mode.");
+        assert!(
+            !in_irq_mode(),
+            "IrqModeMutex can only be locked from Irq mode."
+        );
     }
 
     #[inline(always)]
@@ -372,7 +383,7 @@ unsafe impl<M, T: ?Sized + Send> Sync for Mutex<M, T> {}
 /// [`lock`]: Mutex::lock
 /// [`try_lock`]: Mutex::try_lock
 pub struct MutexGuard<'a, M: RawMutex, T: ?Sized + 'a> {
-    lock: &'a Mutex<M, T>
+    lock: &'a Mutex<M, T>,
 }
 
 // impl<T: ?Sized> !Send for MutexGuard<'_, T> {}
@@ -389,7 +400,10 @@ impl<M: RawMutex, T> Mutex<M, T> {
     /// let mutex = Mutex::new(0);
     /// ```
     pub const fn new(t: T) -> Mutex<M, T> {
-        Mutex { inner: M::INIT, data: UnsafeCell::new(t) }
+        Mutex {
+            inner: M::INIT,
+            data: UnsafeCell::new(t),
+        }
     }
 }
 
@@ -473,8 +487,8 @@ impl<M: RawMutex, T: ?Sized> Mutex<M, T> {
     /// assert_eq!(mutex.into_inner().unwrap(), 0);
     /// ```
     pub fn into_inner(self) -> T
-        where
-            T: Sized,
+    where
+        T: Sized,
     {
         self.data.into_inner()
     }

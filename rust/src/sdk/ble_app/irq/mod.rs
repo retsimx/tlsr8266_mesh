@@ -25,22 +25,23 @@
 //! - Connection event timing and supervision timeouts
 //! - Frequency hopping sequence management
 
-pub mod connection;
-pub mod mesh;
 pub mod advertisement;
+pub mod connection;
+pub mod dispatcher;
+pub mod mesh;
 pub mod packet_handling;
 pub mod timing;
-pub mod dispatcher;
-
-
 
 // Re-export the main interrupt handler and key functions for compatibility
 pub use dispatcher::{irq_handler, IrqTracker};
 pub use mesh::mesh_node_report_status;
 
 // Re-export state management functions used by other modules
-pub use connection::{handle_ble_connection_parameter_updates, cleanup_ble_disconnection, handle_ble_connected_state, process_queued_status_responses};
-pub use mesh::{configure_rf_for_mesh_listening, handle_mesh_listening_state};
 pub use advertisement::{get_ble_advertisement_channel_count, handle_ble_advertisement_state};
-pub use packet_handling::{handle_rf_transmission_complete, handle_rf_packet_reception};
+pub use connection::{
+    cleanup_ble_disconnection, handle_ble_connected_state, handle_ble_connection_parameter_updates,
+    process_queued_status_responses,
+};
+pub use mesh::{configure_rf_for_mesh_listening, handle_mesh_listening_state};
+pub use packet_handling::{handle_rf_packet_reception, handle_rf_transmission_complete};
 pub use timing::configure_ble_receive_state;

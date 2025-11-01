@@ -5,8 +5,8 @@ use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 
 /// Sets the compare value for a PWM channel.
 ///
-/// The compare value determines the point within the PWM cycle at which 
-/// the output transitions. This effectively controls the duty cycle of 
+/// The compare value determines the point within the PWM cycle at which
+/// the output transitions. This effectively controls the duty cycle of
 /// the PWM signal.
 ///
 /// # Parameters
@@ -93,11 +93,11 @@ pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
 pub fn pwm_start(id: u32) {
     // Read current enable register value to preserve other channel states
     let current = read_reg_pwm_enable();
-    
+
     // Set the bit for this channel using the BIT! macro
     // This creates a bitmask with only the specified bit set to 1
     let new_value = current | BIT!(id);
-    
+
     // Write the new value back to the enable register
     write_reg_pwm_enable(new_value);
 }
@@ -125,11 +125,11 @@ pub fn pwm_start(id: u32) {
 pub fn pwm_stop(id: u32) {
     // Read current enable register value to preserve other channel states
     let current = read_reg_pwm_enable();
-    
+
     // Clear the bit for this channel
     // !BIT!(id) creates a bitmask with all bits set to 1 except the specified bit
     let new_value = current & !BIT!(id);
-    
+
     // Write the new value back to the enable register
     write_reg_pwm_enable(new_value);
 }
@@ -138,10 +138,10 @@ pub fn pwm_stop(id: u32) {
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{
-        mock_read_reg_pwm_enable, mock_write_reg_pwm_cmp, mock_write_reg_pwm_cycle, 
+        mock_read_reg_pwm_enable, mock_write_reg_pwm_cmp, mock_write_reg_pwm_cycle,
         mock_write_reg_pwm_enable,
     };
-    
+
     /// Tests the pwm_set_cmp function.
     ///
     /// This test verifies that the pwm_set_cmp function correctly:
@@ -163,16 +163,16 @@ mod tests {
     fn test_pwm_set_cmp() {
         // Configure mock behavior
         mock_write_reg_pwm_cmp(500, 4).returns(());
-        
+
         // Call the function being tested
         pwm_set_cmp(1, 500);
-        
+
         // Verify the register was written with correct parameters:
         // - cmp value of 500
         // - offset of 4 (1 << 2 = 4)
         mock_write_reg_pwm_cmp(500, 4).assert_called(1);
     }
-    
+
     /// Tests the pwm_set_duty function.
     ///
     /// This test verifies that the pwm_set_duty function correctly:
@@ -198,7 +198,7 @@ mod tests {
         let pwm_id = 2;
         let max_tick = 1000;
         let cmp_tick = 250;
-        
+
         // Calculate expected masked value
         let expected_value = MASK_VAL!(
             FLD_PWM::CMP.bits(),
@@ -206,19 +206,19 @@ mod tests {
             FLD_PWM::MAX.bits(),
             max_tick as u32
         );
-        
+
         // Configure mock behavior
         mock_write_reg_pwm_cycle(expected_value, 8).returns(());
-        
+
         // Call the function being tested
         pwm_set_duty(pwm_id, max_tick, cmp_tick);
-        
+
         // Verify the register was written with correct parameters:
         // - calculated mask value
         // - offset of 8 (2 << 2 = 8)
         mock_write_reg_pwm_cycle(expected_value, 8).assert_called(1);
     }
-    
+
     /// Tests the pwm_start function.
     ///
     /// This test verifies that the pwm_start function correctly:
@@ -242,24 +242,24 @@ mod tests {
         // Setup existing register value (bits 0 and 2 already enabled)
         let existing_value = 0b0101;
         mock_read_reg_pwm_enable().returns(existing_value);
-        
+
         // We're going to enable PWM channel 1 (bit 1)
         let pwm_id = 1;
-        let expected_new_value = existing_value | BIT!(pwm_id);  // Should be 0b0111
-        
+        let expected_new_value = existing_value | BIT!(pwm_id); // Should be 0b0111
+
         // Configure mock write
         mock_write_reg_pwm_enable(expected_new_value).returns(());
-        
+
         // Call the function being tested
         pwm_start(pwm_id);
-        
+
         // Verify register was read
         mock_read_reg_pwm_enable().assert_called(1);
-        
+
         // Verify register was written with correct new value
         mock_write_reg_pwm_enable(expected_new_value).assert_called(1);
     }
-    
+
     /// Tests the pwm_stop function.
     ///
     /// This test verifies that the pwm_stop function correctly:
@@ -283,20 +283,20 @@ mod tests {
         // Setup existing register value (bits 0, 1, and 2 enabled)
         let existing_value = 0b0111;
         mock_read_reg_pwm_enable().returns(existing_value);
-        
+
         // We're going to disable PWM channel 1 (bit 1)
         let pwm_id = 1;
-        let expected_new_value = existing_value & !BIT!(pwm_id);  // Should be 0b0101
-        
+        let expected_new_value = existing_value & !BIT!(pwm_id); // Should be 0b0101
+
         // Configure mock write
         mock_write_reg_pwm_enable(expected_new_value).returns(());
-        
+
         // Call the function being tested
         pwm_stop(pwm_id);
-        
+
         // Verify register was read
         mock_read_reg_pwm_enable().assert_called(1);
-        
+
         // Verify register was written with correct new value
         mock_write_reg_pwm_enable(expected_new_value).assert_called(1);
     }

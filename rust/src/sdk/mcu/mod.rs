@@ -1,9 +1,9 @@
 pub mod analog;
 pub mod clock;
+pub mod crypto;
 pub mod dma;
 pub mod gpio;
 pub mod irq_i;
+pub mod random;
 pub mod register;
 pub mod watchdog;
-pub mod random;
-pub mod crypto;

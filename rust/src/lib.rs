@@ -2,30 +2,30 @@
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
 
-use core::ptr::null_mut;
-use embassy_executor::Spawner;
-use app::App;
-use ota::OtaManager;
 use crate::config::{MAX_LUM_BRIGHTNESS_VALUE, PWM_B, PWM_G};
 use crate::embassy::executor::Executor;
 use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::watchdog::wd_clear;
-use fixed::types::I16F16;
 use crate::sdk::pm::cpu_wakeup_init;
+use app::App;
+use core::ptr::null_mut;
+use embassy_executor::Spawner;
+use fixed::types::I16F16;
+use ota::OtaManager;
 
 mod app;
 mod common;
 mod config;
+mod embassy;
+mod light_manager;
 mod main_light;
 mod mesh;
 mod ota;
 mod sdk;
-mod vendor_light;
-mod embassy;
-mod light_manager;
-mod uart_manager;
-pub mod version;
 mod state;
+mod uart_manager;
+mod vendor_light;
+pub mod version;
 
 #[cfg(test)]
 use once_cell::sync::Lazy;
@@ -36,7 +36,7 @@ static mut APP: App = App::default_const();
 #[cfg(test)]
 static mut APP: Lazy<App> = Lazy::new(|| {
     println!("Initializing...");
-    App::default() 
+    App::default()
 });
 
 static mut SPAWNER: *const Spawner = null_mut();
@@ -44,7 +44,9 @@ static mut SPAWNER: *const Spawner = null_mut();
 #[cfg(not(test))]
 pub fn app() -> &'static mut App {
     #[allow(static_mut_refs)]
-    unsafe { &mut APP }
+    unsafe {
+        &mut APP
+    }
 }
 
 #[cfg(test)]
@@ -68,11 +70,11 @@ pub async fn run(spawner: Spawner) {
 }
 
 fn set_pw1(on: bool) {
-    gpio_write(PWM_G as u32, if on {1} else {0});
+    gpio_write(PWM_G as u32, if on { 1 } else { 0 });
 }
 
 fn set_pw2(on: bool) {
-    gpio_write(PWM_B as u32, if on {1} else {0});
+    gpio_write(PWM_B as u32, if on { 1 } else { 0 });
 }
 
 pub fn blinken_testboard() {
@@ -97,9 +99,17 @@ pub fn blinken_testboard() {
 pub fn blinken() {
     for idx in 0..6 {
         if idx % 2 == 0 {
-            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+            app().light_manager.light_adjust_rgb_hw(
+                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+            );
         } else {
-            app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
+            app().light_manager.light_adjust_rgb_hw(
+                I16F16::from_num(0),
+                I16F16::from_num(0),
+                I16F16::from_num(0),
+            );
         }
 
         for _ in 0..1000000 {
@@ -107,7 +117,11 @@ pub fn blinken() {
         }
     }
 
-    app().light_manager.light_adjust_rgb_hw(I16F16::from_num(0), I16F16::from_num(0), I16F16::from_num(0));
+    app().light_manager.light_adjust_rgb_hw(
+        I16F16::from_num(0),
+        I16F16::from_num(0),
+        I16F16::from_num(0),
+    );
 }
 
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap

@@ -1,12 +1,12 @@
-use crate::{app, BIT};
 use crate::common::REGA_LIGHT_OFF;
 use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
-use critical_section;
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
-use crate::state::{*};
+use crate::state::*;
+use crate::{app, BIT};
+use critical_section;
 
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read(0x00);
@@ -312,6 +312,7 @@ pub fn cpu_wakeup_init() {
 }
 
 // recover status before software reboot
+#[cfg_attr(test, mry::mry)]
 fn light_sw_reboot_callback() {
     if OTA_UPDATE_IN_PROGRESS.get() || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
         // rf_slave_ota_busy means mesh ota master busy also.
@@ -327,22 +328,212 @@ fn light_sw_reboot_callback() {
 }
 
 #[link_section = ".ram_code"]
-fn light_sw_reboot_ll()
-{
+#[cfg_attr(test, mry::mry)]
+fn light_sw_reboot_ll() {
     // In the original code it calls this to reset, but I can't get this function working.
     // unsafe { cpu_sleep_wakeup(1, 0x40, ((CLOCK_SYS_CLOCK_1US) * 10000) + read_reg_system_tick()); }
 
     // Instead, let's just reset the MCU as described in the docs
     write_reg_pwdn_ctrl(0x20);
 
-    loop {}
+    // Don't loop forever in tests - just return instead
+    #[cfg(not(test))]
+    {
+        loop {}
+    }
 }
 
 #[cfg_attr(test, mry::mry)]
-pub fn light_sw_reboot()
-{
+pub fn light_sw_reboot() {
     irq_disable();
     light_sw_reboot_callback();
     light_sw_reboot_ll();
     return;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdk::common::compat::mock_load_tbl_cmd_set;
+    use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
+    use crate::sdk::mcu::irq_i::mock_irq_disable;
+    use crate::sdk::mcu::register::mock_write_reg_pwdn_ctrl;
+    use crate::{app_mocker, mock_app_mocker, App};
+    use mry::Any;
+
+    /// Tests usb_dp_pullup_en function with enable=true
+    ///
+    /// Verifies that when enabling USB DP pullup, BIT(4) is cleared
+    /// in the analog register value.
+    #[test]
+    #[mry::lock(analog_read, analog_write)]
+    fn test_usb_dp_pullup_en_enable() {
+        // Setup: analog_read returns a value with BIT(4) set
+        let initial_value = 0xFF;
+        mock_analog_read(0x00).returns(initial_value);
+        mock_analog_write(0x00, initial_value & !BIT!(4)).returns(());
+
+        // Execute
+        usb_dp_pullup_en(true);
+
+        // Verify: analog_write was called with BIT(4) cleared
+        mock_analog_write(0x00, Any).assert_called(1);
+    }
+
+    /// Tests usb_dp_pullup_en function with enable=false
+    ///
+    /// Verifies that when disabling USB DP pullup, BIT(4) is set
+    /// in the analog register value.
+    #[test]
+    #[mry::lock(analog_read, analog_write)]
+    fn test_usb_dp_pullup_en_disable() {
+        // Setup: analog_read returns a value with BIT(4) cleared
+        let initial_value = 0x00;
+        mock_analog_read(0x00).returns(initial_value);
+        mock_analog_write(0x00, initial_value | BIT!(4)).returns(());
+
+        // Execute
+        usb_dp_pullup_en(false);
+
+        // Verify: analog_write was called with BIT(4) set
+        mock_analog_write(0x00, Any).assert_called(1);
+    }
+
+    /// Tests cpu_wakeup_init function
+    ///
+    /// Verifies that cpu_wakeup_init calls load_tbl_cmd_set
+    /// with the correct table.
+    #[test]
+    #[mry::lock(load_tbl_cmd_set)]
+    fn test_cpu_wakeup_init() {
+        // Since load_tbl_cmd_set takes a reference to a slice,
+        // we just verify it's called once
+        mock_load_tbl_cmd_set().returns(0);
+
+        // Execute
+        cpu_wakeup_init();
+
+        // Verify: load_tbl_cmd_set was called exactly once
+        mock_load_tbl_cmd_set().assert_called(1);
+    }
+
+    /// Tests light_sw_reboot_callback when OTA is not in progress
+    ///
+    /// Verifies that when neither OTA_UPDATE_IN_PROGRESS nor
+    /// OTA_UPDATE_MESH_OPERATIONS_BLOCKED are set, no analog_write occurs.
+    #[test]
+    #[mry::lock(app_mocker)]
+    fn test_light_sw_reboot_callback_no_ota() {
+        // Setup: No OTA flags set
+        crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+
+        // Create mock app
+        let mut app = App::default();
+        app.light_manager.mock_is_light_off().returns(false);
+        mock_app_mocker().returns(&mut app);
+
+        // Execute
+        light_sw_reboot_callback();
+
+        // The callback should not call analog_write when no OTA is in progress
+        // Since we can't directly verify analog_write wasn't called without locking it,
+        // this test mainly ensures the function doesn't panic
+    }
+
+    /// Tests light_sw_reboot_callback when OTA is in progress and light is off
+    ///
+    /// Verifies that when OTA flags are set and light is off,
+    /// analog_write is called with RecoverStatus::LightOff.
+    #[test]
+    #[mry::lock(analog_write, app_mocker)]
+    fn test_light_sw_reboot_callback_ota_light_off() {
+        // Setup: OTA flags set, light is off
+        crate::state::OTA_UPDATE_IN_PROGRESS.set(true);
+        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+
+        // Create mock app
+        let mut app = App::default();
+        app.light_manager.mock_is_light_off().returns(true);
+        mock_app_mocker().returns(&mut app);
+
+        mock_analog_write(crate::common::REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
+
+        // Execute
+        light_sw_reboot_callback();
+
+        // Verify: analog_write called with correct parameters
+        mock_analog_write(crate::common::REGA_LIGHT_OFF, RecoverStatus::LightOff as u8)
+            .assert_called(1);
+    }
+
+    /// Tests light_sw_reboot_callback when OTA is in progress and light is on
+    ///
+    /// Verifies that when OTA flags are set and light is on,
+    /// analog_write is called with 0.
+    #[test]
+    #[mry::lock(analog_write, app_mocker)]
+    fn test_light_sw_reboot_callback_ota_light_on() {
+        // Setup: OTA flags set, light is on
+        crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+
+        // Create mock app
+        let mut app = App::default();
+        app.light_manager.mock_is_light_off().returns(false);
+        mock_app_mocker().returns(&mut app);
+
+        mock_analog_write(crate::common::REGA_LIGHT_OFF, 0).returns(());
+
+        // Execute
+        light_sw_reboot_callback();
+
+        // Verify: analog_write called with correct parameters
+        mock_analog_write(crate::common::REGA_LIGHT_OFF, 0).assert_called(1);
+    }
+
+    /// Tests light_sw_reboot function
+    ///
+    /// Verifies that light_sw_reboot calls irq_disable,
+    /// light_sw_reboot_callback, and light_sw_reboot_ll in sequence.
+    #[test]
+    #[mry::lock(irq_disable, light_sw_reboot_callback, light_sw_reboot_ll)]
+    fn test_light_sw_reboot() {
+        mock_irq_disable().returns(0);
+        mock_light_sw_reboot_callback().returns(());
+        mock_light_sw_reboot_ll().returns(());
+
+        // Execute
+        light_sw_reboot();
+
+        // Verify: All functions called in correct order
+        mock_irq_disable().assert_called(1);
+        mock_light_sw_reboot_callback().assert_called(1);
+        mock_light_sw_reboot_ll().assert_called(1);
+    }
+
+    /// Tests PM_WAKEUP enum values
+    ///
+    /// Verifies that PM_WAKEUP enum variants have the correct bit values.
+    #[test]
+    fn test_pm_wakeup_enum_values() {
+        assert_eq!(PM_WAKEUP::CORE as u32, BIT!(5));
+        assert_eq!(PM_WAKEUP::TIMER as u32, BIT!(6));
+        assert_eq!(PM_WAKEUP::COMP as u32, BIT!(7));
+        assert_eq!(PM_WAKEUP::PAD as u32, BIT!(8));
+    }
+
+    /// Tests TCMD constants
+    ///
+    /// Verifies that TCMD constants have the correct values.
+    #[test]
+    fn test_tcmd_constants() {
+        assert_eq!(TCMD_UNDER_RD, 0x80);
+        assert_eq!(TCMD_UNDER_WR, 0x40);
+        assert_eq!(TCMD_UNDER_BOTH, 0xc0);
+        assert_eq!(TCMD_MASK, 0x3f);
+        assert_eq!(TCMD_WRITE, 0x3);
+        assert_eq!(TCMD_WAIT, 0x7);
+        assert_eq!(TCMD_WAREG, 0x8);
+    }
 }

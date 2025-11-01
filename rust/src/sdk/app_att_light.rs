@@ -4,9 +4,10 @@ use core::slice;
 
 use crate::config::{DEVICE_NAME, MESH_NAME};
 use crate::ota::rf_link_slave_data_ota;
-use crate::pub_mut;
 use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
-use crate::sdk::ble_app::light_ll::mesh_management::{mesh_report_status_enable, mesh_report_status_enable_mask};
+use crate::sdk::ble_app::light_ll::mesh_management::{
+    mesh_report_status_enable, mesh_report_status_enable_mask,
+};
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::light::*;
 use crate::sdk::packet_types::{Packet, PacketAttValue};
@@ -14,7 +15,7 @@ use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use crate::state::{*};
+use crate::state::*;
 use crate::version::BUILD_VERSION;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
@@ -59,21 +60,21 @@ pub const CHAR_PROP_SIZE: u8 = 1;
 pub const CHAR_CFG_BITS_SIZE: u8 = 2;
 /** @} end of group GATT_Char_Cfg_Bit_length */
 
-pub const GATT_UUID_PRIMARY_SERVICE: u16 = 0x2800;      // Primary Service
-pub const GATT_UUID_SECONDARY_SERVICE: u16 = 0x2801;    // Secondary Service
-pub const GATT_UUID_INCLUDE: u16 = 0x2802;              // Include
-pub const GATT_UUID_CHARACTER: u16 = 0x2803;            // Characteristic
-pub const GATT_UUID_CHAR_EXT_PROPS: u16 = 0x2900;       // Characteristic Extended Properties
-pub const GATT_UUID_CHAR_USER_DESC: u16 = 0x2901;       // Characteristic User Description
-pub const GATT_UUID_CLIENT_CHAR_CFG: u16 = 0x2902;      // Client Characteristic Configuration
-pub const GATT_UUID_SERVER_CHAR_CFG: u16 = 0x2903;      // Server Characteristic Configuration
-pub const GATT_UUID_CHAR_PRESENT_FORMAT: u16 = 0x2904;  // Characteristic Present Format
-pub const GATT_UUID_CHAR_AGG_FORMAT: u16 = 0x2905;      // Characteristic Aggregate Format
-pub const GATT_UUID_VALID_RANGE: u16 = 0x2906;          // Valid Range
-pub const GATT_UUID_EXT_REPORT_REF: u16 = 0x2907;       // External Report Reference
-pub const GATT_UUID_REPORT_REF: u16 = 0x2908;           // Report Reference
+pub const GATT_UUID_PRIMARY_SERVICE: u16 = 0x2800; // Primary Service
+pub const GATT_UUID_SECONDARY_SERVICE: u16 = 0x2801; // Secondary Service
+pub const GATT_UUID_INCLUDE: u16 = 0x2802; // Include
+pub const GATT_UUID_CHARACTER: u16 = 0x2803; // Characteristic
+pub const GATT_UUID_CHAR_EXT_PROPS: u16 = 0x2900; // Characteristic Extended Properties
+pub const GATT_UUID_CHAR_USER_DESC: u16 = 0x2901; // Characteristic User Description
+pub const GATT_UUID_CLIENT_CHAR_CFG: u16 = 0x2902; // Client Characteristic Configuration
+pub const GATT_UUID_SERVER_CHAR_CFG: u16 = 0x2903; // Server Characteristic Configuration
+pub const GATT_UUID_CHAR_PRESENT_FORMAT: u16 = 0x2904; // Characteristic Present Format
+pub const GATT_UUID_CHAR_AGG_FORMAT: u16 = 0x2905; // Characteristic Aggregate Format
+pub const GATT_UUID_VALID_RANGE: u16 = 0x2906; // Valid Range
+pub const GATT_UUID_EXT_REPORT_REF: u16 = 0x2907; // External Report Reference
+pub const GATT_UUID_REPORT_REF: u16 = 0x2908; // Report Reference
 
-pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00;          // Report Reference
+pub const GATT_UUID_DEVICE_NAME: u16 = 0x2a00; // Report Reference
 
 pub const CHARACTERISTIC_UUID_MANU_NAME_STRING: u16 = 0x2A29;
 pub const CHARACTERISTIC_UUID_MODEL_NUM_STRING: u16 = 0x2A24;
@@ -118,7 +119,7 @@ static FW_REVISION_VALUE: [u8; 4] = [
     (BUILD_VERSION & 0xff) as u8,
     ((BUILD_VERSION >> 8) & 0xff) as u8,
     ((BUILD_VERSION >> 16) & 0xff) as u8,
-    ((BUILD_VERSION >> 24) & 0xff) as u8
+    ((BUILD_VERSION >> 24) & 0xff) as u8,
 ];
 
 static MANU_NAME_STRING_CHAR: u8 = CHAR_PROP_READ;
@@ -194,9 +195,12 @@ fn mesh_status_write(p: &Packet) -> bool {
         return true;
     }
     unsafe {
-        let pktdata = &*slice_from_raw_parts_mut(addr_of!(p.att_write().value) as *mut u8, size_of::<PacketAttValue>());
+        let pktdata = &*slice_from_raw_parts_mut(
+            addr_of!(p.att_write().value) as *mut u8,
+            size_of::<PacketAttValue>(),
+        );
 
-        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice( &pktdata[0..4]);
+        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice(&pktdata[0..4]);
         if p.head().l2cap_len > (3 + 1) {
             mesh_report_status_enable_mask(&pktdata[0..p.head().l2cap_len as usize - 3]);
         } else {
@@ -306,147 +310,151 @@ const fn size_of_val<T>(_: &T) -> usize {
     core::mem::size_of::<T>()
 }
 
-pub_mut!(
-    gAttributes,
-    [AttributeT; 29],
-    [
-        attrdef!((unsafe { gAttributes.0.len() - 1 }) as u8, 0, 0, 0),
-        // gatt
-        attrdefu!(6, 2, 2, 2, PRIMARY_SERVICE_UUID, GAP_SERVICE_UUID),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, DEV_NAME_CHARACTER),
-        attrdef!(
-            0,
-            2,
-            BLE_G_DEV_NAME.len(),
-            BLE_G_DEV_NAME.len(),
-            DEV_NAME_UUID,
-            BLE_G_DEV_NAME
-        ),
-        attrdef!(
-            0,
-            2,
-            SPP_DEVICENAME.len(),
-            SPP_DEVICENAME.len(),
-            USERDESC_UUID,
-            SPP_DEVICENAME
-        ),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, APPEARANCE_CHARACTER),
-        attrdefu!(
-            0,
-            2,
-            size_of_val(&APPEARANCE),
-            size_of_val(&APPEARANCE),
-            APPEARANCE_UIID,
-            APPEARANCE
-        ),
-        // device info
-        attrdefu!(9, 2, 2, 2, PRIMARY_SERVICE_UUID, DEV_INFO_UUID),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, FW_REVISION_CHAR),
-        attrdef!(0, 2, 4, 4, FW_REVISION_CHAR_UUID, FW_REVISION_VALUE),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MANU_NAME_STRING_CHAR),
-        attrdef!(
-            0,
-            2,
-            MANU_NAME_STRING_VALUE.len(),
-            MANU_NAME_STRING_VALUE.len(),
-            MANU_NAME_STRING_CHAR_UUID,
-            MANU_NAME_STRING_VALUE
-        ),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MODEL_ID_CHAR),
-        attrdef!(
-            0,
-            2,
-            MODEL_ID_VALUE.len(),
-            MODEL_ID_VALUE.len(),
-            MODEL_ID_CHAR_UUID,
-            MODEL_ID_VALUE
-        ),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, HW_REVISION_CHAR),
-        attrdefu!(
-            0,
-            2,
-            size_of_val(&HW_REVISION_VALUE),
-            size_of_val(&HW_REVISION_VALUE),
-            HW_REVISION_CHAR_UUID,
-            HW_REVISION_VALUE
-        ),
-        // spp u//0x10
-        attrdef!(13, 2, 16, 16, PRIMARY_SERVICE_UUID, TELINK_SPP_SERVICE_UUID),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_SERVER2CLIENT_PROP), //prop
-        attrdef!(
-            0,
-            16,
-            1,
-            1,
-            TELINK_SPP_DATA_SERVER2CLIENT_UUID,
-            SPP_DATA_SERVER2CLIENT_DATA,
-            Some(mesh_status_write),
-            None
-        ), //value
-        attrdef!(
-            0,
-            2,
-            STATUS_CCC.len(),
-            STATUS_CCC.len(),
-            CLIENT_CHARACTER_CFG_UUID,
-            STATUS_CCC
-        ), /*value, CCC is must for some third-party APP if there is notify or indication*/
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_CLIENT2SERVER_PROP), //prop
-        attrdef!(
-            0,
-            16,
-            16,
-            16,
-            TELINK_SPP_DATA_CLIENT2SERVICE_UUID,
-            SPP_DATA_CLIENT2SERVER_DATA,
-            Some(rf_link_slave_data_write),
-            None
-        ), //value
-        attrdef!(
-            0,
-            2,
-            SPP_COMMANDNAME.len(),
-            SPP_COMMANDNAME.len(),
-            USERDESC_UUID,
-            SPP_COMMANDNAME
-        ),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_OTA_PROP), //prop
-        attrdef!(
-            0,
-            16,
-            16,
-            16,
-            TELINK_SPP_DATA_OTA_UUID,
-            SPP_DATA_OTA_DATA,
-            Some(rf_link_slave_data_ota),
-            None
-        ), //value
-        attrdef!(
-            0,
-            2,
-            SPP_OTANAME.len(),
-            SPP_OTANAME.len(),
-            USERDESC_UUID,
-            SPP_OTANAME
-        ),
-        attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_PAIR_PROP), //prop
-        attrdef!(
-            0,
-            16,
-            16,
-            16,
-            TELINK_SPP_DATA_PAIR_UUID,
-            SPP_DATA_PAIR_DATA,
-            Some(pair_write),
-            Some(pair_read)
-        ), //value
-        attrdef!(
-            0,
-            2,
-            SPP_PAIRNAME.len(),
-            SPP_PAIRNAME.len(),
-            USERDESC_UUID,
-            SPP_PAIRNAME
-        ),
-    ]
-);
+#[repr(C, align(4))]
+struct GAttributesType([AttributeT; 29]);
+
+#[allow(non_upper_case_globals)]
+static mut gAttributes: GAttributesType = GAttributesType([
+    attrdef!((unsafe { gAttributes.0.len() - 1 }) as u8, 0, 0, 0),
+    // gatt
+    attrdefu!(6, 2, 2, 2, PRIMARY_SERVICE_UUID, GAP_SERVICE_UUID),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, DEV_NAME_CHARACTER),
+    attrdef!(
+        0,
+        2,
+        BLE_G_DEV_NAME.len(),
+        BLE_G_DEV_NAME.len(),
+        DEV_NAME_UUID,
+        BLE_G_DEV_NAME
+    ),
+    attrdef!(
+        0,
+        2,
+        SPP_DEVICENAME.len(),
+        SPP_DEVICENAME.len(),
+        USERDESC_UUID,
+        SPP_DEVICENAME
+    ),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, APPEARANCE_CHARACTER),
+    attrdefu!(
+        0,
+        2,
+        size_of_val(&APPEARANCE),
+        size_of_val(&APPEARANCE),
+        APPEARANCE_UIID,
+        APPEARANCE
+    ),
+    // device info
+    attrdefu!(9, 2, 2, 2, PRIMARY_SERVICE_UUID, DEV_INFO_UUID),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, FW_REVISION_CHAR),
+    attrdef!(0, 2, 4, 4, FW_REVISION_CHAR_UUID, FW_REVISION_VALUE),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MANU_NAME_STRING_CHAR),
+    attrdef!(
+        0,
+        2,
+        MANU_NAME_STRING_VALUE.len(),
+        MANU_NAME_STRING_VALUE.len(),
+        MANU_NAME_STRING_CHAR_UUID,
+        MANU_NAME_STRING_VALUE
+    ),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MODEL_ID_CHAR),
+    attrdef!(
+        0,
+        2,
+        MODEL_ID_VALUE.len(),
+        MODEL_ID_VALUE.len(),
+        MODEL_ID_CHAR_UUID,
+        MODEL_ID_VALUE
+    ),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, HW_REVISION_CHAR),
+    attrdefu!(
+        0,
+        2,
+        size_of_val(&HW_REVISION_VALUE),
+        size_of_val(&HW_REVISION_VALUE),
+        HW_REVISION_CHAR_UUID,
+        HW_REVISION_VALUE
+    ),
+    // spp u//0x10
+    attrdef!(13, 2, 16, 16, PRIMARY_SERVICE_UUID, TELINK_SPP_SERVICE_UUID),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_SERVER2CLIENT_PROP), //prop
+    attrdef!(
+        0,
+        16,
+        1,
+        1,
+        TELINK_SPP_DATA_SERVER2CLIENT_UUID,
+        SPP_DATA_SERVER2CLIENT_DATA,
+        Some(mesh_status_write),
+        None
+    ), //value
+    attrdef!(
+        0,
+        2,
+        STATUS_CCC.len(),
+        STATUS_CCC.len(),
+        CLIENT_CHARACTER_CFG_UUID,
+        STATUS_CCC
+    ), /*value, CCC is must for some third-party APP if there is notify or indication*/
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_CLIENT2SERVER_PROP), //prop
+    attrdef!(
+        0,
+        16,
+        16,
+        16,
+        TELINK_SPP_DATA_CLIENT2SERVICE_UUID,
+        SPP_DATA_CLIENT2SERVER_DATA,
+        Some(rf_link_slave_data_write),
+        None
+    ), //value
+    attrdef!(
+        0,
+        2,
+        SPP_COMMANDNAME.len(),
+        SPP_COMMANDNAME.len(),
+        USERDESC_UUID,
+        SPP_COMMANDNAME
+    ),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_OTA_PROP), //prop
+    attrdef!(
+        0,
+        16,
+        16,
+        16,
+        TELINK_SPP_DATA_OTA_UUID,
+        SPP_DATA_OTA_DATA,
+        Some(rf_link_slave_data_ota),
+        None
+    ), //value
+    attrdef!(
+        0,
+        2,
+        SPP_OTANAME.len(),
+        SPP_OTANAME.len(),
+        USERDESC_UUID,
+        SPP_OTANAME
+    ),
+    attrdefu!(0, 2, 1, 1, CHARACTER_UUID, SPP_DATA_PAIR_PROP), //prop
+    attrdef!(
+        0,
+        16,
+        16,
+        16,
+        TELINK_SPP_DATA_PAIR_UUID,
+        SPP_DATA_PAIR_DATA,
+        Some(pair_write),
+        Some(pair_read)
+    ), //value
+    attrdef!(
+        0,
+        2,
+        SPP_PAIRNAME.len(),
+        SPP_PAIRNAME.len(),
+        USERDESC_UUID,
+        SPP_PAIRNAME
+    ),
+]);
+
+pub fn get_gAttributes() -> &'static mut [AttributeT; 29] {
+    unsafe { &mut gAttributes.0 }
+}

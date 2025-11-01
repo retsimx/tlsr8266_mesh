@@ -1,6 +1,5 @@
 use embassy_executor::Spawner;
 
-use crate::{app, uprintln};
 use crate::config::MESH_PWD_ENCODE_SK;
 use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
@@ -18,13 +17,15 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::uart_manager::UartManager;
 use crate::version::BUILD_VERSION;
+use crate::{app, uprintln};
+use heapless::Vec;
 
 #[cfg_attr(test, mry::mry)]
 pub struct App {
     pub ota_manager: OtaManager,
     pub mesh_manager: MeshManager,
     pub light_manager: LightManager,
-    pub uart_manager: UartManager
+    pub uart_manager: UartManager,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const, run)))]
@@ -35,10 +36,10 @@ impl App {
             ota_manager: OtaManager::default_const(),
             mesh_manager: MeshManager::default_const(),
             light_manager: LightManager::default_const(),
-            uart_manager: UartManager::default_const()
+            uart_manager: UartManager::default_const(),
         }
     }
-  
+
     #[cfg(test)]
     pub fn default() -> App {
         App {
@@ -46,13 +47,14 @@ impl App {
             mesh_manager: MeshManager::default(),
             light_manager: LightManager::default(),
             uart_manager: UartManager::default(),
-            mry: Default::default()
+            mry: Default::default(),
         }
     }
 
     pub fn init(&mut self) {
         // Copy the password in to the pair config
-        PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
+        PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()]
+            .copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
 
         rf_drv_init(true);
 
@@ -70,7 +72,11 @@ impl App {
         // Get uart ready to go early
         self.uart_manager.init();
 
-        uprintln!("Booting FW version {}, 16MHz: {}", BUILD_VERSION & 0x7fffffff, (BUILD_VERSION >> 31) == 1);
+        uprintln!(
+            "Booting FW version {}, 16MHz: {}",
+            BUILD_VERSION & 0x7fffffff,
+            (BUILD_VERSION >> 31) == 1
+        );
 
         // Configure the rest of the system
         self.init();
@@ -106,7 +112,9 @@ impl App {
         let mut data = [0_u8; 13];
         data[0] = LGT_POWER_ON;
 
-        app().mesh_manager.send_mesh_message(&data, 0xffff, 3, false);
+        app()
+            .mesh_manager
+            .send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
 
         // Start the panic checker to see if there is information we need to send
         #[embassy_executor::task]

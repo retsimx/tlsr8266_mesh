@@ -1,9 +1,9 @@
-use core::sync::atomic::{AtomicU32, Ordering};
-use embassy_time::driver::{Driver, AlarmHandle};
 use crate::sdk::mcu::clock::clock_time;
+use core::sync::atomic::{AtomicU32, Ordering};
+use embassy_time::driver::{AlarmHandle, Driver};
 
 /// Custom time driver implementation for the embassy-time crate
-/// 
+///
 /// This driver bridges the SDK's clock_time functionality with embassy's time system,
 /// providing a monotonic 64-bit timestamp counter even though the underlying
 /// hardware may have a 32-bit counter that wraps around.
@@ -16,28 +16,28 @@ embassy_time::time_driver_impl!(static DRIVER: MyDriver = MyDriver{});
 
 impl Driver for MyDriver {
     /// Returns the current monotonic timestamp in ticks
-    /// 
+    ///
     /// Uses clock_time64 to handle timer overflow and provide a continuous 64-bit counter
     fn now(&self) -> u64 {
         clock_time64()
     }
 
     /// Allocates a new alarm handle
-    /// 
+    ///
     /// Currently only supports a single alarm with ID 0
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
         Option::from(AlarmHandle::new(0))
     }
 
     /// Sets the callback function for an alarm
-    /// 
+    ///
     /// Currently a no-op implementation as alarms are not fully supported
     fn set_alarm_callback(&self, _alarm: AlarmHandle, _callback: fn(*mut ()), _ctx: *mut ()) {
         // No-op: Alarm callbacks not implemented in this driver
     }
 
     /// Sets an alarm to trigger at the specified timestamp
-    /// 
+    ///
     /// Returns true only if the timestamp is in the future
     /// Note: This is a minimal implementation that doesn't actually schedule alarms
     fn set_alarm(&self, _alarm: AlarmHandle, _timestamp: u64) -> bool {
@@ -55,7 +55,7 @@ static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 /// This function extends the 32-bit hardware timer to a 64-bit logical timer by
 /// tracking overflows of the underlying 32-bit counter. It uses atomic operations
 /// to safely handle concurrent access without locks in the common case.
-/// 
+///
 /// # Algorithm
 /// 1. Read current hardware time and previously seen time
 /// 2. If current time < last time, we may have an overflow
@@ -73,7 +73,7 @@ pub fn clock_time64() -> u64 {
     // Get current hardware time
     let current_time = clock_time();
     let last_time = LAST_CLOCK_TIME.load(Ordering::Relaxed);
-    
+
     // Only enter critical section if we suspect an overflow
     // (current time is less than last seen time)
     if current_time < last_time {
@@ -88,7 +88,7 @@ pub fn clock_time64() -> u64 {
                 let upper = CLOCK_TIME_UPPER.load(Ordering::Relaxed);
                 CLOCK_TIME_UPPER.store(upper + 1, Ordering::Relaxed);
             }
-            
+
             // Update last time seen within the critical section
             LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
         });
@@ -97,7 +97,7 @@ pub fn clock_time64() -> u64 {
         // This fast path avoids the critical section in most calls
         LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
     }
-    
+
     // Combine upper and lower bits to form the 64-bit timestamp
     // Upper 32 bits track number of overflows
     // Lower 32 bits are the current hardware timer value
@@ -107,8 +107,8 @@ pub fn clock_time64() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mry::{self};
     use crate::sdk::mcu::clock::mock_clock_time;
+    use mry::{self};
 
     // Helper function to reset static variables for testing without using unsafe
     fn reset_static_vars() {
@@ -122,13 +122,13 @@ mod tests {
         // Arrange
         let driver = MyDriver {};
         let expected_time = 0x1234567890ABCDEF;
-        
+
         // Mock clock_time64 with the correct format
         mock_clock_time64().returns(expected_time);
-        
+
         // Act
         let result = driver.now();
-        
+
         // Assert
         assert_eq!(result, expected_time);
         mock_clock_time64().assert_called(1);
@@ -138,10 +138,10 @@ mod tests {
     fn test_driver_allocate_alarm() {
         // Arrange
         let driver = MyDriver {};
-        
+
         // Act
         let result = unsafe { driver.allocate_alarm() };
-        
+
         // Assert
         assert!(result.is_some());
         assert_eq!(result.unwrap().id(), 0);
@@ -154,7 +154,7 @@ mod tests {
         let alarm_handle = unsafe { AlarmHandle::new(0) };
         let callback: fn(*mut ()) = |_| {};
         let context: *mut () = core::ptr::null_mut();
-        
+
         // Act & Assert
         // The function is a no-op, so we just verify it doesn't panic
         driver.set_alarm_callback(alarm_handle, callback, context);
@@ -167,14 +167,14 @@ mod tests {
         // Arrange
         let driver = MyDriver {};
         let alarm_handle = unsafe { AlarmHandle::new(0) };
-        
+
         // Need to mock both clock_time and clock_time64 to ensure consistent behavior
         mock_clock_time().returns(1000);
         mock_clock_time64().returns(1000); // Ensure now() returns this value
-        
+
         // Act
         let result = driver.set_alarm(alarm_handle, 2000);
-        
+
         // Assert
         assert!(result);
         mock_clock_time64().assert_called(1);
@@ -186,13 +186,13 @@ mod tests {
         // Arrange
         let driver = MyDriver {};
         let alarm_handle = unsafe { AlarmHandle::new(0) };
-        
+
         // Mock clock_time with the correct format
         mock_clock_time().returns(2000);
-        
+
         // Act - Set an alarm for the past
         let result = driver.set_alarm(alarm_handle, 1000);
-        
+
         // Assert - Should return false for past timestamps
         assert!(!result);
         mock_clock_time().assert_called(1);
@@ -203,20 +203,20 @@ mod tests {
     fn test_clock_time64_no_overflow() {
         // Arrange
         reset_static_vars();
-        
-        // Set initial value 
+
+        // Set initial value
         let initial_value = 1000;
         LAST_CLOCK_TIME.store(initial_value, Ordering::Relaxed);
-        
+
         // Simulate non-overflow case
         let next_value = initial_value + 100;
-        
+
         // Mock clock_time with the correct format
         mock_clock_time().returns(next_value);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         assert_eq!(result, next_value as u64);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
@@ -229,20 +229,20 @@ mod tests {
     fn test_clock_time64_with_overflow() {
         // Arrange
         reset_static_vars();
-        
+
         // Set up overflow scenario
         let initial_value = 0xFFFFFF00_u32;
         LAST_CLOCK_TIME.store(initial_value, Ordering::Relaxed);
-        
+
         // Simulate overflow: next value will be less than previous
         let next_value = 100_u32;
-        
+
         // Mock clock_time with the correct format
         mock_clock_time().returns(next_value);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         // The upper 32 bits should be incremented to 1, and lower 32 bits should be our next value
         assert_eq!(result, (1_u64 << 32) | next_value as u64);
@@ -258,10 +258,10 @@ mod tests {
         reset_static_vars();
         LAST_CLOCK_TIME.store(1000, Ordering::Relaxed);
         mock_clock_time().returns(1500);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         assert_eq!(result, 1500);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
@@ -275,10 +275,10 @@ mod tests {
         reset_static_vars();
         LAST_CLOCK_TIME.store(0xFFFFFF00, Ordering::Relaxed);
         mock_clock_time().returns(100);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         assert_eq!(result, (1_u64 << 32) | 100);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
@@ -293,10 +293,10 @@ mod tests {
         LAST_CLOCK_TIME.store(100, Ordering::Relaxed);
         CLOCK_TIME_UPPER.store(1, Ordering::Relaxed);
         mock_clock_time().returns(200);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         assert_eq!(result, (1_u64 << 32) | 200);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
@@ -311,10 +311,10 @@ mod tests {
         LAST_CLOCK_TIME.store(0xFFFFFF00, Ordering::Relaxed);
         CLOCK_TIME_UPPER.store(1, Ordering::Relaxed);
         mock_clock_time().returns(300);
-        
+
         // Act
         let result = clock_time64();
-        
+
         // Assert
         assert_eq!(result, (2_u64 << 32) | 300);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 2);

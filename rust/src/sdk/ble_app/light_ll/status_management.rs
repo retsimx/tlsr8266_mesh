@@ -54,7 +54,7 @@
 //! └─────────────────┘    └─────────────┘    └─────────────────┘
 //!                            ▲     ▲
 //!                     Status │     │ Commands
-//!                   Response │     │ 
+//!                   Response │     │
 //!                            ▼     ▼
 //!                    ┌─────────────────┐
 //!                    │ Local Processing│
@@ -72,15 +72,15 @@
 use core::cmp::min;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{app};
-use crate::sdk::ble_app::rf_drv_8266::{*};
-use crate::sdk::light::{*};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, sleep_us};
-use crate::sdk::mcu::register::{read_reg_system_tick, read_reg_rnd_number};
-use crate::state::{*};
+use crate::app;
+use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::light::*;
+use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
+use crate::sdk::mcu::register::{read_reg_rnd_number, read_reg_system_tick};
+use crate::state::*;
 
 use super::mesh_management::mesh_send_online_status;
-use super::packet_processing::{rf_link_is_notify_req};
+use super::packet_processing::rf_link_is_notify_req;
 
 /// Initializes BLE slave status reporting parameters to default state.
 ///
@@ -100,12 +100,11 @@ use super::packet_processing::{rf_link_is_notify_req};
 /// - Error recovery procedures
 /// - Status reporting session reset
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_slave_read_status_par_init()
-{
+pub fn rf_link_slave_read_status_par_init() {
     // Reset circular buffer pointers to empty state
     DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
     DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-    
+
     // Clear status message sequence number for fresh tracking
     *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0; 3];
 }
@@ -136,14 +135,13 @@ pub fn rf_link_slave_read_status_par_init()
 /// - System transitions from status reporting to other modes
 /// - Clean shutdown is required before mode changes
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_slave_read_status_stop()
-{
+pub fn rf_link_slave_read_status_stop() {
     // Clear status reporting busy flag to mark operation as inactive
     SLAVE_READ_STATUS_BUSY.set(0);
-    
+
     // Disable unicast mode to return to default broadcast behavior
     DEVICE_STATUS_READ_UNICAST_MODE.set(false);
-    
+
     // Invalidate any pending slave data to prevent stale responses
     SLAVE_DATA_VALID.set(0);
 
@@ -205,15 +203,14 @@ pub fn rf_link_slave_read_status_stop()
 /// * Queues messages in mesh transmission system
 /// * Decrements pending command counters
 #[cfg_attr(test, mry::mry)]
-pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
-{
+pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
     let mut pkt_light_data = PKT_LIGHT_DATA.lock();
 
     // Check if valid command data is pending transmission
     if SLAVE_DATA_VALID.get() != 0 {
         // Decrement the valid data counter (countdown to transmission)
         SLAVE_DATA_VALID.dec();
-        
+
         // Process command if not in final countdown or if conditions allow transmission
         if SLAVE_DATA_VALID.get() == 0 {
             // Special case: immediate transmission required
@@ -227,7 +224,8 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
                 // Calculate relay timing based on processing delay
                 // Formula: (elapsed_time_us + 500) / 1024, clamped to 255
                 let mut relay_time = min(
-                    (((read_reg_system_tick() - bridge_cmd_time) / CLOCK_SYS_CLOCK_1US) + 500) >> 10,
+                    (((read_reg_system_tick() - bridge_cmd_time) / CLOCK_SYS_CLOCK_1US) + 500)
+                        >> 10,
                     0xff,
                 );
 
@@ -297,8 +295,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32)
 /// * Processes pending bridge commands
 /// * Updates transmission timing tracking
 #[cfg_attr(test, mry::mry)]
-pub fn tx_packet_bridge()
-{
+pub fn tx_packet_bridge() {
     // Static variable to track last bridge report transmission time
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);
 
@@ -309,20 +306,21 @@ pub fn tx_packet_bridge()
     sleep_us(100);
 
     // Configure RF hardware for mesh network operation
-    rf_set_ble_access_code(PAIR_AC.get());  // Set mesh network access code
-    rf_set_ble_crc_adv();                   // Configure CRC for advertising packets
+    rf_set_ble_access_code(PAIR_AC.get()); // Set mesh network access code
+    rf_set_ble_crc_adv(); // Configure CRC for advertising packets
 
     // Check if periodic status broadcast is due
     let tick = read_reg_system_tick();
-    let broadcast_interval = (MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
-                           .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
-    
+    let broadcast_interval = (MESH_LISTEN_INTERVAL_US.get()
+        * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
+        .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
+
     if broadcast_interval < tick.saturating_sub(TICK_BRIDGE_REPORT.load(Ordering::Relaxed)) {
         // Update last broadcast time and trigger status transmission
         TICK_BRIDGE_REPORT.store(tick, Ordering::Relaxed);
         mesh_send_online_status();
     }
-    
+
     // Process any pending bridge commands with stored command timestamp
     app_bridge_cmd_handle(BRIDGE_COMMAND_TIMESTAMP.get());
 }
@@ -330,13 +328,15 @@ pub fn tx_packet_bridge()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::rf_drv_8266::{mock_rf_set_tx_rx_off, mock_rf_set_ble_access_code, mock_rf_set_ble_crc_adv};
-    use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_send_online_status;
     use crate::sdk::ble_app::light_ll::packet_processing::mock_rf_link_is_notify_req;
-    use std::sync::atomic::Ordering;
+    use crate::sdk::ble_app::rf_drv_8266::{
+        mock_rf_set_ble_access_code, mock_rf_set_ble_crc_adv, mock_rf_set_tx_rx_off,
+    };
+    use crate::sdk::mcu::clock::mock_sleep_us;
+    use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use mry::Any;
+    use std::sync::atomic::Ordering;
 
     fn setup_test_state() {
         // Reset all status management state
@@ -349,7 +349,7 @@ mod tests {
         BRIDGE_COMMAND_TIMESTAMP.set(1000);
         PAIR_AC.set(0x12345678);
         MESH_LISTEN_INTERVAL_US.set(100000); // 100ms
-        
+
         // Clear packet data to ensure clean state
         let mut packet_data = PKT_LIGHT_DATA.lock();
         packet_data.head_mut()._type = 0x00; // Clear all flags including mesh flag
@@ -406,7 +406,7 @@ mod tests {
         // No mocks should be called since there's no valid data
     }
 
-    #[test] 
+    #[test]
     fn test_app_bridge_cmd_handle_countdown_decrements() {
         setup_test_state();
         SLAVE_DATA_VALID.set(3); // Set countdown value
@@ -422,12 +422,12 @@ mod tests {
     fn test_app_bridge_cmd_handle_immediate_transmission() {
         setup_test_state();
         let mut packet_data = PKT_LIGHT_DATA.lock();
-        
+
         // Set up test packet data
         packet_data.head_mut()._type = 0x00; // Clear mesh flag
         packet_data.att_cmd_mut().value.val[0] = 0x10; // Test command
         drop(packet_data); // Release lock
-        
+
         SLAVE_DATA_VALID.set(1); // Will become 0 after decrement
 
         // Execute function - immediate transmission case
@@ -442,19 +442,19 @@ mod tests {
     fn test_app_bridge_cmd_handle_notify_request_timing() {
         setup_test_state();
         let mut packet_data = PKT_LIGHT_DATA.lock();
-        
+
         // Set up notify request packet
         packet_data.head_mut()._type = 0x00; // Clear mesh flag initially
         packet_data.att_cmd_mut().value.val[0] = 0x10; // Test command (masked will be 0x10)
         packet_data.att_cmd_mut().value.val[17] = 0; // Clear timing field
         drop(packet_data);
-        
+
         SLAVE_DATA_VALID.set(2); // Will become 1 after decrement
         SLAVE_READ_STATUS_BUSY.set(0); // Allow transmission
 
         // Mock notify request check
         mock_rf_link_is_notify_req(0x10).returns(true);
-        
+
         // Mock system tick for timing calculation
         // To get timing value 1: ((tick_diff / 32) + 500) >> 10 = 1
         // So: (tick_diff / 32) + 500 = 1024
@@ -468,7 +468,7 @@ mod tests {
         // Verify packet was modified for mesh transmission
         let packet_data = PKT_LIGHT_DATA.lock();
         assert_ne!(packet_data.head()._type & 0x80, 0); // Mesh flag should be set
-        // Verify timing calculation: (16768/32 + 500) / 1024 = (524 + 500) / 1024 = 1024/1024 = 1
+                                                        // Verify timing calculation: (16768/32 + 500) / 1024 = (524 + 500) / 1024 = 1024/1024 = 1
         assert_eq!(packet_data.att_cmd().value.val[17], 1);
 
         // Verify mocks were called
@@ -481,11 +481,11 @@ mod tests {
     fn test_app_bridge_cmd_handle_non_notify_request() {
         setup_test_state();
         let mut packet_data = PKT_LIGHT_DATA.lock();
-        
+
         packet_data.head_mut()._type = 0x00;
         packet_data.att_cmd_mut().value.val[0] = 0x20; // Non-notify command
         drop(packet_data);
-        
+
         SLAVE_DATA_VALID.set(2);
         SLAVE_READ_STATUS_BUSY.set(0);
 
@@ -525,7 +525,7 @@ mod tests {
     fn test_app_bridge_cmd_handle_zero_data_early_exit() {
         setup_test_state();
         SLAVE_DATA_VALID.set(0); // No valid data, should exit early
-        
+
         // Execute function
         app_bridge_cmd_handle(1000);
 
@@ -538,7 +538,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    #[mry::lock(
+        rf_set_tx_rx_off,
+        sleep_us,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        read_reg_system_tick,
+        mesh_send_online_status,
+        app_bridge_cmd_handle
+    )]
     fn test_tx_packet_bridge_basic_setup() {
         setup_test_state();
 
@@ -564,17 +572,26 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    #[mry::lock(
+        rf_set_tx_rx_off,
+        sleep_us,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        read_reg_system_tick,
+        mesh_send_online_status,
+        app_bridge_cmd_handle
+    )]
     fn test_tx_packet_bridge_status_broadcast_triggered() {
         setup_test_state();
-        
+
         // Set up timing to trigger status broadcast
         // broadcast_interval = (100000 * 8).saturating_sub(3 * 32 * 1000) = 800000 - 96000 = 704000
         // Use a tick value much larger than any possible TICK_BRIDGE_REPORT value from previous tests
         // to guarantee the condition: broadcast_interval < tick - TICK_BRIDGE_REPORT
         let current_tick = 10000000; // Much larger than 704000 and any reasonable TICK_BRIDGE_REPORT
-        let expected_interval = (MESH_LISTEN_INTERVAL_US.get() * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
-                              .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
+        let expected_interval = (MESH_LISTEN_INTERVAL_US.get()
+            * ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL as u32)
+            .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
 
         mock_rf_set_tx_rx_off().returns(());
         mock_sleep_us(100).returns(());
@@ -593,13 +610,20 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, app_bridge_cmd_handle)]
+    #[mry::lock(
+        rf_set_tx_rx_off,
+        sleep_us,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        read_reg_system_tick,
+        app_bridge_cmd_handle
+    )]
     fn test_tx_packet_bridge_status_broadcast_not_due() {
         setup_test_state();
-        
+
         // Set up timing where status broadcast is not due yet
         let current_tick = 1000; // Recent time, broadcast not due
-        
+
         mock_rf_set_tx_rx_off().returns(());
         mock_sleep_us(100).returns(());
         mock_rf_set_ble_access_code(0x12345678).returns(());
@@ -616,7 +640,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_set_tx_rx_off, sleep_us, rf_set_ble_access_code, rf_set_ble_crc_adv, read_reg_system_tick, mesh_send_online_status, app_bridge_cmd_handle)]
+    #[mry::lock(
+        rf_set_tx_rx_off,
+        sleep_us,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        read_reg_system_tick,
+        mesh_send_online_status,
+        app_bridge_cmd_handle
+    )]
     fn test_tx_packet_bridge_function_calls() {
         setup_test_state();
 
@@ -647,12 +679,12 @@ mod tests {
     fn test_app_bridge_cmd_handle_timing_calculation_edge_cases() {
         setup_test_state();
         let mut packet_data = PKT_LIGHT_DATA.lock();
-        
+
         packet_data.head_mut()._type = 0x00;
         packet_data.att_cmd_mut().value.val[0] = 0x10;
         packet_data.att_cmd_mut().value.val[17] = 0;
         drop(packet_data);
-        
+
         SLAVE_DATA_VALID.set(2);
         SLAVE_READ_STATUS_BUSY.set(0);
 
@@ -668,7 +700,7 @@ mod tests {
         // Verify timing was clamped to maximum (255)
         let packet_data = PKT_LIGHT_DATA.lock();
         assert_eq!(packet_data.att_cmd().value.val[17], 255);
-        
+
         // Verify mocks were called
         mock_rf_link_is_notify_req(0x10).assert_called(1);
         mock_read_reg_system_tick().assert_called(1);

@@ -1,19 +1,21 @@
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
+};
 
 use heapless::Deque;
 
 use crate::config::VENDOR_ID;
 use crate::embassy::sync::mutex::CriticalSectionMutex;
-use crate::mesh::{MESH_NODE_ST_PAR_LEN, MeshNodeStT, MeshNodeStValT};
-use crate::sdk::light::{*};
-use crate::sdk::packet_types::{*};
+use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+use crate::sdk::light::*;
+use crate::sdk::packet_types::*;
 
 /// Response buffer for storing packets that need to be sent back to the BLE host.
 /// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
 /// Protected by critical section mutex for thread-safe access in interrupt contexts.
-pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> = CriticalSectionMutex::new(
-    [
-        Packet {
+pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> =
+    CriticalSectionMutex::new(
+        [Packet {
             att_data: PacketAttData {
                 head: PacketL2capHead {
                     dma_len: 0,
@@ -26,45 +28,39 @@ pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COU
                 hl: 0,
                 hh: 0,
                 dat: [0; 23],
-            }
-        };
-        BUFF_RESPONSE_PACKET_COUNT
-    ]
-);
+            },
+        }; BUFF_RESPONSE_PACKET_COUNT],
+    );
 
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
 /// Used to track online status, last communication timestamp, and node-specific data.
-pub static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
-    [
-        MeshNodeStT {
+pub static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> =
+    CriticalSectionMutex::new(
+        [MeshNodeStT {
             tick: 0,
             val: MeshNodeStValT {
                 dev_adr: 0,
                 sn: 0,
                 par: [0; MESH_NODE_ST_PAR_LEN],
             },
-        };
-        MESH_NODE_MAX_NUM
-    ]
-);
+        }; MESH_NODE_MAX_NUM],
+    );
 
 /// Private advertising data structure used in BLE advertisements.
 /// Contains manufacturer ID, mesh product UUID, and MAC address for device identification.
 /// Broadcast during BLE advertising to allow discovery by mesh controllers.
-pub static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> = CriticalSectionMutex::new(
-    AdvPrivate {
-        manufacture_id: VENDOR_ID,
-        mesh_product_uuid: VENDOR_ID,
-        mac_address: 0,
-    }
-);
+pub static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> = CriticalSectionMutex::new(AdvPrivate {
+    manufacture_id: VENDOR_ID,
+    mesh_product_uuid: VENDOR_ID,
+    mac_address: 0,
+});
 
 /// Private advertising response data sent in response to scan requests.
 /// Extended version of advertising data including device status, product UUID,
 /// device address, and additional reserved fields for future use.
-pub static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> = CriticalSectionMutex::new(
-    AdvRspPrivate {
+pub static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
+    CriticalSectionMutex::new(AdvRspPrivate {
         manufacture_id: VENDOR_ID,
         mesh_product_uuid: VENDOR_ID,
         mac_address: 0,
@@ -72,13 +68,13 @@ pub static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> = CriticalSecti
         status: 0x01,
         device_address: 0,
         rsv: [0; 16],
-    }
-);
+    });
 
 /// BLE Link Layer channel table for frequency hopping sequence.
 /// Contains the channel map used for data channel selection in BLE connections.
 /// Updated during connection parameter negotiations and channel map updates.
-pub static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> = CriticalSectionMutex::new([0; 40]);
+pub static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> =
+    CriticalSectionMutex::new([0; 40]);
 
 /// Channel map for slave device indicating which of the 37 BLE data channels are usable.
 /// Each bit represents one channel; used for adaptive frequency hopping.
@@ -86,39 +82,48 @@ pub static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::
 
 /// Current RF operation state indicating which mode is active.
 /// Tracks whether the device is in advertising, connected, receiving, mesh listening, or idle state.
-pub static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> = CriticalSectionMutex::new(RfOperationState::Idle);
+pub static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> =
+    CriticalSectionMutex::new(RfOperationState::Idle);
 
 /// Mesh network name used for pairing and access control.
 /// 16-byte string identifier that devices must match to join the mesh network.
-pub static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
 
 /// Mesh network password used for authentication during pairing.
 /// 16-byte password that must be provided to join the mesh network.
-pub static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
 
 /// Long-Term Key (LTK) for mesh network encryption.
 /// 16-byte cryptographic key used to encrypt/decrypt mesh communications.
-pub static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
 
 /// Group addresses that this device belongs to (up to 8 groups).
 /// Used for group-based lighting control where multiple devices respond to the same command.
-pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> = CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
+pub static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
+    CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
 
 /// Current state of the mesh pairing process.
 /// Tracks progress through pairing sequence: idle, setting, transmitting, receiving, etc.
-pub static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> = CriticalSectionMutex::new(ePairState::PairSetted);
+pub static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
+    CriticalSectionMutex::new(ePairState::PairSetted);
 
 /// Over-The-Air (OTA) update completion status flag.
 /// Indicates whether an OTA firmware update has finished successfully or with errors.
-pub static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> = CriticalSectionMutex::new(OtaState::Continue);
+pub static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> =
+    CriticalSectionMutex::new(OtaState::Continue);
 
 /// Initialization Vector for Master (IVM) used in mesh encryption.
 /// 8-byte nonce used with AES encryption for securing mesh communications from master.
-pub static PAIR_IVM: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
+pub static PAIR_IVM: CriticalSectionMutex<[u8; 8]> =
+    CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
 
 /// Session key derived from mesh password for secure pairing.
 /// 16-byte key used during the pairing process to encrypt configuration data.
-pub static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
+pub static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
 
 /// Initialization Vector for Slave (IVS) used in mesh encryption.
 /// 8-byte nonce used with AES encryption for securing mesh communications from slave.
@@ -126,26 +131,27 @@ pub static PAIR_IVS: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([
 /// Status record table for tracking mesh node communications.
 /// Records device addresses and alarm IDs for up to 64 nodes in the mesh network.
 /// Used to track which devices need status updates or have pending alarms.
-pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> = CriticalSectionMutex::new(
-    [
-        StatusRecord {
+pub static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> =
+    CriticalSectionMutex::new(
+        [StatusRecord {
             adr: [0],
             alarm_id: 0,
-        };
-        MESH_NODE_MAX_NUM
-    ]
-);
+        }; MESH_NODE_MAX_NUM],
+    );
 /// Remote control packet buffer storing received commands for processing.
 /// Queue of up to 20 packet buffers containing operation codes and sequence numbers.
-pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> = CriticalSectionMutex::new(Deque::new());
+pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> =
+    CriticalSectionMutex::new(Deque::new());
 
 /// Sequence number for device status messages.
 /// 3-byte counter used to ensure message ordering and detect duplicates in status reports.
-pub static STATUS_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static STATUS_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> =
+    CriticalSectionMutex::new([0; 3]);
 
 /// General sequence number for all device transmissions.
 /// 3-byte counter used to track and order outgoing mesh messages from this device.
-pub static GENERAL_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([0; 3]);
+pub static GENERAL_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> =
+    CriticalSectionMutex::new([0; 3]);
 
 /// Device MAC address used for network identification.
 /// 6-byte IEEE MAC address uniquely identifying this device in the mesh network.
@@ -157,92 +163,84 @@ pub static ADV_DATA: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([
 /// Advertising packet structure used for BLE advertisements.
 /// Pre-configured packet with advertising data, device address, and payload.
 /// Transmitted during advertising intervals to announce device presence.
-pub static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
-    Packet {
-        adv_ind_module: RfPacketAdvIndModuleT {
-            dma_len: 0x27,
-            _type: 0,
-            rf_len: 0x25,
-            adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
-            data: [0; 31],
-        }
-    }
-);
+pub static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    adv_ind_module: RfPacketAdvIndModuleT {
+        dma_len: 0x27,
+        _type: 0,
+        rf_len: 0x25,
+        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+        data: [0; 31],
+    },
+});
 
 /// Mesh packet template for light control commands.
 /// Pre-structured packet used for sending lighting commands through the mesh network.
 /// Contains source/destination addressing and command payload area.
-pub static PKT_LIGHT_DATA: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
-    Packet {
-        att_cmd: PacketAttCmd {
-            head: PacketL2capHead {
-                dma_len: 0x27,
-                _type: 2,
-                rf_len: 0x25,
-                l2cap_len: 0xCCDD,
-                chan_id: 0,
-            },
-            opcode: 0,
-            handle: 0,
-            handle1: 0,
-            value: PacketAttValue {
-                sno: [0; 3],
-                src: [0; 2],
-                dst: [0; 2],
-                val: [0; 23],
-            },
-        }
-    }
-);
+pub static PKT_LIGHT_DATA: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    att_cmd: PacketAttCmd {
+        head: PacketL2capHead {
+            dma_len: 0x27,
+            _type: 2,
+            rf_len: 0x25,
+            l2cap_len: 0xCCDD,
+            chan_id: 0,
+        },
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: PacketAttValue {
+            sno: [0; 3],
+            src: [0; 2],
+            dst: [0; 2],
+            val: [0; 23],
+        },
+    },
+});
 /// Mesh packet template for light status responses.
 /// Pre-structured packet used for reporting device status back through the mesh.
 /// Contains device state information and addressing for status updates.
-pub static PKT_LIGHT_STATUS: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
-    Packet {
-        att_cmd: PacketAttCmd {
-            head: PacketL2capHead {
-                dma_len: 0x27,
-                _type: 2,
-                rf_len: 0x25,
-                l2cap_len: 0x21,
-                chan_id: 0,
-            },
-            opcode: 0,
-            handle: 0,
-            handle1: 0,
-            value: PacketAttValue {
-                sno: [0; 3],
-                src: [0; 2],
-                dst: [0; 2],
-                val: [0; 23],
-            },
-        }
-    }
-);
+pub static PKT_LIGHT_STATUS: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    att_cmd: PacketAttCmd {
+        head: PacketL2capHead {
+            dma_len: 0x27,
+            _type: 2,
+            rf_len: 0x25,
+            l2cap_len: 0x21,
+            chan_id: 0,
+        },
+        opcode: 0,
+        handle: 0,
+        handle1: 0,
+        value: PacketAttValue {
+            sno: [0; 3],
+            src: [0; 2],
+            dst: [0; 2],
+            val: [0; 23],
+        },
+    },
+});
 
 /// BLE connection initialization packet template.
 /// Contains connection parameters, access address, channel map, and timing information.
 /// Used when establishing BLE connections with central devices.
-pub static PKT_INIT: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(
-    Packet {
-        ll_init: PacketLlInit {
-            dma_len: 0x24,
-            _type: 0x5,
-            rf_len: 0x22,
-            scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
-            adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
-            aa: [0xaa, 0x55, 0x55, 0xaa],
-            crcinit: [0x55, 0x55, 0x55],
-            wsize: 2,
-            woffset: 0x1f,
-            interval: 0x20,
-            latency: 0,
-            timeout: 0x48,
-            chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
-            hop: 0xac,
-        }
-    }
-);
+pub static PKT_INIT: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    ll_init: PacketLlInit {
+        dma_len: 0x24,
+        _type: 0x5,
+        rf_len: 0x22,
+        scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+        adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+        aa: [0xaa, 0x55, 0x55, 0xaa],
+        crcinit: [0x55, 0x55, 0x55],
+        wsize: 2,
+        woffset: 0x1f,
+        interval: 0x20,
+        latency: 0,
+        timeout: 0x48,
+        chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+        hop: 0xac,
+    },
+});
 
 pub struct PairStateData {
     pub pair_ltk: [u8; 16],
@@ -259,8 +257,8 @@ pub struct PairStateData {
 /// Comprehensive pairing state data containing all cryptographic material.
 /// Stores LTK, session keys, work buffers, network names, passwords, and random values
 /// used during the mesh pairing and authentication process.
-pub static PAIR_STATE: CriticalSectionMutex<PairStateData> = CriticalSectionMutex::new(
-    PairStateData {
+pub static PAIR_STATE: CriticalSectionMutex<PairStateData> =
+    CriticalSectionMutex::new(PairStateData {
         pair_ltk: [0; 16],
         pair_sk: [0; 16],
         pair_work: [0; 16],
@@ -270,15 +268,14 @@ pub static PAIR_STATE: CriticalSectionMutex<PairStateData> = CriticalSectionMute
         pair_sk_copy: [0; 16],
         pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
         pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
-    }
-);
+    });
 
 /// Receive buffer array for incoming light control packets.
 /// Contains 4 buffers storing received packet data including RSSI, timing, sequence numbers,
 /// and MAC addresses. Used for processing incoming mesh communications.
-pub static LIGHT_RX_BUFF: CriticalSectionMutex<[LightRxBuff; LIGHT_RX_BUFF_COUNT]> = CriticalSectionMutex::new(
-    [
-        LightRxBuff {
+pub static LIGHT_RX_BUFF: CriticalSectionMutex<[LightRxBuff; LIGHT_RX_BUFF_COUNT]> =
+    CriticalSectionMutex::new(
+        [LightRxBuff {
             dma_len: 0,
             unk1: [0; 3],
             rssi: 0,
@@ -288,9 +285,8 @@ pub static LIGHT_RX_BUFF: CriticalSectionMutex<[LightRxBuff; LIGHT_RX_BUFF_COUNT
             unk3: [0; 5],
             mac: [0; 4],
             unk4: [0; 40],
-        }; LIGHT_RX_BUFF_COUNT
-    ]
-);
+        }; LIGHT_RX_BUFF_COUNT],
+    );
 
 /// Empty packet template used for BLE layer control.
 /// Must be in RAM (.data section) because DMA cannot access flash memory.
@@ -305,7 +301,7 @@ pub static PKT_EMPTY: Packet = Packet {
         rf_len: 0,
         l2cap_len: 0,
         chan_id: 0,
-    }
+    },
 };
 
 /// BLE connection termination packet.
@@ -319,7 +315,7 @@ pub static PKT_TERMINATE: Packet = Packet {
         rf_len: 2,
         opcode: 2,
         data: [0x13],
-    }
+    },
 };
 
 /// ATT error response packet template.
@@ -339,7 +335,7 @@ pub static PKT_ERR_RSP: Packet = Packet {
         err_opcode: 0,
         err_handle: 0,
         err_reason: 0x0a,
-    }
+    },
 };
 
 /// Global flag indicating whether mesh pairing mode is currently active.
@@ -348,7 +344,8 @@ pub static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Bitmask indicating which mesh nodes are active/online.
 /// Each bit represents one node in the mesh network (up to 64 nodes).
-pub static MESH_NODE_MASK: CriticalSectionMutex<[u32; MESH_NODE_MASK_LEN]> = CriticalSectionMutex::new([0; MESH_NODE_MASK_LEN]);
+pub static MESH_NODE_MASK: CriticalSectionMutex<[u32; MESH_NODE_MASK_LEN]> =
+    CriticalSectionMutex::new([0; MESH_NODE_MASK_LEN]);
 
 /// Current state of the BLE pairing finite state machine.
 /// Tracks progress through pairing steps: idle, random exchange, key exchange, etc.
@@ -392,8 +389,10 @@ pub static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
 
 /// Current state of the BLE connection as a peripheral device.
 /// Tracks connection status, advertising state, and link layer operations.
-pub static BLE_PERIPHERAL_LINK_STATE: crate::sdk::light::AtomicBlePeripheralLinkState = 
-    crate::sdk::light::AtomicBlePeripheralLinkState::new(crate::sdk::light::BlePeripheralLinkState::Disconnected);
+pub static BLE_PERIPHERAL_LINK_STATE: crate::sdk::light::AtomicBlePeripheralLinkState =
+    crate::sdk::light::AtomicBlePeripheralLinkState::new(
+        crate::sdk::light::BlePeripheralLinkState::Disconnected,
+    );
 
 /// Timestamp of the last received packet for timeout detection.
 /// Used to detect communication timeouts and trigger reconnection procedures.
@@ -611,7 +610,8 @@ pub static OTA_UPDATE_TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false)
 
 /// OTA operation timeout in seconds (default 30 seconds).
 /// Maximum time allowed for firmware update operations.
-pub static OTA_UPDATE_TIMEOUT_SECONDS: AtomicU16 = AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+pub static OTA_UPDATE_TIMEOUT_SECONDS: AtomicU16 =
+    AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
 /// Next position for device address allocation in mesh network.
 /// Used for assigning unique addresses to new mesh devices.
 pub static MESH_DEVICE_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0);
@@ -718,8 +718,12 @@ impl SimplifyLS<bool> for AtomicBool {
     fn set(&self, val: bool) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { panic!("Not valid for bool"); }
-    fn dec(&self) { panic!("Not valid for bool") }
+    fn inc(&self) {
+        panic!("Not valid for bool");
+    }
+    fn dec(&self) {
+        panic!("Not valid for bool")
+    }
 }
 
 impl SimplifyLS<u8> for AtomicU8 {
@@ -729,8 +733,12 @@ impl SimplifyLS<u8> for AtomicU8 {
     fn set(&self, val: u8) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
-    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
 }
 
 impl SimplifyLS<u16> for AtomicU16 {
@@ -740,8 +748,12 @@ impl SimplifyLS<u16> for AtomicU16 {
     fn set(&self, val: u16) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
-    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
 }
 
 impl SimplifyLS<u32> for AtomicU32 {
@@ -751,8 +763,12 @@ impl SimplifyLS<u32> for AtomicU32 {
     fn set(&self, val: u32) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
-    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
 }
 
 impl SimplifyLS<usize> for AtomicUsize {
@@ -762,8 +778,12 @@ impl SimplifyLS<usize> for AtomicUsize {
     fn set(&self, val: usize) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
-    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
 }
 
 impl SimplifyLS<i32> for AtomicI32 {
@@ -773,26 +793,30 @@ impl SimplifyLS<i32> for AtomicI32 {
     fn set(&self, val: i32) {
         self.store(val, Ordering::Relaxed);
     }
-    fn inc(&self) { self.set(self.get().wrapping_add(1)); }
-    fn dec(&self) { self.set(self.get().wrapping_sub(1)); }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
 }
 
 /// Represents the current state of the BLE pairing process
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PairState {
-    Idle = 0x00,                      // Initial/idle state
-    AwaitingRandom = 0x02,           // Waiting for random challenge
-    ReceivingMeshName = 0x05,        // Receiving mesh name
-    ReceivingMeshPassword = 0x06,    // Receiving mesh password
-    ReceivingMeshLtk = 0x07,         // Receiving long-term key
-    RequestingLtk = 0x09,            // Requesting LTK
-    ResetMesh = 0x0A,                // Reset mesh configuration
-    DeletePairing = 0x0B,            // Deleting pairing
-    RandomConfirmation = 0x0C,       // Random value confirmation
-    SessionKeyExchange = 0x0D,       // Session key exchange
-    Init = 0x0E,                     // Initialization state
-    Completed = 0x0F,                // Pairing process completed
+    Idle = 0x00,                  // Initial/idle state
+    AwaitingRandom = 0x02,        // Waiting for random challenge
+    ReceivingMeshName = 0x05,     // Receiving mesh name
+    ReceivingMeshPassword = 0x06, // Receiving mesh password
+    ReceivingMeshLtk = 0x07,      // Receiving long-term key
+    RequestingLtk = 0x09,         // Requesting LTK
+    ResetMesh = 0x0A,             // Reset mesh configuration
+    DeletePairing = 0x0B,         // Deleting pairing
+    RandomConfirmation = 0x0C,    // Random value confirmation
+    SessionKeyExchange = 0x0D,    // Session key exchange
+    Init = 0x0E,                  // Initialization state
+    Completed = 0x0F,             // Pairing process completed
 }
 
 impl From<u8> for PairState {
@@ -810,7 +834,7 @@ impl From<u8> for PairState {
             0x0D => Self::SessionKeyExchange,
             0x0E => Self::Init,
             0x0F => Self::Completed,
-            _ => Self::Idle,  // Default to Idle for unrecognized states
+            _ => Self::Idle, // Default to Idle for unrecognized states
         }
     }
 }
@@ -835,7 +859,9 @@ impl AtomicPairState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+    use core::sync::atomic::{
+        AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
+    };
 
     #[test]
     fn test_led_controller_state_new_initializes_zero() {

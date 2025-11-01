@@ -45,15 +45,15 @@ use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::{app, BIT};
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MESH_NODE_ST_VAL_LEN, MeshNodeStValT};
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed};
-use crate::sdk::mcu::register::{read_reg_system_tick};
-use crate::sdk::packet_types::{*};
-use crate::sdk::light::{*};
-use crate::state::{*};
+use crate::mesh::{MeshNodeStValT, MESH_NODE_ST_VAL_LEN};
+use crate::sdk::light::*;
+use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US};
+use crate::sdk::mcu::register::read_reg_system_tick;
+use crate::sdk::packet_types::*;
+use crate::state::*;
+use crate::{app, BIT};
 
 /// Updates the mesh network's distributed node status database.
 ///
@@ -109,17 +109,16 @@ use crate::state::{*};
 /// * Time: O(n*m) where n=nodes in packet, m=nodes in table
 /// * Space: O(1) additional space beyond existing node table
 #[cfg_attr(test, mry::mry)]
-pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
-{
+pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
     let mut src_index = 0;
     let mut result = 0xfffffffe;
-    
+
     // Generate current timestamp using scaled timing format (16-bit precision)
     // The | 1 ensures timestamp is never zero (reserved value)
     let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
-    
+
     // Process each node status entry in the received packet
     while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
         // FIXME: Temporary workaround for incorrect device address 1 appearing in packets
@@ -133,9 +132,9 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
         // (Our own status is maintained separately at index 0)
         if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
             let mesh_node_max = MESH_NODE_MAX.get();
-            let mut current_index = 1;  // Start search from index 1 (index 0 is reserved for this device)
+            let mut current_index = 1; // Start search from index 1 (index 0 is reserved for this device)
             let mut mesh_node = &mut mesh_node_st[current_index];
-            
+
             // NODE LOOKUP ALGORITHM: Find existing node or allocate new slot
             if mesh_node_max >= 2 {
                 // Check if the first available slot (index 1) matches the device address
@@ -146,7 +145,9 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
                         mesh_node = &mut mesh_node_st[current_index];
 
                         // Break if we've reached the end of active nodes OR found matching address
-                        if mesh_node_max <= tidx as u8 || pkt[src_index].dev_adr == mesh_node.val.dev_adr {
+                        if mesh_node_max <= tidx as u8
+                            || pkt[src_index].dev_adr == mesh_node.val.dev_adr
+                        {
                             break;
                         }
                     }
@@ -172,7 +173,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
                 MESH_NODE_MASK.lock()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
 
                 result = mesh_node_max as u32;
-            } 
+            }
             // EXISTING NODE UPDATE: Node already exists in table, check if we should update
             else if current_index < mesh_node_max as usize {
                 // SEQUENCE NUMBER VALIDATION: Check if this is a newer status update
@@ -187,18 +188,19 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
                 let timeout = (ONLINE_STATUS_TIMEOUT * 1000) / 2;
 
                 result = current_index as u32;
-                
+
                 // UPDATE ACCEPTANCE ALGORITHM: Multi-condition check for status update validity
                 // Accept update if ANY of these conditions are met:
                 // 1. Sequence number difference is reasonable (≤ 65, accounting for wraparound)
                 //    This handles normal sequence number progression with wraparound protection
                 // 2. Sequence number changed AND (node was offline OR sufficient time has passed)
                 //    This allows recovery from network partitions and handles clock drift
-                if sn_difference <= 65 || 
-                   (sn_difference != 0 && 
-                    (mesh_node.tick == 0 || 
-                     (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16) < tick - mesh_node.tick)) {
-                    
+                if sn_difference <= 65
+                    || (sn_difference != 0
+                        && (mesh_node.tick == 0
+                            || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16)
+                                < tick - mesh_node.tick))
+                {
                     // Update accepted - copy new status data
                     mesh_node.val = pkt[src_index];
 
@@ -275,8 +277,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32
 /// * Modifies mesh node mask to trigger status reporting
 /// * May cause network-wide status updates as topology changes propagate
 #[cfg_attr(test, mry::mry)]
-pub fn mesh_node_flush_status()
-{
+pub fn mesh_node_flush_status() {
     static TICK_NODE_REPORT: AtomicU32 = AtomicU32::new(0);
 
     // Rate limiting: only execute timeout detection every 500ms
@@ -298,7 +299,7 @@ pub fn mesh_node_flush_status()
             let timeout_threshold = (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10;
             let current_time_scaled = (tick >> 0x10) | 1; // Guard bit prevents zero
             let node_last_seen = mesh_node_st[count].tick as u32;
-            
+
             if timeout_threshold < current_time_scaled - node_last_seen {
                 // Node has timed out - mark as offline
                 mesh_node_st[count].tick = 0;
@@ -370,11 +371,10 @@ pub fn mesh_node_flush_status()
 /// * Updates local node status record
 /// * Affects subsequent status broadcasts
 /// * Influences network topology as seen by other nodes
-fn mesh_node_keep_alive()
-{
+fn mesh_node_keep_alive() {
     // Increment monotonic sequence number for status updates
     DEVICE_NODE_SN.inc();
-    
+
     // Prevent sequence number 0 (reserved value) by wrapping to 1
     if DEVICE_NODE_SN.get() == 0 {
         DEVICE_NODE_SN.set(1);
@@ -384,7 +384,7 @@ fn mesh_node_keep_alive()
 
     // Update this device's status record (index 0)
     mesh_node_st[0].val.sn = DEVICE_NODE_SN.get();
-    
+
     // Update timestamp using scaled timing format for consistency
     mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 }
@@ -463,8 +463,7 @@ fn mesh_node_keep_alive()
 /// * Modifies output buffer content
 /// * Advances advertisement rotation for next call
 #[cfg_attr(test, mry::mry)]
-fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
-{
+fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
     static MESH_NODE_CUR: AtomicUsize = AtomicUsize::new(1);
 
     // Initialize output buffer to clean state
@@ -480,14 +479,12 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
         let mut mesh_node_st = MESH_NODE_ST.lock();
 
         // Always place this device's status first in advertisement
-        p_data[0..MESH_NODE_ST_VAL_LEN].copy_from_slice(
-            unsafe {
-                slice::from_raw_parts(
-                    addr_of!(mesh_node_st[0].val) as *const u8,
-                    MESH_NODE_ST_VAL_LEN,
-                )
-            }
-        );
+        p_data[0..MESH_NODE_ST_VAL_LEN].copy_from_slice(unsafe {
+            slice::from_raw_parts(
+                addr_of!(mesh_node_st[0].val) as *const u8,
+                MESH_NODE_ST_VAL_LEN,
+            )
+        });
     }
 
     // Update local status to ensure current information
@@ -496,27 +493,25 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
     let max_node = MESH_NODE_MAX.get() as usize;
-    let mut count = 1;  // Start from 1 (skip self at index 0)
+    let mut count = 1; // Start from 1 (skip self at index 0)
 
-    let mut out_index = count;  // Output position in advertisement packet
-    
+    let mut out_index = count; // Output position in advertisement packet
+
     // Round-robin selection of other nodes for advertisement
     while out_index < elems && count < max_node {
         let mnc = MESH_NODE_CUR.load(Ordering::Relaxed);
-        
+
         // Only advertise nodes that are online (tick != 0)
         if mnc < max_node && mesh_node_st[mnc].tick != 0 {
             // Copy node status to advertisement packet
             let ptr = MESH_NODE_ST_VAL_LEN * out_index;
             out_index = out_index + 1;
-            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN].copy_from_slice(
-                unsafe {
-                    slice::from_raw_parts(
-                        addr_of!(mesh_node_st[mnc].val) as *const u8,
-                        MESH_NODE_ST_VAL_LEN,
-                    )
-                }
-            );
+            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN].copy_from_slice(unsafe {
+                slice::from_raw_parts(
+                    addr_of!(mesh_node_st[mnc].val) as *const u8,
+                    MESH_NODE_ST_VAL_LEN,
+                )
+            });
         }
 
         // Advance round-robin cursor for next advertisement cycle
@@ -625,8 +620,7 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32
 /// * Updates network-wide topology knowledge
 /// * May trigger retransmissions by other nodes
 #[cfg_attr(test, mry::mry)]
-pub fn mesh_send_online_status()
-{
+pub fn mesh_send_online_status() {
     static ADV_ST_SN: AtomicU32 = AtomicU32::new(0);
     static LAST_STATUS_TIME: AtomicU32 = AtomicU32::new(0);
 
@@ -642,25 +636,25 @@ pub fn mesh_send_online_status()
     let mut pkt_light_adv_status = Packet {
         att_write: PacketAttWrite {
             head: PacketL2capHead {
-                dma_len: 0x27,      // Total packet size (39 bytes)
-                _type: 2,           // Advertisement packet type
-                rf_len: 0x25,       // RF payload size (37 bytes)
-                l2cap_len: 0x21,    // L2CAP payload size (33 bytes)
-                chan_id: 0xffff,    // Status advertisement channel
+                dma_len: 0x27,   // Total packet size (39 bytes)
+                _type: 2,        // Advertisement packet type
+                rf_len: 0x25,    // RF payload size (37 bytes)
+                l2cap_len: 0x21, // L2CAP payload size (33 bytes)
+                chan_id: 0xffff, // Status advertisement channel
             },
-            opcode: 0,              // Sequence number (filled below)
-            handle: 0,              // Unused in status packets
-            handle1: 0,             // Unused in status packets
+            opcode: 0,  // Sequence number (filled below)
+            handle: 0,  // Unused in status packets
+            handle1: 0, // Unused in status packets
             value: PacketAttValue::default(),
-        }
+        },
     };
 
     // Get direct access to packet payload for efficient manipulation
-    let pktdata = unsafe { 
+    let pktdata = unsafe {
         &mut *slice_from_raw_parts_mut(
-            addr_of!(pkt_light_adv_status.att_write().value) as *mut u8, 
-            core::mem::size_of::<PacketAttValue>()
-        ) 
+            addr_of!(pkt_light_adv_status.att_write().value) as *mut u8,
+            core::mem::size_of::<PacketAttValue>(),
+        )
     };
 
     // Process node timeouts and collect current status information
@@ -681,7 +675,9 @@ pub fn mesh_send_online_status()
 
     // Queue packet for mesh network transmission
     // TODO: Consider increasing retransmit count for better reliability
-    app().mesh_manager.add_send_mesh_msg(&pkt_light_adv_status, 0, 0);
+    app()
+        .mesh_manager
+        .add_send_mesh_msg(&pkt_light_adv_status, 0, 0);
 }
 
 /// Constructs a mesh network packet with comprehensive parameter validation and setup.
@@ -755,52 +751,63 @@ pub fn mesh_send_online_status()
 /// # Panics
 /// * If `cmd_op_para` length is not in range [3, 13]
 /// * If internal consistency checks fail
-pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8], retransmit_count: u8, send_ack: bool) -> Packet
-{
+pub fn mesh_construct_packet(
+    sno: u32,
+    dst: u16,
+    cmd_op_para: &[u8],
+    retransmit_count: u8,
+    send_ack: bool,
+) -> Packet {
     // Validate command parameter length constraints
-    assert!(cmd_op_para.len() > 2, "Command parameters too short (minimum 3 bytes)");
-    assert!(cmd_op_para.len() <= 13, "Command parameters too long (maximum 13 bytes)");
+    assert!(
+        cmd_op_para.len() > 2,
+        "Command parameters too short (minimum 3 bytes)"
+    );
+    assert!(
+        cmd_op_para.len() <= 13,
+        "Command parameters too long (maximum 13 bytes)"
+    );
 
     let device_address = DEVICE_ADDRESS.get();
 
     // Initialize mesh packet structure with standard header values
     let mut pkt = MeshPkt {
         head: PacketL2capHead {
-            dma_len: 0x27,      // Total DMA transfer length (39 bytes)
-            _type: 2,           // Mesh packet type identifier
-            rf_len: 0x25,       // RF payload length (37 bytes)
-            l2cap_len: 0x21,    // L2CAP payload length (33 bytes)  
-            chan_id: 0xff03,    // Mesh network channel identifier
+            dma_len: 0x27,   // Total DMA transfer length (39 bytes)
+            _type: 2,        // Mesh packet type identifier
+            rf_len: 0x25,    // RF payload length (37 bytes)
+            l2cap_len: 0x21, // L2CAP payload length (33 bytes)
+            chan_id: 0xff03, // Mesh network channel identifier
         },
-        src_tx: device_address,     // Immediate transmitter address
-        handle1: 0,                 // Reserved handle field
-        sno: [0; 3],               // Sequence number (filled below)
-        src_adr: device_address,    // Original source address
-        dst_adr: dst,              // Destination address
-        op: 0,                     // Operation code (filled below)
-        vendor_id: 0,              // Vendor identifier (filled below)
-        par: [0; 10],              // Command parameters (filled below)
-        internal_par1: [0; 5],     // Internal parameters
-        ttl: 0,                    // Time-to-live hop counter
-        internal_par2: [0; 4],     // Additional internal parameters
-        no_use: [0; 5],            // Reserved/unused bytes
+        src_tx: device_address,  // Immediate transmitter address
+        handle1: 0,              // Reserved handle field
+        sno: [0; 3],             // Sequence number (filled below)
+        src_adr: device_address, // Original source address
+        dst_adr: dst,            // Destination address
+        op: 0,                   // Operation code (filled below)
+        vendor_id: 0,            // Vendor identifier (filled below)
+        par: [0; 10],            // Command parameters (filled below)
+        internal_par1: [0; 5],   // Internal parameters
+        ttl: 0,                  // Time-to-live hop counter
+        internal_par2: [0; 4],   // Additional internal parameters
+        no_use: [0; 5],          // Reserved/unused bytes
     };
 
     // Convert 32-bit sequence number to 24-bit little-endian format
     // This provides unique packet identification for duplicate detection
-    pkt.sno[0] = sno as u8;           // LSB
-    pkt.sno[1] = (sno >> 8) as u8;    // Middle byte
-    pkt.sno[2] = (sno >> 16) as u8;   // MSB (limited to 24 bits)
+    pkt.sno[0] = sno as u8; // LSB
+    pkt.sno[1] = (sno >> 8) as u8; // Middle byte
+    pkt.sno[2] = (sno >> 16) as u8; // MSB (limited to 24 bits)
 
     // Copy command opcode and parameters into packet structure
     // Explicitly assign each field to ensure correct layout regardless of struct packing
-    
+
     // Assign operation code (always present)
     pkt.op = cmd_op_para[0];
-    
+
     // Assign vendor ID from bytes 1 and 2 (little-endian u16)
     pkt.vendor_id = u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]]);
-    
+
     // Copy any remaining parameters to the par array
     let remaining_params = &cmd_op_para[3..];
     let copy_len = core::cmp::min(remaining_params.len(), pkt.par.len());
@@ -856,13 +863,12 @@ pub fn mesh_construct_packet(sno: u32, dst: u16, cmd_op_para: &[u8], retransmit_
 /// * Affects subsequent status advertisement inclusion
 /// * Enables/disables network-wide status propagation
 #[cfg_attr(test, mry::mry)]
-pub fn mesh_report_status_enable(enable: bool)
-{
+pub fn mesh_report_status_enable(enable: bool) {
     let mut mesh_node_mask = MESH_NODE_MASK.lock();
     if enable {
         // Set all complete 32-bit words to enable reporting (skip node 0 in each word)
         if MESH_NODE_MAX.get() >> 5 != 0 {
-            mesh_node_mask.iter_mut().for_each(|v| { *v = 0xfffffffe });
+            mesh_node_mask.iter_mut().for_each(|v| *v = 0xfffffffe);
         }
 
         // Handle partial word at the end with exact bit count
@@ -930,14 +936,13 @@ pub fn mesh_report_status_enable(enable: bool)
 /// * Updates global mesh reporting enable flag
 /// * Modifies selective reporting bitmask
 /// * Affects which nodes appear in subsequent status reports
-pub fn mesh_report_status_enable_mask(data: &[u8])
-{
+pub fn mesh_report_status_enable_mask(data: &[u8]) {
     let mut mesh_node_mask = MESH_NODE_MASK.lock();
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
     // Set global reporting enable state from first byte
     MESH_NODE_REPORT_ENABLE.set(data[0] != 0);
-    
+
     // Process selective address list if reporting is enabled
     if MESH_NODE_REPORT_ENABLE.get() && data.len() > 1 {
         for index in 1..data.len() {
@@ -1015,8 +1020,7 @@ pub fn mesh_report_status_enable_mask(data: &[u8])
 /// - Group lookup uses early termination on first match
 /// - Global broadcast check avoids table lookup
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool)
-{
+pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool) {
     let mut group_match = false;
     let mut device_match = false;
 
@@ -1029,7 +1033,7 @@ pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool)
                 break;
             }
         }
-        
+
         // Global broadcast address (0xFFFF) matches all devices
         if pkt.ll_app().value.dst == 0xffff {
             group_match = true;
@@ -1098,13 +1102,12 @@ pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool)
 /// * Refreshes device timestamp to prevent timeout
 /// * Triggers status change notification for network propagation
 /// * Affects subsequent mesh status advertisements
-pub fn ll_device_status_update(val_par: &[u8])
-{
+pub fn ll_device_status_update(val_par: &[u8]) {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
     // Update this device's status parameters (index 0 = local device)
     mesh_node_st[0].val.par.copy_from_slice(val_par);
-    
+
     // Refresh timestamp using scaled timing format for consistency
     mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 
@@ -1116,38 +1119,42 @@ pub fn ll_device_status_update(val_par: &[u8])
 mod tests {
     use super::*;
     use mry::Any;
-    
+
     // Import mock functions from their original modules
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
+    use super::{mock_mesh_node_adv_status, mock_mesh_node_flush_status};
     use crate::embassy::time_driver::mock_clock_time64;
     use crate::main_light::{mock_rf_link_data_callback, mock_rf_link_response_callback};
-    use crate::mesh::{MeshNodeStValT, MeshNodeStT, MESH_NODE_ST_PAR_LEN};
+    use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
     use crate::sdk::light::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
-    use super::{mock_mesh_node_flush_status, mock_mesh_node_adv_status};
-    
+    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
+    use crate::sdk::mcu::register::mock_read_reg_system_tick;
+
     /// Helper function to reset global mesh state for tests
     fn reset_mesh_state() {
         DEVICE_ADDRESS.set(0x10); // Test device address
         DEVICE_NODE_SN.set(100);
         MESH_NODE_MAX.set(10);
         MESH_NODE_REPORT_ENABLE.set(true);
-        
+
         // Clear the mesh node status table
         let mut mesh_node_st = MESH_NODE_ST.lock();
         for i in 0..mesh_node_st.len() {
             mesh_node_st[i] = MeshNodeStT {
                 tick: 0,
                 val: MeshNodeStValT {
-                    dev_adr: if i == 0 { DEVICE_ADDRESS.get() as u8 } else { 0 }, // Set device address for index 0
+                    dev_adr: if i == 0 {
+                        DEVICE_ADDRESS.get() as u8
+                    } else {
+                        0
+                    }, // Set device address for index 0
                     sn: 0,
                     par: [0; MESH_NODE_ST_PAR_LEN],
-                }
+                },
             };
         }
         drop(mesh_node_st);
     }
-    
+
     /// Helper function to create test mesh node status data  
     fn create_test_mesh_node(dev_adr: u8, sn: u32, val: &[u8]) -> MeshNodeStValT {
         let mut node = MeshNodeStValT {
@@ -1173,12 +1180,12 @@ mod tests {
     fn test_mesh_node_update_status_empty_packet() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         let empty_packet: Vec<MeshNodeStValT> = vec![];
         let result = mesh_node_update_status(&empty_packet);
-        
+
         // Should return 1 for successful packet processing (even if empty)
         assert_eq!(result, 1);
     }
@@ -1192,15 +1199,15 @@ mod tests {
     fn test_mesh_node_update_status_new_node() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         // Create test node with different address than device address (0x10)
         let test_node = create_test_mesh_node(0x20, 50, &[1, 2]);
         let packet = vec![test_node];
-        
+
         let result = mesh_node_update_status(&packet);
-        
+
         // Verify the function completed successfully (returns 1 for packet processed)
         assert_eq!(result, 1);
     }
@@ -1213,18 +1220,18 @@ mod tests {
     fn test_mesh_node_update_status_own_address() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         // Create test node with same address as device address (0x10)
         let own_node = create_test_mesh_node(0x10, 50, &[1, 2]);
         let packet = vec![own_node];
-        
+
         let result = mesh_node_update_status(&packet);
-        
+
         // Should return 1 for successful packet processing (own address filtered)
         assert_eq!(result, 1);
-        
+
         // Verify no nodes were added to remote slots
         let mesh_node_st = MESH_NODE_ST.lock();
         assert_eq!(mesh_node_st[1].val.dev_adr, 0); // Should remain empty
@@ -1238,18 +1245,18 @@ mod tests {
     fn test_mesh_node_update_status_address_1_filtering() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         // Create test node with address 1 (should be filtered)
         let filtered_node = create_test_mesh_node(1, 50, &[1, 2]);
         let packet = vec![filtered_node];
-        
+
         let result = mesh_node_update_status(&packet);
-        
+
         // Should return 1 for successful packet processing (address 1 filtered)
         assert_eq!(result, 1);
-        
+
         // Verify no nodes were added
         let mesh_node_st = MESH_NODE_ST.lock();
         assert_eq!(mesh_node_st[1].val.dev_adr, 0); // Should remain empty
@@ -1263,26 +1270,26 @@ mod tests {
     fn test_mesh_node_update_status_sequence_update() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         // First, add a node with sequence number 50
         let node_v1 = create_test_mesh_node(0x20, 50, &[1, 2]);
         let packet1 = vec![node_v1];
         mesh_node_update_status(&packet1);
-        
+
         // Then, update with newer sequence number 51
         let node_v2 = create_test_mesh_node(0x20, 51, &[5, 6]);
         let packet2 = vec![node_v2];
         let result = mesh_node_update_status(&packet2);
-        
+
         // Verify the node was updated (should be at index 10)
         let mesh_node_st = MESH_NODE_ST.lock();
         let updated_node = &mesh_node_st[10];
         assert_eq!(updated_node.val.dev_adr, 0x20);
         assert_eq!(updated_node.val.sn, 51); // Updated sequence number
         assert_eq!(updated_node.val.par[0..2], [5, 6]); // Updated values
-        
+
         // Should return updated result
         assert_ne!(result, 0xfffffffe);
     }
@@ -1295,26 +1302,26 @@ mod tests {
     fn test_mesh_node_update_status_old_sequence() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
-        // First, add a node with sequence number 51 
+
+        // First, add a node with sequence number 51
         let node_v1 = create_test_mesh_node(0x20, 51, &[1, 2]);
         let packet1 = vec![node_v1];
         mesh_node_update_status(&packet1);
-        
-        // Then, try to update with older sequence number 50 
+
+        // Then, try to update with older sequence number 50
         let node_v2 = create_test_mesh_node(0x20, 50, &[5, 6]);
         let packet2 = vec![node_v2];
         let result = mesh_node_update_status(&packet2);
-        
+
         // Verify the node was NOT updated (should be at index 10)
         let mesh_node_st = MESH_NODE_ST.lock();
         let unchanged_node = &mesh_node_st[10];
         assert_eq!(unchanged_node.val.dev_adr, 0x20);
         assert_eq!(unchanged_node.val.sn, 51); // Original sequence number
         assert_eq!(unchanged_node.val.par[0..2], [1, 2]); // Original values
-        
+
         // Should return 1 for successful packet processing
         assert_eq!(result, 1);
     }
@@ -1332,25 +1339,25 @@ mod tests {
     fn test_mesh_node_keep_alive_basic() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         // Get initial values
         let initial_sn = DEVICE_NODE_SN.get();
-        
+
         // Call mesh_node_keep_alive
         mesh_node_keep_alive();
-        
+
         // Verify sequence number was incremented
         assert_eq!(DEVICE_NODE_SN.get(), initial_sn + 1);
-        
+
         // Verify device status record was updated
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
-        
+
         // Check sequence number was updated
         assert_eq!(device_node.val.sn, initial_sn + 1);
-        
+
         // Check timestamp was updated (scaled format: (system_tick >> 0x10) | 1)
         let expected_tick = ((0x12345678u32 >> 0x10) | 1) as u16;
         let actual_tick = device_node.tick; // Copy to avoid packed field reference
@@ -1365,18 +1372,18 @@ mod tests {
     fn test_mesh_node_keep_alive_sequence_wraparound() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0xABCD1234);
-        
+
         reset_mesh_state();
-        
+
         // Set sequence number to 255 (will overflow to 0 on increment)
         DEVICE_NODE_SN.set(255);
-        
+
         // Call mesh_node_keep_alive
         mesh_node_keep_alive();
-        
+
         // Verify sequence number wrapped to 1 (not 0)
         assert_eq!(DEVICE_NODE_SN.get(), 1);
-        
+
         // Verify device status record reflects the wrapped value
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
@@ -1391,29 +1398,29 @@ mod tests {
     fn test_mesh_node_keep_alive_multiple_calls() {
         // Setup mocks - use same timestamp for simplicity
         mock_read_reg_system_tick().returns(0x55555555);
-        
+
         reset_mesh_state();
-        
+
         let initial_sn = DEVICE_NODE_SN.get(); // 100
-        
+
         // First call
         mesh_node_keep_alive();
         assert_eq!(DEVICE_NODE_SN.get(), initial_sn + 1);
-        
-        // Second call  
+
+        // Second call
         mesh_node_keep_alive();
         assert_eq!(DEVICE_NODE_SN.get(), initial_sn + 2);
-        
+
         // Third call
         mesh_node_keep_alive();
         assert_eq!(DEVICE_NODE_SN.get(), initial_sn + 3);
-        
+
         // Verify final device status record
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
         assert_eq!(device_node.val.sn, initial_sn + 3);
-        
-        // Verify timestamp was updated  
+
+        // Verify timestamp was updated
         let expected_tick = ((0x55555555u32 >> 0x10) | 1) as u16;
         let actual_tick = device_node.tick; // Copy to avoid packed field reference
         assert_eq!(actual_tick, expected_tick);
@@ -1426,10 +1433,10 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_keep_alive_timestamp_zero() {
         reset_mesh_state();
-        
+
         mock_read_reg_system_tick().returns(0x00000000);
         mesh_node_keep_alive();
-        
+
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
         let actual_tick = device_node.tick; // Copy to avoid packed field reference
@@ -1444,10 +1451,10 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_keep_alive_timestamp_typical() {
         reset_mesh_state();
-        
+
         mock_read_reg_system_tick().returns(0x12345678);
         mesh_node_keep_alive();
-        
+
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
         let actual_tick = device_node.tick; // Copy to avoid packed field reference
@@ -1462,10 +1469,10 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_keep_alive_timestamp_max_high() {
         reset_mesh_state();
-        
+
         mock_read_reg_system_tick().returns(0xFFFF0000);
         mesh_node_keep_alive();
-        
+
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
         let actual_tick = device_node.tick; // Copy to avoid packed field reference
@@ -1482,9 +1489,9 @@ mod tests {
     fn test_mesh_node_keep_alive_preserves_other_fields() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x55555555);
-        
+
         reset_mesh_state();
-        
+
         // Set up initial device status with specific values
         {
             let mut mesh_node_st = MESH_NODE_ST.lock();
@@ -1492,7 +1499,7 @@ mod tests {
             mesh_node_st[0].val.par = [0xAA, 0xBB];
             mesh_node_st[0].tick = 0x9999;
         }
-        
+
         let initial_dev_adr;
         let initial_par;
         {
@@ -1500,16 +1507,16 @@ mod tests {
             initial_dev_adr = mesh_node_st[0].val.dev_adr;
             initial_par = mesh_node_st[0].val.par;
         }
-        
+
         // Call mesh_node_keep_alive
         mesh_node_keep_alive();
-        
+
         // Verify dev_adr and par were preserved
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0];
         assert_eq!(device_node.val.dev_adr, initial_dev_adr);
         assert_eq!(device_node.val.par, initial_par);
-        
+
         // Verify sn and tick were updated
         assert_eq!(device_node.val.sn, 101); // incremented from 100
         let expected_tick = ((0x55555555u32 >> 0x10) | 1) as u16;
@@ -1527,15 +1534,15 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_minimal() {
         reset_mesh_state();
-        
+
         let sno = 0x123456;
         let dst = 0x42;
         let cmd_op_para = [0xAA, 0x12, 0x34]; // Minimal 3 bytes - distinctive vendor_id bytes
         let retransmit_count = 3;
         let send_ack = true;
-        
+
         let packet = mesh_construct_packet(sno, dst, &cmd_op_para, retransmit_count, send_ack);
-        
+
         // Verify packet header fields
         let mesh_pkt = unsafe { packet.mesh };
         let dma_len = mesh_pkt.head.dma_len; // Copy to avoid packed field reference
@@ -1548,7 +1555,7 @@ mod tests {
         assert_eq!(rf_len, 0x25);
         assert_eq!(l2cap_len, 0x21);
         assert_eq!(chan_id, 0xff03);
-        
+
         // Verify addressing (copy packed fields to avoid alignment issues)
         let src_tx = mesh_pkt.src_tx;
         let src_adr = mesh_pkt.src_adr;
@@ -1556,23 +1563,29 @@ mod tests {
         assert_eq!(src_tx, DEVICE_ADDRESS.get());
         assert_eq!(src_adr, DEVICE_ADDRESS.get());
         assert_eq!(dst_adr, dst);
-        
+
         // Verify sequence number (24-bit little-endian)
         assert_eq!(mesh_pkt.sno[0], (sno & 0xFF) as u8); // LSB
         assert_eq!(mesh_pkt.sno[1], ((sno >> 8) & 0xFF) as u8); // Middle
         assert_eq!(mesh_pkt.sno[2], ((sno >> 16) & 0xFF) as u8); // MSB
-        
+
         // Verify command parameters were copied correctly
         assert_eq!(mesh_pkt.op, cmd_op_para[0]); // Should be 0xAA
-        
+
         // Verify vendor_id uses both bytes in little-endian format
         let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-        // With cmd_op_para[1]=0x12, cmd_op_para[2]=0x34: vendor_id should be 0x3412
-        assert_eq!(vendor_id, u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]]));
+                                            // With cmd_op_para[1]=0x12, cmd_op_para[2]=0x34: vendor_id should be 0x3412
+        assert_eq!(
+            vendor_id,
+            u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
+        );
         assert_eq!(vendor_id, 0x3412); // Explicit check: 0x34 << 8 | 0x12 = 0x3412
-        
+
         // Verify internal parameters
-        assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT], retransmit_count);
+        assert_eq!(
+            mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
+            retransmit_count
+        );
         assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_SEND_ACK], 1);
     }
 
@@ -1582,28 +1595,33 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_maximum() {
         reset_mesh_state();
-        
+
         let sno = 0xFFFFFF; // Max 24-bit value
         let dst = 0xFEDC;
-        let cmd_op_para = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D]; // Max 13 bytes
+        let cmd_op_para = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+        ]; // Max 13 bytes
         let retransmit_count = 7;
         let send_ack = false;
-        
+
         let packet = mesh_construct_packet(sno, dst, &cmd_op_para, retransmit_count, send_ack);
-        
+
         let mesh_pkt = unsafe { packet.mesh };
-        
+
         // Verify sequence number at maximum value
         assert_eq!(mesh_pkt.sno[0], 0xFF);
         assert_eq!(mesh_pkt.sno[1], 0xFF);
         assert_eq!(mesh_pkt.sno[2], 0xFF);
-        
+
         // Verify all command parameters were copied
         assert_eq!(mesh_pkt.op, cmd_op_para[0]);
         let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-        // With longer parameter arrays, both bytes are copied correctly
-        assert_eq!(vendor_id, u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]]));
-        
+                                            // With longer parameter arrays, both bytes are copied correctly
+        assert_eq!(
+            vendor_id,
+            u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
+        );
+
         // Verify extended parameters
         for i in 0..10 {
             let param_idx = i + 3; // Skip op (0) and vendor_id (1,2)
@@ -1613,9 +1631,12 @@ mod tests {
                 assert_eq!(mesh_pkt.par[i], 0); // Unused bytes should be zero
             }
         }
-        
+
         // Verify internal parameters
-        assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT], retransmit_count);
+        assert_eq!(
+            mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
+            retransmit_count
+        );
         assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_SEND_ACK], 0); // send_ack = false
     }
 
@@ -1625,7 +1646,7 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_variable_lengths() {
         reset_mesh_state();
-        
+
         // Test various valid lengths
         for length in 3..=13 {
             let mut cmd_op_para = vec![0u8; length];
@@ -1633,18 +1654,27 @@ mod tests {
             for i in 0..length {
                 cmd_op_para[i] = (i + 1) as u8;
             }
-            
-            let packet = mesh_construct_packet(0x1000 + length as u32, 0x10 + length as u16, &cmd_op_para, length as u8, length % 2 == 0);
-            
+
+            let packet = mesh_construct_packet(
+                0x1000 + length as u32,
+                0x10 + length as u16,
+                &cmd_op_para,
+                length as u8,
+                length % 2 == 0,
+            );
+
             let mesh_pkt = unsafe { packet.mesh };
-            
+
             // Verify basic fields are set correctly
             assert_eq!(mesh_pkt.op, cmd_op_para[0]);
-            
+
             // Verify vendor_id is constructed from bytes 1 and 2
             let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-            assert_eq!(vendor_id, u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]]));
-            
+            assert_eq!(
+                vendor_id,
+                u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
+            );
+
             // Verify parameter array
             let available_par_bytes = length.saturating_sub(3); // Subtract op + vendor_id
             for i in 0..10 {
@@ -1663,9 +1693,9 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_sequence_number_encoding() {
         reset_mesh_state();
-        
+
         let cmd_op_para = [0x10, 0x20, 0x30];
-        
+
         let test_cases = [
             (0x00000000, [0x00, 0x00, 0x00]),
             (0x00000001, [0x01, 0x00, 0x00]),
@@ -1675,14 +1705,16 @@ mod tests {
             (0xABCDEF12, [0x12, 0xEF, 0xCD]), // Upper 8 bits ignored
             (0xFFFFFFFF, [0xFF, 0xFF, 0xFF]), // All bits set
         ];
-        
+
         for (input_sno, expected_bytes) in test_cases {
             let packet = mesh_construct_packet(input_sno, 0x42, &cmd_op_para, 1, false);
             let mesh_pkt = unsafe { packet.mesh };
-            
-            assert_eq!(mesh_pkt.sno, expected_bytes,
+
+            assert_eq!(
+                mesh_pkt.sno, expected_bytes,
                 "Failed for sno=0x{:08X}, expected={:02X?}, got={:02X?}",
-                input_sno, expected_bytes, mesh_pkt.sno);
+                input_sno, expected_bytes, mesh_pkt.sno
+            );
         }
     }
 
@@ -1692,18 +1724,18 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_address_assignment() {
         reset_mesh_state();
-        
+
         // Test with different device addresses
         let test_addresses = [0x01, 0x42, 0xAB, 0xFE];
         let cmd_op_para = [0x11, 0x22, 0x33];
-        
+
         for device_addr in test_addresses {
             DEVICE_ADDRESS.set(device_addr);
-            
+
             let dst_addr = 0x99;
             let packet = mesh_construct_packet(0x123, dst_addr, &cmd_op_para, 2, true);
             let mesh_pkt = unsafe { packet.mesh };
-            
+
             // Both src_tx and src_adr should be set to device address (copy packed fields)
             let src_tx = mesh_pkt.src_tx;
             let src_adr = mesh_pkt.src_adr;
@@ -1720,21 +1752,25 @@ mod tests {
     #[test]
     fn test_mesh_construct_packet_internal_parameters() {
         reset_mesh_state();
-        
+
         let cmd_op_para = [0xA1, 0xB2, 0xC3];
-        
+
         let test_cases = [
             (0, false, 0, 0),
             (1, true, 1, 1),
             (5, false, 5, 0),
             (255, true, 255, 1),
         ];
-        
+
         for (retransmit_count, send_ack, expected_retransmit, expected_ack) in test_cases {
-            let packet = mesh_construct_packet(0x100, 0x50, &cmd_op_para, retransmit_count, send_ack);
+            let packet =
+                mesh_construct_packet(0x100, 0x50, &cmd_op_para, retransmit_count, send_ack);
             let mesh_pkt = unsafe { packet.mesh };
-            
-            assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT], expected_retransmit);
+
+            assert_eq!(
+                mesh_pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
+                expected_retransmit
+            );
             assert_eq!(mesh_pkt.internal_par1[INTERNAL_PAR_SEND_ACK], expected_ack);
         }
     }
@@ -1781,22 +1817,22 @@ mod tests {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x10000000);
         mock_clock_time_exceed(Any, Any).returns(false); // Rate limited, no action
-        
+
         reset_mesh_state();
-        
+
         // Add a node to the mesh
         let test_node = create_test_mesh_node(0x20, 50, &[1, 2]);
         let packet = vec![test_node];
         mesh_node_update_status(&packet);
-        
+
         // Call flush status (should be rate limited and do nothing)
         mesh_node_flush_status();
-        
+
         // Test passes if no crash occurs
     }
 
     // ================================================================================
-    // Tests for mesh_send_online_status function  
+    // Tests for mesh_send_online_status function
     // ================================================================================
 
     /// Tests mesh_send_online_status rate limiting.
@@ -1806,13 +1842,13 @@ mod tests {
     #[mry::lock(clock_time_exceed)]
     fn test_mesh_send_online_status_rate_limited() {
         // Setup mock to simulate rate limiting
-        mock_clock_time_exceed(Any, Any).returns(false); // Rate limited 
-        
+        mock_clock_time_exceed(Any, Any).returns(false); // Rate limited
+
         reset_mesh_state();
-        
+
         // Call should be rate limited and return early
         mesh_send_online_status();
-        
+
         // Verify the function was called (should return early due to rate limiting)
         mock_clock_time_exceed(Any, Any).assert_called(1);
     }
@@ -1823,20 +1859,25 @@ mod tests {
     /// Note: This test will crash when it reaches app().mesh_manager call,
     /// but the mocked functions should be called first.
     #[test]
-    #[mry::lock(clock_time_exceed, clock_time, mesh_node_flush_status, mesh_node_adv_status)]
+    #[mry::lock(
+        clock_time_exceed,
+        clock_time,
+        mesh_node_flush_status,
+        mesh_node_adv_status
+    )]
     #[should_panic] // Expected due to app() call at the end
     fn test_mesh_send_online_status_function_sequence() {
         // Setup mocks
-        mock_clock_time_exceed(Any, Any).returns(true); // Not rate limited 
+        mock_clock_time_exceed(Any, Any).returns(true); // Not rate limited
         mock_clock_time().returns(12345); // Mock the timestamp update
         mock_mesh_node_flush_status().returns(()); // Mock flush status
         mock_mesh_node_adv_status(Any).returns(0); // Mock advertisement status
-        
+
         reset_mesh_state();
-        
+
         // Call should proceed through all mocked steps, then crash on app() call
         mesh_send_online_status();
-        
+
         // If we reach here, the test should fail because it should have panicked
         panic!("Expected function to panic on app() call");
     }
@@ -1851,11 +1892,11 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable() {
         reset_mesh_state();
-        
+
         // Test enabling
         mesh_report_status_enable(true);
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
-        
+
         // Test disabling
         mesh_report_status_enable(false);
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
@@ -1867,11 +1908,11 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_multiple_words() {
         reset_mesh_state();
-        
+
         // Set MESH_NODE_MAX to a value that creates multiple complete 32-bit words
         // to trigger the iter_mut().for_each() path (line 863)
         MESH_NODE_MAX.set(64); // This means we have 64 active nodes = 2 complete words
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -1879,27 +1920,30 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Enable reporting - this should trigger line 863
         mesh_report_status_enable(true);
-        
+
         // Verify the mask was set correctly
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
-            
+
             // With MESH_NODE_MAX = 64, we have 64 >> 5 = 2 complete words
             // Line 863 should set ALL words in the array to 0xFFFFFFFE
             // This tests line 863 specifically
             for (i, &word) in mesh_node_mask.iter().enumerate() {
-                assert_eq!(word, 0xFFFFFFFE, 
-                    "Word {} should be set to 0xFFFFFFFE by line 863 bulk enable logic", i);
+                assert_eq!(
+                    word, 0xFFFFFFFE,
+                    "Word {} should be set to 0xFFFFFFFE by line 863 bulk enable logic",
+                    i
+                );
             }
         }
-        
+
         // Test disabling
         mesh_report_status_enable(false);
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
-        
+
         // Note: The current implementation doesn't clear the mask when disabling,
         // it only sets the global MESH_NODE_REPORT_ENABLE flag to false.
         // This might be a bug, but we're testing the actual behavior.
@@ -1907,8 +1951,11 @@ mod tests {
             let mesh_node_mask = MESH_NODE_MASK.lock();
             // The mask should still have the bits set from the enable call
             for (i, &word) in mesh_node_mask.iter().enumerate() {
-                assert_eq!(word, 0xFFFFFFFE, 
-                    "Word {} mask bits remain set even when disabling (current behavior)", i);
+                assert_eq!(
+                    word, 0xFFFFFFFE,
+                    "Word {} mask bits remain set even when disabling (current behavior)",
+                    i
+                );
             }
         }
     }
@@ -1923,12 +1970,12 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_valid() {
         reset_mesh_state();
-        
+
         // Test with enable mask
         let enable_data = [1u8];
         mesh_report_status_enable_mask(&enable_data);
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
-        
+
         // Test with disable mask
         let disable_data = [0u8];
         mesh_report_status_enable_mask(&disable_data);
@@ -1941,14 +1988,14 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_minimal() {
         reset_mesh_state();
-        
+
         // Set initial state
         MESH_NODE_REPORT_ENABLE.set(true);
-        
+
         // Test with minimal data (empty array would crash)
         let minimal_data = [1u8]; // Single byte with enable flag
         mesh_report_status_enable_mask(&minimal_data);
-        
+
         // Should be set to true
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
     }
@@ -1959,7 +2006,7 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_selective_addresses() {
         reset_mesh_state();
-        
+
         // Set up some nodes in the mesh table
         MESH_NODE_MAX.set(5);
         {
@@ -1969,7 +2016,7 @@ mod tests {
             mesh_node_st[3].val.dev_adr = 0x30;
             mesh_node_st[4].val.dev_adr = 0x40;
         }
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -1977,26 +2024,42 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Enable reporting for specific addresses: 0x20 and 0x40
         let selective_data = [1u8, 0x20, 0x40]; // Enable + two addresses
         mesh_report_status_enable_mask(&selective_data);
-        
+
         // Verify global enable flag
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
-        
+
         // Verify selective address bitmask (tests lines 944-949)
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
             let word0 = mesh_node_mask[0];
-            
+
             // Check specific bits are set for matching addresses
-            assert_eq!(word0 & (1 << 2), 1 << 2, "Bit 2 should be set for node at index 2 (addr 0x20)");
-            assert_eq!(word0 & (1 << 4), 1 << 4, "Bit 4 should be set for node at index 4 (addr 0x40)");
-            
+            assert_eq!(
+                word0 & (1 << 2),
+                1 << 2,
+                "Bit 2 should be set for node at index 2 (addr 0x20)"
+            );
+            assert_eq!(
+                word0 & (1 << 4),
+                1 << 4,
+                "Bit 4 should be set for node at index 4 (addr 0x40)"
+            );
+
             // Check that other bits are not set
-            assert_eq!(word0 & (1 << 1), 0, "Bit 1 should not be set for node at index 1 (addr 0x10)");
-            assert_eq!(word0 & (1 << 3), 0, "Bit 3 should not be set for node at index 3 (addr 0x30)");
+            assert_eq!(
+                word0 & (1 << 1),
+                0,
+                "Bit 1 should not be set for node at index 1 (addr 0x10)"
+            );
+            assert_eq!(
+                word0 & (1 << 3),
+                0,
+                "Bit 3 should not be set for node at index 3 (addr 0x30)"
+            );
         }
     }
 
@@ -2006,7 +2069,7 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_no_matches() {
         reset_mesh_state();
-        
+
         // Set up some nodes with specific addresses
         MESH_NODE_MAX.set(3);
         {
@@ -2014,7 +2077,7 @@ mod tests {
             mesh_node_st[1].val.dev_adr = 0x10;
             mesh_node_st[2].val.dev_adr = 0x20;
         }
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -2022,18 +2085,21 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Try to enable reporting for addresses that don't exist: 0x99, 0xAA
-        let non_matching_data = [1u8, 0x99, 0xAA]; 
+        let non_matching_data = [1u8, 0x99, 0xAA];
         mesh_report_status_enable_mask(&non_matching_data);
-        
+
         // Verify global enable flag is set
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
-        
+
         // Verify no bits are set in the mask since no addresses matched
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
-            assert_eq!(mesh_node_mask[0], 0, "No bits should be set when no addresses match");
+            assert_eq!(
+                mesh_node_mask[0], 0,
+                "No bits should be set when no addresses match"
+            );
         }
     }
 
@@ -2043,10 +2109,10 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_empty_table() {
         reset_mesh_state();
-        
+
         // Set MESH_NODE_MAX to 0 to trigger the condition check (line 942)
         MESH_NODE_MAX.set(0);
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -2054,18 +2120,21 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Try to enable reporting with addresses when table is empty
         let data_with_addresses = [1u8, 0x10, 0x20];
         mesh_report_status_enable_mask(&data_with_addresses);
-        
+
         // Verify global enable flag is set
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
-        
+
         // Verify no bits are set since MESH_NODE_MAX = 0 skips the search
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
-            assert_eq!(mesh_node_mask[0], 0, "No bits should be set when MESH_NODE_MAX = 0");
+            assert_eq!(
+                mesh_node_mask[0], 0,
+                "No bits should be set when MESH_NODE_MAX = 0"
+            );
         }
     }
 
@@ -2075,7 +2144,7 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_disabled_with_addresses() {
         reset_mesh_state();
-        
+
         // Set up some nodes
         MESH_NODE_MAX.set(3);
         {
@@ -2083,7 +2152,7 @@ mod tests {
             mesh_node_st[1].val.dev_adr = 0x10;
             mesh_node_st[2].val.dev_adr = 0x20;
         }
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -2091,18 +2160,21 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Disable reporting but provide addresses - they should be ignored
         let disabled_data = [0u8, 0x10, 0x20]; // Disabled + addresses
         mesh_report_status_enable_mask(&disabled_data);
-        
+
         // Verify global enable flag is disabled
         assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
-        
+
         // Verify no bits are set since reporting is disabled (condition line 940 fails)
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
-            assert_eq!(mesh_node_mask[0], 0, "No bits should be set when reporting is disabled");
+            assert_eq!(
+                mesh_node_mask[0], 0,
+                "No bits should be set when reporting is disabled"
+            );
         }
     }
 
@@ -2112,15 +2184,15 @@ mod tests {
     #[test]
     fn test_mesh_report_status_enable_mask_cross_word() {
         reset_mesh_state();
-        
+
         // Set up nodes that span multiple 32-bit words
         MESH_NODE_MAX.set(40);
         {
             let mut mesh_node_st = MESH_NODE_ST.lock();
-            mesh_node_st[10].val.dev_adr = 0x10;  // First word
-            mesh_node_st[35].val.dev_adr = 0x35;  // Second word  
+            mesh_node_st[10].val.dev_adr = 0x10; // First word
+            mesh_node_st[35].val.dev_adr = 0x35; // Second word
         }
-        
+
         // Clear the mask initially
         {
             let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -2128,20 +2200,28 @@ mod tests {
                 *word = 0;
             }
         }
-        
+
         // Enable reporting for addresses in different words
         let cross_word_data = [1u8, 0x10, 0x35];
         mesh_report_status_enable_mask(&cross_word_data);
-        
+
         // Verify bits are set in correct words
         {
             let mesh_node_mask = MESH_NODE_MASK.lock();
-            
+
             // Node 10: word 0 (10 >> 5 = 0), bit 10 (10 & 0x1f = 10)
-            assert_eq!(mesh_node_mask[0] & (1 << 10), 1 << 10, "Bit 10 should be set in word 0");
-            
-            // Node 35: word 1 (35 >> 5 = 1), bit 3 (35 & 0x1f = 3)  
-            assert_eq!(mesh_node_mask[1] & (1 << 3), 1 << 3, "Bit 3 should be set in word 1");
+            assert_eq!(
+                mesh_node_mask[0] & (1 << 10),
+                1 << 10,
+                "Bit 10 should be set in word 0"
+            );
+
+            // Node 35: word 1 (35 >> 5 = 1), bit 3 (35 & 0x1f = 3)
+            assert_eq!(
+                mesh_node_mask[1] & (1 << 3),
+                1 << 3,
+                "Bit 3 should be set in word 1"
+            );
         }
     }
 
@@ -2157,18 +2237,18 @@ mod tests {
     fn test_ll_device_status_update_valid() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         let test_data = [0x01, 0x02]; // Must be exactly MESH_NODE_ST_PAR_LEN (2) bytes
         ll_device_status_update(&test_data);
-        
+
         // Verify device status was updated
         let mesh_node_st = MESH_NODE_ST.lock();
         let device_node = &mesh_node_st[0]; // Device status at index 0
-        // ll_device_status_update doesn't set dev_adr, only par and tick
+                                            // ll_device_status_update doesn't set dev_adr, only par and tick
         assert_eq!(device_node.val.par[0..2], [0x01, 0x02]);
-        
+
         // Verify sequence number was NOT incremented (ll_device_status_update doesn't call inc)
         assert_eq!(DEVICE_NODE_SN.get(), 100); // Should remain at initial value
     }
@@ -2181,12 +2261,12 @@ mod tests {
     fn test_ll_device_status_update_empty() {
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);
-        
+
         reset_mesh_state();
-        
+
         let minimal_data = [0x00, 0x00]; // Must be exactly MESH_NODE_ST_PAR_LEN (2) bytes
         ll_device_status_update(&minimal_data);
-        
+
         // Should still update the timestamp but NOT sequence number
         assert_eq!(DEVICE_NODE_SN.get(), 100); // Should remain at initial value
     }

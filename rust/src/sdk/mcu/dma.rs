@@ -51,10 +51,10 @@ mod tests {
     fn test_dma_init() {
         // Setup mock for the register write function
         mock_write_reg_dma_chn_irq_msk(0).returns(());
-        
+
         // Call the function being tested
         dma_init();
-        
+
         // Verify the register write function was called exactly once with value 0
         mock_write_reg_dma_chn_irq_msk(0).assert_called(1);
     }
@@ -75,13 +75,13 @@ mod tests {
     fn test_dma_init_uses_zero_value() {
         // Setup mock with Any matcher to verify that only 0 is used
         mock_write_reg_dma_chn_irq_msk(Any).returns(());
-        
+
         // Call the function being tested
         dma_init();
-        
+
         // Verify the register write was called with 0 and not any other value
         mock_write_reg_dma_chn_irq_msk(0).assert_called(1);
-        
+
         // Total call count should be 1
         mock_write_reg_dma_chn_irq_msk(Any).assert_called(1);
     }

@@ -1,8 +1,8 @@
 extern crate core;
 extern crate paste;
 
-use bitflags::bitflags;
 use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
+use bitflags::bitflags;
 
 //****************************************************
 // TLSR8266 Register Documentation
@@ -28,7 +28,7 @@ use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
 //    ```
 //    // Read the current RF channel
 //    let channel = read_reg_rf_channel();
-//    
+//
 //    // Set RF channel to 2
 //    write_reg_rf_channel(2);
 //    ```
@@ -47,7 +47,7 @@ use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
 //    let mut oen = read_reg_gpio_pa_oen();
 //    oen &= !(0x01);  // Clear bit 0 (0 = output)
 //    write_reg_gpio_pa_oen(oen);
-//    
+//
 //    // Set PA0 high
 //    let mut out = read_reg_gpio_pa_out();
 //    out |= 0x01;
@@ -62,11 +62,11 @@ pub const REG_BASE_ADDR: u32 = 0x800000;
 //****************************************************
 
 /// Writes an 8-bit value to a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
 /// * `v` - 8-bit value to write
-/// 
+///
 /// # Examples
 /// ```
 /// // Set the RF channel to 5
@@ -79,7 +79,7 @@ pub fn write_reg8(addr: u32, v: u8) {
 }
 
 /// Writes a 16-bit value to a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
 /// * `v` - 16-bit value to write
@@ -90,7 +90,7 @@ pub fn write_reg16(addr: u32, v: u16) {
 }
 
 /// Writes a 32-bit value to a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
 /// * `v` - 32-bit value to write
@@ -101,13 +101,13 @@ pub fn write_reg32(addr: u32, v: u32) {
 }
 
 /// Reads an 8-bit value from a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
-/// 
+///
 /// # Returns
 /// The 8-bit value read from the register
-/// 
+///
 /// # Examples
 /// ```
 /// // Read the current RF channel
@@ -120,10 +120,10 @@ pub fn read_reg8(addr: u32) -> u8 {
 }
 
 /// Reads a 16-bit value from a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
-/// 
+///
 /// # Returns
 /// The 16-bit value read from the register
 #[cfg_attr(test, mry::mry)]
@@ -133,10 +133,10 @@ pub fn read_reg16(addr: u32) -> u16 {
 }
 
 /// Reads a 32-bit value from a register
-/// 
+///
 /// # Arguments
 /// * `addr` - Register address (without base address)
-/// 
+///
 /// # Returns
 /// The 32-bit value read from the register
 #[cfg_attr(test, mry::mry)]
@@ -224,17 +224,17 @@ macro_rules! regrw_copy {
 //    ```
 //    // Ensure CS is high initially (inactive)
 //    mspi_high();
-//    
+//
 //    // Pull CS low to begin transaction
 //    mspi_low();
-//    
+//
 //    // Write a byte and wait for completion
 //    mspi_write(0x55);  // Example command byte
 //    mspi_wait();       // Wait for transfer to complete
-//    
+//
 //    // Read response byte
 //    let response = mspi_read();
-//    
+//
 //    // Release CS to end transaction
 //    mspi_high();
 //    ```
@@ -245,7 +245,7 @@ macro_rules! regrw_copy {
 //    let mut ctrl = read_reg_master_spi_ctrl();
 //    ctrl |= FLD_MASTER_SPI::CS as u8;
 //    write_reg_master_spi_ctrl(ctrl);
-//    
+//
 //    // Set CS low (active)
 //    ctrl &= !(FLD_MASTER_SPI::CS as u8);
 //    write_reg_master_spi_ctrl(ctrl);
@@ -302,10 +302,10 @@ bitflags! {
 //    ```
 //    // Set UART clock divider (19) and enable UART clock
 //    write_reg_uart_clk_div(19 | 0x8000);
-//    
+//
 //    // Set bit width parameter (13) and enable DMA for RX/TX
 //    write_reg_uart_ctrl0(0x30 | 13);
-//    
+//
 //    // Configure timeout for high baud rate
 //    write_reg_uart_rx_timeout(0xff);
 //    write_reg_uart_rx_timeout_cnt(3);
@@ -315,10 +315,10 @@ bitflags! {
 //    ```
 //    // Set UART clock divider (237) and enable UART clock
 //    write_reg_uart_clk_div(237 | 0x8000);
-//    
+//
 //    // Set bit width parameter (13) and enable DMA for RX/TX
 //    write_reg_uart_ctrl0(0x30 | 13);
-//    
+//
 //    // Configure timeout for low baud rate (one byte is 12 bits max)
 //    write_reg_uart_rx_timeout((13+1)*12);
 //    write_reg_uart_rx_timeout_cnt(1);
@@ -328,11 +328,11 @@ bitflags! {
 //    ```
 //    // Read UART status register
 //    let status = read_reg_uart_status();
-//    
+//
 //    // Check if error flag is set
 //    if (status & (FLD_UART_STATUS::ERR_FLAG as u8)) != 0 {
 //        // UART error detected
-//        
+//
 //        // Clear error by setting the error clear bit
 //        let mut clear_cmd = status;
 //        clear_cmd |= (FLD_UART_STATUS::ERR_CLR as u8);
@@ -341,12 +341,12 @@ bitflags! {
 //    ```
 
 // UART registers
-regrw!(reg_uart_clk_div, 0x094, 16);   // Clock divider and enable bit
-regrw!(reg_uart_ctrl0, 0x096, 8);      // Control register 0 (bit width, etc.)
-regrw!(reg_uart_ctrl1, 0x097, 8);      // Flow control and parity
+regrw!(reg_uart_clk_div, 0x094, 16); // Clock divider and enable bit
+regrw!(reg_uart_ctrl0, 0x096, 8); // Control register 0 (bit width, etc.)
+regrw!(reg_uart_ctrl1, 0x097, 8); // Flow control and parity
 regrw!(reg_uart_rx_timeout, 0x09a, 8); // RX timeout value
 regrw!(reg_uart_rx_timeout_cnt, 0x09b, 8); // RX timeout counter
-regrw!(reg_uart_status, 0x09d, 8);     // Status register
+regrw!(reg_uart_status, 0x09d, 8); // Status register
 
 // UART control bit fields
 bitflags! {
@@ -411,7 +411,7 @@ bitflags! {
 //    let mut reset = read_reg_rst0_16();
 //    reset |= FLD_RST::AES as u16;  // Set the AES reset bit
 //    write_reg_rst0_16(reset);
-//    
+//
 //    // Clear the reset bit to allow normal operation
 //    reset &= !(FLD_RST::AES as u16);
 //    write_reg_rst0_16(reset);
@@ -423,7 +423,7 @@ bitflags! {
 //    let mut clk_en = read_reg_clk_en();
 //    clk_en |= FLD_CLK_EN::AES_EN as u16;
 //    write_reg_clk_en(clk_en);
-//    
+//
 //    // Disable the AES module clock for power saving
 //    clk_en &= !(FLD_CLK_EN::AES_EN as u16);
 //    write_reg_clk_en(clk_en);
@@ -444,7 +444,7 @@ bitflags! {
 //    let mut wakeup = read_reg_wakeup_en();
 //    wakeup |= FLD_WAKEUP_SRC::GPIO as u8;
 //    write_reg_wakeup_en(wakeup);
-//    
+//
 //    // Enter deep sleep mode
 //    write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep as u8);
 //    ```
@@ -569,13 +569,13 @@ regrw!(reg_i2s_mod, 0x68, 8);
 //    ```
 //    // Configure ADC clock divider for appropriate sampling rate
 //    write_reg_adc_step_l(32);  // Set divider value
-//    
+//
 //    // Configure ADC mode and enable clock
 //    let mut adc_mod = 0;
 //    adc_mod |= 0x300;  // Set appropriate mode bits
 //    adc_mod |= FLD_ADC_MOD::CLK_EN as u16;  // Enable ADC clock
 //    write_reg_adc_mod(adc_mod);
-//    
+//
 //    // Now the ADC is ready to sample analog inputs
 //    ```
 //
@@ -593,7 +593,7 @@ regrw!(reg_i2s_mod, 0x68, 8);
 //    let mut dmic_step = (48 & 0x7F);  // Set divider value
 //    dmic_step |= FLD_DMIC_STEP::CLK_EN as u8;  // Enable DMIC clock
 //    write_reg_dmic_step(dmic_step);
-//    
+//
 //    // Configure DMIC mode
 //    write_reg_dmic_mod(0x15);  // Example mode configuration
 //    ```
@@ -660,13 +660,13 @@ regrw!(reg_dmic_mod, 0x6d, 8);
 //    let mut wakeup = read_reg_wakeup_en();
 //    wakeup |= FLD_WAKEUP_SRC::GPIO as u8;
 //    write_reg_wakeup_en(wakeup);
-//    
+//
 //    // Configure PA0 as wakeup pin (using analog register writes)
 //    analog_write(rega_wakeup_en_val0, 0x01);  // Bit 0 for PA0
-//    
+//
 //    // Set wakeup on rising edge
 //    analog_write(raga_gpio_wkup_pol, 0x00);  // 0 for rising edge
-//    
+//
 //    // Enter deep sleep mode
 //    write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep as u8);
 //    ```
@@ -675,11 +675,11 @@ regrw!(reg_dmic_mod, 0x6d, 8);
 //    ```
 //    // Read the deep sleep flag from analog register
 //    let sleep_flag = analog_read(rega_deepsleep_flag);
-//    
+//
 //    if (sleep_flag & 0x40) != 0 {
 //        // Device woke from deep sleep
 //        // Restore previous settings
-//        
+//
 //        // Clear the flag
 //        analog_write(rega_deepsleep_flag, sleep_flag & !0x40);
 //    } else {
@@ -692,12 +692,12 @@ regrw!(reg_dmic_mod, 0x6d, 8);
 //    ```
 //    // Configure system tick for wakeup
 //    write_reg_system_wakeup_tick(read_reg_system_tick() + 32000);  // Wake after 1ms @ 32MHz
-//    
+//
 //    // Enable timer as wakeup source
 //    let mut wakeup = read_reg_wakeup_en();
 //    wakeup |= PM_WAKEUP::TIMER as u8;
 //    write_reg_wakeup_en(wakeup);
-//    
+//
 //    // Enter sleep mode
 //    write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep as u8);
 //    ```
@@ -764,7 +764,7 @@ regrw!(reg_mcu_wakeup_mask, 0x78, 32);
 //    ```
 //    // Read analog register 0x3f (deep sleep flag)
 //    let deep_sleep_flag = analog_read(0x3f);
-//    
+//
 //    // Check if woke from deep sleep
 //    if (deep_sleep_flag & 0x40) != 0 {
 //        // Device woke from deep sleep
@@ -782,19 +782,19 @@ regrw!(reg_mcu_wakeup_mask, 0x78, 32);
 //    ```
 //    // Write address to register
 //    write_reg_ana_addr(addr);
-//    
+//
 //    // Set control bits for read operation
 //    write_reg_ana_ctrl(FLD_ANA::START as u8 | FLD_ANA::RSV as u8);
-//    
+//
 //    // Wait for operation to complete
 //    while (read_reg_ana_ctrl() & (FLD_ANA::BUSY as u8)) != 0 {}
-//    
+//
 //    // Read the result
 //    let data = read_reg_ana_data();
-//    
+//
 //    // Clear control register
 //    write_reg_ana_ctrl(0);
-//    
+//
 //    return data;
 //    ```
 
@@ -829,15 +829,15 @@ bitflags! {
 // - RX sensitivity threshold (0x422): Controls receiver sensitivity
 // - RX automatic calibration (0x426): Manages automatic calibration of receiver
 // - RX mode (0x428): Sets receiver configuration (1M/2M mode, filtering)
-// 
+//
 // Usage Examples:
-// 
+//
 // 1. Setting RF channel:
 //    ```
 //    // Set to channel 5 (2405 MHz)
 //    write_reg_rf_channel(5);
 //    ```
-// 
+//
 // 2. Configuring transmission mode:
 //    ```
 //    // Enable DMA and CRC for transmissions
@@ -1020,8 +1020,8 @@ regrw!(reg_rf_chn_rssi, 0x458, 8);
 
 regrw_idx!(reg_rf_rx_gain_agc, 0x480, 32);
 
-regrw!(reg_rf_rx_dci, 0x4cb, 8); 
-regrw!(reg_rf_rx_dcq, 0x4cf, 8); 
+regrw!(reg_rf_rx_dci, 0x4cb, 8);
+regrw!(reg_rf_rx_dcq, 0x4cf, 8);
 
 // PLL control registers
 regrw!(reg_pll_rx_coarse_tune, 0x4d0, 16);
@@ -1123,8 +1123,8 @@ bitflags! {
     }
 }
 
-regrw!(reg_rf_rx_cap, 0x4f0, 16); 
-regrw!(reg_rf_tx_cap, 0x4f0, 16); 
+regrw!(reg_rf_rx_cap, 0x4f0, 16);
+regrw!(reg_rf_tx_cap, 0x4f0, 16);
 
 //****************************************************
 // DMA and MAC registers (0x500 - 0x57F)
@@ -1161,15 +1161,15 @@ regrw!(reg_rf_tx_cap, 0x4f0, 16);
 //    ```
 //    // Set RF RX buffer address (where received data will be stored)
 //    write_reg_dma_rf_rx_addr(0x8000);  // Memory address
-//    
+//
 //    // Configure RF RX DMA properties
 //    let mut ctrl = 0;
 //    ctrl |= (64 & 0xFF);  // Set buffer size to 64 bytes
 //    ctrl |= (FLD_DMA::WR_MEM as u16);  // Write to memory
 //    // Enable ping-pong for continuous reception if needed
-//    // ctrl |= (FLD_DMA::PINGPONG_EN as u16); 
+//    // ctrl |= (FLD_DMA::PINGPONG_EN as u16);
 //    write_reg_dma_rf_rx_ctrl(ctrl);
-//    
+//
 //    // Enable the RF RX DMA channel
 //    let mut en = read_reg_dma_chn_en();
 //    en |= (FLD_DMA::RF_RX as u32);
@@ -1182,7 +1182,7 @@ regrw!(reg_rf_tx_cap, 0x4f0, 16);
 //    let mut irq_msk = read_reg_dma_chn_irq_msk();
 //    irq_msk |= (FLD_DMA::RF_RX as u32);
 //    write_reg_dma_chn_irq_msk(irq_msk);
-//    
+//
 //    // Also enable DMA interrupts in the global interrupt mask
 //    let mut irq = read_reg_irq_mask();
 //    irq |= (FLD_IRQ::DMA_EN as u32);
@@ -1196,7 +1196,7 @@ regrw!(reg_rf_tx_cap, 0x4f0, 16);
 //    if (status & (FLD_DMA::RF_RX as u32)) != 0 {
 //        // RF data received and available in buffer
 //        // Process received data
-//        
+//
 //        // Clear the ready flag to prepare for next reception
 //        write_reg_dma_rx_rdy0(FLD_DMA::RF_RX as u32);
 //    }
@@ -1217,8 +1217,8 @@ regrw!(reg_dma5_addr, 0x514, 16);
 regrw!(reg_dma5_ctrl, 0x516, 16);
 
 // DMA mode registers
-regrw!(reg_dma0_mode, 0x503, 8);   // DMA0 mode register
-regrw!(reg_dma1_mode, 0x507, 8);   // DMA1 mode register
+regrw!(reg_dma0_mode, 0x503, 8); // DMA0 mode register
+regrw!(reg_dma1_mode, 0x507, 8); // DMA1 mode register
 
 // DMA control registers
 regrw!(reg_dma_chn_en, 0x520, 8);
@@ -1294,13 +1294,13 @@ bitflags! {
 //    ```
 //    // Set data input
 //    write_reg_aes_data(data_block);
-//    
+//
 //    // Start encryption operation
 //    write_reg_aes_ctrl(0x01);  // Enable AES encryption
-//    
+//
 //    // Wait for completion
 //    while (read_reg_aes_ctrl() & 0x01 != 0) {}
-//    
+//
 //    // Read encrypted result
 //    let encrypted = read_reg_aes_data();
 //    ```
@@ -1358,7 +1358,7 @@ regrw!(reg_aes_key15, 0x55f, 8);
 //    let mut oen = read_reg_gpio_pa_oen();
 //    oen &= !(0x01);  // Clear bit 0 (0 = output)
 //    write_reg_gpio_pa_oen(oen);
-//    
+//
 //    // Set PA0 high
 //    let mut out = read_reg_gpio_pa_out();
 //    out |= 0x01;  // Set bit 0
@@ -1371,11 +1371,11 @@ regrw!(reg_aes_key15, 0x55f, 8);
 //    let mut ie = read_reg_gpio_pb_ie();
 //    ie |= 0x04;  // Set bit 2 (1 = input enabled)
 //    write_reg_gpio_pb_ie(ie);
-//    
+//
 //    let mut oen = read_reg_gpio_pb_oen();
 //    oen |= 0x04;  // Set bit 2 (1 = input mode)
 //    write_reg_gpio_pb_oen(oen);
-//    
+//
 //    // Read PB2 value
 //    let value = read_reg_gpio_pb_in() & 0x04;  // Mask bit 2
 //    if value != 0 {
@@ -1391,17 +1391,17 @@ regrw!(reg_aes_key15, 0x55f, 8);
 //    let mut ie = read_reg_gpio_pc_ie();
 //    ie |= 0x08;  // Set bit 3
 //    write_reg_gpio_pc_ie(ie);
-//    
+//
 //    // Set polarity to detect falling edge (1 = invert)
 //    let mut pol = read_reg_gpio_pc_pol();
 //    pol |= 0x08;  // Set bit 3
 //    write_reg_gpio_pc_pol(pol);
-//    
+//
 //    // Enable interrupt for PC3
 //    let mut irq_en = read_reg_gpio_pc_irq_en();
 //    irq_en |= 0x08;  // Set bit 3
 //    write_reg_gpio_pc_irq_en(irq_en);
-//    
+//
 //    // Enable GPIO interrupts in global interrupt mask
 //    let mut irq_mask = read_reg_irq_mask();
 //    irq_mask |= FLD_IRQ::GPIO_EN as u32;
@@ -1594,7 +1594,7 @@ regrw_idx!(reg_gpio_irq_risc2_en, 0x5c8, 8); // reg_irq_mask: FLD_IRQ_GPIO_RISC2
 // - Watchdog timer for system reset on software hang
 // - Capture registers for reading/setting timer values
 // - Status flags for timer events
-// 
+//
 // Key Registers:
 // - reg_tmr_ctrl: Master control for all timers
 // - reg_tmr#_capt: Capture/compare value for timer # (0-2)
@@ -1607,7 +1607,7 @@ regrw_idx!(reg_gpio_irq_risc2_en, 0x5c8, 8); // reg_irq_mask: FLD_IRQ_GPIO_RISC2
 //    ```
 //    // Set Timer0 capture value (when to trigger)
 //    write_reg_tmr0_capt(50000);  // 50,000 clock cycles
-//    
+//
 //    // Configure and start Timer0 in continuous mode
 //    let mut ctrl = read_reg_tmr_ctrl();
 //    ctrl &= !(FLD_TMR::TMR0_MODE as u32);  // Clear mode bits (00 = continuous)
@@ -1620,7 +1620,7 @@ regrw_idx!(reg_gpio_irq_risc2_en, 0x5c8, 8); // reg_irq_mask: FLD_IRQ_GPIO_RISC2
 //    let status = read_reg_tmr_sta();
 //    if (status & (FLD_TMR_STA::TMR0 as u8)) != 0 {
 //        // Timer0 has triggered
-//        
+//
 //        // Clear the timer status flag
 //        write_reg_tmr_sta(FLD_TMR_STA::TMR0 as u8);
 //    }
@@ -1631,10 +1631,10 @@ regrw_idx!(reg_gpio_irq_risc2_en, 0x5c8, 8); // reg_irq_mask: FLD_IRQ_GPIO_RISC2
 //    // Set watchdog timeout (higher value = longer timeout)
 //    let mut ctrl = read_reg_tmr_ctrl();
 //    ctrl &= !(0x3FFF << 9);  // Clear watchdog bits
-//    ctrl |= (1000 & 0x3FFF) << 9;  // Set timeout value 
+//    ctrl |= (1000 & 0x3FFF) << 9;  // Set timeout value
 //    ctrl |= FLD_TMR::TMR_WD_EN as u32;  // Enable watchdog
 //    write_reg_tmr_ctrl(ctrl);
-//    
+//
 //    // Periodically reset watchdog to prevent system reset
 //    // (must be called regularly to "pet" the watchdog)
 //    ctrl = read_reg_tmr_ctrl();
@@ -1714,7 +1714,7 @@ regrw!(reg_tmr2_tick, 0x638, 32);
 //    let mut mask = read_reg_irq_mask();
 //    mask |= FLD_IRQ::TMR0_EN as u32;
 //    write_reg_irq_mask(mask);
-//    
+//
 //    // Enable global interrupts
 //    write_reg_irq_en(1);
 //    ```
@@ -1722,12 +1722,12 @@ regrw!(reg_tmr2_tick, 0x638, 32);
 // 2. Checking which interrupts are active:
 //    ```
 //    let active_irqs = read_reg_irq_src();
-//    
+//
 //    if (active_irqs & (FLD_IRQ::TMR0_EN as u32)) != 0 {
 //        // Timer0 interrupt is active
 //        // Handle Timer0 interrupt
 //    }
-//    
+//
 //    if (active_irqs & (FLD_IRQ::GPIO_EN as u32)) != 0 {
 //        // GPIO interrupt is active
 //        // Check which GPIO triggered the interrupt
@@ -1738,13 +1738,13 @@ regrw!(reg_tmr2_tick, 0x638, 32);
 //    ```
 //    // Give Timer0 interrupt higher priority than GPIO interrupts
 //    let mut pri = read_reg_irq_pri();
-//    
+//
 //    // Clear priority bits for Timer0 and GPIO (bits 0-1 for Timer0, bits 18-19 for GPIO)
 //    pri &= ~((0x3 << 0) | (0x3 << 18));
-//    
+//
 //    // Set Timer0 to highest priority (00) and GPIO to lower priority (01)
 //    pri |= (0x0 << 0) | (0x1 << 18);
-//    
+//
 //    write_reg_irq_pri(pri);
 //    ```
 
@@ -1813,7 +1813,7 @@ bitflags! {
 //    ```
 //    // Set the system tick interrupt period (trigger every 10,000 ticks)
 //    write_reg_system_tick_irq(10000);
-//    
+//
 //    // Start the system tick counter
 //    write_reg_system_tick_ctrl(FLD_SYSTEM_TICK::START as u8);
 //    ```
@@ -1822,7 +1822,7 @@ bitflags! {
 //    ```
 //    // Get current tick value
 //    let start_tick = read_reg_system_tick();
-//    
+//
 //    // Wait for 1000 ticks to pass
 //    while (read_reg_system_tick() - start_tick < 1000) {
 //        // Optional: can yield here for power saving
@@ -1833,7 +1833,7 @@ bitflags! {
 //    ```
 //    // Set wakeup time (wake after 50,000 ticks)
 //    write_reg_system_wakeup_tick(read_reg_system_tick() + 50000);
-//    
+//
 //    // Configure power management to use system tick for wakeup
 //    // ... additional power management code ...
 //    ```
@@ -1887,7 +1887,7 @@ impl FLD_SYSTEM_TICK {
 //    write_reg_pwm_cycle(0, 0x00100010);  // Max = 0x0010, Cmp = 0x0010 (100% duty)
 //                                         // or use separate writes:
 //                                         // High 16 bits = max value, Low 16 bits = compare value
-//    
+//
 //    // Enable PWM0
 //    let mut enable = read_reg_pwm_enable();
 //    enable |= 0x01;  // Enable bit 0 for PWM0
@@ -1898,7 +1898,7 @@ impl FLD_SYSTEM_TICK {
 //    ```
 //    // Set PWM1 cycle and compare value for 25% duty cycle
 //    write_reg_pwm_cycle(1, 0x00200005);  // Max = 0x0020, Cmp = 0x0005 (25% duty)
-//    
+//
 //    // Enable PWM1
 //    let mut enable = read_reg_pwm_enable();
 //    enable |= 0x02;  // Enable bit 1 for PWM1
@@ -1911,7 +1911,7 @@ impl FLD_SYSTEM_TICK {
 //    let mut invert = read_reg_pwm_invert();
 //    invert |= 0x04;  // Set bit 2 for PWM2
 //    write_reg_pwm_invert(invert);
-//    
+//
 //    // Set PWM2 polarity
 //    let mut pol = read_reg_pwm_pol();
 //    pol |= 0x04;  // Set bit 2 for PWM2
@@ -1979,7 +1979,7 @@ regrw!(reg_pwm_irq_sta, 0x7b1, 8);
 //    if (status & (FLD_RF_IRQ_MASK::IRQ_RX as u16)) != 0 {
 //        // A packet was received, process it
 //        // ...
-//        
+//
 //        // Clear the interrupt
 //        let mut clear = 0;
 //        clear |= (FLD_RF_IRQ_MASK::IRQ_RX as u32);
@@ -2045,14 +2045,14 @@ bitflags! {
 
 ///////////////////// PM register /////////////////////////
 
-pub const  		rega_deepsleep_flag: u8 =		0x3f;		//0x34 - 0x39 (watch dog reset)
-// #define		rega_deepsleep_flag: u8 =		0x34		//0x3a - 0x3b (power-on reset)
-// pub const  		flag_deepsleep_wakeup	(analog_read(0x3f) & 0x40)
+pub const rega_deepsleep_flag: u8 = 0x3f; //0x34 - 0x39 (watch dog reset)
+                                          // #define		rega_deepsleep_flag: u8 =		0x34		//0x3a - 0x3b (power-on reset)
+                                          // pub const  		flag_deepsleep_wakeup	(analog_read(0x3f) & 0x40)
 
-pub const  		rega_wakeup_en_val0: u8 =		0x41;
-pub const  		rega_wakeup_en_val1: u8 =		0x42;
-pub const  		rega_wakeup_en_val2: u8 =		0x43;
-pub const  		raga_gpio_wkup_pol: u8 =		0x44;
+pub const rega_wakeup_en_val0: u8 = 0x41;
+pub const rega_wakeup_en_val1: u8 = 0x42;
+pub const rega_wakeup_en_val2: u8 = 0x43;
+pub const raga_gpio_wkup_pol: u8 = 0x44;
 
-pub const  		raga_pga_gain0: u8 =		0x86;
-pub const  		raga_pga_gain1: u8 = 0x87;
+pub const raga_pga_gain0: u8 = 0x86;
+pub const raga_pga_gain1: u8 = 0x87;

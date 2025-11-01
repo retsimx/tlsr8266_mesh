@@ -42,7 +42,7 @@ pub fn mspi_low() {
 /// Writes a byte to the SPI data register to be transmitted.
 ///
 /// This function sends a single byte over the SPI bus by writing it to the SPI data register.
-/// The byte will be shifted out on the MOSI (Master Out Slave In) line while simultaneously 
+/// The byte will be shifted out on the MOSI (Master Out Slave In) line while simultaneously
 /// receiving a byte on the MISO (Master In Slave Out) line.
 ///
 /// # Parameters
@@ -52,7 +52,7 @@ pub fn mspi_low() {
 /// # Notes
 ///
 /// * This function only initiates the transmission; it does not wait for completion.
-/// * After calling this function, you should call mspi_wait() to ensure the byte 
+/// * After calling this function, you should call mspi_wait() to ensure the byte
 ///   has been fully transmitted before proceeding with further operations.
 /// * The byte written will be shifted out MSB (Most Significant Bit) first, which
 ///   is the standard SPI protocol.
@@ -169,7 +169,7 @@ pub fn mspi_get() -> u8 {
 #[cfg_attr(test, mry::mry)]
 pub fn mspi_read() -> u8 {
     mspi_write(0); // Send dummy byte to generate clock pulses
-    mspi_wait();   // Wait for transmission to complete
+    mspi_wait(); // Wait for transmission to complete
     return mspi_get(); // Read and return the received byte
 }
 
@@ -177,38 +177,38 @@ pub fn mspi_read() -> u8 {
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{
-        mock_read_reg_master_spi_ctrl, mock_read_reg_master_spi_data, 
+        mock_read_reg_master_spi_ctrl, mock_read_reg_master_spi_data,
         mock_write_reg_master_spi_ctrl, mock_write_reg_master_spi_data,
     };
-    
+
     /// Tests that mspi_high sets the SPI CS high by writing the correct bit to the control register.
     #[test]
     #[mry::lock(write_reg_master_spi_ctrl)]
     fn test_mspi_high() {
         // Set up expectations
         mock_write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits()).returns(());
-        
+
         // Execute function under test
         mspi_high();
-        
+
         // Verify the control register was written correctly
         mock_write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits()).assert_called(1);
     }
-    
+
     /// Tests that mspi_low clears the SPI CS bit by writing 0 to the control register.
     #[test]
     #[mry::lock(write_reg_master_spi_ctrl)]
     fn test_mspi_low() {
         // Set up expectations
         mock_write_reg_master_spi_ctrl(0).returns(());
-        
+
         // Execute function under test
         mspi_low();
-        
+
         // Verify the control register was written correctly
         mock_write_reg_master_spi_ctrl(0).assert_called(1);
     }
-    
+
     /// Tests that mspi_write correctly writes data to the SPI data register.
     #[test]
     #[mry::lock(write_reg_master_spi_data)]
@@ -216,48 +216,48 @@ mod tests {
         // Set up expectations for different data values
         mock_write_reg_master_spi_data(0x42).returns(());
         mock_write_reg_master_spi_data(0xFF).returns(());
-        
+
         // Execute function under test with different values
         mspi_write(0x42);
         mspi_write(0xFF);
-        
+
         // Verify each call was made correctly
         mock_write_reg_master_spi_data(0x42).assert_called(1);
         mock_write_reg_master_spi_data(0xFF).assert_called(1);
     }
-    
+
     /// Tests that mspi_wait polls the busy bit until the operation completes.
     #[test]
     #[mry::lock(read_reg_master_spi_ctrl)]
     fn test_mspi_wait() {
         // Use a static mutable counter to ensure proper tracking across function calls
         static mut CALL_COUNT: usize = 0;
-        
+
         // Reset the counter at the start of the test
         unsafe { CALL_COUNT = 0 };
-        
+
         // Set up the behavior of the mocked function using our static counter
         mock_read_reg_master_spi_ctrl().returns_with(|| {
             // Safely increment the counter - this is within test code only
-            let count = unsafe { 
-                CALL_COUNT += 1; 
-                CALL_COUNT 
+            let count = unsafe {
+                CALL_COUNT += 1;
+                CALL_COUNT
             };
-            
+
             if count <= 2 {
                 FLD_MASTER_SPI::BUSY.bits() // First two calls: busy
             } else {
                 0 // Third call: no longer busy
             }
         });
-        
+
         // Execute function under test
         mspi_wait();
-        
+
         // Verify control register was read exactly 3 times
         mock_read_reg_master_spi_ctrl().assert_called(3);
     }
-    
+
     /// Tests that mspi_ctrl_write correctly writes to the SPI control register.
     #[test]
     #[mry::lock(write_reg_master_spi_ctrl)]
@@ -265,31 +265,34 @@ mod tests {
         // Set up expectations for different control values
         mock_write_reg_master_spi_ctrl(0x0A).returns(());
         mock_write_reg_master_spi_ctrl(0x01).returns(());
-        
+
         // Execute function under test with different values
         mspi_ctrl_write(0x0A);
         mspi_ctrl_write(0x01);
-        
+
         // Verify each call was made correctly
         mock_write_reg_master_spi_ctrl(0x0A).assert_called(1);
         mock_write_reg_master_spi_ctrl(0x01).assert_called(1);
     }
-    
+
     /// Tests that mspi_get correctly reads data from the SPI data register.
     #[test]
     #[mry::lock(read_reg_master_spi_data)]
     fn test_mspi_get() {
         // Set up expectations for data register reads
         mock_read_reg_master_spi_data().returns(0x42);
-        
+
         // Execute function under test
         let result = mspi_get();
-        
+
         // Verify result and call count
-        assert_eq!(result, 0x42, "mspi_get should return the value from the data register");
+        assert_eq!(
+            result, 0x42,
+            "mspi_get should return the value from the data register"
+        );
         mock_read_reg_master_spi_data().assert_called(1);
     }
-    
+
     /// Tests that mspi_read performs the complete read sequence:
     /// 1. Writes a dummy byte to generate clock
     /// 2. Waits for operation to complete
@@ -301,37 +304,37 @@ mod tests {
         mock_mspi_write(0).returns(());
         mock_mspi_wait().returns(());
         mock_mspi_get().returns(0xA5);
-        
+
         // Execute function under test
         let result = mspi_read();
-        
+
         // Verify result and calls
-        assert_eq!(result, 0xA5, "mspi_read should return the value from mspi_get");
+        assert_eq!(
+            result, 0xA5,
+            "mspi_read should return the value from mspi_get"
+        );
         mock_mspi_write(0).assert_called(1);
         mock_mspi_wait().assert_called(1);
         mock_mspi_get().assert_called(1);
     }
-    
+
     /// Tests the integration between mspi functions in a typical SPI transaction.
     #[test]
-    #[mry::lock(
-        mspi_high, mspi_low, mspi_write, 
-        mspi_wait, mspi_get
-    )]
+    #[mry::lock(mspi_high, mspi_low, mspi_write, mspi_wait, mspi_get)]
     fn test_spi_transaction() {
         // Set up for a typical SPI command-response transaction
         // For functions called multiple times, use counters and closures
-        
+
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
-        
+
         // Handle different mspi_write parameters
-        mock_mspi_write(0x9F).returns(());  // JEDEC ID command
-        
+        mock_mspi_write(0x9F).returns(()); // JEDEC ID command
+
         mock_mspi_write(0).returns(());
-        
+
         mock_mspi_wait().returns(());
-        
+
         // Track mspi_get calls with different return values
         let mut get_count = 0;
         mock_mspi_get().returns_with(move || {
@@ -341,29 +344,29 @@ mod tests {
                 _ => 0x40, // Second byte of JEDEC ID (device type)
             }
         });
-        
+
         // Execute a sequence that resembles a typical SPI transaction
-        mspi_high();               // Ensure CS starts high
-        mspi_low();                // Begin transaction by activating CS
-        mspi_write(0x9F);          // Send JEDEC ID command
-        mspi_wait();               // Wait for command to send
-        
+        mspi_high(); // Ensure CS starts high
+        mspi_low(); // Begin transaction by activating CS
+        mspi_write(0x9F); // Send JEDEC ID command
+        mspi_wait(); // Wait for command to send
+
         // Read first byte of response
-        mspi_write(0);             // Send dummy byte to clock in data
-        mspi_wait();               // Wait for clock cycles
-        let byte1 = mspi_get();    // Read received data
-        
+        mspi_write(0); // Send dummy byte to clock in data
+        mspi_wait(); // Wait for clock cycles
+        let byte1 = mspi_get(); // Read received data
+
         // Read second byte of response
-        mspi_write(0);             // Send dummy byte to clock in data
-        mspi_wait();               // Wait for clock cycles
-        let byte2 = mspi_get();    // Read received data
-        
-        mspi_high();               // End transaction by deactivating CS
-        
+        mspi_write(0); // Send dummy byte to clock in data
+        mspi_wait(); // Wait for clock cycles
+        let byte2 = mspi_get(); // Read received data
+
+        mspi_high(); // End transaction by deactivating CS
+
         // Verify results
         assert_eq!(byte1, 0xEF, "First JEDEC ID byte should be 0xEF");
         assert_eq!(byte2, 0x40, "Second JEDEC ID byte should be 0x40");
-        
+
         // Verify call sequence
         mock_mspi_high().assert_called(2);
         mock_mspi_low().assert_called(1);

@@ -55,8 +55,8 @@
 //! - **Access Control**: Only authenticated devices can control mesh network functions
 //! - **Revocation**: Immediate credential deletion prevents further unauthorized access
 
-use crate::sdk::ble_app::ble_ll_pair::{pair_set_key, pair_save_key};
-use crate::state::{PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK, SimplifyLS};
+use crate::sdk::ble_app::ble_ll_pair::{pair_save_key, pair_set_key};
+use crate::state::{SimplifyLS, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK};
 
 /// Securely deletes the current mesh network pairing configuration.
 ///
@@ -124,8 +124,7 @@ use crate::state::{PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK, S
 /// cryptographic key erasure. For high-security applications, consider
 /// additional memory clearing procedures.
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_delete_pair()
-{
+pub fn rf_link_delete_pair() {
     // Allocate credential structure (48 bytes: name + password + reserved)
     let mut key = [0u8; 16 * 3];
 
@@ -138,7 +137,7 @@ pub fn rf_link_delete_pair()
 
     // Update the pairing subsystem with current credentials before deletion
     pair_set_key(&key);
-    
+
     // Commit the credential state to flash memory for persistence
     pair_save_key();
 
@@ -149,7 +148,7 @@ pub fn rf_link_delete_pair()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_pair::{mock_pair_set_key, mock_pair_save_key};
+    use crate::sdk::ble_app::ble_ll_pair::{mock_pair_save_key, mock_pair_set_key};
     use mry::Any;
 
     #[test]

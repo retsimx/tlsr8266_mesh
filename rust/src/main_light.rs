@@ -6,27 +6,37 @@ use embassy_time::{Duration, Timer};
 use fixed::types::I16F16;
 
 use crate::app;
-use crate::BIT;
 use crate::common::*;
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::connection_management::{light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc};
+use crate::sdk::ble_app::light_ll::connection_management::{
+    light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
+};
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_construct_packet;
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
-use crate::sdk::factory_reset::{factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason};
+use crate::sdk::factory_reset::{
+    factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason,
+};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US, clock_time, clock_time_exceed};
-use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func};
-use crate::sdk::mcu::register::{FLD_IRQ, FLD_TMR, read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl};
+use crate::sdk::mcu::clock::{
+    clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
+};
+use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
+use crate::sdk::mcu::irq_i::irq_disable;
+use crate::sdk::mcu::register::{
+    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt,
+    write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
+};
 use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
-use crate::state::{*};
+use crate::state::*;
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
-use crate::sdk::mcu::irq_i::irq_disable;
+use crate::BIT;
+use heapless::Vec;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -72,13 +82,11 @@ fn light_init_default() {
     let len = ADV_DATA.lock().len() + size_of::<AdvPrivate>() + 2;
     if len < 31 {
         max_mesh_name_len = 31 - len - 2;
-        MAX_MESH_NAME_LEN.set(
-            if max_mesh_name_len < 16 {
-                max_mesh_name_len
-            } else {
-                16
-            }
-        );
+        MAX_MESH_NAME_LEN.set(if max_mesh_name_len < 16 {
+            max_mesh_name_len
+        } else {
+            16
+        });
     }
 
     light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
@@ -138,26 +146,37 @@ fn proc_led() {
 
     if LED_CONTROLLER.event_pending.get() != 0 {
         // new event
-        LED_CONTROLLER.on_duration_us.set((LED_CONTROLLER.event_pending.get() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        LED_CONTROLLER.off_duration_us.set(((LED_CONTROLLER.event_pending.get() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
-        LED_CONTROLLER.blink_count.set((LED_CONTROLLER.event_pending.get() >> 16) & 0xff);
-        LED_CONTROLLER.led_selection_mask.set(LED_CONTROLLER.event_pending.get() >> 24);
+        LED_CONTROLLER
+            .on_duration_us
+            .set((LED_CONTROLLER.event_pending.get() & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER
+            .off_duration_us
+            .set(((LED_CONTROLLER.event_pending.get() >> 8) & 0xff) * 64000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER
+            .blink_count
+            .set((LED_CONTROLLER.event_pending.get() >> 16) & 0xff);
+        LED_CONTROLLER
+            .led_selection_mask
+            .set(LED_CONTROLLER.event_pending.get() >> 24);
 
         LED_CONTROLLER.event_pending.set(0);
-        LED_CONTROLLER.timing_tick.set(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
+        LED_CONTROLLER
+            .timing_tick
+            .set(clock_time() + 30000000 * CLOCK_SYS_CLOCK_1US);
         LED_CONTROLLER.pattern_number.set(0);
         LED_CONTROLLER.is_on.set(0);
     }
 
     if clock_time() - LED_CONTROLLER.timing_tick.get()
         >= (if LED_CONTROLLER.is_on.get() != 0 {
-        LED_CONTROLLER.on_duration_us.get()
-    } else {
-        LED_CONTROLLER.off_duration_us.get()
-    })
+            LED_CONTROLLER.on_duration_us.get()
+        } else {
+            LED_CONTROLLER.off_duration_us.get()
+        })
     {
         LED_CONTROLLER.timing_tick.set(clock_time());
-        let led_off = (LED_CONTROLLER.is_on.get() != 0 || LED_CONTROLLER.on_duration_us.get() == 0) && LED_CONTROLLER.off_duration_us.get() != 0;
+        let led_off = (LED_CONTROLLER.is_on.get() != 0 || LED_CONTROLLER.on_duration_us.get() == 0)
+            && LED_CONTROLLER.off_duration_us.get() != 0;
         let led_on = LED_CONTROLLER.is_on.get() == 0 && LED_CONTROLLER.on_duration_us.get() != 0;
 
         LED_CONTROLLER.is_on.set(!LED_CONTROLLER.is_on.get());
@@ -166,17 +185,25 @@ fn proc_led() {
             if LED_CONTROLLER.pattern_number.get() - 1 == LED_CONTROLLER.blink_count.get() {
                 LED_CONTROLLER.blink_count.set(0);
                 LED_CONTROLLER.pattern_number.set(0);
-                app().light_manager.light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
+                app()
+                    .light_manager
+                    .light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
             if LED_CONTROLLER.led_selection_mask.get() & BIT!(0) != 0 {
-                app().light_manager.light_adjust_cw(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+                app().light_manager.light_adjust_cw(
+                    I16F16::from_num(LED_INDICATE_VAL * led_on as u16),
+                    I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+                );
             }
             if LED_CONTROLLER.led_selection_mask.get() & BIT!(1) != 0 {
-                app().light_manager.light_adjust_ww(I16F16::from_num(LED_INDICATE_VAL * led_on as u16), I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+                app().light_manager.light_adjust_ww(
+                    I16F16::from_num(LED_INDICATE_VAL * led_on as u16),
+                    I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+                );
             }
             if LED_CONTROLLER.led_selection_mask.get() & BIT!(5) != 0 {}
         }
@@ -187,7 +214,10 @@ fn light_auth_check() {
     if SECURITY_ENABLE.get()
         && !PAIR_LOGIN_OK.get()
         && BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get() != 0
-        && clock_time_exceed(BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(), AUTH_TIME * 1000 * 1000)
+        && clock_time_exceed(
+            BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(),
+            AUTH_TIME * 1000 * 1000,
+        )
     {
         //rf_link_slave_disconnect(); // must login in 60s after connected, if need
         BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0);
@@ -217,11 +247,7 @@ pub async fn main_loop() {
 Called to handle messages that require a response to be returned
 */
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_response_callback(
-
-    ppp: &mut PacketAttValue,
-    p_req: &PacketAttValue,
-) -> bool {
+pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValue) -> bool {
     // mac-app[5] low 2 bytes used as ttc && hop-count
     // let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
@@ -338,7 +364,7 @@ pub fn rf_link_response_callback(
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
         }
-        _ => return false
+        _ => return false,
     }
 
     true
@@ -365,7 +391,9 @@ pub fn rf_link_data_callback(p: &Packet) {
     let op = op_cmd[0] & 0x3F;
 
     match op {
-        LGT_CMD_LIGHT_ONOFF => app().light_manager.send_message(LGT_CMD_LIGHT_ONOFF, params),
+        LGT_CMD_LIGHT_ONOFF => app()
+            .light_manager
+            .send_message(LGT_CMD_LIGHT_ONOFF, params),
         LGT_CMD_LIGHT_CONFIG_GRP => {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
@@ -379,18 +407,24 @@ pub fn rf_link_data_callback(p: &Packet) {
                         cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                     }
                 }
-                _ => ()
+                _ => (),
             }
         }
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
-            if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params)) && add_device_address(val) {
-                app().mesh_manager.mesh_device_address_validation_completed();
+            if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params))
+                && add_device_address(val)
+            {
+                app()
+                    .mesh_manager
+                    .mesh_device_address_validation_completed();
             }
         }
         LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
         LGT_CMD_SET_MAC_ADDR => {
-            let mac = [params[0], params[1], params[2], params[3], params[4], params[5]];
+            let mac = [
+                params[0], params[1], params[2], params[3], params[4], params[5],
+            ];
             flash_erase_sector(FLASH_ADR_MAC);
             flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
             light_sw_reboot();
@@ -400,19 +434,26 @@ pub fn rf_link_data_callback(p: &Packet) {
             let res = (params[0] as u32).try_into();
             match res {
                 Ok(res) => kick_out(res),
-                Err(..) => kick_out(KickoutReason::OutOfMesh)
+                Err(..) => kick_out(KickoutReason::OutOfMesh),
             }
 
             light_sw_reboot();
         }
-        LGT_CMD_MESH_PAIR => app().mesh_manager.mesh_pair_cb(&params),
-        _ => ()
+        LGT_CMD_MESH_PAIR => app()
+            .mesh_manager
+            .mesh_pair_cb(&Vec::from_slice(&params).unwrap()),
+        _ => (),
     }
 }
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-pub fn light_slave_tx_command(p_cmd: &[u8], para: u16, retransmit_count: u8, send_ack: bool) -> Packet {
+pub fn light_slave_tx_command(
+    p_cmd: &[u8],
+    para: u16,
+    retransmit_count: u8,
+    send_ack: bool,
+) -> Packet {
     let mut cmd_op_para: [u8; 13] = [0; 13];
     let cmd_sno = clock_time() + DEVICE_ADDRESS.get() as u32;
 
@@ -441,6 +482,6 @@ pub fn rf_link_light_event_callback(status: u8) {
         }
         LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
         LGT_CMD_MESH_PAIR_TIMEOUT => cfg_led_event(LED_EVENT_FLASH_2HZ_2S),
-        _ => ()
+        _ => (),
     }
 }

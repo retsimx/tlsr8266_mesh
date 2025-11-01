@@ -15,11 +15,11 @@ pub const RF_FAST_MODE_1M: u8 = 1;
 pub const PM_PIN_PULL_DEFAULT: u8 = 1;
 
 /// Pull-up/pull-down configuration constants for GPIO pins
-/// 
+///
 /// These constants define various pull-up/pull-down resistor settings that can be
 /// applied to GPIO pins to ensure defined logic levels when pins are not actively
 /// driven.
-/// 
+///
 /// * `GPIO_PULL_UP_0`: No pull-up (floating)
 /// * `GPIO_PULL_UP_1M`: 1MΩ pull-up resistor
 /// * `GPIO_PULL_UP_10K`: 10kΩ pull-up resistor
@@ -57,22 +57,22 @@ pub enum GPIO_DIR {
 /// * `AS_SWS`/`AS_SWM`: Serial wire debug
 /// * `AS_TEST`: Test mode
 /// * `AS_ADC`: Analog-to-digital converter
-pub const AS_GPIO: u8 = 0;      // Standard GPIO mode
-pub const AS_MSPI: u8 = 1;      // Master SPI interface
-pub const AS_SWIRE: u8 = 2;     // Serial wire interface
-pub const AS_UART: u8 = 3;      // Serial UART interface
-pub const AS_PWM: u8 = 4;       // Pulse width modulation
-pub const AS_I2C: u8 = 5;       // I2C interface
-pub const AS_SPI: u8 = 6;       // SPI interface
-pub const AS_ETH_MAC: u8 = 7;   // Ethernet MAC interface
-pub const AS_I2S: u8 = 8;       // I2S audio interface
-pub const AS_SDM: u8 = 9;       // Sigma-delta modulation
-pub const AS_DMIC: u8 = 10;     // Digital microphone interface
-pub const AS_USB: u8 = 11;      // USB interface
-pub const AS_SWS: u8 = 12;      // Serial wire debug (SWS)
-pub const AS_SWM: u8 = 13;      // Serial wire debug (SWM)
-pub const AS_TEST: u8 = 14;     // Test mode
-pub const AS_ADC: u8 = 15;      // Analog-to-digital converter
+pub const AS_GPIO: u8 = 0; // Standard GPIO mode
+pub const AS_MSPI: u8 = 1; // Master SPI interface
+pub const AS_SWIRE: u8 = 2; // Serial wire interface
+pub const AS_UART: u8 = 3; // Serial UART interface
+pub const AS_PWM: u8 = 4; // Pulse width modulation
+pub const AS_I2C: u8 = 5; // I2C interface
+pub const AS_SPI: u8 = 6; // SPI interface
+pub const AS_ETH_MAC: u8 = 7; // Ethernet MAC interface
+pub const AS_I2S: u8 = 8; // I2S audio interface
+pub const AS_SDM: u8 = 9; // Sigma-delta modulation
+pub const AS_DMIC: u8 = 10; // Digital microphone interface
+pub const AS_USB: u8 = 11; // USB interface
+pub const AS_SWS: u8 = 12; // Serial wire debug (SWS)
+pub const AS_SWM: u8 = 13; // Serial wire debug (SWM)
+pub const AS_TEST: u8 = 14; // Test mode
+pub const AS_ADC: u8 = 15; // Analog-to-digital converter
 
 pub const PA0_INPUT_ENABLE: u8 = 1;
 pub const PA1_INPUT_ENABLE: u8 = 0;
@@ -358,62 +358,62 @@ pub const PM_PIN_UP_DOWN_FLOAT: u8 = 0xff;
 /// The encoding format allows for efficient pin manipulation by separating
 /// the port number and bit position, which can be extracted using bit operations.
 pub enum GPIO_PIN_TYPE {
-    GPIO_PA0 = 0x000 | BIT!(0),  // Port A, pin 0
-    GPIO_PA1 = 0x000 | BIT!(1),  // Port A, pin 1
-    GPIO_PA2 = 0x000 | BIT!(2),  // Port A, pin 2
-    GPIO_PA3 = 0x000 | BIT!(3),  // Port A, pin 3
-    GPIO_PA4 = 0x000 | BIT!(4),  // Port A, pin 4
-    GPIO_PA5 = 0x000 | BIT!(5),  // Port A, pin 5
-    GPIO_PA6 = 0x000 | BIT!(6),  // Port A, pin 6
-    GPIO_PA7 = 0x000 | BIT!(7),  // Port A, pin 7
-    
-    GPIO_PB0 = 0x100 | BIT!(0),  // Port B, pin 0
-    GPIO_PB1 = 0x100 | BIT!(1),  // Port B, pin 1
-    GPIO_PB2 = 0x100 | BIT!(2),  // Port B, pin 2
-    GPIO_PB3 = 0x100 | BIT!(3),  // Port B, pin 3
-    GPIO_PB4 = 0x100 | BIT!(4),  // Port B, pin 4
-    GPIO_PB5 = 0x100 | BIT!(5),  // Port B, pin 5
-    GPIO_PB6 = 0x100 | BIT!(6),  // Port B, pin 6
-    GPIO_PB7 = 0x100 | BIT!(7),  // Port B, pin 7
-    
-    GPIO_PC0 = 0x200 | BIT!(0),  // Port C, pin 0
-    GPIO_PC1 = 0x200 | BIT!(1),  // Port C, pin 1
-    GPIO_PC2 = 0x200 | BIT!(2),  // Port C, pin 2
-    GPIO_PC3 = 0x200 | BIT!(3),  // Port C, pin 3
-    GPIO_PC4 = 0x200 | BIT!(4),  // Port C, pin 4
-    GPIO_PC5 = 0x200 | BIT!(5),  // Port C, pin 5
-    GPIO_PC6 = 0x200 | BIT!(6),  // Port C, pin 6
-    GPIO_PC7 = 0x200 | BIT!(7),  // Port C, pin 7
-    
-    GPIO_PD0 = 0x300 | BIT!(0),  // Port D, pin 0
-    GPIO_PD1 = 0x300 | BIT!(1),  // Port D, pin 1
-    GPIO_PD2 = 0x300 | BIT!(2),  // Port D, pin 2
-    GPIO_PD3 = 0x300 | BIT!(3),  // Port D, pin 3
-    GPIO_PD4 = 0x300 | BIT!(4),  // Port D, pin 4
-    GPIO_PD5 = 0x300 | BIT!(5),  // Port D, pin 5
-    GPIO_PD6 = 0x300 | BIT!(6),  // Port D, pin 6
-    GPIO_PD7 = 0x300 | BIT!(7),  // Port D, pin 7
-    
-    GPIO_PE0 = 0x400 | BIT!(0),  // Port E, pin 0
-    GPIO_PE1 = 0x400 | BIT!(1),  // Port E, pin 1
-    GPIO_PE2 = 0x400 | BIT!(2),  // Port E, pin 2
-    GPIO_PE3 = 0x400 | BIT!(3),  // Port E, pin 3
-    GPIO_PE4 = 0x400 | BIT!(4),  // Port E, pin 4
-    GPIO_PE5 = 0x400 | BIT!(5),  // Port E, pin 5
-    GPIO_PE6 = 0x400 | BIT!(6),  // Port E, pin 6
-    GPIO_PE7 = 0x400 | BIT!(7),  // Port E, pin 7
-    
-    GPIO_PF0 = 0x500 | BIT!(0),  // Port F, pin 0
-    GPIO_PF1 = 0x500 | BIT!(1),  // Port F, pin 1
+    GPIO_PA0 = 0x000 | BIT!(0), // Port A, pin 0
+    GPIO_PA1 = 0x000 | BIT!(1), // Port A, pin 1
+    GPIO_PA2 = 0x000 | BIT!(2), // Port A, pin 2
+    GPIO_PA3 = 0x000 | BIT!(3), // Port A, pin 3
+    GPIO_PA4 = 0x000 | BIT!(4), // Port A, pin 4
+    GPIO_PA5 = 0x000 | BIT!(5), // Port A, pin 5
+    GPIO_PA6 = 0x000 | BIT!(6), // Port A, pin 6
+    GPIO_PA7 = 0x000 | BIT!(7), // Port A, pin 7
 
-    GPIO_MAX_COUNT = 56,         // Total number of GPIO pins
+    GPIO_PB0 = 0x100 | BIT!(0), // Port B, pin 0
+    GPIO_PB1 = 0x100 | BIT!(1), // Port B, pin 1
+    GPIO_PB2 = 0x100 | BIT!(2), // Port B, pin 2
+    GPIO_PB3 = 0x100 | BIT!(3), // Port B, pin 3
+    GPIO_PB4 = 0x100 | BIT!(4), // Port B, pin 4
+    GPIO_PB5 = 0x100 | BIT!(5), // Port B, pin 5
+    GPIO_PB6 = 0x100 | BIT!(6), // Port B, pin 6
+    GPIO_PB7 = 0x100 | BIT!(7), // Port B, pin 7
+
+    GPIO_PC0 = 0x200 | BIT!(0), // Port C, pin 0
+    GPIO_PC1 = 0x200 | BIT!(1), // Port C, pin 1
+    GPIO_PC2 = 0x200 | BIT!(2), // Port C, pin 2
+    GPIO_PC3 = 0x200 | BIT!(3), // Port C, pin 3
+    GPIO_PC4 = 0x200 | BIT!(4), // Port C, pin 4
+    GPIO_PC5 = 0x200 | BIT!(5), // Port C, pin 5
+    GPIO_PC6 = 0x200 | BIT!(6), // Port C, pin 6
+    GPIO_PC7 = 0x200 | BIT!(7), // Port C, pin 7
+
+    GPIO_PD0 = 0x300 | BIT!(0), // Port D, pin 0
+    GPIO_PD1 = 0x300 | BIT!(1), // Port D, pin 1
+    GPIO_PD2 = 0x300 | BIT!(2), // Port D, pin 2
+    GPIO_PD3 = 0x300 | BIT!(3), // Port D, pin 3
+    GPIO_PD4 = 0x300 | BIT!(4), // Port D, pin 4
+    GPIO_PD5 = 0x300 | BIT!(5), // Port D, pin 5
+    GPIO_PD6 = 0x300 | BIT!(6), // Port D, pin 6
+    GPIO_PD7 = 0x300 | BIT!(7), // Port D, pin 7
+
+    GPIO_PE0 = 0x400 | BIT!(0), // Port E, pin 0
+    GPIO_PE1 = 0x400 | BIT!(1), // Port E, pin 1
+    GPIO_PE2 = 0x400 | BIT!(2), // Port E, pin 2
+    GPIO_PE3 = 0x400 | BIT!(3), // Port E, pin 3
+    GPIO_PE4 = 0x400 | BIT!(4), // Port E, pin 4
+    GPIO_PE5 = 0x400 | BIT!(5), // Port E, pin 5
+    GPIO_PE6 = 0x400 | BIT!(6), // Port E, pin 6
+    GPIO_PE7 = 0x400 | BIT!(7), // Port E, pin 7
+
+    GPIO_PF0 = 0x500 | BIT!(0), // Port F, pin 0
+    GPIO_PF1 = 0x500 | BIT!(1), // Port F, pin 1
+
+    GPIO_MAX_COUNT = 56, // Total number of GPIO pins
 }
 
 /// Functional aliases for GPIO pins.
 ///
-/// This implementation block defines named aliases for GPIO pins based on their 
-/// default or commonly used peripheral functions. These aliases make code more 
-/// readable by referring to pins by their functional role rather than just 
+/// This implementation block defines named aliases for GPIO pins based on their
+/// default or commonly used peripheral functions. These aliases make code more
+/// readable by referring to pins by their functional role rather than just
 /// their port/pin designations.
 ///
 /// The aliases are grouped by functionality:
@@ -427,50 +427,50 @@ pub enum GPIO_PIN_TYPE {
 /// - General purpose: GPIO_GPx (numbered general purpose pins)
 impl GPIO_PIN_TYPE {
     // Serial wire debug interface
-    pub const GPIO_SWS: GPIO_PIN_TYPE = GPIO_PA0;       // Serial wire signal
-    pub const GPIO_SWM: GPIO_PIN_TYPE = GPIO_PA7;       // Serial wire mode
-    
+    pub const GPIO_SWS: GPIO_PIN_TYPE = GPIO_PA0; // Serial wire signal
+    pub const GPIO_SWM: GPIO_PIN_TYPE = GPIO_PA7; // Serial wire mode
+
     // PWM channels
-    pub const GPIO_PWM3A1: GPIO_PIN_TYPE = GPIO_PA1;    // PWM3 channel A
-    pub const GPIO_PWM3NA4: GPIO_PIN_TYPE = GPIO_PA4;   // PWM3 channel A complementary
-    pub const GPIO_PWM4A5: GPIO_PIN_TYPE = GPIO_PA5;    // PWM4 channel A
-    pub const GPIO_PWM4NA6: GPIO_PIN_TYPE = GPIO_PA6;   // PWM4 channel A complementary
-    pub const GPIO_PWM5B0: GPIO_PIN_TYPE = GPIO_PB0;    // PWM5 channel B
-    pub const GPIO_PWM5NB1: GPIO_PIN_TYPE = GPIO_PB1;   // PWM5 channel B complementary
-    pub const GPIO_PWM0NB7: GPIO_PIN_TYPE = GPIO_PB7;   // PWM0 channel B complementary
-    pub const GPIO_PWM0C0: GPIO_PIN_TYPE = GPIO_PC0;    // PWM0 channel C
-    pub const GPIO_PWM1NC1: GPIO_PIN_TYPE = GPIO_PC1;   // PWM1 channel C complementary
-    pub const GPIO_PWM1NC2: GPIO_PIN_TYPE = GPIO_PC2;   // PWM1 channel C complementary
-    pub const GPIO_PWM1C3: GPIO_PIN_TYPE = GPIO_PC3;    // PWM1 channel C
-    pub const GPIO_PWM2C4: GPIO_PIN_TYPE = GPIO_PC4;    // PWM2 channel C
-    pub const GPIO_PWM2NC5: GPIO_PIN_TYPE = GPIO_PC5;   // PWM2 channel C complementary
-    pub const GPIO_PWM3D2: GPIO_PIN_TYPE = GPIO_PD2;    // PWM3 channel D
-    pub const GPIO_PWM4D3: GPIO_PIN_TYPE = GPIO_PD3;    // PWM4 channel D
-    
+    pub const GPIO_PWM3A1: GPIO_PIN_TYPE = GPIO_PA1; // PWM3 channel A
+    pub const GPIO_PWM3NA4: GPIO_PIN_TYPE = GPIO_PA4; // PWM3 channel A complementary
+    pub const GPIO_PWM4A5: GPIO_PIN_TYPE = GPIO_PA5; // PWM4 channel A
+    pub const GPIO_PWM4NA6: GPIO_PIN_TYPE = GPIO_PA6; // PWM4 channel A complementary
+    pub const GPIO_PWM5B0: GPIO_PIN_TYPE = GPIO_PB0; // PWM5 channel B
+    pub const GPIO_PWM5NB1: GPIO_PIN_TYPE = GPIO_PB1; // PWM5 channel B complementary
+    pub const GPIO_PWM0NB7: GPIO_PIN_TYPE = GPIO_PB7; // PWM0 channel B complementary
+    pub const GPIO_PWM0C0: GPIO_PIN_TYPE = GPIO_PC0; // PWM0 channel C
+    pub const GPIO_PWM1NC1: GPIO_PIN_TYPE = GPIO_PC1; // PWM1 channel C complementary
+    pub const GPIO_PWM1NC2: GPIO_PIN_TYPE = GPIO_PC2; // PWM1 channel C complementary
+    pub const GPIO_PWM1C3: GPIO_PIN_TYPE = GPIO_PC3; // PWM1 channel C
+    pub const GPIO_PWM2C4: GPIO_PIN_TYPE = GPIO_PC4; // PWM2 channel C
+    pub const GPIO_PWM2NC5: GPIO_PIN_TYPE = GPIO_PC5; // PWM2 channel C complementary
+    pub const GPIO_PWM3D2: GPIO_PIN_TYPE = GPIO_PD2; // PWM3 channel D
+    pub const GPIO_PWM4D3: GPIO_PIN_TYPE = GPIO_PD3; // PWM4 channel D
+
     // MSPI (Master SPI) interface
-    pub const GPIO_MSDI: GPIO_PIN_TYPE = GPIO_PA2;      // MSPI data in
-    pub const GPIO_MCLK: GPIO_PIN_TYPE = GPIO_PA3;      // MSPI clock
-    pub const GPIO_MSDO: GPIO_PIN_TYPE = GPIO_PB2;      // MSPI data out
-    pub const GPIO_MSCN: GPIO_PIN_TYPE = GPIO_PB3;      // MSPI chip select
-    
+    pub const GPIO_MSDI: GPIO_PIN_TYPE = GPIO_PA2; // MSPI data in
+    pub const GPIO_MCLK: GPIO_PIN_TYPE = GPIO_PA3; // MSPI clock
+    pub const GPIO_MSDO: GPIO_PIN_TYPE = GPIO_PB2; // MSPI data out
+    pub const GPIO_MSCN: GPIO_PIN_TYPE = GPIO_PB3; // MSPI chip select
+
     // USB interface
-    pub const GPIO_DM: GPIO_PIN_TYPE = GPIO_PB5;        // USB D-
-    pub const GPIO_DP: GPIO_PIN_TYPE = GPIO_PB6;        // USB D+
-    
+    pub const GPIO_DM: GPIO_PIN_TYPE = GPIO_PB5; // USB D-
+    pub const GPIO_DP: GPIO_PIN_TYPE = GPIO_PB6; // USB D+
+
     // UART interface
-    pub const GPIO_UTX: GPIO_PIN_TYPE = GPIO_PC6;       // UART TX
-    pub const GPIO_URX: GPIO_PIN_TYPE = GPIO_PC7;       // UART RX
-    
+    pub const GPIO_UTX: GPIO_PIN_TYPE = GPIO_PC6; // UART TX
+    pub const GPIO_URX: GPIO_PIN_TYPE = GPIO_PC7; // UART RX
+
     // I2C/SPI interface
-    pub const GPIO_CN: GPIO_PIN_TYPE = GPIO_PE6;        // I2C/SPI chip select
-    pub const GPIO_DI: GPIO_PIN_TYPE = GPIO_PE7;        // I2C/SPI data in
-    pub const GPIO_DO: GPIO_PIN_TYPE = GPIO_PF0;        // I2C/SPI data out
-    pub const GPIO_CK: GPIO_PIN_TYPE = GPIO_PF1;        // I2C/SPI clock
-    
+    pub const GPIO_CN: GPIO_PIN_TYPE = GPIO_PE6; // I2C/SPI chip select
+    pub const GPIO_DI: GPIO_PIN_TYPE = GPIO_PE7; // I2C/SPI data in
+    pub const GPIO_DO: GPIO_PIN_TYPE = GPIO_PF0; // I2C/SPI data out
+    pub const GPIO_CK: GPIO_PIN_TYPE = GPIO_PF1; // I2C/SPI clock
+
     // Digital microphone interface
-    pub const GPIO_DMIC_CK: GPIO_PIN_TYPE = GPIO_PE1;   // DMIC clock
-    pub const GPIO_DMIC_DI: GPIO_PIN_TYPE = GPIO_PE2;   // DMIC data in
-    
+    pub const GPIO_DMIC_CK: GPIO_PIN_TYPE = GPIO_PE1; // DMIC clock
+    pub const GPIO_DMIC_DI: GPIO_PIN_TYPE = GPIO_PE2; // DMIC data in
+
     // General purpose (GP) pins
     pub const GPIO_GP0: GPIO_PIN_TYPE = GPIO_PB7;
     pub const GPIO_GP1: GPIO_PIN_TYPE = GPIO_PC1;
@@ -518,7 +518,7 @@ impl GPIO_PIN_TYPE {
 /// - 100kΩ pull-down (3)
 ///
 /// # Notes
-/// 
+///
 /// - Register bits 8-15: Input enable flags
 /// - Register bits 16-23: Output enable flags (inverted logic)
 /// - Register bits 24-31: Initial output values
@@ -917,22 +917,22 @@ pub fn gpio_init() {
 pub fn gpio_set_func(pin: u32, func: u8) {
     // Extract the bit position from the pin identifier (lower 8 bits)
     let bit: u8 = (pin & 0xff) as u8;
-    
+
     // Calculate register offset based on port number
     let reg_offset = (pin >> 8) << 3;
-    
+
     // Read current register value
     let current_value = read_reg_gpio_gpio_func(reg_offset);
-    
+
     // Prepare the new register value based on the function type
     let new_value = if func == AS_GPIO {
         // For GPIO function, set the bit in the function register
-        current_value | bit  // Set bit to enable GPIO function
+        current_value | bit // Set bit to enable GPIO function
     } else {
         // For peripheral function, clear the bit in the function register
-        current_value & !bit  // Clear bit to enable peripheral function
+        current_value & !bit // Clear bit to enable peripheral function
     };
-    
+
     // Write the new value to the register
     write_reg_gpio_gpio_func(new_value, reg_offset);
 }
@@ -965,21 +965,21 @@ pub fn gpio_set_func(pin: u32, func: u8) {
 pub fn gpio_set_output_en(pin: u32, value: u32) {
     // Extract the bit position from the pin identifier
     let bit = (pin & 0xff) as u8;
-    
+
     // Calculate the register offset based on port number
     let reg_offset = (pin >> 8) << 3;
-    
+
     // Read current register value
     let mut val = read_reg_gpio_oen(reg_offset);
-    
+
     if value == 0 {
         // Disable output: Set the bit (inverted logic)
-        BM_SET!(val, bit);  // Set bit to disable output (inverted logic)
+        BM_SET!(val, bit); // Set bit to disable output (inverted logic)
     } else {
         // Enable output: Clear the bit (inverted logic)
-        BM_CLR!(val, bit);  // Clear bit to enable output (inverted logic)
+        BM_CLR!(val, bit); // Clear bit to enable output (inverted logic)
     }
-    
+
     write_reg_gpio_oen(val, reg_offset);
 }
 
@@ -1013,21 +1013,21 @@ pub fn gpio_set_output_en(pin: u32, value: u32) {
 pub fn gpio_set_input_en(pin: u32, value: u32) {
     // Extract the bit position from the pin identifier
     let bit = (pin & 0xff) as u8;
-    
+
     // Calculate the register offset based on port number
     let reg_offset = (pin >> 8) << 3;
-    
+
     // Read current register value
     let mut val = read_reg_gpio_oen(reg_offset);
-    
+
     if value != 0 {
         // Enable input
-        BM_SET!(val, bit);  // Set bit to enable input
+        BM_SET!(val, bit); // Set bit to enable input
     } else {
         // Disable input
-        BM_CLR!(val, bit);  // Clear bit to disable input
+        BM_CLR!(val, bit); // Clear bit to disable input
     }
-    
+
     write_reg_gpio_oen(val, reg_offset);
 }
 
@@ -1059,30 +1059,30 @@ pub fn gpio_set_input_en(pin: u32, value: u32) {
 pub fn gpio_write(pin: u32, value: u32) {
     // Extract the bit position from the pin identifier
     let bit = (pin & 0xff) as u8;
-    
+
     // Calculate the register offset based on port number
     let reg_offset = (pin >> 8) << 3;
-    
+
     // Read current register value
     let mut val = read_reg_gpio_out(reg_offset);
-    
+
     if value != 0 {
         // Set pin to high (1)
-        BM_SET!(val, bit);  // Set bit to drive the pin high
+        BM_SET!(val, bit); // Set bit to drive the pin high
     } else {
         // Set pin to low (0)
-        BM_CLR!(val, bit);  // Clear bit to drive the pin low
+        BM_CLR!(val, bit); // Clear bit to drive the pin low
     }
-    
+
     write_reg_gpio_out(val, reg_offset);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{ 
+    use crate::sdk::mcu::register::{
         mock_read_reg_gpio_gpio_func, mock_read_reg_gpio_oen, mock_read_reg_gpio_out,
-        mock_write_reg_gpio_gpio_func, mock_write_reg_gpio_oen, mock_write_reg_gpio_out
+        mock_write_reg_gpio_gpio_func, mock_write_reg_gpio_oen, mock_write_reg_gpio_out,
     };
 
     /// Tests setting a GPIO pin to GPIO function mode.
@@ -1103,11 +1103,11 @@ mod tests {
     fn test_gpio_set_func_as_gpio() {
         // Setup initial register value - PA0 is port A (offset 0)
         mock_read_reg_gpio_gpio_func(0).returns(0x00);
-        mock_write_reg_gpio_gpio_func(0x01, 0).returns(()); 
-        
+        mock_write_reg_gpio_gpio_func(0x01, 0).returns(());
+
         // Call the function (set PA0 as GPIO)
         gpio_set_func(GPIO_PA0 as u32, AS_GPIO);
-        
+
         // Verify function register was written with bit 1 set (PA0's bit mask is 0x01)
         mock_write_reg_gpio_gpio_func(0x01, 0).assert_called(1);
     }
@@ -1130,11 +1130,11 @@ mod tests {
     fn test_gpio_set_func_as_peripheral() {
         // Setup initial register value with PA0's bit set (bit mask 0x01)
         mock_read_reg_gpio_gpio_func(0).returns(0x01);
-        mock_write_reg_gpio_gpio_func(0x00, 0).returns(()); 
-        
+        mock_write_reg_gpio_gpio_func(0x00, 0).returns(());
+
         // Call the function (set PA0 as UART)
         gpio_set_func(GPIO_PA0 as u32, AS_UART);
-        
+
         // Verify function register was written with PA0's bit cleared
         mock_write_reg_gpio_gpio_func(0x00, 0).assert_called(1);
     }
@@ -1158,11 +1158,11 @@ mod tests {
         // Port B offset = 8 (calculated from (0x100 >> 8) << 3 = 0x08)
         // PB2's bit mask is 0x04
         mock_read_reg_gpio_gpio_func(8).returns(0x04);
-        mock_write_reg_gpio_gpio_func(0x00, 8).returns(()); 
-        
+        mock_write_reg_gpio_gpio_func(0x00, 8).returns(());
+
         // Call the function (set PB2 as MSPI)
         gpio_set_func(GPIO_PB2 as u32, AS_MSPI);
-        
+
         // Verify function register was written with bit 2 cleared at port B offset
         mock_write_reg_gpio_gpio_func(0x00, 8).assert_called(1);
     }
@@ -1186,11 +1186,11 @@ mod tests {
         // Setup initial register value with all outputs disabled (all 1s)
         // PA3 is port A (offset 0)
         mock_read_reg_gpio_oen(0).returns(0xFF);
-        mock_write_reg_gpio_oen(0xF7, 0).returns(()); 
+        mock_write_reg_gpio_oen(0xF7, 0).returns(());
 
         // Call the function (enable output for PA3)
         gpio_set_output_en(GPIO_PA3 as u32, 1);
-        
+
         // Verify OEN register was written with PA3's bit cleared (bit mask 0x08)
         // Expected: 0xFF with bit 3 cleared = 0xF7
         mock_write_reg_gpio_oen(0xF7, 0).assert_called(1);
@@ -1216,10 +1216,10 @@ mod tests {
         // Port B offset = 8, bit 5 already cleared (enabled)
         mock_read_reg_gpio_oen(8).returns(0xDF);
         mock_write_reg_gpio_oen(0xFF, 8).returns(());
-        
+
         // Call the function (disable output for PB5)
         gpio_set_output_en(GPIO_PB5 as u32, 0);
-        
+
         // Verify OEN register was written with bit 5 set (disable output)
         // Expected: 0xDF with bit 5 set = 0xFF
         mock_write_reg_gpio_oen(0xFF, 8).assert_called(1);
@@ -1245,10 +1245,10 @@ mod tests {
         // Bit 6 initially cleared
         mock_read_reg_gpio_oen(16).returns(0xBF);
         mock_write_reg_gpio_oen(0xFF, 16).returns(());
-        
+
         // Call the function (enable input for PC6)
         gpio_set_input_en(GPIO_PC6 as u32, 1);
-        
+
         // Verify register was written with bit 6 set
         // Expected: 0xBF with bit 6 set = 0xFF
         mock_write_reg_gpio_oen(0xFF, 16).assert_called(1);
@@ -1274,10 +1274,10 @@ mod tests {
         // Bit 2 initially set
         mock_read_reg_gpio_oen(24).returns(0x04);
         mock_write_reg_gpio_oen(0x00, 24).returns(());
-        
+
         // Call the function (disable input for PD2)
         gpio_set_input_en(GPIO_PD2 as u32, 0);
-        
+
         // Verify register was written with bit 2 cleared
         // Expected: 0x04 with bit 2 cleared = 0x00
         mock_write_reg_gpio_oen(0x00, 24).assert_called(1);
@@ -1302,10 +1302,10 @@ mod tests {
         // Setup initial register value with bit 5 cleared
         mock_read_reg_gpio_out(0).returns(0xDF);
         mock_write_reg_gpio_out(0xFF, 0).returns(());
-        
+
         // Call the function (write high to PA5)
         gpio_write(GPIO_PA5 as u32, 1);
-        
+
         // Verify OUT register was written with bit 5 set
         // Expected: 0xDF with bit 5 set = 0xFF
         mock_write_reg_gpio_out(0xFF, 0).assert_called(1);
@@ -1331,10 +1331,10 @@ mod tests {
         // Bit 1 initially set
         mock_read_reg_gpio_out(8).returns(0x02);
         mock_write_reg_gpio_out(0x00, 8).returns(());
-        
+
         // Call the function (write low to PB1)
         gpio_write(GPIO_PB1 as u32, 0);
-        
+
         // Verify OUT register was written with bit 1 cleared
         // Expected: 0x02 with bit 1 cleared = 0x00
         mock_write_reg_gpio_out(0x00, 8).assert_called(1);

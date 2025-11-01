@@ -49,7 +49,7 @@
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::OtaState;
-use crate::state::{OTA_UPDATE_CURRENT_FLASH_ADDRESS, SimplifyLS};
+use crate::state::{SimplifyLS, OTA_UPDATE_CURRENT_FLASH_ADDRESS};
 
 /// Saves OTA firmware data to flash memory with verification.
 ///
@@ -115,24 +115,24 @@ use crate::state::{OTA_UPDATE_CURRENT_FLASH_ADDRESS, SimplifyLS};
 /// Flash memory has limited write/erase cycles (typically 10,000-100,000 cycles).
 /// This function contributes to flash wear and should only be used for legitimate
 /// firmware updates to preserve flash lifetime.
-pub fn rf_ota_save_data(data: &[u8]) -> OtaState
-{
+pub fn rf_ota_save_data(data: &[u8]) -> OtaState {
     // Calculate target flash address: base OTA region + current write offset
     let addr = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + FLASH_ADR_LIGHT_NEW_FW;
-    
+
     // Write the firmware data packet to flash memory
     flash_write_page(addr, data.len() as u32, data.as_ptr());
 
     // Allocate temporary buffer for verification read (16 bytes max packet size)
     let mut tmp = [0u8; 0x10];
-    
+
     // Read back the written data for verification
     flash_read_page(addr, data.len() as u32, tmp.as_mut_ptr());
 
     // Verify data integrity by comparing original data with read-back data
     if data == &tmp[..data.len()] {
         // Write verification successful - advance write pointer for next packet
-        OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + data.len() as u32);
+        OTA_UPDATE_CURRENT_FLASH_ADDRESS
+            .set(OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + data.len() as u32);
         return OtaState::Continue;
     } else {
         // Write verification failed - return error to abort update
@@ -144,15 +144,15 @@ pub fn rf_ota_save_data(data: &[u8]) -> OtaState
 mod tests {
     use super::*;
     use mry::Any;
-    
+
     // Import mock functions from their original modules
-    use crate::sdk::drivers::flash::{mock_flash_write_page, mock_flash_read_page};
-    
+    use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
+
     /// Helper function to reset global state for test isolation
     fn reset_ota_state() {
         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
     }
-    
+
     // ================================================================================
     // Tests for rf_ota_save_data function
     // ================================================================================
@@ -167,23 +167,26 @@ mod tests {
         // Setup mocks for basic flash operations
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         let test_data = [0x01, 0x02, 0x03, 0x04];
         let initial_address = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get();
-        
+
         // Call the function under test
         let result = rf_ota_save_data(&test_data);
-        
+
         // Verify flash operations were called with correct parameters
         let expected_addr = initial_address + FLASH_ADR_LIGHT_NEW_FW;
-        mock_flash_write_page(expected_addr, test_data.len() as u32, test_data.as_ptr()).assert_called(1);
+        mock_flash_write_page(expected_addr, test_data.len() as u32, test_data.as_ptr())
+            .assert_called(1);
         mock_flash_read_page(expected_addr, test_data.len() as u32, Any).assert_called(1);
-        
+
         // Function should return some valid OtaState (since mocks don't modify buffers)
-        assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                "Function should return a valid OtaState");
+        assert!(
+            matches!(result, OtaState::Continue | OtaState::Error),
+            "Function should return a valid OtaState"
+        );
     }
 
     /// Tests rf_ota_save_data with empty data.
@@ -195,22 +198,26 @@ mod tests {
         // Setup mocks for empty data operations
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         let empty_data: &[u8] = &[];
         let initial_address = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get();
-        
+
         let result = rf_ota_save_data(empty_data);
-        
+
         // Verify operations were called with zero length
         let expected_addr = initial_address + FLASH_ADR_LIGHT_NEW_FW;
         mock_flash_write_page(expected_addr, 0, empty_data.as_ptr()).assert_called(1);
         mock_flash_read_page(expected_addr, 0, Any).assert_called(1);
-        
+
         // Empty data should succeed since verification will compare empty slices
-        assert_eq!(result, OtaState::Continue, "Should return Continue for empty data");
-        
+        assert_eq!(
+            result,
+            OtaState::Continue,
+            "Should return Continue for empty data"
+        );
+
         // Flash address should advance by the length of data (which is 0 for empty data)
         assert_eq!(
             OTA_UPDATE_CURRENT_FLASH_ADDRESS.get(),
@@ -228,22 +235,24 @@ mod tests {
         // Setup mocks for single byte operation
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         let single_byte = [0x42];
         let initial_address = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get();
-        
+
         let result = rf_ota_save_data(&single_byte);
-        
+
         // Verify operations called with length 1
         let expected_addr = initial_address + FLASH_ADR_LIGHT_NEW_FW;
         mock_flash_write_page(expected_addr, 1, single_byte.as_ptr()).assert_called(1);
         mock_flash_read_page(expected_addr, 1, Any).assert_called(1);
-        
+
         // Function should execute successfully
-        assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                "Function should return a valid OtaState for single byte");
+        assert!(
+            matches!(result, OtaState::Continue | OtaState::Error),
+            "Function should return a valid OtaState for single byte"
+        );
     }
 
     /// Tests rf_ota_save_data with maximum typical packet size.
@@ -255,23 +264,26 @@ mod tests {
         // Setup mocks for 16-byte packet (typical maximum)
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         // Create 16-byte test packet with sequential pattern
         let max_packet: Vec<u8> = (0..16).map(|i| (i & 0xFF) as u8).collect();
         let initial_address = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get();
-        
+
         let result = rf_ota_save_data(&max_packet);
-        
+
         // Verify operations called with correct length
         let expected_addr = initial_address + FLASH_ADR_LIGHT_NEW_FW;
-        mock_flash_write_page(expected_addr, max_packet.len() as u32, max_packet.as_ptr()).assert_called(1);
+        mock_flash_write_page(expected_addr, max_packet.len() as u32, max_packet.as_ptr())
+            .assert_called(1);
         mock_flash_read_page(expected_addr, max_packet.len() as u32, Any).assert_called(1);
-        
+
         // Function should execute successfully
-        assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                "Function should return a valid OtaState for max packet size");
+        assert!(
+            matches!(result, OtaState::Continue | OtaState::Error),
+            "Function should return a valid OtaState for max packet size"
+        );
     }
 
     /// Tests rf_ota_save_data with different flash addresses.
@@ -284,25 +296,32 @@ mod tests {
         // Setup mocks
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         // Set a specific offset for testing address calculation
         let test_offset = 0x1000;
         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(test_offset);
-        
+
         let test_data = [0xAA, 0xBB];
-        
+
         let result = rf_ota_save_data(&test_data);
-        
+
         // Verify address calculation: offset + base address
         let expected_flash_addr = test_offset + FLASH_ADR_LIGHT_NEW_FW;
-        mock_flash_write_page(expected_flash_addr, test_data.len() as u32, test_data.as_ptr()).assert_called(1);
+        mock_flash_write_page(
+            expected_flash_addr,
+            test_data.len() as u32,
+            test_data.as_ptr(),
+        )
+        .assert_called(1);
         mock_flash_read_page(expected_flash_addr, test_data.len() as u32, Any).assert_called(1);
-        
+
         // Function should execute successfully
-        assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                "Function should return a valid OtaState with custom offset");
+        assert!(
+            matches!(result, OtaState::Continue | OtaState::Error),
+            "Function should return a valid OtaState with custom offset"
+        );
     }
 
     /// Tests rf_ota_save_data operation sequence.
@@ -313,42 +332,62 @@ mod tests {
     #[mry::lock(flash_write_page, flash_read_page)]
     fn test_rf_ota_save_data_operation_sequence() {
         use core::sync::atomic::{AtomicU32, Ordering};
-        
+
         // Track operation sequence using atomic counters
         static WRITE_CALL_COUNT: AtomicU32 = AtomicU32::new(0);
         static READ_CALL_COUNT: AtomicU32 = AtomicU32::new(0);
-        
+
         // Reset counters
         WRITE_CALL_COUNT.store(0, Ordering::Relaxed);
         READ_CALL_COUNT.store(0, Ordering::Relaxed);
-        
+
         // Setup mocks to track call order
         mock_flash_write_page(Any, Any, Any).returns_with(|_addr, _len, _buf| {
             let count = WRITE_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
             // Verify write is called before any reads
-            assert_eq!(READ_CALL_COUNT.load(Ordering::Relaxed), count, 
-                      "Write {} should occur before read {}", count, count);
+            assert_eq!(
+                READ_CALL_COUNT.load(Ordering::Relaxed),
+                count,
+                "Write {} should occur before read {}",
+                count,
+                count
+            );
         });
-        
+
         mock_flash_read_page(Any, Any, Any).returns_with(|_addr, _len, _buf| {
             let count = READ_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
             // Verify write was called first
-            assert_eq!(WRITE_CALL_COUNT.load(Ordering::Relaxed), count + 1, 
-                      "Read {} should occur after write {}", count, count);
+            assert_eq!(
+                WRITE_CALL_COUNT.load(Ordering::Relaxed),
+                count + 1,
+                "Read {} should occur after write {}",
+                count,
+                count
+            );
         });
-        
+
         reset_ota_state();
-        
+
         let test_data = [0x77, 0x77, 0x77];
         let result = rf_ota_save_data(&test_data);
-        
+
         // Verify both operations were called exactly once in correct order
-        assert_eq!(WRITE_CALL_COUNT.load(Ordering::Relaxed), 1, "Write should be called exactly once");
-        assert_eq!(READ_CALL_COUNT.load(Ordering::Relaxed), 1, "Read should be called exactly once");
-        
+        assert_eq!(
+            WRITE_CALL_COUNT.load(Ordering::Relaxed),
+            1,
+            "Write should be called exactly once"
+        );
+        assert_eq!(
+            READ_CALL_COUNT.load(Ordering::Relaxed),
+            1,
+            "Read should be called exactly once"
+        );
+
         // Function should execute successfully
-        assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                "Function should return a valid OtaState");
+        assert!(
+            matches!(result, OtaState::Continue | OtaState::Error),
+            "Function should return a valid OtaState"
+        );
     }
 
     /// Tests rf_ota_save_data with multiple sequential calls.
@@ -361,26 +400,29 @@ mod tests {
         // Setup mocks that will return Error (since we can't easily mock buffer verification)
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         let packets = [
             vec![0x00, 0x01, 0x02], // First packet (3 bytes)
-            vec![0x03, 0x04],       // Second packet (2 bytes)  
+            vec![0x03, 0x04],       // Second packet (2 bytes)
             vec![0x05],             // Third packet (1 byte)
         ];
-        
+
         let initial_address = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get();
-        
+
         // Process each packet sequentially
         for (i, packet) in packets.iter().enumerate() {
             let result = rf_ota_save_data(packet);
-            
+
             // Function should execute without crashing
-            assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                    "Packet {} should return valid OtaState", i);
+            assert!(
+                matches!(result, OtaState::Continue | OtaState::Error),
+                "Packet {} should return valid OtaState",
+                i
+            );
         }
-        
+
         // Verify correct number of operations (one write and one read per packet)
         mock_flash_write_page(Any, Any, Any).assert_called(packets.len());
         mock_flash_read_page(Any, Any, Any).assert_called(packets.len());
@@ -396,24 +438,27 @@ mod tests {
         // Setup mocks for pattern testing
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         let test_patterns = [
             vec![0x00, 0x00, 0x00, 0x00], // All zeros
             vec![0xFF, 0xFF, 0xFF, 0xFF], // All ones
             vec![0xAA, 0x55, 0xAA, 0x55], // Alternating pattern
             vec![0x00, 0xFF, 0x00, 0xFF], // Alternating extreme values
         ];
-        
+
         for (i, pattern) in test_patterns.iter().enumerate() {
             let result = rf_ota_save_data(pattern);
-            
+
             // Each pattern should be processed without crashing
-            assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                    "Pattern {} should return valid OtaState", i);
+            assert!(
+                matches!(result, OtaState::Continue | OtaState::Error),
+                "Pattern {} should return valid OtaState",
+                i
+            );
         }
-        
+
         // Verify all patterns were processed
         mock_flash_write_page(Any, Any, Any).assert_called(test_patterns.len());
         mock_flash_read_page(Any, Any, Any).assert_called(test_patterns.len());
@@ -429,23 +474,26 @@ mod tests {
         // Setup mocks to test the 16-byte temporary buffer handling
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_flash_read_page(Any, Any, Any).returns(());
-        
+
         reset_ota_state();
-        
+
         // Test sizes around the 16-byte buffer boundary
         let test_sizes = [1, 8, 15, 16]; // Various sizes up to buffer limit
-        
+
         for &size in &test_sizes {
             // Create test data
             let test_data: Vec<u8> = (0..size).map(|i| (0x80 | i) as u8).collect();
-            
+
             let result = rf_ota_save_data(&test_data);
-            
+
             // Verify function executes for all buffer sizes
-            assert!(matches!(result, OtaState::Continue | OtaState::Error), 
-                    "Size {} should return valid OtaState", size);
+            assert!(
+                matches!(result, OtaState::Continue | OtaState::Error),
+                "Size {} should return valid OtaState",
+                size
+            );
         }
-        
+
         // Verify all sizes were processed
         mock_flash_write_page(Any, Any, Any).assert_called(test_sizes.len());
         mock_flash_read_page(Any, Any, Any).assert_called(test_sizes.len());

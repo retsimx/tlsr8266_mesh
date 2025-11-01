@@ -2,14 +2,14 @@
 //!
 //! This module provides low-level functions for reading from and writing to
 //! analog control registers on the Telink TLSR8266F512 SoC. These operations
-//! are critical for configuring various hardware components including 
+//! are critical for configuring various hardware components including
 //! RF transceiver parameters, power management, and clock settings.
 
-use critical_section;
 use crate::sdk::mcu::register::{
     read_reg_ana_ctrl, read_reg_ana_data, write_reg_ana_addr, write_reg_ana_ctrl,
     write_reg_ana_data, FLD_ANA,
 };
+use critical_section;
 
 /// Waits until analog register operations are complete.
 ///
@@ -57,20 +57,20 @@ pub fn analog_read(addr: u8) -> u8 {
     critical_section::with(|_| {
         // 1. Set the address register to the target analog register
         write_reg_ana_addr(addr);
-        
+
         // 2. Write control register to start read operation
         //    START bit initiates the operation
         //    RSV bit must be set during reads
         write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RSV).bits());
         //   Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RSV) << 16) | addr;"
         //   This will fail because of time sequence and more over size is bigger
-        
+
         // 3. Wait for the analog operation to complete
         analog_wait();
-        
+
         // 4. Read the data from the data register
         let data = read_reg_ana_data();
-        
+
         // 5. Clear control register to finish operation
         write_reg_ana_ctrl(0); // finish
 
@@ -101,10 +101,10 @@ pub fn analog_write(addr: u8, v: u8) {
     critical_section::with(|_| {
         // 1. Set the address register to the target analog register
         write_reg_ana_addr(addr);
-        
+
         // 2. Write the data to the data register
         write_reg_ana_data(v);
-        
+
         // 3. Write control register to start write operation
         //    START bit initiates the operation
         //    RW bit must be set during writes (1=write, 0=read)
@@ -112,10 +112,10 @@ pub fn analog_write(addr: u8, v: u8) {
 
         //	 Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RW) << 16) | (v << 8) | addr;"
         //   This will fail because of time sequence and more over size is bigger
-        
+
         // 4. Wait for the analog operation to complete
         analog_wait();
-        
+
         // 5. Clear control register to finish operation
         write_reg_ana_ctrl(0); // finish
     });
@@ -124,12 +124,11 @@ pub fn analog_write(addr: u8, v: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Import the mock functions from register module
     use crate::sdk::mcu::register::{
-        mock_read_reg_ana_ctrl, mock_read_reg_ana_data, 
-        mock_write_reg_ana_addr, mock_write_reg_ana_ctrl,
-        mock_write_reg_ana_data
+        mock_read_reg_ana_ctrl, mock_read_reg_ana_data, mock_write_reg_ana_addr,
+        mock_write_reg_ana_ctrl, mock_write_reg_ana_data,
     };
 
     /// Tests analog_wait function for proper busy bit polling behavior.
@@ -155,7 +154,7 @@ mod tests {
     fn test_analog_wait() {
         // Create counter to track number of calls and simulate busy flag clearing
         let mut call_count = 0;
-        
+
         // Mock behavior: Return busy flag (bit 1 set) for first 3 calls,
         // then return not busy (bit 1 clear)
         mock_read_reg_ana_ctrl().returns_with(move || {
@@ -166,10 +165,10 @@ mod tests {
                 0 // Return busy flag clear
             }
         });
-        
+
         // Call the function being tested
         analog_wait();
-        
+
         // Verify function polled register until busy flag cleared
         mock_read_reg_ana_ctrl().assert_called(3);
     }
@@ -202,32 +201,32 @@ mod tests {
         // Setup test data
         let test_addr: u8 = 0x42;
         let expected_data: u8 = 0xAB;
-        
+
         // Setup mock behavior for register operations
         mock_write_reg_ana_addr(test_addr).returns(());
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RSV).bits()).returns(());
         mock_write_reg_ana_ctrl(0).returns(());
         mock_analog_wait().returns(());
         mock_read_reg_ana_data().returns(expected_data);
-        
+
         // Call the function being tested
         let result = analog_read(test_addr);
-        
+
         // Verify correct address was set
         mock_write_reg_ana_addr(test_addr).assert_called(1);
-        
+
         // Verify correct control bits were set for read operation
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RSV).bits()).assert_called(1);
-        
+
         // Verify analog_wait was called to wait for operation completion
         mock_analog_wait().assert_called(1);
-        
+
         // Verify data register was read exactly once
         mock_read_reg_ana_data().assert_called(1);
-        
+
         // Verify control register was cleared after operation
         mock_write_reg_ana_ctrl(0).assert_called(1);
-        
+
         // Verify correct data was returned
         assert_eq!(result, expected_data);
     }
@@ -255,38 +254,43 @@ mod tests {
     /// * Verifies critical timing sequence and register operations
     /// * Checks that control bits are set correctly for write operation
     #[test]
-    #[mry::lock(write_reg_ana_addr, write_reg_ana_data, write_reg_ana_ctrl, analog_wait)]
+    #[mry::lock(
+        write_reg_ana_addr,
+        write_reg_ana_data,
+        write_reg_ana_ctrl,
+        analog_wait
+    )]
     fn test_analog_write() {
         // Setup test data
         let test_addr: u8 = 0x42;
         let test_value: u8 = 0xCD;
-        
+
         // Setup mock behavior for register operations
         mock_write_reg_ana_addr(test_addr).returns(());
         mock_write_reg_ana_data(test_value).returns(());
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RW).bits()).returns(());
         mock_write_reg_ana_ctrl(0).returns(());
         mock_analog_wait().returns(());
-        
+
         // Call the function being tested
         analog_write(test_addr, test_value);
-        
+
         // Verify correct address was set
         mock_write_reg_ana_addr(test_addr).assert_called(1);
-        
+
         // Verify data was written to data register
         mock_write_reg_ana_data(test_value).assert_called(1);
-        
+
         // Verify correct control bits were set for write operation
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RW).bits()).assert_called(1);
-        
+
         // Verify analog_wait was called to wait for operation completion
         mock_analog_wait().assert_called(1);
-        
+
         // Verify control register was cleared after operation
         mock_write_reg_ana_ctrl(0).assert_called(1);
     }
-    
+
     /// Tests analog_read function behavior with critical_section.
     ///
     /// This test verifies that analog_read correctly:
@@ -304,24 +308,24 @@ mod tests {
         // Setup test data
         let test_addr: u8 = 0x55;
         let expected_data: u8 = 0x99;
-        
+
         // Setup mock behavior for register operations
         mock_write_reg_ana_addr(test_addr).returns(());
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RSV).bits()).returns(());
         mock_write_reg_ana_ctrl(0).returns(());
         mock_analog_wait().returns(());
         mock_read_reg_ana_data().returns(expected_data);
-        
+
         // Call the function being tested
         let result = analog_read(test_addr);
-        
+
         // Verify correct result
         assert_eq!(result, expected_data);
-        
+
         // All other verifications are the same as test_analog_read
         // This test is primarily to ensure the critical_section is being used
     }
-    
+
     /// Tests analog_write function behavior with critical_section.
     ///
     /// This test verifies that analog_write correctly:
@@ -334,22 +338,27 @@ mod tests {
     ///   uses critical_section, as we can't directly test the critical_section
     ///   behavior in unit tests
     #[test]
-    #[mry::lock(write_reg_ana_addr, write_reg_ana_data, write_reg_ana_ctrl, analog_wait)]
+    #[mry::lock(
+        write_reg_ana_addr,
+        write_reg_ana_data,
+        write_reg_ana_ctrl,
+        analog_wait
+    )]
     fn test_analog_write_critical_section() {
         // Setup test data
         let test_addr: u8 = 0x66;
         let test_value: u8 = 0x88;
-        
+
         // Setup mock behavior for register operations
         mock_write_reg_ana_addr(test_addr).returns(());
         mock_write_reg_ana_data(test_value).returns(());
         mock_write_reg_ana_ctrl((FLD_ANA::START | FLD_ANA::RW).bits()).returns(());
         mock_write_reg_ana_ctrl(0).returns(());
         mock_analog_wait().returns(());
-        
+
         // Call the function being tested
         analog_write(test_addr, test_value);
-        
+
         // All verifications are the same as test_analog_write
         // This test is primarily to ensure the critical_section is being used
     }

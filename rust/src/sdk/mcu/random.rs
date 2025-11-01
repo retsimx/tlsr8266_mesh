@@ -37,7 +37,7 @@ pub fn rand() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Import mocked versions of the functions from their original modules
     use crate::sdk::mcu::clock::mock_clock_time;
     use crate::sdk::mcu::register::mock_read_reg_rnd_number;
@@ -65,18 +65,21 @@ mod tests {
     #[mry::lock(clock_time, read_reg_rnd_number)]
     fn test_rand_basic() {
         // Setup mock responses with fixed values for deterministic testing
-        mock_clock_time().returns(0x1234);  // Mock system time
-        mock_read_reg_rnd_number().returns(0xABCD);  // Mock hardware RNG
-        
+        mock_clock_time().returns(0x1234); // Mock system time
+        mock_read_reg_rnd_number().returns(0xABCD); // Mock hardware RNG
+
         // Calculate expected result: time (truncated to 16 bits) XOR hardware RNG
         let expected = (0x1234 as u16) ^ 0xABCD;
-        
+
         // Call the function we're testing
         let result = rand();
-        
+
         // Verify result matches expected XOR combination
-        assert_eq!(result, expected, "The random value should be the XOR of clock time and hardware RNG");
-        
+        assert_eq!(
+            result, expected,
+            "The random value should be the XOR of clock time and hardware RNG"
+        );
+
         // Verify each dependency was called exactly once
         mock_clock_time().assert_called(1);
         mock_read_reg_rnd_number().assert_called(1);
@@ -116,14 +119,14 @@ mod tests {
             // Mixed values
             (0x1234, 0x5678, 0x1234 ^ 0x5678),
             // Large clock_time value (truncated to 16 bits)
-            (0x12345678, 0xABCD, (0x5678 ^ 0xABCD))
+            (0x12345678, 0xABCD, (0x5678 ^ 0xABCD)),
         ];
-        
+
         // Create vectors to hold the test values
         let time_values: Vec<u32> = test_cases.iter().map(|&(t, _, _)| t).collect();
         let rng_values: Vec<u16> = test_cases.iter().map(|&(_, r, _)| r).collect();
         let expected_results: Vec<u16> = test_cases.iter().map(|&(_, _, e)| e).collect();
-       
+
         let time_values_copy = time_values.clone();
         let rng_values_copy = rng_values.clone();
 
@@ -134,28 +137,28 @@ mod tests {
             time_index += 1;
             value
         });
-        
+
         let mut rng_index = 0;
         mock_read_reg_rnd_number().returns_with(move || {
             let value = rng_values_copy[rng_index];
             rng_index += 1;
             value
         });
-        
+
         // Run through all test cases
         for (i, expected_result) in expected_results.iter().enumerate() {
             // Call function under test
             let result = rand();
-            
+
             // Verify correct XOR operation
             assert_eq!(
-                result, 
-                *expected_result, 
+                result,
+                *expected_result,
                 "Test case {}: For clock_time()=0x{:X} and RNG=0x{:X}, expected 0x{:X} but got 0x{:X}",
                 i, time_values[i], rng_values[i], expected_result, result
             );
         }
-        
+
         // Verify each source function was called the correct number of times
         mock_clock_time().assert_called(test_cases.len());
         mock_read_reg_rnd_number().assert_called(test_cases.len());
@@ -184,40 +187,40 @@ mod tests {
     fn test_rand_distribution() {
         // Setup simulated time progression
         let mut simulated_time = 0u32;
-        
+
         // Simulate changing clock time with a closure
         mock_clock_time().returns_with(move || {
             let current_time = simulated_time;
-            simulated_time += 1;  // Increment for next call
+            simulated_time += 1; // Increment for next call
             current_time
         });
-        
+
         // Simulate varying hardware RNG patterns
         let rng_patterns = [0x1234, 0xAAAA, 0x5555, 0xFFFF, 0x0000, 0x9876];
         let mut rng_index = 0;
-        
+
         mock_read_reg_rnd_number().returns_with(move || {
             let value = rng_patterns[rng_index % rng_patterns.len()];
             rng_index += 1;
             value
         });
-        
+
         // Generate a set of random numbers
         const SAMPLE_SIZE: usize = 100;
         let mut random_values = Vec::with_capacity(SAMPLE_SIZE);
-        
+
         for _ in 0..SAMPLE_SIZE {
             random_values.push(rand());
         }
-        
+
         // Verify expected call counts
         mock_clock_time().assert_called(SAMPLE_SIZE);
         mock_read_reg_rnd_number().assert_called(SAMPLE_SIZE);
-        
+
         // Basic distribution test - check for variance in the output
         // Count occurrences of set bits in specific positions
         let mut bit_counts = [0; 16];
-        
+
         for value in &random_values {
             for bit in 0..16 {
                 if (value & (1 << bit)) != 0 {
@@ -225,7 +228,7 @@ mod tests {
                 }
             }
         }
-        
+
         // Verify reasonable distribution (not all bits are always 0 or always 1)
         // Each bit should be set in some values and clear in others
         for (bit_pos, &count) in bit_counts.iter().enumerate() {
@@ -236,9 +239,12 @@ mod tests {
                 if count == 0 { 0 } else { 1 }
             );
         }
-        
+
         // Additional check: verify we have a good variety of values
-        let unique_values = random_values.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_values = random_values
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert!(
             unique_values > SAMPLE_SIZE / 2,
             "Expected more unique random values, got only {}/{}",
@@ -271,13 +277,14 @@ mod tests {
         // Create sequences of time and RNG values to simulate a calling pattern
         let time_sequence = [0x0001, 0x0002, 0x0003, 0x0004, 0x0005];
         let rng_sequence = [0xA000, 0xB000, 0xC000, 0xD000, 0xE000];
-        
+
         // Pre-calculate expected results
-        let expected_results: Vec<u16> = time_sequence.iter()
+        let expected_results: Vec<u16> = time_sequence
+            .iter()
             .zip(rng_sequence.iter())
             .map(|(&t, &r)| (t as u16) ^ r)
             .collect();
-        
+
         // Setup mock with sequences
         let mut time_index = 0;
         mock_clock_time().returns_with(move || {
@@ -285,24 +292,23 @@ mod tests {
             time_index = (time_index + 1) % time_sequence.len();
             value as u32
         });
-        
+
         let mut rng_index = 0;
         mock_read_reg_rnd_number().returns_with(move || {
             let value = rng_sequence[rng_index];
             rng_index = (rng_index + 1) % rng_sequence.len();
             value
         });
-        
+
         // Generate sequence of random numbers and verify against expected results
         for expected in &expected_results {
             let result = rand();
             assert_eq!(
-                result, 
-                *expected, 
+                result, *expected,
                 "Random value does not match expected pattern"
             );
         }
-        
+
         // Verify correct number of calls to source functions
         mock_clock_time().assert_called(expected_results.len());
         mock_read_reg_rnd_number().assert_called(expected_results.len());

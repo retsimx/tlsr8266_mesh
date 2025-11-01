@@ -4,21 +4,27 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::app;
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
-use crate::sdk::ble_app::light_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
-use crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop;
 use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
+use crate::sdk::ble_app::light_ll::packet_processing::{
+    is_add_packet_buf_ready, rf_link_add_tx_packet,
+};
+use crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop;
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE};
+use crate::sdk::drivers::flash::{
+    flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE,
+};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::gpio::{AS_GPIO, gpio_set_func, gpio_set_output_en, gpio_write};
-use crate::sdk::mcu::register::{FldPwdnCtrl, write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl};
+use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
+use crate::sdk::mcu::irq_i::irq_disable;
+use crate::sdk::mcu::register::{
+    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
+};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{Packet, PacketAttData};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::{*};
-use crate::sdk::mcu::irq_i::irq_disable;
+use crate::state::*;
 
 #[cfg_attr(test, mry::mry)]
 pub struct OtaManager {
@@ -123,11 +129,7 @@ impl OtaManager {
     pub fn is_ota_area_valid(&self) -> bool {
         let mut buf: [u8; 4] = [0; 4];
         for i in 0..OtaManager::ERASE_SECTORS_FOR_OTA {
-            flash_read_page(
-                FLASH_ADR_LIGHT_NEW_FW + i * 0x1000,
-                4,
-                buf.as_mut_ptr(),
-            );
+            flash_read_page(FLASH_ADR_LIGHT_NEW_FW + i * 0x1000, 4, buf.as_mut_ptr());
             let tmp = buf[0] as u32
                 | (buf[1] as u32) << 8
                 | (buf[2] as u32) << 16
@@ -143,20 +145,20 @@ impl OtaManager {
     pub fn erase_ota_data(&self) {
         for i in 0..OtaManager::ERASE_SECTORS_FOR_OTA {
             flash_erase_sector(
-                FLASH_ADR_LIGHT_NEW_FW
-                    + (OtaManager::ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000,
+                FLASH_ADR_LIGHT_NEW_FW + (OtaManager::ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000,
             );
         }
     }
 
     pub fn rf_link_slave_data_ota(&mut self, data: &Packet) {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue
+            || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
+        {
             return;
         }
 
         if !OTA_UPDATE_IN_PROGRESS.get() {
-            if !PAIR_LOGIN_OK.get()
-            {
+            if !PAIR_LOGIN_OK.get() {
                 return;
             }
 
@@ -172,7 +174,10 @@ impl OtaManager {
     }
 
     pub fn rf_mesh_data_ota(&mut self, pkt_data: &[u8], last: bool) -> u16 {
-        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || OTA_UPDATE_IN_PROGRESS.get() || !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+        if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue
+            || OTA_UPDATE_IN_PROGRESS.get()
+            || !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
+        {
             return u16::MAX;
         }
 
@@ -183,7 +188,9 @@ impl OtaManager {
         let index = data.dat[0] as u16 | ((data.dat[1] as u16) << 8);
 
         static LAST_INDEX: AtomicU16 = AtomicU16::new(u16::MAX);
-        if LAST_INDEX.load(Ordering::Relaxed) == u16::MAX || LAST_INDEX.load(Ordering::Relaxed) < index {
+        if LAST_INDEX.load(Ordering::Relaxed) == u16::MAX
+            || LAST_INDEX.load(Ordering::Relaxed) < index
+        {
             LAST_INDEX.store(index, Ordering::Relaxed);
 
             BUFF_RESPONSE.lock()[0] = Packet { att_data: data };
@@ -202,14 +209,21 @@ impl OtaManager {
     }
 
     pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
-        let packet_len = if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() { 8 } else { 16 };
+        let packet_len = if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+            8
+        } else {
+            16
+        };
 
         let mut reset_flag = OtaState::Continue;
         for i in 0..self.slave_ota_data_cache_idx {
             let p = BUFF_RESPONSE.lock()[i];
             let n_data_len = (p.head().l2cap_len - 7) as usize;
 
-            if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() || crc16(&p.att_data().dat[0..n_data_len + 2]) == p.att_data().dat[n_data_len + 2] as u16 | (p.att_data().dat[n_data_len + 3] as u16) << 8
+            if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
+                || crc16(&p.att_data().dat[0..n_data_len + 2])
+                    == p.att_data().dat[n_data_len + 2] as u16
+                        | (p.att_data().dat[n_data_len + 3] as u16) << 8
             {
                 OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS); // refresh timeout
 
@@ -217,7 +231,8 @@ impl OtaManager {
                 if n_data_len == 0 {
                     let mut ota_pkt_total = [0u8; 4];
                     flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 0x18, 4, ota_pkt_total.as_mut_ptr());
-                    let ota_pkt_total = u32::from_le_bytes(ota_pkt_total).div_ceil(packet_len) as u16;
+                    let ota_pkt_total =
+                        u32::from_le_bytes(ota_pkt_total).div_ceil(packet_len) as u16;
                     if ota_pkt_total < 3 {
                         // invalid fw
                         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
@@ -241,15 +256,19 @@ impl OtaManager {
                             self.ota_rcv_last_idx = 0;
                             reset_flag = OtaState::Error;
                         } else {
-                            reset_flag = rf_ota_save_data(&p.att_data().dat[2..2 + packet_len as usize]);
+                            reset_flag =
+                                rf_ota_save_data(&p.att_data().dat[2..2 + packet_len as usize]);
                         }
                     } else if cur_idx == self.ota_rcv_last_idx + 1 {
                         if reset_flag != OtaState::Error {
-                            if OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + packet_len > (OtaManager::FW_SIZE_MAX_K * 1024) {
+                            if OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + packet_len
+                                > (OtaManager::FW_SIZE_MAX_K * 1024)
+                            {
                                 // !is_valid_fw_len()
                                 reset_flag = OtaState::Error;
                             } else {
-                                reset_flag = rf_ota_save_data(&p.att_data().dat[2..2 + packet_len as usize]);
+                                reset_flag =
+                                    rf_ota_save_data(&p.att_data().dat[2..2 + packet_len as usize]);
                             }
                         }
                     } else {
@@ -294,18 +313,11 @@ impl OtaManager {
         }
 
         let mut flag0 = 0;
-        flash_read_page(
-            FLASH_ADR_LIGHT_NEW_FW + 8,
-            1,
-            addr_of!(flag0) as *mut u8,
-        );
+        flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
         if 0x4b != flag0 {
             flag0 = 0x4b;
-            flash_write_page(
-                FLASH_ADR_LIGHT_NEW_FW + 8,
-                1,
-                addr_of!(flag0) as *mut u8,
-            ); //Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
+            flash_write_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
+            //Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
         }
 
         flash_erase_sector(OtaManager::FLASH_ADR_OTA_READY_FLAG);
@@ -352,7 +364,7 @@ impl OtaManager {
                 self.rf_ota_set_flag();
                 self.rf_led_ota_ok();
             }
-            _ => ()
+            _ => (),
         }
         irq_disable();
         light_sw_reboot();
@@ -369,7 +381,10 @@ impl OtaManager {
 
         if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             let mut reboot_flag = false;
-            if 0 == self.terminate_cnt && OTA_UPDATE_TERMINATION_REQUESTED.get() && is_add_packet_buf_ready() {
+            if 0 == self.terminate_cnt
+                && OTA_UPDATE_TERMINATION_REQUESTED.get()
+                && is_add_packet_buf_ready()
+            {
                 self.terminate_cnt = 6;
                 rf_link_add_tx_packet(&PKT_TERMINATE);
             }

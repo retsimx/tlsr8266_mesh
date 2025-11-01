@@ -1,7 +1,7 @@
 //! # Light Link Layer (light_ll) Module
 //!
-//! This module implements the core link layer functionality for a BLE mesh lighting system 
-//! on the TLSR8266 chip. The light_ll module serves as the bridge between the low-level 
+//! This module implements the core link layer functionality for a BLE mesh lighting system
+//! on the TLSR8266 chip. The light_ll module serves as the bridge between the low-level
 //! BLE radio hardware and the higher-level mesh networking protocol stack.
 //!
 //! ## Architecture Overview

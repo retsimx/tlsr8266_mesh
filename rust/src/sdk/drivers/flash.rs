@@ -133,11 +133,11 @@ enum FLASH_VOLTAGE {
 #[inline(never)]
 #[link_section = ".ram_code"]
 pub fn flash_send_cmd(cmd: FLASH_CMD) {
-    mspi_high();      // Deactivate chip select
-    sleep_us(1);      // Ensure minimum CS high time
-    mspi_low();       // Activate chip select
-    mspi_write(u8::from(cmd));  // Send command byte using idiomatic conversion
-    mspi_wait();      // Wait for completion
+    mspi_high(); // Deactivate chip select
+    sleep_us(1); // Ensure minimum CS high time
+    mspi_low(); // Activate chip select
+    mspi_write(u8::from(cmd)); // Send command byte using idiomatic conversion
+    mspi_wait(); // Wait for completion
 }
 
 /// Sends a 24-bit memory address to the flash over SPI.
@@ -166,11 +166,11 @@ pub fn flash_send_cmd(cmd: FLASH_CMD) {
 pub fn flash_send_addr(addr: u32) {
     // Extract address bytes in big-endian order (MSB first)
     let addr_bytes = [
-        ((addr >> 16) & 0xff) as u8,  // High byte (bits 23-16)
-        ((addr >> 8) & 0xff) as u8,   // Middle byte (bits 15-8)
-        (addr & 0xff) as u8,          // Low byte (bits 7-0)
+        ((addr >> 16) & 0xff) as u8, // High byte (bits 23-16)
+        ((addr >> 8) & 0xff) as u8,  // Middle byte (bits 15-8)
+        (addr & 0xff) as u8,         // Low byte (bits 7-0)
     ];
-    
+
     // Send each byte and wait for transmission to complete
     for &byte in addr_bytes.iter() {
         mspi_write(byte);
@@ -225,14 +225,14 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
     critical_section::with(|_| {
         // Start transaction by sending read command
         flash_send_cmd(FLASH_CMD::READ_CMD);
-        
+
         // Send address (always required for flash_read_page)
         flash_send_addr(addr);
-        
+
         // Issue additional clock cycle to prepare for data reading
         mspi_write(0x00);
         mspi_wait();
-        
+
         // Set SPI controller to auto mode (0x0a) for efficient reading
         mspi_ctrl_write(0x0a);
         mspi_wait();
@@ -242,14 +242,14 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
         unsafe {
             // Create a slice to the uninitialized buffer for safer indexing
             let buffer = core::slice::from_raw_parts_mut(buf, len as usize);
-            
+
             // Use iterator instead of raw pointer arithmetic
             for i in 0..len as usize {
                 buffer[i] = mspi_get();
                 mspi_wait();
             }
         }
-        
+
         // End SPI transaction
         mspi_high();
     });
@@ -258,7 +258,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 /// Writes data or status to flash memory.
 ///
 /// Handles the complete SPI flash write sequence including the write enable command,
-/// main command, address, and data bytes. This function must run from 
+/// main command, address, and data bytes. This function must run from
 /// RAM to ensure proper operation during flash programming.
 ///
 /// # Parameters
@@ -289,42 +289,37 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 /// * Uses safe code with slices when possible to access the data buffer
 #[inline(never)]
 #[link_section = ".ram_code"]
-fn flash_mspi_write_ram(
-    cmd: FLASH_CMD,
-    addr: u32,
-    data: *const u8,
-    data_len: u32,
-) {
+fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u32) {
     // Use critical section for atomic SPI operation
     critical_section::with(|_| {
         // Send write enable command (required before any write operation)
         flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD);
-        
+
         // Send the main write command
         flash_send_cmd(cmd);
-        
+
         // Send address
         flash_send_addr(addr);
-        
+
         // Send all data bytes from buffer - use a safer pattern if data is present
         if !data.is_null() && data_len > 0 {
             // Create a temporary slice from the raw pointer for safer access
             let data_slice = unsafe { core::slice::from_raw_parts(data, data_len as usize) };
-            
+
             // Use iterator for more idiomatic access
             for &byte in data_slice {
                 mspi_write(byte);
                 mspi_wait();
             }
         }
-        
+
         // End SPI transaction - initiates the internal write operation
         mspi_high();
-        
+
         // Wait for write operation to complete with timeout protection
         // Initial delay to allow flash operation to start
         sleep_us(100);
-        
+
         // Send command to read flash status register
         flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
 
@@ -335,18 +330,18 @@ fn flash_mspi_write_ram(
             if mspi_read() & BUSY_BIT == 0 {
                 break; // Exit loop when flash is no longer busy
             }
-            
+
             // No explicit delay here - reading takes time and prevents tight loop
         }
-        
+
         // Deactivate SPI chip select regardless of success/failure
-        mspi_high();// Use a more structured approach to waiting for completion
+        mspi_high(); // Use a more structured approach to waiting for completion
     });
 }
 
 /// Reads data from flash memory into a buffer.
 ///
-/// High-level function for reading data from flash memory. This function provides a 
+/// High-level function for reading data from flash memory. This function provides a
 /// simplified interface over the lower-level flash_mspi_read_ram function.
 ///
 /// # Parameters
@@ -419,40 +414,40 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
     if len == 0 || buf.is_null() {
         return;
     }
-    
+
     // Create a safe slice from the raw input buffer
     let data = unsafe { core::slice::from_raw_parts(buf, len as usize) };
-    
+
     // Track current position in data and address
     let mut bytes_written: usize = 0;
     let mut current_addr = addr;
     let mut bytes_remaining = len;
-    
+
     // Calculate remaining bytes in current page by finding offset within page
     // and subtracting from PAGE_SIZE
     let mut current_page_remaining = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
-    
+
     // Continue until all data is written
     while bytes_remaining > 0 {
         // Determine write size: either remaining page size or remaining data
         let write_size = core::cmp::min(bytes_remaining, current_page_remaining);
-        
+
         // Get pointer to current position in the buffer
         let current_data_ptr = unsafe { buf.add(bytes_written) };
-        
+
         // Write current chunk to flash
         flash_mspi_write_ram(
             FLASH_CMD::WRITE_CMD,
             current_addr,
             current_data_ptr,
-            write_size
+            write_size,
         );
-        
+
         // Update tracking variables
         bytes_written += write_size as usize;
         current_addr += write_size;
         bytes_remaining -= write_size;
-        
+
         // For subsequent pages, use full page size
         current_page_remaining = PAGE_SIZE;
     }
@@ -503,11 +498,11 @@ pub fn flash_erase_sector(addr: u32) {
 mod tests {
     use super::*;
     use std::vec::Vec;
-    
+
     // Import mocked versions of the functions from their original modules
     use crate::sdk::drivers::spi::{
-        mock_mspi_ctrl_write, mock_mspi_get, mock_mspi_high, mock_mspi_low,
-        mock_mspi_read, mock_mspi_wait, mock_mspi_write,
+        mock_mspi_ctrl_write, mock_mspi_get, mock_mspi_high, mock_mspi_low, mock_mspi_read,
+        mock_mspi_wait, mock_mspi_write,
     };
     use crate::sdk::mcu::clock::mock_sleep_us;
     use crate::sdk::mcu::watchdog::mock_wd_clear;
@@ -546,33 +541,40 @@ mod tests {
     /// * Tests the standard READ_CMD (0x03) flash read command
     /// * Covers the complete read sequence including interrupt handling
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_get, 
-               mspi_ctrl_write, mspi_high, mspi_low, mspi_wait,
-               sleep_us)]
+    #[mry::lock(
+        mspi_read,
+        mspi_write,
+        mspi_get,
+        mspi_ctrl_write,
+        mspi_high,
+        mspi_low,
+        mspi_wait,
+        sleep_us
+    )]
     fn test_flash_read_page() {
         // Setup mock responses for SPI functions
-        
+
         // Simulate the busy bit being clear (not busy)
         mock_mspi_read().returns(0);
-        mock_mspi_write(0x03).returns(());  // READ_CMD
-        mock_mspi_write(0x10).returns(());  // addr[23:16]
-        mock_mspi_write(0x00).returns(());  // addr[15:8] addr[7:0] dummy write for reading
+        mock_mspi_write(0x03).returns(()); // READ_CMD
+        mock_mspi_write(0x10).returns(()); // addr[23:16]
+        mock_mspi_write(0x00).returns(()); // addr[15:8] addr[7:0] dummy write for reading
 
         mock_sleep_us(1).returns(());
-        
+
         // Configure chip select behavior
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
-        
+
         // Configure wait behavior
         mock_mspi_wait().returns(());
-        
+
         // Configure auto mode write
         mock_mspi_ctrl_write(0x0a).returns(());
-        
+
         // Setup sequential byte responses for flash read data
         let expected_data = [0xAA, 0xBB, 0xCC, 0xDD];
-        
+
         // Use a closure to return different values on each call
         let mut get_calls = 0;
         mock_mspi_get().returns_with(move || {
@@ -584,23 +586,23 @@ mod tests {
         // Create a buffer to hold read data
         let mut buffer = vec![0; 4];
         let buf_ptr = vec_to_raw_mut(&mut buffer);
-        
+
         // Call the function we're testing
         flash_read_page(0x1000, 4, buf_ptr);
-        
+
         // Verify expected buffer contents after read
         assert_eq!(buffer, expected_data);
-        
+
         // Verify proper command sequence with exact call counts
         mock_mspi_high().assert_called(2); // Initial deactivate + final deactivate
-        mock_mspi_low().assert_called(1);  // Activation for command
-        
+        mock_mspi_low().assert_called(1); // Activation for command
+
         // Verify SPI was set to auto mode for reading
         mock_mspi_ctrl_write(0x0a).assert_called(1);
-        
+
         // Verify we waited for each operation with exact count
         mock_mspi_wait().assert_called(10);
-        
+
         // Verify all expected data bytes were read
         mock_mspi_get().assert_called(4);
     }
@@ -627,63 +629,61 @@ mod tests {
     /// * This test focuses on the simple case where data fits within page boundaries
     /// * Page size is 256 bytes for this device
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
     fn test_flash_write_page_small() {
         // Setup mock responses
-        
+
         // Simulate the busy bit being clear after a write
         mock_mspi_read().returns(0);
-        
+
         // Setup other mocks needed for the write operation
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
         mock_sleep_us(1).returns(());
         mock_sleep_us(100).returns(());
-        
+
         // Create test data to write
         let data = vec![0x11, 0x22, 0x33, 0x44];
-        
-        // Setup expectations for each data byte write
-        mock_mspi_write(0x06).returns(());  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x02).returns(());  // WRITE_CMD
-        mock_mspi_write(0x10).returns(());  // addr[23:16]
-        mock_mspi_write(0x00).returns(());  // addr[15:8] addr[7:0]
-        mock_mspi_write(0x05).returns(());  // READ_STATUS_CMD_LOWBYTE
 
-        
+        // Setup expectations for each data byte write
+        mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x02).returns(()); // WRITE_CMD
+        mock_mspi_write(0x10).returns(()); // addr[23:16]
+        mock_mspi_write(0x00).returns(()); // addr[15:8] addr[7:0]
+        mock_mspi_write(0x05).returns(()); // READ_STATUS_CMD_LOWBYTE
+
         // Setup expectations for each data byte
         for byte in &data {
             mock_mspi_write(*byte).returns(());
         }
-        
+
         let data_ptr = vec_to_raw(&data);
-        
+
         // Call function with address at start of a page boundary
         flash_write_page(0x1000, 4, data_ptr);
-        
-        // Verify proper command sequence for write with exact counts
-        mock_mspi_high().assert_called(5);  // Initial + after WRITE_ENABLE + after WRITE + final
-        mock_mspi_low().assert_called(3);   // For WRITE_ENABLE_CMD and WRITE_CMD
-        
-        // Verify commands were sent
-        mock_mspi_write(0x06).assert_called(1);  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x02).assert_called(1);  // WRITE_CMD
-        
-        // Verify address was sent
-        mock_mspi_write(0x10).assert_called(1);  // addr[23:16]
-        mock_mspi_write(0x00).assert_called(2);  // addr[15:8] and addr[7:0]
 
-        mock_mspi_write(0x05).assert_called(1);  // READ_STATUS_CMD_LOWBYTE
-        
+        // Verify proper command sequence for write with exact counts
+        mock_mspi_high().assert_called(5); // Initial + after WRITE_ENABLE + after WRITE + final
+        mock_mspi_low().assert_called(3); // For WRITE_ENABLE_CMD and WRITE_CMD
+
+        // Verify commands were sent
+        mock_mspi_write(0x06).assert_called(1); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x02).assert_called(1); // WRITE_CMD
+
+        // Verify address was sent
+        mock_mspi_write(0x10).assert_called(1); // addr[23:16]
+        mock_mspi_write(0x00).assert_called(2); // addr[15:8] and addr[7:0]
+
+        mock_mspi_write(0x05).assert_called(1); // READ_STATUS_CMD_LOWBYTE
+
         // Verify data was written
         for byte in data {
             mock_mspi_write(byte).assert_called(1);
         }
-        
+
         // Verify wait was called appropriate number of times
-        mock_mspi_wait().assert_called(10);  // 1 for each write + additional waits
+        mock_mspi_wait().assert_called(10); // 1 for each write + additional waits
     }
 
     /// Tests flash_write_page function with data that crosses page boundaries.
@@ -709,65 +709,64 @@ mod tests {
     /// * The test uses a special pattern in the data to help verify correct buffer position
     /// * This test focuses specifically on the page-spanning behavior
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
     fn test_flash_write_page_cross_boundary() {
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
-        
+
         // Setup other mocks needed for the write operation
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
         mock_sleep_us(1).returns(());
         mock_sleep_us(100).returns(());
-        
+
         // Create test data to write (spans two pages)
         // Use a special pattern to verify correct buffer position is used
         let mut data = Vec::new();
         for i in 0..300 {
             data.push((i & 0xFF) as u8);
         }
-        
+
         // Setup expectations for command bytes
-        mock_mspi_write(0x06).returns(());  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x02).returns(());  // WRITE_CMD
-        
+        mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x02).returns(()); // WRITE_CMD
+
         // Setup expectations for address bytes for first page
-        mock_mspi_write(0x10).returns(());  // addr[23:16]
-        mock_mspi_write(0x0F).returns(());  // addr[15:8]
-        mock_mspi_write(0xA).returns(());   // addr[7:0] = 0xFA
-        
+        mock_mspi_write(0x10).returns(()); // addr[23:16]
+        mock_mspi_write(0x0F).returns(()); // addr[15:8]
+        mock_mspi_write(0xA).returns(()); // addr[7:0] = 0xFA
+
         // Setup expectations for address bytes for second page
-        mock_mspi_write(0x11).returns(());  // addr[23:16]
-        mock_mspi_write(0x00).returns(());  // addr[15:8]
-        mock_mspi_write(0x00).returns(());  // addr[7:0]
-        
+        mock_mspi_write(0x11).returns(()); // addr[23:16]
+        mock_mspi_write(0x00).returns(()); // addr[15:8]
+        mock_mspi_write(0x00).returns(()); // addr[7:0]
+
         // Setup expectations for data bytes (use wildcard since there are too many)
         // We'll use the Any matcher for the data bytes
         mock_mspi_write(mry::Any).returns(());
-        
+
         let data_ptr = vec_to_raw(&data);
-        
+
         // Start near the end of a page to force crossing boundary
         // PAGE_SIZE is 256, so we'll start at offset 250 (0xFA)
         let start_addr = 0x10FA; // 6 bytes before page boundary
-        
+
         // Call function to write across page boundary
         flash_write_page(start_addr, 300, data_ptr);
-        
+
         // Verify high/low signals for chip select with exact counts
-        mock_mspi_high().assert_called(15);  // 4 per page (2 pages)
-        mock_mspi_low().assert_called(9);   // 2 per page (2 pages)
-        
+        mock_mspi_high().assert_called(15); // 4 per page (2 pages)
+        mock_mspi_low().assert_called(9); // 2 per page (2 pages)
+
         // Verify command bytes were sent
-        mock_mspi_write(0x06).assert_called(5);  // WRITE_ENABLE_CMD called twice (once per page)
-        mock_mspi_write(0x02).assert_called(5);  // WRITE_CMD called twice (once per page)
-        
+        mock_mspi_write(0x06).assert_called(5); // WRITE_ENABLE_CMD called twice (once per page)
+        mock_mspi_write(0x02).assert_called(5); // WRITE_CMD called twice (once per page)
+
         // Verify correct number of wait calls
         // 6 + 300 bytes = 306 bytes of data writing -> 306 wait calls
         // Plus additional waits for commands and addresses
-        mock_mspi_wait().assert_called(318);  // 306 data bytes + commands + addresses
+        mock_mspi_wait().assert_called(318); // 306 data bytes + commands + addresses
     }
 
     /// Tests the flash_erase_sector function.
@@ -790,12 +789,13 @@ mod tests {
     /// * The function should ensure the watchdog is cleared before long erase operations
     /// * SPI protocol requires specific chip select sequence
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us, wd_clear)]
+    #[mry::lock(
+        mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us, wd_clear
+    )]
     fn test_flash_erase_sector() {
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
-        
+
         // Setup other required mocks
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
@@ -803,33 +803,33 @@ mod tests {
         mock_sleep_us(1).returns(());
         mock_sleep_us(100).returns(());
         mock_wd_clear().returns(());
-        
+
         // Setup command expectations
-        mock_mspi_write(0x06).returns(());  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x20).returns(());  // SECT_ERASE_CMD addr[23:16]
-        mock_mspi_write(0x05).returns(());  // READ_STATUS_CMD_LOWBYTE
-        
+        mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x20).returns(()); // SECT_ERASE_CMD addr[23:16]
+        mock_mspi_write(0x05).returns(()); // READ_STATUS_CMD_LOWBYTE
+
         // Setup address bytes expectations
-        mock_mspi_write(0x00).returns(());  // addr[15:8] addr[7:0]
-        
+        mock_mspi_write(0x00).returns(()); // addr[15:8] addr[7:0]
+
         // Call function to erase sector
         flash_erase_sector(0x2000);
-        
+
         // Verify watchdog was cleared
         mock_wd_clear().assert_called(1);
-        
+
         // Verify proper command sequence with exact call counts
-        mock_mspi_high().assert_called(5);  // Initial + after WRITE_ENABLE + after ERASE + final + flash wait done
-        mock_mspi_low().assert_called(3);   // For WRITE_ENABLE_CMD and SECT_ERASE_CMD + flash wait done
-        
+        mock_mspi_high().assert_called(5); // Initial + after WRITE_ENABLE + after ERASE + final + flash wait done
+        mock_mspi_low().assert_called(3); // For WRITE_ENABLE_CMD and SECT_ERASE_CMD + flash wait done
+
         // Verify commands were sent
-        mock_mspi_write(0x06).assert_called(1);  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x20).assert_called(2);  // SECT_ERASE_CMD and addr[23:16]
-        mock_mspi_write(0x00).assert_called(2);  // addr[15:8] and addr[7:0]
-        mock_mspi_write(0x05).assert_called(1);  // READ_STATUS_CMD_LOWBYTE 
+        mock_mspi_write(0x06).assert_called(1); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x20).assert_called(2); // SECT_ERASE_CMD and addr[23:16]
+        mock_mspi_write(0x00).assert_called(2); // addr[15:8] and addr[7:0]
+        mock_mspi_write(0x05).assert_called(1); // READ_STATUS_CMD_LOWBYTE
 
         // Verify correct number of wait calls
-        mock_mspi_wait().assert_called(6);  // Commands + addresses + additional waits
+        mock_mspi_wait().assert_called(6); // Commands + addresses + additional waits
     }
 
     /// Tests the flash_send_addr function.
@@ -856,13 +856,13 @@ mod tests {
         mock_mspi_write(0x34).returns(());
         mock_mspi_write(0x56).returns(());
         mock_mspi_wait().returns(());
-        
+
         // Test address: 0x123456 - should send bytes 0x12, 0x34, 0x56 in that order
         flash_send_addr(0x123456);
-        
+
         // Verify each byte was sent in correct order (MSB first)
         mock_mspi_write(0x12).assert_called(1);
-        mock_mspi_wait().assert_called(3);  // Total of 3 waits (one after each byte)
+        mock_mspi_wait().assert_called(3); // Total of 3 waits (one after each byte)
         mock_mspi_write(0x34).assert_called(1);
         mock_mspi_write(0x56).assert_called(1);
     }
@@ -871,7 +871,7 @@ mod tests {
     ///
     /// This test verifies the full operational sequence of flash memory operations:
     /// 1. Reading erased flash (all 0xFF)
-    /// 2. Erasing a sector 
+    /// 2. Erasing a sector
     /// 3. Writing data to flash
     /// 4. Reading back the data to confirm it was written correctly
     ///
@@ -890,12 +890,21 @@ mod tests {
     /// * The watchdog is verified to be cleared during erase operation
     /// * The test uses a specific pattern of data to ensure proper write operations
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_get, mspi_ctrl_write, mspi_high, 
-                mspi_low, mspi_wait, sleep_us, wd_clear)]
+    #[mry::lock(
+        mspi_read,
+        mspi_write,
+        mspi_get,
+        mspi_ctrl_write,
+        mspi_high,
+        mspi_low,
+        mspi_wait,
+        sleep_us,
+        wd_clear
+    )]
     fn test_flash_read_write_cycle() {
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
-        
+
         // Setup other required mocks
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
@@ -903,20 +912,20 @@ mod tests {
         mock_mspi_ctrl_write(0x0a).returns(());
         mock_sleep_us(mry::Any).returns(());
         mock_wd_clear().returns(());
-        
+
         // Setup command byte expectations
         mock_mspi_write(mry::Any).returns(());
-        
+
         // ======== FIRST PHASE: Reading erased flash ========
-        
+
         // Simulate reading erased flash (all 0xFF)
         let erased_pattern = 0xFF;
-        
+
         // Setup a closure to return 0xFF for the first 4 reads (erased flash)
         let mut read_phases = 0;
         let write_data = vec![0xA1, 0xB2, 0xC3, 0xD4];
         let write_data_copy = write_data.clone();
-        
+
         mock_mspi_get().returns_with(move || {
             if read_phases < 4 {
                 // First phase: return erased pattern
@@ -929,37 +938,37 @@ mod tests {
                 write_data_copy[index]
             }
         });
-        
+
         // Step 1: Verify sector is "erased" (all 0xFF)
         let mut read_buffer = vec![0; 4];
         flash_read_page(0x3000, 4, vec_to_raw_mut(&mut read_buffer));
         assert!(read_buffer.iter().all(|&b| b == erased_pattern));
-        
+
         // Step 2: Erase sector to prepare for write
         flash_erase_sector(0x3000);
         mock_wd_clear().assert_called(1);
-        
+
         // Step 3: Write data to flash
         flash_write_page(0x3000, 4, vec_to_raw(&write_data));
-        
+
         // Step 4: Read back the data
         let mut verify_buffer = vec![0; 4];
         flash_read_page(0x3000, 4, vec_to_raw_mut(&mut verify_buffer));
-        
+
         // Step 5: Verify the data matches what we wrote
         assert_eq!(verify_buffer, write_data);
-        
+
         // Verify the mspi_get was called exactly 8 times (4 for erased read + 4 for verification)
         mock_mspi_get().assert_called(8);
-        
+
         // Verify that chip select operations occurred correct number of times
         // Each flash operation starts and ends with chip select operations
-        mock_mspi_high().assert_called(14);  // Multiple operations
-        mock_mspi_low().assert_called(8);    // One per major operation
-        
+        mock_mspi_high().assert_called(14); // Multiple operations
+        mock_mspi_low().assert_called(8); // One per major operation
+
         // Verify commands were sent
-        mock_mspi_write(0x03).assert_called(2);  // READ_CMD called twice
-        mock_mspi_write(0x06).assert_called(2);  // WRITE_ENABLE_CMD called twice
+        mock_mspi_write(0x03).assert_called(2); // READ_CMD called twice
+        mock_mspi_write(0x06).assert_called(2); // WRITE_ENABLE_CMD called twice
     }
 
     /// Tests the flash busy flag timeout protection in flash_mspi_write_ram.
@@ -976,58 +985,57 @@ mod tests {
     /// 4. Verify the function completes without hanging
     /// 5. Verify mspi_read was called exactly FLASH_WAIT_ITERATIONS times
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
     fn test_flash_busy_flag_timeout() {
         // Setup mock responses
-        
+
         // Critical: Always return 1 to simulate flash never clearing the busy flag
         // This will force the polling loop to run for the full FLASH_WAIT_ITERATIONS
         mock_mspi_read().returns(1);
-        
+
         // Setup other mocks needed for the write operation
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
         mock_sleep_us(1).returns(());
         mock_sleep_us(100).returns(());
-        
+
         // Setup expectations for command bytes
-        mock_mspi_write(0x06).returns(());  // WRITE_ENABLE_CMD
-        mock_mspi_write(0x02).returns(());  // WRITE_CMD
-        mock_mspi_write(0x10).returns(());  // addr[23:16]
-        mock_mspi_write(0x00).returns(());  // addr[15:8] addr[7:0]
-        mock_mspi_write(0x05).returns(());  // READ_STATUS_CMD_LOWBYTE
-        
+        mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
+        mock_mspi_write(0x02).returns(()); // WRITE_CMD
+        mock_mspi_write(0x10).returns(()); // addr[23:16]
+        mock_mspi_write(0x00).returns(()); // addr[15:8] addr[7:0]
+        mock_mspi_write(0x05).returns(()); // READ_STATUS_CMD_LOWBYTE
+
         // Test data to write
         let data = vec![0x11, 0x22, 0x33, 0x44];
         for byte in &data {
             mock_mspi_write(*byte).returns(());
         }
-        
+
         // Call the function - it should complete after FLASH_WAIT_ITERATIONS cycles
         // without hanging indefinitely
         let data_ptr = vec_to_raw(&data);
         flash_write_page(0x1000, 4, data_ptr);
-        
+
         // Verify mspi_read was called exactly FLASH_WAIT_ITERATIONS times
         // This is the critical check - making sure it exits the loop after the timeout
         mock_mspi_read().assert_called(FLASH_WAIT_ITERATIONS as usize);
-        
+
         // Verify high/low signals for chip select
-        mock_mspi_high().assert_called(5);  // Initial + after commands + final
-        mock_mspi_low().assert_called(3);   // For WRITE_ENABLE, WRITE_CMD, READ_STATUS
-        
+        mock_mspi_high().assert_called(5); // Initial + after commands + final
+        mock_mspi_low().assert_called(3); // For WRITE_ENABLE, WRITE_CMD, READ_STATUS
+
         // Verify wait calls occurred for all operations
-        mock_mspi_wait().assert_called(10);  // For commands + data
+        mock_mspi_wait().assert_called(10); // For commands + data
     }
-    
+
     /// Tests the early return condition in flash_write_page function.
     ///
     /// This test verifies that the function correctly exits early when:
     /// 1. The length parameter is 0, or
     /// 2. The buffer pointer is null
-    /// 
+    ///
     /// In either case, the function should return immediately without making
     /// any calls to the underlying flash_mspi_write_ram function.
     ///
@@ -1035,7 +1043,7 @@ mod tests {
     ///
     /// 1. Setup mock expectations for functions that should NOT be called
     /// 2. Call flash_write_page with zero length but valid buffer
-    /// 3. Call flash_write_page with null buffer but non-zero length 
+    /// 3. Call flash_write_page with null buffer but non-zero length
     /// 4. Verify no calls were made to any mocked functions
     ///
     /// # Notes
@@ -1044,33 +1052,32 @@ mod tests {
     /// * Ensuring the function does nothing when given empty/invalid parameters
     /// * Prevents potential undefined behavior from null pointer operations
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, 
-               sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
     fn test_flash_write_page_early_return() {
         // Create a valid test data buffer (won't be used with length 0)
         let data = vec![0x11, 0x22, 0x33, 0x44];
         let data_ptr = vec_to_raw(&data);
-        
+
         // Case 1: Test with zero length but valid buffer
         flash_write_page(0x1000, 0, data_ptr);
-        
+
         // Case 2: Test with null buffer but non-zero length
         flash_write_page(0x1000, 4, std::ptr::null());
-        
+
         // Verify that no SPI or interrupt functions were called
         // This confirms the early return is working correctly
-        
+
         // Check SPI control functions weren't called
         mock_mspi_high().assert_called(0);
         mock_mspi_low().assert_called(0);
         mock_mspi_wait().assert_called(0);
-        
+
         // Check that no data was written
         mock_mspi_write(mry::Any).assert_called(0);
-        
+
         // Check that no status was read (no flash operation occurred)
         mock_mspi_read().assert_called(0);
-        
+
         // No delays should have been called either
         mock_sleep_us(mry::Any).assert_called(0);
     }

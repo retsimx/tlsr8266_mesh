@@ -359,7 +359,7 @@ fn in_irq_mode() -> bool {
 /// assert_eq!(*res_mutex.lock(), 800);
 /// ```
 ///
-/// pub struct Mutex<M, T: ?Sized> {
+pub struct Mutex<M, T: ?Sized> {
     inner: M,
     //poison: Flag,
     data: UnsafeCell<T>,

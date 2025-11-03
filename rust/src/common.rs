@@ -237,7 +237,7 @@ pub fn pair_flash_config_init() -> bool {
         }
 
         // This slot is valid, so it becomes the new last_valid_index
-        last_valid_index = offset as i32;
+        last_valid_index = offset;
     }
 
     FLASH_CONFIGURATION_INDEX.set(last_valid_index);

@@ -12,7 +12,7 @@ use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 /// NB: Poisoning is not required for the TLSR8266 because if a panic occurs while the lock is held
 /// then the entire chip will reboot anyway. So using a mutex after a panic is impossible. Due to
 /// this the poisoning code has been removed to reduce code size and execution overheads
-
+///
 /// Raw mutex trait.
 ///
 /// This mutex is "raw", which means it does not actually contain the protected data, it
@@ -359,8 +359,7 @@ fn in_irq_mode() -> bool {
 /// assert_eq!(*res_mutex.lock(), 800);
 /// ```
 ///
-
-pub struct Mutex<M, T: ?Sized> {
+/// pub struct Mutex<M, T: ?Sized> {
     inner: M,
     //poison: Flag,
     data: UnsafeCell<T>,

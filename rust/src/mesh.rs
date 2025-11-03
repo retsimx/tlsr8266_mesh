@@ -1,7 +1,6 @@
 use core::ptr::addr_of;
 
 use bytemuck::{Pod, Zeroable};
-use embassy_time::{Duration, Timer};
 use heapless::{Deque, Vec};
 
 use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
@@ -18,7 +17,7 @@ use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
-use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
+use crate::sdk::drivers::flash::{flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::{
@@ -181,7 +180,7 @@ impl MeshManager {
         // destination: The address of the destination
         // retransmit_count: How many times the packet should be rebroadcast at each node
         // send_ack: If the destination device should send an ack message back after it's handled the message
-        let pkt = light_slave_tx_command(&data, destination, retransmit_count, send_ack);
+        let pkt = light_slave_tx_command(data, destination, retransmit_count, send_ack);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
             app().mesh_manager.add_rcv_mesh_msg(&pkt);
@@ -1315,7 +1314,6 @@ mod tests {
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
         PAIR_LOGIN_OK.set(true);
         DEVICE_ADDRESS.set(0x1234);
-        VENDOR_ID;
 
         let mesh_manager = MeshManager::default();
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 2, 3]).unwrap();
@@ -2100,11 +2098,10 @@ mod tests {
         // pkt_send_buf is empty by default
 
         // Execute - should return immediately with no error
-        let result = block_on(mesh_manager.send_mesh_msg_iteration());
+        block_on(mesh_manager.send_mesh_msg_iteration());
 
         // Verify - should still be empty
         assert_eq!(mesh_manager.pkt_send_buf.len(), 0);
-        assert_eq!(result, ());
     }
 
     /// Tests send_mesh_msg_iteration with ready packet
@@ -2147,11 +2144,10 @@ mod tests {
         mock_rf_set_rxmode().returns(());
 
         // Execute
-        let result = block_on(mesh_manager.send_mesh_msg_iteration());
+        block_on(mesh_manager.send_mesh_msg_iteration());
 
         // Verify - packet should be processed and removed from buffer
         assert_eq!(mesh_manager.pkt_send_buf.len(), 0);
-        assert_eq!(result, ());
         mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
     }
 
@@ -2167,11 +2163,10 @@ mod tests {
         // pkt_rcv_buf is empty by default
 
         // Execute - should return immediately with no error
-        let result = block_on(mesh_manager.rcv_mesh_msg_iteration());
+        block_on(mesh_manager.rcv_mesh_msg_iteration());
 
         // Verify - should still be empty
         assert_eq!(mesh_manager.pkt_rcv_buf.len(), 0);
-        assert_eq!(result, ());
     }
 
     /// Tests rcv_mesh_msg_iteration with packet to receive
@@ -2192,11 +2187,10 @@ mod tests {
         mock_rf_link_rc_data(Any).returns(());
 
         // Execute
-        let result = block_on(mesh_manager.rcv_mesh_msg_iteration());
+        block_on(mesh_manager.rcv_mesh_msg_iteration());
 
         // Verify - packet should be processed and removed from buffer
         assert_eq!(mesh_manager.pkt_rcv_buf.len(), 0);
-        assert_eq!(result, ());
         mock_rf_link_rc_data(Any).assert_called(1);
     }
 }

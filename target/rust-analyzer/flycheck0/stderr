@@ -1,0 +1,54 @@
+   0.035961483s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint: fingerprint error for tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("tlsr8266_mesh", ["lib"], "/home/lewis/Projects/lights/tlsr8266_mesh/rust/src/lib.rs", Edition2021) }
+   0.035989786s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint:     err: failed to read `/home/lewis/Projects/lights/tlsr8266_mesh/rust/target/debug/.fingerprint/tlsr8266_mesh-441fe06a03dff414/lib-tlsr8266_mesh`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: cargo_util::paths::read_bytes
+   1: cargo_util::paths::read
+   2: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   3: cargo::core::compiler::fingerprint::prepare_target
+   4: cargo::core::compiler::compile
+   5: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   6: cargo::ops::cargo_compile::compile_ws
+   7: cargo::ops::cargo_compile::compile_with_exec
+   8: cargo::ops::cargo_compile::compile
+   9: cargo::commands::check::exec
+  10: <cargo::cli::Exec>::exec
+  11: cargo::main
+  12: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  13: std::rt::lang_start::<()>::{closure#0}
+  14: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/core/src/ops/function.rs:284:13
+  15: std::panicking::try::do_call
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panicking.rs:589:40
+  16: std::panicking::try
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panicking.rs:552:19
+  17: std::panic::catch_unwind
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panic.rs:359:14
+  18: std::rt::lang_start_internal::{{closure}}
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/rt.rs:168:24
+  19: std::panicking::try::do_call
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panicking.rs:589:40
+  20: std::panicking::try
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panicking.rs:552:19
+  21: std::panic::catch_unwind
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/panic.rs:359:14
+  22: std::rt::lang_start_internal
+             at /rustc/1799887bb281d1ab49287750f1950b8c738c6b77/library/std/src/rt.rs:164:5
+  23: main
+  24: __libc_start_call_main
+             at ./csu/../sysdeps/nptl/libc_start_call_main.h:58:16
+  25: __libc_start_main_impl
+             at ./csu/../csu/libc-start.c:360:3
+  26: <unknown>
+   0.089607953s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint: stale: changed "/home/lewis/Projects/lights/tlsr8266_mesh/rust/src/sdk/ble_app/ble_ll_pair.rs"
+   0.089620156s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint:           (vs) "/home/lewis/Projects/lights/tlsr8266_mesh/rust/target/debug/.fingerprint/tlsr8266_mesh-39616680202a3dd8/dep-test-lib-tlsr8266_mesh"
+   0.089622500s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1762150065, nanos: 435722402 } < FileTime { seconds: 1762153803, nanos: 349908325 }
+   0.089673486s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint: fingerprint dirty for tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("tlsr8266_mesh", ["lib"], "/home/lewis/Projects/lights/tlsr8266_mesh/rust/src/lib.rs", Edition2021) }
+   0.089683294s  INFO prepare_target{force=false package_id=tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust) target="tlsr8266_mesh"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/home/lewis/Projects/lights/tlsr8266_mesh/rust/target/debug/.fingerprint/tlsr8266_mesh-39616680202a3dd8/dep-test-lib-tlsr8266_mesh", reference_mtime: FileTime { seconds: 1762150065, nanos: 435722402 }, stale: "/home/lewis/Projects/lights/tlsr8266_mesh/rust/src/sdk/ble_app/ble_ll_pair.rs", stale_mtime: FileTime { seconds: 1762153803, nanos: 349908325 } }))
+    Checking tlsr8266_mesh v0.1.0 (/home/lewis/Projects/lights/tlsr8266_mesh/rust)
+error: could not compile `tlsr8266_mesh` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `tlsr8266_mesh` (lib test) due to 1 previous error

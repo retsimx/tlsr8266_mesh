@@ -1,8 +1,8 @@
 use core::ptr::addr_of;
-use core::time::Duration;
 
 use bytemuck::{Pod, Zeroable};
-use embassy_time::Timer;
+#[cfg(not(test))]
+use embassy_time::{Duration, Timer};
 use heapless::{Deque, Vec};
 
 use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
@@ -19,7 +19,7 @@ use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
-use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
+use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::{
@@ -725,7 +725,7 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
         mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
     };
-    use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
+    use crate::sdk::drivers::flash::{mock_flash_write_page};
     use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed, mock_sleep_us};
     use crate::sdk::mcu::register::{
@@ -1888,8 +1888,7 @@ mod tests {
         clock_time_exceed,
         light_slave_tx_command,
         rf_link_match_group_mac,
-        app_mocker,
-        flash_read_page
+        app_mocker
     )]
     fn test_mesh_pair_proc_rx_done_state() {
         // Setup
@@ -1910,7 +1909,6 @@ mod tests {
         // Trigger interval check: clock_time_exceed(1000, 500 * 1000)
         mock_clock_time_exceed(1000, 500 * 1000).returns(true);
         mock_clock_time().returns(6000);
-        mock_flash_read_page(Any, Any, Any).returns(());
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));

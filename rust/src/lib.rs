@@ -1,7 +1,6 @@
 #![feature(type_alias_impl_trait)]
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), panic = "abort")]
 
 use crate::config::{MAX_LUM_BRIGHTNESS_VALUE, PWM_B, PWM_G};
 use crate::embassy::executor::Executor;

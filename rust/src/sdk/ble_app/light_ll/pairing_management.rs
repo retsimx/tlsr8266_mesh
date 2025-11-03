@@ -146,6 +146,7 @@ pub fn rf_link_delete_pair() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::ble_app::ble_ll_pair::{mock_pair_save_key, mock_pair_set_key};

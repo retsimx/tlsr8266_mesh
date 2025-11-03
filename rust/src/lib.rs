@@ -1,6 +1,7 @@
 #![feature(type_alias_impl_trait)]
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), panic = "abort")]
 
 use crate::config::{MAX_LUM_BRIGHTNESS_VALUE, PWM_B, PWM_G};
 use crate::embassy::executor::Executor;
@@ -50,12 +51,14 @@ pub fn app() -> &'static mut App {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn app_mocker() -> *mut App {
     unsafe { &mut *APP as *mut App }
 }
 
 #[cfg(test)]
+#[coverage(off)]
 pub fn app<'a>() -> &'a mut App {
     unsafe { __make_static(&mut *app_mocker()) }
 }

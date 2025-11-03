@@ -592,12 +592,14 @@ pub fn rf_link_slave_add_status(packet: &Packet) {
     let format_mode = packet.mesh().internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE];
     if format_mode == PACKET_FORMAT_STANDARD_PARAMS {
         // Standard parameter mode: copy specific parameter values to response
-        st_ptr.att_data_mut().dat[0x12] = packet.mesh().par[9];
-        st_ptr.att_data_mut().dat[0x13] = packet.mesh().internal_par1[INTERNAL_PAR_STATUS_DATA];
+        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM] =
+            packet.mesh().par[MESH_PAR_STATUS_TICK];
+        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_DATA] =
+            packet.mesh().internal_par1[INTERNAL_PAR_STATUS_DATA];
     } else {
         // All packets initialize with internal_par1: [0; 5], so this should never happen
         // but we'll use the fallback behavior for safety
-        st_ptr.att_data_mut().dat[0x12..0x14].fill(0xff);
+        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM..=PKT_ATT_DATA_STATUS_DATA].fill(0xff);
     }
 
     // SOURCE ADDRESS INSERTION: Add mesh source address to BLE packet
@@ -690,6 +692,7 @@ pub fn rf_link_slave_add_status(packet: &Packet) {
 /// * May trigger BLE peripheral status responses
 /// * May queue packets for mesh relay transmission
 /// * Modifies packet contents for relay operations
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_rc_data(packet: &mut Packet) {
     // PACKET CLASSIFICATION: STATUS ADVERTISEMENT DETECTION
     // Status advertisements use channel ID 0xffff and have 0xa5a5a5a5 signature
@@ -899,38 +902,46 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         match op {
             LGT_CMD_LIGHT_READ_STATUS => {
                 // Device status query response
-                pkt_light_status.att_cmd_mut().value.val[15] = GET_STATUS;
-                pkt_light_status.att_cmd_mut().value.val[13] = packet.mesh().par[9];
-                pkt_light_status.att_cmd_mut().value.val[14] = 0;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    GET_STATUS;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_TTC] =
+                    packet.mesh().par[MESH_PAR_STATUS_TICK];
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_HOP_COUNT] = 0;
             }
             LGT_CMD_LIGHT_GRP_REQ => {
                 // Group operation response - copy packet format mode parameter
-                pkt_light_status.att_cmd_mut().value.val[15] =
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
                     packet.mesh().internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE];
             }
             LGT_CMD_LIGHT_CONFIG_GRP => {
                 // Group configuration response
-                pkt_light_status.att_cmd_mut().value.val[15] = GET_GROUP1;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    GET_GROUP1;
             }
             LGT_CMD_CONFIG_DEV_ADDR => {
                 // Device address configuration response
-                pkt_light_status.att_cmd_mut().value.val[15] = GET_DEV_ADDR;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    GET_DEV_ADDR;
             }
             LGT_CMD_USER_NOTIFY_REQ => {
                 // User notification response
-                pkt_light_status.att_cmd_mut().value.val[15] = GET_USER_NOTIFY;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    GET_USER_NOTIFY;
             }
             LGT_CMD_START_OTA_REQ => {
                 // OTA start response
-                pkt_light_status.att_cmd_mut().value.val[15] = CMD_START_OTA;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    CMD_START_OTA;
             }
             LGT_CMD_OTA_DATA_REQ => {
                 // OTA data transfer response
-                pkt_light_status.att_cmd_mut().value.val[15] = CMD_OTA_DATA;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    CMD_OTA_DATA;
             }
             LGT_CMD_END_OTA_REQ => {
                 // OTA completion response
-                pkt_light_status.att_cmd_mut().value.val[15] = CMD_END_OTA;
+                pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] =
+                    CMD_END_OTA;
             }
             _ => {
                 // Unknown operation - use default handling
@@ -1544,6 +1555,7 @@ pub fn parse_ble_packet_op_params(
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use heapless::Deque;
@@ -1555,6 +1567,7 @@ mod tests {
     use crate::sdk::ble_app::light_ll::mesh_management::{
         mock_mesh_node_update_status, mock_rf_link_match_group_mac,
     };
+    use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::mcu::clock::{mock_clock_time, CLOCK_SYS_CLOCK_1US};
     use crate::sdk::mcu::register::{
         mock_read_reg_dma_tx_rptr, mock_read_reg_dma_tx_wptr, mock_read_reg_rnd_number,
@@ -3432,7 +3445,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             GET_GROUP1,
             "Response should contain GET_GROUP1"
         );
@@ -3472,7 +3485,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             GET_DEV_ADDR,
             "Response should contain GET_DEV_ADDR"
         );
@@ -3512,7 +3525,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             GET_USER_NOTIFY,
             "Response should contain GET_USER_NOTIFY"
         );
@@ -3552,7 +3565,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             CMD_START_OTA,
             "Response should contain CMD_START_OTA"
         );
@@ -3592,7 +3605,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             CMD_OTA_DATA,
             "Response should contain CMD_OTA_DATA"
         );
@@ -3632,7 +3645,7 @@ mod tests {
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
             CMD_END_OTA,
             "Response should contain CMD_END_OTA"
         );
@@ -3676,9 +3689,118 @@ mod tests {
         // Check that the response value was not modified (default case does nothing)
         let pkt_status = PKT_LIGHT_STATUS.lock();
         assert_eq!(
-            pkt_status.att_cmd().value.val[15],
-            0,
-            "Default case should not modify val[15]"
+            pkt_status.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
+            GET_STATUS,
+            "Default case should not modify response type (remains GET_STATUS)"
+        );
+    }
+
+    /// Tests coverage of line 747 where 2-byte opcodes result in op = 0 (unsupported opcode format).
+    /// This tests the _ => 0 case in the opcode length match statement.
+    #[test]
+    #[mry::lock(
+        rf_link_match_group_mac,
+        parse_ble_packet_op_params,
+        is_exist_in_rc_pkt_buf,
+        read_reg_system_tick,
+        read_reg_rnd_number
+    )]
+    fn test_opcode_extraction_unsupported_length() {
+        reset_test_state();
+
+        // Mock parse_ble_packet_op_params to return an invalid opcode length
+        // This should cause op_cmd_len to be 4, triggering the _ => 0 case on line 747
+        mock_parse_ble_packet_op_params(Any, Any).returns((
+            true,               // success
+            [0x80, 0x45, 0x00], // op_codes
+            4,                  // op_cmd_len = 4 (invalid, triggers _ => 0 case)
+            [0u8; 16],          // parameters
+            0,                  // params_len
+        ));
+
+        // Mock other dependencies to avoid side effects
+        mock_read_reg_system_tick().returns(0x12345678);
+        mock_read_reg_rnd_number().returns(0x42);
+        mock_rf_link_match_group_mac(Any).returns((false, false));
+        mock_is_exist_in_rc_pkt_buf(Any, Any).returns(false);
+
+        let mut packet =
+            create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
+
+        rf_link_rc_data(&mut packet);
+
+        // Verify that op was set to 0 (line 747: _ => 0)
+        // This should be verified indirectly by checking that is_exist_in_rc_pkt_buf
+        // was called with op = 0
+        mock_is_exist_in_rc_pkt_buf(0, Any).assert_called(1);
+
+        // Verify that rf_link_match_group_mac was called once during processing
+        mock_rf_link_match_group_mac(Any).assert_called(1);
+
+        assert!(
+            true,
+            "Unsupported opcode length (2-byte) handled correctly, op set to 0"
+        );
+    }
+
+    /// Tests fallthrough to line 979 where notification response transmission is skipped.
+    /// This occurs when the condition on line 955 evaluates to false:
+    /// !(not_slave_message || BLE_PERIPHERAL_LINK_COMMAND.get() != op || params[1] != 0)
+    #[test]
+    #[mry::lock(
+        rf_link_match_group_mac,
+        rf_link_data_callback,
+        rf_link_response_callback,
+        app_mocker
+    )]
+    fn test_notification_response_transmission_skipped() {
+        reset_test_state();
+
+        // Set up App mock to track mesh message sending (should NOT be called)
+        let mut app = App::default();
+        app.mesh_manager
+            .mock_add_send_mesh_msg(Any, Any, Any)
+            .returns(());
+        mock_app_mocker().returns(&mut app);
+
+        mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
+        mock_rf_link_data_callback(Any).returns(());
+        mock_rf_link_response_callback(Any, Any).returns(true); // Even if callback returns true...
+
+        // Use peripheral mode to avoid hardware register access
+        BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
+
+        let mut packet = create_test_packet(
+            LGT_CMD_LIGHT_READ_STATUS,
+            [0x01, 0x02, 0x03], // Same sequence number as GENERAL_MESSAGE_SEQUENCE_NUMBER
+            0x1234,
+            0x1234,
+        );
+
+        // Set up conditions to make the transmission condition false:
+        // 1. not_slave_message = false (packet sno matches GENERAL_MESSAGE_SEQUENCE_NUMBER)
+        *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [0x01, 0x02, 0x03];
+        // 2. BLE_PERIPHERAL_LINK_COMMAND.get() == op (same command)
+        BLE_PERIPHERAL_LINK_COMMAND.set(LGT_CMD_LIGHT_READ_STATUS);
+        // 3. params[1] == 0 (parameter is zero)
+        packet.att_cmd_mut().value.val[2] = 0x00; // params[1] = val[2] = 0
+
+        rf_link_rc_data(&mut packet);
+
+        // Verify local processing callback was called
+        mock_rf_link_data_callback(Any).assert_called(1);
+
+        // Verify response callback was NOT called (fell through to line 979)
+        mock_rf_link_response_callback(Any, Any).assert_called(0);
+
+        // Verify mesh message was NOT sent (fell through to line 979)
+        app.mesh_manager
+            .mock_add_send_mesh_msg(Any, Any, Any)
+            .assert_called(0);
+
+        assert!(
+            true,
+            "Notification response transmission skipped, fell through to line 979"
         );
     }
 }

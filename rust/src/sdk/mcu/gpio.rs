@@ -1078,6 +1078,7 @@ pub fn gpio_write(pin: u32, value: u32) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{

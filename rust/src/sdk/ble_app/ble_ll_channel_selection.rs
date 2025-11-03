@@ -96,6 +96,7 @@ pub fn ble_ll_select_next_data_channel(channel_map: &[u8], hop: u8) -> u32 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

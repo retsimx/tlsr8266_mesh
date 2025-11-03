@@ -74,6 +74,7 @@ pub fn vendor_set_adv_data() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::light::AdvRspPrivate;

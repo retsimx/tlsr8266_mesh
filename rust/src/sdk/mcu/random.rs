@@ -35,6 +35,7 @@ pub fn rand() -> u16 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 

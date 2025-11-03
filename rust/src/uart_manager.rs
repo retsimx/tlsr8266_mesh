@@ -74,6 +74,7 @@ impl TryFrom<u8> for UartMsg {
 }
 
 // AppCmdValueT
+#[cfg_attr(test, mry::mry)]
 pub fn light_mesh_rx_cb(data: &Packet) {
     // Don't report messages that we sent
     if !app().uart_manager.started()
@@ -408,6 +409,7 @@ impl UartManager {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;

@@ -495,6 +495,7 @@ pub fn flash_erase_sector(addr: u32) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::vec::Vec;

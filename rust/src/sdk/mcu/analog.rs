@@ -122,6 +122,7 @@ pub fn analog_write(addr: u8, v: u8) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 

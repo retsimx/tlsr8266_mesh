@@ -119,6 +119,7 @@ pub fn irq_init() {
 
 /// Test suite for the interrupt control interface
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{

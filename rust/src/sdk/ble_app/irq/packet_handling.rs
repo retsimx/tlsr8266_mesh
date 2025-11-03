@@ -207,6 +207,7 @@ fn process_received_packet_slow_path(
 ///
 /// This function processes scan requests addressed to this device and generates
 /// appropriate scan response packets containing device information.
+#[cfg_attr(test, mry::mry)]
 fn handle_scan_request(entry: &LightRxBuff, rx_time: u32) {
     // Verify the scan request is addressed to this device by checking MAC address
     if entry.mac == MAC_ID.lock()[0..4] {
@@ -402,6 +403,7 @@ fn handle_ble_connection_data(entry: &LightRxBuff, packet: &Packet, rx_time: u32
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use core::ptr::addr_of;
@@ -1953,5 +1955,91 @@ mod tests {
 
         // Since pkt_valid() returns false at line 291, app() is never called
         // No need to mock or assert app() calls since we return early
+    }
+
+    /// Tests the fallthrough to handle_ble_connection_data (line 193) in process_received_packet_slow_path.
+    ///
+    /// This tests the case where:
+    /// - We pass packet validation (lines 152-156)
+    /// - We enter the Advertising state check (line 168)
+    /// - We DON'T take the scan request branch (cmd != 3, line 171)
+    /// - We DON'T take the connection request branch (cmd != 5, line 177)
+    /// - We DON'T take the mesh packet branch (line 184) because we're in Receiving state
+    /// - We fall through to handle_ble_connection_data (line 193)
+    #[test]
+    #[mry::lock(
+        handle_scan_request,
+        handle_connection_request,
+        handle_mesh_packet,
+        handle_ble_connection_data,
+        write_reg8,
+        write_reg16,
+        write_reg32
+    )]
+    fn test_process_received_packet_slow_path_fallthrough_line_180() {
+        reset_global_state();
+
+        // Setup mocks for all potential handlers
+        mock_handle_scan_request(Any, Any).returns(());
+        mock_handle_connection_request(Any, Any, Any).returns(());
+        mock_handle_mesh_packet(Any, Any).returns(());
+        mock_handle_ble_connection_data(Any, Any, Any).returns(());
+        mock_write_reg8(Any, Any).returns(());
+        mock_write_reg16(Any, Any).returns(());
+        mock_write_reg32(Any, Any).returns(());
+
+        // Set state:
+        // - Advertising check at line 168: we need to be in ANY state to reach this check
+        // - cmd != 3 and cmd != 5: so we don't return from the Advertising block
+        // - At line 184: NOT OTA AND NOT Receiving must be FALSE to skip mesh handler
+        // - We can achieve this by setting Receiving state, which makes (!OTA && != Receiving) = false
+        // - But wait, we also need to reach the Advertising check. So we need:
+        //   - We enter the Advertising check (doesn't matter what state for the check itself, it just evaluates)
+        //   - cmd != 3 and cmd != 5 (so we don't return from lines 172-180)
+        //   - Then at line 184: (!OTA && != Receiving) must be false
+        // - We can be in OTA mode, which makes (!OTA && != Receiving) = false regardless of Receiving state
+        // Let's use OTA mode:
+        BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
+        OTA_UPDATE_IN_PROGRESS.set(true); // In OTA mode to skip mesh handler
+
+        // Create a buffer structure with cmd that is neither 3 nor 5
+        let test_dma_len = 25u8;
+        let sno1_for_dma = test_dma_len - 0x11; // 25 - 17 = 8 (0x08)
+        let rx_time = 120000u32;
+
+        let mut extended_buffer = [0u8; 128];
+        let entry_ptr = extended_buffer.as_mut_ptr() as *mut LightRxBuff;
+        unsafe {
+            *entry_ptr = LightRxBuff {
+                dma_len: test_dma_len,
+                unk1: [0; 3],
+                rssi: 0,
+                unk2: [0; 3],
+                rx_time,
+                sno: [0x07, sno1_for_dma, 0x10], // cmd=7 (not 3 or 5)
+                unk3: [0; 5],
+                mac: [0x11, 0x22, 0x33, 0x44],
+                unk4: [0; 40],
+            };
+        }
+
+        // Set status byte to pass validation
+        let status_offset = test_dma_len as usize + 3;
+        if status_offset < extended_buffer.len() {
+            extended_buffer[status_offset] = 0x40;
+        }
+
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        light_rx_buff[0] = unsafe { *entry_ptr };
+
+        // Execute the function
+        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+
+        // Verify that ONLY handle_ble_connection_data was called (line 193)
+        // The other handlers should have 0 calls since we skipped their branches
+        mock_handle_scan_request(Any, Any).assert_called(0);
+        mock_handle_connection_request(Any, Any, Any).assert_called(0);
+        mock_handle_mesh_packet(Any, Any).assert_called(0);
+        mock_handle_ble_connection_data(Any, Any, Any).assert_called(1);
     }
 }

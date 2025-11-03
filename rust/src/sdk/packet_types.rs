@@ -507,6 +507,7 @@ impl Packet {
 const_assert!(mem::size_of::<Packet>() == 48);
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use core::mem;

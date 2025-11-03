@@ -141,6 +141,7 @@ pub fn rf_ota_save_data(data: &[u8]) -> OtaState {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

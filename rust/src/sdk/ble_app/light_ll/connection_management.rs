@@ -636,6 +636,7 @@ pub fn back_to_rxmode_bridge() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

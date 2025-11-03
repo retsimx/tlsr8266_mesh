@@ -145,6 +145,7 @@ pub fn handle_ble_advertisement_state() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

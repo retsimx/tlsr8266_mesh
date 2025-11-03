@@ -230,7 +230,8 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
                 );
 
                 // Store timing information in packet for mesh relay optimization
-                pkt_light_data.att_cmd_mut().value.val[17] = relay_time as u8;
+                pkt_light_data.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RELAY_TIMING] =
+                    relay_time as u8;
             }
 
             // Queue the command for mesh transmission (no delay, no retransmit)
@@ -326,6 +327,7 @@ pub fn tx_packet_bridge() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_send_online_status;
@@ -446,7 +448,7 @@ mod tests {
         // Set up notify request packet
         packet_data.head_mut()._type = 0x00; // Clear mesh flag initially
         packet_data.att_cmd_mut().value.val[0] = 0x10; // Test command (masked will be 0x10)
-        packet_data.att_cmd_mut().value.val[17] = 0; // Clear timing field
+        packet_data.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RELAY_TIMING] = 0; // Clear timing field
         drop(packet_data);
 
         SLAVE_DATA_VALID.set(2); // Will become 1 after decrement
@@ -469,7 +471,10 @@ mod tests {
         let packet_data = PKT_LIGHT_DATA.lock();
         assert_ne!(packet_data.head()._type & 0x80, 0); // Mesh flag should be set
                                                         // Verify timing calculation: (16768/32 + 500) / 1024 = (524 + 500) / 1024 = 1024/1024 = 1
-        assert_eq!(packet_data.att_cmd().value.val[17], 1);
+        assert_eq!(
+            packet_data.att_cmd().value.val[PKT_VAL_MAC_APP_RELAY_TIMING],
+            1
+        );
 
         // Verify mocks were called
         mock_rf_link_is_notify_req(0x10).assert_called(1);
@@ -682,7 +687,7 @@ mod tests {
 
         packet_data.head_mut()._type = 0x00;
         packet_data.att_cmd_mut().value.val[0] = 0x10;
-        packet_data.att_cmd_mut().value.val[17] = 0;
+        packet_data.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RELAY_TIMING] = 0;
         drop(packet_data);
 
         SLAVE_DATA_VALID.set(2);
@@ -699,7 +704,10 @@ mod tests {
 
         // Verify timing was clamped to maximum (255)
         let packet_data = PKT_LIGHT_DATA.lock();
-        assert_eq!(packet_data.att_cmd().value.val[17], 255);
+        assert_eq!(
+            packet_data.att_cmd().value.val[PKT_VAL_MAC_APP_RELAY_TIMING],
+            255
+        );
 
         // Verify mocks were called
         mock_rf_link_is_notify_req(0x10).assert_called(1);

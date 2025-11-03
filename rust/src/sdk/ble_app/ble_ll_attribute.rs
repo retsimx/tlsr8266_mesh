@@ -1239,6 +1239,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::app_att_light::{

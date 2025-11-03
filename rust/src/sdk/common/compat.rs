@@ -297,6 +297,7 @@ pub fn panic(info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::embassy::yield_now::mock_yield_now;
@@ -500,6 +501,35 @@ mod tests {
 
         // Call send with doasync = false (synchronous) to cover line 172
         stream.send(false, false);
+
+        // Verify that the synchronous send was called
+        app.uart_manager.driver.mock_send(Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(app_mocker)]
+    fn test_uart_stream_send_panic_mode() {
+        // Create a test stream with some data
+        let mut stream = UartStream::<128>::new();
+        let test_data = b"Panic message!";
+        let _ = stream.write_all(test_data);
+
+        // Create a UartDriver (mry makes it mockable)
+        let mut driver = UartDriver::default();
+        // Mock the send method to return true
+        driver.mock_send(Any).returns(true);
+
+        // Create a UartManager with the mocked driver
+        let mut uart_manager = UartManager::default();
+        uart_manager.driver = driver;
+
+        // Set up mock app with the uart_manager
+        let mut app = crate::App::default();
+        app.uart_manager = uart_manager;
+        mock_app_mocker().returns(&mut app);
+
+        // Call send with is_panic = true and doasync = false (synchronous panic mode) to cover line 170
+        stream.send(true, false);
 
         // Verify that the synchronous send was called
         app.uart_manager.driver.mock_send(Any).assert_called(1);

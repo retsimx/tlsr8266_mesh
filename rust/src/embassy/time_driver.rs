@@ -105,6 +105,7 @@ pub fn clock_time64() -> u64 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::clock::mock_clock_time;

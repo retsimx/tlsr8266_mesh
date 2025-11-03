@@ -448,8 +448,9 @@ pub fn rf_link_data_callback(p: &Packet) {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
+#[cfg_attr(test, mry::mry)]
 pub fn light_slave_tx_command(
-    p_cmd: &[u8],
+    p_cmd: &Vec<u8, 13>,
     para: u16,
     retransmit_count: u8,
     send_ack: bool,

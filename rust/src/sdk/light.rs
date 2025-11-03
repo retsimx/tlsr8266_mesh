@@ -224,6 +224,29 @@ pub const INTERNAL_PAR_SEND_ACK: usize = 3;
 // Note: Only format mode 0 is actually used - all packets initialize with internal_par1: [0; 5]
 pub const PACKET_FORMAT_STANDARD_PARAMS: u8 = 0; // Copy specific parameter values to response (only format actually used)
 
+// Packet AttCmd/AttWrite value array field offsets
+// Structure: val[23] = op[1~3], params[0~10], mac-app[5], ttl[1], mac-net[4]
+pub const PKT_VAL_OFFSET_OP: usize = 0;
+pub const PKT_VAL_OFFSET_PARAMS: usize = 3;
+pub const PKT_VAL_OFFSET_MAC_APP: usize = 13;
+pub const PKT_VAL_OFFSET_TTL: usize = 18;
+pub const PKT_VAL_OFFSET_MAC_NET: usize = 19;
+
+// MAC-app field offsets (within val array, starting at index 13)
+// mac-app is a 5-byte field containing: [ttc, hop_count, response_type, link_interval, relay_timing]
+pub const PKT_VAL_MAC_APP_TTC: usize = 13; // Time-to-complete / status field
+pub const PKT_VAL_MAC_APP_HOP_COUNT: usize = 14; // Mesh hop counter
+pub const PKT_VAL_MAC_APP_RESPONSE_TYPE: usize = 15; // Response type indicator (GET_STATUS, GET_GROUP1, etc)
+pub const PKT_VAL_MAC_APP_LINK_INTERVAL: usize = 16; // BLE connection link interval
+pub const PKT_VAL_MAC_APP_RELAY_TIMING: usize = 17; // Mesh relay timing for congestion control
+
+// Mesh packet par[] array indices
+pub const MESH_PAR_STATUS_TICK: usize = 9; // Status request tick value
+
+// PacketAttData dat[] array indices (for status responses)
+pub const PKT_ATT_DATA_STATUS_PARAM: usize = 0x12; // Status parameter field
+pub const PKT_ATT_DATA_STATUS_DATA: usize = 0x13; // Status data field
+
 /// BLE peripheral connection link states.
 ///
 /// This enum represents the different operational states of the BLE peripheral
@@ -345,6 +368,7 @@ pub enum RfOperationState {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 

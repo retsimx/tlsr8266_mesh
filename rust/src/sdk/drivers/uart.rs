@@ -504,6 +504,7 @@ impl UartDriver {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use std::vec::Vec;

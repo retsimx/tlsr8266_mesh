@@ -1,5 +1,5 @@
 use core::cell::UnsafeCell;
-use core::ptr::{addr_of, null, null_mut, slice_from_raw_parts_mut};
+use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 
 use crate::config::{DEVICE_NAME, MESH_NAME};
@@ -194,20 +194,26 @@ fn mesh_status_write(p: &Packet) -> bool {
     if !PAIR_LOGIN_OK.get() {
         return true;
     }
-    unsafe {
-        let pktdata = &*slice_from_raw_parts_mut(
-            addr_of!(p.att_write().value) as *mut u8,
-            size_of::<PacketAttValue>(),
-        );
 
+    // Access packet data safely through att_val
+    let pktdata = &p.att_val().value;
+
+    // Copy first 4 bytes to SPP_DATA_SERVER2CLIENT_DATA
+    unsafe {
         SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice(&pktdata[0..4]);
-        if p.head().l2cap_len > (3 + 1) {
-            mesh_report_status_enable_mask(&pktdata[0..p.head().l2cap_len as usize - 3]);
-        } else {
-            mesh_report_status_enable(pktdata[0] != 0);
-        }
     }
-    return true;
+
+    // Route based on packet length
+    let l2cap_len = p.head().l2cap_len as usize;
+    if l2cap_len > 4 {
+        // Long packet: pass selective mesh addresses
+        mesh_report_status_enable_mask(&pktdata[0..l2cap_len - 3]);
+    } else {
+        // Short packet: just enable/disable based on first byte
+        mesh_report_status_enable(pktdata[0] != 0);
+    }
+
+    true
 }
 
 #[derive(PartialEq)]
@@ -306,6 +312,7 @@ macro_rules! attrdefu {
     };
 }
 
+#[coverage(off)]
 const fn size_of_val<T>(_: &T) -> usize {
     core::mem::size_of::<T>()
 }
@@ -457,4 +464,301 @@ static mut gAttributes: GAttributesType = GAttributesType([
 
 pub fn get_gAttributes() -> &'static mut [AttributeT; 29] {
     unsafe { &mut gAttributes.0 }
+}
+
+#[cfg(test)]
+#[coverage(off)]
+mod tests {
+    use super::*;
+    use crate::sdk::ble_app::light_ll::mesh_management::{
+        mock_mesh_report_status_enable, mock_mesh_report_status_enable_mask,
+    };
+    use crate::sdk::packet_types::PacketL2capHead;
+    use crate::state::PAIR_LOGIN_OK;
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_not_logged_in() {
+        // Arrange - User not logged in
+        PAIR_LOGIN_OK.set(false);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 0,
+                chan_id: 0,
+            },
+        };
+
+        // Set up test data
+        pkt.att_val_mut().value[0] = 0x01;
+        pkt.att_val_mut().value[1] = 0x02;
+        pkt.att_val_mut().value[2] = 0x03;
+        pkt.att_val_mut().value[3] = 0x04;
+
+        // Mock both functions - use specific values even though they won't be called
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert - Should return true immediately without processing
+        assert_eq!(result, true);
+        // Verify neither function was called since not logged in
+        mock_mesh_report_status_enable(true).assert_called(0);
+        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).assert_called(0);
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_logged_in_short_packet() {
+        // Arrange - User logged in, short packet (l2cap_len <= 4)
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 4, // Short packet: 4 - 3 = 1 byte, not > 4
+                chan_id: 0,
+            },
+        };
+
+        // Set up test data - first byte is enable flag
+        pkt.att_val_mut().value[0] = 0x01; // Non-zero = enable
+        pkt.att_val_mut().value[1] = 0xAA;
+        pkt.att_val_mut().value[2] = 0xBB;
+        pkt.att_val_mut().value[3] = 0xCC;
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&[0x01][..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert
+        assert_eq!(result, true);
+        // Verify mesh_report_status_enable was called with true (pktdata[0] != 0) and mask was not
+        mock_mesh_report_status_enable(true).assert_called(1);
+        mock_mesh_report_status_enable_mask(&[0x01][..]).assert_called(0);
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_logged_in_short_packet_disable() {
+        // Arrange - User logged in, short packet with disable flag
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 4, // Short packet
+                chan_id: 0,
+            },
+        };
+
+        // Set up test data - first byte is disable flag
+        pkt.att_val_mut().value[0] = 0x00; // Zero = disable
+        pkt.att_val_mut().value[1] = 0x11;
+        pkt.att_val_mut().value[2] = 0x22;
+        pkt.att_val_mut().value[3] = 0x33;
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(false).returns(());
+        mock_mesh_report_status_enable_mask(&[0x00][..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert
+        assert_eq!(result, true);
+        // Verify mesh_report_status_enable was called with false (pktdata[0] == 0) and mask was not
+        mock_mesh_report_status_enable(false).assert_called(1);
+        mock_mesh_report_status_enable_mask(&[0x00][..]).assert_called(0);
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_logged_in_long_packet() {
+        // Arrange - User logged in, long packet (l2cap_len > 4)
+        // This tests that when l2cap_len > 4, mesh_report_status_enable_mask is called
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 10, // Long packet: 10 - 3 = 7 bytes
+                chan_id: 0,
+            },
+        };
+
+        // Set up test data - multiple bytes for selective reporting
+        pkt.att_val_mut().value[0] = 0x01;
+        pkt.att_val_mut().value[1] = 0x02;
+        pkt.att_val_mut().value[2] = 0x03;
+        pkt.att_val_mut().value[3] = 0x04;
+        pkt.att_val_mut().value[4] = 0x05;
+        pkt.att_val_mut().value[5] = 0x06;
+        pkt.att_val_mut().value[6] = 0x07;
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
+            .returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert - Should return true
+        assert_eq!(result, true);
+        // Verify mask was called with first 7 bytes and enable was not
+        mock_mesh_report_status_enable(true).assert_called(0);
+        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
+            .assert_called(1);
+        // Verify the first 4 bytes were copied
+        unsafe {
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0x01);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x02);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x03);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x04);
+        }
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_logged_in_maximum_long_packet() {
+        // Arrange - User logged in, maximum size packet with selective addresses
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 20, // Long packet: 20 - 3 = 17 bytes of selective data
+                chan_id: 0,
+            },
+        };
+
+        // Set up test data with multiple selective addresses
+        let test_data = [
+            0xFF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            0x0E, 0x0F, 0x10,
+        ];
+        pkt.att_val_mut().value[0..17].copy_from_slice(&test_data);
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&test_data[..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert - Should return true
+        assert_eq!(result, true);
+        // Verify mask was called with first 17 bytes and enable was not
+        mock_mesh_report_status_enable(true).assert_called(0);
+        mock_mesh_report_status_enable_mask(&test_data[..]).assert_called(1);
+        // Verify the first 4 bytes were copied
+        unsafe {
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0xFF);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x01);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x02);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x03);
+        }
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_copies_first_four_bytes() {
+        // Arrange - Verify that first 4 bytes are copied to SPP_DATA_SERVER2CLIENT_DATA
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 4,
+                chan_id: 0,
+            },
+        };
+
+        // Set specific values to verify they are copied
+        pkt.att_val_mut().value[0] = 0x11;
+        pkt.att_val_mut().value[1] = 0x22;
+        pkt.att_val_mut().value[2] = 0x33;
+        pkt.att_val_mut().value[3] = 0x44;
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&[0x11][..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert
+        assert_eq!(result, true);
+        // Verify enable was called with true (0x11 != 0) and mask was not
+        mock_mesh_report_status_enable(true).assert_called(1);
+        mock_mesh_report_status_enable_mask(&[0x11][..]).assert_called(0);
+        // Verify the first 4 bytes were copied to SPP_DATA_SERVER2CLIENT_DATA
+        unsafe {
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0x11);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x22);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x33);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x44);
+        }
+    }
+
+    #[test]
+    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
+    fn test_mesh_status_write_boundary_condition() {
+        // Arrange - Test boundary case where l2cap_len = 5 (just over threshold of 4)
+        PAIR_LOGIN_OK.set(true);
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 5, // 5 - 3 = 2, which is > 0, triggers mask path
+                chan_id: 0,
+            },
+        };
+
+        pkt.att_val_mut().value[0] = 0xAA;
+        pkt.att_val_mut().value[1] = 0xBB;
+        pkt.att_val_mut().value[2] = 0xCC;
+        pkt.att_val_mut().value[3] = 0xDD;
+
+        // Mock both functions with expected values
+        mock_mesh_report_status_enable(true).returns(());
+        mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).returns(());
+
+        // Act
+        let result = mesh_status_write(&pkt);
+
+        // Assert - Should return true and call mesh_report_status_enable_mask
+        assert_eq!(result, true);
+        // Verify mask was called with first 2 bytes (l2cap_len - 3) and enable was not
+        mock_mesh_report_status_enable(true).assert_called(0);
+        mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).assert_called(1);
+        // Verify the first 4 bytes were copied
+        unsafe {
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0xAA);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0xBB);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0xCC);
+            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0xDD);
+        }
+    }
 }

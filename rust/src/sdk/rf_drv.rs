@@ -656,6 +656,7 @@ pub fn add_group(group_id: u16) -> bool {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::mock_remove_group;
     use super::*;

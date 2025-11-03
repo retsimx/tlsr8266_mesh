@@ -174,6 +174,7 @@ pub fn mspi_read() -> u8 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{

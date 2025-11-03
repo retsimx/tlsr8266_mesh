@@ -193,6 +193,7 @@ pub fn sleep_us(us: u32) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 

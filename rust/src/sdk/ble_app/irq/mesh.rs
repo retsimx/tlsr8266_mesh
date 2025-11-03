@@ -239,6 +239,7 @@ pub fn handle_mesh_listening_state() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::common::SYS_CHN_LISTEN;

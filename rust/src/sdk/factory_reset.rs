@@ -999,6 +999,7 @@ pub fn kick_out(par: KickoutReason) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_write_page};

@@ -22,19 +22,30 @@
 
 ### Testing Style
 
-**Tests in Same File** - In Rust, it's idiomatic to include tests in the same file as the code they test. Place tests in a `mod tests` block at the end of the file:
+**Tests in Same File** - In Rust, it's idiomatic to include tests in the same file as the code they test. Place tests in a `mod tests` block at the end of the file with coverage disabled:
 ```rust
 // Implementation code here...
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_some_function() {
         // Test implementation
         assert_eq!(some_function(1), expected_result);
     }
+}
+```
+
+**Coverage Attributes** - All test modules should be marked with `#[coverage(off)]` to exclude them from code coverage analysis. This attribute should be placed immediately after `#[cfg(test)]`:
+
+```rust
+#[cfg(test)]
+#[coverage(off)]
+mod tests {
+    // Test implementations
 }
 ```
 

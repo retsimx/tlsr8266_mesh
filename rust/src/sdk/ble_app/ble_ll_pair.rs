@@ -85,6 +85,7 @@ const LGT_CMD_PAIR_OK: u8 = 0xc5; // Pairing successful
 ///
 /// @param ps The packet to decrypt
 /// @return true if decryption was successful, false otherwise
+#[cfg_attr(test, mry::mry)]
 pub fn pair_dec_packet(ps: &mut Packet) -> bool {
     // Early return if security is not enabled
     if !SECURITY_ENABLE.get() {
@@ -784,7 +785,7 @@ pub fn pair_write(data: &Packet) -> bool {
         // --- Step 3: Network Provisioning - Set Network Password ---
         PAIR_OP_SET_MESH_PASSWORD => {
             // Input validation based on security mode
-            let state_valid = if SECURITY_ENABLE.get() {
+            if SECURITY_ENABLE.get() {
                 // Secure mode: Must be in ReceivingMeshName state
                 if BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
                     pair_par_init();
@@ -796,7 +797,6 @@ pub fn pair_write(data: &Packet) -> bool {
                 pair_state.pair_work.copy_from_slice(&src[0..KEY_SIZE]);
                 pair_state.pair_pass =
                     aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
-                true
             } else {
                 // Simple mode: Must be logged in and in correct state
                 if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
@@ -807,18 +807,14 @@ pub fn pair_write(data: &Packet) -> bool {
 
                 // Store plaintext password
                 pair_state.pair_pass.copy_from_slice(&src[0..KEY_SIZE]);
-                true
-            };
+            }
 
-            // Set state and security checks
-            if state_valid {
-                // Advance to next state
-                BLE_PAIR_ST.set(PairState::ReceivingMeshPassword);
+            // Advance to next state after validation passes
+            BLE_PAIR_ST.set(PairState::ReceivingMeshPassword);
 
-                // Security check: Password must differ from network name
-                if pair_state.pair_nn != pair_state.pair_pass {
-                    return true;
-                }
+            // Security check: Password must differ from network name
+            if pair_state.pair_nn != pair_state.pair_pass {
+                return true;
             }
 
             // Password identical to name - security violation
@@ -915,8 +911,8 @@ pub fn pair_write(data: &Packet) -> bool {
             let is_get_ltk = opcode == PAIR_OP_GET_MESH_LTK;
             let is_verify = opcode == PAIR_OP_VERIFY_CREDENTIALS;
 
-            // Save session key if this is a GET_LTK operation
-            if is_verify && is_get_ltk {
+            // For GET_MESH_LTK: Save the original session key before modification
+            if is_get_ltk {
                 pair_state.pair_sk_copy = pair_state.pair_sk;
             }
 
@@ -950,34 +946,30 @@ pub fn pair_write(data: &Packet) -> bool {
                     == &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE]
             };
 
-            // Only process if this is a verification request or user is already logged in
-            if is_verify || PAIR_LOGIN_OK.get() {
+            // Handle GET_MESH_LTK: Only for already-logged-in users
+            if is_get_ltk {
+                if PAIR_LOGIN_OK.get() && verification_succeeded {
+                    // Verification succeeded: transition to RequestingLtk
+                    BLE_PAIR_ST.set(PairState::RequestingLtk);
+                    return true;
+                }
+                // GET_MESH_LTK failed: either not logged in or verification failed
+                // Fall through to reset pairing
+            }
+
+            // Handle VERIFY_CREDENTIALS: Authenticate the user
+            if is_verify {
                 if verification_succeeded {
-                    if is_get_ltk {
-                        // LTK request succeeded
-                        BLE_PAIR_ST.set(PairState::RequestingLtk);
-                        return true;
-                    }
-
-                    if !is_verify {
-                        // Inconsistent state
-                        BLE_PAIR_ST.set(PairState::DeletePairing);
-                        return true;
-                    }
-
-                    // Verification succeeded - mark as logged in
+                    // Mark as logged in and move to key exchange
                     PAIR_LOGIN_OK.set(true);
                     BLE_PAIR_ST.set(PairState::SessionKeyExchange);
                     return true;
                 }
-
-                // Verification failed - clear login status for verify operations
-                if is_verify {
-                    PAIR_LOGIN_OK.set(false);
-                }
+                // Verification failed: clear any login status
+                PAIR_LOGIN_OK.set(false);
             }
 
-            // Reset pairing on verification failure
+            // Reset pairing on verification failure or if we reach here
             pair_par_init();
             return true;
         }
@@ -991,6 +983,7 @@ pub fn pair_write(data: &Packet) -> bool {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::common::{
@@ -2572,23 +2565,97 @@ mod tests {
     }
 
     #[test]
-    fn test_pair_proc_other_state() {
-        // Arrange: Use a state not explicitly handled (e.g., Completed)
+    #[test]
+    fn test_pair_proc_completed_case() {
+        // Arrange: Use the Completed state which is explicitly handled in the match statement
         setup_proc_state(PairState::Completed, true, true, true, false, false);
 
         // Act
         let result = pair_proc();
 
         // Assert
-        // In the current implementation, unhandled states fall through and return Some(pkt)
-        // after clearing the PAIR_READ_PENDING flag.
-        assert!(result.is_some()); // Changed from is_none()
-                                   // Verify the state byte in the returned packet matches the initial state
+        assert!(result.is_some(), "Expected Some(pkt) for Completed state");
+
+        let pkt = result.unwrap();
+
+        // Verify the state byte in the returned packet matches the initial state
         assert_eq!(
-            result.unwrap().att_read_rsp().value[0],
-            PairState::Completed as u8
+            pkt.att_read_rsp().value[0],
+            PairState::Completed as u8,
+            "State byte should match the initial pairing state"
         );
-        assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared
+
+        // Verify Completed handler sets l2cap_len to HEADER_SIZE (2)
+        let l2cap_len = pkt.head().l2cap_len;
+        assert_eq!(
+            l2cap_len, 2,
+            "Completed state should set l2cap_len to HEADER_SIZE (2)"
+        );
+
+        // Verify rf_len and dma_len are calculated from the modified l2cap_len
+        let rf_len = pkt.head().rf_len;
+        let dma_len = pkt.head().dma_len;
+        assert_eq!(rf_len, 2 + 0x4, "rf_len should be l2cap_len + 0x4");
+        assert_eq!(dma_len, 2 + 6, "dma_len should be l2cap_len + 6");
+
+        // Flag should be cleared
+        assert_eq!(
+            PAIR_READ_PENDING.get(),
+            false,
+            "PAIR_READ_PENDING should be cleared"
+        );
+    }
+
+    #[test]
+    fn test_pair_proc_other_state() {
+        // Arrange: Use a state not explicitly handled in the match statement (line 655 default case)
+        // RandomConfirmation is not in the explicit match arms, so it falls through to default
+        setup_proc_state(
+            PairState::RandomConfirmation,
+            true,
+            true,
+            true,
+            false,
+            false,
+        );
+
+        // Act
+        let result = pair_proc();
+
+        // Assert
+        // Unhandled states fall through and return Some(pkt) with default packet configuration
+        assert!(result.is_some(), "Expected Some(pkt) for unhandled state");
+
+        let pkt = result.unwrap();
+
+        // Verify the state byte in the returned packet matches the initial state
+        assert_eq!(
+            pkt.att_read_rsp().value[0],
+            PairState::RandomConfirmation as u8,
+            "State byte should match the initial pairing state"
+        );
+
+        // Verify default packet configuration is used (not modified by any specific state handler)
+        // Copy packed fields to local variables to avoid alignment issues
+        let l2cap_len = pkt.head().l2cap_len;
+        let rf_len = pkt.head().rf_len;
+        let dma_len = pkt.head().dma_len;
+
+        // Default l2cap_len is 0x17 (23) from packet initialization at line 456
+        assert_eq!(l2cap_len, 0x17, "Default l2cap_len should be 0x17");
+
+        // rf_len = l2cap_len + 0x4 (line 660)
+        assert_eq!(rf_len, 0x17 + 0x4, "rf_len should be l2cap_len + 0x4");
+
+        // dma_len = l2cap_len + 6 (line 661)
+        assert_eq!(dma_len, 0x17 + 6, "dma_len should be l2cap_len + 6");
+
+        // Flag should be cleared
+        assert_eq!(
+            PAIR_READ_PENDING.get(),
+            false,
+            "PAIR_READ_PENDING should be cleared"
+        );
     }
 
     #[test]
@@ -3269,6 +3336,55 @@ mod tests {
     }
 
     #[test]
+    #[mry::lock(pair_par_init)]
+    fn test_pair_write_set_mesh_ltk_simple_mode_fallthrough_not_logged_in() {
+        // Arrange - Simple mode but not logged in (fallthrough to line 890)
+        setup_proc_state(
+            PairState::ReceivingMeshPassword,
+            true,
+            false, // security disabled (simple mode)
+            false, // NOT logged in - triggers fallthrough
+            false,
+            false,
+        );
+
+        // Create a packet with SET_MESH_LTK opcode
+        let mut pkt = Packet {
+            att_val: PacketAttRawValue {
+                head: PacketL2capHead {
+                    l2cap_len: 0x13,
+                    chan_id: 0,
+                    _type: 0,
+                    dma_len: 0,
+                    rf_len: 0,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            },
+        };
+
+        // Setup packet data
+        const PAIR_OP_SET_MESH_LTK: u8 = 0x06;
+        let plaintext_ltk = b"PlaintextLTK1234";
+        pkt.att_val_mut().value[0] = PAIR_OP_SET_MESH_LTK;
+        pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
+
+        // Mock pair_par_init for the reset
+        mock_pair_par_init().returns(());
+
+        // Act
+        let result = pair_write(&pkt);
+
+        // Assert - Verify fallthrough path (lines 890-892)
+        assert_eq!(result, true);
+        mock_pair_par_init().assert_called(1); // Line 890: pair_par_init() called
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
+        assert_eq!(PAIR_ENC_ENABLE.get(), false); // Line 892: PAIR_ENC_ENABLE cleared
+    }
+
+    #[test]
     fn test_pair_write_delete_pairing() {
         // Arrange
         setup_proc_state(PairState::Completed, false, true, true, false, false);
@@ -3601,6 +3717,122 @@ mod tests {
         // Assert
         assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Verify reset was called
+    }
+
+    #[test]
+    fn test_pair_write_get_mesh_ltk_saves_session_key() {
+        // Arrange - Test that session key is saved (line 916)
+        setup_proc_state(PairState::Idle, false, false, true, false, false);
+
+        // Create a packet with GET_MESH_LTK opcode
+        let mut pkt = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: 0,
+                chan_id: 0,
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            },
+        };
+
+        // Setup packet data: opcode + random challenge + credentials
+        const PAIR_OP_GET_MESH_LTK: u8 = 0x08;
+        let test_random = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        // Set up network name and password with known values
+        let original_session_key = [0x55u8; 16];
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn = *b"TestNetwork\0\0\0\0\0";
+            pair_state.pair_pass = *b"TestPassword\0\0\0\0";
+            // Set a specific session key that we'll verify gets copied
+            pair_state.pair_sk = original_session_key;
+            pair_state.pair_sk_copy.fill(0x00); // Initially empty
+        }
+
+        // In simple mode, the client sends XOR(nn, pass)
+        let mut expected_credential_proof = [0u8; 16];
+        for i in 0..16 {
+            expected_credential_proof[i] =
+                b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
+        }
+
+        pkt.att_val_mut().value[0] = PAIR_OP_GET_MESH_LTK;
+        pkt.att_val_mut().value[1..1 + test_random.len()].copy_from_slice(&test_random);
+        pkt.att_val_mut().value[9..9 + expected_credential_proof.len()]
+            .copy_from_slice(&expected_credential_proof);
+
+        // Act
+        let result = pair_write(&pkt);
+
+        // Assert
+        assert_eq!(result, true);
+
+        // Verify that session key was copied (line 916)
+        // The copy should contain the original session key before modification
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(pair_state.pair_sk_copy, original_session_key, "Session key copy should contain the original session key from before GET_MESH_LTK processing");
+
+        // Verify that pair_sk was modified to contain the master random (lines 924-925)
+        let mut expected_sk = [0u8; 16];
+        expected_sk[0..8].copy_from_slice(&test_random);
+        // Rest is filled with 0 (line 926)
+        assert_eq!(
+            pair_state.pair_sk, expected_sk,
+            "Session key should be updated with master random"
+        );
+    }
+
+    #[test]
+    #[mry::lock(pair_par_init)]
+    fn test_pair_write_get_mesh_ltk_fallthrough_verification_failed_not_logged_in() {
+        // Arrange - Test fallthrough when verification fails and not logged in (lines 964-968)
+        setup_proc_state(PairState::Idle, false, false, false, false, false); // Not logged in
+
+        // Create a packet with GET_MESH_LTK opcode
+        let mut pkt = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: 0,
+                chan_id: 0,
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            },
+        };
+
+        // Setup packet data: opcode + random challenge + INCORRECT credentials
+        const PAIR_OP_GET_MESH_LTK: u8 = 0x08;
+        let test_random = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        // Set up network name and password with known values
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn = *b"TestNetwork\0\0\0\0\0";
+            pair_state.pair_pass = *b"TestPassword\0\0\0\0";
+        }
+
+        pkt.att_val_mut().value[0] = PAIR_OP_GET_MESH_LTK;
+        pkt.att_val_mut().value[1..1 + test_random.len()].copy_from_slice(&test_random);
+
+        // Send INCORRECT credential proof (not matching XOR(nn, pass))
+        let incorrect_proof = [0xFFu8; 16];
+        pkt.att_val_mut().value[9..9 + incorrect_proof.len()].copy_from_slice(&incorrect_proof);
+
+        // Mock pair_par_init for the reset
+        mock_pair_par_init().returns(());
+
+        // Act
+        let result = pair_write(&pkt);
+
+        // Assert - Verify fallthrough path (lines 964-968)
+        assert_eq!(result, true);
+        // Since we're not logged in and this is GET_MESH_LTK (not verify),
+        // the condition at line 950 (is_verify || PAIR_LOGIN_OK.get()) fails
+        // So we skip the block and fall through to pair_par_init() at line 964
+        mock_pair_par_init().assert_called(1); // Line 964: pair_par_init() called
+                                               // Line 965: return true
     }
 
     #[test]
@@ -4091,5 +4323,33 @@ mod tests {
 
         // Verify pair_save_key was NOT called for this path
         mock_pair_save_key().assert_called(0);
+    }
+
+    #[test]
+    fn test_pair_write_unknown_opcode() {
+        // Arrange - Test default case for unknown opcode (line 978-980)
+        setup_proc_state(PairState::Idle, false, false, false, false, false);
+
+        // Create a packet with an unknown opcode
+        let mut pkt = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: 0,
+                chan_id: 0,
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: [0; 30],
+            },
+        };
+
+        // Setup packet data with unknown/unsupported opcode
+        const UNKNOWN_OPCODE: u8 = 0xFF; // Not any of the handled opcodes
+        pkt.att_val_mut().value[0] = UNKNOWN_OPCODE;
+
+        // Act
+        let result = pair_write(&pkt);
+
+        // Assert - Should hit default case and return true
+        assert_eq!(result, true, "Unknown opcode should be handled gracefully");
     }
 }

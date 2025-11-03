@@ -636,6 +636,7 @@ pub fn process_queued_status_responses() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

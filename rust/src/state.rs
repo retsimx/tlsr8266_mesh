@@ -857,6 +857,7 @@ impl AtomicPairState {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use core::sync::atomic::{

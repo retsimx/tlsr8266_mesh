@@ -138,6 +138,7 @@ pub fn wd_clear() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::{

@@ -31,6 +31,7 @@ pub fn dma_init() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::register::mock_write_reg_dma_chn_irq_msk;

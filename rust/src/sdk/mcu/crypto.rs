@@ -436,6 +436,7 @@ pub fn aes_att_encryption_packet(
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::mcu::crypto::{

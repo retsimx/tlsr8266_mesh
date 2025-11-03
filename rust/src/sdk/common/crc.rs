@@ -47,6 +47,7 @@ const CRC16_TABLE: [u16; 256] = generate_crc16_table();
 ///
 /// Approximately 40-50% faster than the previous dual-table implementation
 /// on ARM Thumb processors due to reduced memory accesses and loop unrolling.
+#[cfg_attr(test, mry::mry)]
 #[inline]
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xffff;
@@ -106,6 +107,7 @@ pub fn crc16(data: &[u8]) -> u16 {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use crate::sdk::common::crc::crc16;
 

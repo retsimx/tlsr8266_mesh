@@ -352,6 +352,7 @@ pub fn light_sw_reboot() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::common::compat::mock_load_tbl_cmd_set;

@@ -71,6 +71,7 @@ impl Future for YieldNow {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use core::task::{RawWaker, RawWakerVTable, Waker};

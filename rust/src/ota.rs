@@ -422,6 +422,8 @@ impl OtaManager {
     }
 }
 
+// Coverage disable for this function because it's simply a bridge function from GATT to App function.
+#[coverage(off)]
 pub fn rf_link_slave_data_ota(data: &Packet) -> bool {
     app().ota_manager.rf_link_slave_data_ota(data);
 

@@ -936,6 +936,7 @@ pub fn mesh_report_status_enable(enable: bool) {
 /// * Updates global mesh reporting enable flag
 /// * Modifies selective reporting bitmask
 /// * Affects which nodes appear in subsequent status reports
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_report_status_enable_mask(data: &[u8]) {
     let mut mesh_node_mask = MESH_NODE_MASK.lock();
     let mut mesh_node_st = MESH_NODE_ST.lock();
@@ -1116,6 +1117,7 @@ pub fn ll_device_status_update(val_par: &[u8]) {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;

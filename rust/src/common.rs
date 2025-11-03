@@ -6,7 +6,7 @@ use core::slice;
 use crate::app;
 use crate::config::*;
 use crate::sdk::ble_app::light_ll::connection_management::setup_ble_parameter_start;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::packet_types::Packet;
@@ -128,6 +128,7 @@ pub fn rf_update_conn_para(p: &Packet) -> u8 {
     0
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn retrieve_dev_grp_address() {
     let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
     let mut addr_next_pos = MESH_DEVICE_ADDRESS_NEXT_POSITION.get();
@@ -174,6 +175,7 @@ pub fn retrieve_dev_grp_address() {
     }
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_init() {
     app().mesh_manager.mesh_node_buf_init();
 
@@ -189,7 +191,8 @@ pub fn pair_flash_clean() {
     let mut flash_dat_swap: [u8; 64] = [0; 64];
     let flash_dat_swap_len = flash_dat_swap.len();
 
-    if FLASH_CONFIGURATION_INDEX.get() >= 0xeff {
+    // If configuration has reached the last entry (0xfc0), wrap to the beginning
+    if FLASH_CONFIGURATION_INDEX.get() >= 0xfc0 {
         let src_addr = (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get()) as *const u8;
         unsafe {
             flash_dat_swap.copy_from_slice(slice::from_raw_parts(src_addr, flash_dat_swap_len));
@@ -206,33 +209,43 @@ pub fn pair_flash_clean() {
 }
 
 pub fn pair_flash_config_init() -> bool {
-    let result;
+    // Read first 0x40 byte chunk to get the valid flag marker
+    let mut first_buffer = [0u8; 0x40];
+    flash_read_page(FLASH_ADR_PAIRING, 0x40, first_buffer.as_mut_ptr());
 
-    unsafe {
-        if PAIR_CONFIG_VALID_FLAG == *(FLASH_ADR_PAIRING as *const u8) {
-            let mut index = 0x40;
-            loop {
-                if *(FLASH_ADR_PAIRING as *const u8).offset(index)
-                    != *(FLASH_ADR_PAIRING as *const u8)
-                {
-                    break;
-                }
-                index += 0x40;
-                if index == 0x1000 {
-                    break;
-                }
-            }
-            FLASH_CONFIGURATION_INDEX.set(index as i32 + -0x40);
-            pair_flash_clean();
-            result = true;
-        } else {
-            FLASH_CONFIGURATION_INDEX.set(-0x41);
-            result = false;
-        }
+    // If first byte is not valid, no configuration exists
+    if first_buffer[0] != PAIR_CONFIG_VALID_FLAG {
+        FLASH_CONFIGURATION_INDEX.set(-1);
+        return false;
     }
-    result
+
+    // Scan through all possible 0x40 byte chunks to find the last valid configuration
+    // The algorithm walks through offsets (0x40, 0x80, ..., 0xfc0) until it finds
+    // an empty slot (first byte != PAIR_CONFIG_VALID_FLAG). The last valid position
+    // is then used as the configuration index.
+    let mut last_valid_index = 0i32;
+    let mut buffer = [0u8; 0x40];
+
+    for offset in (0x40..=0xfc0).step_by(0x40) {
+        flash_read_page(FLASH_ADR_PAIRING + offset as u32, 0x40, buffer.as_mut_ptr());
+
+        // If this slot is empty (first byte != PAIR_CONFIG_VALID_FLAG), we've found
+        // the boundary between used and unused space
+        if buffer[0] != PAIR_CONFIG_VALID_FLAG {
+            // The last valid configuration is at the previous offset
+            break;
+        }
+
+        // This slot is valid, so it becomes the new last_valid_index
+        last_valid_index = offset as i32;
+    }
+
+    FLASH_CONFIGURATION_INDEX.set(last_valid_index);
+    pair_flash_clean();
+    true
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32 {
     // Ensure the input slices are copied into fixed-size arrays
     let mut name_arr = [0u8; 16];
@@ -308,7 +321,7 @@ pub fn pair_load_key() {
 
     let pairing_addr = FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get();
 
-    if -1 < FLASH_CONFIGURATION_INDEX.get() && pairing_addr != 0x0 {
+    if FLASH_CONFIGURATION_INDEX.get() >= 0 && pairing_addr != 0x0 {
         {
             let mut pair_state = PAIR_STATE.lock();
 

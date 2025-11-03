@@ -112,6 +112,7 @@ pub fn configure_ble_receive_state() {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_select_next_data_channel;

@@ -1,6 +1,8 @@
 use core::ptr::addr_of;
+use core::time::Duration;
 
 use bytemuck::{Pod, Zeroable};
+use embassy_time::Timer;
 use heapless::{Deque, Vec};
 
 use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
@@ -17,7 +19,7 @@ use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
-use crate::sdk::drivers::flash::{flash_write_page};
+use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::{

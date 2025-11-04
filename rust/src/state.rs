@@ -5,6 +5,7 @@ use core::sync::atomic::{
 use heapless::Deque;
 
 use crate::config::VENDOR_ID;
+use crate::const_assert;
 use crate::embassy::sync::mutex::CriticalSectionMutex;
 use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
 use crate::sdk::light::*;
@@ -159,7 +160,9 @@ pub static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0;
 
 /// BLE advertising data payload.
 /// Contains flags and service information broadcast during BLE advertising.
-pub static ADV_DATA: CriticalSectionMutex<[u8; 3]> = CriticalSectionMutex::new([2, 1, 5]);
+pub const ADV_DATA_INIT: [u8; 3] = [2, 1, 5];
+pub static ADV_DATA: CriticalSectionMutex<[u8; ADV_DATA_INIT.len()]> =
+    CriticalSectionMutex::new(ADV_DATA_INIT);
 /// Advertising packet structure used for BLE advertisements.
 /// Pre-configured packet with advertising data, device address, and payload.
 /// Transmitted during advertising intervals to announce device presence.
@@ -464,7 +467,14 @@ pub static SET_UUID_FLAG: AtomicBool = AtomicBool::new(false);
 
 /// Maximum allowed length for mesh network names.
 /// Enforces string length limits for mesh configuration.
-pub static MAX_MESH_NAME_LEN: AtomicUsize = AtomicUsize::new(16);
+const ADV_PRIVATE_SIZE: usize = ADV_DATA_INIT.len() + size_of::<AdvPrivate>() + 2;
+const_assert!(ADV_PRIVATE_SIZE < 31);
+
+pub const MAX_MESH_NAME_LEN: usize = if 31 - ADV_PRIVATE_SIZE - 2 < 16 {
+    31 - ADV_PRIVATE_SIZE - 2
+} else {
+    16
+};
 /// LED controller state managing all LED operations.
 /// Encapsulates timing, patterns, and current state for LED control.
 pub struct LedControllerState {

@@ -665,6 +665,7 @@ fn init_reset_sequence() {
 /// # Notes
 ///
 /// * This function should be called during device boot
+#[cfg_attr(test, mry::mry)]
 pub fn factory_reset_handle() {
     // Initialize the reset sequence tracking
     init_reset_sequence();
@@ -771,6 +772,7 @@ pub fn factory_reset_handle() {
 /// * This function implements the timing verification logic for the factory reset sequence
 /// * It validates each power cycle against specific time windows defined in POWER_CYCLE_TIMING
 /// * If any timing window is not followed correctly, the entire sequence is reset
+#[cfg_attr(test, mry::mry)]
 pub fn factory_reset_cnt_check() {
     // If no timing check is active, exit early
     if FACTORY_RESET_STATE.clear_state.get() == 0 {

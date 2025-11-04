@@ -32,11 +32,13 @@ pub fn dev_addr_with_mac_flag(params: &[u8]) -> bool {
     DEV_ADDR_PAR_WITH_MAC == params[2]
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
     par_rsp[4..10].copy_from_slice(&*MAC_ID.lock());
     true
 }
 
+#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
     if params[0] == 0xff && params[1] == 0xff {
         // get - return current validation pending state
@@ -306,7 +308,7 @@ pub fn pair_update_key() {
         None => pair_state.pair_nn.len(),
     };
 
-    let name_len = min(MAX_MESH_NAME_LEN.get(), name_len);
+    let name_len = min(MAX_MESH_NAME_LEN, name_len);
 
     set_advertisement_mesh_name(&pair_state.pair_nn[0..name_len]);
     let tmp = *ADV_PRI_DATA.lock();
@@ -330,7 +332,7 @@ pub fn pair_load_key() {
             pair_state.pair_ltk.iter_mut().for_each(|v| *v = 0);
 
             pair_state.pair_nn.copy_from_slice(unsafe {
-                slice::from_raw_parts((pairing_addr + 0x10) as *const u8, MAX_MESH_NAME_LEN.get())
+                slice::from_raw_parts((pairing_addr + 0x10) as *const u8, MAX_MESH_NAME_LEN)
             });
             pair_state.pair_pass.copy_from_slice(unsafe {
                 slice::from_raw_parts((pairing_addr + 0x20) as *const u8, 0x10)

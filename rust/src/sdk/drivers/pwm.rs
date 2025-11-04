@@ -54,6 +54,7 @@ pub fn pwm_set_cmp(id: u32, cmp: u16) {
 /// * The PWM frequency is determined by the system clock divided by max_tick
 /// * The register offset is calculated as (id << 2) because each PWM channel's
 ///   registers are spaced 4 bytes apart
+#[cfg_attr(test, mry::mry)]
 pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
     // Combine the max and compare values into a single 32-bit register value
     // FLD_PWM::CMP and FLD_PWM::MAX define the bit positions for these values
@@ -90,6 +91,7 @@ pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
 /// * The function preserves the state of other PWM channels
 /// * Each bit in the enable register corresponds to one PWM channel
 /// * The channel must be properly configured before starting
+#[cfg_attr(test, mry::mry)]
 pub fn pwm_start(id: u32) {
     // Read current enable register value to preserve other channel states
     let current = read_reg_pwm_enable();

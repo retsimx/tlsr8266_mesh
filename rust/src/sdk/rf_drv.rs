@@ -463,6 +463,7 @@ pub fn compact_flash_storage() {
 /// - Address must be non-zero
 /// - Address must conform to `DEVICE_ADDR_MASK_DEFAULT`
 /// - Address must differ from current device address
+#[cfg_attr(test, mry::mry)]
 pub fn add_device_address(dev_id: u16) -> bool {
     // Validate the device ID
     let mut result = false;
@@ -579,6 +580,7 @@ pub fn remove_group(group_id: u16) -> bool {
 /// - Updates in-memory group table immediately
 /// - Appends to flash storage log for persistence
 /// - Triggers flash compaction if storage space is low
+#[cfg_attr(test, mry::mry)]
 pub fn add_group(group_id: u16) -> bool {
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);

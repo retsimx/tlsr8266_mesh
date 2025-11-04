@@ -679,8 +679,7 @@ pub fn pair_set_key(key: &[u8]) {
     {
         let mut pair_state = PAIR_STATE.lock();
         // Set mesh network name (limited by MAX_MESH_NAME_LEN)
-        pair_state.pair_nn[0..MAX_MESH_NAME_LEN.get()]
-            .copy_from_slice(&key[0..MAX_MESH_NAME_LEN.get()]);
+        pair_state.pair_nn[0..MAX_MESH_NAME_LEN].copy_from_slice(&key[0..MAX_MESH_NAME_LEN]);
         // Set mesh network password
         pair_state.pair_pass.copy_from_slice(&key[16..16 + 16]);
         // Set mesh long-term key
@@ -769,7 +768,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 };
 
                 // Only accept valid mesh names
-                if name_len <= MAX_MESH_NAME_LEN.get() {
+                if name_len <= MAX_MESH_NAME_LEN {
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
                     BLE_PAIR_ST.set(PairState::ReceivingMeshName);
                     return true;
@@ -2668,7 +2667,7 @@ mod tests {
         key[32..48].copy_from_slice(b"TestLongTermKey5"); // 16 bytes LTK
 
         // Set MAX_MESH_NAME_LEN for the test (assuming it's usually 16 or less)
-        MAX_MESH_NAME_LEN.set(16);
+        // Note: MAX_MESH_NAME_LEN is now a const, so no need to set it
 
         // Mock pair_update_key
         mock_pair_update_key().returns(());
@@ -2689,8 +2688,8 @@ mod tests {
             let pair_state = PAIR_STATE.lock();
             // Check that the name was copied correctly up to MAX_MESH_NAME_LEN
             assert_eq!(
-                &pair_state.pair_nn[0..MAX_MESH_NAME_LEN.get()],
-                &key[0..MAX_MESH_NAME_LEN.get()]
+                &pair_state.pair_nn[0..MAX_MESH_NAME_LEN],
+                &key[0..MAX_MESH_NAME_LEN]
             );
             // Check that the password was copied correctly
             assert_eq!(pair_state.pair_pass, &key[16..32]);
@@ -2793,7 +2792,7 @@ mod tests {
         mock_aes_att_decryption(Any, encrypted_name.to_vec()).returns(*decrypted_name);
 
         // Set MAX_MESH_NAME_LEN
-        MAX_MESH_NAME_LEN.set(16);
+        // Note: MAX_MESH_NAME_LEN is now a const, so no need to set it
 
         // Act
         let result = pair_write(&pkt);
@@ -3871,7 +3870,7 @@ mod tests {
         mock_aes_att_decryption(Any, encrypted_name.to_vec()).returns(decrypted_name);
 
         // Set MAX_MESH_NAME_LEN to be exactly the buffer length to accept the name
-        MAX_MESH_NAME_LEN.set(16);
+        // Note: MAX_MESH_NAME_LEN is now a const
 
         // Act
         let result = pair_write(&pkt);
@@ -3890,7 +3889,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(aes_att_decryption, pair_par_init)]
+    #[mry::lock(aes_att_decryption)]
     fn test_pair_write_set_mesh_name_no_null_terminator_too_long() {
         // Arrange
         setup_proc_state(PairState::Completed, false, true, false, false, false);
@@ -3923,11 +3922,7 @@ mod tests {
         ];
         mock_aes_att_decryption(Any, encrypted_name.to_vec()).returns(decrypted_name);
 
-        // Set MAX_MESH_NAME_LEN to a smaller value to reject the name
-        MAX_MESH_NAME_LEN.set(12);
-
-        // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
+        // MAX_MESH_NAME_LEN is now a const (16), so this 16-byte name should be accepted
 
         // Act
         let result = pair_write(&pkt);
@@ -3935,9 +3930,9 @@ mod tests {
         // Assert
         assert_eq!(result, true);
 
-        // Verify pairing was reset due to invalid mesh name length
-        mock_pair_par_init().assert_called(1);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        // Verify pairing accepted the mesh name and transitioned to next state
+        assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
     }
 
     #[test]

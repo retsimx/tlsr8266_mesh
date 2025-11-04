@@ -8,6 +8,7 @@ use crate::state::*;
 use crate::{app, BIT};
 use critical_section;
 
+#[cfg_attr(test, mry::mry)]
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read(0x00);
     if en {

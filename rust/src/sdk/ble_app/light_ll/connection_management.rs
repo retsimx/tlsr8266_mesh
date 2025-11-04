@@ -415,6 +415,7 @@ pub fn rf_link_timing_adjust(time: u32) {
 /// * Modifies global connection and advertising enable flags
 /// * Affects device discoverability in BLE scans
 /// * Controls whether new connection requests will be accepted
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_pairing_enable(enable: bool) {
     BLE_PERIPHERAL_CONNECTION_ENABLED.set(enable);
     BLE_PERIPHERAL_ADVERTISING_ENABLED.set(enable);
@@ -551,6 +552,7 @@ fn update_connect_para() {
 /// # Call Frequency
 /// This function should be called regularly (typically from the main loop)
 /// to ensure timely processing of time-sensitive operations.
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_proc() {
     // Process mesh network pairing operations
     app().mesh_manager.mesh_pair_proc();
@@ -577,6 +579,7 @@ pub fn rf_link_slave_proc() {
 ///
 /// # Side Effects
 /// * Modifies `BLE_SCAN_RESPONSE_INTERVAL_US` for timing calibration
+#[cfg_attr(test, mry::mry)]
 pub fn light_check_tick_per_us(ticks: u32) {
     if ticks == 0x10 {
         // Clock frequency detected: set to minimal scan response interval

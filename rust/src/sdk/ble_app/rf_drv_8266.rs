@@ -647,6 +647,7 @@ fn rf_link_slave_set_adv(adv_data_ptr: &[u8]) {
  *
  * @param interval - Base interval value for BLE timing operations
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_init(interval: u32) {
     unsafe {
         // Initialize the basic MCU link layer functionality
@@ -778,6 +779,7 @@ pub fn rf_link_slave_init(interval: u32) {
  *
  * @param index - The power level index (0-11), where 0 is highest power
  */
+#[cfg_attr(test, mry::mry)]
 pub fn rf_set_power_level_index(index: u32) {
     // Default to the lowest power setting (index 11) if out of range
     let tbl_index = if index < TBL_RF_POWER.len() as u32 {

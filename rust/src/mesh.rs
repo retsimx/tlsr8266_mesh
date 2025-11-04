@@ -725,7 +725,7 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
         mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
     };
-    use crate::sdk::drivers::flash::{mock_flash_write_page};
+    use crate::sdk::drivers::flash::mock_flash_write_page;
     use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed, mock_sleep_us};
     use crate::sdk::mcu::register::{

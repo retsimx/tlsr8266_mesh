@@ -22,6 +22,7 @@ use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 /// # Hardware Context
 /// This function interacts with the TLSR8266's BLE transceiver through the SDK layer
 /// to establish the device's presence in the mesh network.
+#[cfg_attr(test, mry::mry)]
 pub fn vendor_set_adv_data() {
     // Step 1: Configure and send primary advertisement data
     // --------------------------------------------------

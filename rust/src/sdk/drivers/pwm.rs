@@ -24,6 +24,7 @@ use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 /// * The register offset is calculated as (id << 2) because each PWM channel's
 ///   registers are spaced 4 bytes apart in the register map
 /// * Lower compare values result in shorter duty cycles
+#[cfg_attr(test, mry::mry)]
 pub fn pwm_set_cmp(id: u32, cmp: u16) {
     // Each PWM channel's registers are spaced 4 bytes apart
     // Calculate the offset by shifting the ID left by 2 (multiplying by 4)

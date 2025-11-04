@@ -1103,6 +1103,7 @@ pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool) {
 /// * Refreshes device timestamp to prevent timeout
 /// * Triggers status change notification for network propagation
 /// * Affects subsequent mesh status advertisements
+#[cfg_attr(test, mry::mry)]
 pub fn ll_device_status_update(val_par: &[u8]) {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 

@@ -547,6 +547,7 @@ pub fn pair_flash_clean() {
 /// # Side Effects
 /// * Sets FLASH_CONFIGURATION_INDEX to last valid slot offset or -1
 /// * May trigger sector erase if at wrap threshold
+#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_config_init() -> bool {
     // STEP 1: Check if any configuration exists
     let mut first_buffer = [0u8; 0x40];
@@ -910,6 +911,15 @@ pub fn pair_load_key() {
     // EARLY RETURN: No valid configuration exists (first boot or factory reset)
     // Negative index indicates pair_flash_config_init() found no valid config marker
     if config_index < 0 {
+        // Initialize PAIR_STATE with default credentials from PAIR_CONFIG_*
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn = *PAIR_CONFIG_MESH_NAME.lock();
+            pair_state.pair_pass = *PAIR_CONFIG_MESH_PWD.lock();
+            pair_state.pair_ltk = *PAIR_CONFIG_MESH_LTK.lock();
+        }
+        // Update BLE advertisement with default name and regenerate access code
+        pair_update_key();
         return;
     }
 
@@ -1793,8 +1803,24 @@ mod tests {
     // To test this properly, we would need to refactor to use dependency injection.
 
     #[test]
-    #[mry::lock(flash_read_page, flash_erase_sector, flash_write_page)]
+    #[mry::lock(
+        flash_read_page,
+        flash_erase_sector,
+        flash_write_page,
+        pair_update_key
+    )]
     fn test_pair_load_key_handles_no_config() {
+        // Setup: Initialize PAIR_CONFIG_* with default values
+        PAIR_CONFIG_MESH_NAME.lock().fill(0);
+        PAIR_CONFIG_MESH_NAME.lock()[0..11].copy_from_slice(b"out_of_mesh");
+        
+        PAIR_CONFIG_MESH_PWD.lock().fill(0);
+        PAIR_CONFIG_MESH_PWD.lock()[0..3].copy_from_slice(b"123");
+        
+        let test_ltk = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 
+                        0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf];
+        *PAIR_CONFIG_MESH_LTK.lock() = test_ltk;
+
         // Setup flash to have no valid configuration
         mock_flash_read_page(Any, Any, Any).returns_with(
             |_addr: u32, _len: u32, buf: SendWrapper<*mut u8>| {
@@ -1804,11 +1830,102 @@ mod tests {
         );
         mock_flash_erase_sector(Any).returns(());
         mock_flash_write_page(Any, Any, Any).returns(());
+        mock_pair_update_key().returns(());
 
-        // Call function - should return early without error
+        // Call function - should load defaults and call pair_update_key
         pair_load_key();
 
         // Verify FLASH_CONFIGURATION_INDEX is -1
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), -1);
+
+        // Verify PAIR_STATE was initialized with default credentials
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(&pair_state.pair_nn[0..11], b"out_of_mesh");
+        assert_eq!(&pair_state.pair_pass[0..3], b"123");
+        assert_eq!(pair_state.pair_ltk, test_ltk);
+        drop(pair_state);
+
+        // Verify pair_update_key was called to update advertisements
+        mock_pair_update_key().assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(
+        flash_read_page,
+        flash_erase_sector,
+        flash_write_page,
+        pair_update_key,
+        pair_flash_config_init
+    )]
+    fn test_pair_load_key_loads_valid_config() {
+        // Setup: Initialize PAIR_CONFIG_* with defaults (should NOT be used)
+        PAIR_CONFIG_MESH_NAME.lock().fill(0);
+        PAIR_CONFIG_MESH_NAME.lock()[0..11].copy_from_slice(b"out_of_mesh");
+        PAIR_CONFIG_MESH_PWD.lock().fill(0);
+        PAIR_CONFIG_MESH_PWD.lock()[0..3].copy_from_slice(b"123");
+
+        // Mock pair_flash_config_init to set a valid index
+        mock_pair_flash_config_init().returns_with(|| {
+            FLASH_CONFIGURATION_INDEX.set(0x1000);
+            true
+        });
+
+        // Mock flash reads to return custom configuration
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            |addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
+                let buffer = unsafe { core::slice::from_raw_parts_mut(*buf, len as usize) };
+                
+                // Determine what data to return based on offset
+                let base_addr = FLASH_ADR_PAIRING + 0x1000;
+                let offset = addr.saturating_sub(base_addr);
+                
+                match offset {
+                    0x10 => {
+                        // Mesh name at offset +0x10
+                        buffer.fill(0);
+                        buffer[0..10].copy_from_slice(b"CustomMesh");
+                    }
+                    0x20 => {
+                        // Password at offset +0x20
+                        buffer.fill(0);
+                        buffer[0..8].copy_from_slice(b"Pass1234");
+                    }
+                    0x30 => {
+                        // LTK at offset +0x30
+                        buffer.fill(0xAA);
+                    }
+                    0x01 => {
+                        // Validation flag
+                        buffer[0] = 0x00;
+                    }
+                    0x0F => {
+                        // Config flag (not encoded)
+                        buffer[0] = 0x00;
+                    }
+                    _ => {
+                        buffer.fill(0);
+                    }
+                }
+            },
+        );
+        mock_flash_erase_sector(Any).returns(());
+        mock_flash_write_page(Any, Any, Any).returns(());
+        mock_pair_update_key().returns(());
+
+        // Call function - should load from flash, not defaults
+        pair_load_key();
+
+        // Verify PAIR_STATE was loaded with custom config, NOT defaults
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(&pair_state.pair_nn[0..10], b"CustomMesh");
+        assert_eq!(&pair_state.pair_pass[0..8], b"Pass1234");
+        assert_eq!(pair_state.pair_ltk[0], 0xAA);
+        
+        // Verify it did NOT use the default credentials
+        assert_ne!(&pair_state.pair_nn[0..11], b"out_of_mesh");
+        drop(pair_state);
+
+        // Verify pair_update_key was called to update advertisements
+        mock_pair_update_key().assert_called(1);
     }
 }

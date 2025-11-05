@@ -703,26 +703,22 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 
         if signature_slice == SIGNATURE {
             // Extract node status array from packet and update mesh database
-            // Status data starts at sequence number field, spans 0x1a bytes
-            // Each status entry is MESH_NODE_ST_VAL_LEN bytes
-            // Create a safe slice from the mesh data fields
-            let mut status_data = [0u8; 0x1a];
-            status_data[0..3].copy_from_slice(&packet.mesh().sno); // 3 bytes
-            let dst_bytes = packet.mesh().dst_adr.to_le_bytes();
-            status_data[3..5].copy_from_slice(&dst_bytes); // 2 bytes
-            let src_bytes = packet.mesh().src_adr.to_le_bytes();
-            status_data[5..7].copy_from_slice(&src_bytes); // 2 bytes
-            let vendor_bytes = packet.mesh().vendor_id.to_le_bytes();
-            status_data[7..9].copy_from_slice(&vendor_bytes); // 2 bytes
-            status_data[9] = packet.mesh().op; // 1 byte
-            status_data[10..20].copy_from_slice(&packet.mesh().par); // 10 bytes
-                                                                     // Remaining bytes (20-26) would come from additional packet data if available
+            // Status data is in the first 24 bytes of PacketAttValue (written by mesh_node_adv_status)
+            // This overlays the sno, src, dst, and val fields of PacketAttValue
+            // We need to extract from the value field, not from MeshPkt metadata fields
+
+            // Get raw bytes of PacketAttValue starting from the beginning
+            let value_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    addr_of!(packet.att_write().value) as *const u8,
+                    24, // Status data is 24 bytes
+                )
+            };
 
             // Convert to mesh_node_st_val_t array safely using bytemuck
-            let status_entries = 0x1a / MESH_NODE_ST_VAL_LEN;
-            // Ensure we have the right number of bytes for the conversion
+            let status_entries = 24 / MESH_NODE_ST_VAL_LEN;
             let bytes_needed = status_entries * MESH_NODE_ST_VAL_LEN;
-            let status_bytes = &status_data[0..bytes_needed];
+            let status_bytes = &value_bytes[0..bytes_needed];
             let status_slice = bytemuck::cast_slice::<u8, MeshNodeStValT>(status_bytes);
             mesh_node_update_status(status_slice);
         }

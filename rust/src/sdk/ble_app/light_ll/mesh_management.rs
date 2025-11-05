@@ -121,13 +121,6 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 
     // Process each node status entry in the received packet
     while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
-        // FIXME: Temporary workaround for incorrect device address 1 appearing in packets
-        // This filtering should be removed once the root cause is identified and fixed
-        if pkt[src_index].dev_adr == 1 {
-            src_index += 1;
-            continue;
-        }
-
         // Skip our own device address - we don't track our own status in the remote node table
         // (Our own status is maintained separately at index 0)
         if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
@@ -2272,5 +2265,167 @@ mod tests {
 
         // Should still update the timestamp but NOT sequence number
         assert_eq!(DEVICE_NODE_SN.get(), 100); // Should remain at initial value
+    }
+
+    // ================================================================================
+    // Test to demonstrate the status packet parsing bug
+    // ================================================================================
+
+    /// Integration test for status packet parsing with real node status data.
+    ///
+    /// This test verifies that status advertisement packets are correctly parsed to extract
+    /// actual node status entries from the PacketAttValue payload, rather than incorrectly
+    /// extracting data from packet metadata fields (sno, dst_adr, src_adr).
+    ///
+    /// The test creates a realistic status packet with known node status data and verifies
+    /// that the correct device addresses and status information are parsed.
+    #[test]
+    #[mry::lock(read_reg_system_tick, mesh_node_update_status)]
+    fn test_status_packet_parsing_integration() {
+        use crate::sdk::ble_app::light_ll::packet_processing::rf_link_rc_data;
+        use crate::sdk::packet_types::{Packet, PacketAttValue, PacketAttWrite, PacketL2capHead};
+
+        // Setup mocks
+        mock_read_reg_system_tick().returns(0x12345678);
+
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x42); // Our device address
+
+        // Create a status advertisement packet with realistic node status data
+        // The status data is in the first 24 bytes of PacketAttValue
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 0x21,
+                    chan_id: 0xffff, // Status advertisement channel
+                },
+                opcode: 0x12,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue {
+                    // These first fields overlay the actual status data
+                    // For a status packet, we need to set these as raw bytes representing MeshNodeStValT entries
+                    // Entry 0: bytes 0-3 [dev_adr=0x10, sn=0x01, par[0]=0x11, par[1]=0x22]
+                    sno: [0x10, 0x01, 0x11], // First 3 bytes of entry 0
+                    src: [0x22, 0x20],       // Last byte of entry 0 + first byte of entry 1
+                    dst: [0x02, 0x33],       // Entry 1 continued: sn=0x02, par[0]=0x33
+                    val: {
+                        let mut val = [0u8; 23];
+                        // Entry 1 last byte (par[1])
+                        val[0] = 0x44;
+                        // Entry 2: dev_adr=0x30, sn=0x03, par=[0x55, 0x66]
+                        val[1] = 0x30;
+                        val[2] = 0x03;
+                        val[3] = 0x55;
+                        val[4] = 0x66;
+                        // Entry 3: dev_adr=0x01, sn=0x04, par=[0x77, 0x88]
+                        val[5] = 0x01; // Device address 1 - should now be processed correctly
+                        val[6] = 0x04;
+                        val[7] = 0x77;
+                        val[8] = 0x88;
+                        // Entry 4: dev_adr=0x50, sn=0x05, par=[0x99, 0xAA]
+                        val[9] = 0x50;
+                        val[10] = 0x05;
+                        val[11] = 0x99;
+                        val[12] = 0xAA;
+                        // Entry 5: dev_adr=0x60, sn=0x06, par=[0xBB, 0xCC]
+                        val[13] = 0x60;
+                        val[14] = 0x06;
+                        val[15] = 0xBB;
+                        val[16] = 0xCC;
+
+                        // Remaining 6 bytes unused (bytes 17-22 in val array)
+                        // Set the signature at the correct position (bytes 17-20 in val array)
+                        val[17] = 0xa5;
+                        val[18] = 0xa5;
+                        val[19] = 0xa5;
+                        val[20] = 0xa5;
+                        val
+                    },
+                },
+            },
+        };
+
+        // Use a static variable to capture data from the mock
+        static CAPTURED_DATA: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+        // Clear any previous capture
+        *CAPTURED_DATA.lock().unwrap() = None;
+
+        // Set up mock with a side effect that captures the data
+        mock_mesh_node_update_status(Any).returns_with(|pkt: Vec<MeshNodeStValT>| {
+            // Capture the raw bytes to see what device addresses are being parsed
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    pkt.as_ptr() as *const u8,
+                    pkt.len() * core::mem::size_of::<MeshNodeStValT>(),
+                )
+            };
+            *CAPTURED_DATA.lock().unwrap() = Some(bytes.to_vec());
+            1u32
+        });
+
+        // Process the packet
+        rf_link_rc_data(&mut packet);
+
+        // Verify mesh_node_update_status was called
+        mock_mesh_node_update_status(Any).assert_called(1);
+
+        // Now check what was captured - should be the actual node status data
+        let captured = CAPTURED_DATA.lock().unwrap();
+        let data = captured
+            .as_ref()
+            .expect("mesh_node_update_status should have been called");
+
+        // With MESH_NODE_ST_VAL_LEN = 4, each entry is [dev_adr, sn, par[0], par[1]]
+        // The data should come from PacketAttValue bytes 0-23:
+        //   Entry 0: [0x10, 0x01, 0x11, 0x22] - from sno[0-2] + src[0]
+        //   Entry 1: [0x20, 0x02, 0x33, 0x44] - from src[1] + dst[0-1] + val[0]
+        //   Entry 2: [0x30, 0x03, 0x55, 0x66] - from val[1-4]
+        //   Entry 3: [0x01, 0x04, 0x77, 0x88] - from val[5-8] (address 1!)
+        //   Entry 4: [0x50, 0x05, 0x99, 0xAA] - from val[9-12]
+        //   Entry 5: [0x60, 0x06, 0xBB, 0xCC] - from val[13-16]
+
+        // Verify we have 24 bytes (6 entries * 4 bytes each)
+        assert_eq!(data.len(), 24, "Should have 24 bytes of status data");
+
+        // Verify each entry is parsed correctly
+        assert_eq!(data[0], 0x10, "Entry 0 dev_adr should be 0x10");
+        assert_eq!(data[1], 0x01, "Entry 0 sn should be 0x01");
+        assert_eq!(data[2], 0x11, "Entry 0 par[0] should be 0x11");
+        assert_eq!(data[3], 0x22, "Entry 0 par[1] should be 0x22");
+
+        assert_eq!(data[4], 0x20, "Entry 1 dev_adr should be 0x20");
+        assert_eq!(data[5], 0x02, "Entry 1 sn should be 0x02");
+
+        assert_eq!(data[6], 0x33, "Entry 1 par[0] should be 0x33");
+        assert_eq!(data[7], 0x44, "Entry 1 par[1] should be 0x44");
+
+        assert_eq!(data[8], 0x30, "Entry 2 dev_adr should be 0x30");
+        assert_eq!(data[9], 0x03, "Entry 2 sn should be 0x03");
+        assert_eq!(data[10], 0x55, "Entry 2 par[0] should be 0x55");
+        assert_eq!(data[11], 0x66, "Entry 2 par[1] should be 0x66");
+
+        // Most importantly - verify that device address 1 is correctly parsed
+        assert_eq!(
+            data[12], 0x01,
+            "Entry 3 dev_adr should be 0x01 (address 1 should work!)"
+        );
+        assert_eq!(data[13], 0x04, "Entry 3 sn should be 0x04");
+        assert_eq!(data[14], 0x77, "Entry 3 par[0] should be 0x77");
+        assert_eq!(data[15], 0x88, "Entry 3 par[1] should be 0x88");
+
+        assert_eq!(data[16], 0x50, "Entry 4 dev_adr should be 0x50");
+        assert_eq!(data[17], 0x05, "Entry 4 sn should be 0x05");
+        assert_eq!(data[18], 0x99, "Entry 4 par[0] should be 0x99");
+        assert_eq!(data[19], 0xAA, "Entry 4 par[1] should be 0xAA");
+
+        assert_eq!(data[20], 0x60, "Entry 5 dev_adr should be 0x60");
+        assert_eq!(data[21], 0x06, "Entry 5 sn should be 0x06");
+        assert_eq!(data[22], 0xBB, "Entry 5 par[0] should be 0xBB");
+        assert_eq!(data[23], 0xCC, "Entry 5 par[1] should be 0xCC");
     }
 }

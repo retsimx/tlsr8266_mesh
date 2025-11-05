@@ -305,7 +305,7 @@ impl MeshManager {
                 handle1: 0x00, // status handler
                 value: PacketAttValue {
                     sno: [op | 0xc0, (VENDOR_ID & 0xff) as u8, (VENDOR_ID >> 8) as u8],
-                    src: [(dev_adr & 0xFF) as u8, (dev_adr >> 8) as u8], // todo: Should this actually be dst?
+                    src: [(dev_adr & 0xFF) as u8, (dev_adr >> 8) as u8],
                     dst: [0; 2],
                     val: [0; 23],
                 },

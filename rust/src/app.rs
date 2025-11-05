@@ -1,3 +1,4 @@
+#![coverage(off)]
 use embassy_executor::Spawner;
 
 use crate::config::MESH_PWD_ENCODE_SK;

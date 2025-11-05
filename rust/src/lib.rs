@@ -66,19 +66,23 @@ unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
     core::mem::transmute(t)
 }
 
+#[coverage(off)]
 #[embassy_executor::task]
 pub async fn run(spawner: Spawner) {
     app().run(spawner).await;
 }
 
+#[coverage(off)]
 fn set_pw1(on: bool) {
     gpio_write(PWM_G as u32, if on { 1 } else { 0 });
 }
 
+#[coverage(off)]
 fn set_pw2(on: bool) {
     gpio_write(PWM_B as u32, if on { 1 } else { 0 });
 }
 
+#[coverage(off)]
 pub fn blinken_testboard() {
     for idx in 0..6 {
         if idx % 2 == 0 {
@@ -98,6 +102,7 @@ pub fn blinken_testboard() {
     set_pw2(false);
 }
 
+#[coverage(off)]
 pub fn blinken() {
     for idx in 0..6 {
         if idx % 2 == 0 {
@@ -128,6 +133,7 @@ pub fn blinken() {
 
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]
+#[coverage(off)]
 pub extern "C" fn main_entrypoint() {
     // Must happen first
     OtaManager::handle_ota_update();

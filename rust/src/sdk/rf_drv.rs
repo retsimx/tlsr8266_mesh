@@ -254,6 +254,7 @@ fn compact_adv_data_removing_invalid_manufacturer(
 /// - Finds existing mesh name field or allocates space for a new one
 /// - Updates packet length fields automatically
 /// - Preserves other advertisement data structures
+#[cfg_attr(test, mry::mry)]
 pub fn set_advertisement_mesh_name(name: &[u8]) {
     let mut pkt_adv = PKT_ADV.lock();
 

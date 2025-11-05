@@ -457,6 +457,7 @@ pub fn rf_link_slave_pairing_enable(enable: bool) {
 /// # Returns
 /// * Success code (0) if parameters are valid
 /// * Error code (0xfffffffd/0xfffffffe) if validation fails
+#[cfg_attr(test, mry::mry)]
 pub fn setup_ble_parameter_start(
     mut interval_min: u16,
     mut interval_max: u16,

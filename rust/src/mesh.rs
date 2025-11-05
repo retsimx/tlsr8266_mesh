@@ -39,6 +39,13 @@ pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
 
+/// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
+///
+/// Credentials are transmitted in 6 messages (Name1/2, Pwd1/2, Ltk1/2), then
+/// devices switch to the new mesh using MeshPairEffectDelay (delayed switch).
+///
+/// Note: MeshPairEffect (immediate switch) exists for receiving only - it's not
+/// sent by this implementation as it was part of a broken single-device optimization.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum MeshPairState {
     MeshPairName1 = 0,
@@ -48,7 +55,7 @@ enum MeshPairState {
     MeshPairLtk1,
     MeshPairLtk2,
     MeshPairEffectDelay,
-    MeshPairEffect,
+    MeshPairEffect, // Receive-only: immediate effect (not sent by this code)
     MeshPairDefaultMesh,
 }
 
@@ -394,21 +401,8 @@ impl MeshManager {
             .copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock());
     }
 
-    fn get_online_node_cnt(&mut self) -> u8 {
-        let mesh_node_st = MESH_NODE_ST.lock();
-
-        let mut cnt = 0;
-        for i in 0..MESH_NODE_MAX.get() {
-            if mesh_node_st[i as usize].tick != 0 {
-                cnt += 1;
-            }
-        }
-
-        cnt
-    }
-
     pub fn mesh_pair_proc(&mut self) {
-        let mut dst_addr = 0xFFFF;
+        let dst_addr = 0xFFFF;
         let mut op_para: [u8; 16] = [0; 16];
 
         if self.default_mesh_effect_delay_ref != 0
@@ -450,19 +444,7 @@ impl MeshManager {
             return;
         }
 
-        // TODO REMOVE THIS FALSE
-        if false
-            && *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxStart
-            && self.mesh_pair_state == MeshPairState::MeshPairName1
-            && self.get_online_node_cnt() == 1
-        {
-            op_para[0] = LGT_CMD_MESH_PAIR;
-            op_para[3] = MeshPairState::MeshPairEffect as u8;
-            dst_addr = 0x0000; // there is noly one device in mesh,just effect itself.
-            self.mesh_pair_state = MeshPairState::MeshPairName1;
-            self.mesh_pair_start_time = 0;
-            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-        } else if *PAIR_SETTING_FLAG.lock() as u8 >= ePairState::PairSetMeshTxStart as u8
+        if *PAIR_SETTING_FLAG.lock() as u8 >= ePairState::PairSetMeshTxStart as u8
             && clock_time_exceed(self.mesh_pair_time, self.mesh_pair_cmd_interval * 1000)
         {
             self.mesh_pair_time = clock_time();
@@ -1559,57 +1541,6 @@ mod tests {
         assert_eq!(PAIR_AC.get(), 0xDEADBEEF);
         assert_eq!(PAIR_STATE.lock().pair_ltk, test_ltk);
         mock_access_code(Any, Any).assert_called(1);
-    }
-
-    // --- get_online_node_cnt Tests ---
-
-    /// Tests get_online_node_cnt with no online nodes
-    #[test]
-    fn test_get_online_node_cnt_zero() {
-        // Setup
-        let mut mesh_manager = MeshManager::default();
-        MESH_NODE_MAX.set(5);
-
-        let mut mesh_node_st = MESH_NODE_ST.lock();
-        for i in 0..5 {
-            mesh_node_st[i] = MeshNodeStT {
-                tick: 0,
-                val: MeshNodeStValT {
-                    dev_adr: 0,
-                    sn: 0,
-                    par: [0; MESH_NODE_ST_PAR_LEN],
-                },
-            };
-        }
-        drop(mesh_node_st);
-
-        // Execute
-        let count = mesh_manager.get_online_node_cnt();
-
-        // Verify
-        assert_eq!(count, 0);
-    }
-
-    /// Tests get_online_node_cnt with some online nodes
-    #[test]
-    fn test_get_online_node_cnt_some_online() {
-        // Setup
-        let mut mesh_manager = MeshManager::default();
-        MESH_NODE_MAX.set(5);
-
-        let mut mesh_node_st = MESH_NODE_ST.lock();
-        mesh_node_st[0].tick = 100;
-        mesh_node_st[1].tick = 0;
-        mesh_node_st[2].tick = 200;
-        mesh_node_st[3].tick = 0;
-        mesh_node_st[4].tick = 300;
-        drop(mesh_node_st);
-
-        // Execute
-        let count = mesh_manager.get_online_node_cnt();
-
-        // Verify
-        assert_eq!(count, 3);
     }
 
     // --- mesh_pair_proc Tests ---

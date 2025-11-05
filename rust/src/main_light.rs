@@ -35,7 +35,7 @@ use crate::sdk::rf_drv::*;
 use crate::state::*;
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
-use crate::BIT;
+use crate::{uprintln, BIT};
 use heapless::Vec;
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
@@ -121,6 +121,13 @@ pub fn user_init() {
     app().light_manager.light_lum_retrieve();
 
     rf_link_slave_init(40000);
+
+    // Print MAC address now that it has been loaded from flash
+    let mac = MAC_ID.lock();
+    uprintln!(
+        "MAC Address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
 
     factory_reset_handle();
 

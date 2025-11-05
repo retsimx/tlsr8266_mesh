@@ -128,8 +128,8 @@ pub struct MeshManager {
     mesh_pair_timeout: u32,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 6>,
-    pkt_rcv_buf: Deque<Packet, 6>,
+    pkt_send_buf: Vec<SendPkt, 8>,
+    pkt_rcv_buf: Deque<Packet, 8>,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const)))]
@@ -1970,8 +1970,8 @@ mod tests {
         let mut mesh_manager = MeshManager::default();
         let test_pkt = create_test_packet(0x5678, 0xABCD, [1, 2, 3]);
 
-        // Fill the buffer (capacity is 6)
-        for i in 0..6 {
+        // Fill the buffer (capacity is 8)
+        for i in 0..8 {
             let pkt = create_test_packet(i as u16, 0xFFFF, [i as u8, 0, 0]);
             mesh_manager.add_send_mesh_msg(&pkt, i as u64, 0);
         }
@@ -1980,7 +1980,7 @@ mod tests {
         mesh_manager.add_send_mesh_msg(&test_pkt, 1000, 3);
 
         // Verify - buffer should still be at max capacity
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 6);
+        assert_eq!(mesh_manager.pkt_send_buf.len(), 8);
     }
 
     // --- add_rcv_mesh_msg Tests ---
@@ -2005,8 +2005,8 @@ mod tests {
         // Setup
         let mut mesh_manager = MeshManager::default();
 
-        // Fill the buffer (capacity is 6)
-        for i in 0..6 {
+        // Fill the buffer (capacity is 8)
+        for i in 0..8 {
             let pkt = create_test_packet(i as u16, 0xFFFF, [i as u8, 0, 0]);
             mesh_manager.add_rcv_mesh_msg(&pkt);
         }
@@ -2016,7 +2016,7 @@ mod tests {
         mesh_manager.add_rcv_mesh_msg(&test_pkt);
 
         // Verify - buffer should still be at max capacity
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 6);
+        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 8);
     }
 
     /// Tests send_mesh_msg_iteration with no packets to send

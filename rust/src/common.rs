@@ -486,13 +486,15 @@ pub fn pair_flash_clean() {
     const CONFIG_SIZE: usize = 64;
     const WRAP_THRESHOLD: i32 = 0xfc0; // Last 64-byte slot before 4KB sector end
 
-    // WRAP DETECTION: Check if we've reached the last configuration slot
+    // WRAP DETECTION: Check if we've gone past the last configuration slot
     // At 0xFC0 (4032 bytes), we're at the last 64-byte boundary in a 4KB sector
-    if FLASH_CONFIGURATION_INDEX.get() >= WRAP_THRESHOLD {
+    // We only wrap when we would exceed this (i.e., index > 0xFC0)
+    if FLASH_CONFIGURATION_INDEX.get() > WRAP_THRESHOLD {
         let mut config_backup = [0u8; CONFIG_SIZE];
-        let src_addr = (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get()) as u32;
+        // Read from the previous slot (current index - 64) since we just incremented past the boundary
+        let src_addr = (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get() - 64) as u32;
 
-        // Read current configuration into backup buffer
+        // Read current configuration from previous slot into backup buffer
         flash_read_page(src_addr, CONFIG_SIZE as u32, config_backup.as_mut_ptr());
 
         // Erase sector and write configuration to the beginning
@@ -986,11 +988,15 @@ pub fn pair_load_key() {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::sdk::ble_app::ble_ll_pair::pair_save_key;
     use crate::sdk::ble_app::light_ll::connection_management::mock_setup_ble_parameter_start;
     use crate::sdk::drivers::flash::{
         mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
-    use crate::sdk::mcu::crypto::mock_aes_att_encryption;
+    use crate::sdk::mcu::crypto::{
+        decode_password, encode_password, mock_aes_att_encryption, mock_decode_password,
+        mock_encode_password,
+    };
     use crate::sdk::packet_types::Packet;
     use crate::sdk::rf_drv::{
         mock_set_advertisement_manufacturer_data, mock_set_advertisement_mesh_name,
@@ -1927,5 +1933,349 @@ mod tests {
 
         // Verify pair_update_key was called to update advertisements
         mock_pair_update_key().assert_called(1);
+    }
+
+    // --- Integration Tests for Flash Pairing Persistence ---
+    // These tests verify the complete save/load cycle for pairing data
+
+    /// Test that a single write/read cycle preserves pairing data correctly
+    #[test]
+    #[mry::lock(
+        flash_read_page,
+        flash_write_page,
+        flash_erase_sector,
+        pair_update_key,
+        encode_password,
+        decode_password
+    )]
+    fn test_pairing_persistence_single_write_read() {
+        use std::sync::{Arc, Mutex};
+        
+        // Simulate 4KB flash sector
+        let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
+        let flash_clone_write = Arc::clone(&flash_storage);
+        let flash_clone_read = Arc::clone(&flash_storage);
+        let flash_clone_erase = Arc::clone(&flash_storage);
+        
+        // Setup: No existing config (first boot)
+        FLASH_CONFIGURATION_INDEX.set(-1);
+        
+        // Set up default credentials (normally set during init)
+        *PAIR_CONFIG_MESH_NAME.lock() = *b"defaultmesh\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_PWD.lock() = *b"defaultpass\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_LTK.lock() = [0xCD; 16];
+        
+        // Mock flash operations to use our simulated flash
+        mock_flash_write_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
+                let data = unsafe { std::slice::from_raw_parts(*data_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let mut storage = flash_clone_write.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        storage[offset + i] &= data[i]; // Flash can only transition 1->0
+                    }
+                }
+            },
+        );
+
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, buf_ptr: SendWrapper<*mut u8>| {
+                let buf = unsafe { std::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let storage = flash_clone_read.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        buf[i] = storage[offset + i];
+                    }
+                }
+            },
+        );
+
+        mock_flash_erase_sector(Any).returns_with(move |_addr: u32| {
+            flash_clone_erase.lock().unwrap().fill(0xFF);
+        });
+
+        mock_pair_update_key().returns(());
+        
+        // Mock encode/decode_password to return the input data (identity function for testing)
+        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+
+        // Set test pairing data
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.copy_from_slice(b"testmesh\0\0\0\0\0\0\0\0");
+            pair_state.pair_pass.copy_from_slice(b"password123\0\0\0\0\0");
+            pair_state.pair_ltk = [0xAB; 16];
+        }
+
+        // SAVE: Call pair_save_key
+        pair_save_key();
+
+        // Note: Flash erase is NOT called on first write since flash starts erased (all 0xFF)
+        // Erase only happens when wrapping around at offset 0xFC0
+        
+        // Verify index was set to correct value
+        // With original bug: -1 + 64 = 63
+        // With fix: should be 0
+        let save_index = FLASH_CONFIGURATION_INDEX.get();
+        assert_eq!(save_index, 0, "First save should write to offset 0");
+
+        // Clear pair state to verify load works
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.fill(0);
+            pair_state.pair_pass.fill(0);
+            pair_state.pair_ltk.fill(0);
+        }
+
+        // Simulate reboot
+        FLASH_CONFIGURATION_INDEX.set(-1);
+
+        // LOAD: Call pair_load_key
+        pair_load_key();
+
+        // Verify loaded data matches
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(&pair_state.pair_nn[0..8], b"testmesh", "Mesh name should match");
+        assert_eq!(&pair_state.pair_pass[0..11], b"password123", "Password should match");
+        assert_eq!(pair_state.pair_ltk, [0xAB; 16], "LTK should match");
+        
+        // Verify the load found the config at the correct index
+        let load_index = FLASH_CONFIGURATION_INDEX.get();
+        assert_eq!(load_index, save_index, "Load should find config at same index where it was saved");
+    }
+
+    /// Test that no pairing data in flash loads defaults
+    #[test]
+    #[mry::lock(flash_read_page, pair_update_key)]
+    fn test_pairing_persistence_no_data_loads_defaults() {
+        use std::sync::{Arc, Mutex};
+        
+        // Erased flash (all 0xFF)
+        let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
+        let flash_clone = Arc::clone(&flash_storage);
+        
+        FLASH_CONFIGURATION_INDEX.set(0); // Reset to initial state
+        
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, buf_ptr: SendWrapper<*mut u8>| {
+                let buf = unsafe { std::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let storage = flash_clone.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        buf[i] = storage[offset + i];
+                    }
+                }
+            },
+        );
+
+        mock_pair_update_key().returns(());
+
+        // Set defaults in PAIR_CONFIG_*
+        *PAIR_CONFIG_MESH_NAME.lock() = *b"defaultmesh\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_PWD.lock() = *b"defaultpass\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_LTK.lock() = [0xCD; 16];
+
+        // Load from empty flash
+        pair_load_key();
+
+        // Verify defaults were loaded
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(&pair_state.pair_nn[0..11], b"defaultmesh");
+        assert_eq!(&pair_state.pair_pass[0..11], b"defaultpass");
+        assert_eq!(pair_state.pair_ltk, [0xCD; 16]);
+        
+        // Verify index is -1 (no config found)
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), -1);
+    }
+
+    /// Test multiple writes use wear-leveling (different offsets)
+    #[test]
+    #[mry::lock(
+        flash_read_page,
+        flash_write_page,
+        flash_erase_sector,
+        pair_update_key,
+        encode_password,
+        decode_password
+    )]
+    fn test_pairing_persistence_wear_leveling() {
+        use std::sync::{Arc, Mutex};
+        
+        let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
+        let flash_clone_write = Arc::clone(&flash_storage);
+        let flash_clone_read = Arc::clone(&flash_storage);
+        let flash_clone_erase = Arc::clone(&flash_storage);
+        
+        FLASH_CONFIGURATION_INDEX.set(-1);
+        
+        mock_flash_write_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
+                let data = unsafe { std::slice::from_raw_parts(*data_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let mut storage = flash_clone_write.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        storage[offset + i] &= data[i];
+                    }
+                }
+            },
+        );
+
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, buf_ptr: SendWrapper<*mut u8>| {
+                let buf = unsafe { std::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let storage = flash_clone_read.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        buf[i] = storage[offset + i];
+                    }
+                }
+            },
+        );
+
+        mock_flash_erase_sector(Any).returns_with(move |_addr: u32| {
+            flash_clone_erase.lock().unwrap().fill(0xFF);
+        });
+
+        mock_pair_update_key().returns(());
+        
+        // Mock encode/decode_password to return the input data (identity function for testing)
+        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+
+        // First write
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.copy_from_slice(b"mesh1\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_pass.copy_from_slice(b"pass1\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_ltk = [0x01; 16];
+        }
+        pair_save_key();
+        let index1 = FLASH_CONFIGURATION_INDEX.get();
+
+        // Second write (should use next slot)
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.copy_from_slice(b"mesh2\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_pass.copy_from_slice(b"pass2\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_ltk = [0x02; 16];
+        }
+        pair_save_key();
+        let index2 = FLASH_CONFIGURATION_INDEX.get();
+
+        // Third write
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.copy_from_slice(b"mesh3\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_pass.copy_from_slice(b"pass3\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_ltk = [0x03; 16];
+        }
+        pair_save_key();
+        let index3 = FLASH_CONFIGURATION_INDEX.get();
+
+        // Verify wear-leveling: each write should use next 64-byte slot
+        assert_eq!(index2, index1 + 64, "Second write should advance 64 bytes");
+        assert_eq!(index3, index2 + 64, "Third write should advance 64 bytes");
+
+        // Simulate reboot and load
+        FLASH_CONFIGURATION_INDEX.set(-1);
+        pair_load_key();
+
+        // Should load the last written config (mesh3)
+        let pair_state = PAIR_STATE.lock();
+        assert_eq!(&pair_state.pair_nn[0..5], b"mesh3");
+        assert_eq!(&pair_state.pair_pass[0..5], b"pass3");
+        assert_eq!(pair_state.pair_ltk, [0x03; 16]);
+        
+        // Load index should match last save index
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), index3);
+    }
+
+    /// Test sector boundary wraparound
+    #[test]
+    #[mry::lock(
+        flash_read_page,
+        flash_write_page,
+        flash_erase_sector,
+        pair_update_key,
+        encode_password,
+        decode_password
+    )]
+    fn test_pairing_persistence_wraparound() {
+        use std::sync::{Arc, Mutex};
+        
+        let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
+        let flash_clone_write = Arc::clone(&flash_storage);
+        let flash_clone_read = Arc::clone(&flash_storage);
+        let flash_clone_erase = Arc::clone(&flash_storage);
+        
+        // Start near end of sector
+        FLASH_CONFIGURATION_INDEX.set(0xF80); // Second to last slot
+        
+        mock_flash_write_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
+                let data = unsafe { std::slice::from_raw_parts(*data_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let mut storage = flash_clone_write.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        storage[offset + i] &= data[i];
+                    }
+                }
+            },
+        );
+
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            move |addr: u32, len: u32, buf_ptr: SendWrapper<*mut u8>| {
+                let buf = unsafe { std::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
+                let offset = (addr - FLASH_ADR_PAIRING) as usize;
+                let storage = flash_clone_read.lock().unwrap();
+                for i in 0..len as usize {
+                    if offset + i < storage.len() {
+                        buf[i] = storage[offset + i];
+                    }
+                }
+            },
+        );
+
+        let erase_count = Arc::new(Mutex::new(0));
+        let erase_count_clone = Arc::clone(&erase_count);
+        
+        mock_flash_erase_sector(Any).returns_with(move |_addr: u32| {
+            flash_clone_erase.lock().unwrap().fill(0xFF);
+            *erase_count_clone.lock().unwrap() += 1;
+        });
+
+        mock_pair_update_key().returns(());
+        
+        // Mock encode/decode_password to return the input data (identity function for testing)
+        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+
+        // Write data
+        {
+            let mut pair_state = PAIR_STATE.lock();
+            pair_state.pair_nn.copy_from_slice(b"boundary\0\0\0\0\0\0\0\0");
+            pair_state.pair_pass.copy_from_slice(b"test\0\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state.pair_ltk = [0xBC; 16];
+        }
+        
+        // First write goes to 0xFC0 (last slot)
+        pair_save_key();
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0xFC0);
+
+        // Next write should trigger wraparound
+        pair_save_key();
+        
+        // After wraparound, index should be back at 0
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0, "Should wrap to offset 0");
+        
+        // Verify sector was erased during wraparound
+        assert!(*erase_count.lock().unwrap() >= 1, "Sector should have been erased for wraparound");
     }
 }

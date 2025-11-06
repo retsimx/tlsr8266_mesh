@@ -136,7 +136,7 @@ pub fn handle_rf_packet_reception() {
 fn process_received_packet_slow_path(
     rx_index: usize,
     dma_len: u8,
-    light_rx_buff: &mut [LightRxBuff; 4],
+    light_rx_buff: &mut [LightRxBuff; LIGHT_RX_BUFF_COUNT],
 ) {
     let entry = &light_rx_buff[rx_index];
     let rx_time = entry.rx_time;
@@ -622,7 +622,7 @@ mod tests {
 
         // Create buffer with invalid packet (dma_len == 1) that matches last timestamp
         let test_timestamp = 5000u32;
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = create_mock_rx_buffer_entry(test_timestamp, 1, [0; 4], [0; 3]);
 
         // Setup state for duplicate detection
@@ -663,7 +663,7 @@ mod tests {
         mock_write_reg_dma2_addr(Any).returns(());
 
         // Create buffer with invalid packet (dma_len == 1) with unique timestamp
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = create_mock_rx_buffer_entry(9999, 1, [0; 4], [0; 3]);
 
         LIGHT_RX_BUFFER_WRITE_POINTER.set(1); // Will use index 0
@@ -717,7 +717,7 @@ mod tests {
         // Create buffer with valid packet
         let test_timestamp = 7500u32;
         let test_dma_len = 25u8;
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = create_mock_rx_buffer_entry(
             test_timestamp,
             test_dma_len,
@@ -1327,7 +1327,7 @@ mod tests {
 
         // Create an invalid packet that will fail validation
         // Validation requires: dma_len > 0xe AND dma_len == (sno[1] & 0x3f) + 0x11 AND status check
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] =
             create_mock_rx_buffer_entry(60000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]); // dma_len=10 < 0xe
 
@@ -1354,7 +1354,7 @@ mod tests {
         // Need: dma_len > 0xe, dma_len == (sno[1] & 0x3f) + 0x11, and status check
         // Let's use dma_len=32, so need sno[1] & 0x3f = 32 - 0x11 = 15 (0x0f)
         // For cmd=3, need sno[0] & 0xf = 3
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] =
             create_mock_rx_buffer_entry(65000, 32, [0x11, 0x22, 0x33, 0x44], [0x03, 0x0f, 0x10]);
 
@@ -1459,7 +1459,7 @@ mod tests {
 
         // Test with timestamp near overflow boundary
         let near_overflow_time = 0xFFFFFFF0u32;
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = create_mock_rx_buffer_entry(
             near_overflow_time,
             25,
@@ -1627,7 +1627,7 @@ mod tests {
         }
 
         // Create light_rx_buff array with our constructed entry
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Store initial timestamp state to verify it gets updated (line 152)
@@ -1704,7 +1704,7 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Store initial timestamp
@@ -1769,7 +1769,7 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Store initial timestamp
@@ -1835,7 +1835,7 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Store initial timestamp
@@ -2029,7 +2029,7 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); 4];
+        let mut light_rx_buff = [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Execute the function

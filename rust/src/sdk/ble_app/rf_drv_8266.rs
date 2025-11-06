@@ -676,55 +676,6 @@ pub fn rf_link_slave_init(interval: u32) {
             flash_write_page(FLASH_ADR_MAC, 4, mac.as_ptr() as *const u8);
         }
 
-        // Check for existing pairing configuration or create a new one
-        let mut pair_check: [u32; 1] = [0];
-        flash_read_page(FLASH_ADR_PAIRING + 1, 4, pair_check.as_mut_ptr() as *mut u8);
-        let pair_addr = pair_check[0];
-        if pair_addr == 0 {
-            // Configure pairing address in flash memory
-            let pairing_addr = FLASH_ADR_PAIRING;
-
-            // Store the mesh long-term key (LTK)
-            let mut buff: [u8; 16] = [0; 16];
-            buff[0..16].copy_from_slice(&PAIR_CONFIG_MESH_LTK.lock()[0..16]);
-            flash_write_page(pairing_addr + 48, 16, buff.as_mut_ptr());
-
-            // Encode and store the mesh password
-            let mut buff: [u8; 16] = [0; 16];
-            let len = min(MESH_PWD.len(), buff.len());
-            buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-            buff = encode_password(&buff);
-            flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
-
-            // Store the out-of-mesh device name
-            let mut buff: [u8; 16] = [0; 16];
-            let len = min(OUT_OF_MESH.len(), buff.len());
-            buff[0..len].copy_from_slice(&OUT_OF_MESH.as_bytes()[0..len]);
-            flash_write_page(pairing_addr + 16, 16, buff.as_mut_ptr());
-
-            // Set up pairing validity flags
-            let mut buff: [u8; 16] = [0; 16];
-            buff[0] = PAIR_VALID_FLAG; // Indicator that pairing data is valid
-            buff[15] = PAIR_VALID_FLAG; // Redundant flag for data integrity check
-
-            // Configure mesh pair enable if requested
-            if MESH_PAIR_ENABLE.get() {
-                MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
-                buff[1] = 1;
-            }
-
-            // Write pairing configuration to flash
-            flash_write_page(pairing_addr, 16, buff.as_mut_ptr());
-
-            // Reboot device to apply new configuration
-            irq_disable();
-            light_sw_reboot();
-            #[cfg(not(test))]
-            loop {}
-            #[cfg(test)]
-            return;
-        }
-
         // Read the MAC address from flash
         flash_read_page(FLASH_ADR_MAC, 6, MAC_ID.lock().as_mut_ptr());
 
@@ -3653,145 +3604,6 @@ mod tests {
     #[mry::lock(
         blc_ll_init_basic_mcu,
         flash_read_page,
-        flash_write_page,
-        encode_password,
-        irq_disable,
-        light_sw_reboot,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg8
-    )]
-    fn test_rf_link_slave_init_pairing_not_configured_mesh_pair_disabled() {
-        // Arrange - MAC set, pairing not configured, mesh pair disabled
-        let test_interval = 500;
-
-        // Mock basic MCU init
-        mock_blc_ll_init_basic_mcu().returns(());
-
-        // Mock reading system tick
-        mock_read_reg_system_tick().returns(0x87654321);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-
-        // Mock flash read - handle all calls with specific signatures
-        // First call: MAC check (FLASH_ADR_MAC, 4 bytes)
-        mock_flash_read_page(FLASH_ADR_MAC, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0xAABBCCDD;
-                } // Not MAX, so no MAC generation
-            },
-        );
-
-        // Second call: pairing check (FLASH_ADR_PAIRING + 1, 4 bytes)
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0;
-                } // Zero = not configured
-            },
-        );
-
-        // Mock password encoding
-        mock_encode_password(Any).returns([
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
-            0xFF, 0x00,
-        ]);
-
-        // Mock flash writes for pairing configuration
-        mock_flash_write_page(Any, Any, Any).returns(());
-
-        // Mock reboot functions (should be called when pairing not configured)
-        mock_irq_disable().returns(0); // irq_disable returns u8
-        mock_light_sw_reboot().returns(());
-
-        // Act
-        rf_link_slave_init(test_interval);
-
-        // Verify mocks were called
-        mock_flash_write_page(Any, Any, Any).assert_called(4); // LTK, password, device name, flags
-        mock_encode_password(Any).assert_called(1);
-        mock_irq_disable().assert_called(1);
-        mock_light_sw_reboot().assert_called(1);
-    }
-
-    #[test]
-    #[mry::lock(
-        blc_ll_init_basic_mcu,
-        flash_read_page,
-        flash_write_page,
-        encode_password,
-        irq_disable,
-        light_sw_reboot,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg8
-    )]
-    fn test_rf_link_slave_init_pairing_not_configured_mesh_pair_enabled() {
-        // Arrange - MAC set, pairing not configured, mesh pair enabled
-        let test_interval = 750;
-
-        // Mock basic MCU init
-        mock_blc_ll_init_basic_mcu().returns(());
-
-        // Mock reading system tick
-        mock_read_reg_system_tick().returns(0x11223344);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-
-        // Mock flash read for MAC check (returns non-MAX, MAC already set)
-        mock_flash_read_page(FLASH_ADR_MAC, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0x11223344;
-                } // Not MAX, so no MAC generation
-            },
-        );
-
-        // Mock flash read for pairing check (returns 0, so pairing not configured)
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0;
-                } // Zero = not configured
-            },
-        );
-
-        // Enable mesh pair
-        MESH_PAIR_ENABLE.set(true);
-
-        // Mock password encoding
-        mock_encode_password(Any).returns([
-            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x99, 0x00,
-        ]);
-
-        // Mock flash writes
-        mock_flash_write_page(Any, Any, Any).returns(());
-
-        // Mock reboot functions
-        mock_irq_disable().returns(0);
-        mock_light_sw_reboot().returns(());
-
-        // Act
-        rf_link_slave_init(test_interval);
-
-        // Verify mocks and state
-        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), true);
-        mock_encode_password(Any).assert_called(1);
-        mock_flash_write_page(Any, Any, Any).assert_called(4);
-        mock_irq_disable().assert_called(1);
-        mock_light_sw_reboot().assert_called(1);
-
-        // Reset for other tests
-        MESH_PAIR_ENABLE.set(false);
-        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
-    }
-
-    #[test]
-    #[mry::lock(
-        blc_ll_init_basic_mcu,
-        flash_read_page,
         rf_link_slave_set_adv,
         pair_load_key,
         retrieve_dev_grp_address,
@@ -3848,15 +3660,6 @@ mod tests {
             },
         );
 
-        // Second call: pairing check (FLASH_ADR_PAIRING + 1, 4 bytes) - returns non-zero so pairing is configured
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0x12345678;
-                } // Non-zero, so pairing is configured
-            },
-        );
-
         // Third call: MAC read (FLASH_ADR_MAC, 6 bytes)
         mock_flash_read_page(FLASH_ADR_MAC, 6, Any).returns(());
 
@@ -3878,7 +3681,6 @@ mod tests {
         // Assert - normal initialization path
         mock_blc_ll_init_basic_mcu().assert_called(1);
         mock_flash_read_page(FLASH_ADR_MAC, 4, Any).assert_called(1); // MAC check
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).assert_called(1); // Pairing check
         mock_flash_read_page(FLASH_ADR_MAC, 6, Any).assert_called(1); // MAC read
         mock_rf_link_slave_set_adv(Any).assert_called(1);
         mock_pair_load_key().assert_called(1);

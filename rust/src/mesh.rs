@@ -236,7 +236,9 @@ impl MeshManager {
     /// Sets the validation flag to false, allowing mesh credentials to be saved.
     pub fn mesh_device_address_validation_completed(&mut self) {
         MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false); // validation completed successfully
-        if MESH_PAIR_ENABLE.get() {
+        if MESH_PAIR_ENABLE.get() && FLASH_CONFIGURATION_INDEX.get() >= 0 {
+            // Only write to flash if we have a valid configuration index
+            // When FLASH_CONFIGURATION_INDEX is -1 (no config), we shouldn't write anything
             // Write to byte [1] of the header to clear the device address validation pending flag
             // The header is stored at FLASH_CONFIGURATION_INDEX + 0x00, and byte [1] holds the validation state
             let mut data: [u8; 1] = [0];

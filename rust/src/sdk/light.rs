@@ -111,9 +111,9 @@ pub const DEVICE_ADDR_MASK_DEFAULT: u16 = 0x7FFF;
 pub const MESH_NODE_MAX_NUM: usize = 64;
 pub const MESH_NODE_MASK_LEN: usize = ((MESH_NODE_MAX_NUM + 31) >> 5);
 
-pub const LIGHT_RX_BUFF_COUNT: usize = 4;
-pub const BUFF_RESPONSE_PACKET_COUNT: usize = 12;
-pub const BLT_FIFO_TX_PACKET_COUNT: usize = 8;
+pub const LIGHT_RX_BUFF_COUNT: usize = 8;
+pub const BUFF_RESPONSE_PACKET_COUNT: usize = 16;
+pub const BLT_FIFO_TX_PACKET_COUNT: usize = 12;
 
 pub const PKT_CMD_LEN: usize = 11;
 
@@ -714,9 +714,9 @@ mod tests {
         assert_eq!(SEND_MESH_STATUS_INTERVAL_MS, 200);
 
         // Buffer size constants
-        assert_eq!(LIGHT_RX_BUFF_COUNT, 4);
-        assert_eq!(BUFF_RESPONSE_PACKET_COUNT, 12);
-        assert_eq!(BLT_FIFO_TX_PACKET_COUNT, 8);
+        assert_eq!(LIGHT_RX_BUFF_COUNT, 8);
+        assert_eq!(BUFF_RESPONSE_PACKET_COUNT, 16);
+        assert_eq!(BLT_FIFO_TX_PACKET_COUNT, 12);
         assert_eq!(PKT_CMD_LEN, 11);
 
         // Bridge constants

@@ -122,13 +122,13 @@ async fn uart_receiver() {
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<UartData, 6>,
-    recv_channel: Deque<UartData, 6>,
+    send_channel: Deque<UartData, 12>,
+    recv_channel: Deque<UartData, 12>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
     uart_status_reporting: bool,
-    sent: Deque<Fingerprint, 6>,
+    sent: Deque<Fingerprint, 12>,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const, wait_for_message)))]
@@ -726,7 +726,7 @@ mod tests {
         let mut manager = UartManager::default();
 
         critical_section::with(|_| {
-            for value in 0..6u8 {
+            for value in 0..12u8 {
                 manager
                     .sent
                     .push_back([value; CTRL_FINGERPRINT_LEN])
@@ -739,7 +739,7 @@ mod tests {
         manager.record_sent_fingerprint(new_fingerprint);
 
         critical_section::with(|_| {
-            assert_eq!(manager.sent.len(), 6);
+            assert_eq!(manager.sent.len(), 12);
             assert_eq!(manager.sent.front().unwrap(), &[1u8; CTRL_FINGERPRINT_LEN]);
             assert_eq!(manager.sent.back().unwrap(), &new_fingerprint);
         });
@@ -802,7 +802,7 @@ mod tests {
         };
 
         // Fill the channel to capacity
-        let capacity = 6; // This matches the capacity in UartManager (Deque<UartData, 6>)
+        let capacity = 12; // This matches the capacity in UartManager (Deque<UartData, 6>)
         for _ in 0..capacity {
             let result = manager.send_message(&msg);
             assert!(result);

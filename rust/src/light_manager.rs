@@ -76,7 +76,7 @@ impl LightState {
 
 #[cfg_attr(test, mry::mry)]
 pub struct LightManager {
-    channel: Deque<Message, 5>,
+    channel: Deque<Message, 10>,
 
     old_light_state: LightState,
     new_light_state: LightState,
@@ -639,22 +639,22 @@ mod tests {
         let mut manager = create_test_light_manager();
 
         // Fill the channel (capacity is 5)
-        for i in 0..5 {
+        for i in 0..10 {
             manager.send_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
         }
 
         critical_section::with(|_| {
-            assert_eq!(manager.channel.len(), 5);
+            assert_eq!(manager.channel.len(), 10);
         });
 
         // Try to add one more - should be ignored
         manager.send_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
 
         critical_section::with(|_| {
-            assert_eq!(manager.channel.len(), 5);
+            assert_eq!(manager.channel.len(), 10);
             // Verify the last message is still the 5th one, not the 99
             let msg = manager.channel.back().unwrap();
-            assert_eq!(msg.params[0], 4);
+            assert_eq!(msg.params[0], 9);
         });
     }
 

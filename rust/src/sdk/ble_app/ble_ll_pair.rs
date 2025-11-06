@@ -331,9 +331,18 @@ pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
 
     // For a new config set (addr=0), clean the old sector and increment the index
     if addr == OFFSET_HEADER {
-        pair_flash_clean();
         // Cast to i32 to match FLASH_CONFIGURATION_INDEX type
-        FLASH_CONFIGURATION_INDEX.set(FLASH_CONFIGURATION_INDEX.get() + SECTOR_SIZE);
+        // Special case: if index is -1 (no config), set to 0, otherwise increment by SECTOR_SIZE
+        let current_index = FLASH_CONFIGURATION_INDEX.get();
+        if current_index < 0 {
+            FLASH_CONFIGURATION_INDEX.set(0);
+        } else {
+            FLASH_CONFIGURATION_INDEX.set(current_index + SECTOR_SIZE);
+        }
+        
+        // Clean the flash (handles wraparound if needed)
+        // Note: pair_flash_clean() may reset index back to 0 if we wrapped around
+        pair_flash_clean();
     }
 
     // Save the data to flash at the calculated address

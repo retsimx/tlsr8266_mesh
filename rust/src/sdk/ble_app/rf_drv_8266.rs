@@ -688,6 +688,12 @@ pub fn rf_link_slave_init(interval: u32) {
         // Load encryption keys for secure communication
         pair_load_key();
 
+        let access_code = PAIR_AC.get();
+        
+        // Immediately configure RF hardware with new access code
+        // This ensures the hardware is ready for mesh listening before interrupts fire
+        rf_set_ble_access_code(access_code);
+
         // Set device MAC address in packet templates for responses
         PKT_LIGHT_DATA.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
         PKT_LIGHT_STATUS.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);

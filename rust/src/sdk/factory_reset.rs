@@ -117,7 +117,6 @@ use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::pm::light_sw_reboot;
 use crate::state::*;
-use crate::uprintln;
 use crate::BIT;
 use critical_section;
 

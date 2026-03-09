@@ -29,17 +29,74 @@ jobs:
         working-directory: rust
 
   test:
-    name: Test
+    name: Test & Coverage
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Install 32-bit build dependencies
         run: sudo apt-get install -y gcc-multilib
 
-      - name: Run tests
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.6.16
+
+      - name: Run tests with coverage
+        id: coverage
         working-directory: rust
-        run: ./run_tests.sh
+        run: |
+          set -o pipefail
+          ./run_tests.sh 2>&1 | tee /tmp/coverage-output.txt
+          TOTAL=$(grep -E "^TOTAL" /tmp/coverage-output.txt | tail -1)
+          LINE_PCT=$(echo "$TOTAL"   | awk '{print $4}')
+          FUNC_PCT=$(echo "$TOTAL"   | awk '{print $7}')
+          REGION_PCT=$(echo "$TOTAL" | awk '{print $10}')
+          echo "line_pct=${LINE_PCT}"     >> "$GITHUB_OUTPUT"
+          echo "func_pct=${FUNC_PCT}"     >> "$GITHUB_OUTPUT"
+          echo "region_pct=${REGION_PCT}" >> "$GITHUB_OUTPUT"
+
+      - name: Post coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const linePct   = '${{ steps.coverage.outputs.line_pct }}';
+            const funcPct   = '${{ steps.coverage.outputs.func_pct }}';
+            const regionPct = '${{ steps.coverage.outputs.region_pct }}';
+            const body = [
+              '## 📊 Coverage Report',
+              '',
+              '| Metric    | Coverage |',
+              '|-----------|----------|',
+              `| Lines     | ${linePct} |`,
+              `| Functions | ${funcPct} |`,
+              `| Regions   | ${regionPct} |`,
+            ].join('\n');
+            const marker = '## 📊 Coverage Report';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
   llvm:
     name: Build LLC

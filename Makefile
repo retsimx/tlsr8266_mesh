@@ -1,7 +1,7 @@
 
 TARGET = lightblemesh
 
-CC  = ./toolchain/tc32/bin/tc32-elf-gcc
+CC  = ./toolchain/tc32/bin/tc32-elf-gcc -B ./toolchain/tc32/bin/tc32-elf-
 AS  = ./toolchain/tc32/bin/tc32-elf-as
 LD  = ./toolchain/tc32/bin/tc32-elf-ld
 CP  = ./toolchain/tc32/bin/tc32-elf-objcopy

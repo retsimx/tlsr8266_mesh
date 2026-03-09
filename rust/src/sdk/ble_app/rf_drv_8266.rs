@@ -3611,6 +3611,7 @@ mod tests {
         blc_ll_init_basic_mcu,
         flash_read_page,
         rf_link_slave_set_adv,
+        rf_set_ble_access_code,
         pair_load_key,
         retrieve_dev_grp_address,
         mesh_node_init,
@@ -3672,6 +3673,9 @@ mod tests {
         // Mock advertisement setup
         mock_rf_link_slave_set_adv(Any).returns(());
 
+        // Mock access code configuration
+        mock_rf_set_ble_access_code(Any).returns(());
+
         // Mock key loading
         mock_pair_load_key().returns(());
 
@@ -3689,6 +3693,7 @@ mod tests {
         mock_flash_read_page(FLASH_ADR_MAC, 4, Any).assert_called(1); // MAC check
         mock_flash_read_page(FLASH_ADR_MAC, 6, Any).assert_called(1); // MAC read
         mock_rf_link_slave_set_adv(Any).assert_called(1);
+        mock_rf_set_ble_access_code(Any).assert_called(1); // Access code set
         mock_pair_load_key().assert_called(1);
         mock_retrieve_dev_grp_address().assert_called(1);
         mock_mesh_node_init().assert_called(1);

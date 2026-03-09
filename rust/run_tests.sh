@@ -8,10 +8,11 @@ if ! cargo llvm-cov --version &>/dev/null; then
 fi
 
 if [ "${CI:-}" = "true" ]; then
-    # CI mode: run tests and emit a plain text summary (no lcov export, which
-    # crashes on x86_64 hosts when targeting i686 binaries)
-    RUST_BACKTRACE=1 cargo llvm-cov \
-        --branch \
+    # CI mode: plain cargo test — llvm-cov crashes on x86_64 hosts when
+    # processing i686 profdata (cross-arch SIGSEGV in llvm-cov report/export).
+    # Coverage is run locally via this script without the CI env var set.
+    RUST_BACKTRACE=1 cargo test \
+        --tests \
         --target i686-unknown-linux-gnu \
         -- --test-threads=1 "$@"
 else

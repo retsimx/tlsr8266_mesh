@@ -43,23 +43,20 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Run tests with coverage
-        run: LCOV_OUTPUT=lcov.info ./run_tests.sh
-        working-directory: rust
-
-      - name: Extract coverage summary
         id: coverage
         working-directory: rust
         run: |
-          SUMMARY=$(cargo llvm-cov report --branch --target i686-unknown-linux-gnu \
-            --summary-only 2>&1 | grep -E "^TOTAL" || true)
-          # Parse: TOTAL <lines> <covered> <pct> <funcs> <covered_f> <pct_f> <regions> ...
-          LINE_PCT=$(echo "$SUMMARY" | awk '{print $4}')
-          FUNC_PCT=$(echo "$SUMMARY" | awk '{print $7}')
-          REGION_PCT=$(echo "$SUMMARY" | awk '{print $10}')
-          echo "line_pct=${LINE_PCT}" >> "$GITHUB_OUTPUT"
-          echo "func_pct=${FUNC_PCT}" >> "$GITHUB_OUTPUT"
+          # cargo llvm-cov prints a TOTAL summary line at the end; capture it
+          OUTPUT=$(./run_tests.sh 2>&1)
+          echo "$OUTPUT"
+          TOTAL=$(echo "$OUTPUT" | grep -E "^TOTAL" | tail -1)
+          # Columns: TOTAL <lines> <covered> <line_pct> <funcs> <covered_f> <func_pct> <regions> <covered_r> <region_pct>
+          LINE_PCT=$(echo "$TOTAL"   | awk '{print $4}')
+          FUNC_PCT=$(echo "$TOTAL"   | awk '{print $7}')
+          REGION_PCT=$(echo "$TOTAL" | awk '{print $10}')
+          echo "line_pct=${LINE_PCT}"     >> "$GITHUB_OUTPUT"
+          echo "func_pct=${FUNC_PCT}"     >> "$GITHUB_OUTPUT"
           echo "region_pct=${REGION_PCT}" >> "$GITHUB_OUTPUT"
-          echo "summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
 
       - name: Post coverage comment on PR
         if: github.event_name == 'pull_request'

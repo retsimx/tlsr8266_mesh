@@ -16,19 +16,15 @@ The process to convert Rust code into TC32 bytecode is somewhat roundabout. Sinc
 
 The compilation process follows these steps:
 
-1. **Generate LLVM bytecode**: Using a Rust compiler that supports the same word size (8266 is a Thumb16 MCU with 32bit word size - so i686 target is used)
+1. **Generate LLVM IR**: Using a Rust compiler that supports the same word size (8266 is a Thumb16 MCU with 32bit word size - so i686 target is used), the Rust crates are compiled to LLVM IR (`.ll` files).
 
-2. **Fix LLVM bytecode**: TC32 doesn't have some Thumb instructions such as LDREX or STREX, nor any profiling like arm.hint or instructions such as SEV. The IR is parsed and changed as required with replacements, or instructions are removed altogether.
+2. **Generate TC32 assembly**: The LLVM IR is compiled by a patched `llc` from our LLVM fork which emits TC32-compatible assembly directly. The fork handles all instruction renaming, section layout, and TC32-specific fixups natively — no post-processing scripts required. The forked LLVM is available at: https://github.com/retsimx/llvm-project (see [LLVM build instructions](#llvm) below)
 
-3. **Generate Thumb16 assembly**: The LLVM IR is sent through an external LLVM build with relevant TC32 changes to emit Thumb16 ARM assembly code. The forked LLVM with the relevant changes is available at: https://github.com/retsimx/llvm-project (see [LLVM build instructions](#llvm) below)
+3. **Generate object files**: The TC32 assembly is assembled directly by the TC32 `as` into object files (one per Rust crate, plus the C startup file).
 
-4. **Convert to TC32 assembly**: The generated Thumb16 assembly is parsed and instructions are converted to TC32 equivalents where applicable. It's **almost** 1:1 mapping between Thumb16 and TC32 instructions. This step also fixes up unique section names and ram-code for use with --gc-sections.
+4. **Link object files**: All the generated object files are linked together using the vendor linker script with `--gc-sections` to eliminate unused code.
 
-5. **Generate object files**: The parsed TC32 assembly language is sent directly into the TC32 `as` to generate the object files (for each Rust crate, including this project which is itself a library crate)
-
-6. **Link object files**: All the generated object files are linked together using the vendor linker script.
-
-7. **Flash the firmware**: The binary is flashed to the MCU (or BLE/UART OTA it across)
+5. **Flash the firmware**: The binary is flashed to the MCU (or BLE/UART OTA it across)
 
 ### Building Instructions
 
@@ -38,7 +34,7 @@ The entire build process can be run using:
 make clean && make
 ```
 
-from the repository root. The built firmware will be in the `_build` directory. Some makefile changes may need to be made to correct paths to the local LLVM build.
+from the repository root. The built firmware will be in the `_build` directory. The Makefile assumes `llc` is at `../../llvm/build/bin/llc` relative to this repo; override with `LLC=/path/to/llc make` if needed.
 
 ## Testing
 
@@ -59,9 +55,9 @@ To run the test suite, an x86 compatible machine is needed, and there is a helpe
 
 The steps to build the required LLVM fork are as follows:
 
-1. **Clone the repository**:
+1. **Clone the repository** (use the `tc32` branch):
    ```bash
-   git clone https://github.com/retsimx/llvm-project.git
+   git clone -b tc32 https://github.com/retsimx/llvm-project.git
    ```
 
 2. **Create a build directory**:
@@ -70,42 +66,33 @@ The steps to build the required LLVM fork are as follows:
    cd build
    ```
 
-3. **Configure the build** (Only building the ARM target):
+3. **Configure the build** (ARM target only, `llc` tool only):
    ```bash
-   CMAKE_PREFIX_PATH="" DESTDIR="" "cmake" "../llvm-project/llvm" "-G" "Ninja" \
-   "-DLLVM_ENABLE_ASSERTIONS=ON" \
-   "-DLLVM_ENABLE_PLUGINS=OFF" \
-   "-DLLVM_TARGETS_TO_BUILD=ARM" \
-   "-DLLVM_INCLUDE_EXAMPLES=OFF" \
-   "-DLLVM_INCLUDE_DOCS=OFF" \
-   "-DLLVM_INCLUDE_BENCHMARKS=OFF" \
-   "-DLLVM_INCLUDE_TESTS=OFF" \
-   "-DLLVM_ENABLE_TERMINFO=OFF" \
-   "-DLLVM_ENABLE_LIBEDIT=OFF" \
-   "-DLLVM_ENABLE_BINDINGS=OFF" \
-   "-DLLVM_ENABLE_Z3_SOLVER=OFF" \
-   "-DLLVM_PARALLEL_COMPILE_JOBS=12" \
-   "-DLLVM_ENABLE_WARNINGS=ON" \
-   "-DLLVM_INSTALL_UTILS=ON" \
-   "-DLLVM_ENABLE_ZSTD=OFF" \
-   "-DLLVM_ENABLE_ZLIB=ON" \
-   "-DLLVM_ENABLE_LIBXML2=OFF" \
-   "-DCMAKE_INSTALL_MESSAGE=LAZY" \
-   "-DCMAKE_C_COMPILER=cc" \
-   "-DCMAKE_CXX_COMPILER=c++" \
-   "-DCMAKE_ASM_COMPILER=cc" \
-   "-DCMAKE_C_FLAGS=-ffunction-sections -fdata-sections -fPIC -m64" \
-   "-DCMAKE_CXX_FLAGS=-ffunction-sections -fdata-sections -fPIC -m64" \
-   "-DCMAKE_SHARED_LINKER_FLAGS=" \
-   "-DCMAKE_MODULE_LINKER_FLAGS=" \
-   "-DCMAKE_EXE_LINKER_FLAGS=" \
-   "-DCMAKE_ASM_FLAGS= -ffunction-sections -fdata-sections -fPIC -m64" \
-   "-DCMAKE_BUILD_TYPE=Release"
+   cmake "../llvm-project/llvm" -G Ninja \
+   -DLLVM_ENABLE_ASSERTIONS=ON \
+   -DLLVM_ENABLE_PLUGINS=OFF \
+   -DLLVM_TARGETS_TO_BUILD=ARM \
+   -DLLVM_TOOLS_TO_BUILD=llc \
+   -DLLVM_INCLUDE_EXAMPLES=OFF \
+   -DLLVM_INCLUDE_DOCS=OFF \
+   -DLLVM_INCLUDE_BENCHMARKS=OFF \
+   -DLLVM_INCLUDE_TESTS=OFF \
+   -DLLVM_ENABLE_TERMINFO=OFF \
+   -DLLVM_ENABLE_LIBEDIT=OFF \
+   -DLLVM_ENABLE_BINDINGS=OFF \
+   -DLLVM_ENABLE_Z3_SOLVER=OFF \
+   -DLLVM_ENABLE_WARNINGS=ON \
+   -DLLVM_ENABLE_ZSTD=OFF \
+   -DLLVM_ENABLE_ZLIB=ON \
+   -DLLVM_ENABLE_LIBXML2=OFF \
+   -DCMAKE_C_COMPILER=cc \
+   -DCMAKE_CXX_COMPILER=c++ \
+   -DCMAKE_BUILD_TYPE=Release
    ```
 
-4. **Build LLVM**:
+4. **Build `llc`**:
    ```bash
-   ninja llc
+   ninja -j$(nproc) llc
    ```
 
-5. **Locate the resulting files**: The output should be in `./bin`. Make sure that the `llc` referenced in `toolchain/rust2c.sh` points to the correct location.
+5. **Locate the binary**: The output will be at `build/bin/llc`. Update the `LLC` variable in the `Makefile` (or pass it as `LLC=/path/to/llc make`) if your build is in a non-default location.

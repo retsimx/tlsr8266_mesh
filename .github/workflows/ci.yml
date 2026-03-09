@@ -36,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install 32-bit build dependencies
+        run: sudo apt-get install -y gcc-multilib
+
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 

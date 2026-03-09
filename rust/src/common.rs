@@ -1005,6 +1005,19 @@ mod tests {
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 
+    /// Creates an aligned [u8; 100] buffer suitable for casting to *const Packet.
+    /// Packet requires align(4); a [u8] array on the stack has no alignment guarantee.
+    fn aligned_packet_buf() -> [u32; 25] {
+        [0u32; 25]
+    }
+
+    /// Cast an aligned u32 buffer to a *const Packet for use in tests.
+    macro_rules! packet_from_buf {
+        ($buf:expr) => {
+            unsafe { &*($buf.as_ptr() as *const Packet) }
+        };
+    }
+
     // --- Tests for dev_addr_with_mac_flag ---
 
     #[test]
@@ -1212,7 +1225,8 @@ mod tests {
 
         // Create a packet with success response (0x0000)
         // PacketL2capHead structure: dma_len(4), _type(1), rf_len(1), l2cap_len(2), chan_id(2)
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         // dma_len (offset 0-3) = 0x00000000
         packet_data[4] = 2; // _type: l2cap data pkt, start pkt
         packet_data[5] = 0x0A; // rf_len
@@ -1227,7 +1241,7 @@ mod tests {
         packet_data[14] = 0x00; // result_low (success)
         packet_data[15] = 0x00; // result_high
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
 
@@ -1255,7 +1269,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         // Create a packet with rejection response (0x0001)
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1269,7 +1284,7 @@ mod tests {
         packet_data[14] = 0x01; // result_low (rejection)
         packet_data[15] = 0x00; // result_high
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
 
@@ -1296,7 +1311,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         // Create a packet with rejection response
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1310,7 +1326,7 @@ mod tests {
         packet_data[14] = 0x01; // result_low (rejection)
         packet_data[15] = 0x00; // result_high
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
 
@@ -1331,11 +1347,12 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         // Create a packet that doesn't match the expected response
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0B; // Different rf_len (doesn't match 0x0A)
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         // Call function
         let result = rf_update_conn_para(packet);
@@ -1352,7 +1369,8 @@ mod tests {
         CONN_UPDATE_CNT.set(0);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 0; // _type = 0 (not an L2CAP start packet)
         packet_data[5] = 0x0A; // Correct rf_len (but shouldn't matter)
         packet_data[6] = 0x06; // Correct l2cap_len_low
@@ -1365,7 +1383,7 @@ mod tests {
         packet_data[13] = 0x00; // Correct data_len_high
         packet_data[14] = 0x00; // Success result
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         // Call function
         let result = rf_update_conn_para(packet);
@@ -1382,7 +1400,8 @@ mod tests {
         CONN_UPDATE_CNT.set(0);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x07; // l2cap_len_low (WRONG - should be 0x06)
@@ -1395,7 +1414,7 @@ mod tests {
         packet_data[13] = 0x00; // data_len_high (correct)
         packet_data[14] = 0x00; // result (correct)
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         let result = rf_update_conn_para(packet);
 
@@ -1410,7 +1429,8 @@ mod tests {
         CONN_UPDATE_CNT.set(0);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1423,7 +1443,7 @@ mod tests {
         packet_data[13] = 0x00; // data_len_high (correct)
         packet_data[14] = 0x00; // result (correct)
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         let result = rf_update_conn_para(packet);
 
@@ -1438,7 +1458,8 @@ mod tests {
         CONN_UPDATE_CNT.set(0);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1451,7 +1472,7 @@ mod tests {
         packet_data[13] = 0x00; // data_len_high (correct)
         packet_data[14] = 0x00; // result (correct)
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         let result = rf_update_conn_para(packet);
 
@@ -1466,7 +1487,8 @@ mod tests {
         CONN_UPDATE_CNT.set(0);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1479,7 +1501,7 @@ mod tests {
         packet_data[13] = 0x00; // data_len_high (correct)
         packet_data[14] = 0x00; // result (correct)
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         let result = rf_update_conn_para(packet);
 
@@ -1494,7 +1516,8 @@ mod tests {
         CONN_UPDATE_CNT.set(2);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1508,7 +1531,7 @@ mod tests {
         packet_data[14] = 0x02; // result_low (unknown code - should be 0x00 or 0x01)
         packet_data[15] = 0x00; // result_high
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         // Call function
         let result = rf_update_conn_para(packet);
@@ -1525,7 +1548,8 @@ mod tests {
         CONN_UPDATE_CNT.set(1);
         CONN_UPDATE_SUCCESSED.set(false);
 
-        let mut packet_data: [u8; 100] = [0; 100];
+        let mut packet_data = aligned_packet_buf();
+        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1539,7 +1563,7 @@ mod tests {
         packet_data[14] = 0xFF; // result_low (unknown code)
         packet_data[15] = 0xFF; // result_high
 
-        let packet = unsafe { &*(packet_data.as_ptr() as *const Packet) };
+        let packet = packet_from_buf!(packet_data);
 
         let result = rf_update_conn_para(packet);
 

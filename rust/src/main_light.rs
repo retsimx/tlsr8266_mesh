@@ -126,7 +126,12 @@ pub fn user_init() {
     let mac = MAC_ID.lock();
     uprintln!(
         "MAC Address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]
+        mac[5],
+        mac[4],
+        mac[3],
+        mac[2],
+        mac[1],
+        mac[0]
     );
 
     factory_reset_handle();
@@ -401,15 +406,11 @@ pub fn rf_link_data_callback(p: &Packet) {
         LGT_CMD_LIGHT_CONFIG_GRP => {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
-                LIGHT_DEL_GRP_PARAM => {
-                    if remove_group(val) {
-                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-                    }
+                LIGHT_DEL_GRP_PARAM if remove_group(val) => {
+                    cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                 }
-                LIGHT_ADD_GRP_PARAM => {
-                    if add_group(val) {
-                        cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
-                    }
+                LIGHT_ADD_GRP_PARAM if add_group(val) => {
+                    cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                 }
                 _ => (),
             }

@@ -1,5 +1,5 @@
 #!/bin/bash
-#sed -i 's/#\[panic_handler\]/\/\/panic_handler/g' src/sdk/common/compat.rs
+set -e
 
 # Check if cargo-llvm-cov is installed, install if not
 if ! cargo llvm-cov --version &>/dev/null; then
@@ -7,5 +7,17 @@ if ! cargo llvm-cov --version &>/dev/null; then
     cargo install cargo-llvm-cov
 fi
 
-RUST_BACKTRACE=1 cargo llvm-cov --branch --show-missing-lines --target i686-unknown-linux-gnu -- --show-output --test-threads=1 $@
-#RUST_BACKTRACE=1 cargo llvm-cov --branch --target i686-unknown-linux-gnu -- --show-output --test-threads=1
+if [ "${CI:-}" = "true" ]; then
+    # CI mode: same as local but without --show-missing-lines
+    RUST_BACKTRACE=1 cargo llvm-cov \
+        --branch \
+        --target i686-unknown-linux-gnu \
+        -- --test-threads=1 "$@"
+else
+    # Local mode: human-readable with missing lines
+    RUST_BACKTRACE=1 cargo llvm-cov \
+        --branch \
+        --show-missing-lines \
+        --target i686-unknown-linux-gnu \
+        -- --show-output --test-threads=1 "$@"
+fi

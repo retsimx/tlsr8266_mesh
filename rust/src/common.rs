@@ -637,7 +637,7 @@ pub fn pair_flash_config_init() -> bool {
 /// The dual-pass validation with alternating patterns ensures:
 /// 1. First pass: Validates against 0xAAAAAAAA (alternating 1010...)
 /// 2. Second pass: Validates against 0x55555555 (alternating 0101...)
-/// This catches both odd and even bit position degeneracy.
+///    This catches both odd and even bit position degeneracy.
 ///
 /// # Parameters
 /// * `name` - Mesh network name (truncated/padded to 16 bytes)
@@ -1226,7 +1226,8 @@ mod tests {
         // Create a packet with success response (0x0000)
         // PacketL2capHead structure: dma_len(4), _type(1), rf_len(1), l2cap_len(2), chan_id(2)
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         // dma_len (offset 0-3) = 0x00000000
         packet_data[4] = 2; // _type: l2cap data pkt, start pkt
         packet_data[5] = 0x0A; // rf_len
@@ -1270,7 +1271,8 @@ mod tests {
 
         // Create a packet with rejection response (0x0001)
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1312,7 +1314,8 @@ mod tests {
 
         // Create a packet with rejection response
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1348,7 +1351,8 @@ mod tests {
 
         // Create a packet that doesn't match the expected response
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0B; // Different rf_len (doesn't match 0x0A)
 
@@ -1370,7 +1374,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 0; // _type = 0 (not an L2CAP start packet)
         packet_data[5] = 0x0A; // Correct rf_len (but shouldn't matter)
         packet_data[6] = 0x06; // Correct l2cap_len_low
@@ -1401,7 +1406,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x07; // l2cap_len_low (WRONG - should be 0x06)
@@ -1430,7 +1436,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1459,7 +1466,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1488,7 +1496,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type (correct)
         packet_data[5] = 0x0A; // rf_len (correct)
         packet_data[6] = 0x06; // l2cap_len_low (correct)
@@ -1517,7 +1526,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1549,7 +1559,8 @@ mod tests {
         CONN_UPDATE_SUCCESSED.set(false);
 
         let mut packet_data = aligned_packet_buf();
-        let packet_data: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
+        let packet_data: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(packet_data.as_mut_ptr() as *mut u8, 100) };
         packet_data[4] = 2; // _type
         packet_data[5] = 0x0A; // rf_len
         packet_data[6] = 0x06; // l2cap_len_low
@@ -1833,22 +1844,19 @@ mod tests {
     // To test this properly, we would need to refactor to use dependency injection.
 
     #[test]
-    #[mry::lock(
-        flash_read_page,
-        flash_erase_sector,
-        flash_write_page,
-        pair_update_key
-    )]
+    #[mry::lock(flash_read_page, flash_erase_sector, flash_write_page, pair_update_key)]
     fn test_pair_load_key_handles_no_config() {
         // Setup: Initialize PAIR_CONFIG_* with default values
         PAIR_CONFIG_MESH_NAME.lock().fill(0);
         PAIR_CONFIG_MESH_NAME.lock()[0..11].copy_from_slice(b"out_of_mesh");
-        
+
         PAIR_CONFIG_MESH_PWD.lock().fill(0);
         PAIR_CONFIG_MESH_PWD.lock()[0..3].copy_from_slice(b"123");
-        
-        let test_ltk = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 
-                        0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf];
+
+        let test_ltk = [
+            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+            0xde, 0xdf,
+        ];
         *PAIR_CONFIG_MESH_LTK.lock() = test_ltk;
 
         // Setup flash to have no valid configuration
@@ -1904,11 +1912,11 @@ mod tests {
         mock_flash_read_page(Any, Any, Any).returns_with(
             |addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
                 let buffer = unsafe { core::slice::from_raw_parts_mut(*buf, len as usize) };
-                
+
                 // Determine what data to return based on offset
                 let base_addr = FLASH_ADR_PAIRING + 0x1000;
                 let offset = addr.saturating_sub(base_addr);
-                
+
                 match offset {
                     0x10 => {
                         // Mesh name at offset +0x10
@@ -1950,7 +1958,7 @@ mod tests {
         assert_eq!(&pair_state.pair_nn[0..10], b"CustomMesh");
         assert_eq!(&pair_state.pair_pass[0..8], b"Pass1234");
         assert_eq!(pair_state.pair_ltk[0], 0xAA);
-        
+
         // Verify it did NOT use the default credentials
         assert_ne!(&pair_state.pair_nn[0..11], b"out_of_mesh");
         drop(pair_state);
@@ -1974,21 +1982,21 @@ mod tests {
     )]
     fn test_pairing_persistence_single_write_read() {
         use std::sync::{Arc, Mutex};
-        
+
         // Simulate 4KB flash sector
         let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
         let flash_clone_write = Arc::clone(&flash_storage);
         let flash_clone_read = Arc::clone(&flash_storage);
         let flash_clone_erase = Arc::clone(&flash_storage);
-        
+
         // Setup: No existing config (first boot)
         FLASH_CONFIGURATION_INDEX.set(-1);
-        
+
         // Set up default credentials (normally set during init)
         *PAIR_CONFIG_MESH_NAME.lock() = *b"defaultmesh\0\0\0\0\0";
         *PAIR_CONFIG_MESH_PWD.lock() = *b"defaultpass\0\0\0\0\0";
         *PAIR_CONFIG_MESH_LTK.lock() = [0xCD; 16];
-        
+
         // Mock flash operations to use our simulated flash
         mock_flash_write_page(Any, Any, Any).returns_with(
             move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
@@ -2021,16 +2029,22 @@ mod tests {
         });
 
         mock_pair_update_key().returns(());
-        
+
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
 
         // Set test pairing data
         {
             let mut pair_state = PAIR_STATE.lock();
-            pair_state.pair_nn.copy_from_slice(b"testmesh\0\0\0\0\0\0\0\0");
-            pair_state.pair_pass.copy_from_slice(b"password123\0\0\0\0\0");
+            pair_state
+                .pair_nn
+                .copy_from_slice(b"testmesh\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_pass
+                .copy_from_slice(b"password123\0\0\0\0\0");
             pair_state.pair_ltk = [0xAB; 16];
         }
 
@@ -2039,7 +2053,7 @@ mod tests {
 
         // Note: Flash erase is NOT called on first write since flash starts erased (all 0xFF)
         // Erase only happens when wrapping around at offset 0xFC0
-        
+
         // Verify index was set to correct value
         // With original bug: -1 + 64 = 63
         // With fix: should be 0
@@ -2062,13 +2076,24 @@ mod tests {
 
         // Verify loaded data matches
         let pair_state = PAIR_STATE.lock();
-        assert_eq!(&pair_state.pair_nn[0..8], b"testmesh", "Mesh name should match");
-        assert_eq!(&pair_state.pair_pass[0..11], b"password123", "Password should match");
+        assert_eq!(
+            &pair_state.pair_nn[0..8],
+            b"testmesh",
+            "Mesh name should match"
+        );
+        assert_eq!(
+            &pair_state.pair_pass[0..11],
+            b"password123",
+            "Password should match"
+        );
         assert_eq!(pair_state.pair_ltk, [0xAB; 16], "LTK should match");
-        
+
         // Verify the load found the config at the correct index
         let load_index = FLASH_CONFIGURATION_INDEX.get();
-        assert_eq!(load_index, save_index, "Load should find config at same index where it was saved");
+        assert_eq!(
+            load_index, save_index,
+            "Load should find config at same index where it was saved"
+        );
     }
 
     /// Test that no pairing data in flash loads defaults
@@ -2076,13 +2101,13 @@ mod tests {
     #[mry::lock(flash_read_page, pair_update_key)]
     fn test_pairing_persistence_no_data_loads_defaults() {
         use std::sync::{Arc, Mutex};
-        
+
         // Erased flash (all 0xFF)
         let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
         let flash_clone = Arc::clone(&flash_storage);
-        
+
         FLASH_CONFIGURATION_INDEX.set(0); // Reset to initial state
-        
+
         mock_flash_read_page(Any, Any, Any).returns_with(
             move |addr: u32, len: u32, buf_ptr: SendWrapper<*mut u8>| {
                 let buf = unsafe { std::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
@@ -2111,7 +2136,7 @@ mod tests {
         assert_eq!(&pair_state.pair_nn[0..11], b"defaultmesh");
         assert_eq!(&pair_state.pair_pass[0..11], b"defaultpass");
         assert_eq!(pair_state.pair_ltk, [0xCD; 16]);
-        
+
         // Verify index is -1 (no config found)
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), -1);
     }
@@ -2128,14 +2153,14 @@ mod tests {
     )]
     fn test_pairing_persistence_wear_leveling() {
         use std::sync::{Arc, Mutex};
-        
+
         let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
         let flash_clone_write = Arc::clone(&flash_storage);
         let flash_clone_read = Arc::clone(&flash_storage);
         let flash_clone_erase = Arc::clone(&flash_storage);
-        
+
         FLASH_CONFIGURATION_INDEX.set(-1);
-        
+
         mock_flash_write_page(Any, Any, Any).returns_with(
             move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
                 let data = unsafe { std::slice::from_raw_parts(*data_ptr, len as usize) };
@@ -2167,16 +2192,22 @@ mod tests {
         });
 
         mock_pair_update_key().returns(());
-        
+
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
 
         // First write
         {
             let mut pair_state = PAIR_STATE.lock();
-            pair_state.pair_nn.copy_from_slice(b"mesh1\0\0\0\0\0\0\0\0\0\0\0");
-            pair_state.pair_pass.copy_from_slice(b"pass1\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_nn
+                .copy_from_slice(b"mesh1\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_pass
+                .copy_from_slice(b"pass1\0\0\0\0\0\0\0\0\0\0\0");
             pair_state.pair_ltk = [0x01; 16];
         }
         pair_save_key();
@@ -2185,8 +2216,12 @@ mod tests {
         // Second write (should use next slot)
         {
             let mut pair_state = PAIR_STATE.lock();
-            pair_state.pair_nn.copy_from_slice(b"mesh2\0\0\0\0\0\0\0\0\0\0\0");
-            pair_state.pair_pass.copy_from_slice(b"pass2\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_nn
+                .copy_from_slice(b"mesh2\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_pass
+                .copy_from_slice(b"pass2\0\0\0\0\0\0\0\0\0\0\0");
             pair_state.pair_ltk = [0x02; 16];
         }
         pair_save_key();
@@ -2195,8 +2230,12 @@ mod tests {
         // Third write
         {
             let mut pair_state = PAIR_STATE.lock();
-            pair_state.pair_nn.copy_from_slice(b"mesh3\0\0\0\0\0\0\0\0\0\0\0");
-            pair_state.pair_pass.copy_from_slice(b"pass3\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_nn
+                .copy_from_slice(b"mesh3\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_pass
+                .copy_from_slice(b"pass3\0\0\0\0\0\0\0\0\0\0\0");
             pair_state.pair_ltk = [0x03; 16];
         }
         pair_save_key();
@@ -2215,7 +2254,7 @@ mod tests {
         assert_eq!(&pair_state.pair_nn[0..5], b"mesh3");
         assert_eq!(&pair_state.pair_pass[0..5], b"pass3");
         assert_eq!(pair_state.pair_ltk, [0x03; 16]);
-        
+
         // Load index should match last save index
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), index3);
     }
@@ -2232,15 +2271,15 @@ mod tests {
     )]
     fn test_pairing_persistence_wraparound() {
         use std::sync::{Arc, Mutex};
-        
+
         let flash_storage = Arc::new(Mutex::new([0xFFu8; 4096]));
         let flash_clone_write = Arc::clone(&flash_storage);
         let flash_clone_read = Arc::clone(&flash_storage);
         let flash_clone_erase = Arc::clone(&flash_storage);
-        
+
         // Start near end of sector
         FLASH_CONFIGURATION_INDEX.set(0xF80); // Second to last slot
-        
+
         mock_flash_write_page(Any, Any, Any).returns_with(
             move |addr: u32, len: u32, data_ptr: SendWrapper<*const u8>| {
                 let data = unsafe { std::slice::from_raw_parts(*data_ptr, len as usize) };
@@ -2269,37 +2308,50 @@ mod tests {
 
         let erase_count = Arc::new(Mutex::new(0));
         let erase_count_clone = Arc::clone(&erase_count);
-        
+
         mock_flash_erase_sector(Any).returns_with(move |_addr: u32| {
             flash_clone_erase.lock().unwrap().fill(0xFF);
             *erase_count_clone.lock().unwrap() += 1;
         });
 
         mock_pair_update_key().returns(());
-        
+
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any).returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_decode_password(Any)
+            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
 
         // Write data
         {
             let mut pair_state = PAIR_STATE.lock();
-            pair_state.pair_nn.copy_from_slice(b"boundary\0\0\0\0\0\0\0\0");
-            pair_state.pair_pass.copy_from_slice(b"test\0\0\0\0\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_nn
+                .copy_from_slice(b"boundary\0\0\0\0\0\0\0\0");
+            pair_state
+                .pair_pass
+                .copy_from_slice(b"test\0\0\0\0\0\0\0\0\0\0\0\0");
             pair_state.pair_ltk = [0xBC; 16];
         }
-        
+
         // First write goes to 0xFC0 (last slot)
         pair_save_key();
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0xFC0);
 
         // Next write should trigger wraparound
         pair_save_key();
-        
+
         // After wraparound, index should be back at 0
-        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0, "Should wrap to offset 0");
-        
+        assert_eq!(
+            FLASH_CONFIGURATION_INDEX.get(),
+            0,
+            "Should wrap to offset 0"
+        );
+
         // Verify sector was erased during wraparound
-        assert!(*erase_count.lock().unwrap() >= 1, "Sector should have been erased for wraparound");
+        assert!(
+            *erase_count.lock().unwrap() >= 1,
+            "Sector should have been erased for wraparound"
+        );
     }
 }

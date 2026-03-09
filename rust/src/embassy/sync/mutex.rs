@@ -524,7 +524,7 @@ impl<M: RawMutex, T> From<T> for Mutex<M, T> {
     }
 }
 
-impl<M: RawMutex, T: ?Sized + Default> Default for Mutex<M, T> {
+impl<M: RawMutex, T: Default> Default for Mutex<M, T> {
     /// Creates a `Mutex<T>`, with the `Default` value for T.
     fn default() -> Mutex<M, T> {
         Mutex::new(Default::default())

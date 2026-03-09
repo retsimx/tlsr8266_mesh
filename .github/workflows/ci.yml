@@ -99,7 +99,7 @@ jobs:
             }
 
   llvm:
-    name: Build LLC
+    name: Build LLVM tools
     runs-on: ubuntu-latest
     outputs:
       llc-cache-hit: ${{ steps.cache.outputs.cache-hit }}
@@ -110,12 +110,12 @@ jobs:
           REV=$(git ls-remote "$LLVM_REPO" "refs/heads/$LLVM_BRANCH" | cut -f1)
           echo "rev=${REV}" >> "$GITHUB_OUTPUT"
 
-      - name: Cache LLC binary
+      - name: Cache LLVM binaries
         id: cache
         uses: actions/cache@v4
         with:
-          path: llvm-install/bin/llc
-          key: llc-${{ steps.llvm-rev.outputs.rev }}
+          path: llvm-install/bin
+          key: llvm-tools-${{ steps.llvm-rev.outputs.rev }}
 
       - name: Install build dependencies
         if: steps.cache.outputs.cache-hit != 'true'
@@ -137,27 +137,29 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang++ \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
             -DLLVM_TARGETS_TO_BUILD=ARM \
-            -DLLVM_TOOLS_TO_BUILD=llc \
+            -DLLVM_TOOLS_TO_BUILD="llc;llvm-link;opt" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DCMAKE_INSTALL_PREFIX=llvm-install
 
-      - name: Build LLC
+      - name: Build LLVM tools
         if: steps.cache.outputs.cache-hit != 'true'
-        run: ninja -C llvm-build llc
+        run: ninja -C llvm-build llc llvm-link opt
 
-      - name: Install LLC
+      - name: Install LLVM tools
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p llvm-install/bin
           cp llvm-build/bin/llc llvm-install/bin/llc
+          cp llvm-build/bin/llvm-link llvm-install/bin/llvm-link
+          cp llvm-build/bin/opt llvm-install/bin/opt
 
-      - name: Upload LLC artifact
+      - name: Upload LLVM tools artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llc
-          path: llvm-install/bin/llc
+          name: llvm-tools
+          path: llvm-install/bin
           retention-days: 7
 
   firmware:
@@ -167,21 +169,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download LLC
+      - name: Download LLVM tools
         uses: actions/download-artifact@v4
         with:
-          name: llc
-          path: llc-bin
+          name: llvm-tools
+          path: llvm-bin
 
-      - name: Make LLC executable
-        run: chmod +x llc-bin/llc
+      - name: Make LLVM tools executable
+        run: chmod +x llvm-bin/llc llvm-bin/llvm-link llvm-bin/opt
 
       - name: Install Rust toolchain
         run: rustup show  # triggers rust-toolchain.toml
         working-directory: rust
 
       - name: Build firmware
-        run: make LLC="$GITHUB_WORKSPACE/llc-bin/llc"
+        run: |
+          make \
+            LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
+            LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 

@@ -62,11 +62,11 @@ $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ)
 	 cd rust && \
 	 RUSTFLAGS="--emit=llvm-ir" cargo build --lib --color=always --release -Z build-std=core --all-features --target thumbv6m-none-eabi && \
 	 echo "Linking IR modules..." && \
-	 $$_LLVM_LINK target/thumbv6m-none-eabi/release/deps/*.ll -o target/thumbv6m-none-eabi/release/deps/merged.ll && \
+	 $$_LLVM_LINK target/thumbv6m-none-eabi/release/deps/*.ll -o target/thumbv6m-none-eabi/release/deps/merged.bc && \
 	 echo "Optimising IR..." && \
-	 $$_OPT -passes="$(OPT_PASSES)" -inline-threshold=$(OPT_INLINE_THRESHOLD) target/thumbv6m-none-eabi/release/deps/merged.ll -o target/thumbv6m-none-eabi/release/deps/merged_opt.ll && \
+	 $$_OPT -passes="$(OPT_PASSES)" -inline-threshold=$(OPT_INLINE_THRESHOLD) target/thumbv6m-none-eabi/release/deps/merged.bc -o target/thumbv6m-none-eabi/release/deps/merged_opt.bc && \
 	 echo "Compiling optimised IR to assembly..." && \
-	 $$_LLC $(LLC_FLAGS) target/thumbv6m-none-eabi/release/deps/merged_opt.ll -o target/thumbv6m-none-eabi/release/deps/merged.s && \
+	 $$_LLC $(LLC_FLAGS) target/thumbv6m-none-eabi/release/deps/merged_opt.bc -o target/thumbv6m-none-eabi/release/deps/merged.s && \
 	 echo "Assembling..." && \
 	 ../$(AS) -o target/thumbv6m-none-eabi/release/deps/merged.o target/thumbv6m-none-eabi/release/deps/merged.s
 	$(LD) $(LDFLAGS) -o $@ $(RUST_DEPS)/merged.o $(STARTUP_OBJ) $(LIB)
@@ -83,7 +83,7 @@ all: $(BUILD_DIR)/$(TARGET).bin
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f $(RUST_DEPS)/*.s $(RUST_DEPS)/*.o $(RUST_DEPS)/merged.ll $(RUST_DEPS)/merged_opt.ll
+	rm -f $(RUST_DEPS)/*.s $(RUST_DEPS)/*.o $(RUST_DEPS)/merged.bc $(RUST_DEPS)/merged_opt.bc
 
 .PHONY: distclean
 distclean: clean

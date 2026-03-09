@@ -280,7 +280,7 @@ pub async fn check_panic_info() {
     flash_erase_sector(panic_addr);
 }
 
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 #[panic_handler]
 pub fn panic(info: &PanicInfo) -> ! {
     critical_section::with(|_| {

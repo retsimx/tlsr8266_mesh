@@ -12,22 +12,30 @@ OPT ?= ../../llvm/build/bin/opt
 
 # Whole-module IR optimization pipeline.
 #
-# Phase 1 (function-level): SROA, mem-to-reg, instcombine, CFG simplification,
+# Phase 1 (module-level): ipsccp (inter-procedural sparse conditional constant
+#   propagation) propagates constant arguments across call boundaries, making
+#   branches deterministic and enabling downstream dead code elimination.
+#   deadargelim then removes any function parameters made dead by ipsccp.
+#
+# Phase 2 (function-level): SROA, mem-to-reg, instcombine, CFG simplification,
 #   DCE, loop rotation + LICM, aggressive DCE, dead store elimination.
 #   Running before inlining shrinks functions so more become eligible.
 #
-# Phase 2 (module-level): always-inline (honours #[inline(always)]), then
+# Phase 3 (module-level): always-inline (honours #[inline(always)]), then
 #   cgscc(inline) with threshold=50 IR instructions. On Cortex-M0/TC32 every
 #   call costs ~10+ cycles (no branch predictor, no return-address stack), so
 #   inlining functions up to ~50 IR instructions recovers that overhead while
 #   staying net-positive on code size. Above threshold=50 size starts growing.
 #
-# Phase 3 (function-level): repeat the same safe passes on the inlined code so
-#   the merged bodies are fully cleaned up (constant folding across boundaries,
-#   dead stores from the callee, simplified CFG, etc.).
+# Phase 4 (module-level): second ipsccp+deadargelim round after inlining.
+#   Inlining exposes new constants at call sites that weren't visible before —
+#   a second ipsccp pass propagates these and enables further dead-code removal.
+#
+# Phase 5 (function-level): repeat the same safe passes on the fully inlined
+#   and constant-propagated code so merged bodies are fully cleaned up.
 OPT_INLINE_THRESHOLD = 50
 OPT_SAFE = sroa,mem2reg,instcombine<no-verify-fixpoint>,simplifycfg,dce,loop-simplify,lcssa,loop-rotate,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg,adce,dse
-OPT_PASSES = function($(OPT_SAFE)),always-inline,cgscc(inline),function($(OPT_SAFE))
+OPT_PASSES = ipsccp,deadargelim,function($(OPT_SAFE)),always-inline,cgscc(inline),ipsccp,deadargelim,function($(OPT_SAFE))
 
 CCFLAGS = -O2 -fshort-wchar -fms-extensions -finline-small-functions -fpack-struct -fshort-enums -Wall -std=gnu99 -DMCU_STARTUP_8266 -D__PROJECT_LIGHT_8266__=1 -DPROVISIONING_ENABLE -I ./sdk/ -ffunction-sections -fdata-sections
 

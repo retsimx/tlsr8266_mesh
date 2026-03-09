@@ -339,7 +339,7 @@ pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
         } else {
             FLASH_CONFIGURATION_INDEX.set(current_index + SECTOR_SIZE);
         }
-        
+
         // Clean the flash (handles wraparound if needed)
         // Note: pair_flash_clean() may reset index back to 0 if we wrapped around
         pair_flash_clean();

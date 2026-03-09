@@ -689,7 +689,7 @@ pub fn rf_link_slave_init(interval: u32) {
         pair_load_key();
 
         let access_code = PAIR_AC.get();
-        
+
         // Immediately configure RF hardware with new access code
         // This ensures the hardware is ready for mesh listening before interrupts fire
         rf_set_ble_access_code(access_code);

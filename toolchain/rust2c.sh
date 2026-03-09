@@ -8,7 +8,7 @@ AS=./toolchain/tc32/bin/tc32-elf-as
 
 # if LLC not set, then set with default value
 if [ "x$LLC" = "x" ]; then
-	LLC=../../llvm/build/bin/llc
+LLC=../../llvm/build/bin/llc
 fi
 
 cd rust
@@ -20,9 +20,7 @@ for i in target/thumbv6m-none-eabi/release/deps/*.ll; do
 
   echo "Doing ${bname}"
 
-  python3 ../toolchain/fix_ir.py $bname.ll
-
-  bash -c "$LLC -march=thumb -mcpu=arm9 -mattr=+soft-float,-v6 $bname.ll.ll2 && python3 ../toolchain/fix_asm.py $bname.ll.ll2.s && ../$AS -o $bname.o $bname.ll.ll2.s.tc32" &
+  bash -c "$LLC -march=thumb -mcpu=arm9 -mattr=+soft-float,-v6 $bname.ll -o $bname.s && ../$AS -o $bname.o $bname.s" &
 done
 
 wait

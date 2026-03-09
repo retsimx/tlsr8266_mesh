@@ -29,15 +29,15 @@ $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ)
 	@[ -f .env ] && . .env || :; \
 	 _LLC=$${LLC:-$(LLC)}; \
 	 cd rust && \
-	 RUSTFLAGS="--emit=llvm-bc" cargo build --color=always --release -Z build-std=core --all-features --target thumbv6m-none-eabi && \
+	 RUSTFLAGS="--emit=llvm-ir" cargo build --lib --color=always --release -Z build-std=core --all-features --target thumbv6m-none-eabi && \
 	 pids=""; \
-	 for i in target/thumbv6m-none-eabi/release/deps/*.bc; do \
+	 for i in target/thumbv6m-none-eabi/release/deps/*.ll; do \
 	   bname="$${i%.*}"; \
 	   if [ -f $$bname.o ] && [ $$bname.o -nt $$i ] && [ $$bname.o -nt $$_LLC ]; then \
 	     continue; \
 	   fi; \
-	   echo "Compiling $${bname}.bc"; \
-	   ($$_LLC $(LLC_FLAGS) $$bname.bc -o $$bname.s && ../$(AS) -o $$bname.o $$bname.s) & \
+	   echo "Compiling $${bname}.ll"; \
+	   ($$_LLC $(LLC_FLAGS) $$bname.ll -o $$bname.s && ../$(AS) -o $$bname.o $$bname.s) & \
 	   pids="$$pids $$!"; \
 	 done; \
 	 failed=0; for pid in $$pids; do wait $$pid || failed=1; done; [ $$failed -eq 0 ]
@@ -55,4 +55,9 @@ all: $(BUILD_DIR)/$(TARGET).bin
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f $(RUST_DEPS)/*.s $(RUST_DEPS)/*.o $(RUST_DEPS)/*.bc
+	rm -f $(RUST_DEPS)/*.s $(RUST_DEPS)/*.o
+
+.PHONY: distclean
+distclean: clean
+	cd rust && cargo clean
+	rm -f $(RUST_DEPS)/*.ll

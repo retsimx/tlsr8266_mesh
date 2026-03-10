@@ -10,7 +10,7 @@ The required Rust toolchain for this project includes:
 
 ## Building the Firmware
 
-The process to convert Rust code into TC32 bytecode is somewhat roundabout. Since the toolchain provided by Telink only supports C and their changes are not open sourced, it's necessary to use their compiler - or at least toolchain. Thankfully LLVM can generate better code (citation needed) than the provided TC32 GCC. Using LLVM in this manner also means it's theoretically possible to compile any language that has an LLVM frontend for the TLSR8266.
+The process to convert Rust code into TC32 bytecode is somewhat roundabout. Since the toolchain provided by Telink only supports C and their changes are not open sourced, it's necessary to use their compiler - or at least toolchain. Thankfully LLVM can generate more optimised code than the provided TC32 GCC, and using LLVM in this manner also means it's theoretically possible to compile any language that has an LLVM frontend for the TLSR8266.
 
 ### Build Process
 
@@ -53,7 +53,21 @@ To run the test suite, an x86 compatible machine is needed, and there is a helpe
 <a id="llvm"></a>
 ## LLVM Build Instructions
 
-The steps to build the required LLVM fork are as follows:
+### Prerequisites
+
+The following tools must be installed before building LLVM:
+
+- `cmake` (3.20 or later recommended)
+- `ninja`
+- A C/C++ compiler: `clang` and `clang++` (recommended), or `gcc`/`g++`
+
+On Ubuntu/Debian:
+
+```bash
+sudo apt-get install -y cmake ninja-build clang lld
+```
+
+### Build Steps
 
 1. **Clone the repository** (use the `tc32` branch):
    ```bash
@@ -66,13 +80,13 @@ The steps to build the required LLVM fork are as follows:
    cd build
    ```
 
-3. **Configure the build** (ARM target only, `llc` tool only):
+3. **Configure the build** (ARM target only, building `llc`, `llvm-link`, and `opt`):
    ```bash
    cmake "../llvm-project/llvm" -G Ninja \
    -DLLVM_ENABLE_ASSERTIONS=ON \
    -DLLVM_ENABLE_PLUGINS=OFF \
    -DLLVM_TARGETS_TO_BUILD=ARM \
-   -DLLVM_TOOLS_TO_BUILD=llc \
+   -DLLVM_TOOLS_TO_BUILD="llc;llvm-link;opt" \
    -DLLVM_INCLUDE_EXAMPLES=OFF \
    -DLLVM_INCLUDE_DOCS=OFF \
    -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -85,14 +99,18 @@ The steps to build the required LLVM fork are as follows:
    -DLLVM_ENABLE_ZSTD=OFF \
    -DLLVM_ENABLE_ZLIB=ON \
    -DLLVM_ENABLE_LIBXML2=OFF \
-   -DCMAKE_C_COMPILER=cc \
-   -DCMAKE_CXX_COMPILER=c++ \
+   -DCMAKE_C_COMPILER=clang \
+   -DCMAKE_CXX_COMPILER=clang++ \
    -DCMAKE_BUILD_TYPE=Release
    ```
 
-4. **Build `llc`**:
+4. **Build the tools**:
    ```bash
-   ninja -j$(nproc) llc
+   ninja -j$(nproc) llc llvm-link opt
    ```
 
-5. **Locate the binary**: The output will be at `build/bin/llc`. Update the `LLC` variable in the `Makefile` (or pass it as `LLC=/path/to/llc make`) if your build is in a non-default location.
+5. **Locate the binaries**: The outputs will be at `build/bin/llc`, `build/bin/llvm-link`, and `build/bin/opt`. Update the `LLC`, `LLVM_LINK`, and `OPT` variables in the `Makefile` (or pass them on the command line) if your build directory differs from the default:
+
+   ```bash
+   LLC=/path/to/llc LLVM_LINK=/path/to/llvm-link OPT=/path/to/opt make
+   ```

@@ -17,7 +17,10 @@ For improved security, you should also generate a custom Long-Term Key (LTK). Th
 The included script `meshutils/mesh_add.py` is used to provision a device to join your mesh network. Before running the script:
 
 1. Ensure the device is powered on and in an unpaired state (new devices or factory reset devices advertise with the name "out_of_mesh")
-2. Make sure you have Python 3 and required dependencies installed (run `pip install -r utilities/meshutils/requirements.txt`)
+2. Make sure you have Python 3 and required dependencies installed:
+   ```bash
+   pip install -r utilities/meshutils/requirements.txt
+   ```
 3. Ensure you have Bluetooth permissions on your system
 
 ### Command Line Arguments
@@ -30,6 +33,8 @@ The script accepts the following arguments:
 * `--mesh_ltk` (optional): A custom Long-Term Key for the mesh in hex format (32 hex characters / 16 bytes). If not provided, the script will use a default LTK with a security warning and confirmation prompt.
 
 ### Usage Examples
+
+Run the following commands from the `utilities/meshutils/` directory:
 
 ```bash
 # Add a light with address 5 to mesh "myhome" with password "securepass"

@@ -34,7 +34,10 @@ The `meshutils/flash_fw.py` script performs secure OTA updates through the follo
 Before running the script:
 
 1. Ensure the device is powered on and within BLE range
-2. Make sure you have Python 3 and required dependencies installed (run `pip install -r utilities/meshutils/requirements.txt`)
+2. Make sure you have Python 3 and required dependencies installed:
+   ```bash
+   pip install -r utilities/meshutils/requirements.txt
+   ```
 3. Ensure you have Bluetooth permissions on your system
 4. Know the current mesh credentials of the device (name and password)
 
@@ -49,6 +52,8 @@ The script requires the following arguments:
 * `--force` (optional): Flag to bypass version checks. This will allow flashing older firmware or firmware with the same version number, but will NOT bypass clock speed compatibility checks unless explicitly modified.
 
 ### Usage Examples
+
+Run the following commands from the `utilities/meshutils/` directory:
 
 ```bash
 # Basic firmware update to a paired device

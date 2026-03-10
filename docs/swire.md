@@ -2,22 +2,26 @@
 
 ## Overview
 
-Included in this project is a Raspberry Pi Pico/W micropython project that allows SWire communication with the TSLR chips. The client is 95% rbarons code, and the micropython code is mostly my own. It uses PIO to communicate with the MCU, and the micropython Raw REPL to interface with the pico.
+This project includes a Raspberry Pi Pico/W MicroPython implementation for SWire communication with TLSR chips. It uses PIO to communicate with the MCU at the bit level, and the MicroPython Raw REPL to interface with the Pico from a host PC. The Python client is based on [rbaron's SWire client](https://github.com/rbaron/m6-reveng), with a custom MicroPython device implementation.
+
+## Prerequisites
+
+- A Raspberry Pi Pico or Pico W with [MicroPython firmware](https://micropython.org/download/RPI_PICO/) installed
+- Python 3 and the dependencies from `utilities/picow_swire/requirements.txt` installed on the host
+
+There is no need to manually copy any code to the Pico — `client.py` automatically uploads `remote.py` to the device via the MicroPython Raw REPL on each run.
 
 ## Timing Configuration
 
-Depending on the crystal speed attached to your TLSR chip, you might need to fiddle with the timings. I've got 12Mhz and 16Mhz devices - and they need different timings. I've provided timings that work for me in the code.
-
-## Setup Requirements
-
-There is no need to copy any code on to the Pi, `client.py` will copy `remote.py` to the Pi via the micropython REPL. The only requirement on the Pi side is that micropython be flashed on to the device.
+TLSR8266 devices may use either a 12 MHz or 16 MHz crystal oscillator, which affects SWire timing requirements. If communication is unreliable, the timing constants in `remote.py` may need to be adjusted to match the crystal frequency of the target device. The repository includes timing values that work for both 12 MHz and 16 MHz devices; select the appropriate set for your hardware.
 
 ## Hardware Connections
 
-The circuit diagram matches the schematic provided by rbaron (Image from [rbaron's blog post](https://rbaron.net/blog/2021/07/06/Reverse-engineering-the-M6-smart-fitness-band.html)), but with a Raspberry Pi Pico rather than an STM32.
+The circuit follows the schematic provided by rbaron (see [rbaron's blog post](https://rbaron.net/blog/2021/07/06/Reverse-engineering-the-M6-smart-fitness-band.html)), adapted for a Raspberry Pi Pico instead of an STM32.
 
 ### Pin Mapping
-The pin mapping between STM32 and RPi Pico (as coded in `remote.py` - change if required) are as follows:
+
+The following table shows the mapping from the original STM32-based schematic to the Raspberry Pi Pico GPIO pins (as defined in `remote.py`; adjust if needed):
 
 | STM32 | RPi Pico |
 |-------|----------|
@@ -27,9 +31,24 @@ The pin mapping between STM32 and RPi Pico (as coded in `remote.py` - change if 
 
 ![RPi Pico programmer + TLSR8266 setup](assets/swire_schematic.png)
 
-## Usage Example
+## Usage
 
-Typical usage for flashing the firmware looks something like:
+Run all commands from the `utilities/picow_swire/` directory.
+
+### Flash firmware
+
+```bash
+python client.py write_flash ../../_build/lightblemesh.bin
+```
+
+### Reset the CPU
+
+```bash
+python client.py cpu_reset
+```
+
+### Flash and reset in one step
 
 ```bash
 python client.py write_flash ../../_build/lightblemesh.bin && python client.py cpu_reset
+```

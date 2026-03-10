@@ -19,7 +19,10 @@ The update process consists of the following phases:
 Before using the UART updater:
 
 1. Ensure the device is powered on and connected to a USB-to-UART adapter
-2. Make sure you have Python 3 and required dependencies installed (run `pip install -r utilities/meshutils/requirements.txt`)
+2. Make sure you have Python 3 and required dependencies installed:
+   ```bash
+   pip install -r utilities/meshutils/requirements.txt
+   ```
 3. Know the mesh address of the target device
 4. Have the appropriate firmware binary file ready
 5. Verify the target device is accessible through the mesh network if updating a remote node
@@ -31,6 +34,8 @@ The `meshutils/flash_fw_uart.py` script requires the following parameters:
 * `--fw_file` (required): The firmware binary file to flash to the target device
 * `--mesh_address` (required): The mesh node address to flash the firmware to (This is the address provided to the node when it was paired)
 * `--force` (optional): Flag to bypass version checks. This will allow flashing older firmware or firmware with the same version number, but will NOT bypass clock speed compatibility checks
+
+> **Note:** The serial port and baud rate are not configurable via command line arguments. The script uses `/dev/ttyUSB0` at 115200 baud by default. To use a different port, edit the `reset_connection()` function in `flash_fw_uart.py`.
 
 ## Critical Warning: Clock Speed Compatibility
 
@@ -44,6 +49,8 @@ The `meshutils/flash_fw_uart.py` script requires the following parameters:
 > - Recovery from a clock speed mismatch is generally impossible once bricked
 
 ## Usage Examples
+
+Run the following commands from the `utilities/meshutils/` directory:
 
 ```bash
 # Update firmware on device with mesh address 5
@@ -109,5 +116,5 @@ The UART updater expects a standard USB-to-UART adapter connected to the E104-BT
 - GND connected between the adapter and the module
 - VCC should be provided by a stable power source (either through USB or external)
 
-The default serial port is `/dev/ttyUSB0` with a baud rate of 115200. If your setup uses a different port, you'll need to modify the `reset_connection()` function in the script.
+The default serial port is `/dev/ttyUSB0` with a baud rate of 115200. If your setup uses a different port, edit the `reset_connection()` function in `flash_fw_uart.py`.
 

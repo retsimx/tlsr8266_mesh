@@ -21,3 +21,6 @@ Comprehensive documentation on the BLE pairing and security mechanisms for the T
 ### [UART Command Packet Examples](uart_api.md)
 Reference documentation with examples of UART command packets for device control (work in progress).
 
+### [BLE & Mesh Hardware/Software Reference](ble_hardware_reference.md)
+Comprehensive technical datasheet covering the complete BLE and proprietary mesh implementation. Includes hardware register reference, RF subsystem configuration, interrupt architecture, BLE link-layer state engine, packet formats, GATT attribute table, pairing protocol, OTA update mechanisms, AES cryptography, flash storage layout, and full documentation of the proprietary flooding mesh protocol: access code derivation, mesh/BLE coexistence state machine, packet routing, node status propagation, over-mesh re-pairing, and timing reference.
+

@@ -1,10 +1,9 @@
 # TLSR8266 BLE Mesh — Hardware & Software Technical Reference
 
-> **Revision:** 1.0  
+> **Revision:** 1.1  
 > **Target SoC:** Telink TLSR8266F512  
 > **System clock:** 32 MHz (192 MHz PLL ÷ 6)  
-> **RF:** 2.4 GHz BLE 1 Mbps GFSK  
-> **Generated from:** Rust firmware source at `rust/src/sdk/`
+> **RF:** 2.4 GHz BLE 1 Mbps GFSK
 
 ---
 
@@ -38,8 +37,7 @@
 26. [Over-Mesh OTA Firmware Update](#26-over-mesh-ota-firmware-update)
 27. [Complete System Timing Reference (Mesh)](#27-complete-system-timing-reference-mesh)
 
-**Appendix:**
-- [A. Implementation Gaps — Precise Clarifications](#appendix-a-implementation-gaps--precise-clarifications)
+
 
 ---
 
@@ -216,6 +214,15 @@ All addresses are offsets from `REG_BASE_ADDR = 0x800000`.
 | `reg_rf_chn_rssi` | 0x458 | 8 | Channel RSSI measurement |
 | `reg_rf_rx_gain_agc` | 0x480 | 32 | AGC gain table (indexed, 7 entries × 4 bytes) |
 
+**`reg_rf_tx_mode` (0x400) bit definitions:**
+
+| Bit | Symbol | Description |
+|-----|--------|-------------|
+| 0 | `DMA_EN` | Enable DMA for TX packet transfers |
+| 1 | `CRC_EN` | Enable CRC generation |
+| 3 | (modem) | Additional modem parameter; `TBL_RF_INI` sets 0x400 to `0x0B` then `0x0F`; final post-init value is `0x0F` |
+| 2, 4–15 | (reserved) | Set via `TBL_RF_INI`; do not modify independently |
+
 **`reg_rf_rx_mode` (FLD_RF_RX_MODE) bit definitions:**
 
 | Bit | Symbol | Description |
@@ -373,6 +380,33 @@ All addresses are offsets from `REG_BASE_ADDR = 0x800000`.
 | 5 | `RW` | 1 = write, 0 = read |
 | 6 | `START` | Start operation |
 
+**Analog register access procedures:**
+
+The analog interface at 0x0B8–0x0BA is an indirect-access bus. Both read and write sequences must be executed atomically (with interrupts disabled).
+
+**Write procedure:**
+```c
+void analog_write(uint8_t addr, uint8_t value) {
+    REG8(0x800B8) = addr;          // 1. Set target address
+    REG8(0x800B9) = value;         // 2. Write data
+    REG8(0x800BA) = 0x60;          // 3. Trigger: START (bit 6) | RW (bit 5)
+    while (REG8(0x800BA) & 0x01);  // 4. Poll BUSY (bit 0) until clear
+    REG8(0x800BA) = 0x00;          // 5. Clear control register
+}
+```
+
+**Read procedure:**
+```c
+uint8_t analog_read(uint8_t addr) {
+    REG8(0x800B8) = addr;          // 1. Set target address
+    REG8(0x800BA) = 0x50;          // 2. Trigger: START (bit 6) | RSV (bit 4)
+    while (REG8(0x800BA) & 0x01);  // 3. Poll BUSY (bit 0) until clear
+    uint8_t data = REG8(0x800B9);  // 4. Read result
+    REG8(0x800BA) = 0x00;          // 5. Clear control register
+    return data;
+}
+```
+
 **Key analog register addresses (indirect):**
 
 | Addr | Description |
@@ -391,9 +425,9 @@ All addresses are offsets from `REG_BASE_ADDR = 0x800000`.
 
 | Register | Offset | Width | Description |
 |----------|--------|-------|-------------|
-| `reg_aes_ctrl` | 0x540 | 8 | AES control (bit 0 = direction: 0=encrypt/1=decrypt, bit 2 = done flag) |
-| `reg_aes_data` | 0x548 | 32 | AES data I/O (write 4 words, read 4 words) |
-| `reg_aes_key[0..15]` | 0x550–0x55F | 8 each | AES-128 key bytes (indexed) |
+| `reg_aes_ctrl` | 0x540 | 8 | Control: bit 0 = direction (0=encrypt, 1=decrypt); bit 2 = done flag (poll until set) |
+| `reg_aes_data` | 0x548 | 32 | Data FIFO — auto-advances on each 32-bit access; write 4 words (source in), read 4 words (result out) |
+| `reg_aes_key[0..15]` | 0x550–0x55F | 8 each | AES-128 key bytes, indexed 0–15 |
 
 ### 2.11 GPIO Registers (0x580–0x5CF)
 
@@ -651,13 +685,24 @@ Setting power level: `rf_set_power_level_index(index)` writes these 4 values to 
 
 | Function | Mode Code | Description |
 |----------|-----------|-------------|
-| `rf_start_stx2tx(addr, tick)` | 0x87 | TX at tick, then auto-switch to RX |
+| `rf_start_stx2rx(addr, tick)` | 0x87 | TX at tick, then auto-switch to RX |
 | `rf_start_srx2tx(addr, tick)` | 0x85 | RX at tick, then auto-switch to TX |
 | `rf_start_brx(addr, tick)` | 0x82 | Broadcast RX at tick |
 
-All three: write tick to `reg_rf_sched_tick` (0xF18), set bit 2 in `reg_rf_mode`, write mode code to `reg_rf_mode_control` (0xF00), set DMA3 address.
+**Exact register write sequence for `rf_start_srx2tx(addr, tick)`** (order is critical):
 
----
+```c
+void rf_start_srx2tx(uint32_t packet_addr, uint32_t tick) {
+    REG32(0x800F18) = tick;                        // 1. reg_rf_sched_tick — set trigger time
+    REG16(0x80050C) = (uint16_t)(packet_addr);     // 2. reg_dma3_addr (reg_dma_rf_tx_addr) — 16-bit addr offset from 0x800000
+    REG8(0x800F16) = REG8(0x800F16) | 0x04;        // 3. reg_rf_mode — enable scheduled mode (bit 2)
+    REG8(0x800F00) = 0x85;                         // 4. reg_rf_mode_control — issue SRX2TX command
+}
+```
+
+The same pattern applies to `rf_start_stx2rx` (mode `0x87`) and `rf_start_brx` (mode `0x82`), each setting `reg_dma3_addr` to the TX packet address and `reg_dma2_addr` to the RX buffer address before issuing the command.
+
+
 
 ## 5. DMA Configuration
 
@@ -676,9 +721,20 @@ All three: write tick to `reg_rf_sched_tick` (0xF18), set bit 2 in `reg_rf_mode`
 
 During `blc_ll_init_basic_mcu()`:
 
-1. `reg_dma2_addr` ← address of `LIGHT_RX_BUFF[LIGHT_RX_BUFFER_WRITE_POINTER]` (16-bit, offset from 0x800000).
-2. `reg_dma2_ctrl` ← `0x0104` (buffer size = 0x04 in units, write-to-memory enabled).
+1. `reg_dma2_addr` ← address of `LIGHT_RX_BUFF[LIGHT_RX_BUFFER_WRITE_POINTER]` (16-bit offset from `0x800000`).
+2. `reg_dma2_ctrl` ← `0x0104` — field breakdown:
+
+| Bits | Description |
+|------|-------------|
+| [7:0] | Buffer size in units of 16 bytes. `0x04` = 4 × 16 = **64 bytes** per RX buffer slot. |
+| [8] | Write-to-memory enable: `1` = hardware writes received data into the buffer address. |
+| [15:9] | Reserved. |
+
+Each entry in `LIGHT_RX_BUFF` must be at least **64 bytes** in size.
+
 3. `reg_dma_chn_irq_msk` ← `0x00`.
+
+> **Note:** The RF DMA channels (2 = RX, 3 = TX) are **not** enabled via `reg_dma_chn_en` (0x520). The RF state machine commands (`reg_rf_mode_control`) activate DMA implicitly. `reg_dma_chn_en` is used only for UART DMA channels; **do not set bits 2 or 3**.
 
 ### 5.3 RX Buffer Ring Management
 
@@ -699,9 +755,33 @@ TX uses DMA channel 3. The transmit buffer address is set per-packet:
 - `rf_start_stx2rx(addr, tick)` → writes `addr` to `reg_dma3_addr`.
 - `rf_start_brx(addr, tick)` → writes empty packet addr to `reg_dma3_addr`.
 
-The DMA TX read pointer (`reg_dma_tx_rptr` at 0x52A) is reset to `0x10` on disconnect.
+**TX circular buffer management:**
+
+The TX subsystem uses an 8-slot software-managed circular FIFO with hardware read/write pointers:
+
+| Register | Offset | Description |
+|----------|--------|-------------|
+| `reg_dma_tx_rptr` | 0x52A | Hardware read pointer (hardware decrements as packets are consumed) |
+| `reg_dma_tx_wptr` | 0x52B | Software write pointer (software increments when queuing a packet) |
+
+```c
+bool is_tx_fifo_ready() {
+    uint8_t used = (REG8(0x80052B) - REG8(0x80052A)) & 7;
+    return used < 3;  // Ready when fewer than 3 of 8 slots occupied
+}
+
+void enqueue_tx_packet(Packet *pkt) {
+    if (!is_tx_fifo_ready()) return;
+    uint8_t wptr = REG8(0x80052B);
+    // Copy pkt to BLE_TX_BUFF[wptr & (TX_FIFO_DEPTH - 1)]
+    REG8(0x80052B) = wptr + 1;  // Advance write pointer
+}
+```
+
+On disconnect, `reg_dma_tx_rptr` is reset to `0x10` (and `reg_dma_tx_wptr` synchronised) to drain any pending packets.
 
 ---
+
 
 ## 6. Interrupt System
 
@@ -729,99 +809,184 @@ Additional sources enabled at runtime:
 | Disable | `write_reg_irq_en(0)` — returns previous state |
 | Restore | `write_reg_irq_en(saved_state)` |
 
-### 6.3 IRQ Dispatch Flow (`irq_handler`)
+### 6.3 TC32 Interrupt Vector and ISR Calling Convention
 
-`irq_handler()` is `#[no_mangle] extern "C"`, placed in `.ram_code`. Execution:
+The TC32 core uses a fixed interrupt vector table in flash, defined in `sdk/cstartup_8266.S`:
+
+```asm
+.org 0x0   tj  __reset          ; Reset vector at flash offset 0x0
+.org 0x10  tj  __irq            ; IRQ vector at flash offset 0x10
+```
+
+The `__irq` thunk saves all registers, calls `irq_handler`, then restores them:
+
+```asm
+__irq:
+    tpush   {r14}           ; save LR
+    tpush   {r0-r7}         ; save low registers
+    tmrss   r0              ; read CPSR into r0
+    tmov    r1, r8          ; move high registers to r1-r5
+    tmov    r2, r9
+    tmov    r3, r10
+    tmov    r4, r11
+    tmov    r5, r12
+    tpush   {r0-r5}         ; save CPSR + r8-r12
+    tjl     irq_handler     ; call C/Rust handler
+    tpop    {r0-r5}         ; restore CPSR + r8-r12
+    tmov    r8,  r1
+    tmov    r9,  r2
+    tmov    r10, r3
+    tmov    r11, r4
+    tmov    r12, r5
+    tmssr   r0              ; restore CPSR
+    tpop    {r0-r7}         ; restore low registers
+    treti   {r15}           ; return from IRQ (restores PC from r15)
+```
+
+**Implications for a C/Rust firmware implementation:**
+
+- `irq_handler` must be a plain C function with external linkage and the symbol name `irq_handler` (no name-mangling). Do **not** mark it with any ISR attribute — all register save/restore is performed by `__irq`.
+- The C function sees a normal calling environment on entry.
+- The function **must reside in RAM** (`.ram_code` section) because the flash instruction cache may be disabled during RF operations.
+- The startup code allocates a dedicated IRQ stack of **0x800 bytes** (`IRQ_STK_SIZE`) and sets `r13` to the top-of-stack in IRQ mode (`mode = 0x12`). No stack setup is required in `irq_handler` itself.
+
+### 6.4 IRQ Dispatch Flow (`irq_handler`)
+
+`irq_handler()` is placed in `.ram_code`. Execution sequence:
 
 ```
 irq_handler()
-├── Create IrqTracker (sets IS_IRQ_MODE = true; auto-clears on drop)
+├── Create IrqTracker (sets IS_IRQ_MODE = true; auto-clears on drop/return)
 ├── Read reg_rf_irq_status (0xF20)
 ├── If IRQ_TX set:
 │   └── handle_rf_transmission_complete()
-│       └── Write 2 to reg_rf_irq_status (clear TX bit)
+│       └── Write 0x0002 to reg_rf_irq_status (clear TX bit 1)
 ├── If IRQ_RX set:
 │   └── handle_rf_packet_reception()
 │       ├── Advance RX ring buffer write pointer
-│       ├── Check RF error status (0x0B → discard)
-│       ├── Update DMA2 address to next buffer
-│       ├── Clear RX IRQ (write 1 to reg_rf_irq_status)
-│       ├── Validate packet: dma_len > 0x0E, length matches, status byte & 0x51 == 0x40
-│       ├── Check duplicate via timestamp
+│       ├── Check reg_rf_rx_status (0x443) — if 0x0B discard (FOOTER error)
+│       ├── Update DMA2 address to next buffer slot
+│       ├── Write 0x0001 to reg_rf_irq_status (clear RX bit 0)
+│       ├── Validate packet:
+│       │   ├── dma_len > 0x0E
+│       │   ├── dma_len == (rf_len & 0x3F) + 0x11  (length consistency)
+│       │   └── *(pkt_base + dma_len + 3) & 0x51 == 0x40  (hardware status footer)
+│       ├── Timestamp duplicate check
 │       └── Dispatch based on BLE_PERIPHERAL_LINK_STATE:
 │           ├── Advertising: handle scan req (cmd=3) or connect req (cmd=5)
 │           ├── Mesh: handle_mesh_packet (decrypt, deduplicate, forward)
-│           └── Connected: handle_ble_connection_data (SN check, timing adjust)
+│           └── Connected/Receiving: handle_ble_connection_data (SN check, timing adjust)
 └── handle_system_interrupts()
-    ├── SYSTEM_TIMER IRQ (bit 20 of reg_irq_src):
-    │   ├── Clear: write SYSTEM_TIMER bit to reg_irq_src
+    ├── SYSTEM_TIMER IRQ (reg_irq_src bit 20):
+    │   ├── Clear: write 0x00100000 to reg_irq_src (0x648)
     │   └── Dispatch based on CURRENT_RF_STATE:
     │       ├── Advertising → handle_ble_advertisement_state()
     │       ├── Connected → handle_ble_connected_state()
     │       ├── Receiving → configure_ble_receive_state()
     │       ├── MeshListening → handle_mesh_listening_state()
     │       └── Idle → (no action)
-    ├── Timer 0 IRQ:
-    │   ├── Clear TMR0 status bit
+    ├── Timer 0 IRQ (reg_tmr_sta bit 0):
+    │   ├── Clear: write 0x01 to reg_tmr_sta (0x623)
     │   ├── Advance 64-bit clock
     │   └── OTA timeout decrement (if active)
-    ├── Timer 1 IRQ:
-    │   ├── Clear TMR1 status bit
+    ├── Timer 1 IRQ (reg_tmr_sta bit 1):
+    │   ├── Clear: write 0x02 to reg_tmr_sta (0x623)
     │   └── Call light_manager.transition_step()
     └── UART IRQ:
         └── Call uart_manager.check_irq()
 ```
 
+**Interrupt clear values (write-1-to-clear):**
+
+| IRQ | Register | Address | Value to Write |
+|-----|----------|---------|----------------|
+| SYSTEM_TIMER | `reg_irq_src` | 0x648 | `0x00100000` (bit 20) |
+| Timer 0 | `reg_tmr_sta` | 0x623 | `0x01` (bit 0) |
+| Timer 1 | `reg_tmr_sta` | 0x623 | `0x02` (bit 1) |
+| RF RX | `reg_rf_irq_status` | 0xF20 | `0x0001` (bit 0) |
+| RF TX | `reg_rf_irq_status` | 0xF20 | `0x0002` (bit 1) |
+
+**Packet hardware status footer:**
+
+The RF hardware appends a status byte immediately after the received packet payload in the DMA buffer. Its location and interpretation:
+
+```c
+// Location: packet_buffer_base + dma_len + 3
+uint8_t status = *((uint8_t *)(packet_addr + dma_len + 3));
+
+// Validity check:
+// bit 6 set  → valid packet received
+// bit 4 clear → no packet-type error
+// bit 0 clear → no CRC error
+if ((status & 0x51) != 0x40) { discard_packet(); }
+```
+
+The two-stage packet validation is:
+1. `reg_rf_rx_status` (register 0x443) — check for `0x0B` (FOOTER state error in RX state machine) before looking at the DMA buffer.
+2. DMA buffer status footer — check `(status & 0x51) == 0x40` after reading the packet.
+
 
 ## 7. BLE Link Layer State Engine
 
-### 7.1 States
+The firmware maintains two parallel state variables that together govern RF behaviour:
 
-The RF subsystem operates as a state machine driven by the system tick IRQ:
+| Variable | Type | Purpose |
+|----------|------|---------|
+| `CURRENT_RF_STATE` | `RfOperationState` | Drives the system-timer IRQ dispatch (§6.4) |
+| `BLE_PERIPHERAL_LINK_STATE` | `BlePeripheralLinkState` | Drives packet-reception dispatch (§6.4) |
 
-| State | Enum Value | Description |
-|-------|------------|-------------|
-| `Idle` | — | No RF operation |
-| `Advertising` | 1 | Broadcasting ADV_IND on channels 37/38/39 |
-| `Connected` | 5 | Active BLE connection with master |
-| `Receiving` | 7 | Listening for next connection event |
-| `MeshListening` | 4 | Listening on mesh channels for mesh packets |
+Both are updated together on state transitions and must remain consistent.
 
-### 7.2 State Transition Diagram
+### 7.1 `BlePeripheralLinkState` — Peripheral Link State
+
+Controls packet reception handling. Has explicit discriminant values:
+
+| State | Discriminant | Description |
+|-------|-------------|-------------|
+| `Disconnected` | 0 | No active BLE link; idle |
+| `Advertising` | 1 | Broadcasting ADV_IND; accepting SCAN_REQ and CONNECT_IND |
+| `Mesh` | 4 | Listening on mesh channel (access code = `PAIR_AC`) |
+| `Connected` | 5 | Active BLE connection; connection data packets expected |
+| `Receiving` | 7 | Awaiting next connection event packet from master |
+
+### 7.2 `RfOperationState` — RF Operation State
+
+Controls system-timer IRQ dispatch. Compiler-assigned sequential discriminants (0–4):
+
+| State | Value | Description |
+|-------|-------|-------------|
+| `Idle` | 0 | No RF operation scheduled |
+| `Advertising` | 1 | Transmit ADV_IND, cycle channels 37/38/39 |
+| `Connected` | 2 | Bridge BLE↔mesh; run connection event |
+| `Receiving` | 3 | Configure RX window for next connection event |
+| `MeshListening` | 4 | Listen on mesh channel; periodically advertise |
+
+### 7.3 State Transition Diagram
 
 ```
-                    ┌─────────────┐
-       Power-on ──►│  Advertising │◄──── disconnect / timeout
-                    └──────┬──────┘
-                           │ CONNECT_IND received
-                           ▼
-                    ┌─────────────┐
-                    │  Receiving   │◄──── schedule_next_connection_event()
-                    └──────┬──────┘
-                           │ connection event
-                           ▼
-                    ┌─────────────┐
-                    │  Connected   │──── process mesh + bridge + status
-                    └──────┬──────┘
-                           │ event complete
-                           ▼
-                    ┌─────────────┐
-                    │  Receiving   │ (loop back for next event)
-                    └──────────────┘
-
-  From Advertising (after adv sequence complete):
-                    ┌─────────────────┐
-                    │ MeshListening   │◄──── adv complete (channels 37/38/39 done)
-                    └──────┬──────────┘
-                           │ listen cycle increments
-                           │ if (cycle % ADV_INTERVAL2LISTEN_INTERVAL == 0)
-                           ▼
-                    ┌─────────────┐
-                    │  Advertising │  (with random jitter)
-                    └─────────────┘
+                  ┌──────────────────────────────────────────┐
+                  │              Power-on / Reset             │
+                  └───────────────────┬──────────────────────┘
+                                      ▼
+                               ┌──────────────┐
+                          ┌───►│ MeshListening │◄──────────────────────┐
+                          │    └──────┬───────┘                        │
+                          │           │ every 4th listen cycle          │
+                          │           │ (ADV_INTERVAL2LISTEN = 4)       │
+                          │           ▼                                 │
+                          │    ┌──────────────┐                        │
+                          │    │  Advertising  │                        │
+                          │    └──────┬────────┘                       │
+                          │           │ CONNECT_IND received            │
+                          │           ▼                                 │
+                          │    ┌──────────────┐   disconnect/timeout    │
+                          └────│   Connected   │────────────────────────┘
+                               └──────────────┘
+                                       ↕  (Receiving ↔ Connected loop
+                                          within a connection)
 ```
 
-### 7.3 Timing Parameters
+### 7.4 Timing Parameters
 
 | Parameter | Symbol | Default Value | Units |
 |-----------|--------|---------------|-------|
@@ -834,7 +999,7 @@ The RF subsystem operates as a state machine driven by the system tick IRQ:
 | Timing adjust window | — | 700–1100 µs (normal), ±200 µs correction | µs |
 | OTA RX timeout | — | 10,000 µs (10 ms) | µs |
 
-### 7.4 Main Loop Structure
+### 7.5 Main Loop Structure
 
 The main loop runs outside interrupt context:
 
@@ -1105,7 +1270,7 @@ All packets are accessed through a 48-byte `Packet` union type. `const_assert!(s
 | 20 | 1 | `op` | Operation code |
 | 21 | 2 | `vendor_id` | Vendor ID (little-endian) |
 | 23 | 10 | `par` | Parameters [0–9] |
-| 33 | 5 | `internal_par1` | Internal: [0]=status_data, [1]=packet_format_mode, [2]=retransmit_count, [3]=send_ack, [4]=reserved (see §22.2 and Appendix A.10) |
+| 33 | 5 | `internal_par1` | Internal relay parameters — see §22.2 for field layout |
 | 38 | 1 | `ttl` | Time to live |
 | 39 | 4 | `internal_par2` | Internal: [1] used as MIC buffer for broadcast |
 | 43 | 5 | `no_use` | Unused/padding |
@@ -1167,6 +1332,48 @@ All packets are accessed through a 48-byte `Packet` union type. `const_assert!(s
 **MTU Response (14 bytes):** opcode 0x03, MTU = 0x0017 (23 bytes).
 
 **Error Response (15 bytes):** opcode 0x01, err_opcode, err_handle[2], err_reason.
+
+---
+
+### 11.8 Worked Example: Minimal Mesh Broadcast Packet
+
+The following example constructs a `MeshPkt` to broadcast a `LGT_CMD_LIGHT_ONOFF` (turn-on) command to all nodes (group address `0xFFFF`):
+
+```c
+MeshPkt pkt = {0};
+
+// L2CAP / BLE header fields
+pkt.head.dma_len    = 40;        // Total payload length
+pkt.head.rf_len     = 37;        // Over-air length (dma_len - 3)
+pkt.head.l2cap_len  = 29;        // ATT payload (rf_len - 8)
+pkt.head.chan_id    = 0x0004;    // BLE L2CAP ATT channel
+
+// Mesh addressing
+pkt.sno[0]          = sno & 0xFF;  // 24-bit sequence number, LE
+pkt.sno[1]          = (sno >> 8) & 0xFF;
+pkt.sno[2]          = (sno >> 16) & 0xFF;
+pkt.src_adr         = MY_DEVICE_ADDR;     // 16-bit, LE
+pkt.dst_adr         = 0xFFFF;             // broadcast
+
+// Command
+pkt.op              = LGT_CMD_LIGHT_ONOFF; // 0xD0
+pkt.vendor_id       = VENDOR_ID;           // 0x0211 (LE)
+pkt.par[0]          = 1;                   // param: ON
+
+// Internal relay control
+pkt.internal_par1[INTERNAL_PAR_STATUS_DATA]        = 0;
+pkt.internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE] = 0;
+pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT]   = 2; // relay twice
+pkt.internal_par1[INTERNAL_PAR_SEND_ACK]           = 0; // no ACK
+
+pkt.ttl = 10;
+
+// Encrypt payload (bytes 10–37) with mesh LTK
+aes_att_encryption_packet(MESH_LTK, &pkt);
+
+// Transmit on mesh channel
+rf_start_stx(&pkt, get_system_tick() + TX_DELAY_TICKS);
+```
 
 ---
 
@@ -1460,9 +1667,11 @@ The `--force` flag bypasses the version number comparison but **never** bypasses
 
 | Register | Address | Width | Description |
 |----------|---------|-------|-------------|
-| `reg_aes_ctrl` | `0x540` | 8-bit | Control: bit 0 = direction (0=enc, 1=dec); bit 2 = done flag (read) |
-| `reg_aes_key[i]` | `0x548 + i` | 8-bit | Key byte `i` (write only; 16 bytes, index 0–15) |
-| `reg_aes_data[i]` | `0x558 + i×4` | 32-bit | Source/result data word `i` (0–3); each word is 4 bytes big-endian |
+| `reg_aes_ctrl` | `0x540` | 8-bit | Control register: bit 0 = direction (0=encrypt, 1=decrypt); bit 2 = done flag (read; set by hardware when operation completes) |
+| `reg_aes_data` | `0x548` | 32-bit | Single auto-advancing 32-bit FIFO register. Each write shifts in one word of source data; each read shifts out one word of result data. The address does **not** increment — the register itself advances its internal pointer automatically. |
+| `reg_aes_key[i]` | `0x550 + i` | 8-bit | Key byte `i` (write only; 16 bytes, i = 0–15) |
+
+> **Caution:** The `reg_aes_data` register is a FIFO, **not** an addressable array. Do not construct indexed addresses from 0x548. Writing 4 consecutive 32-bit values to address 0x548 loads all 16 bytes of source data; reading 4 consecutive 32-bit values from address 0x548 retrieves the 16-byte result.
 
 ### 16.2 Low-Level AES Procedure (`aes_ll_encryption`)
 
@@ -1470,13 +1679,28 @@ The `--force` flag bypasses the version number comparison but **never** bypasses
 Input:  key[16], source[16], direction ∈ {Encrypt=0, Decrypt=1}
 
 1. Write direction bit to reg_aes_ctrl (0x540).
-2. Write key bytes in REVERSED order:
+
+2. Write key bytes in REVERSED order (key[15] → index 0, key[0] → index 15):
      for i in 0..16: reg_aes_key[i] = key[15 - i]
-3. Write source data as four 32-bit words:
-     for i in 0..4: reg_aes_data[i] = u32::from_le_bytes(source[i*4..(i+1)*4])
-4. Poll reg_aes_ctrl until bit 2 (value 0x04) is set (done).
-5. Read result as four 32-bit words:
-     for i in 0..4: result[i*4..(i+1)*4] = reg_aes_data[i].to_le_bytes()
+
+3. Write source data as four big-endian 32-bit words in REVERSE index order.
+   The hardware expects word index 3 first, word index 0 last:
+     for i in [3, 2, 1, 0]:
+         word = u32::from_be_bytes(source[i*4 .. i*4+4])
+         write_u32(reg_aes_data /*0x548*/, word)
+
+   (The FIFO auto-advances after each 32-bit write; do not change the address.)
+
+4. Poll reg_aes_ctrl (0x540) until bit 2 (0x04) is set (done flag).
+
+5. Read result as four 32-bit LE words in FORWARD index order:
+     for i in 0..4:
+         word = read_u32(reg_aes_data /*0x548*/)
+         result[i*4]   = (word >>  0) & 0xFF  // little-endian byte extraction
+         result[i*4+1] = (word >>  8) & 0xFF
+         result[i*4+2] = (word >> 16) & 0xFF
+         result[i*4+3] = (word >> 24) & 0xFF
+
 6. Return result[16].
 ```
 
@@ -1728,15 +1952,19 @@ The resulting 32-bit value is stored in `PAIR_AC` and loaded into the RF access 
 
 ### 21.1 `RfOperationState` Enum
 
-The global `CURRENT_RF_STATE` variable (type `RfOperationState`) controls which handler the system-timer IRQ invokes:
+The global `CURRENT_RF_STATE` variable (type `RfOperationState`) controls which handler the system-timer IRQ invokes. This is **distinct** from `BLE_PERIPHERAL_LINK_STATE` (type `BlePeripheralLinkState`) which controls packet-reception dispatch (see §7.1). Both variables coexist and must be kept consistent.
 
-| Variant | Value | Meaning |
-|---------|-------|---------|
-| `Idle` | 0 | No RF operation scheduled |
-| `Advertising` | 1 | Send BLE advertising packet then switch to `MeshListening` |
-| `Connected` | 2 | Maintain BLE connection; bridge commands to mesh |
-| `Receiving` | 3 | Awaiting BLE connection packet |
-| `MeshListening` | 4 | Listen on mesh channel; periodically advertise |
+`RfOperationState` has **no explicit discriminant values** — the compiler assigns sequential integers:
+
+| Variant | Compiler Value | Role in system-timer IRQ dispatch |
+|---------|---------------|----------------------------------|
+| `Idle` | 0 | No RF operation; IRQ does nothing |
+| `Advertising` | 1 | Transmit ADV_IND on channels 37/38/39, then enter `MeshListening` |
+| `Connected` | 2 | Run BLE connection event; bridge commands to mesh |
+| `Receiving` | 3 | Configure RX window for next connection event |
+| `MeshListening` | 4 | Listen on mesh channel; periodically enter `Advertising` |
+
+Compare with `BlePeripheralLinkState` which uses **explicit non-sequential discriminants**: Disconnected=0, Advertising=1, Mesh=4, Connected=5, Receiving=7 (values 2, 3, 6 are invalid gaps).
 
 ### 21.2 State Transition Diagram
 
@@ -2162,240 +2390,3 @@ With BRIDGE_MAX_CNT=8:        ≤8 relay hops possible
 | Post-credential apply delay | 1000 ms | `MESH_PAIR_CMD_INTERVAL × 2` |
 
 ---
-
-## Appendix A: Implementation Gaps — Precise Clarifications
-
-This appendix resolves the specific underdocumented details identified during a bare-metal implementation review. Each subsection addresses one gap.
-
-### A.1 TC32 Interrupt Vector Table and ISR Calling Convention
-
-The TC32 uses a fixed interrupt vector table in flash, defined in `sdk/cstartup_8266.S`. The table has two relevant entries:
-
-```
-.org 0x0   tj  __reset          ; Reset vector at flash offset 0
-.org 0x10  tj  __irq            ; IRQ vector at flash offset 0x10
-```
-
-The `__irq` thunk in the startup file saves all registers, calls `irq_handler`, and restores them:
-
-```asm
-__irq:
-    tpush   {r14}           ; save LR
-    tpush   {r0-r7}         ; save low registers
-    tmrss   r0              ; read CPSR into r0
-    tmov    r1, r8          ; move high registers to r0-r5
-    tmov    r2, r9
-    tmov    r3, r10
-    tmov    r4, r11
-    tmov    r5, r12
-    tpush   {r0-r5}         ; save CPSR + r8-r12
-    tjl     irq_handler     ; call C function
-    tpop    {r0-r5}         ; restore CPSR + r8-r12
-    tmov    r8,  r1
-    tmov    r9,  r2
-    tmov    r10, r3
-    tmov    r11, r4
-    tmov    r12, r5
-    tmssr   r0              ; restore CPSR
-    tpop    {r0-r7}         ; restore low registers
-    treti   {r15}           ; return from IRQ (restores PC from r15)
-```
-
-**Implications for a C implementation:**
-
-- `irq_handler` must be a plain C function with `extern "C"` linkage and the symbol name `irq_handler` (no mangling).
-- **Do not** mark it with any ISR attribute — all register save/restore is done by `__irq`. The C function sees a normal C calling environment.
-- The function **must be in RAM** (`.ram_code` section) because the flash instruction cache may be disabled during RF operations.
-- A separate IRQ stack of **0x800 bytes** (`IRQ_STK_SIZE`) is set up by the startup code. No stack allocation is needed in `irq_handler` itself.
-- The IRQ stack base address is set to `irq_stk + 0x800` (top-of-stack) in the startup code via `tmcsr` (mode = `0x12` = IRQ_MODE) + `tmov r13, r0`.
-
-### A.2 `analog_write()` Register Sequence
-
-The full procedure for writing to an analog register (indirect via `reg_ana_*` at 0x0B8–0x0BA):
-
-```c
-void analog_write(uint8_t addr, uint8_t value) {
-    // 1. Poll until not busy
-    while (REG8(0x0BA) & 0x01) {}
-
-    // 2. Write target address
-    REG8(0x0B8) = addr;
-
-    // 3. Write data value
-    REG8(0x0B9) = value;
-
-    // 4. Trigger write: START (bit 6) | RW (bit 5) = 0x60
-    REG8(0x0BA) = 0x60;
-
-    // 5. Poll until complete
-    while (REG8(0x0BA) & 0x01) {}
-
-    // 6. Clear control register to finish
-    REG8(0x0BA) = 0x00;
-}
-```
-
-The `analog_read()` procedure differs: write `START (0x40) | RSV (0x10) = 0x50` to 0x0BA (note: no RW bit), poll busy, read result from 0x0B9, write 0x00 to 0x0BA.
-
-### A.3 `reg_rf_tx_mode` (0x400) Bit Definitions
-
-| Bit | Symbol | Description |
-|-----|--------|-------------|
-| 0 | `DMA_EN` | Enable DMA for TX packet transfers |
-| 1 | `CRC_EN` | Enable CRC generation |
-| 2–15 | (reserved) | Other modem parameters set via TBL_RF_INI |
-
-The TBL_RF_INI sequence sets 0x400 to `0x0B` (bits 0, 1, 3) then `0x0F` (bits 0-3) then `0x08` (bit 3 only). The final value written by the init table at entry 43 (`0x401 = 0x08`) is for a different register. At the end of `rf_drv_init`, `reg_rf_tx_mode1` (0x400) holds `0x0F` from entry 27.
-
-### A.4 `rf_start_srx2tx()` Exact Register Write Sequence
-
-The complete sequence for `rf_start_srx2tx(packet_addr, tick)`:
-
-```c
-void rf_start_srx2tx(uint32_t packet_addr, uint32_t tick) {
-    // 1. Set scheduled trigger time
-    REG32(0xF18) = tick;                    // reg_rf_sched_tick
-
-    // 2. Set TX DMA source address (16-bit, offset from 0x800000)
-    REG16(0x50C) = (packet_addr - 0x800000) >> 0;  // reg_dma3_addr (reg_dma_rf_tx_addr)
-
-    // 3. Enable scheduled mode: set bit 2 in reg_rf_mode (0xF16)
-    REG8(0xF16) = REG8(0xF16) | 0x04;
-
-    // 4. Write mode command: 0x85 = SRX2TX
-    REG8(0xF00) = 0x85;                     // reg_rf_mode_control
-}
-```
-
-The order matters: set the tick and address before enabling the command.
-
-### A.5 `reg_dma2_ctrl` (0x0104) Field Definitions
-
-The 16-bit DMA control register format:
-
-| Bits | Description |
-|------|-------------|
-| [7:0] | **Buffer size** in units of 16 bytes. Value `0x04` = 4 × 16 = 64 bytes per RX buffer slot. |
-| [8] | **Write-to-memory enable** (1 = hardware writes received data to the buffer address). |
-| [15:9] | Reserved. |
-
-So `0x0104` = `(1 << 8) | 4` = write-to-memory enabled, 64-byte buffer size. The RX buffer array `LIGHT_RX_BUFF` must therefore have each entry allocated as at least 64 bytes.
-
-### A.6 `reg_dma_chn_en` (0x520) — RF Channels
-
-The RF DMA channels (2 = RX, 3 = TX) are **not explicitly enabled** in `reg_dma_chn_en` by the BLE init code. The TBL_RF_INI sequence and mode register writes (`rf_set_rxmode`, `rf_start_*`) activate DMA implicitly via the mode control register (0xF00). The `reg_dma_chn_en` register is only used for UART DMA channels (bits 0 and 1). For RF operation: **do not set bits 2 or 3** — leave `reg_dma_chn_en` at its reset value.
-
-### A.7 TX DMA Buffer Management
-
-The TX circular buffer has 8 slots, managed by hardware pointers at:
-- `reg_dma_tx_wptr` (0x52B) — software-incremented write pointer
-- `reg_dma_tx_rptr` (0x52A) — hardware-decremented read pointer
-
-To queue a TX packet:
-
-```c
-bool is_tx_ready() {
-    uint8_t used = (REG8(0x52B) - REG8(0x52A)) & 7;
-    return used < 3;   // ready when fewer than 3 slots used
-}
-
-void enqueue_tx_packet(Packet *pkt) {
-    if (!is_tx_ready()) return;
-    uint8_t wptr = REG8(0x52B);
-    // Copy packet to BLE_TX_BUFF[wptr & (BLT_FIFO_TX_PACKET_COUNT - 1)]
-    // Then advance write pointer:
-    REG8(0x52B) = wptr + 1;
-}
-```
-
-On disconnect, `reg_dma_tx_rptr` is reset to `0x10` (and `reg_dma_tx_wptr` synchronised) to drain any pending packets.
-
-### A.8 Packet Status Byte — Location and Meaning
-
-The packet validation in `handle_rf_packet_reception()` performs two checks:
-
-**Check 1 — RF hardware error:**
-```c
-if (REG8(0x443) == 0x0B) { discard(); }  // reg_rf_rx_status: 0x0B = FOOTER error state
-```
-This reads the **register** `reg_rf_rx_status` (0x443), not a field inside the packet.
-
-**Check 2 — Packet status footer:**
-```c
-// Status byte is appended by hardware AFTER the packet payload
-// Location: packet_buffer_addr + dma_len + 3
-uint8_t status = *((uint8_t *)(packet_addr + dma_len + 3));
-if ((status & 0x51) != 0x40) { discard(); }
-```
-
-The hardware appends a status byte at offset `dma_len + 3` relative to the packet start. The mask `0x51` checks:
-- Bit 0: CRC error (must be 0)
-- Bit 4: Packet type OK (must be 1 — `0x40` has bit 6 set, but the mask only checks bit 4 via `0x50`, combined result `0x40` means bit 6 is set indicating valid packet reception)
-- Bit 6: Valid packet received (must be 1 — value `0x40` = bit 6 set)
-
-In summary: `status & 0x51 == 0x40` means bit 6 set (valid) and bits 0, 4 clear (no CRC error, no type error).
-
-### A.9 IRQ Source Clear — Concrete Values
-
-When clearing interrupts, write the **specific bit mask** to the status register (write-1-to-clear):
-
-| IRQ | Register | Address | Value to Write |
-|-----|----------|---------|----------------|
-| SYSTEM_TIMER | `reg_irq_src` | 0x648 | `0x00100000` (bit 20) |
-| Timer 0 | `reg_tmr_sta` | 0x623 | `0x01` (bit 0) |
-| Timer 1 | `reg_tmr_sta` | 0x623 | `0x02` (bit 1) |
-| RF RX | `reg_rf_irq_status` | 0xF20 | `0x0001` (bit 0) |
-| RF TX | `reg_rf_irq_status` | 0xF20 | `0x0002` (bit 1) |
-
-### A.10 `internal_par1` — Corrected Field Mapping
-
-Section 11.2 contains an error. The correct `internal_par1` field mapping from `sdk/light.rs` is:
-
-| Index | Constant | Description |
-|-------|----------|-------------|
-| `[0]` | `INTERNAL_PAR_STATUS_DATA` | Status/response data |
-| `[1]` | `INTERNAL_PAR_PACKET_FORMAT_MODE` | Packet format mode indicator |
-| `[2]` | `INTERNAL_PAR_RETRANSMIT_COUNT` | Remaining relay hops |
-| `[3]` | `INTERNAL_PAR_SEND_ACK` | 1 = destination should acknowledge |
-| `[4]` | (reserved) | Unused |
-
-Section 11.2 previously listed `[0]=retransmit_count, [1]=send_ack` which is incorrect.
-
-### A.11 Minimal Mesh Broadcast Packet — Worked Example
-
-A broadcast mesh packet targeting all nodes (`dst_adr = 0xFFFF`), opcode `LGT_CMD_LIGHT_ONOFF` (`0x10`):
-
-```c
-MeshPkt pkt = {0};
-
-// PacketL2capHead (10 bytes at offset 0)
-pkt.head.dma_len  = sizeof(MeshPkt) - 4;  // 44 (excludes dma_len field itself)
-pkt.head._type    = 0x00;                  // PDU type flags (0 = default)
-pkt.head.rf_len   = sizeof(MeshPkt) - 6;  // 42 (excludes dma_len + _type + rf_len)
-pkt.head.l2cap_len = 0x0022;              // L2CAP payload length
-pkt.head.chan_id  = 0xFFFF;               // broadcast
-
-// Mesh addressing (offsets 10-22)
-pkt.src_tx  = DEVICE_ADDRESS;             // own address (updated at TX time)
-pkt.handle1 = 0x00;                       // no flags
-pkt.sno[0]  = (cmd_sno) & 0xFF;          // sequence = clock_time() + own_addr
-pkt.sno[1]  = (cmd_sno >> 8) & 0xFF;
-pkt.sno[2]  = (cmd_sno >> 16) & 0xFF;
-pkt.src_adr = DEVICE_ADDRESS;
-pkt.dst_adr = 0xFFFF;                    // broadcast
-
-// Opcode (offset 20-22)
-pkt.op        = LGT_CMD_LIGHT_ONOFF | 0xC0;  // 0xD0
-pkt.vendor_id = VENDOR_ID;               // little-endian
-
-// Parameters (offset 23-32): command-specific, zero for a simple on/off
-// pkt.par[0] = 1;   // 1 = on, 0 = off
-
-// Internal (offset 33-42)
-pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT] = 2;  // relay twice
-pkt.internal_par1[INTERNAL_PAR_SEND_ACK]         = 0;  // no ack required
-pkt.ttl = 0;
-
-// Encrypt if SECURITY_ENABLE (set bit 7 of handle1, then call pair_enc_packet_mesh)
-// Then transmit via send_mesh_msg_iteration() on all 4 SYS_CHN_LISTEN channels
-```

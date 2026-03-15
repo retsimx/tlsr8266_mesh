@@ -33,13 +33,12 @@ from bleak import BleakClient
 
 from mesh_common import (
     # Constants
-    shared_key, VERSION_MASK, VERSION_16MHZ,
+    VERSION_MASK, VERSION_16MHZ,
     pair_characteristic_uuid, notify_characteristic_uuid,
     command_characteristic_uuid, ota_characteristic_uuid,
-    firmware_revision_uuid, PAIR_OP_VERIFY_CREDENTIALS,
+    firmware_revision_uuid,
     # Functions
-    encode_mesh_credentials, encrypt_data, reverse_section,
-    process_session_key, PacketParser, crc16
+    authenticate, PacketParser, crc16
 )
 
 # Constants for firmware update
@@ -185,34 +184,7 @@ async def main():
 
             # ----- PHASE 2: AUTHENTICATION -----
             print("Authenticating with device...")
-
-            # Set mesh credentials from arguments
-            mesh_name = args.mesh_name
-            mesh_pass = args.mesh_password
-
-            # Generate and verify mesh credentials
-            plaintext_mesh_credentials = encode_mesh_credentials(mesh_name, mesh_pass)
-
-            # Prepare authentication request
-            enc_key = bytearray(shared_key)[:] + b'\0' * 8  # Pad shared key to 16 bytes
-            encrypted = encrypt_data(enc_key, plaintext_mesh_credentials)
-
-            # Build authentication command with PAIR_OP_VERIFY_CREDENTIALS opcode
-            command_data = bytearray(b'\0' * 17)
-            command_data[0] = PAIR_OP_VERIFY_CREDENTIALS  # Verify credentials opcode
-            command_data[1:1 + len(shared_key)] = shared_key[:]  # Client random challenge
-            command_data[9:9 + 8] = encrypted[8:]  # Proof of credentials
-
-            # Adjust byte order for device compatibility
-            reverse_section(command_data, 9, 16)
-
-            # Send authentication request and process server response
-            await client.write_gatt_char(pair_characteristic_uuid, command_data)
-            response = await client.read_gatt_char(pair_characteristic_uuid)
-            
-            # Extract session key from response
-            session_key = process_session_key(response, plaintext_mesh_credentials)
-
+            session_key = await authenticate(client, args.mesh_name, args.mesh_password)
             print("Authentication successful, session established")
 
             # ----- PHASE 3: FIRMWARE TRANSFER -----

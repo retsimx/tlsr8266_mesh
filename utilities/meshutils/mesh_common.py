@@ -7,6 +7,7 @@ and firmware update tools. It implements the core cryptographic operations and
 command processing required for secure communication with TLSR8266 devices.
 """
 
+import binascii
 import random
 import math
 from Cryptodome.Cipher import AES
@@ -450,10 +451,10 @@ class CommandAction:
         command[offset] = (self.opcode & 0xff).to_bytes(length=4, byteorder='little', signed=True)[0] | 0xC0
         offset += 1
         
-        # Write the 16-bit vendor ID (2 bytes)
-        command[offset] = (self.vendor_id >> 8) & 0xFF        # High byte
-        offset += 1
+        # Write the 16-bit vendor ID (2 bytes, little-endian)
         command[offset] = self.vendor_id & 0xFF               # Low byte
+        offset += 1
+        command[offset] = (self.vendor_id >> 8) & 0xFF        # High byte
         offset += 1
         
         # Write command parameters if provided
@@ -651,3 +652,125 @@ class BaseCommandAction:
             CommandAction: The command action ready for execution
         """
         return CommandAction(self)
+
+# ---------------------------------------------------------------------------
+# Hardware-compatible AES helper (mirrors Rust aes_att_encryption)
+# ---------------------------------------------------------------------------
+
+def aes_att_encryption(key, source):
+    """Replicate Rust aes_att_encryption: reverses key and source before AES-ECB,
+    then reverses the output, matching TLSR8266 hardware byte order."""
+    k = bytearray(key); k.reverse()
+    s = bytearray(source); s.reverse()
+    cipher = AES.new(bytes(k), AES.MODE_ECB)
+    res = bytearray(cipher.encrypt(bytes(s)))
+    res.reverse()
+    return res
+
+
+def aes_att_decryption(key, ciphertext):
+    """Replicate Rust aes_att_decryption: reverses key and ciphertext before AES-ECB
+    decrypt, then reverses the output, matching TLSR8266 hardware byte order.
+
+    This is the inverse of aes_att_encryption and is used to decrypt values that
+    the firmware encrypted with aes_att_encryption (e.g. the LTK in get_ltk)."""
+    k = bytearray(key); k.reverse()
+    c = bytearray(ciphertext); c.reverse()
+    cipher = AES.new(bytes(k), AES.MODE_ECB)
+    res = bytearray(cipher.decrypt(bytes(c)))
+    res.reverse()
+    return res
+
+
+def decrypt_notification(data, session_key, mac_bytes_fwd):
+    """Decrypt and authenticate a BLE ATT notification from a mesh slave node.
+
+    Args:
+        data: Raw notification bytes (sno[3] | src[2] | mic[2] | ciphertext[...])
+        session_key: 16-byte session key derived during authentication.
+        mac_bytes_fwd: Device MAC address in display order (MSB first).
+
+    Returns:
+        Decrypted payload as bytearray, or None if MIC verification fails.
+    """
+    if len(data) < 8:
+        return None
+    sno = data[0:3]
+    src_addr = data[3:5]
+    mic_received = data[5:7]
+    encrypted_payload = bytearray(data[7:])
+    if not encrypted_payload:
+        return None
+
+    mac_rev = bytearray(mac_bytes_fwd); mac_rev.reverse()
+    ivs = bytearray(8)
+    ivs[0:3] = mac_rev[0:3]
+    ivs[3:6] = sno
+    ivs[6:8] = src_addr
+
+    # AES-CTR decryption
+    r = bytearray(16)
+    r[1:9] = ivs
+    decrypted = bytearray(len(encrypted_payload))
+    keystream = bytearray(16)
+    for i in range(len(encrypted_payload)):
+        if (i & 15) == 0:
+            keystream = aes_att_encryption(session_key, r)
+            r[0] += 1
+        decrypted[i] = encrypted_payload[i] ^ keystream[i & 15]
+
+    # CBC-MAC authentication
+    auth_block = bytearray(16)
+    auth_block[0:8] = ivs
+    auth_block[8] = len(encrypted_payload)
+    auth_value = aes_att_encryption(session_key, auth_block)
+    for i in range(len(decrypted)):
+        auth_value[i & 15] ^= decrypted[i]
+        if (i & 15) == 15 or i == len(decrypted) - 1:
+            auth_value = aes_att_encryption(session_key, auth_value)
+
+    return decrypted if auth_value[0:2] == mic_received else None
+
+
+def parse_mac_address(mac_str):
+    """Parse a BLE MAC address string into forward and reversed byte arrays.
+
+    Args:
+        mac_str: MAC address string, e.g. "12:34:56:78:9A:1D" or "1234567890ab".
+
+    Returns:
+        (mac_bytes_fwd, mac_bytes_rev) where fwd is MSB-first (display order)
+        and rev is LSB-first (firmware/flash order).
+    """
+    raw = mac_str.replace(':', '').replace('-', '')
+    fwd = bytearray(binascii.unhexlify(raw))
+    return fwd, bytearray(reversed(fwd))
+
+
+async def authenticate(client, mesh_name, password):
+    """Perform the PAIR_OP_VERIFY_CREDENTIALS handshake and return the session key.
+
+    Args:
+        client: Connected BleakClient instance.
+        mesh_name: Mesh network name string.
+        password: Mesh network password string.
+
+    Returns:
+        16-byte session key as bytearray.
+
+    Raises:
+        Exception: If the session key returned by the device doesn't match.
+    """
+    plaintext_credentials = encode_mesh_credentials(mesh_name, password)
+    enc_key = bytearray(shared_key)[:] + b'\0' * 8
+    encrypted = encrypt_data(enc_key, plaintext_credentials)
+
+    auth_cmd = bytearray(17)
+    auth_cmd[0] = PAIR_OP_VERIFY_CREDENTIALS
+    auth_cmd[1:1 + len(shared_key)] = shared_key[:]
+    auth_cmd[9:9 + 8] = encrypted[8:]
+    reverse_section(auth_cmd, 9, 16)
+
+    await client.write_gatt_char(pair_characteristic_uuid, auth_cmd)
+    response = await client.read_gatt_char(pair_characteristic_uuid)
+    return process_session_key(response, plaintext_credentials)

@@ -49,27 +49,7 @@ from mesh_common import crc16
 # [3-42] = data payload (40 bytes)
 # [42-43] = CRC16 of bytes 0-42
 
-# Command codes
-ENABLE_UART = 0x01    # Enable UART reporting mode
-LIGHT_CTRL = 0x02     # Light control command
-LIGHT_STATUS = 0x03   # Light status response
-MESH_MESSAGE = 0x04   # Mesh network message
-PANIC_MESSAGE = 0x05  # Panic/error message
-PRINT_MESSAGE = 0x06  # Debug print message
-ACK = 0xFF            # Acknowledgment code
-
-# OTA update command codes
-OTA_START = 0x24      # Start OTA update process
-OTA_DATA = 0x26       # OTA data packet
-OTA_END = 0x28        # End OTA update process
-OTA_START_RESP = 0x25 # Response to OTA start
-OTA_DATA_RESP = 0x27  # Response to OTA data packet
-
-# Timing and packet constants
-PACKET_LENGTH = 44    # Total UART packet length
-CRC_OFFSET = 42       # Offset of CRC in packet
-PAYLOAD_OFFSET = 3    # Offset of payload in packets
-UART_BAUDRATE = 115200 # Default serial connection baudrate
+from uart_constants import *
 
 # Global variables
 connection = None

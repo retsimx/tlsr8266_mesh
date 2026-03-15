@@ -37,18 +37,16 @@ from bleak import BleakClient, BleakScanner
 
 from mesh_common import (
     # Constants
-    shared_key,
     pair_characteristic_uuid, notify_characteristic_uuid,
     command_characteristic_uuid,
-    PAIR_OP_VERIFY_CREDENTIALS, PAIR_OP_SET_MESH_NAME,
+    PAIR_OP_SET_MESH_NAME,
     PAIR_OP_SET_MESH_PASSWORD, PAIR_OP_SET_MESH_LTK,
     PAIR_STATE_MESH_EFFECT, PAIR_STATE_PAIRING_COMPLETE, MESH_FLAG,
     DEFAULT_LTK, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD,
     # Classes
     BaseCommandAction, Command,
     # Functions
-    encode_mesh_credentials, encrypt_data, reverse_section,
-    process_session_key
+    authenticate, parse_mac_address, encrypt_data,
 )
 
 async def main():
@@ -112,31 +110,7 @@ async def main():
     async with BleakClient(device.address) as client:
         # ----- PHASE 1: AUTHENTICATION AND SESSION KEY ESTABLISHMENT -----
         print("Authenticating with device...")
-
-        # Generate mesh credential verification material
-        # For unprovisioned devices, use default credentials for authentication
-        plaintext_mesh_credentials = encode_mesh_credentials(DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD)
-
-        # Prepare authentication request
-        enc_key = bytearray(shared_key)[:] + b'\0' * 8  # Pad shared key to 16 bytes
-        encrypted = encrypt_data(enc_key, plaintext_mesh_credentials)
-
-        # Build authentication command with PAIR_OP_VERIFY_CREDENTIALS opcode
-        command_data = bytearray(b'\0' * 17)
-        command_data[0] = PAIR_OP_VERIFY_CREDENTIALS  # Verify credentials opcode
-        command_data[1:1 + len(shared_key)] = shared_key[:]  # Client random challenge
-        command_data[9:9 + 8] = encrypted[8:]  # Proof of credentials
-
-        # Adjust byte order for device compatibility
-        reverse_section(command_data, 9, 16)
-
-        # Send authentication request and process server response
-        await client.write_gatt_char(pair_characteristic_uuid, command_data)
-        response = await client.read_gatt_char(pair_characteristic_uuid)
-        
-        # Extract session key from response
-        session_key = process_session_key(response, plaintext_mesh_credentials)
-
+        session_key = await authenticate(client, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD)
         print("Authentication successful, session established")
 
         # ----- PHASE 2: DEVICE CONFIGURATION FOR MESH -----
@@ -147,8 +121,7 @@ async def main():
         print(f"Assigning mesh address: {mesh_address}")
 
         # Get device MAC address and reverse for protocol compatibility
-        mac_bytes = bytearray(binascii.unhexlify(device.address.replace(':', '')))
-        mac_bytes.reverse()
+        _, mac_bytes = parse_mac_address(device.address)
 
         print("Setting device mesh address...")
         # Send command to set mesh address (opcode 0xE0)
@@ -158,7 +131,7 @@ async def main():
             params=[mesh_address & 0xff, (mesh_address >> 8) & 0xff],  # Little-endian address
             mesh_address=0,  # Direct to device (not through mesh)
             session_key=session_key,
-            vendor_id=int("1102", 16),  # Standard vendor ID
+            vendor_id=0x0211,  # Telink vendor ID (LE: [0x11, 0x02] on wire)
             no_response=True
         ).build_command_action()
 

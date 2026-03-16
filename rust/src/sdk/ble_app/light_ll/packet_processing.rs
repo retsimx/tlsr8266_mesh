@@ -2142,7 +2142,11 @@ mod tests {
         let st = &buf[0];
 
         // dat[0..3] = sno
-        assert_eq!(&st.att_data().dat[0..3], &[0xAA, 0xBB, 0xCC], "sno mismatch");
+        assert_eq!(
+            &st.att_data().dat[0..3],
+            &[0xAA, 0xBB, 0xCC],
+            "sno mismatch"
+        );
         // dat[3..5] = src_adr (overwritten from dst then from src at the end)
         assert_eq!(st.att_data().dat[3], 0x1F, "src_adr low byte");
         assert_eq!(st.att_data().dat[4], 0x00, "src_adr high byte");
@@ -2157,8 +2161,16 @@ mod tests {
             "dat[7] must be opcode (not vendor_id)"
         );
         // dat[8..10] = vendor_id (little-endian)
-        assert_eq!(st.att_data().dat[8], (VENDOR_ID & 0xFF) as u8, "vendor_id lo");
-        assert_eq!(st.att_data().dat[9], ((VENDOR_ID >> 8) & 0xFF) as u8, "vendor_id hi");
+        assert_eq!(
+            st.att_data().dat[8],
+            (VENDOR_ID & 0xFF) as u8,
+            "vendor_id lo"
+        );
+        assert_eq!(
+            st.att_data().dat[9],
+            ((VENDOR_ID >> 8) & 0xFF) as u8,
+            "vendor_id hi"
+        );
         // dat[10..12] = first two par bytes
         assert_eq!(st.att_data().dat[10], 0x11, "par[0] = CW lo");
         assert_eq!(st.att_data().dat[11], 0x22, "par[1] = CW hi");

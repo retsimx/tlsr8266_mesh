@@ -272,7 +272,7 @@ pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValu
     let group_address = GROUP_ADDRESS.lock();
 
     let mut idx = 0;
-    match p_req.val[15] {
+    match ppp.val[15] {
         GET_STATUS => {
             ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 

@@ -580,11 +580,11 @@ pub fn rf_link_slave_add_status(packet: &Packet) {
     // Copy the source address (2 bytes)
     let src_bytes = packet.mesh().src_adr.to_le_bytes();
     st_ptr.att_data_mut().dat[5..7].copy_from_slice(&src_bytes);
+    // Copy the operation code (1 byte) — op precedes vendor_id in the mesh packet layout
+    st_ptr.att_data_mut().dat[7] = packet.mesh().op;
     // Copy the vendor ID (2 bytes)
     let vendor_bytes = packet.mesh().vendor_id.to_le_bytes();
-    st_ptr.att_data_mut().dat[7..9].copy_from_slice(&vendor_bytes);
-    // Copy the operation code (1 byte)
-    st_ptr.att_data_mut().dat[9] = packet.mesh().op;
+    st_ptr.att_data_mut().dat[8..10].copy_from_slice(&vendor_bytes);
     // Copy the parameters (10 bytes)
     st_ptr.att_data_mut().dat[10..20].copy_from_slice(&packet.mesh().par);
 
@@ -2111,8 +2111,70 @@ mod tests {
         );
     }
 
-    // ================================================================================
-    // Tests for is_add_packet_buf_ready function
+    /// Tests that the assembled BLE notification packet has op at dat[7] and
+    /// vendor_id at dat[8..10], matching the mesh packet memory layout and the
+    /// format expected by the Python client's decrypt_notification parser.
+    #[test]
+    #[mry::lock()]
+    fn test_rf_link_slave_add_status_packet_layout() {
+        reset_test_state();
+        SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS); // allow notify req mask
+
+        let mut packet = create_test_packet(
+            LGT_CMD_LIGHT_STATUS | 0xc0,
+            [0xAA, 0xBB, 0xCC],
+            0x001F, // src_adr = 31
+            0x0000, // dst_adr
+        );
+        // Set known par values so we can verify them in the output
+        packet.att_cmd_mut().value.val[3] = 0x11; // par[0] = CW lo
+        packet.att_cmd_mut().value.val[4] = 0x22; // par[1] = CW hi
+
+        rf_link_slave_add_status(&packet);
+
+        assert_eq!(
+            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            1,
+            "Write pointer should advance"
+        );
+
+        let buf = BUFF_RESPONSE.lock();
+        let st = &buf[0];
+
+        // dat[0..3] = sno
+        assert_eq!(
+            &st.att_data().dat[0..3],
+            &[0xAA, 0xBB, 0xCC],
+            "sno mismatch"
+        );
+        // dat[3..5] = src_adr (overwritten from dst then from src at the end)
+        assert_eq!(st.att_data().dat[3], 0x1F, "src_adr low byte");
+        assert_eq!(st.att_data().dat[4], 0x00, "src_adr high byte");
+        // dat[5..7] = src_adr (original src copy)
+        assert_eq!(st.att_data().dat[5], 0x1F, "dat[5] src low");
+        assert_eq!(st.att_data().dat[6], 0x00, "dat[6] src high");
+        // dat[7] = op — MUST come before vendor_id so Python parser reads it at index 0
+        // of the decrypted payload (after sno+src+mic are stripped)
+        assert_eq!(
+            st.att_data().dat[7],
+            LGT_CMD_LIGHT_STATUS | 0xc0,
+            "dat[7] must be opcode (not vendor_id)"
+        );
+        // dat[8..10] = vendor_id (little-endian)
+        assert_eq!(
+            st.att_data().dat[8],
+            (VENDOR_ID & 0xFF) as u8,
+            "vendor_id lo"
+        );
+        assert_eq!(
+            st.att_data().dat[9],
+            ((VENDOR_ID >> 8) & 0xFF) as u8,
+            "vendor_id hi"
+        );
+        // dat[10..12] = first two par bytes
+        assert_eq!(st.att_data().dat[10], 0x11, "par[0] = CW lo");
+        assert_eq!(st.att_data().dat[11], 0x22, "par[1] = CW hi");
+    }
     // ================================================================================
 
     /// Tests transmission buffer ready status with empty buffer.

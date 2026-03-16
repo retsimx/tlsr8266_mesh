@@ -272,7 +272,7 @@ pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValu
     let group_address = GROUP_ADDRESS.lock();
 
     let mut idx = 0;
-    match p_req.val[15] {
+    match ppp.val[15] {
         GET_STATUS => {
             ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 
@@ -1103,9 +1103,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = GET_GROUP1;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = GET_GROUP1;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1134,9 +1134,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = GET_GROUP2;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = GET_GROUP2;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1169,9 +1169,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = GET_GROUP3;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = GET_GROUP3;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1194,9 +1194,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = GET_DEV_ADDR;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = GET_DEV_ADDR;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1216,9 +1216,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = GET_USER_NOTIFY;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = GET_USER_NOTIFY;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1248,9 +1248,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
-        request.val[15] = CMD_START_OTA;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = CMD_START_OTA;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1284,9 +1284,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0xAA, 0xBB];
-        request.val[15] = CMD_OTA_DATA;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = CMD_OTA_DATA;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1317,9 +1317,9 @@ mod tests {
 
         let mut request = create_test_packet_att_value();
         request.src = [0xCC, 0xDD];
-        request.val[15] = CMD_END_OTA;
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = CMD_END_OTA;
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
@@ -1342,9 +1342,9 @@ mod tests {
         DEVICE_ADDRESS.set(0x1234);
 
         let mut request = create_test_packet_att_value();
-        request.val[15] = 0xFF; // Invalid command
 
         let mut response = create_test_packet_att_value();
+        response.val[15] = 0xFF; // Invalid command
 
         // Execute
         let result = rf_link_response_callback(&mut response, &request);

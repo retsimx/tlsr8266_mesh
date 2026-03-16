@@ -107,134 +107,138 @@ async def main():
         return
 
     print(f"Found device {device.address}, connecting...")
-    async with BleakClient(device.address) as client:
-        # ----- PHASE 1: AUTHENTICATION AND SESSION KEY ESTABLISHMENT -----
-        print("Authenticating with device...")
-        session_key = await authenticate(client, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD)
-        print("Authentication successful, session established")
+    try:
+        async with BleakClient(device.address) as client:
+            # ----- PHASE 1: AUTHENTICATION AND SESSION KEY ESTABLISHMENT -----
+            print("Authenticating with device...")
+            session_key = await authenticate(client, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD)
+            print("Authentication successful, session established")
 
-        # ----- PHASE 2: DEVICE CONFIGURATION FOR MESH -----
-        print("Configuring device for mesh network...")
+            # ----- PHASE 2: DEVICE CONFIGURATION FOR MESH -----
+            print("Configuring device for mesh network...")
 
-        # Get mesh address from command line arguments
-        mesh_address = args.mesh_address
-        print(f"Assigning mesh address: {mesh_address}")
+            # Get mesh address from command line arguments
+            mesh_address = args.mesh_address
+            print(f"Assigning mesh address: {mesh_address}")
 
-        # Get device MAC address and reverse for protocol compatibility
-        _, mac_bytes = parse_mac_address(device.address)
+            # Get device MAC address and reverse for protocol compatibility
+            _, mac_bytes = parse_mac_address(device.address)
 
-        print("Setting device mesh address...")
-        # Send command to set mesh address (opcode 0xE0)
-        action = BaseCommandAction(
-            mac_address=mac_bytes,
-            opcode=0xe0,     # Command to set mesh address
-            params=[mesh_address & 0xff, (mesh_address >> 8) & 0xff],  # Little-endian address
-            mesh_address=0,  # Direct to device (not through mesh)
-            session_key=session_key,
-            vendor_id=0x0211,  # Telink vendor ID (LE: [0x11, 0x02] on wire)
-            no_response=True
-        ).build_command_action()
+            print("Setting device mesh address...")
+            # Send command to set mesh address (opcode 0xE0)
+            action = BaseCommandAction(
+                mac_address=mac_bytes,
+                opcode=0xe0,     # Command to set mesh address
+                params=[mesh_address & 0xff, (mesh_address >> 8) & 0xff],  # Little-endian address
+                mesh_address=0,  # Direct to device (not through mesh)
+                session_key=session_key,
+                vendor_id=0x0211,  # Telink vendor ID (LE: [0x11, 0x02] on wire)
+                no_response=True
+            ).build_command_action()
 
-        await action.encode_and_send(client)
-        
-        # Allow time for the device to process the mesh address
-        await sleep(4)
+            await action.encode_and_send(client)
+            
+            # Allow time for the device to process the mesh address
+            await sleep(4)
 
-        # ----- PHASE 3: PROVISIONING MESH PARAMETERS -----
-        print("Provisioning mesh parameters...")
+            # ----- PHASE 3: PROVISIONING MESH PARAMETERS -----
+            print("Provisioning mesh parameters...")
 
-        # Prepare and encrypt mesh name
-        name = mesh_name.encode()
-        # Pad name to 16 bytes
-        name = bytearray(name) + bytearray([0] * (16 - len(name)))
-        # Encrypt name with session key
-        name = encrypt_data(session_key, name)
-        # Reverse bytes for device compatibility
-        name.reverse()
+            # Prepare and encrypt mesh name
+            name = mesh_name.encode()
+            # Pad name to 16 bytes
+            name = bytearray(name) + bytearray([0] * (16 - len(name)))
+            # Encrypt name with session key
+            name = encrypt_data(session_key, name)
+            # Reverse bytes for device compatibility
+            name.reverse()
 
-        # Prepare and encrypt mesh password
-        pwd = mesh_password.encode()
-        # Pad password to 16 bytes
-        pwd = bytearray(pwd) + bytearray([0] * (16 - len(pwd)))
-        # Encrypt password with session key
-        pwd = encrypt_data(session_key, pwd)
-        # Reverse bytes for device compatibility
-        pwd.reverse()
+            # Prepare and encrypt mesh password
+            pwd = mesh_password.encode()
+            # Pad password to 16 bytes
+            pwd = bytearray(pwd) + bytearray([0] * (16 - len(pwd)))
+            # Encrypt password with session key
+            pwd = encrypt_data(session_key, pwd)
+            # Reverse bytes for device compatibility
+            pwd.reverse()
 
-        # Prepare and encrypt long term key (LTK)
-        # LTK validation and user confirmation was done earlier
-        
-        # Encrypt the LTK with the session key
-        ltk = encrypt_data(session_key, ltk_bytes)
-        # Reverse bytes for device compatibility
-        ltk.reverse()
+            # Prepare and encrypt long term key (LTK)
+            # LTK validation and user confirmation was done earlier
+            
+            # Encrypt the LTK with the session key
+            ltk = encrypt_data(session_key, ltk_bytes)
+            # Reverse bytes for device compatibility
+            ltk.reverse()
 
-        # Add opcodes to the start of each parameter
-        name = bytearray([PAIR_OP_SET_MESH_NAME]) + name
-        pwd = bytearray([PAIR_OP_SET_MESH_PASSWORD]) + pwd
-        # Add mesh flag to LTK to indicate this is for mesh communication
-        ltk = bytearray([PAIR_OP_SET_MESH_LTK]) + ltk + bytearray([MESH_FLAG])
+            # Add opcodes to the start of each parameter
+            name = bytearray([PAIR_OP_SET_MESH_NAME]) + name
+            pwd = bytearray([PAIR_OP_SET_MESH_PASSWORD]) + pwd
+            # Add mesh flag to LTK to indicate this is for mesh communication
+            ltk = bytearray([PAIR_OP_SET_MESH_LTK]) + ltk + bytearray([MESH_FLAG])
 
-        # Create commands for each parameter
-        name_command = Command(name, pair_characteristic_uuid, client)
-        pwd_command = Command(pwd, pair_characteristic_uuid, client)
-        ltk_command = Command(ltk, pair_characteristic_uuid, client)
+            # Create commands for each parameter
+            name_command = Command(name, pair_characteristic_uuid, client)
+            pwd_command = Command(pwd, pair_characteristic_uuid, client)
+            ltk_command = Command(ltk, pair_characteristic_uuid, client)
 
-        # Send mesh parameters in sequence
-        print("Sending mesh name...")
-        await name_command.write()
-        await sleep(0.2)  # Allow device time to process
-        
-        print("Sending mesh password...")
-        await pwd_command.write()
-        await sleep(0.2)  # Allow device time to process
- 
-        print("Sending mesh LTK...")
-        await ltk_command.write()
-        await sleep(0.2)  # Allow device time to process
+            # Send mesh parameters in sequence
+            print("Sending mesh name...")
+            await name_command.write()
+            await sleep(0.2)  # Allow device time to process
+            
+            print("Sending mesh password...")
+            await pwd_command.write()
+            await sleep(0.2)  # Allow device time to process
+     
+            print("Sending mesh LTK...")
+            await ltk_command.write()
+            await sleep(0.2)  # Allow device time to process
 
-        # ----- PHASE 4: VERIFY SUCCESSFUL PAIRING -----
-        # Read the device state to verify successful pairing
-        # Give the device a bit more time to complete state transitions
-        await sleep(2)
-        result = await client.read_gatt_char(pair_characteristic_uuid)
-
-        # Check if device is in the expected state (pairing complete)
-        # If it's in MeshPairEffect (0x07), try waiting a bit more
-        if result[0] == PAIR_STATE_MESH_EFFECT:  # MeshPairEffect - almost complete
-            print("Device in MeshPairEffect state, waiting for final transition...")
-            await sleep(1.0)
+            # ----- PHASE 4: VERIFY SUCCESSFUL PAIRING -----
+            # Read the device state to verify successful pairing
+            # Give the device a bit more time to complete state transitions
+            await sleep(2)
             result = await client.read_gatt_char(pair_characteristic_uuid)
-        
-        if result[0] != PAIR_STATE_PAIRING_COMPLETE:
-            # Accept MeshPairEffect (0x07) as success too, since it's very close
-            if result[0] == PAIR_STATE_MESH_EFFECT:
-                print(f"Device in MeshPairEffect state (0x{PAIR_STATE_MESH_EFFECT:02x}) - pairing likely successful")
+
+            # Check if device is in the expected state (pairing complete)
+            # If it's in MeshPairEffect (0x07), try waiting a bit more
+            if result[0] == PAIR_STATE_MESH_EFFECT:  # MeshPairEffect - almost complete
+                print("Device in MeshPairEffect state, waiting for final transition...")
+                await sleep(1.0)
+                result = await client.read_gatt_char(pair_characteristic_uuid)
+            
+            if result[0] != PAIR_STATE_PAIRING_COMPLETE:
+                # Accept MeshPairEffect (0x07) as success too, since it's very close
+                if result[0] == PAIR_STATE_MESH_EFFECT:
+                    print(f"Device in MeshPairEffect state (0x{PAIR_STATE_MESH_EFFECT:02x}) - pairing likely successful")
+                else:
+                    print(f"Light could not be added to mesh. Unexpected state: 0x{result[0]:02x}")
+                    print(f"Expected state: 0x{PAIR_STATE_PAIRING_COMPLETE:02x} (PAIR_STATE_PAIRING_COMPLETE)")
+                    return
+
+            print(f"Light with MAC ({device.address}) successfully added to mesh network")
+            print(f"Mesh Name: {mesh_name}")
+            print(f"Mesh Address: {mesh_address}")
+            if using_default_ltk:
+                print("Using default LTK")
             else:
-                print(f"Light could not be added to mesh. Unexpected state: 0x{result[0]:02x}")
-                print(f"Expected state: 0x{PAIR_STATE_PAIRING_COMPLETE:02x} (PAIR_STATE_PAIRING_COMPLETE)")
-                return
+                print("Using custom LTK")
 
-        print(f"Light with MAC ({device.address}) successfully added to mesh network")
-        print(f"Mesh Name: {mesh_name}")
-        print(f"Mesh Address: {mesh_address}")
-        if using_default_ltk:
-            print("Using default LTK")
-        else:
-            print("Using custom LTK")
+            # Set up notification handler for any device messages
+            def on_message(*args, **kwargs):
+                print("Message received:", args, kwargs)
 
-        # Set up notification handler for any device messages
-        def on_message(*args, **kwargs):
-            print("Message received:", args, kwargs)
+            # Enable notifications
+            print("Enabling notifications...")
+            await client.write_gatt_char(notify_characteristic_uuid, [1])
+            await client.start_notify(notify_characteristic_uuid, on_message)
 
-        # Enable notifications
-        print("Enabling notifications...")
-        await client.write_gatt_char(notify_characteristic_uuid, [1])
-        await client.start_notify(notify_characteristic_uuid, on_message)
-
-        # Keep connection open to observe any messages
-        print("Monitoring device for 120 seconds...")
-        await asyncio.sleep(120)
+            # Keep connection open to observe any messages
+            print("Monitoring device for 10 seconds...")
+            await asyncio.sleep(10)
+    except EOFError:
+        # Suppress EOFError which can happen during disconnection if the device resets
+        pass
 
 
 # Run the main function when script is executed

@@ -57,10 +57,25 @@ static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 /// to safely handle concurrent access without locks in the common case.
 ///
 /// # Algorithm
-/// 1. Read current hardware time and previously seen time
-/// 2. If current time < last time, we may have an overflow
-/// 3. Use a critical section to safely update the upper 32 bits if overflow confirmed
+/// 1. Inside a critical section (interrupts disabled), read the current hardware time
+///    and the previously seen time atomically together
+/// 2. If current time < last time, the 32-bit hardware counter has overflowed - increment
+///    the upper 32 bits to extend the counter
+/// 3. Update the last seen time
 /// 4. Return a combined 64-bit timestamp (upper 32 bits | lower 32 bits)
+///
+/// # Why clock_time() must be called inside the critical section
+///
+/// Previously, clock_time() was called BEFORE entering the critical section. This created
+/// a race condition: if a hardware interrupt fired between reading clock_time() and reading
+/// LAST_CLOCK_TIME, and that interrupt handler itself called clock_time64() (e.g. to step
+/// a light transition), it would update LAST_CLOCK_TIME to a newer value. When the
+/// interrupted code resumed, LAST_CLOCK_TIME was now genuinely larger than the stale
+/// current_time, so the code falsely detected a 32-bit overflow and incremented the upper
+/// bits. At 16-24 MHz this adds ~180-268 seconds to Instant::now() instantaneously, which
+/// blew past any in-progress transition timestamp and caused the light to snap to its final
+/// state. By reading clock_time() inside the critical section, interrupts are physically
+/// incapable of wedging themselves between the hardware read and the comparison.
 #[cfg_attr(test, mry::mry)]
 pub fn clock_time64() -> u64 {
     // When not testing, these static variables are defined here
@@ -70,38 +85,28 @@ pub fn clock_time64() -> u64 {
     #[cfg(not(test))]
     static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 
-    // Get current hardware time
-    let current_time = clock_time();
-    let last_time = LAST_CLOCK_TIME.load(Ordering::Relaxed);
+    critical_section::with(|_| {
+        // Read the hardware time inside the critical section so that no interrupt can update
+        // LAST_CLOCK_TIME between this read and the comparison below.
+        let current_time = clock_time();
+        let last_time = LAST_CLOCK_TIME.load(Ordering::Relaxed);
 
-    // Only enter critical section if we suspect an overflow
-    // (current time is less than last seen time)
-    if current_time < last_time {
-        critical_section::with(|_| {
-            // Re-check within critical section to avoid race conditions
-            // This prevents multiple threads from incrementing the upper bits
-            let last_time_cs = LAST_CLOCK_TIME.load(Ordering::Relaxed);
-            if current_time < last_time_cs {
-                // Overflow confirmed - increment upper bits
-                // Use load-modify-store instead of fetch_add since fetch_add might not be supported
-                // on all platforms or with all atomics implementations
-                let upper = CLOCK_TIME_UPPER.load(Ordering::Relaxed);
-                CLOCK_TIME_UPPER.store(upper + 1, Ordering::Relaxed);
-            }
+        if current_time < last_time {
+            // Overflow confirmed - increment upper bits.
+            // Use load-modify-store instead of fetch_add since fetch_add might not be supported
+            // on all platforms or with all atomics implementations.
+            let upper = CLOCK_TIME_UPPER.load(Ordering::Relaxed);
+            CLOCK_TIME_UPPER.store(upper + 1, Ordering::Relaxed);
+        }
 
-            // Update last time seen within the critical section
-            LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
-        });
-    } else {
-        // Normal case (no overflow) - just update the last seen time
-        // This fast path avoids the critical section in most calls
+        // Always update the last seen time so subsequent calls can detect the next overflow.
         LAST_CLOCK_TIME.store(current_time, Ordering::Relaxed);
-    }
 
-    // Combine upper and lower bits to form the 64-bit timestamp
-    // Upper 32 bits track number of overflows
-    // Lower 32 bits are the current hardware timer value
-    (CLOCK_TIME_UPPER.load(Ordering::Relaxed) as u64) << 32 | current_time as u64
+        // Combine upper and lower bits to form the 64-bit timestamp.
+        // Upper 32 bits track the number of overflows.
+        // Lower 32 bits are the current hardware timer value.
+        (CLOCK_TIME_UPPER.load(Ordering::Relaxed) as u64) << 32 | current_time as u64
+    })
 }
 
 #[cfg(test)]

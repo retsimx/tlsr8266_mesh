@@ -62,6 +62,17 @@ pub fn app<'a>() -> &'a mut App {
     unsafe { __make_static(&mut *app_mocker()) }
 }
 
+/// Resets the global APP's uart_manager without going through `app_mocker`, so it
+/// is safe to call from test helpers that run inside a `mry::lock(app_mocker)` scope.
+#[cfg(test)]
+#[coverage(off)]
+pub fn reset_app_uart_for_test() {
+    #[allow(static_mut_refs)]
+    unsafe {
+        (*APP).uart_manager = crate::uart_manager::UartManager::default();
+    }
+}
+
 unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
     core::mem::transmute(t)
 }

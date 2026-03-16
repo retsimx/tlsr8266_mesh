@@ -1569,7 +1569,7 @@ mod tests {
         mock_read_reg_dma_tx_rptr, mock_read_reg_dma_tx_wptr, mock_read_reg_rnd_number,
         mock_read_reg_system_tick, mock_write_reg_dma_tx_fifo,
     };
-    use crate::{app_mocker, mock_app_mocker, App};
+    use crate::{app_mocker, mock_app_mocker, reset_app_uart_for_test, App};
 
     /// Helper function to create a test packet with specified values.
     fn create_test_packet(opcode: u8, sno: [u8; 3], src_adr: u16, dst_adr: u16) -> Packet {
@@ -1695,6 +1695,9 @@ mod tests {
                 },
             },
         };
+
+        // Reset UartManager to clear mock state from previous tests
+        reset_app_uart_for_test();
     }
 
     // ================================================================================

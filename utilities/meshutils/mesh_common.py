@@ -691,7 +691,8 @@ def decrypt_notification(data, session_key, mac_bytes_fwd):
         mac_bytes_fwd: Device MAC address in display order (MSB first).
 
     Returns:
-        Decrypted payload as bytearray, or None if MIC verification fails.
+        Decrypted payload as bytearray with layout (op[1] | vendor_id[2] | params[10]),
+        or None if MIC verification fails.
     """
     if len(data) < 8:
         return None

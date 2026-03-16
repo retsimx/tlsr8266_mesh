@@ -28,6 +28,7 @@ use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
 use crate::state::*;
 
+#[cfg_attr(test, mry::mry)]
 /// Reports mesh node status information for transmission to the BLE master.
 ///
 /// This function collects status information from mesh nodes that have pending updates

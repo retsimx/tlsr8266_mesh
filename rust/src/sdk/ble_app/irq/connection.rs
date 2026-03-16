@@ -378,7 +378,9 @@ fn process_mesh_operations() {
     use crate::config::VENDOR_ID;
     use crate::mesh::MESH_NODE_ST_VAL_LEN;
     use crate::sdk::ble_app::ble_ll_pair::pair_proc;
+    use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
     use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
+    use crate::uart_manager::UartMsg;
 
     // Process any pending status read operations
     if SLAVE_READ_STATUS_BUSY.get() != 0 {
@@ -397,16 +399,20 @@ fn process_mesh_operations() {
     // Flush any pending mesh node status updates
     mesh_node_flush_status();
 
-    // Generate and send mesh status reports if conditions are met:
-    // - Transmission buffer is available
-    // - UART manager is not started (to avoid conflicts)
-    if is_add_packet_buf_ready() && !app().uart_manager.started() {
-        let mut data = [0u8; 20];
+    // Generate and send mesh status reports.
+    // Data is collected once and dispatched independently to each sink:
+    // - BLE: sent whenever the TX buffer is ready, regardless of UART state
+    // - UART: sent whenever UART status reporting is enabled, regardless of BLE state
+    // The two paths are fully independent of each other.
+    let mut data = [0u8; 20];
 
-        // Collect mesh node status data (limit based on available space)
-        let count = super::mesh::mesh_node_report_status(&mut data, 10 / MESH_NODE_ST_VAL_LEN);
+    // Collect mesh node status data (limit based on available space)
+    let count = super::mesh::mesh_node_report_status(&mut data, 10 / MESH_NODE_ST_VAL_LEN);
 
-        if count != 0 {
+    if count != 0 {
+        // BLE path: send status notification to the connected central.
+        // Only gated on TX buffer availability — not UART state.
+        if is_add_packet_buf_ready() {
             // Create BLE ATT packet for mesh status reporting
             let mut pkt = Packet {
                 att_cmd: PacketAttCmd {
@@ -457,24 +463,21 @@ fn process_mesh_operations() {
             // Copy the collected mesh status data into the packet payload
             pkt.att_cmd_mut().value.val[3..].copy_from_slice(&data);
 
-            // Add the packet to the transmission queue
+            // Add the packet to the BLE transmission queue
             rf_link_add_tx_packet(&pkt);
+        }
 
-            // Also send status via UART if UART status reporting is enabled
-            // This provides debugging/monitoring capability
-            if app().uart_manager.uart_status_reporting_enabled() {
-                use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
-                use crate::uart_manager::UartMsg;
-
-                let mut uart_msg = UartData {
-                    len: UART_DATA_LEN as u32,
-                    data: [0; UART_DATA_LEN],
-                };
-                uart_msg.data[2] = UartMsg::LightStatus as u8;
-                uart_msg.data[3..3 + count * MESH_NODE_ST_VAL_LEN]
-                    .copy_from_slice(&data[..count * MESH_NODE_ST_VAL_LEN]);
-                let _ = app().uart_manager.send_message(&uart_msg);
-            }
+        // UART path: send status to the connected daemon for monitoring/debugging.
+        // Only gated on the UART status reporting enable flag — not BLE TX buffer state.
+        if app().uart_manager.uart_status_reporting_enabled() {
+            let mut uart_msg = UartData {
+                len: UART_DATA_LEN as u32,
+                data: [0; UART_DATA_LEN],
+            };
+            uart_msg.data[2] = UartMsg::LightStatus as u8;
+            uart_msg.data[3..3 + count * MESH_NODE_ST_VAL_LEN]
+                .copy_from_slice(&data[..count * MESH_NODE_ST_VAL_LEN]);
+            let _ = app().uart_manager.send_message(&uart_msg);
         }
     }
 }
@@ -644,6 +647,8 @@ mod tests {
     // Import mock functions from their original modules
     use crate::common::mock_pair_load_key;
     use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_build_available_channel_table;
+    use crate::sdk::ble_app::irq::mesh::mock_mesh_node_report_status;
+    use crate::sdk::ble_app::irq::mesh_node_report_status; // needed for mry::lock
     use crate::sdk::ble_app::light_ll::connection_management::mock_back_to_rxmode_bridge;
     use crate::sdk::ble_app::light_ll::mesh_management::{
         mock_mesh_node_flush_status, mock_mesh_report_status_enable,
@@ -661,6 +666,7 @@ mod tests {
         mock_write_reg_system_tick_irq,
     };
     use crate::sdk::packet_types::{Packet, PacketAttData};
+    use crate::uart_manager::UartManager;
 
     // Import mock for functions in the same module
     use super::mock_cleanup_ble_disconnection;
@@ -687,6 +693,8 @@ mod tests {
             let mut chn_map = SLAVE_CHN_MAP.lock();
             *chn_map = [0xff, 0xff, 0xff, 0xff, 0x1f]; // Default all channels enabled
         }
+
+        app().uart_manager = UartManager::default();
     }
 
     /// Tests that the connection event counter is incremented on every call.
@@ -2128,6 +2136,81 @@ mod tests {
 
         // Verify status processing
         mock_mesh_node_flush_status().assert_called(1);
+    }
+
+    /// Tests that the BLE and UART status reporting paths are fully independent.
+    ///
+    /// When the UART daemon is started and status reporting is enabled, UART should
+    /// fire regardless of BLE TX buffer state. When BLE TX buffer is ready, BLE
+    /// should fire regardless of UART state. Neither path should block the other.
+    #[test]
+    #[mry::lock(
+        is_add_packet_buf_ready,
+        mesh_node_flush_status,
+        mesh_node_report_status,
+        rf_link_add_tx_packet
+    )]
+    fn test_process_mesh_operations_ble_and_uart_are_independent() {
+        reset_global_state();
+
+        // UART daemon is started (sender_started = true), and UART status reporting is enabled.
+        // BLE TX buffer is NOT ready.
+        // Expected: UART send fires; BLE rf_link_add_tx_packet does NOT fire.
+        mock_mesh_node_flush_status().returns(());
+        mock_is_add_packet_buf_ready().returns(false);
+        mock_mesh_node_report_status(Any, Any).returns(2); // 2 nodes worth of data
+        mock_rf_link_add_tx_packet(Any).returns(true);
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        SLAVE_READ_STATUS_BUSY.set(0);
+        process_mesh_operations();
+
+        // BLE should not have been called (TX buffer not ready)
+        mock_rf_link_add_tx_packet(Any).assert_called(0);
+        // UART should have been called despite BLE buffer not being ready
+        app().uart_manager.mock_send_message(Any).assert_called(1);
+    }
+
+    /// Tests that BLE status is sent when TX buffer is ready, even if UART is not enabled.
+    #[test]
+    #[mry::lock(
+        is_add_packet_buf_ready,
+        mesh_node_flush_status,
+        mesh_node_report_status,
+        rf_link_add_tx_packet
+    )]
+    fn test_process_mesh_operations_ble_fires_without_uart() {
+        reset_global_state();
+
+        // BLE TX buffer ready; UART status reporting disabled.
+        // Expected: BLE fires; UART send does NOT fire.
+        mock_mesh_node_flush_status().returns(());
+        mock_is_add_packet_buf_ready().returns(true);
+        mock_mesh_node_report_status(Any, Any).returns(2);
+        mock_rf_link_add_tx_packet(Any).returns(true);
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(false);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        SLAVE_READ_STATUS_BUSY.set(0);
+        process_mesh_operations();
+
+        // BLE should have fired
+        mock_rf_link_add_tx_packet(Any).assert_called(1);
+        // UART should not have fired (reporting disabled)
+        app().uart_manager.mock_send_message(Any).assert_called(0);
     }
 
     /// Tests connection event timing management.

@@ -713,7 +713,7 @@ pub fn mesh_send_online_status() {
     // Get direct access to packet payload for efficient manipulation
     let pktdata = unsafe {
         &mut *slice_from_raw_parts_mut(
-            addr_of!(pkt_light_adv_status.att_write().value) as *mut u8,
+            addr_of_mut!(pkt_light_adv_status.att_write_mut().value) as *mut u8,
             core::mem::size_of::<PacketAttValue>(),
         )
     };
@@ -851,7 +851,7 @@ pub fn mesh_construct_packet(
         internal_par1: [0; 5],   // Internal parameters
         ttl: 0,                  // Time-to-live hop counter
         internal_par2: [0; 4],   // Additional internal parameters
-        no_use: [0; 5],          // Reserved/unused bytes
+        no_use: [0; 4],          // Reserved/unused bytes
     };
 
     // Convert 32-bit sequence number to 24-bit little-endian format

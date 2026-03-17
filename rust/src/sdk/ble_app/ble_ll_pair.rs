@@ -1397,7 +1397,7 @@ mod tests {
                 ttl: 0,
                 internal_par2: [0; 4],
                 dst_adr: 0,
-                no_use: [0; 5],
+                no_use: [0; 4],
             },
         };
         packet
@@ -1506,6 +1506,44 @@ mod tests {
 
         // Assert
         assert_eq!(result, false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(aes_att_decryption_packet)]
+    fn test_pair_dec_packet_mesh_broadcast_mic_offset() {
+        // Verify that broadcast decryption reads the MIC from internal_par2[1] (absolute offset 41).
+        // When MeshPkt incorrectly uses repr(C, packed) instead of repr(C, align(4)),
+        // internal_par2 shifts from offset 40 to 39, causing the MIC to be read from
+        // offset 40 instead of 41, breaking cross-firmware compatibility.
+        SECURITY_ENABLE.set(true);
+        let mut packet = create_test_mesh_packet(true); // broadcast
+        PAIR_STATE.lock().pair_ltk.fill(0xDD);
+
+        // Write distinguishable bytes at the critical offsets
+        let base = core::ptr::addr_of!(packet) as *mut u8;
+        unsafe {
+            // Offset 40 = internal_par2[0] with align(4). Would be internal_par2[1] if packed.
+            *base.add(40) = 0xAA;
+            // Offset 41 = internal_par2[1] with align(4). This is the correct MIC position.
+            *base.add(41) = 0xBB;
+            *base.add(42) = 0xCC;
+        }
+
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
+            move |_sk: Vec<u8>, _iv: Vec<u8>, mic: Vec<u8>, _data: Vec<u8>| -> bool {
+                // MIC must be [0xBB, 0xCC] from offset 41-42, NOT [0xAA, 0xBB] from offset 40-41
+                assert_eq!(
+                    mic,
+                    vec![0xBB, 0xCC],
+                    "Broadcast MIC must be read from internal_par2[1] at offset 41, not offset 40"
+                );
+                true
+            },
+        );
+
+        let result = pair_dec_packet_mesh(&mut packet);
+        assert!(result);
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 

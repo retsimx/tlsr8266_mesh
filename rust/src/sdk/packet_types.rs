@@ -170,7 +170,7 @@ pub struct PacketAttData {
 }
 
 #[derive(Clone, Copy, Default)]
-#[repr(C, packed)]
+#[repr(C, align(4))]
 pub struct MeshPkt {
     pub head: PacketL2capHead,  // 0
     pub src_tx: u16,            // 10
@@ -179,12 +179,12 @@ pub struct MeshPkt {
     pub src_adr: u16,           // 16
     pub dst_adr: u16,           // 18
     pub op: u8,                 // 20
-    pub vendor_id: u16,         // 21
-    pub par: [u8; 10],          // 23
-    pub internal_par1: [u8; 5], // 33
-    pub ttl: u8,                // 38
-    pub internal_par2: [u8; 4], // 39
-    pub no_use: [u8; 5],        // 43 size must 48, when is set to be rf tx address.
+    pub vendor_id: u16,         // 22 (1 byte padding after op for u16 alignment)
+    pub par: [u8; 10],          // 24
+    pub internal_par1: [u8; 5], // 34
+    pub ttl: u8,                // 39
+    pub internal_par2: [u8; 4], // 40
+    pub no_use: [u8; 4],        // 44 size must 48, when is set to be rf tx address.
 }
 
 const_assert!(mem::size_of::<MeshPkt>() == 48);
@@ -637,7 +637,7 @@ mod tests {
                 internal_par1: [0x18, 0x19, 0x1A, 0x1B, 0x1C],
                 ttl: 0x1D,
                 internal_par2: [0x1E, 0x1F, 0x20, 0x21],
-                no_use: [0x22, 0x23, 0x24, 0x25, 0x26],
+                no_use: [0x22, 0x23, 0x24, 0x25],
             },
         };
 
@@ -777,10 +777,53 @@ mod tests {
         assert_eq!(mem::offset_of!(MeshPkt, src_adr), 16);
         assert_eq!(mem::offset_of!(MeshPkt, dst_adr), 18);
         assert_eq!(mem::offset_of!(MeshPkt, op), 20);
-        assert_eq!(mem::offset_of!(MeshPkt, vendor_id), 21);
-        assert_eq!(mem::offset_of!(MeshPkt, par), 23);
-        assert_eq!(mem::offset_of!(MeshPkt, ttl), 38);
-        assert_eq!(mem::offset_of!(MeshPkt, no_use), 43);
+        assert_eq!(mem::offset_of!(MeshPkt, vendor_id), 22);
+        assert_eq!(mem::offset_of!(MeshPkt, par), 24);
+        assert_eq!(mem::offset_of!(MeshPkt, internal_par1), 34);
+        assert_eq!(mem::offset_of!(MeshPkt, ttl), 39);
+        assert_eq!(mem::offset_of!(MeshPkt, internal_par2), 40);
+        assert_eq!(mem::offset_of!(MeshPkt, no_use), 44);
+    }
+
+    /// Tests that MeshPkt broadcast encryption fields are at correct absolute byte offsets.
+    /// pair_dec_packet_mesh/pair_enc_packet_mesh for broadcast packets (chan_id == 0xffff) use:
+    ///   - IV: 8 bytes starting from head.rf_len (offset 5)
+    ///   - MIC: 2 bytes at internal_par2[1] (must be offset 41)
+    ///   - Data: 0x1c bytes starting from sno (offset 13, so data covers bytes 13..41)
+    /// The MIC must immediately follow the data region (offset 41) for AES-CCM to work correctly.
+    /// If MeshPkt uses packed repr instead of align(4), internal_par2 shifts to offset 39,
+    /// putting internal_par2[1] at offset 40, which overlaps the data region and breaks decryption.
+    #[test]
+    fn test_meshpkt_broadcast_encryption_field_offsets() {
+        let pkt = MeshPkt::default();
+        let base = core::ptr::addr_of!(pkt) as usize;
+
+        // IV source: rf_len in head (offset 5 within PacketL2capHead)
+        let rf_len_offset = unsafe { core::ptr::addr_of!(pkt.head.rf_len) as usize - base };
+        assert_eq!(
+            rf_len_offset, 5,
+            "rf_len must be at offset 5 for broadcast IV"
+        );
+
+        // Encrypted data region: 0x1c (28) bytes starting from sno
+        let sno_offset = mem::offset_of!(MeshPkt, sno);
+        assert_eq!(
+            sno_offset, 13,
+            "sno must be at offset 13 for broadcast data"
+        );
+
+        // MIC location: internal_par2[1] - must be at offset 41 (sno + 0x1c = 13 + 28)
+        let internal_par2_offset = mem::offset_of!(MeshPkt, internal_par2);
+        assert_eq!(
+            internal_par2_offset, 40,
+            "internal_par2 must be at offset 40"
+        );
+        let mic_offset = internal_par2_offset + 1; // internal_par2[1]
+        assert_eq!(
+            mic_offset,
+            sno_offset + 0x1c,
+            "broadcast MIC (internal_par2[1]) must immediately follow the 0x1c-byte data region"
+        );
     }
 
     /// Tests PktBuf structure

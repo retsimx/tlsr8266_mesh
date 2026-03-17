@@ -41,6 +41,7 @@ pub enum UartMsg {
     MeshMessage = 0x04, // Sent by us to notify when a mesh message is sent
     PanicMessage = 0x05, // Sent by us to provide details of a panic
     PrintMessage = 0x06, // Sent by us to provide print output
+    NodeStatus = 0x07, // Sent by us for individual node online/offline and on/off change events. Payload: groups of [node_id, online, on_off] (3 bytes each, up to 13 per packet)
     Ack = 0xff,
 }
 
@@ -52,6 +53,7 @@ impl From<UartMsg> for u8 {
             UartMsg::MeshMessage => 0x04,
             UartMsg::PanicMessage => 0x05,
             UartMsg::PrintMessage => 0x06,
+            UartMsg::NodeStatus => 0x07,
             UartMsg::Ack => 0xff,
         }
     }
@@ -67,6 +69,7 @@ impl TryFrom<u8> for UartMsg {
             0x04 => Ok(UartMsg::MeshMessage),
             0x05 => Ok(UartMsg::PanicMessage),
             0x06 => Ok(UartMsg::PrintMessage),
+            0x07 => Ok(UartMsg::NodeStatus),
             0xff => Ok(UartMsg::Ack),
             _ => Err(()),
         }

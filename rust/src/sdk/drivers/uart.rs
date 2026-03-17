@@ -74,8 +74,7 @@ impl HardwareControl {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-/// UART data packet structure for transmission and reception.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 ///
 /// This struct must be a multiple of 16 bytes in size to ensure proper
 /// DMA alignment for efficient data transfer.

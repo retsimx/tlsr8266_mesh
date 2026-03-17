@@ -402,6 +402,9 @@ impl UartManager {
                 (*SPAWNER).spawn(uart_sender()).unwrap();
             }
 
+            // Enable status reporting before calling mesh_report_status_enable so that the
+            // initial dump fired inside that function can actually reach the UART send path.
+            self.enable_uart_status_reporting();
             mesh_report_status_enable(true);
         }
 
@@ -901,6 +904,9 @@ mod tests {
 
         // Verify sender_started was set to true
         assert!(manager.sender_started);
+
+        // Verify uart_status_reporting was enabled so the initial dump can fire
+        assert!(manager.uart_status_reporting_enabled());
     }
 
     /// Tests the handle_rx method with an invalid CRC.

@@ -805,7 +805,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             packet.mesh_mut().src_tx = DEVICE_ADDRESS.get();
 
             // Copy command parameters to ACK packet
-            // The +1 offset appears to be accessing the high byte of vendor_id, followed by op and parameters
+            // vendor_id[1] is the high byte; followed by op and parameters
             let vendor_high_byte = ((packet.mesh().vendor_id >> 8) & 0xFF) as u8;
             let mut param_data = [0u8; 12]; // Max size for vendor_high + op + 10 param bytes
             param_data[0] = vendor_high_byte;
@@ -945,7 +945,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         }
 
         // Copy request parameters to response packet
-        // The +1 offset appears to be accessing the high byte of vendor_id, followed by op and parameters
+        // vendor_id[1] is the high byte; followed by op and parameters
         let vendor_high_byte = ((packet.mesh().vendor_id >> 8) & 0xFF) as u8;
         let mut param_data = [0u8; 12]; // Max size for vendor_high + op + 10 param bytes
         param_data[0] = vendor_high_byte;
@@ -1514,9 +1514,16 @@ pub fn parse_ble_packet_op_params(
         }
     };
 
-    // Copy the operation code bytes
+    // Copy the operation code bytes from the val[] flat byte overlay.
+    // MeshPkt is repr(C, align(4)): the 1-byte padding after op (offset 21) means
+    // mesh_construct_packet writes vendor_id_lo there via val[1], so the receiver
+    // correctly reads val[1]=vendor_id_lo, val[2]=vendor_id_hi, val[3..]=params.
+    // Both old and new firmware use this same val[] layout for mesh commands.
     let mut op_codes = [0u8; 3];
-    op_codes[0..op_len].copy_from_slice(&val[0..op_len]);
+    op_codes[0] = first_op_byte;
+    if op_len > 1 {
+        op_codes[1..op_len].copy_from_slice(&val[1..op_len]);
+    }
 
     // Special handling for opcode 6 (more parameters allowed + delta offset adjustment)
     let is_special_op = (first_op_byte & 0x3f) == 6;
@@ -1538,8 +1545,8 @@ pub fn parse_ble_packet_op_params(
     let (parameters, params_len) = if success {
         // Copy parameter bytes from the packet
         let mut parameters = [0u8; 16];
-        let param_start = op_len;
         let param_count = packet_data_len as usize;
+        let param_start = op_len;
         parameters[0..param_count].copy_from_slice(&val[param_start..param_start + param_count]);
         (parameters, packet_data_len as u8)
     } else {

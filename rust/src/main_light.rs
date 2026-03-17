@@ -1743,6 +1743,115 @@ mod tests {
         // Verify: No further processing occurs (test completes without errors)
     }
 
+    /// Integration test: verifies the full path from a UART LightCtrl payload, through
+    /// `mesh_construct_packet` and `parse_ble_packet_op_params`, to `rf_link_data_callback`
+    /// dispatching the light-on command.
+    ///
+    /// Guards against a regression where `mesh_construct_packet` was changed from a raw flat
+    /// memory copy to explicit struct field assignments. `MeshPkt` is `repr(C, align(4))`, which
+    /// inserts 1 byte of padding between `op` (offset 20) and `vendor_id` (offset 22). With
+    /// struct field assignments, `vendor_id_lo` lands at offset 22 (the struct field) instead of
+    /// offset 21 (what the `val[]` overlay reads). `parse_ble_packet_op_params` reads via `val[]`
+    /// and sees `val[1] = padding = 0x00`, computing `vendor_id = 0x1100 ≠ VENDOR_ID`, causing
+    /// `rf_link_data_callback` to silently discard the command on every node in the mesh.
+    ///
+    /// The fix is in construction: `mesh_construct_packet` uses a raw flat byte copy from
+    /// `&pkt.op`, placing `vendor_id_lo` at offset 21 (padding slot) and `vendor_id_hi` at
+    /// offset 22 — exactly where `val[1]` and `val[2]` read from.
+    #[test]
+    #[mry::lock(clock_time, app_mocker)]
+    fn test_uart_light_ctrl_to_light_on_integration() {
+        use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
+        use heapless::Vec;
+
+        DEVICE_ADDRESS.set(0x1234);
+
+        // Mock clock_time, which light_slave_tx_command uses to seed the mesh sequence number.
+        mock_clock_time().returns(0x5000);
+
+        // Step 1: Construct the 13-byte payload that handle_light_ctrl extracts from
+        //         msg.data[CTRL_PAYLOAD_RANGE] (bytes 5..18 of a UART LightCtrl message).
+        //         Layout: [op, vid_lo*, vid_hi*, par0..par9]
+        //         (* vid bytes are overwritten by light_slave_tx_command with VENDOR_ID)
+        let uart_payload: [u8; 13] = [
+            LGT_CMD_LIGHT_ONOFF, // op = 0x10 (will become 0xd0 after |= 0xc0)
+            0x00,                // vendor_id_lo placeholder — overwritten to VENDOR_ID lo
+            0x00,                // vendor_id_hi placeholder — overwritten to VENDOR_ID hi
+            LIGHT_ON_PARAM,      // par[0] = 0x01 (ON)
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let destination: u16 = 0x1234; // Same as DEVICE_ADDRESS — targeting this device
+
+        // Step 2: Build the packet as send_mesh_message does:
+        //         light_slave_tx_command sets op |= 0xc0, fills VENDOR_ID bytes,
+        //         then calls mesh_construct_packet which does a raw flat copy from &pkt.op.
+        let payload_vec = Vec::<u8, 13>::from_slice(&uart_payload).unwrap();
+        let packet = light_slave_tx_command(&payload_vec, destination, 0, false);
+
+        // Step 3: Verify the wire-format bytes via the val[] overlay — the same view that
+        //         parse_ble_packet_op_params uses. The raw copy writes:
+        //           byte 20 (val[0]) = op | 0xc0
+        //           byte 21 (val[1]) = VENDOR_ID & 0xFF = 0x11  ← vendor_id_lo in padding slot
+        //           byte 22 (val[2]) = VENDOR_ID >> 8   = 0x02  ← vendor_id_hi
+        //           byte 23 (val[3]) = LIGHT_ON_PARAM           ← par[0]
+        //         If construction used struct fields instead, val[1] would be 0x00 (padding)
+        //         and the vendor_id check in rf_link_data_callback would compute 0x1100 ≠ VENDOR_ID.
+        let val = &packet.att_write().value.val;
+        assert_eq!(val[0] & 0x3f, LGT_CMD_LIGHT_ONOFF, "val[0] must hold op");
+        assert_eq!(
+            val[1],
+            (VENDOR_ID & 0xFF) as u8,
+            "val[1] must hold vendor_id_lo (not padding)"
+        );
+        assert_eq!(
+            val[2],
+            (VENDOR_ID >> 8) as u8,
+            "val[2] must hold vendor_id_hi"
+        );
+        assert_eq!(val[3], LIGHT_ON_PARAM, "val[3] must hold par[0]");
+
+        // Step 4: Run the REAL parse_ble_packet_op_params (not mocked) end-to-end.
+        let (success, op_cmd, op_len, params, _) = parse_ble_packet_op_params(&packet, true);
+        assert!(success, "parse_ble_packet_op_params should succeed");
+        assert_eq!(op_len, LightOpType::OpType3 as u8, "op_len must be 3");
+        let parsed_vendor_id = (op_cmd[2] as u16) << 8 | op_cmd[1] as u16;
+        assert_eq!(
+            parsed_vendor_id, VENDOR_ID,
+            "vendor_id reconstructed from op_cmd[1..3] must equal VENDOR_ID \
+             (regression: struct field assignment leaves val[1]=padding=0x00 → vendor_id=0x1100)"
+        );
+        assert_eq!(
+            op_cmd[0] & 0x3f,
+            LGT_CMD_LIGHT_ONOFF,
+            "op must be LGT_CMD_LIGHT_ONOFF"
+        );
+        assert_eq!(
+            params[0], LIGHT_ON_PARAM,
+            "params[0] must be LIGHT_ON_PARAM"
+        );
+
+        // Step 5: Run the REAL rf_link_data_callback (not mocked).
+        //         With the bug: vendor_id check fails → early return → light never turns on.
+        //         With the fix: vendor_id passes → LGT_CMD_LIGHT_ONOFF dispatched correctly.
+        let mut app = App::default();
+        app.light_manager.mock_send_message(Any, Any).returns(());
+        mock_app_mocker().returns(&mut app);
+
+        rf_link_data_callback(&packet);
+
+        app.light_manager
+            .mock_send_message(LGT_CMD_LIGHT_ONOFF, Any)
+            .assert_called(1);
+    }
+
     // --- Tests for rf_link_light_event_callback ---
 
     #[test]

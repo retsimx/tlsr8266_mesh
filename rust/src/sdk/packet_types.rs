@@ -791,8 +791,8 @@ mod tests {
     ///   - MIC: 2 bytes at internal_par2[1] (must be offset 41)
     ///   - Data: 0x1c bytes starting from sno (offset 13, so data covers bytes 13..41)
     /// The MIC must immediately follow the data region (offset 41) for AES-CCM to work correctly.
-    /// If MeshPkt uses packed repr instead of align(4), internal_par2 shifts to offset 39,
-    /// putting internal_par2[1] at offset 40, which overlaps the data region and breaks decryption.
+    /// MeshPkt is repr(C, align(4)): the 1-byte padding after op (offset 21) means internal_par2
+    /// is at offset 40 and internal_par2[1] is at offset 41.
     #[test]
     fn test_meshpkt_broadcast_encryption_field_offsets() {
         let pkt = MeshPkt::default();

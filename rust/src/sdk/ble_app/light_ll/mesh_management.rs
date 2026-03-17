@@ -230,16 +230,29 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
                 result = current_index as u32;
 
                 // UPDATE ACCEPTANCE ALGORITHM: Multi-condition check for status update validity
-                // Accept update if ANY of these conditions are met:
-                // 1. Sequence number difference is reasonable (≤ 65, accounting for wraparound)
-                //    This handles normal sequence number progression with wraparound protection
-                // 2. Sequence number changed AND (node was offline OR sufficient time has passed)
-                //    This allows recovery from network partitions and handles clock drift
-                if sn_difference <= 65
-                    || (sn_difference != 0
-                        && (mesh_node.tick == 0
-                            || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16)
-                                < tick - mesh_node.tick))
+                //
+                // THE CRITICAL INVARIANT: only accept packets where sn has actually advanced
+                // (sn_difference > 0).  If we refresh tick for same-sn packets (sn_difference == 0)
+                // then neighbours running old firmware that keep re-broadcasting a dead node's
+                // last-known state will permanently prevent that node from ever timing out —
+                // because every relay arrives with the same frozen sn and keeps resetting the
+                // clock.  A live node's sn increments on every advertisement (mesh_node_keep_alive
+                // is called before each outgoing status packet), so any genuinely live node will
+                // always produce advancing sequence numbers.  Only dead nodes produce stale relays
+                // with a frozen sn.
+                //
+                // Given sn_difference > 0, accept the update if ANY of these conditions are met:
+                // 1. Sequence number advance is reasonable (1–65).  Handles normal operation and
+                //    u8 wraparound: 64→1 gives sn_difference=193 which exceeds 65, but that is
+                //    unusual; the timeout path (condition 3) catches it.
+                // 2. Node was previously offline (tick == 0): always revive with any new sn.
+                // 3. Large sn jump (>65) after enough time has passed: handles recovery from
+                //    clock drift or long network partition.
+                if sn_difference > 0
+                    && (sn_difference <= 65
+                        || mesh_node.tick == 0
+                        || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16)
+                            < tick.wrapping_sub(mesh_node.tick))
                 {
                     // Update accepted - copy new status data
                     mesh_node.val = pkt[src_index];
@@ -357,9 +370,15 @@ pub fn mesh_node_flush_status() {
             // Calculate timeout threshold using scaled timing for precision
             let timeout_threshold = (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10;
             let current_time_scaled = (tick >> 0x10) | 1; // Guard bit prevents zero
-            let node_last_seen = mesh_node_st[count].tick as u32;
 
-            if timeout_threshold < current_time_scaled - node_last_seen {
+            // Use wrapping u16 subtraction so the elapsed time is computed correctly
+            // when the 16-bit scaled tick counter wraps (~every 134 s at 32 MHz).
+            // Widening to u32 before subtracting would underflow after a wrap and
+            // falsely mark every online node as timed-out simultaneously.
+            let elapsed =
+                (current_time_scaled as u16).wrapping_sub(mesh_node_st[count].tick) as u32;
+
+            if timeout_threshold < elapsed {
                 // Node has timed out - mark as offline
                 mesh_node_st[count].tick = 0;
 
@@ -876,26 +895,18 @@ pub fn mesh_construct_packet(
     pkt.sno[1] = (sno >> 8) as u8; // Middle byte
     pkt.sno[2] = (sno >> 16) as u8; // MSB (limited to 24 bits)
 
-    // Copy command opcode and parameters into packet structure
-    // Explicitly assign each field to ensure correct layout regardless of struct packing
-
-    // Assign operation code (always present)
-    pkt.op = cmd_op_para[0];
-
-    // Assign vendor ID from bytes 1 and 2 (little-endian u16)
-    pkt.vendor_id = u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]]);
-
-    // Copy any remaining parameters to the par array
-    let remaining_params = &cmd_op_para[3..];
-    let copy_len = core::cmp::min(remaining_params.len(), pkt.par.len());
-    pkt.par[..copy_len].copy_from_slice(&remaining_params[..copy_len]);
-
-    // Configure internal protocol parameters for transmission control
-    pkt.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT] = retransmit_count;
-    pkt.internal_par1[INTERNAL_PAR_SEND_ACK] = if send_ack { 1 } else { 0 };
-
-    // Wrap mesh packet in generic packet union for transmission
-    Packet { mesh: pkt }
+    // Write op, vendor_id, and params via the att_cmd val[] overlay. This correctly
+    // places bytes at their wire positions regardless of MeshPkt struct alignment:
+    //   val[0] = op at offset 20
+    //   val[1] = vendor_id lo at offset 21 (the u16 alignment padding slot; receiver reads here)
+    //   val[2] = vendor_id hi at offset 22
+    //   val[3..] = params at offset 23+
+    // parse_ble_packet_op_params reads from this same val[] overlay, so the bytes match exactly.
+    let mut packet = Packet { mesh: pkt };
+    packet.att_cmd_mut().value.val[..cmd_op_para.len()].copy_from_slice(cmd_op_para);
+    packet.mesh_mut().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT] = retransmit_count;
+    packet.mesh_mut().internal_par1[INTERNAL_PAR_SEND_ACK] = if send_ack { 1 } else { 0 };
+    packet
 }
 
 /// Enables or disables mesh status reporting with comprehensive mask management.
@@ -1815,17 +1826,14 @@ mod tests {
         assert_eq!(mesh_pkt.sno[1], ((sno >> 8) & 0xFF) as u8); // Middle
         assert_eq!(mesh_pkt.sno[2], ((sno >> 16) & 0xFF) as u8); // MSB
 
-        // Verify command parameters were copied correctly
-        assert_eq!(mesh_pkt.op, cmd_op_para[0]); // Should be 0xAA
-
-        // Verify vendor_id uses both bytes in little-endian format
-        let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-                                            // With cmd_op_para[1]=0x12, cmd_op_para[2]=0x34: vendor_id should be 0x3412
-        assert_eq!(
-            vendor_id,
-            u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
-        );
-        assert_eq!(vendor_id, 0x3412); // Explicit check: 0x34 << 8 | 0x12 = 0x3412
+        // Verify command parameters via the wire-format val[] overlay.
+        // mesh_construct_packet writes cmd_op_para as a raw flat copy from &pkt.op,
+        // bypassing struct alignment so val[i] == cmd_op_para[i] for all i.
+        let val = &packet.att_write().value.val;
+        assert_eq!(val[0], cmd_op_para[0]); // op
+        assert_eq!(val[1], cmd_op_para[1]); // vendor_id_lo in wire format (padding slot)
+        assert_eq!(val[2], cmd_op_para[2]); // vendor_id_hi in wire format
+                                            // No params for 3-byte cmd_op_para
 
         // Verify internal parameters
         assert_eq!(
@@ -1859,22 +1867,16 @@ mod tests {
         assert_eq!(mesh_pkt.sno[1], 0xFF);
         assert_eq!(mesh_pkt.sno[2], 0xFF);
 
-        // Verify all command parameters were copied
-        assert_eq!(mesh_pkt.op, cmd_op_para[0]);
-        let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-                                            // With longer parameter arrays, both bytes are copied correctly
-        assert_eq!(
-            vendor_id,
-            u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
-        );
-
-        // Verify extended parameters
-        for i in 0..10 {
-            let param_idx = i + 3; // Skip op (0) and vendor_id (1,2)
+        // Verify command parameters via the wire-format val[] overlay.
+        // Raw flat copy: val[i] == cmd_op_para[i] for all copied bytes.
+        let val = &packet.att_write().value.val;
+        assert_eq!(val[0], cmd_op_para[0]); // op
+        assert_eq!(val[1], cmd_op_para[1]); // vendor_id_lo (wire)
+        assert_eq!(val[2], cmd_op_para[2]); // vendor_id_hi (wire)
+        for i in 0..10usize {
+            let param_idx = i + 3;
             if param_idx < cmd_op_para.len() {
-                assert_eq!(mesh_pkt.par[i], cmd_op_para[param_idx]);
-            } else {
-                assert_eq!(mesh_pkt.par[i], 0); // Unused bytes should be zero
+                assert_eq!(val[param_idx], cmd_op_para[param_idx]);
             }
         }
 
@@ -1911,24 +1913,14 @@ mod tests {
 
             let mesh_pkt = unsafe { packet.mesh };
 
-            // Verify basic fields are set correctly
-            assert_eq!(mesh_pkt.op, cmd_op_para[0]);
-
-            // Verify vendor_id is constructed from bytes 1 and 2
-            let vendor_id = mesh_pkt.vendor_id; // Copy to avoid packed field reference
-            assert_eq!(
-                vendor_id,
-                u16::from_le_bytes([cmd_op_para[1], cmd_op_para[2]])
-            );
-
-            // Verify parameter array
-            let available_par_bytes = length.saturating_sub(3); // Subtract op + vendor_id
-            for i in 0..10 {
-                if i < available_par_bytes {
-                    assert_eq!(mesh_pkt.par[i], cmd_op_para[i + 3]);
-                } else {
-                    assert_eq!(mesh_pkt.par[i], 0);
-                }
+            // Verify wire-format bytes via val[] overlay.
+            // Raw flat copy: val[i] == cmd_op_para[i] for all copied bytes.
+            let val = &packet.att_write().value.val;
+            assert_eq!(val[0], cmd_op_para[0]); // op
+            assert_eq!(val[1], cmd_op_para[1]); // vendor_id_lo (wire)
+            assert_eq!(val[2], cmd_op_para[2]); // vendor_id_hi (wire)
+            for i in 0..length.saturating_sub(3) {
+                assert_eq!(val[i + 3], cmd_op_para[i + 3]);
             }
         }
     }
@@ -3099,6 +3091,73 @@ mod tests {
         app().uart_manager.mock_send_message(Any).assert_called(1);
     }
 
+    /// Regression test: mesh_node_flush_status must NOT falsely time-out nodes when the
+    /// 16-bit scaled tick counter wraps around (~every 134 s at 32 MHz).
+    ///
+    /// Before the fix, `current_time_scaled` (u16 stored as u32) was subtracted from
+    /// `node_last_seen` (u16 widened to u32). After a wrap, current_time_scaled ≈ 1
+    /// but node_last_seen ≈ 0xFFE0, so the u32 subtraction underflowed to ~4.3 billion,
+    /// which always exceeded the timeout threshold. This caused ALL online nodes to be
+    /// reported OFFLINE simultaneously on every clock wrap.
+    ///
+    /// The fix uses `(current_time_scaled as u16).wrapping_sub(node.tick)` so the elapsed
+    /// time is computed in 16-bit modular arithmetic and stays small (correct) after a wrap.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_node_flush_status_no_false_timeout_on_tick_wrap() {
+        reset_mesh_state();
+
+        // Simulate: clock scaled-tick has just wrapped.
+        // current_time_scaled = (0x00000020 >> 16) | 1 = 0x0001 (small, just past wrap).
+        // Node's tick was set to 0xFFE0 (just before the wrap — correct elapsed ≈ 33 units ≈ 68 ms).
+        // A u32 subtraction: 1 - 0xFFE0 underflows to 4294934305`.. which >> timeout_threshold.
+        // The correct u16 wrapping subtraction: 0x0001u16.wrapping_sub(0xFFE0) = 0x0021 = 33.
+        // timeout_threshold = (32 * 3000 * 1000) >> 16 ≈ 1464. 33 < 1464 → should NOT timeout.
+        let raw_tick: u32 = 0x00010000; // (>> 16) | 1 = 1
+        mock_read_reg_system_tick().returns(raw_tick);
+        mock_clock_time_exceed(Any, Any).returns(true); // bypass rate-limiter
+
+        // Add a node and manually set its tick to simulate "just before wrap"
+        let node = create_test_mesh_node(0x42, 1, &[0x01, 0x00]);
+        mesh_node_update_status(&[node]);
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            for i in 1..MESH_NODE_MAX.get() as usize {
+                if mesh_node_st[i].val.dev_adr == 0x42 {
+                    mesh_node_st[i].tick = 0xFFE0; // just before the wrap
+                    break;
+                }
+            }
+        }
+
+        // uart_status_reporting must be enabled; send_message should NOT be called
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+        }
+
+        mesh_node_flush_status();
+
+        // Node should still be online — no send_message call means no OFFLINE event
+        app().uart_manager.mock_send_message(Any).assert_called(0);
+
+        // Verify tick is still non-zero (node not falsely marked offline)
+        let mesh_node_st = MESH_NODE_ST.lock();
+        for i in 1..MESH_NODE_MAX.get() as usize {
+            if mesh_node_st[i].val.dev_adr == 0x42 {
+                let tick_val = mesh_node_st[i].tick; // copy out of packed field before assert
+                assert_ne!(
+                    tick_val, 0,
+                    "Node must NOT be falsely timed out after tick wrap"
+                );
+                return;
+            }
+        }
+        panic!("test node 0x42 not found in MESH_NODE_ST");
+    }
+
     // ================================================================================
     // UART calls from ll_device_status_update
     // ================================================================================
@@ -3121,6 +3180,181 @@ mod tests {
         ll_device_status_update(&[0xDE, 0xAD]);
 
         app().uart_manager.mock_send_message(Any).assert_called(1);
+    }
+
+    /// Tests that a stale relayed packet with the same sn does NOT refresh tick on an
+    /// online node.  This is the primary case: the dead node is still online (tick != 0)
+    /// when relays start arriving, so the timeout can never fire unless we stop refreshing
+    /// tick on sn_difference == 0.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_update_status_stale_relay_does_not_refresh_tick_online_node() {
+        reset_mesh_state();
+
+        let initial_tick: u16 = 0x1234;
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            mesh_node_st[1].tick = initial_tick; // online
+            mesh_node_st[1].val = MeshNodeStValT {
+                dev_adr: 0x55,
+                sn: 7,
+                par: [1, 0],
+            };
+        }
+        MESH_NODE_MAX.set(2);
+        DEVICE_ADDRESS.set(0x01);
+
+        // Simulate time having moved forward slightly — tick now higher.
+        mock_read_reg_system_tick().returns(0x5678_0000u32);
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        // Same sn=7 relay — sn has not advanced.
+        let stale_pkt = [MeshNodeStValT {
+            dev_adr: 0x55,
+            sn: 7,
+            par: [1, 0],
+        }];
+        mesh_node_update_status(&stale_pkt);
+
+        // tick must NOT have been updated — stays at initial_tick so the timeout clock
+        // is not reset and the node will eventually expire.
+        let mesh_node_st = MESH_NODE_ST.lock();
+        for i in 1..MESH_NODE_MAX.get() as usize {
+            if mesh_node_st[i].val.dev_adr == 0x55 {
+                let tick_val = mesh_node_st[i].tick;
+                assert_eq!(
+                    tick_val, initial_tick,
+                    "Stale relay must not refresh tick on online node"
+                );
+                return;
+            }
+        }
+        panic!("node 0x55 not found");
+    }
+
+    /// Tests that a node which timed out (tick==0) is NOT re-onlined by a stale relayed
+    /// packet carrying the same sequence number as the one we last saw.
+    ///
+    /// Scenario: node 0x55 was last seen with sn=7, then timed out (tick set to 0 by
+    /// mesh_node_flush_status).  An active neighbour keeps re-broadcasting node 0x55's
+    /// last-known state with the same sn=7.  Before the fix the same-sn relayed packet
+    /// would restore tick and emit an "online" UART event.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_update_status_stale_relay_does_not_reonline_dead_node() {
+        reset_mesh_state();
+
+        // Place node 0x55 into the table, already timed out (tick == 0, sn == 7).
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            mesh_node_st[1].tick = 0; // offline
+            mesh_node_st[1].val = MeshNodeStValT {
+                dev_adr: 0x55,
+                sn: 7,
+                par: [1, 0],
+            };
+        }
+        MESH_NODE_MAX.set(2);
+        DEVICE_ADDRESS.set(0x01);
+
+        // current scaled tick for mesh_node_update_status
+        mock_read_reg_system_tick().returns(0x0012_3400);
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        // Deliver a "stale relay": same dev_adr, same sn=7, SAME par — just a
+        // re-broadcast of the exact packet we already saw for the dead node.
+        let stale_pkt = [MeshNodeStValT {
+            dev_adr: 0x55,
+            sn: 7,
+            par: [1, 0],
+        }];
+        mesh_node_update_status(&stale_pkt);
+
+        // No "online" UART notification must have been emitted.
+        app().uart_manager.mock_send_message(Any).assert_called(0);
+
+        // tick must remain 0 — node stays offline.
+        let mesh_node_st = MESH_NODE_ST.lock();
+        for i in 1..MESH_NODE_MAX.get() as usize {
+            if mesh_node_st[i].val.dev_adr == 0x55 {
+                let tick_val = mesh_node_st[i].tick;
+                assert_eq!(
+                    tick_val, 0,
+                    "Stale relay must not restore tick for offline node"
+                );
+                return;
+            }
+        }
+        panic!("node 0x55 not found");
+    }
+
+    /// Tests that an offline node IS brought back online when a genuinely new packet
+    /// arrives with an advanced sequence number (sn_difference > 0).
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_update_status_fresh_sn_reonlines_dead_node() {
+        reset_mesh_state();
+
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            mesh_node_st[1].tick = 0; // offline
+            mesh_node_st[1].val = MeshNodeStValT {
+                dev_adr: 0x55,
+                sn: 7,
+                par: [1, 0],
+            };
+        }
+        MESH_NODE_MAX.set(2);
+        DEVICE_ADDRESS.set(0x01);
+
+        mock_read_reg_system_tick().returns(0x0012_3400);
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        // New packet from the now-revived light: sn advanced to 8.
+        let fresh_pkt = [MeshNodeStValT {
+            dev_adr: 0x55,
+            sn: 8,
+            par: [1, 0],
+        }];
+        mesh_node_update_status(&fresh_pkt);
+
+        // Should have sent exactly one "online" notification.
+        app().uart_manager.mock_send_message(Any).assert_called(1);
+
+        // tick must be non-zero — node is back online.
+        let mesh_node_st = MESH_NODE_ST.lock();
+        for i in 1..MESH_NODE_MAX.get() as usize {
+            if mesh_node_st[i].val.dev_adr == 0x55 {
+                let tick_val = mesh_node_st[i].tick;
+                assert_ne!(
+                    tick_val, 0,
+                    "Fresh packet must restore tick for revived node"
+                );
+                return;
+            }
+        }
+        panic!("node 0x55 not found");
     }
 
     /// Tests that ll_device_status_update does not send UART when reporting is disabled.

@@ -1513,9 +1513,9 @@ mod tests {
     #[mry::lock(aes_att_decryption_packet)]
     fn test_pair_dec_packet_mesh_broadcast_mic_offset() {
         // Verify that broadcast decryption reads the MIC from internal_par2[1] (absolute offset 41).
-        // When MeshPkt incorrectly uses repr(C, packed) instead of repr(C, align(4)),
-        // internal_par2 shifts from offset 40 to 39, causing the MIC to be read from
-        // offset 40 instead of 41, breaking cross-firmware compatibility.
+        // MeshPkt is repr(C, align(4)): vendor_id is u16 so there is 1 byte of alignment padding
+        // at offset 21. This makes internal_par2 land at offset 40, and internal_par2[1] at
+        // offset 41. The 0x1c-byte data region covers sno(13)..internal_par2[0](40) inclusive.
         SECURITY_ENABLE.set(true);
         let mut packet = create_test_mesh_packet(true); // broadcast
         PAIR_STATE.lock().pair_ltk.fill(0xDD);
@@ -1523,20 +1523,20 @@ mod tests {
         // Write distinguishable bytes at the critical offsets
         let base = core::ptr::addr_of!(packet) as *mut u8;
         unsafe {
-            // Offset 40 = internal_par2[0] with align(4). Would be internal_par2[1] if packed.
+            // Offset 40 = internal_par2[0]. Last byte of the 0x1c-byte data region.
             *base.add(40) = 0xAA;
-            // Offset 41 = internal_par2[1] with align(4). This is the correct MIC position.
+            // Offset 41 = internal_par2[1]. This is the correct MIC position.
             *base.add(41) = 0xBB;
             *base.add(42) = 0xCC;
         }
 
         mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
             move |_sk: Vec<u8>, _iv: Vec<u8>, mic: Vec<u8>, _data: Vec<u8>| -> bool {
-                // MIC must be [0xBB, 0xCC] from offset 41-42, NOT [0xAA, 0xBB] from offset 40-41
+                // MIC must be [0xBB, 0xCC] from offset 41-42
                 assert_eq!(
                     mic,
                     vec![0xBB, 0xCC],
-                    "Broadcast MIC must be read from internal_par2[1] at offset 41, not offset 40"
+                    "Broadcast MIC must be read from internal_par2[1] at offset 41"
                 );
                 true
             },
@@ -1545,6 +1545,113 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
         assert!(result);
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
+    }
+
+    /// Integration test: verifies that pair_enc/dec_packet_mesh passes the correct byte
+    /// contents to AES when the MeshPkt struct fields are set. This catches regressions
+    /// if the struct layout is changed (e.g. padding removed, fields reordered) because
+    /// the data slice would no longer contain the expected bytes at the expected positions.
+    ///
+    /// Broadcast payload layout (0x1c = 28 bytes from sno@13 to internal_par2[0]@40 inclusive):
+    ///   data[0..3]   = sno              (offsets 13-15)
+    ///   data[3..5]   = src_adr          (offsets 16-17, little-endian)
+    ///   data[5..7]   = dst_adr          (offsets 18-19, little-endian)
+    ///   data[7]      = op               (offset 20)
+    ///   data[8]      = PADDING          (offset 21 — u16 alignment padding, value is undefined)
+    ///   data[9]      = vendor_id lo     (offset 22, little-endian lo byte)
+    ///   data[10]     = vendor_id hi     (offset 23, little-endian hi byte)
+    ///   data[11..21] = par[0..10]       (offsets 24-33)
+    ///   data[21..26] = internal_par1    (offsets 34-38)
+    ///   data[26]     = ttl              (offset 39)
+    ///   data[27]     = internal_par2[0] (offset 40)
+    ///   MIC written to internal_par2[1..3] (offsets 41-42)
+    ///
+    /// REGRESSION SIGNAL: vendor_id is at data[9..11], NOT data[8..10]. If MeshPkt.vendor_id
+    /// is changed to [u8; 2] (removing the padding), vendor_id lo shifts to data[8] and the
+    /// assertion `data[9] == vendor_id_lo` fails with the wrong byte value. Additionally, the
+    /// data length would shrink to 0x1b, catching both issues simultaneously.
+    #[test]
+    #[mry::lock(aes_att_encryption_packet)]
+    fn test_pair_enc_packet_mesh_broadcast_struct_layout_integration() {
+        SECURITY_ENABLE.set(true);
+        PAIR_STATE.lock().pair_ltk.fill(0x00);
+
+        let mut packet = Packet {
+            mesh: MeshPkt {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: PACKET_TYPE_ENCRYPTED,
+                    rf_len: 30,
+                    l2cap_len: 20,
+                    chan_id: MESH_BROADCAST_CHANNEL,
+                },
+                src_tx: 0,
+                handle1: 0,
+                sno: [0x01, 0x02, 0x03],
+                src_adr: 0x0504, // little-endian: [0x04, 0x05]
+                dst_adr: 0x0706, // little-endian: [0x06, 0x07]
+                op: 0x08,
+                vendor_id: 0x2211, // lo=0x11 at offset 22, hi=0x22 at offset 23
+                par: [0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC],
+                internal_par1: [0x15, 0x16, 0x17, 0x18, 0x19],
+                ttl: 0x1A,
+                internal_par2: [0x1B, 0x00, 0x00, 0x00], // [0] in data, [1..3] overwritten by MIC
+                no_use: [0; 4],
+            },
+        };
+
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).returns_with(
+            move |_sk: Vec<u8>, _iv: Vec<u8>, _dst: Vec<u8>, data: Vec<u8>| -> () {
+                assert_eq!(
+                    data.len(),
+                    0x1c,
+                    "broadcast data region must be 28 bytes (0x1c)"
+                );
+                // sno
+                assert_eq!(data[0], 0x01, "data[0] = sno[0]");
+                assert_eq!(data[1], 0x02, "data[1] = sno[1]");
+                assert_eq!(data[2], 0x03, "data[2] = sno[2]");
+                // src_adr / dst_adr
+                assert_eq!(data[3], 0x04, "data[3] = src_adr lo");
+                assert_eq!(data[4], 0x05, "data[4] = src_adr hi");
+                assert_eq!(data[5], 0x06, "data[5] = dst_adr lo");
+                assert_eq!(data[6], 0x07, "data[6] = dst_adr hi");
+                // op at offset 20
+                assert_eq!(data[7], 0x08, "data[7] = op");
+                // data[8] is the u16 alignment padding byte (offset 21) — its value is
+                // uninitialized/undefined in repr(C) struct literals, so we skip asserting it.
+                // Its existence is implied by vendor_id being at data[9..11] below.
+                //
+                // vendor_id at offsets 22-23 (little-endian: lo=0x11, hi=0x22).
+                // If vendor_id were changed to [u8; 2] the padding disappears: lo would shift
+                // to data[8] and hi to data[9], both assertions below would fail.
+                assert_eq!(
+                    data[9], 0x11,
+                    "data[9] = vendor_id lo (offset 22, after padding at offset 21)"
+                );
+                assert_eq!(data[10], 0x22, "data[10] = vendor_id hi (offset 23)");
+                // par starts at data[11] (offset 24), NOT data[10] (offset 23)
+                assert_eq!(
+                    &data[11..21],
+                    &[0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC],
+                    "data[11..21] = par"
+                );
+                // internal_par1
+                assert_eq!(
+                    &data[21..26],
+                    &[0x15, 0x16, 0x17, 0x18, 0x19],
+                    "data[21..26] = internal_par1"
+                );
+                // ttl
+                assert_eq!(data[26], 0x1A, "data[26] = ttl");
+                // internal_par2[0] — last byte of encrypted region
+                assert_eq!(data[27], 0x1B, "data[27] = internal_par2[0]");
+            },
+        );
+
+        let result = pair_enc_packet_mesh(&mut packet);
+        assert!(result);
+        mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
     #[test]

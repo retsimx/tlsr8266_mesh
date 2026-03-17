@@ -1593,7 +1593,7 @@ mod tests {
                 internal_par1: [0; 5],
                 ttl: 0,
                 internal_par2: [0; 4],
-                no_use: [0; 5],
+                no_use: [0; 4],
             },
         }
     }

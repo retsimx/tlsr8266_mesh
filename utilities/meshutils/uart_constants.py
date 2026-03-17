@@ -12,6 +12,7 @@ LIGHT_STATUS = 0x03   # Light status response
 MESH_MESSAGE = 0x04   # Mesh network message
 PANIC_MESSAGE = 0x05  # Panic/error message
 PRINT_MESSAGE = 0x06  # Debug print message
+NODE_STATUS = 0x07    # Node online/offline and on/off change events; payload: [node_id, online, on_off] groups (3 bytes each)
 ACK = 0xFF            # Acknowledgment code
 
 # OTA update command codes

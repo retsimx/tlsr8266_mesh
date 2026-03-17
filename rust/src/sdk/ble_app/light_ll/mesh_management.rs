@@ -57,24 +57,32 @@ use crate::state::*;
 use crate::uart_manager::UartMsg;
 use crate::{app, BIT};
 
-/// Sends node status entries to the UART daemon as a LightStatus message.
+/// Sends node status change events to the UART daemon as a NodeStatus message.
 ///
-/// This is called directly wherever MESH_NODE_MASK bits are set (i.e. wherever
-/// node status changes in RAM) so that UART status reporting works regardless
-/// of BLE connection state.
-fn send_uart_node_status(entries: &[MeshNodeStValT]) {
+/// Each entry is `(node_id, online, on_off)` where `online=1` means the node is
+/// reachable, `online=0` means it has timed out/gone offline, and `on_off` reflects
+/// `par[0]` (nonzero = on). Up to 13 entries fit in one UART packet.
+///
+/// This is called directly wherever node state changes in RAM so that UART status
+/// reporting works regardless of BLE connection state.
+fn send_uart_node_changes(entries: &[(u8, u8, u8)]) {
     if entries.is_empty() || !app().uart_manager.uart_status_reporting_enabled() {
         return;
     }
-    let mut uart_msg = UartData {
-        len: UART_DATA_LEN as u32,
-        data: [0; UART_DATA_LEN],
-    };
-    uart_msg.data[2] = UartMsg::LightStatus as u8;
-    let byte_count = entries.len() * MESH_NODE_ST_VAL_LEN;
-    let entry_bytes: &[u8] = bytemuck::cast_slice(entries);
-    uart_msg.data[3..3 + byte_count].copy_from_slice(&entry_bytes[..byte_count]);
-    let _ = app().uart_manager.send_message(&uart_msg);
+    const MAX_PER_PKT: usize = 13; // floor((UART_DATA_LEN - 3) / 3)
+    for chunk in entries.chunks(MAX_PER_PKT) {
+        let mut uart_msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        uart_msg.data[2] = UartMsg::NodeStatus as u8;
+        for (i, &(node_id, online, on_off)) in chunk.iter().enumerate() {
+            uart_msg.data[3 + i * 3] = node_id;
+            uart_msg.data[3 + i * 3 + 1] = online;
+            uart_msg.data[3 + i * 3 + 2] = on_off;
+        }
+        let _ = app().uart_manager.send_message(&uart_msg);
+    }
 }
 
 /// Updates the mesh network's distributed node status database.
@@ -138,11 +146,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
     let mut result = 0xfffffffe;
 
     // Track nodes whose status changed for UART reporting
-    let mut changed = [MeshNodeStValT {
-        dev_adr: 0,
-        sn: 0,
-        par: [0; MESH_NODE_ST_PAR_LEN],
-    }; 6];
+    let mut changed: [(u8, u8, u8); 6] = [(0, 0, 0); 6];
     let mut changed_count = 0;
 
     // Generate current timestamp using scaled timing format (16-bit precision)
@@ -181,7 +185,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
             if MESH_NODE_MAX_NUM == current_index {
                 // Send any status changes collected so far before returning
                 drop(mesh_node_st);
-                send_uart_node_status(&changed[..changed_count]);
+                send_uart_node_changes(&changed[..changed_count]);
                 return 1; // Table full, cannot add more nodes
             }
 
@@ -200,7 +204,11 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 
                 // Record for UART notification
                 if changed_count < changed.len() {
-                    changed[changed_count] = pkt[src_index];
+                    changed[changed_count] = (
+                        pkt[src_index].dev_adr,
+                        1,
+                        if pkt[src_index].par[0] != 0 { 1 } else { 0 },
+                    );
                     changed_count += 1;
                 }
 
@@ -244,7 +252,11 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 
                         // Record for UART notification
                         if changed_count < changed.len() {
-                            changed[changed_count] = pkt[src_index];
+                            changed[changed_count] = (
+                                pkt[src_index].dev_adr,
+                                1,
+                                if pkt[src_index].par[0] != 0 { 1 } else { 0 },
+                            );
                             changed_count += 1;
                         }
                     }
@@ -261,7 +273,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 
     // Send UART status for all changed nodes (after releasing MESH_NODE_ST lock)
     drop(mesh_node_st);
-    send_uart_node_status(&changed[..changed_count]);
+    send_uart_node_changes(&changed[..changed_count]);
 
     return 1; // Success - packet processed
 }
@@ -335,11 +347,7 @@ pub fn mesh_node_flush_status() {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
     // Track timed-out nodes for UART reporting
-    let mut timed_out = [MeshNodeStValT {
-        dev_adr: 0,
-        sn: 0,
-        par: [0; MESH_NODE_ST_PAR_LEN],
-    }; 9];
+    let mut timed_out: [(u8, u8, u8); 9] = [(0, 0, 0); 9];
     let mut timed_out_count = 0;
 
     // Scan all known mesh nodes for timeout detection (skip index 0 = this device)
@@ -359,9 +367,17 @@ pub fn mesh_node_flush_status() {
                 // Calculate bit position: word index = count >> 5, bit index = count & 0x1f
                 MESH_NODE_MASK.lock()[count >> 5] |= 1 << (count & 0x1f);
 
-                // Record for UART notification
+                // Record for UART notification (online=0 = timed out/offline)
                 if timed_out_count < timed_out.len() {
-                    timed_out[timed_out_count] = mesh_node_st[count].val;
+                    timed_out[timed_out_count] = (
+                        mesh_node_st[count].val.dev_adr,
+                        0,
+                        if mesh_node_st[count].val.par[0] != 0 {
+                            1
+                        } else {
+                            0
+                        },
+                    );
                     timed_out_count += 1;
                 }
             }
@@ -370,7 +386,7 @@ pub fn mesh_node_flush_status() {
 
     // Send UART status for timed-out nodes (after releasing MESH_NODE_ST lock)
     drop(mesh_node_st);
-    send_uart_node_status(&timed_out[..timed_out_count]);
+    send_uart_node_changes(&timed_out[..timed_out_count]);
 }
 
 /// Updates this device's own status record to maintain mesh network presence.
@@ -925,21 +941,44 @@ pub fn mesh_construct_packet(
 /// * Enables/disables network-wide status propagation
 #[cfg_attr(test, mry::mry)]
 pub fn mesh_report_status_enable(enable: bool) {
-    let mut mesh_node_mask = MESH_NODE_MASK.lock();
-    if enable {
-        // Set all complete 32-bit words to enable reporting (skip node 0 in each word)
-        if MESH_NODE_MAX.get() >> 5 != 0 {
-            mesh_node_mask.iter_mut().for_each(|v| *v = 0xfffffffe);
-        }
+    {
+        let mut mesh_node_mask = MESH_NODE_MASK.lock();
+        if enable {
+            // Set all complete 32-bit words to enable reporting (skip node 0 in each word)
+            if MESH_NODE_MAX.get() >> 5 != 0 {
+                mesh_node_mask.iter_mut().for_each(|v| *v = 0xfffffffe);
+            }
 
-        // Handle partial word at the end with exact bit count
-        if MESH_NODE_MAX.get() & 0x1f != 0 {
-            let bit_count = MESH_NODE_MAX.get() & 0x1f;
-            mesh_node_mask[MESH_NODE_MAX.get() as usize >> 5] = (1 << bit_count) - 1;
+            // Handle partial word at the end with exact bit count
+            if MESH_NODE_MAX.get() & 0x1f != 0 {
+                let bit_count = MESH_NODE_MAX.get() & 0x1f;
+                mesh_node_mask[MESH_NODE_MAX.get() as usize >> 5] = (1 << bit_count) - 1;
+            }
         }
     }
 
     MESH_NODE_REPORT_ENABLE.set(enable);
+
+    // Send an initial dump of all known nodes when enabling UART status reporting,
+    // so the host can immediately see the full current state of the mesh.
+    if enable {
+        let mut initial: [(u8, u8, u8); MESH_NODE_MAX_NUM] = [(0, 0, 0); MESH_NODE_MAX_NUM];
+        let mut count = 0;
+        {
+            let mesh_node_st = MESH_NODE_ST.lock();
+            for idx in 0..MESH_NODE_MAX.get() as usize {
+                let node = &mesh_node_st[idx];
+                if node.val.dev_adr == 0 {
+                    continue;
+                }
+                let online = if node.tick != 0 { 1u8 } else { 0u8 };
+                let on_off = if node.val.par[0] != 0 { 1u8 } else { 0u8 };
+                initial[count] = (node.val.dev_adr, online, on_off);
+                count += 1;
+            }
+        }
+        send_uart_node_changes(&initial[..count]);
+    }
 }
 
 /// Enables selective mesh status reporting for specific device addresses.
@@ -1183,7 +1222,7 @@ pub fn ll_device_status_update(val_par: &[u8]) {
     }
 
     // Send UART status for own device (after releasing MESH_NODE_ST lock)
-    send_uart_node_status(&[val]);
+    send_uart_node_changes(&[(val.dev_adr, 1, if val.par[0] != 0 { 1 } else { 0 })]);
 }
 
 #[cfg(test)]
@@ -2167,6 +2206,75 @@ mod tests {
         }
     }
 
+    /// Tests that mesh_report_status_enable sends an initial UART dump of all known nodes.
+    ///
+    /// Verifies: When enabling, all nodes with dev_adr != 0 appear in a NodeStatus packet
+    /// with the correct online and on_off values. Nodes with tick==0 → online=0.
+    #[test]
+    fn test_mesh_report_status_enable_sends_initial_dump() {
+        reset_mesh_state();
+
+        // Populate 3 nodes at indices 0-2
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            // Index 0: own device, online, on
+            mesh_node_st[0] = MeshNodeStT {
+                tick: 1,
+                val: MeshNodeStValT {
+                    dev_adr: 0x10,
+                    sn: 1,
+                    par: [1, 0xFF],
+                },
+            };
+            // Index 1: remote node, online, off
+            mesh_node_st[1] = MeshNodeStT {
+                tick: 1,
+                val: MeshNodeStValT {
+                    dev_adr: 0x20,
+                    sn: 2,
+                    par: [0, 0xFF],
+                },
+            };
+            // Index 2: remote node, offline (tick=0), on
+            mesh_node_st[2] = MeshNodeStT {
+                tick: 0,
+                val: MeshNodeStValT {
+                    dev_adr: 0x30,
+                    sn: 3,
+                    par: [1, 0xFF],
+                },
+            };
+        }
+        MESH_NODE_MAX.set(3);
+
+        let mut expected = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
+        expected.data[3] = 0x10; // node 0: id
+        expected.data[4] = 1; // node 0: online
+        expected.data[5] = 1; // node 0: on
+        expected.data[6] = 0x20; // node 1: id
+        expected.data[7] = 1; // node 1: online
+        expected.data[8] = 0; // node 1: off
+        expected.data[9] = 0x30; // node 2: id
+        expected.data[10] = 0; // node 2: offline (tick==0)
+        expected.data[11] = 1; // node 2: on
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(expected).returns(true);
+        }
+
+        mesh_report_status_enable(true);
+
+        app().uart_manager.mock_send_message(Any).assert_called(1);
+    }
+
     // ================================================================================
     // Tests for mesh_report_status_enable_mask function
     // ================================================================================
@@ -2641,13 +2749,12 @@ mod tests {
     }
 
     // ================================================================================
-    // Tests for send_uart_node_status
+    // Tests for send_uart_node_changes
     // ================================================================================
 
-    /// Tests that send_uart_node_status does nothing when given an empty slice.
-    /// The empty check short-circuits before uart_status_reporting_enabled is called.
+    /// Tests that send_uart_node_changes does nothing when given an empty slice.
     #[test]
-    fn test_send_uart_node_status_empty_no_send() {
+    fn test_send_uart_node_changes_empty_no_send() {
         reset_mesh_state();
         {
             let mut app = app();
@@ -2657,14 +2764,14 @@ mod tests {
             app.uart_manager.mock_send_message(Any).returns(true);
         }
 
-        send_uart_node_status(&[]);
+        send_uart_node_changes(&[]);
 
         app().uart_manager.mock_send_message(Any).assert_called(0);
     }
 
-    /// Tests that send_uart_node_status does nothing when UART reporting is disabled.
+    /// Tests that send_uart_node_changes does nothing when UART reporting is disabled.
     #[test]
-    fn test_send_uart_node_status_uart_disabled_no_send() {
+    fn test_send_uart_node_changes_uart_disabled_no_send() {
         reset_mesh_state();
         {
             let mut app = app();
@@ -2674,30 +2781,26 @@ mod tests {
             app.uart_manager.mock_send_message(Any).returns(true);
         }
 
-        let entry = create_test_mesh_node(0x20, 5, &[0xAB, 0xCD]);
-        send_uart_node_status(&[entry]);
+        send_uart_node_changes(&[(0x20, 1, 1)]);
 
         app().uart_manager.mock_send_message(Any).assert_called(0);
     }
 
-    /// Tests that send_uart_node_status sends the correctly formatted UartData for a single entry.
+    /// Tests that send_uart_node_changes sends correctly formatted NodeStatus packet.
     ///
-    /// Verifies: data[2] = LightStatus (0x03), data[3..7] = serialized MeshNodeStValT.
+    /// Verifies: data[2] = NodeStatus (0x07), then [node_id, online, on_off] per entry.
     #[test]
-    fn test_send_uart_node_status_single_entry_correct_format() {
+    fn test_send_uart_node_changes_single_entry_correct_format() {
         reset_mesh_state();
-
-        let entry = create_test_mesh_node(0x20, 5, &[0xAB, 0xCD]);
 
         let mut expected = UartData {
             len: UART_DATA_LEN as u32,
             data: [0; UART_DATA_LEN],
         };
-        expected.data[2] = UartMsg::LightStatus as u8; // 0x03
-        expected.data[3] = 0x20; // dev_adr
-        expected.data[4] = 5; // sn
-        expected.data[5] = 0xAB; // par[0]
-        expected.data[6] = 0xCD; // par[1]
+        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
+        expected.data[3] = 0x20; // node_id
+        expected.data[4] = 1; // online
+        expected.data[5] = 1; // on_off (par[0] was non-zero)
 
         {
             let mut app = app();
@@ -2707,45 +2810,35 @@ mod tests {
             app.uart_manager.mock_send_message(expected).returns(true);
         }
 
-        send_uart_node_status(&[entry]);
+        send_uart_node_changes(&[(0x20, 1, 1)]);
 
         app().uart_manager.mock_send_message(Any).assert_called(1);
     }
 
-    /// Tests that send_uart_node_status packs multiple entries into a single message.
+    /// Tests that send_uart_node_changes packs multiple entries into a single message.
     ///
-    /// Three entries must appear consecutively starting at data[3], in the same
-    /// order they were passed, with data[2] = LightStatus.
+    /// Three entries appear consecutively at data[3..12], data[2] = NodeStatus (0x07).
     #[test]
-    fn test_send_uart_node_status_multiple_entries_packed() {
+    fn test_send_uart_node_changes_multiple_entries_packed() {
         reset_mesh_state();
-
-        let entries = [
-            create_test_mesh_node(0x10, 1, &[0x11, 0x22]),
-            create_test_mesh_node(0x20, 2, &[0x33, 0x44]),
-            create_test_mesh_node(0x30, 3, &[0x55, 0x66]),
-        ];
 
         let mut expected = UartData {
             len: UART_DATA_LEN as u32,
             data: [0; UART_DATA_LEN],
         };
-        expected.data[2] = UartMsg::LightStatus as u8;
-        // Entry 0
+        expected.data[2] = UartMsg::NodeStatus as u8;
+        // Entry 0: node 0x10, online, on
         expected.data[3] = 0x10;
         expected.data[4] = 1;
-        expected.data[5] = 0x11;
-        expected.data[6] = 0x22;
-        // Entry 1
-        expected.data[7] = 0x20;
-        expected.data[8] = 2;
-        expected.data[9] = 0x33;
-        expected.data[10] = 0x44;
-        // Entry 2
-        expected.data[11] = 0x30;
-        expected.data[12] = 3;
-        expected.data[13] = 0x55;
-        expected.data[14] = 0x66;
+        expected.data[5] = 1;
+        // Entry 1: node 0x20, online, off
+        expected.data[6] = 0x20;
+        expected.data[7] = 1;
+        expected.data[8] = 0;
+        // Entry 2: node 0x30, offline, on
+        expected.data[9] = 0x30;
+        expected.data[10] = 0;
+        expected.data[11] = 1;
 
         {
             let mut app = app();
@@ -2755,10 +2848,29 @@ mod tests {
             app.uart_manager.mock_send_message(expected).returns(true);
         }
 
-        send_uart_node_status(&entries);
+        send_uart_node_changes(&[(0x10, 1, 1), (0x20, 1, 0), (0x30, 0, 1)]);
 
         // All three entries fit in one call
         app().uart_manager.mock_send_message(Any).assert_called(1);
+    }
+
+    /// Tests that send_uart_node_changes splits more than 13 entries across multiple packets.
+    #[test]
+    fn test_send_uart_node_changes_chunks_over_13() {
+        reset_mesh_state();
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(true);
+        }
+
+        // 14 entries → 2 packets (13 + 1)
+        let entries: [(u8, u8, u8); 14] = core::array::from_fn(|i| (i as u8 + 1, 1, 0));
+        send_uart_node_changes(&entries);
+
+        app().uart_manager.mock_send_message(Any).assert_called(2);
     }
 
     // ================================================================================
@@ -2944,6 +3056,47 @@ mod tests {
         mesh_node_flush_status();
 
         app().uart_manager.mock_send_message(Any).assert_called(0);
+    }
+
+    /// Tests that mesh_node_flush_status sends online=0 (offline) in the NodeStatus packet.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_node_flush_status_timeout_sends_offline_format() {
+        mock_read_reg_system_tick().returns(0x60000000);
+        mock_clock_time_exceed(Any, Any).returns(true);
+
+        reset_mesh_state();
+
+        // Add a node with par[0]=1 (on) so we can verify on_off in the offline message
+        let node = create_test_mesh_node(0x20, 5, &[0x01, 0x02]);
+        mesh_node_update_status(&[node]);
+
+        // Force the node's tick to a very old value so it times out
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            mesh_node_st[10].tick = 1;
+        }
+
+        let mut expected = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
+        expected.data[3] = 0x20; // node_id
+        expected.data[4] = 0; // online = 0 (offline, timed out)
+        expected.data[5] = 1; // on_off = 1 (par[0] was 0x01, non-zero)
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(expected).returns(true);
+        }
+
+        mesh_node_flush_status();
+
+        app().uart_manager.mock_send_message(Any).assert_called(1);
     }
 
     // ================================================================================

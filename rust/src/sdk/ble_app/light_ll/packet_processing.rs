@@ -1574,7 +1574,7 @@ mod tests {
     /// Helper function to create a test packet with specified values.
     fn create_test_packet(opcode: u8, sno: [u8; 3], src_adr: u16, dst_adr: u16) -> Packet {
         Packet {
-            att_cmd: PacketAttCmd {
+            mesh: MeshPkt {
                 head: PacketL2capHead {
                     dma_len: 0x1B, // 27 bytes
                     _type: 2,
@@ -1582,21 +1582,18 @@ mod tests {
                     l2cap_len: 0x15, // 21 bytes (10 header + 1 opcode + 10 params = 21)
                     chan_id: 4,
                 },
-                opcode: 0x12,
-                handle: 0,
+                src_tx: 0,
                 handle1: 0,
-                value: PacketAttValue {
-                    sno,
-                    src: [(src_adr & 0xFF) as u8, (src_adr >> 8) as u8],
-                    dst: [(dst_adr & 0xFF) as u8, (dst_adr >> 8) as u8],
-                    val: {
-                        let mut val = [0u8; 23];
-                        val[0] = opcode; // Don't add 0xc0 - let tests set this explicitly
-                        val[1] = (VENDOR_ID & 0xFF) as u8;
-                        val[2] = ((VENDOR_ID >> 8) & 0xFF) as u8;
-                        val
-                    },
-                },
+                sno,
+                src_adr,
+                dst_adr,
+                op: opcode,
+                vendor_id: VENDOR_ID,
+                par: [0; 10],
+                internal_par1: [0; 5],
+                ttl: 0,
+                internal_par2: [0; 4],
+                no_use: [0; 5],
             },
         }
     }
@@ -2130,8 +2127,9 @@ mod tests {
             0x0000, // dst_adr
         );
         // Set known par values so we can verify them in the output
-        packet.att_cmd_mut().value.val[3] = 0x11; // par[0] = CW lo
-        packet.att_cmd_mut().value.val[4] = 0x22; // par[1] = CW hi
+        // Use mesh_mut() since rf_link_slave_add_status reads via mesh() (align(4) layout)
+        packet.mesh_mut().par[0] = 0x11; // par[0] = CW lo
+        packet.mesh_mut().par[1] = 0x22; // par[1] = CW hi
 
         rf_link_slave_add_status(&packet);
 
@@ -2689,6 +2687,145 @@ mod tests {
             true,
             "Status advertisement with valid signature processed and mesh update called"
         );
+    }
+
+    /// Tests end-to-end status advertisement processing: rf_link_rc_data receives a
+    /// status packet, calls the REAL mesh_node_update_status (not mocked), and verifies
+    /// that the remote nodes actually appear in MESH_NODE_ST with MESH_NODE_MASK bits set.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_rf_link_rc_data_status_advertisement_end_to_end() {
+        use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+
+        mock_read_reg_system_tick().returns(0x12345678);
+
+        reset_test_state();
+
+        // Set up mesh state: DEVICE_ADDRESS is 0x1234 (set by reset_test_state)
+        // Low byte is 0x34, so any node with dev_adr != 0x34 will be accepted
+        MESH_NODE_MAX.set(1);
+        MESH_NODE_REPORT_ENABLE.set(true);
+
+        // Initialize MESH_NODE_ST[0] with our device
+        {
+            let mut mesh_node_st = MESH_NODE_ST.lock();
+            for i in 0..mesh_node_st.len() {
+                mesh_node_st[i] = MeshNodeStT {
+                    tick: 0,
+                    val: MeshNodeStValT {
+                        dev_adr: if i == 0 { 0x34 } else { 0 },
+                        sn: 0,
+                        par: [0; MESH_NODE_ST_PAR_LEN],
+                    },
+                };
+            }
+        }
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+
+        // Create a status advertisement packet with two remote node entries.
+        // The status data occupies the first 24 bytes of PacketAttValue (sno + src + dst + val[0..17]).
+        // Each MeshNodeStValT is 4 bytes: [dev_adr, sn, par0, par1]
+        //
+        // Layout in PacketAttValue:
+        //   sno[0..3] + src[0..2] + dst[0..2] + val[0..17] = 24 bytes = 6 entries
+        //
+        // Entry 0 (bytes 0-3): sno[0]=dev_adr, sno[1]=sn, sno[2]=par0, src[0]=par1
+        // Entry 1 (bytes 4-7): src[1]=dev_adr, dst[0]=sn, dst[1]=par0, val[0]=par1
+        // Entry 2 (bytes 8-11): val[1..4] (set to 0 to terminate)
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0x27,
+                    _type: 2,
+                    rf_len: 0x25,
+                    l2cap_len: 0x21,
+                    chan_id: 0xffff, // Status advertisement channel
+                },
+                opcode: 0x12,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue {
+                    // Entry 0: node addr=0x0A, sn=1, par=[0x80, 0x00]
+                    sno: [0x0A, 0x01, 0x80],
+                    // Entry 0 par[1], then Entry 1: node addr=0x14, sn=5, par=[0xFF, ...]
+                    src: [0x00, 0x14],
+                    dst: [0x05, 0xFF],
+                    val: {
+                        let mut val = [0u8; 23];
+                        val[0] = 0x01; // Entry 1 par[1]
+                                       // val[1..4] = Entry 2: dev_adr=0 terminates the list
+                                       // Signature at positions 17-20
+                        val[17] = 0xa5;
+                        val[18] = 0xa5;
+                        val[19] = 0xa5;
+                        val[20] = 0xa5;
+                        val
+                    },
+                },
+            },
+        };
+
+        rf_link_rc_data(&mut packet);
+
+        // Verify MESH_NODE_MAX expanded to include the two new nodes
+        assert_eq!(
+            MESH_NODE_MAX.get(),
+            3,
+            "MESH_NODE_MAX should be 3 (own + 2 remote)"
+        );
+
+        // Verify MESH_NODE_ST has the remote nodes
+        {
+            let mesh_node_st = MESH_NODE_ST.lock();
+
+            // Node at index 1: addr=0x0A (10), sn=1, par=[0x80, 0x00]
+            assert_eq!(
+                mesh_node_st[1].val.dev_adr, 0x0A,
+                "First remote node dev_adr"
+            );
+            assert_eq!(mesh_node_st[1].val.sn, 0x01, "First remote node sn");
+            assert_eq!(
+                mesh_node_st[1].val.par,
+                [0x80, 0x00],
+                "First remote node par"
+            );
+            let tick1 = mesh_node_st[1].tick;
+            assert_ne!(tick1, 0, "First remote node should be online");
+
+            // Node at index 2: addr=0x14 (20), sn=5, par=[0xFF, 0x01]
+            assert_eq!(
+                mesh_node_st[2].val.dev_adr, 0x14,
+                "Second remote node dev_adr"
+            );
+            assert_eq!(mesh_node_st[2].val.sn, 0x05, "Second remote node sn");
+            assert_eq!(
+                mesh_node_st[2].val.par,
+                [0xFF, 0x01],
+                "Second remote node par"
+            );
+            let tick2 = mesh_node_st[2].tick;
+            assert_ne!(tick2, 0, "Second remote node should be online");
+        }
+
+        // Verify MESH_NODE_MASK has bits set for the new nodes
+        {
+            let mask = MESH_NODE_MASK.lock();
+            assert_ne!(
+                mask[0] & (1 << 1),
+                0,
+                "Mask bit 1 should be set for node at index 1"
+            );
+            assert_ne!(
+                mask[0] & (1 << 2),
+                0,
+                "Mask bit 2 should be set for node at index 2"
+            );
+        }
     }
 
     /// Tests status advertisement processing with invalid signature (no mesh update call).

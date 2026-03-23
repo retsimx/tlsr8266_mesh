@@ -51,10 +51,12 @@ RUST_DEPS  = rust/target/thumbv6m-none-eabi/release/deps
 STARTUP_SRC = ./sdk/cstartup_8266.S
 STARTUP_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(STARTUP_SRC:%.S=%.o)))
 
+RUST_SRCS = $(shell find rust/src -name '*.rs') rust/Cargo.toml rust/Cargo.lock
+
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 	$(CP) -O binary $< $@
 
-$(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ)
+$(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ) $(RUST_SRCS)
 	@[ -f .env ] && . .env || :; \
 	 _LLC=$${LLC:-$(LLC)}; \
 	 _LLVM_LINK=$${LLVM_LINK:-$(LLVM_LINK)}; \

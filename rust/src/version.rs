@@ -1,1 +1,1 @@
-pub static BUILD_VERSION: u32 = 3537;
+pub static BUILD_VERSION: u32 = 3538;

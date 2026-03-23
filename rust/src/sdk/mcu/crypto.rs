@@ -215,15 +215,15 @@ pub fn decode_password(password: &[u8; 16]) -> [u8; 16] {
 /// * `packet_data` - The encrypted packet data to be decrypted (modified in place)
 ///
 /// # Returns
-/// * `true` if the calculated MIC matches the `expected_mic` (verification passed)
-/// * `false` if verification failed, indicating corrupted data or wrong encryption key
+/// * `Ok(())` if the calculated MIC matches the `expected_mic` (verification passed)
+/// * `Err(())` if verification failed, indicating corrupted data or wrong encryption key
 #[cfg_attr(test, mry::mry)]
 pub fn aes_att_decryption_packet(
     key: &[u8; 16],
     ivm: &[u8; 8],
     expected_mic: &[u8],
     packet_data: &mut [u8],
-) -> bool {
+) -> Result<(), ()> {
     // Phase 0: Handle empty packet special case
     if packet_data.len() == 0 {
         // For empty packets, create an authentication block with specific format
@@ -239,7 +239,10 @@ pub fn aes_att_decryption_packet(
 
         // Verify expected MIC matches the calculated tag by comparing the first n bytes
         // where n is the length of expected_mic
-        return expected_mic[0..expected_mic.len()] == auth_tag[0..expected_mic.len()];
+        if expected_mic[0..expected_mic.len()] == auth_tag[0..expected_mic.len()] {
+            return Ok(());
+        }
+        return Err(());
     }
 
     // For non-empty packets, decryption happens in multiple phases:
@@ -308,7 +311,11 @@ pub fn aes_att_decryption_packet(
     }
 
     // Verify the integrity by comparing the expected MIC with the calculated authentication tag (MIC)
-    expected_mic[0..expected_mic.len()] == auth_value[0..expected_mic.len()]
+    if expected_mic[0..expected_mic.len()] == auth_value[0..expected_mic.len()] {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Encrypts a packet using AES-128 algorithm with authenticated encryption (CCM-like mode).
@@ -960,7 +967,10 @@ mod tests {
         mock_aes_att_encryption(&key, &expected_ivs).assert_called(1);
 
         // Verify correct result (should match first 3 bytes of expected_encrypted)
-        assert_eq!(result, expected_encrypted[0..3] == expected_mic[0..3]);
+        assert_eq!(
+            result.is_ok(),
+            expected_encrypted[0..3] == expected_mic[0..3]
+        );
     }
 
     #[test]
@@ -1023,7 +1033,7 @@ mod tests {
         // The second encryption call is used to compute ivs for validation
         // Verify the final result based on expected_mic and ivs
         assert_eq!(
-            result,
+            result.is_ok(),
             second_encryption[0..expected_mic.len()] == expected_mic
         );
     }
@@ -1075,7 +1085,7 @@ mod tests {
 
         // Assert
         // For empty expected_mic, should always return true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify packet data was properly transformed
         // First 16 bytes are processed using first encryption result
@@ -1133,7 +1143,7 @@ mod tests {
 
         // Assert
         // Should return true because expected_mic matches the first 4 bytes of final_encryption
-        assert_eq!(result, true);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1179,7 +1189,7 @@ mod tests {
 
         // Assert
         // Should return false because expected_mic does not match the first 4 bytes of final_encryption
-        assert_eq!(result, false);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1228,7 +1238,7 @@ mod tests {
         let result = aes_att_decryption_packet(&key, &ivm, &expected_mic, &mut packet_data);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify all bytes were properly transformed
         for i in 0..16 {
@@ -1297,7 +1307,7 @@ mod tests {
         // Assert
         // The validation should succeed as we've set up the fifth encryption result
         // to match the expected_mic value in its first three bytes
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify that proper number of encryption calls were made
         // The exact number depends on the complexity of the algorithm

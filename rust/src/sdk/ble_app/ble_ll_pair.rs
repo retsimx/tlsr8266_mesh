@@ -86,10 +86,10 @@ const LGT_CMD_PAIR_OK: u8 = 0xc5; // Pairing successful
 /// @param ps The packet to decrypt
 /// @return true if decryption was successful, false otherwise
 #[cfg_attr(test, mry::mry)]
-pub fn pair_dec_packet(ps: &mut Packet) -> bool {
+pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
     // Early return if security is not enabled
     if !SECURITY_ENABLE.get() {
-        return false;
+        return Err(());
     }
 
     let mut pair_ivm = PAIR_IVM.lock();
@@ -111,7 +111,7 @@ pub fn pair_dec_packet(ps: &mut Packet) -> bool {
     let pair_sk = &PAIR_STATE.lock().pair_sk;
 
     // Perform decryption using AES-CCM
-    unsafe {
+    let result = unsafe {
         // Create data slice and decrypt in-place
         let data = slice_from_raw_parts_mut(data_ptr, data_len);
         aes_att_decryption_packet(
@@ -120,6 +120,11 @@ pub fn pair_dec_packet(ps: &mut Packet) -> bool {
             &src,       // Expected MIC (Message Integrity Check)
             &mut *data, // Data to decrypt (in place)
         )
+    };
+    if result.is_ok() {
+        Ok(())
+    } else {
+        Err(())
     }
 }
 
@@ -198,22 +203,22 @@ pub fn pair_enc_packet(ps: &mut Packet) {
 /// @param ps The mesh packet to decrypt
 /// @return true if decryption was successful, false otherwise
 #[cfg_attr(test, mry::mry)]
-pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
+pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
     // Early return if security is disabled - we treat packets as already decrypted
     if !SECURITY_ENABLE.get() {
-        return true;
+        return Ok(());
     }
 
     // Validate this packet has the encryption flag set
     if ps.head()._type & PACKET_TYPE_ENCRYPTED == 0 {
-        return false;
+        return Err(());
     }
 
     // Check if packet length is within valid range for decryption
     let rf_len = ps.head().rf_len;
     let payload_len = rf_len - 0x12;
     if payload_len > 0x13 {
-        return false;
+        return Err(());
     }
 
     // Get the long-term key for mesh decryption
@@ -222,7 +227,7 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
     // Decrypt the packet based on its type (broadcast vs directed)
     let is_broadcast = ps.head().chan_id == MESH_BROADCAST_CHANNEL;
 
-    if is_broadcast {
+    let result = if is_broadcast {
         // Broadcast packet structure:
         // - IV: first 8 bytes starting from rf_len
         // - Expected MIC: 2 bytes from internal_par2[1]
@@ -251,6 +256,11 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
                 slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len as usize)
             }, // Data
         )
+    };
+    if result.is_ok() {
+        Ok(())
+    } else {
+        Err(())
     }
 }
 
@@ -259,7 +269,7 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> bool {
 ///
 /// @param ps The mesh packet to encrypt
 /// @return true if encryption was successful, false otherwise
-pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool {
+pub fn pair_enc_packet_mesh(ps: &mut Packet) {
     // Only proceed with encryption if security is enabled
     if SECURITY_ENABLE.get() {
         // Get access to the long-term key used for mesh encryption
@@ -286,7 +296,7 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool {
             // Perform encryption using AES-CCM
             aes_att_encryption_packet(pair_ltk, iv, dst, payload); // dst is the mic_output buffer
 
-            return true;
+            return;
         } else {
             // Direct mesh packet encryption
             // - Use IV from packet's handle1 field (8 bytes)
@@ -305,12 +315,8 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) -> bool {
 
             // Perform encryption using AES-CCM
             aes_att_encryption_packet(pair_ltk, iv, dst, payload); // dst is the mic_output buffer
-
-            return true;
         }
     }
-
-    false
 }
 
 /// Save pairing configuration data to flash memory
@@ -705,10 +711,8 @@ pub fn pair_set_key(key: &[u8]) {
 /// has been received and needs to be processed by the pair_proc function.
 ///
 /// @param _ Unused packet parameter
-/// @return Always returns true to indicate success
-pub fn pair_read(_: &Packet) -> bool {
+pub fn pair_read(_: &Packet) {
     PAIR_READ_PENDING.set(true);
-    true
 }
 
 /// Process pairing commands from a connected BLE device
@@ -735,8 +739,8 @@ pub fn pair_read(_: &Packet) -> bool {
 /// 5. Maintenance - Delete pairing information or reset mesh
 ///
 /// @param data Packet containing the pairing command
-/// @return Always returns true to indicate the command was processed
-pub fn pair_write(data: &Packet) -> bool {
+/// Processing pair_write commands always completes; the function has void return.
+pub fn pair_write(data: &Packet) {
     let pktdata = &data.att_val().value;
     let opcode = pktdata[0];
     let src = &pktdata[1..];
@@ -751,7 +755,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 .pair_randm
                 .copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
             BLE_PAIR_ST.set(PairState::AwaitingRandom);
-            return true;
+            return;
         }
 
         // --- Step 2: Network Provisioning - Set Network Name ---
@@ -763,7 +767,7 @@ pub fn pair_write(data: &Packet) -> bool {
                     pair_state.pair_nn.copy_from_slice(&src[0..KEY_SIZE]);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
                     BLE_PAIR_ST.set(PairState::ReceivingMeshName);
-                    return true;
+                    return;
                 }
             } else if BLE_PAIR_ST.get() == PairState::Completed {
                 // Secure mode: Decrypt and validate the mesh name
@@ -780,14 +784,14 @@ pub fn pair_write(data: &Packet) -> bool {
                 if name_len <= MAX_MESH_NAME_LEN {
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
                     BLE_PAIR_ST.set(PairState::ReceivingMeshName);
-                    return true;
+                    return;
                 }
             }
 
             // Invalid mesh name or state - reset pairing
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
-            return true;
+            return;
         }
 
         // --- Step 3: Network Provisioning - Set Network Password ---
@@ -798,7 +802,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 if BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
                     pair_par_init();
                     PAIR_ENC_ENABLE.set(false);
-                    return true;
+                    return;
                 }
 
                 // Decrypt password using session key
@@ -810,7 +814,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
                     pair_par_init();
                     PAIR_ENC_ENABLE.set(false);
-                    return true;
+                    return;
                 }
 
                 // Store plaintext password
@@ -822,13 +826,13 @@ pub fn pair_write(data: &Packet) -> bool {
 
             // Security check: Password must differ from network name
             if pair_state.pair_nn != pair_state.pair_pass {
-                return true;
+                return;
             }
 
             // Password identical to name - security violation
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
-            return true;
+            return;
         }
 
         // --- Step 4: Network Provisioning - Set LTK ---
@@ -845,7 +849,7 @@ pub fn pair_write(data: &Packet) -> bool {
                     pair_par_init();
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                     PAIR_ENC_ENABLE.set(false);
-                    return true;
+                    return;
                 }
 
                 // Process encrypted LTK
@@ -858,7 +862,7 @@ pub fn pair_write(data: &Packet) -> bool {
                     pair_state.pair_ltk_mesh =
                         aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
-                    return true;
+                    return;
                 }
 
                 // Regular mode: Decrypt standard LTK
@@ -867,7 +871,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                 rf_link_light_event_callback(LGT_CMD_PAIR_OK);
-                return true;
+                return;
             }
             // Simple mode handling
             else if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::ReceivingMeshPassword {
@@ -883,7 +887,7 @@ pub fn pair_write(data: &Packet) -> bool {
                     // Mesh mode: Store plaintext mesh LTK
                     pair_state.pair_ltk_mesh.copy_from_slice(&src[0..KEY_SIZE]);
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
-                    return true;
+                    return;
                 }
 
                 // Regular mode: Store plaintext standard LTK
@@ -891,27 +895,27 @@ pub fn pair_write(data: &Packet) -> bool {
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                 rf_link_light_event_callback(LGT_CMD_PAIR_OK);
-                return true;
+                return;
             }
 
             // Invalid state - reset pairing
             pair_par_init();
             *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
             PAIR_ENC_ENABLE.set(false);
-            return true;
+            return;
         }
 
         // --- Step 5: Pair Maintenance - Delete Pairing ---
         PAIR_OP_DELETE_PAIRING => {
             PAIR_ENC_ENABLE.set(false);
             BLE_PAIR_ST.set(PairState::Idle);
-            return true;
+            return;
         }
 
         // --- Step 5: Pair Maintenance - Reset Mesh ---
         PAIR_OP_RESET_MESH => {
             // No specific action yet for reset mesh
-            return true;
+            return;
         }
 
         // --- Combined handling for LTK Request and Credential Verification ---
@@ -959,7 +963,7 @@ pub fn pair_write(data: &Packet) -> bool {
                 if PAIR_LOGIN_OK.get() && verification_succeeded {
                     // Verification succeeded: transition to RequestingLtk
                     BLE_PAIR_ST.set(PairState::RequestingLtk);
-                    return true;
+                    return;
                 }
                 // GET_MESH_LTK failed: either not logged in or verification failed
                 // Fall through to reset pairing
@@ -971,7 +975,7 @@ pub fn pair_write(data: &Packet) -> bool {
                     // Mark as logged in and move to key exchange
                     PAIR_LOGIN_OK.set(true);
                     BLE_PAIR_ST.set(PairState::SessionKeyExchange);
-                    return true;
+                    return;
                 }
                 // Verification failed: clear any login status
                 PAIR_LOGIN_OK.set(false);
@@ -979,13 +983,13 @@ pub fn pair_write(data: &Packet) -> bool {
 
             // Reset pairing on verification failure or if we reach here
             pair_par_init();
-            return true;
+            return;
         }
 
         // --- Default: Unknown or unsupported opcode ---
         _ => {
             // No specific handling for unknown opcodes
-            return true;
+            return;
         }
     }
 }
@@ -1059,7 +1063,7 @@ mod tests {
         let result = pair_dec_packet(&mut packet);
 
         // Assert
-        assert_eq!(result, false);
+        assert!(result.is_err());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
     }
 
@@ -1071,13 +1075,13 @@ mod tests {
         let mut packet = create_test_packet();
 
         // Mock successful decryption with Any for all arguments
-        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(true);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(Ok(()));
 
         // Act
         let result = pair_dec_packet(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify the IV was updated with sequence number
         let pair_ivm = PAIR_IVM.lock();
@@ -1097,13 +1101,13 @@ mod tests {
         let mut packet = create_test_packet();
 
         // Mock failed decryption with Any for all arguments
-        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(Err(()));
 
         // Act
         let result = pair_dec_packet(&mut packet);
 
         // Assert
-        assert_eq!(result, false);
+        assert!(result.is_err());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1116,13 +1120,13 @@ mod tests {
         packet.att_write_mut().value.sno = [0xF1, 0xF2, 0xF3]; // Different sequence number
 
         // Mock decryption with Any for all arguments
-        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(true);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(Ok(()));
 
         // Act
         let result = pair_dec_packet(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify IV was updated with new sequence number
         let pair_ivm = PAIR_IVM.lock();
@@ -1142,7 +1146,7 @@ mod tests {
 
         // Setup expectation with parameter validation
         mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
-            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> Result<(), ()> {
                 // Validate session key
                 assert_eq!(sk, &[0xBB; 16]);
 
@@ -1157,7 +1161,7 @@ mod tests {
                 // Payload data length check (not checking contents due to complexity)
                 assert_eq!(data.len(), packet.head().l2cap_len as usize - 8);
 
-                true
+                Ok(())
             },
         );
 
@@ -1165,7 +1169,7 @@ mod tests {
         let result = pair_dec_packet(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1414,7 +1418,7 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true); // Should return true when security is disabled
+        assert!(result.is_ok()); // Should return true when security is disabled
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
     }
 
@@ -1430,7 +1434,7 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, false); // Should return false when encryption flag is not set
+        assert!(result.is_err()); // Should return false when encryption flag is not set
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
     }
 
@@ -1446,7 +1450,7 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, false); // Should return false for invalid length
+        assert!(result.is_err()); // Should return false for invalid length
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(0);
     }
 
@@ -1463,7 +1467,7 @@ mod tests {
 
         // Mock successful decryption
         mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
-            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> Result<(), ()> {
                 // Check LTK was passed correctly
                 assert_eq!(sk, &[0xDD; 16]);
                 // Check IV and src aren't empty (detailed checking is complex due to pointers)
@@ -1473,7 +1477,7 @@ mod tests {
                 // Check data length for broadcast packets
                 assert_eq!(data.len(), 0x1c);
 
-                true
+                Ok(())
             },
         );
 
@@ -1482,7 +1486,7 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify mock was called with correct parameters
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1)
@@ -1499,13 +1503,13 @@ mod tests {
         PAIR_STATE.lock().pair_ltk.fill(0xDD);
 
         // Mock failed decryption
-        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(Err(()));
 
         // Act
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, false);
+        assert!(result.is_err());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1531,19 +1535,19 @@ mod tests {
         }
 
         mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
-            move |_sk: Vec<u8>, _iv: Vec<u8>, mic: Vec<u8>, _data: Vec<u8>| -> bool {
+            move |_sk: Vec<u8>, _iv: Vec<u8>, mic: Vec<u8>, _data: Vec<u8>| -> Result<(), ()> {
                 // MIC must be [0xBB, 0xCC] from offset 41-42
                 assert_eq!(
                     mic,
                     vec![0xBB, 0xCC],
                     "Broadcast MIC must be read from internal_par2[1] at offset 41"
                 );
-                true
+                Ok(())
             },
         );
 
         let result = pair_dec_packet_mesh(&mut packet);
-        assert!(result);
+        assert!(result.is_ok());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1649,8 +1653,7 @@ mod tests {
             },
         );
 
-        let result = pair_enc_packet_mesh(&mut packet);
-        assert!(result);
+        pair_enc_packet_mesh(&mut packet);
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1667,7 +1670,7 @@ mod tests {
 
         // Mock successful decryption
         mock_aes_att_decryption_packet(Any, Any, Any, Any).returns_with(
-            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> bool {
+            move |sk: Vec<u8>, iv: Vec<u8>, src: Vec<u8>, data: Vec<u8>| -> Result<(), ()> {
                 // Check LTK was passed correctly
                 assert_eq!(sk, &[0xEE; 16]);
                 // Check IV and src aren't empty (detailed checking is complex due to pointers)
@@ -1677,7 +1680,7 @@ mod tests {
                 // Check data length for broadcast packets
                 assert_eq!(data.len(), 0x20 - 0x12);
 
-                true
+                Ok(())
             },
         );
 
@@ -1685,7 +1688,7 @@ mod tests {
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify mock was called with correct parameters for direct packets
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1)
@@ -1702,13 +1705,13 @@ mod tests {
         PAIR_STATE.lock().pair_ltk.fill(0xEE);
 
         // Mock failed decryption
-        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(false);
+        mock_aes_att_decryption_packet(Any, Any, Any, Any).returns(Err(()));
 
         // Act
         let result = pair_dec_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, false);
+        assert!(result.is_err());
         mock_aes_att_decryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1720,10 +1723,9 @@ mod tests {
         let mut packet = create_test_mesh_packet(false);
 
         // Act
-        let result = pair_enc_packet_mesh(&mut packet);
+        pair_enc_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, false); // Should return false when security is disabled
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(0);
     }
 
@@ -1741,10 +1743,9 @@ mod tests {
         mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
 
         // Act
-        let result = pair_enc_packet_mesh(&mut packet);
+        pair_enc_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1776,10 +1777,9 @@ mod tests {
         );
 
         // Act
-        let result = pair_enc_packet_mesh(&mut packet);
+        pair_enc_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1798,10 +1798,9 @@ mod tests {
         mock_aes_att_encryption_packet(Any, Any, Any, Any).returns(());
 
         // Act
-        let result = pair_enc_packet_mesh(&mut packet);
+        pair_enc_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1834,10 +1833,9 @@ mod tests {
         );
 
         // Act
-        let result = pair_enc_packet_mesh(&mut packet);
+        pair_enc_packet_mesh(&mut packet);
 
         // Assert
-        assert_eq!(result, true);
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(1);
     }
 
@@ -1872,10 +1870,9 @@ mod tests {
             packet.head_mut().rf_len = rf_len; // Set specific RF length for testing
 
             // Act
-            let result = pair_enc_packet_mesh(&mut packet);
+            pair_enc_packet_mesh(&mut packet);
 
             // Assert
-            assert_eq!(result, true);
         }
 
         mock_aes_att_encryption_packet(Any, Any, Any, Any).assert_called(3);
@@ -2872,11 +2869,10 @@ mod tests {
         };
 
         // Act
-        let result = pair_read(&dummy_packet);
+        pair_read(&dummy_packet);
 
         // Assert
         assert_eq!(PAIR_READ_PENDING.get(), true); // Verify the flag is set
-        assert_eq!(result, true); // Verify the function returns true
     }
 
     #[test]
@@ -2903,10 +2899,9 @@ mod tests {
         pkt.att_val_mut().value[1..1 + test_random.len()].copy_from_slice(&test_random);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::AwaitingRandom);
 
         // Verify the random challenge was stored
@@ -2949,10 +2944,9 @@ mod tests {
         // Note: MAX_MESH_NAME_LEN is now a const, so no need to set it
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
 
@@ -2985,10 +2979,9 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_name.len()].copy_from_slice(plaintext_name);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
 
@@ -3025,10 +3018,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Check that pairing was reset
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -3064,10 +3056,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Check that pairing was reset
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -3117,10 +3108,9 @@ mod tests {
         mock_aes_att_decryption(Any, encrypted_pass.to_vec()).returns(*decrypted_pass);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshPassword);
 
         // Verify password was stored after decryption
@@ -3159,10 +3149,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Check that pairing was reset
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -3204,10 +3193,9 @@ mod tests {
         }
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshPassword);
 
         // Verify password was stored directly
@@ -3256,10 +3244,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Check that pairing was reset due to security violation
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -3312,10 +3299,9 @@ mod tests {
         mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
 
@@ -3374,10 +3360,9 @@ mod tests {
         mock_aes_att_decryption(Any, encrypted_ltk.to_vec()).returns(*decrypted_mesh_ltk);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
 
@@ -3427,10 +3412,9 @@ mod tests {
         mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
 
@@ -3479,10 +3463,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Check that pairing was reset
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Should be set to PairSetted upon failure
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
@@ -3528,10 +3511,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert - Verify fallthrough path (lines 890-892)
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Line 890: pair_par_init() called
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
         assert_eq!(PAIR_ENC_ENABLE.get(), false); // Line 892: PAIR_ENC_ENABLE cleared
@@ -3559,10 +3541,9 @@ mod tests {
         pkt.att_val_mut().value[0] = PAIR_OP_DELETE_PAIRING;
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -3593,10 +3574,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         // RESET_MESH doesn't call pair_par_init currently, so we don't assert it was called
         // Currently the function doesn't change the state for this opcode
     }
@@ -3644,10 +3624,9 @@ mod tests {
             .copy_from_slice(&expected_credential_proof);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::SessionKeyExchange);
         assert_eq!(PAIR_LOGIN_OK.get(), true);
 
@@ -3698,10 +3677,9 @@ mod tests {
         mock_aes_att_encryption(Any, Any).returns(expected_work);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::SessionKeyExchange);
         assert_eq!(PAIR_LOGIN_OK.get(), true);
         assert_eq!(PAIR_ENC_ENABLE.get(), false); // Temporarily disabled during verification
@@ -3759,10 +3737,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(PAIR_LOGIN_OK.get(), false); // Login should fail
         mock_pair_par_init().assert_called(1); // Check that pairing was reset
     }
@@ -3812,10 +3789,9 @@ mod tests {
             .copy_from_slice(&expected_credential_proof);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::RequestingLtk);
 
         // Verify the random challenge was stored
@@ -3865,10 +3841,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Verify reset was called
     }
 
@@ -3917,10 +3892,9 @@ mod tests {
             .copy_from_slice(&expected_credential_proof);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
 
         // Verify that session key was copied (line 916)
         // The copy should contain the original session key before modification
@@ -3977,15 +3951,13 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert - Verify fallthrough path (lines 964-968)
-        assert_eq!(result, true);
         // Since we're not logged in and this is GET_MESH_LTK (not verify),
         // the condition at line 950 (is_verify || PAIR_LOGIN_OK.get()) fails
         // So we skip the block and fall through to pair_par_init() at line 964
         mock_pair_par_init().assert_called(1); // Line 964: pair_par_init() called
-                                               // Line 965: return true
     }
 
     #[test]
@@ -4027,10 +3999,9 @@ mod tests {
         // Note: MAX_MESH_NAME_LEN is now a const
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
 
@@ -4079,10 +4050,9 @@ mod tests {
         // MAX_MESH_NAME_LEN is now a const (16), so this 16-byte name should be accepted
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
 
         // Verify pairing accepted the mesh name and transitioned to next state
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
@@ -4124,10 +4094,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Verify pairing was reset
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -4160,10 +4129,9 @@ mod tests {
         mock_pair_par_init().returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         mock_pair_par_init().assert_called(1); // Verify pairing was reset
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
@@ -4208,10 +4176,9 @@ mod tests {
         pkt.att_val_mut().value[MESH_FLAG_OFFSET] = 0x80; // Set the high bit for mesh flag
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
 
@@ -4267,10 +4234,9 @@ mod tests {
         mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow, not the mesh LTK
@@ -4328,10 +4294,9 @@ mod tests {
         mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow even with 0x80 bit set, because mesh is disabled
@@ -4391,10 +4356,9 @@ mod tests {
         mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow because packet is too short
@@ -4456,10 +4420,9 @@ mod tests {
         mock_aes_att_decryption(Any, encrypted_mesh_ltk.to_vec()).returns(*decrypted_mesh_ltk);
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
 
@@ -4496,9 +4459,8 @@ mod tests {
         pkt.att_val_mut().value[0] = UNKNOWN_OPCODE;
 
         // Act
-        let result = pair_write(&pkt);
+        pair_write(&pkt);
 
-        // Assert - Should hit default case and return true
-        assert_eq!(result, true, "Unknown opcode should be handled gracefully");
+        // Assert - Default case with unknown opcode is handled gracefully
     }
 }

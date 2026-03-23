@@ -129,19 +129,23 @@ fn update_packet_lengths(pkt: &mut crate::sdk::packet_types::Packet, total_data_
 }
 
 /// Helper function to clear all groups from memory
-fn clear_all_groups_from_memory() -> bool {
+fn clear_all_groups_from_memory() -> Result<(), ()> {
     critical_section::with(|_| {
         let mut groups = GROUP_ADDRESS.lock();
         let had_groups = groups.iter().any(|&addr| addr != 0);
 
         groups.iter_mut().for_each(|addr| *addr = 0);
 
-        had_groups
+        if had_groups {
+            Ok(())
+        } else {
+            Err(())
+        }
     })
 }
 
 /// Helper function to clear specific group from memory
-fn clear_specific_group_from_memory(group_id: u16) -> bool {
+fn clear_specific_group_from_memory(group_id: u16) -> Result<(), ()> {
     critical_section::with(|_| {
         GROUP_ADDRESS
             .lock()
@@ -149,14 +153,14 @@ fn clear_specific_group_from_memory(group_id: u16) -> bool {
             .find(|addr| **addr == group_id)
             .map(|addr| {
                 *addr = 0;
-                true
+                Ok(())
             })
-            .unwrap_or(false)
+            .unwrap_or(Err(()))
     })
 }
 
 /// Helper function to delete groups from flash storage
-fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> bool {
+fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
     let initial_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
     let mut found_any = false;
     let mut groups_deleted = 0;
@@ -187,7 +191,11 @@ fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> bool {
         }
     }
 
-    found_any
+    if found_any {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 fn read_group_address(flash_addr: u32) -> u16 {
@@ -465,9 +473,9 @@ pub fn compact_flash_storage() {
 /// - Address must conform to `DEVICE_ADDR_MASK_DEFAULT`
 /// - Address must differ from current device address
 #[cfg_attr(test, mry::mry)]
-pub fn add_device_address(dev_id: u16) -> bool {
+pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
     // Validate the device ID
-    let mut result = false;
+    let mut success = false;
 
     // Device ID must be non-zero and conform to the device address mask
     // Also must be different from the current device address
@@ -505,10 +513,14 @@ pub fn add_device_address(dev_id: u16) -> bool {
         // Notify application of address change
         rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED);
 
-        result = true;
+        success = true;
     }
 
-    return result;
+    if success {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Removes a group address from the mesh network
@@ -531,12 +543,12 @@ pub fn add_device_address(dev_id: u16) -> bool {
 /// - For delete-all: removes up to 8 group entries to prevent excessive flash wear
 /// - Only processes entries identified as group addresses (not device addresses)
 #[cfg_attr(test, mry::mry)]
-pub fn remove_group(group_id: u16) -> bool {
+pub fn remove_group(group_id: u16) -> Result<(), ()> {
     let grp_next_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
 
     // Early exit if no groups are stored
     if grp_next_pos == 0 {
-        return false;
+        return Err(());
     }
 
     let is_delete_all = group_id == GROUP_DELETE_ALL;
@@ -551,8 +563,12 @@ pub fn remove_group(group_id: u16) -> bool {
     // Clear groups from flash storage
     let flash_cleared = delete_groups_from_flash(group_id, is_delete_all);
 
-    // Return true if either memory or flash was modified
-    memory_cleared || flash_cleared
+    // Return Ok(()) if either memory or flash was modified
+    if memory_cleared.is_ok() || flash_cleared.is_ok() {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Adds a new group address to the mesh network with rotation policy
@@ -582,7 +598,7 @@ pub fn remove_group(group_id: u16) -> bool {
 /// - Appends to flash storage log for persistence
 /// - Triggers flash compaction if storage space is low
 #[cfg_attr(test, mry::mry)]
-pub fn add_group(group_id: u16) -> bool {
+pub fn add_group(group_id: u16) -> Result<(), ()> {
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
 
@@ -599,7 +615,7 @@ pub fn add_group(group_id: u16) -> bool {
             for index in 0..MAX_GROUP_COUNT as usize {
                 // Return if group already exists
                 if group_id == GROUP_ADDRESS.lock()[index] {
-                    return false;
+                    return Err(());
                 }
 
                 // Found empty slot, add group here
@@ -618,7 +634,7 @@ pub fn add_group(group_id: u16) -> bool {
                         (MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize
                             + DEVICE_ADDR_SIZE as usize) as u16,
                     );
-                    return true;
+                    return Ok(());
                 }
             }
 
@@ -629,7 +645,7 @@ pub fn add_group(group_id: u16) -> bool {
 
             // Remove the oldest group
             let oldest_index = OLDEST_POS.load(Ordering::Relaxed);
-            remove_group(GROUP_ADDRESS.lock()[oldest_index]);
+            let _ = remove_group(GROUP_ADDRESS.lock()[oldest_index]);
 
             // Add new group in its place
             GROUP_ADDRESS.lock()[oldest_index] = group_id;
@@ -652,10 +668,10 @@ pub fn add_group(group_id: u16) -> bool {
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(
             (MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize + DEVICE_ADDR_SIZE as usize) as u16,
         );
-        return true;
+        return Ok(());
     }
 
-    return false;
+    return Err(());
 }
 
 #[cfg(test)]
@@ -1149,7 +1165,7 @@ mod tests {
         let result = add_device_address(dev_id);
 
         // Verify function returns true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify device address is set in memory
         assert_eq!(DEVICE_ADDRESS.get(), dev_id);
@@ -1180,7 +1196,7 @@ mod tests {
         let result = add_device_address(0);
 
         // Verify function returns false
-        assert_eq!(result, false);
+        assert!(result.is_err());
 
         // Verify device address remains unchanged
         assert_eq!(DEVICE_ADDRESS.get(), 0);
@@ -1198,7 +1214,7 @@ mod tests {
         let result = add_device_address(invalid_dev_id);
 
         // Verify function returns false
-        assert_eq!(result, false);
+        assert!(result.is_err());
 
         // Verify device address remains unchanged
         assert_eq!(DEVICE_ADDRESS.get(), 0);
@@ -1217,7 +1233,7 @@ mod tests {
         let result = add_device_address(dev_id);
 
         // Verify function returns false
-        assert_eq!(result, false);
+        assert!(result.is_err());
     }
 
     /// Tests rf_link_add_dev_addr replacing existing address
@@ -1242,7 +1258,7 @@ mod tests {
         let result = add_device_address(new_dev_id);
 
         // Verify function returns true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify new device address is set
         assert_eq!(DEVICE_ADDRESS.get(), new_dev_id);
@@ -1268,7 +1284,7 @@ mod tests {
         let result = remove_group(0x1234);
 
         // Verify function returns false
-        assert_eq!(result, false);
+        assert!(result.is_err());
     }
 
     /// Tests rf_link_del_group deleting all groups
@@ -1304,7 +1320,7 @@ mod tests {
         let result = remove_group(GROUP_DELETE_ALL);
 
         // Verify function returns true (flash operations find valid group addresses)
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify all groups are cleared in memory
         critical_section::with(|_| {
@@ -1347,7 +1363,7 @@ mod tests {
         let result = remove_group(0x8002);
 
         // Verify function returns true (found and deleted the target group)
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify specific group is cleared (the one that matches)
         critical_section::with(|_| {
@@ -1372,7 +1388,7 @@ mod tests {
         let result = add_group(group_id);
 
         // Verify function returns true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify group is added to memory
         critical_section::with(|_| {
@@ -1401,7 +1417,7 @@ mod tests {
         let result = add_group(invalid_group_id);
 
         // Verify function returns false
-        assert_eq!(result, false);
+        assert!(result.is_err());
 
         // Verify no group is added
         critical_section::with(|_| {
@@ -1423,14 +1439,14 @@ mod tests {
         let group_id = 0x8001; // Valid group ID that should succeed initially
 
         // Add group first time
-        assert_eq!(add_group(group_id), true);
+        assert!(add_group(group_id).is_ok());
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
 
         // Try to add same group again
         let result = add_group(group_id);
 
         // Verify function returns false and no additional flash write occurs
-        assert_eq!(result, false);
+        assert!(result.is_err());
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
     }
 
@@ -1445,7 +1461,7 @@ mod tests {
 
         // Mock flash operations
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        mock_remove_group(mry::Any).returns(true);
+        mock_remove_group(mry::Any).returns(Ok(()));
 
         // Fill all group slots with valid group IDs
         for i in 0..crate::sdk::light::MAX_GROUP_COUNT as u16 {
@@ -1459,7 +1475,7 @@ mod tests {
         let result = add_group(new_group_id);
 
         // Verify function returns true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify oldest group is replaced (first one due to rotation)
         critical_section::with(|_| {
@@ -1491,7 +1507,7 @@ mod tests {
         let result = add_group(new_group_id);
 
         // Verify function returns true
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify group is added to first empty slot
         critical_section::with(|_| {
@@ -1523,7 +1539,7 @@ mod tests {
             },
         );
 
-        assert!(!delete_groups_from_flash(0x9555, false));
+        assert!(delete_groups_from_flash(0x9555, false).is_err());
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(0);
     }
 
@@ -1543,7 +1559,7 @@ mod tests {
         );
         mock_flash_write_page(flash_addr, DEVICE_ADDR_SIZE, mry::Any).returns(());
 
-        assert!(delete_groups_from_flash(group_id, false));
+        assert!(delete_groups_from_flash(group_id, false).is_ok());
         mock_flash_write_page(flash_addr, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
     }
 
@@ -1566,7 +1582,7 @@ mod tests {
             },
         );
 
-        assert!(!delete_groups_from_flash(0x8000, false));
+        assert!(delete_groups_from_flash(0x8000, false).is_err());
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(0);
     }
 
@@ -1593,7 +1609,7 @@ mod tests {
         );
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).returns(());
 
-        assert!(delete_groups_from_flash(0, true));
+        assert!(delete_groups_from_flash(0, true).is_ok());
         // The guard fires after the 8th deletion.
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(8);
     }

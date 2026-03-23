@@ -488,7 +488,7 @@ mod tests {
         // Create a UartDriver (mry makes it mockable)
         let mut driver = UartDriver::default();
         // Mock the send method to return true
-        driver.mock_send(Any).returns(true);
+        driver.mock_send(Any).returns(());
 
         // Create a UartManager with the mocked driver
         let mut uart_manager = UartManager::default();
@@ -517,7 +517,7 @@ mod tests {
         // Create a UartDriver (mry makes it mockable)
         let mut driver = UartDriver::default();
         // Mock the send method to return true
-        driver.mock_send(Any).returns(true);
+        driver.mock_send(Any).returns(());
 
         // Create a UartManager with the mocked driver
         let mut uart_manager = UartManager::default();

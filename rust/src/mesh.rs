@@ -319,6 +319,7 @@ impl MeshManager {
                 && rf_link_add_tx_packet(&Packet {
                     att_cmd: pkt_notify,
                 })
+                .is_ok()
             {
                 err = 0;
             }
@@ -932,7 +933,7 @@ mod tests {
         mock_sleep_us(1000).returns(());
         mock_write_reg_rf_irq_status(Any).returns(());
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Execute
         app.mesh_manager.mesh_pair_proc_effect();
@@ -975,7 +976,7 @@ mod tests {
         mock_pair_load_key().returns(());
         mock_pair_save_key().returns(());
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_link_light_event_callback(Any).returns(());
         mock_write_reg_rf_irq_status(Any).returns(());
@@ -1305,7 +1306,7 @@ mod tests {
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 2, 3]).unwrap();
 
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Execute
         let result = mesh_manager.mesh_cmd_notify(0x10, &params, 0x1234);
@@ -1352,7 +1353,7 @@ mod tests {
         let mesh_manager = MeshManager::default();
 
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Execute
         let result = mesh_manager.mesh_pair_complete_notify();
@@ -1414,7 +1415,7 @@ mod tests {
         mock_app_mocker().returns(&mut app);
 
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
         mock_mesh_node_init().returns(());
@@ -1454,7 +1455,7 @@ mod tests {
         mock_app_mocker().returns(&mut app);
 
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
         mock_mesh_node_init().returns(());
@@ -1494,7 +1495,7 @@ mod tests {
         mesh_manager.new_mesh_ltk = [3; 16];
 
         mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_pair_save_key().returns(());
         mock_rf_set_ble_access_code(0xABCDEF12).returns(());
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());

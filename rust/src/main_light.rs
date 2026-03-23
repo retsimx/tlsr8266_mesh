@@ -256,7 +256,10 @@ pub async fn main_loop() {
 Called to handle messages that require a response to be returned
 */
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValue) -> bool {
+pub fn rf_link_response_callback(
+    ppp: &mut PacketAttValue,
+    p_req: &PacketAttValue,
+) -> Result<(), ()> {
     // mac-app[5] low 2 bytes used as ttc && hop-count
     // let dst_unicast = is_unicast_addr(&p_req.dst);
     ppp.dst = p_req.src;
@@ -324,7 +327,8 @@ pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValu
         }
         GET_DEV_ADDR => {
             ppp.val[0] = LGT_CMD_DEV_ADDR_RSP | 0xc0;
-            return dev_addr_with_mac_rsp(&mut ppp.val);
+            dev_addr_with_mac_rsp(&mut ppp.val);
+            return Ok(());
         }
         GET_USER_NOTIFY => {
             /*user can get parameters from APP.
@@ -373,10 +377,10 @@ pub fn rf_link_response_callback(ppp: &mut PacketAttValue, p_req: &PacketAttValu
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
         }
-        _ => return false,
+        _ => return Err(()),
     }
 
-    true
+    Ok(())
 }
 
 /*@brief: This function is called in IRQ state, use IRQ stack.
@@ -406,10 +410,10 @@ pub fn rf_link_data_callback(p: &Packet) {
         LGT_CMD_LIGHT_CONFIG_GRP => {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
-                LIGHT_DEL_GRP_PARAM if remove_group(val) => {
+                LIGHT_DEL_GRP_PARAM if remove_group(val).is_ok() => {
                     cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                 }
-                LIGHT_ADD_GRP_PARAM if add_group(val) => {
+                LIGHT_ADD_GRP_PARAM if add_group(val).is_ok() => {
                     cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
                 }
                 _ => (),
@@ -418,7 +422,7 @@ pub fn rf_link_data_callback(p: &Packet) {
         LGT_CMD_CONFIG_DEV_ADDR => {
             let val = params[0] as u16 | ((params[1] as u16) << 8);
             if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params))
-                && add_device_address(val)
+                && add_device_address(val).is_ok()
             {
                 app()
                     .mesh_manager
@@ -1078,7 +1082,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_STATUS");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_STATUS"
+        );
         assert_eq!(
             response.dst, request.src,
             "Destination should be request source"
@@ -1111,7 +1118,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_GROUP1");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_GROUP1"
+        );
         assert_eq!(response.val[0], LGT_CMD_LIGHT_GRP_RSP1 | 0xc0);
         assert_eq!(response.val[3], 0x11, "First group address");
         assert_eq!(response.val[4], 0x22, "Second group address");
@@ -1142,7 +1152,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_GROUP2");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_GROUP2"
+        );
         assert_eq!(response.val[0], LGT_CMD_LIGHT_GRP_RSP2 | 0xc0);
         assert_eq!(response.val[3], 0xBB, "First group low byte");
         assert_eq!(response.val[4], 0xAA, "First group high byte");
@@ -1177,7 +1190,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_GROUP3");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_GROUP3"
+        );
         assert_eq!(response.val[0], LGT_CMD_LIGHT_GRP_RSP3 | 0xc0);
         assert_eq!(response.val[3], 0x22, "Fifth group low byte");
         assert_eq!(response.val[4], 0x11, "Fifth group high byte");
@@ -1190,7 +1206,7 @@ mod tests {
 
         // Setup
         DEVICE_ADDRESS.set(0x1234);
-        mock_dev_addr_with_mac_rsp(Any).returns(true);
+        mock_dev_addr_with_mac_rsp(Any).returns(());
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1202,7 +1218,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_DEV_ADDR");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_DEV_ADDR"
+        );
         assert_eq!(response.val[0], LGT_CMD_DEV_ADDR_RSP | 0xc0);
         mock_dev_addr_with_mac_rsp(Any).assert_called(1);
     }
@@ -1224,7 +1243,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for GET_USER_NOTIFY");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for GET_USER_NOTIFY"
+        );
         assert_eq!(response.val[0], LGT_CMD_USER_NOTIFY_RSP | 0xc0);
         assert_eq!(response.val[3], 0xCD); // Device address low byte
         assert_eq!(response.val[4], 0xAB); // Device address high byte
@@ -1256,7 +1278,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for CMD_START_OTA");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for CMD_START_OTA"
+        );
         assert_eq!(response.val[0], LGT_CMD_START_OTA_RSP | 0xc0);
         assert_eq!(response.val[3], (BUILD_VERSION & 0xFF) as u8);
         assert_eq!(response.val[4], ((BUILD_VERSION >> 8) & 0xFF) as u8);
@@ -1292,7 +1317,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for CMD_OTA_DATA");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for CMD_OTA_DATA"
+        );
         assert_eq!(response.val[0], LGT_CMD_OTA_DATA_RSP | 0xc0);
         assert_eq!(response.val[1], 0x34); // idx low byte
         assert_eq!(response.val[2], 0x12); // idx high byte
@@ -1325,7 +1353,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(result, "Callback should return true for CMD_END_OTA");
+        assert!(
+            result.is_ok(),
+            "Callback should return Ok(()) for CMD_END_OTA"
+        );
         assert_eq!(response.val[0], LGT_CMD_END_OTA_RSP | 0xc0);
         assert_eq!(response.val[1], 0xCD); // idx low byte
         assert_eq!(response.val[2], 0xAB); // idx high byte
@@ -1341,7 +1372,7 @@ mod tests {
         // Setup
         DEVICE_ADDRESS.set(0x1234);
 
-        let mut request = create_test_packet_att_value();
+        let request = create_test_packet_att_value();
 
         let mut response = create_test_packet_att_value();
         response.val[15] = 0xFF; // Invalid command
@@ -1350,7 +1381,10 @@ mod tests {
         let result = rf_link_response_callback(&mut response, &request);
 
         // Verify
-        assert!(!result, "Callback should return false for invalid command");
+        assert!(
+            result.is_err(),
+            "Callback should return Err(()) for invalid command"
+        );
     }
 
     // --- Tests for rf_link_data_callback ---
@@ -1428,7 +1462,7 @@ mod tests {
             params,
             0,
         ));
-        mock_remove_group(Any).returns(true);
+        mock_remove_group(Any).returns(Ok(()));
 
         // Execute
         rf_link_data_callback(&packet);
@@ -1475,7 +1509,7 @@ mod tests {
             params,
             0,
         ));
-        mock_remove_group(Any).returns(false);
+        mock_remove_group(Any).returns(Err(()));
 
         // Clear LED event before test
         LED_CONTROLLER.event_pending.set(0);
@@ -1528,7 +1562,7 @@ mod tests {
             params,
             0,
         ));
-        mock_add_group(Any).returns(true);
+        mock_add_group(Any).returns(Ok(()));
 
         // Execute
         rf_link_data_callback(&packet);
@@ -1572,7 +1606,7 @@ mod tests {
         ));
         mock_dev_addr_with_mac_flag(Any).returns(false);
         mock_dev_addr_with_mac_match(Any).returns(true);
-        mock_add_device_address(Any).returns(true);
+        mock_add_device_address(Any).returns(Ok(()));
 
         // Execute
         rf_link_data_callback(&packet);

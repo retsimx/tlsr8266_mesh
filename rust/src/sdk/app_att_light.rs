@@ -190,9 +190,9 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
-fn mesh_status_write(p: &Packet) -> bool {
+fn mesh_status_write(p: &Packet) {
     if !PAIR_LOGIN_OK.get() {
-        return true;
+        return;
     }
 
     // Access packet data safely through att_val
@@ -212,8 +212,6 @@ fn mesh_status_write(p: &Packet) -> bool {
         // Short packet: just enable/disable based on first byte
         mesh_report_status_enable(pktdata[0] != 0);
     }
-
-    true
 }
 
 #[derive(PartialEq)]
@@ -224,8 +222,8 @@ pub struct AttributeT {
     pub attr_max_len: u8,
     pub uuid: *const u8,
     pub p_attr_value: *mut u8,
-    pub w: Option<fn(data: &Packet) -> bool>,
-    pub r: Option<fn(data: &Packet) -> bool>,
+    pub w: Option<fn(data: &Packet)>,
+    pub r: Option<fn(data: &Packet)>,
 }
 
 #[macro_export]
@@ -503,10 +501,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert - Should return true immediately without processing
-        assert_eq!(result, true);
         // Verify neither function was called since not logged in
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).assert_called(0);
@@ -539,10 +536,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0x01][..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         // Verify mesh_report_status_enable was called with true (pktdata[0] != 0) and mask was not
         mock_mesh_report_status_enable(true).assert_called(1);
         mock_mesh_report_status_enable_mask(&[0x01][..]).assert_called(0);
@@ -575,10 +571,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0x00][..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         // Verify mesh_report_status_enable was called with false (pktdata[0] == 0) and mask was not
         mock_mesh_report_status_enable(false).assert_called(1);
         mock_mesh_report_status_enable_mask(&[0x00][..]).assert_called(0);
@@ -616,10 +611,9 @@ mod tests {
             .returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert - Should return true
-        assert_eq!(result, true);
         // Verify mask was called with first 7 bytes and enable was not
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
@@ -661,10 +655,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&test_data[..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert - Should return true
-        assert_eq!(result, true);
         // Verify mask was called with first 17 bytes and enable was not
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&test_data[..]).assert_called(1);
@@ -704,10 +697,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0x11][..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert
-        assert_eq!(result, true);
         // Verify enable was called with true (0x11 != 0) and mask was not
         mock_mesh_report_status_enable(true).assert_called(1);
         mock_mesh_report_status_enable_mask(&[0x11][..]).assert_called(0);
@@ -746,10 +738,9 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).returns(());
 
         // Act
-        let result = mesh_status_write(&pkt);
+        mesh_status_write(&pkt);
 
         // Assert - Should return true and call mesh_report_status_enable_mask
-        assert_eq!(result, true);
         // Verify mask was called with first 2 bytes (l2cap_len - 3) and enable was not
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).assert_called(1);

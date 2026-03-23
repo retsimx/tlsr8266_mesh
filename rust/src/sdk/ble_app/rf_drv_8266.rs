@@ -357,11 +357,11 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet) {
  * @return true if packet was successfully processed or is a duplicate, false otherwise
  */
 #[cfg_attr(test, mry::mry)]
-fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
+fn rf_link_slave_data_write_no_dec(data: &Packet) {
     // Validate minimum packet size requirement
     // RF length must be at least 0x11 bytes for valid command packets
     if data.head().rf_len < 0x11 {
-        return false;
+        return;
     }
 
     // Extract the sequence number from the packet
@@ -371,7 +371,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
     // Check if this is a duplicate packet (same sequence number as the last one)
     // Return true for duplicates to avoid reprocessing the same command
     if sno == *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() {
-        return true;
+        return;
     }
 
     // Extract operation command and parameters from the packet using the refactored function
@@ -399,7 +399,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
         // Validate mandatory parameter values for broadcast device address configuration
         // Parameters 0 and 1 must be 0xFF for this command type
         if params[0] != 0xff || params[1] != 0xff {
-            return false;
+            return;
         }
         // Construct 16-bit destination address from bytes 5-6
         dst_addr = (dst_addr << 8) | data.att_write().value.dst[0] as u32;
@@ -481,7 +481,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
         } else {
             SLAVE_DATA_VALID.set(0); // No bridge forwarding needed
         }
-        return true;
+        return;
     }
 
     // For notification request commands, prepare the status response
@@ -570,13 +570,13 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
 
         // Call the response callback to fill in application-specific status data
         // If the callback returns true, add the status packet to the response queue
-        if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt) {
+        if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt).is_ok() {
             rf_link_slave_add_status(&*pkt_light_status);
         }
     }
 
     // Return true to indicate successful packet processing
-    return true;
+    return;
 }
 
 /**
@@ -594,16 +594,17 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) -> bool {
  * @param data - Reference to the received packet data
  * @return true if packet was processed successfully, false otherwise
  */
-pub fn rf_link_slave_data_write(data: &Packet) -> bool {
+pub fn rf_link_slave_data_write(data: &Packet) {
     let mut data: Packet = data.clone();
 
     // Check if security is enabled and attempt packet decryption
-    if PAIR_LOGIN_OK.get() && pair_dec_packet(&mut data) {
+    if PAIR_LOGIN_OK.get() && pair_dec_packet(&mut data).is_ok() {
         // Process the decrypted packet
-        return rf_link_slave_data_write_no_dec(&mut data);
+        rf_link_slave_data_write_no_dec(&mut data);
+        return;
     }
 
-    return false;
+    return;
 }
 
 /**
@@ -2311,10 +2312,9 @@ mod tests {
         };
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Invalid packet length should return false
-        assert_eq!(result, false);
     }
 
     #[test]
@@ -2338,10 +2338,9 @@ mod tests {
         });
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Duplicate packet should return true (successful but no processing)
-        assert_eq!(result, true);
     }
 
     #[test]
@@ -2397,10 +2396,9 @@ mod tests {
         mock_rf_link_slave_read_status_stop().returns(());
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify callback was called
         mock_rf_link_data_callback(Any).assert_called(1);
@@ -2466,10 +2464,9 @@ mod tests {
         mock_rf_link_slave_read_status_stop().returns(());
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify callback was NOT called (no match)
         mock_rf_link_data_callback(Any).assert_called(0);
@@ -2518,10 +2515,9 @@ mod tests {
         mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true (doesn't fail, just uses default opcode 0)
-        assert_eq!(result, true);
 
         // Verify opcode was set to 0 (default case on line 387)
         assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0);
@@ -2566,10 +2562,9 @@ mod tests {
         mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return false due to invalid parameters for broadcast device config (lines 399-403)
-        assert_eq!(result, false);
     }
 
     #[test]
@@ -2633,7 +2628,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2645,10 +2640,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true and process the packet (line 403 is executed: dst_addr reassignment)
-        assert_eq!(result, true);
 
         // Verify sequence number was updated
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
@@ -2704,10 +2698,9 @@ mod tests {
         mock_rf_link_slave_read_status_stop().returns(());
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify read status stop was called (line 468)
         mock_rf_link_slave_read_status_stop().assert_called(1);
@@ -2793,7 +2786,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2805,10 +2798,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to params[0] * 2 + 1 = 5 * 2 + 1 = 11 (covers line 517)
         assert_eq!(SLAVE_DATA_VALID.get(), 11);
@@ -2884,7 +2876,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2896,10 +2888,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to params[3] * 2 + 1 = 7 * 2 + 1 = 15 (covers line 523)
         assert_eq!(SLAVE_DATA_VALID.get(), 15);
@@ -2967,7 +2958,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2979,10 +2970,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to BRIDGE_MAX_CNT * 2 + 1 (covers line 530)
         assert_eq!(SLAVE_DATA_VALID.get(), (BRIDGE_MAX_CNT as u32) * 2 + 1);
@@ -3050,7 +3040,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3062,10 +3052,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to 0 for direct device match (line 537)
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -3133,7 +3122,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3145,10 +3134,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify response type is set to 7 (covers line 500: LGT_CMD_USER_NOTIFY_REQ)
         critical_section::with(|_| {
@@ -3221,7 +3209,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3233,10 +3221,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to 0 for direct device match (line 537)
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -3303,7 +3290,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3315,10 +3302,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify SLAVE_DATA_VALID is set to 0 for direct device match (covers line 537)
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -3387,7 +3373,7 @@ mod tests {
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3399,10 +3385,9 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
 
         // Test the function
-        let result = rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec(&packet);
 
         // Should return true for successful processing
-        assert_eq!(result, true);
 
         // Verify callback was called
         mock_rf_link_data_callback(Any).assert_called(1);
@@ -3437,10 +3422,9 @@ mod tests {
         };
 
         // Act
-        let result = rf_link_slave_data_write(&packet);
+        rf_link_slave_data_write(&packet);
 
         // Assert - should return false when pairing not OK, without calling decryption or processing
-        assert_eq!(result, false);
         mock_pair_dec_packet(Any).assert_called(0);
         mock_rf_link_slave_data_write_no_dec(Any).assert_called(0);
     }
@@ -3461,13 +3445,12 @@ mod tests {
         };
 
         // Mock pair_dec_packet to return false (decryption fails)
-        mock_pair_dec_packet(Any).returns(false);
+        mock_pair_dec_packet(Any).returns(Err(()));
 
         // Act
-        let result = rf_link_slave_data_write(&packet);
+        rf_link_slave_data_write(&packet);
 
         // Assert - should return false when decryption fails, without calling processing
-        assert_eq!(result, false);
         mock_pair_dec_packet(Any).assert_called(1);
         mock_rf_link_slave_data_write_no_dec(Any).assert_called(0);
     }
@@ -3488,16 +3471,15 @@ mod tests {
         };
 
         // Mock successful decryption
-        mock_pair_dec_packet(Any).returns(true);
+        mock_pair_dec_packet(Any).returns(Ok(()));
 
         // Mock successful processing
-        mock_rf_link_slave_data_write_no_dec(Any).returns(true);
+        mock_rf_link_slave_data_write_no_dec(Any).returns(());
 
         // Act
-        let result = rf_link_slave_data_write(&packet);
+        rf_link_slave_data_write(&packet);
 
         // Assert - should return the result from rf_link_slave_data_write_no_dec
-        assert_eq!(result, true);
         mock_pair_dec_packet(Any).assert_called(1);
         mock_rf_link_slave_data_write_no_dec(Any).assert_called(1);
     }

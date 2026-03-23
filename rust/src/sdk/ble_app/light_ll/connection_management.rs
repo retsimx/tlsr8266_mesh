@@ -195,7 +195,7 @@ fn check_par_con(packet: &Packet) -> bool {
 /// - Mesh network state
 /// - System interrupts and timers
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool {
+pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
     // Initialize connection update tracking variables
     CONN_UPDATE_SUCCESSED.set(false);
     CONN_UPDATE_CNT.set(0);
@@ -330,10 +330,10 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) -> bool {
             // 0x67 = specific timing value for tx wait & settle time on TLSR8266
             write_reg8(0x00800f04, 0x67);
 
-            return true;
+            return;
         }
     }
-    return false;
+    return;
 }
 
 /// Implements adaptive timing adjustment algorithm for BLE slave connections.
@@ -738,7 +738,7 @@ mod tests {
 
         // Test with valid parameters - should return true (indicating valid)
         let result = check_par_con(&packet);
-        assert_eq!(result, true, "Valid parameters should pass validation");
+        assert!(result, "Connection should be established");
     }
 
     /// Tests check_par_con with invalid connection interval.
@@ -753,7 +753,7 @@ mod tests {
         packet.ll_init.interval = 0xc7b + 6; // This should fail validation
 
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Invalid interval should fail validation");
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with invalid window size.
@@ -766,15 +766,12 @@ mod tests {
         // Test zero window size
         packet.ll_init.wsize = 0;
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Zero window size should fail validation");
+        assert!(!result, "Connection should be rejected");
 
         // Test window size > interval (from create_test_packet interval = 20)
         packet.ll_init.wsize = 25; // Greater than interval of 20
         let result = check_par_con(&packet);
-        assert_eq!(
-            result, false,
-            "Window size > interval should fail validation"
-        );
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with invalid supervision timeout.
@@ -787,12 +784,12 @@ mod tests {
         // Test timeout <= 9
         packet.ll_init.timeout = 9;
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Timeout <= 9 should fail validation");
+        assert!(!result, "Connection should be rejected");
 
         // Test timeout >= 0xc81
         packet.ll_init.timeout = 0xc81;
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Timeout >= 0xc81 should fail validation");
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with invalid window offset.
@@ -807,10 +804,7 @@ mod tests {
         packet.ll_init.woffset = 21; // Greater than interval
 
         let result = check_par_con(&packet);
-        assert_eq!(
-            result, false,
-            "Window offset > interval should fail validation"
-        );
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with invalid hop increment.
@@ -824,7 +818,7 @@ mod tests {
         packet.ll_init.hop = 0;
 
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Zero hop increment should fail validation");
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with invalid channel map.
@@ -838,7 +832,7 @@ mod tests {
         packet.ll_init.chm = [0x00, 0x00, 0x00, 0x00, 0x00];
 
         let result = check_par_con(&packet);
-        assert_eq!(result, false, "Empty channel map should fail validation");
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con with zero latency.
@@ -852,10 +846,7 @@ mod tests {
         packet.ll_init.latency = 0;
 
         let result = check_par_con(&packet);
-        assert_eq!(
-            result, true,
-            "Zero latency should be valid (immediate response)"
-        );
+        assert!(result, "Connection should be established");
     }
 
     /// Tests check_par_con latency constraint validation.
@@ -871,10 +862,7 @@ mod tests {
         packet.ll_init.latency = ((100_u32 << 3) / 100) as u16; // This should fail the constraint
 
         let result = check_par_con(&packet);
-        assert_eq!(
-            result, false,
-            "Latency constraint violation should fail validation"
-        );
+        assert!(!result, "Connection should be rejected");
     }
 
     /// Tests check_par_con boundary cases.
@@ -892,7 +880,7 @@ mod tests {
         packet.ll_init.latency = 1; // Minimum valid latency
 
         let result = check_par_con(&packet);
-        assert_eq!(result, true, "Minimum valid parameters should pass");
+        assert!(result, "Connection should be established");
 
         // Test maximum valid values
         packet.ll_init.interval = 3200; // Maximum valid interval
@@ -902,7 +890,7 @@ mod tests {
         packet.ll_init.latency = 0; // Zero latency to satisfy constraint (0 * 3200 * 2 = 0 < 3200)
 
         let result = check_par_con(&packet);
-        assert_eq!(result, true, "Maximum valid parameters should pass");
+        assert!(result, "Connection should be established");
     }
 
     // ================================================================================
@@ -934,10 +922,10 @@ mod tests {
         // Disable peripheral connections
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(false);
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(
-            result, false,
-            "Should reject connection when peripheral is disabled"
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            !NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be rejected"
         );
     }
 
@@ -978,10 +966,10 @@ mod tests {
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(true);
         packet.ll_init.adv_a = [0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]; // Different from MAC_ID
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(
-            result, false,
-            "Should reject connection with mismatched addresses"
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            !NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be rejected"
         );
     }
 
@@ -1027,10 +1015,10 @@ mod tests {
         // Set invalid parameters (zero window size makes check_par_con return false)
         packet.ll_init.wsize = 0;
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(
-            result, false,
-            "Should reject connection with invalid parameters"
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            !NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be rejected"
         );
     }
 
@@ -1077,8 +1065,11 @@ mod tests {
 
         // Use valid parameters (create_test_packet already has valid params)
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(result, true, "Should accept connection with valid setup");
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be established"
+        );
 
         // Verify connection state was initialized
         assert_eq!(
@@ -1166,8 +1157,11 @@ mod tests {
         packet.ll_init.woffset = 5; // 5 * 1.25ms = 6.25ms
         packet.ll_init.interval = 20; // 20 * 1.25ms = 25ms
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(result, true, "Connection should succeed");
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be established"
+        );
 
         // Verify window offset calculation: CLOCK_SYS_CLOCK_1US * 1250 * (woffset + 1)
         let expected_offset = CLOCK_SYS_CLOCK_1US * 1250 * (5 + 1);
@@ -1228,12 +1222,11 @@ mod tests {
         }
         // Use valid parameters for successful connection
 
-        let result = rf_link_slave_connect(&packet, time);
-        assert_eq!(
-            result, true,
-            "Connection should succeed with security enabled"
+        rf_link_slave_connect(&packet, time);
+        assert!(
+            NEED_UPDATE_CONNECT_PARA.get(),
+            "Connection should be established"
         );
-
         // Verify security timestamp was recorded
         assert_ne!(
             BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(),

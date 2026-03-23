@@ -2259,7 +2259,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(expected).returns(true);
+            app.uart_manager.mock_send_message(expected).returns(Ok(()));
         }
 
         mesh_report_status_enable(true);
@@ -2753,7 +2753,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         send_uart_node_changes(&[]);
@@ -2770,7 +2770,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(false);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         send_uart_node_changes(&[(0x20, 1, 1)]);
@@ -2799,7 +2799,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(expected).returns(true);
+            app.uart_manager.mock_send_message(expected).returns(Ok(()));
         }
 
         send_uart_node_changes(&[(0x20, 1, 1)]);
@@ -2837,7 +2837,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(expected).returns(true);
+            app.uart_manager.mock_send_message(expected).returns(Ok(()));
         }
 
         send_uart_node_changes(&[(0x10, 1, 1), (0x20, 1, 0), (0x30, 0, 1)]);
@@ -2855,7 +2855,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // 14 entries → 2 packets (13 + 1)
@@ -2881,7 +2881,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         let new_node = create_test_mesh_node(0x20, 5, &[0xAB, 0xCD]);
@@ -2916,7 +2916,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // Update with same sn advance but different par → par_match = false
@@ -2952,7 +2952,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // Update with newer sn but identical par → par_match = true and tick != 0 → no UART
@@ -2974,7 +2974,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(false);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         let new_node = create_test_mesh_node(0x20, 5, &[0x01, 0x02]);
@@ -3014,7 +3014,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         mesh_node_flush_status();
@@ -3042,7 +3042,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         mesh_node_flush_status();
@@ -3083,7 +3083,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(expected).returns(true);
+            app.uart_manager.mock_send_message(expected).returns(Ok(()));
         }
 
         mesh_node_flush_status();
@@ -3174,7 +3174,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         ll_device_status_update(&[0xDE, 0xAD]);
@@ -3212,7 +3212,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // Same sn=7 relay — sn has not advanced.
@@ -3272,7 +3272,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // Deliver a "stale relay": same dev_adr, same sn=7, SAME par — just a
@@ -3328,7 +3328,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(true);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         // New packet from the now-revived light: sn advanced to 8.
@@ -3369,7 +3369,7 @@ mod tests {
             app.uart_manager
                 .mock_uart_status_reporting_enabled()
                 .returns(false);
-            app.uart_manager.mock_send_message(Any).returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
         }
 
         ll_device_status_update(&[0x01, 0x02]);

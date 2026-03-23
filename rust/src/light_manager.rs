@@ -104,19 +104,18 @@ impl Transition {
         }
     }
 
-    fn begin(&mut self, to: I16F16) {
+    fn begin_at(&mut self, start: Instant, to: I16F16) {
         // Same-target guard: if already heading to this target, don't restart the transition.
         if to == self.to {
             return;
         }
         self.from = self.current;
-        self.start = Instant::now();
-        self.end = self.start + Duration::from_millis(TRANSITION_TIME_MS);
+        self.start = start;
+        self.end = start + Duration::from_millis(TRANSITION_TIME_MS);
         self.to = to;
     }
 
-    fn step(&mut self) -> bool {
-        let now = Instant::now();
+    fn step_at(&mut self, now: Instant) -> bool {
         if now >= self.end {
             self.current = self.to;
             return false;
@@ -262,9 +261,11 @@ impl LightManager {
                 self.last_transition_time = clock_time();
             }
 
-            self.brightness_tr.begin(I16F16::from_num(brightness));
-            self.cw_tr.begin(I16F16::from_num(cw));
-            self.ww_tr.begin(I16F16::from_num(ww));
+            let now = Instant::now();
+            self.brightness_tr
+                .begin_at(now, I16F16::from_num(brightness));
+            self.cw_tr.begin_at(now, I16F16::from_num(cw));
+            self.ww_tr.begin_at(now, I16F16::from_num(ww));
 
             // Enable timer1
             write_reg_tmr1_tick(0);
@@ -276,9 +277,10 @@ impl LightManager {
     }
 
     pub fn transition_step(&mut self) {
-        let b = self.brightness_tr.step();
-        let c = self.cw_tr.step();
-        let w = self.ww_tr.step();
+        let now = Instant::now();
+        let b = self.brightness_tr.step_at(now);
+        let c = self.cw_tr.step_at(now);
+        let w = self.ww_tr.step_at(now);
 
         if !b && !c && !w {
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !FLD_TMR::TMR1_EN.bits());
@@ -463,7 +465,8 @@ impl LightManager {
     pub fn light_onoff_hw(&mut self, on: bool) {
         let target = if on { self.brightness } else { 0 };
         critical_section::with(|_| {
-            self.brightness_tr.begin(I16F16::from_num(target));
+            self.brightness_tr
+                .begin_at(Instant::now(), I16F16::from_num(target));
             write_reg_tmr1_tick(0);
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
             self.transition_step();

@@ -69,7 +69,7 @@ pub fn app<'a>() -> &'a mut App {
 pub fn reset_app_uart_for_test() {
     #[allow(static_mut_refs)]
     unsafe {
-        (*APP).uart_manager = crate::uart_manager::UartManager::default();
+        APP.uart_manager = crate::uart_manager::UartManager::default();
     }
 }
 

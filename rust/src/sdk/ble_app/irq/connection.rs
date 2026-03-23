@@ -248,7 +248,7 @@ fn initialize_connection_hardware() {
 /// - `true` if connection timed out and cleanup was performed
 /// - `false` if connection is still valid
 #[cfg_attr(test, mry::mry)]
-fn check_connection_supervision_timeout() -> bool {
+fn check_connection_supervision_timeout() -> Result<(), ()> {
     // Check for BLE connection supervision timeout
     // Per BLE specification, if no communication occurs within the supervision timeout,
     // the connection must be considered lost and terminated
@@ -267,9 +267,9 @@ fn check_connection_supervision_timeout() -> bool {
         // Perform full BLE disconnection cleanup
         cleanup_ble_disconnection();
 
-        return true;
+        return Ok(());
     }
-    false
+    Err(())
 }
 
 /// Handles timeouts for status read operations.
@@ -298,10 +298,10 @@ fn handle_status_read_timeout() {
 /// - Scheduling next connection event during OTA
 ///
 /// ## Returns
-/// - `true` if OTA is active and function handled the connection event
-/// - `false` if no OTA is in progress
+/// - `Ok(())` if OTA is active and function handled the connection event
+/// - `Err(())` if no OTA is in progress
 #[cfg_attr(test, mry::mry)]
-fn handle_ota_operations() -> bool {
+fn handle_ota_operations() -> Result<(), ()> {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     // Static variable to track OTA timeout intervals (1 second increments)
@@ -336,9 +336,9 @@ fn handle_ota_operations() -> bool {
         // During OTA, schedule next connection event and return to RX state
         write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-        return true;
+        return Ok(());
     }
-    false
+    Err(())
 }
 
 /// Handles bridge packet transmission based on connection conditions.
@@ -390,7 +390,7 @@ fn process_mesh_operations() {
         let pair_proc_result = pair_proc();
         if pair_proc_result.is_some() {
             let pkt = pair_proc_result.unwrap();
-            rf_link_add_tx_packet(&pkt);
+            let _ = rf_link_add_tx_packet(&pkt);
         }
     }
 
@@ -459,7 +459,7 @@ fn process_mesh_operations() {
             pkt.att_cmd_mut().value.val[3..].copy_from_slice(&data);
 
             // Add the packet to the BLE transmission queue
-            rf_link_add_tx_packet(&pkt);
+            let _ = rf_link_add_tx_packet(&pkt);
         }
     }
 }
@@ -555,7 +555,7 @@ pub fn handle_ble_connected_state() {
     initialize_connection_hardware();
 
     // 2. Check for connection supervision timeout (early exit if timed out)
-    if check_connection_supervision_timeout() {
+    if check_connection_supervision_timeout().is_ok() {
         return;
     }
 
@@ -563,7 +563,7 @@ pub fn handle_ble_connected_state() {
     handle_status_read_timeout();
 
     // 4. Handle OTA operations (early exit if OTA is active)
-    if handle_ota_operations() {
+    if handle_ota_operations().is_ok() {
         return;
     }
 
@@ -609,7 +609,7 @@ pub fn process_queued_status_responses() {
 
         // Try to add the packet to the transmission queue
         // If the TX buffer is full, stop processing and try again later
-        if !rf_link_add_tx_packet(&packet) {
+        if rf_link_add_tx_packet(&packet).is_err() {
             return;
         }
 
@@ -1921,9 +1921,9 @@ mod tests {
         let result = check_connection_supervision_timeout();
 
         // Verify no timeout detected
-        assert_eq!(
-            result, false,
-            "Should return false when connection is valid"
+        assert!(
+            result.is_err(),
+            "Should return Err when connection is valid"
         );
     }
 
@@ -1945,9 +1945,9 @@ mod tests {
         let result = check_connection_supervision_timeout();
 
         // Verify timeout detected
-        assert_eq!(
-            result, true,
-            "Should return true when connection has timed out"
+        assert!(
+            result.is_ok(),
+            "Should return Ok when connection has timed out"
         );
     }
 
@@ -2017,7 +2017,7 @@ mod tests {
         let result = handle_ota_operations();
 
         // Verify no OTA handling
-        assert_eq!(result, false, "Should return false when OTA is not active");
+        assert!(result.is_err(), "Should return Err when OTA is not active");
         mock_write_reg_system_tick_irq(Any).assert_called(0);
     }
 
@@ -2036,7 +2036,7 @@ mod tests {
         let result = handle_ota_operations();
 
         // Verify OTA handling
-        assert_eq!(result, true, "Should return true when OTA is active");
+        assert!(result.is_ok(), "Should return Ok when OTA is active");
         mock_write_reg_system_tick_irq(15000).assert_called(1);
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
@@ -2140,7 +2140,7 @@ mod tests {
         mock_mesh_node_flush_status().returns(());
         mock_is_add_packet_buf_ready().returns(false);
         mock_mesh_node_report_status(Any, Any).returns(2); // 2 nodes worth of data
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         SLAVE_READ_STATUS_BUSY.set(0);
         process_mesh_operations();
@@ -2166,7 +2166,7 @@ mod tests {
         mock_mesh_node_flush_status().returns(());
         mock_is_add_packet_buf_ready().returns(true);
         mock_mesh_node_report_status(Any, Any).returns(2);
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         SLAVE_READ_STATUS_BUSY.set(0);
         process_mesh_operations();
@@ -2258,9 +2258,9 @@ mod tests {
     fn test_handle_ble_connected_state_normal_flow() {
         // Mock all decomposed functions for normal flow (no early exits)
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(false); // No timeout
+        mock_check_connection_supervision_timeout().returns(Err(())); // No timeout
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(false); // No OTA active
+        mock_handle_ota_operations().returns(Err(())); // No OTA active
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
@@ -2294,9 +2294,9 @@ mod tests {
     fn test_handle_ble_connected_state_timeout_early_exit() {
         // Mock functions with connection timeout
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(true); // Timeout occurred
+        mock_check_connection_supervision_timeout().returns(Ok(())); // Timeout occurred
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(false);
+        mock_handle_ota_operations().returns(Err(()));
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
@@ -2331,9 +2331,9 @@ mod tests {
     fn test_handle_ble_connected_state_ota_early_exit() {
         // Mock functions with OTA active
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(false); // No timeout
+        mock_check_connection_supervision_timeout().returns(Err(())); // No timeout
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(true); // OTA is active
+        mock_handle_ota_operations().returns(Ok(())); // OTA is active
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
@@ -2369,7 +2369,7 @@ mod tests {
     #[mry::lock(rf_link_add_tx_packet)]
     fn test_process_queued_status_responses_normal_processing() {
         // Mock rf_link_add_tx_packet to succeed
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Setup: Multiple packets queued (start with clean state)
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
@@ -2393,7 +2393,7 @@ mod tests {
     #[mry::lock(rf_link_add_tx_packet)]
     fn test_process_queued_status_responses_buffer_full() {
         // Mock rf_link_add_tx_packet to fail immediately (buffer full)
-        mock_rf_link_add_tx_packet(Any).returns(false);
+        mock_rf_link_add_tx_packet(Any).returns(Err(()));
 
         // Setup: Packets queued (start with clean state)
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
@@ -2417,7 +2417,7 @@ mod tests {
     #[mry::lock(rf_link_add_tx_packet)]
     fn test_process_queued_status_responses_buffer_wraparound() {
         // Mock rf_link_add_tx_packet to succeed
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Setup: Buffer wraparound scenario (need to understand BUFF_RESPONSE_PACKET_COUNT)
         // Let's use a safer approach - start near the end and wrap to beginning
@@ -2444,7 +2444,7 @@ mod tests {
     #[mry::lock(rf_link_add_tx_packet)]
     fn test_process_queued_status_responses_empty_queue() {
         // Mock rf_link_add_tx_packet
-        mock_rf_link_add_tx_packet(Any).returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Setup: Empty queue (read == write)
         DEVICE_STATUS_BUFFER_READ_POINTER.set(5);

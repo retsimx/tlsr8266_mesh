@@ -107,7 +107,7 @@ pub fn light_mesh_rx_cb(data: &Packet) {
         unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.add(i) };
     }
 
-    app().uart_manager.send_message(&msg);
+    let _ = app().uart_manager.send_message(&msg);
 }
 
 #[coverage(off)]
@@ -186,14 +186,14 @@ impl UartManager {
         self.driver.init();
     }
 
-    pub fn send_message(&mut self, msg: &UartData) -> bool {
+    pub fn send_message(&mut self, msg: &UartData) -> Result<(), ()> {
         critical_section::with(|_| {
             if !self.send_channel.is_full() {
                 let _ = self.send_channel.push_back(*msg);
-                return true;
+                return Ok(());
             }
 
-            false
+            Err(())
         })
     }
 
@@ -360,7 +360,7 @@ impl UartManager {
         Self::compute_crc(msg);
     }
 
-    async fn driver_send_async(&mut self, msg: &UartData) -> bool {
+    async fn driver_send_async(&mut self, msg: &UartData) {
         self.driver.send_async(msg).await
     }
 
@@ -676,7 +676,7 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
 
-        manager.mock_driver_send_async(Any).returns(true);
+        manager.mock_driver_send_async(Any).returns(());
         manager.mock_send_with_retry(Any).calls_real_impl();
         mock_wd_clear().returns(());
         mock_clock_time().returns(10);
@@ -709,7 +709,6 @@ mod tests {
                     manager_ref.last_ack = manager_ref.ack_counter;
                 }
             }
-            true
         });
         manager.mock_send_with_retry(Any).calls_real_impl();
         mock_wd_clear().returns(());
@@ -761,7 +760,7 @@ mod tests {
     /// 1. Create a UartManager with an empty send channel
     /// 2. Create a test message
     /// 3. Call send_message with the test message
-    /// 4. Verify the function returns true (message accepted)
+    /// 4. Verify the function returns Ok(()) (message accepted)
     #[test]
     fn test_send_message_with_space() {
         // Create a UartManager with empty queue
@@ -777,7 +776,7 @@ mod tests {
         let result = manager.send_message(&msg);
 
         // Verify result
-        assert!(result);
+        assert!(result.is_ok());
 
         // Verify channel has one message
         critical_section::with(|_| {
@@ -795,7 +794,7 @@ mod tests {
     /// 1. Create a UartManager
     /// 2. Fill the send channel to capacity
     /// 3. Try to send one more message
-    /// 4. Verify the function returns false (message rejected)
+    /// 4. Verify the function returns Err(()) (message rejected)
     #[test]
     fn test_send_message_when_full() {
         // Create a UartManager
@@ -811,14 +810,14 @@ mod tests {
         let capacity = 12; // This matches the capacity in UartManager (Deque<UartData, 6>)
         for _ in 0..capacity {
             let result = manager.send_message(&msg);
-            assert!(result);
+            assert!(result.is_ok());
         }
 
         // Try to send one more message
         let result = manager.send_message(&msg);
 
         // Verify the message was rejected
-        assert!(!result);
+        assert!(result.is_err());
 
         // Verify channel length is still at capacity
         critical_section::with(|_| {

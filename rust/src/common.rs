@@ -85,9 +85,8 @@ pub fn dev_addr_with_mac_flag(params: &[u8]) -> bool {
 /// par_rsp[4..10] - 6-byte MAC address
 /// ```
 #[cfg_attr(test, mry::mry)]
-pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) -> bool {
+pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) {
     par_rsp[4..10].copy_from_slice(&*MAC_ID.lock());
-    true
 }
 
 /// Validates device address parameters against local MAC address.
@@ -550,7 +549,7 @@ pub fn pair_flash_clean() {
 /// * Sets FLASH_CONFIGURATION_INDEX to last valid slot offset or -1
 /// * May trigger sector erase if at wrap threshold
 #[cfg_attr(test, mry::mry)]
-pub fn pair_flash_config_init() -> bool {
+pub fn pair_flash_config_init() {
     // STEP 1: Check if any configuration exists
     let mut first_buffer = [0u8; 0x40];
     flash_read_page(FLASH_ADR_PAIRING, 0x40, first_buffer.as_mut_ptr());
@@ -558,7 +557,7 @@ pub fn pair_flash_config_init() -> bool {
     if first_buffer[0] != PAIR_CONFIG_VALID_FLAG {
         // No configuration has ever been written
         FLASH_CONFIGURATION_INDEX.set(-1);
-        return false;
+        return;
     }
 
     // STEP 2: Linear scan to find last valid configuration
@@ -583,7 +582,6 @@ pub fn pair_flash_config_init() -> bool {
     // STEP 3: Update global index and handle wraparound if needed
     FLASH_CONFIGURATION_INDEX.set(last_valid_index);
     pair_flash_clean(); // Check for sector wraparound condition
-    true
 }
 
 /// Generates a Bluetooth LE access code from mesh name and password.
@@ -1058,10 +1056,9 @@ mod tests {
         let mut par_rsp = [0u8; 16];
 
         // Call function
-        let result = dev_addr_with_mac_rsp(&mut par_rsp);
+        dev_addr_with_mac_rsp(&mut par_rsp);
 
         // Verify result
-        assert!(result, "Should return true");
         assert_eq!(
             &par_rsp[4..10],
             &test_mac,
@@ -1652,10 +1649,9 @@ mod tests {
         mock_flash_write_page(Any, Any, Any).returns(());
 
         // Call function
-        let result = pair_flash_config_init();
+        pair_flash_config_init();
 
         // Verify result
-        assert!(!result, "Should return false when no valid config");
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), -1);
     }
 
@@ -1682,10 +1678,9 @@ mod tests {
         mock_flash_write_page(Any, Any, Any).returns(());
 
         // Call function
-        let result = pair_flash_config_init();
+        pair_flash_config_init();
 
         // Verify result
-        assert!(result, "Should return true when valid config found");
         assert_eq!(
             FLASH_CONFIGURATION_INDEX.get(),
             0x80,
@@ -1905,7 +1900,6 @@ mod tests {
         // Mock pair_flash_config_init to set a valid index
         mock_pair_flash_config_init().returns_with(|| {
             FLASH_CONFIGURATION_INDEX.set(0x1000);
-            true
         });
 
         // Mock flash reads to return custom configuration

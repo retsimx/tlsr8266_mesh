@@ -2608,11 +2608,8 @@ mod tests {
         static mut CALLBACK_CALLED: bool = false;
 
         // Define a test callback function
-        let test_callback = |_packet: &Packet| -> bool {
-            unsafe {
-                CALLBACK_CALLED = true;
-            }
-            true
+        let test_callback = |_packet: &Packet| unsafe {
+            CALLBACK_CALLED = true;
         };
 
         // Set up the callback on the attribute
@@ -2955,11 +2952,8 @@ mod tests {
             let original_w = get_gAttributes()[test_attr_idx].w;
 
             // Define a test callback function
-            let test_callback = |_packet: &Packet| -> bool {
-                unsafe {
-                    WRITE_CALLBACK_CALLED = true;
-                }
-                true
+            let test_callback = |_packet: &Packet| unsafe {
+                WRITE_CALLBACK_CALLED = true;
             };
 
             // Set the write callback
@@ -3020,11 +3014,8 @@ mod tests {
 
                 // Define a callback
                 static mut CALLED: bool = false;
-                let test_callback = |_packet: &Packet| -> bool {
-                    unsafe {
-                        CALLED = true;
-                    }
-                    true
+                let test_callback = |_packet: &Packet| unsafe {
+                    CALLED = true;
                 };
 
                 // Set up the write callback

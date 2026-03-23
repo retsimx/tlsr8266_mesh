@@ -302,7 +302,7 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
             || packet.head().l2cap_len != 0x21
             || packet.head()._type & 3 != 2
             || packet.head().chan_id == 0xeeff
-            || !pair_dec_packet_mesh(&mut packet)
+            || pair_dec_packet_mesh(&mut packet).is_err()
         {
             return false;
         }
@@ -909,7 +909,7 @@ mod tests {
         reset_global_state();
 
         // Setup mock
-        mock_rf_link_slave_connect(Any, Any).returns(true);
+        mock_rf_link_slave_connect(Any, Any).returns(());
 
         // Setup matching MAC address
         let device_mac = [0x11, 0x22, 0x33, 0x44];
@@ -940,7 +940,7 @@ mod tests {
         reset_global_state();
 
         // Setup mock
-        mock_rf_link_slave_connect(Any, Any).returns(true);
+        mock_rf_link_slave_connect(Any, Any).returns(());
 
         // Setup non-matching MAC addresses
         {
@@ -982,7 +982,7 @@ mod tests {
         // Setup mocks for successful packet validation
         mock_read_reg_system_tick_irq().returns(50000);
         mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(true); // Packet decryption succeeds
+        mock_pair_dec_packet_mesh(Any).returns(Ok(())); // Packet decryption succeeds
         mock_parse_ble_packet_op_params(Any, Any).returns((
             true,
             [0x01, 0x02, 0x03],
@@ -1035,7 +1035,7 @@ mod tests {
         mock_read_reg_system_tick_irq().returns(1073774000u32); // Large IRQ time
         mock_read_reg_system_tick().returns(100); // Small system time
                                                   // Difference: 1073774000 - 100 - 32000 = 1073741900 > 1073741823 ✓
-        mock_pair_dec_packet_mesh(Any).returns(true);
+        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
 
         // Setup connection state for timing validation
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -1063,7 +1063,7 @@ mod tests {
         reset_global_state();
 
         // Setup mocks
-        mock_pair_dec_packet_mesh(Any).returns(false); // Decryption fails
+        mock_pair_dec_packet_mesh(Any).returns(Err(())); // Decryption fails
         mock_parse_ble_packet_op_params(Any, Any).returns((true, [0; 3], 0, [0; 16], 0));
 
         // Setup for no connection (skip timing validation)
@@ -1095,7 +1095,7 @@ mod tests {
         reset_global_state();
 
         // Setup mocks for duplicate detection
-        mock_pair_dec_packet_mesh(Any).returns(true);
+        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
         mock_parse_ble_packet_op_params(Any, Any).returns((
             true,
             [0x01, 0x02, 0x03],
@@ -1139,7 +1139,7 @@ mod tests {
         reset_global_state();
 
         // Setup mocks
-        mock_rf_link_slave_data(Any, Any).returns(true);
+        mock_rf_link_slave_data(Any, Any).returns(());
         mock_read_reg_system_tick().returns(45000);
 
         // Setup initial state
@@ -1886,7 +1886,7 @@ mod tests {
         // Setup mocks for mesh packet validation
         mock_read_reg_system_tick_irq().returns(50000);
         mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(true);
+        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
 
         // Mock app_mocker for the app() call that happens after pkt_valid() returns true
         let test_app = crate::app::App::default();
@@ -1938,7 +1938,7 @@ mod tests {
         // Setup mocks for mesh packet validation
         mock_read_reg_system_tick_irq().returns(50000);
         mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(true);
+        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
         // Make parse_ble_packet_op_params fail to trigger line 291
         mock_parse_ble_packet_op_params(Any, Any).returns((false, [0; 3], 0, [0; 16], 0));
 

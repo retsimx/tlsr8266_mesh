@@ -121,12 +121,19 @@ impl OtaManager {
     }
 
     pub fn check_ota_area_startup(&self) {
-        if !self.is_ota_area_valid() {
+        // Check if OTA area is valid; if not or on error, erase it
+        if let Ok(false) | Err(()) = self.is_ota_area_valid() {
             self.erase_ota_data();
         }
     }
 
-    pub fn is_ota_area_valid(&self) -> bool {
+    /// Validates the OTA firmware area by checking if it's in a clean state.
+    ///
+    /// Performs hardware flash I/O to read OTA area sectors. Returns:
+    /// - `Ok(true)` if OTA area is valid (all sectors contain 0xFFFFFFFF)
+    /// - `Ok(false)` if OTA area is invalid (contains non-erased data)
+    /// - `Err(())` if hardware I/O error occurs
+    pub fn is_ota_area_valid(&self) -> Result<bool, ()> {
         let mut buf: [u8; 4] = [0; 4];
         for i in 0..OtaManager::ERASE_SECTORS_FOR_OTA {
             flash_read_page(FLASH_ADR_LIGHT_NEW_FW + i * 0x1000, 4, buf.as_mut_ptr());
@@ -135,11 +142,11 @@ impl OtaManager {
                 | (buf[2] as u32) << 16
                 | (buf[3] as u32) << 24;
             if tmp != ONES_32 {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
     pub fn erase_ota_data(&self) {
@@ -208,7 +215,7 @@ impl OtaManager {
         LAST_INDEX.load(Ordering::Relaxed)
     }
 
-    pub fn rf_link_slave_data_ota_save(&mut self) -> bool {
+    pub fn rf_link_slave_data_ota_save(&mut self) {
         let packet_len = if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
             8
         } else {
@@ -296,7 +303,6 @@ impl OtaManager {
             }
         }
         self.slave_ota_data_cache_idx = 0;
-        true
     }
 
     pub fn rf_ota_set_flag(&self) {
@@ -386,7 +392,7 @@ impl OtaManager {
                 && is_add_packet_buf_ready()
             {
                 self.terminate_cnt = 6;
-                rf_link_add_tx_packet(&PKT_TERMINATE);
+                let _ = rf_link_add_tx_packet(&PKT_TERMINATE);
             }
 
             if self.terminate_cnt != 0 {
@@ -424,8 +430,6 @@ impl OtaManager {
 
 // Coverage disable for this function because it's simply a bridge function from GATT to App function.
 #[coverage(off)]
-pub fn rf_link_slave_data_ota(data: &Packet) -> bool {
+pub fn rf_link_slave_data_ota(data: &Packet) {
     app().ota_manager.rf_link_slave_data_ota(data);
-
-    true
 }

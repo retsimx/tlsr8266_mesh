@@ -972,7 +972,9 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             if rf_link_response_callback(
                 &mut pkt_light_status.att_cmd_mut().value,
                 &packet.att_cmd().value,
-            ) {
+            )
+            .is_ok()
+            {
                 // Mark packet for mesh transmission
                 pkt_light_status.head_mut()._type |= BIT!(7);
 
@@ -1102,7 +1104,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 /// * Triggers timing adjustment algorithms
 /// * May change connection interval and timeout values
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
+pub fn rf_link_slave_data(packet: &Packet, time: u32) {
     // Extract key packet header fields for processing decisions
     let header = packet.head();
     let rf_len = header.rf_len;
@@ -1111,7 +1113,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
 
     // CHANNEL VALIDATION: Ensure channel ID is within valid range for data packets
     if (packet_type & 3) == 2 && chanid > 6 {
-        return false; // Invalid channel for data packet
+        return; // Invalid channel for data packet
     }
 
     // CONNECTION PARAMETER UPDATE HANDLING: Channel 5 is reserved for parameter updates
@@ -1128,7 +1130,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
     if rf_len < 6 {
         // Packets shorter than 6 bytes are generally invalid
         if rf_len == 0 {
-            return false; // Zero-length packets are always invalid
+            return; // Zero-length packets are always invalid
         }
         // Non-zero but short packets might be valid (e.g., empty data)
     } else {
@@ -1148,7 +1150,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
             let mut channel_map = SLAVE_CHN_MAP.lock();
             channel_map.copy_from_slice(&channel_map_data);
 
-            return true; // Channel map update processed successfully
+            return; // Channel map update processed successfully
         }
 
         // CONNECTION INTERVAL UPDATE ALGORITHM: 12-byte type 3 packets with l2cap_len[0] == 0
@@ -1175,7 +1177,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
             // Set connection timeout: nid * 10ms
             BLE_CONN_TIMEOUT.set(packet.ll_data().nid as u32 * 10000);
 
-            return false; // Connection parameter update processed (no further handling)
+            return; // Connection parameter update processed (no further handling)
         }
     }
 
@@ -1185,7 +1187,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) -> bool {
         rf_link_add_tx_packet(&res_pkt);
     }
 
-    false // Default: packet processed without special return conditions
+    // Default: packet processed without special conditions
 }
 
 /// Implements transmission buffer capacity monitoring with DMA pointer arithmetic.
@@ -1335,7 +1337,7 @@ pub fn is_add_packet_buf_ready() -> bool {
 /// * Mutex protection for shared buffer access
 /// * Safe for concurrent access from multiple contexts
 #[cfg_attr(test, mry::mry)]
-pub fn rf_link_add_tx_packet(packet: &Packet) -> bool {
+pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
     use crate::embassy::sync::mutex::{CriticalSectionMutex, Mutex};
 
     // STATIC BUFFER ALLOCATION: Pre-allocated transmission buffer for zero-allocation operation
@@ -1400,10 +1402,10 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> bool {
         // DMA QUEUE REGISTRATION: Register encrypted packet with DMA engine
         write_reg_dma_tx_fifo(addr_of!(blt_tx_fifo[index]) as u16);
 
-        return true; // Packet successfully queued for transmission
+        return Ok(()); // Packet successfully queued for transmission
     }
 
-    return false; // Buffer full - packet rejected to prevent overflow
+    return Err(()); // Buffer full - packet rejected to prevent overflow
 }
 
 /// Extracts operation codes and parameters from BLE/mesh packets using adaptive parsing.
@@ -2242,7 +2244,7 @@ mod tests {
 
         let result = rf_link_add_tx_packet(&packet);
 
-        assert_eq!(result, true, "Should successfully queue packet");
+        assert!(result.is_ok(), "Should successfully queue packet");
 
         // Verify DMA registration was called
         mock_write_reg_dma_tx_fifo(Any).assert_called(1);
@@ -2260,7 +2262,7 @@ mod tests {
         let result = rf_link_add_tx_packet(&packet);
 
         // (7 - 3) % 8 = 4, which is >= 4 (threshold)
-        assert_eq!(result, false, "Should reject packet when buffer is full");
+        assert!(result.is_err(), "Should reject packet when buffer is full");
     }
 
     /// Tests empty buffer initialization.
@@ -2275,8 +2277,8 @@ mod tests {
 
         let result = rf_link_add_tx_packet(&packet);
 
-        assert_eq!(
-            result, true,
+        assert!(
+            result.is_ok(),
             "Should successfully initialize empty buffer and add packet"
         );
 
@@ -2472,12 +2474,7 @@ mod tests {
         let packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
         let time = 12345678;
 
-        let result = rf_link_slave_data(&packet, time);
-
-        assert_eq!(
-            result, false,
-            "Should return false for normal packet processing"
-        );
+        rf_link_slave_data(&packet, time);
     }
 
     /// Tests connection parameter update channel handling.
@@ -2489,13 +2486,9 @@ mod tests {
         packet.head_mut().chan_id = 5; // Channel 5 is for connection parameter updates
         let time = 12345678;
 
-        let result = rf_link_slave_data(&packet, time);
+        rf_link_slave_data(&packet, time);
 
         // Function should handle connection parameter updates
-        assert_eq!(
-            result, false,
-            "Should return false for connection parameter updates"
-        );
     }
 
     /// Tests invalid channel ID rejection.
@@ -2508,12 +2501,7 @@ mod tests {
         packet.head_mut().chan_id = 10; // Invalid channel (> 6)
         let time = 12345678;
 
-        let result = rf_link_slave_data(&packet, time);
-
-        assert_eq!(
-            result, false,
-            "Should reject packet with invalid channel ID"
-        );
+        rf_link_slave_data(&packet, time);
     }
 
     /// Tests zero-length packet handling.
@@ -2527,7 +2515,7 @@ mod tests {
 
         let result = rf_link_slave_data(&packet, time);
 
-        assert_eq!(result, false, "Should handle zero-length packet");
+        // void function: no return value to check
     }
 
     /// Tests BLE channel map update processing (lines 1094-1111).
@@ -2574,13 +2562,9 @@ mod tests {
         BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(0);
         SLAVE_CHN_MAP.lock().fill(0);
 
-        let result = rf_link_slave_data(&packet, time);
+        rf_link_slave_data(&packet, time);
 
-        // Verify the function returns true for successful channel map update
-        assert_eq!(
-            result, true,
-            "Should return true for successful channel map update"
-        );
+        // Verify timing state updated (channel map update sets timestamp to 1)
 
         // Verify timing update timestamp was set to 1 (channel map change type)
         assert_eq!(
@@ -3234,7 +3218,7 @@ mod tests {
         reset_test_state();
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3286,7 +3270,7 @@ mod tests {
 
         // Mock callback functions that are called during local processing
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock duplicate detection to allow processing
         mock_is_exist_in_rc_pkt_buf(Any, Any).returns(false); // Not a duplicate
@@ -3590,7 +3574,7 @@ mod tests {
         mock_rf_link_match_group_mac(Any).returns((false, true)); // device_match = true
 
         // Mock response callback (should NOT be called due to line 837 setting slave_read_status_response = false)
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock app to track mesh message sending (should NOT be called for duplicates)
         let mut app = App::default();
@@ -3628,7 +3612,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3668,7 +3652,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3708,7 +3692,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3748,7 +3732,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3788,7 +3772,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3828,7 +3812,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3869,7 +3853,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true);
+        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
 
         // Mock to make unknown command behave like a notify request to test the default case
         mock_rf_link_is_notify_req(Any).returns(true);
@@ -3970,7 +3954,7 @@ mod tests {
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(true); // Even if callback returns true...
+        mock_rf_link_response_callback(Any, Any).returns(Ok(())); // Even if callback returns true...
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);

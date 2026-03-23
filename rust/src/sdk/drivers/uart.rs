@@ -186,7 +186,7 @@ impl UartDriver {
 
         // 4. Initialize UART with default settings (115200 baud at 32MHz clock)
         // Parameters: clkdiv=69, bit width=3, RX IRQ=on, TX IRQ=on, no hardware control
-        self.uart_init(69, 3, true, true, HardwareControl::NoControl);
+        let _ = self.uart_init(69, 3, true, true, HardwareControl::NoControl);
     }
 
     /// Initializes the UART hardware with specified settings.
@@ -205,8 +205,8 @@ impl UartDriver {
     ///
     /// # Returns
     ///
-    /// * `true` if initialization succeeded
-    /// * `false` if invalid parameters were provided (e.g., bwpc < 3)
+    /// * `Ok(())` if initialization succeeded
+    /// * `Err(())` if invalid parameters were provided (e.g., bwpc < 3)
     ///
     /// # Notes
     ///
@@ -221,10 +221,10 @@ impl UartDriver {
         enable_rx_irq: bool,
         enable_tx_irq: bool,
         hw_control: HardwareControl,
-    ) -> bool {
+    ) -> Result<(), ()> {
         // Validate bit width parameter - must be at least 3
         if bwpc < 3 {
-            return false;
+            return Err(());
         }
 
         // Calculate actual baud rate based on system clock and parameters
@@ -288,7 +288,7 @@ impl UartDriver {
             write_reg_dma_chn_en(read_reg_dma_chn_en() | BIT!(1));
         }
 
-        true
+        Ok(())
     }
 
     /// Gets and clears the UART interrupt source flags.
@@ -365,14 +365,12 @@ impl UartDriver {
     ///
     /// # Returns
     ///
-    /// * `true` if transmission was initiated successfully
-    ///
     /// # Notes
     ///
     /// * This function returns after initiating the transfer, not when the transfer completes
     /// * The busy flag remains set until cleared by `clear_tx_busy_flag`
     /// * Maximum wait time for previous transmission is 100ms
-    pub async fn send_async(&mut self, msg: &UartData) -> bool {
+    pub async fn send_async(&mut self, msg: &UartData) {
         // Get current time for timeout calculation
         let t_timeout = clock_time();
 
@@ -391,8 +389,6 @@ impl UartDriver {
 
         // Trigger DMA transfer to start transmission
         write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
-
-        true
     }
 
     /// Sends data synchronously over UART using DMA.
@@ -407,15 +403,13 @@ impl UartDriver {
     ///
     /// # Returns
     ///
-    /// * `true` if transmission was initiated successfully
-    ///
     /// # Notes
     ///
     /// * This function returns after initiating the transfer, not when the transfer completes
     /// * Uses critical_section to prevent interrupts during the setup process
     /// * Maximum wait time for previous transmission is 10ms
     /// * Watchdog is kicked during waiting to prevent resets
-    pub fn send(&mut self, msg: &UartData) -> bool {
+    pub fn send(&mut self, msg: &UartData) {
         critical_section::with(|_| {
             // Get current time for timeout calculation
             let t_timeout = clock_time();
@@ -435,8 +429,6 @@ impl UartDriver {
 
             // Trigger DMA transfer to start transmission
             write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
-
-            true
         })
     }
 
@@ -478,17 +470,12 @@ impl UartDriver {
     /// This static function reads the UART status register, checks for errors,
     /// and clears them if present.
     ///
-    /// # Returns
-    ///
-    /// * `true` if an error was detected and cleared
-    /// * `false` if no error was detected
-    ///
     /// # Notes
     ///
     /// * Checks bit 7 of status register (FLD_UART_STATUS::ERR_FLAG) for error indication
     /// * Clears errors by setting bit 6 of the same register
     /// * Can be called periodically to ensure UART remains in a clean state
-    pub fn clear_error() -> bool {
+    pub fn clear_error() {
         // Read UART status register
         let state = read_reg_uart_status();
 
@@ -496,9 +483,7 @@ impl UartDriver {
         if state & FLD_UART_STATUS::ERR_FLAG.bits() != 0 {
             // Clear error by setting bit 6 while preserving other bits
             write_reg_uart_status(state | FLD_UART_STATUS::ERR_CLR.bits());
-            return true;
         }
-        false
     }
 }
 
@@ -686,19 +671,19 @@ mod tests {
 
     /// Tests that the UART initialization function correctly validates the bit width parameter.
     ///
-    /// This test verifies that the uart_init method returns false when:
+    /// This test verifies that the uart_init method returns Err(()) when:
     /// - The bit width parameter (bwpc) is less than the minimum required value of 3
     ///
     /// # Algorithm
     ///
     /// 1. Create a driver instance
     /// 2. Call uart_init with an invalid bit width parameter (less than 3)
-    /// 3. Verify the function returns false
+    /// 3. Verify the function returns Err(())
     ///
     /// # Notes
     ///
     /// * No mocks are needed for this test since we're only validating the parameter check
-    /// * The function should return early without making any register modifications
+    /// * The function should return early with an error without making any register modifications
     #[test]
     fn test_uart_init_invalid_bit_width() {
         // Create a new driver with default settings
@@ -707,8 +692,8 @@ mod tests {
         // Call uart_init with an invalid bit width (below minimum of 3)
         let result = driver.uart_init(69, 2, true, true, HardwareControl::NoControl);
 
-        // Verify the function returns false for invalid parameters
-        assert_eq!(result, false);
+        // Verify the function returns Err(()) for invalid parameters
+        assert!(result.is_err());
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with no flags set.
@@ -927,10 +912,9 @@ mod tests {
 
         // Driver is not busy
         let mut driver = UartDriver::default();
-        let result = driver.send(&msg);
+        driver.send(&msg);
 
         // Verify result and busy flag
-        assert_eq!(result, true);
         assert_eq!(driver.is_tx_busy, true);
 
         // Verify DMA configuration
@@ -1006,10 +990,9 @@ mod tests {
         let mut driver = UartDriver::default();
         driver.is_tx_busy = true;
 
-        let result = driver.send(&msg);
+        driver.send(&msg);
 
         // Verify result and final busy state
-        assert_eq!(result, true);
         assert_eq!(driver.is_tx_busy, true);
 
         // Verify DMA was configured
@@ -1076,7 +1059,6 @@ mod tests {
         let result = futures::executor::block_on(driver.send_async(&msg));
 
         // Verify result and busy flag
-        assert_eq!(result, true);
         assert_eq!(driver.is_tx_busy, true);
 
         // Verify DMA configuration
@@ -1155,7 +1137,6 @@ mod tests {
         let result = futures::executor::block_on(driver.send_async(&msg));
 
         // Verify result and final busy state
-        assert_eq!(result, true);
         assert_eq!(driver.is_tx_busy, true);
 
         // Verify DMA was configured
@@ -1205,7 +1186,7 @@ mod tests {
     /// - Reads the UART status register
     /// - Detects that no error is present (bit 7 not set)
     /// - Does not attempt to clear anything
-    /// - Returns false to indicate no error was detected
+    /// - Performs no write when no error is detected
     ///
     /// # Algorithm
     ///
@@ -1213,17 +1194,14 @@ mod tests {
     /// 2. Call clear_error method
     /// 3. Verify the status register was read
     /// 4. Verify no write was performed
-    /// 5. Verify the method returned false
+    /// 5. Verify no write was performed
     #[test]
     #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_no_error() {
         // No error present (bit 7 not set)
         mock_read_reg_uart_status().returns(0x00);
 
-        let result = UartDriver::clear_error();
-
-        // Should return false when no error is detected
-        assert_eq!(result, false);
+        UartDriver::clear_error();
 
         // Verify interactions
         mock_read_reg_uart_status().assert_called(1);
@@ -1236,7 +1214,7 @@ mod tests {
     /// - Reads the UART status register
     /// - Detects error condition (bit 7 set)
     /// - Clears the error by setting bit 6
-    /// - Returns true to indicate an error was cleared
+    /// - Clears the error condition
     ///
     /// # Algorithm
     ///
@@ -1244,7 +1222,7 @@ mod tests {
     /// 2. Call clear_error method
     /// 3. Verify the status register was read
     /// 4. Verify the correct value was written back (with bit 6 set)
-    /// 5. Verify the method returned true
+    /// 5. Verify the clear write was performed
     #[test]
     #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_basic_error() {
@@ -1255,10 +1233,7 @@ mod tests {
         )
         .returns(());
 
-        let result = UartDriver::clear_error();
-
-        // Should return true when an error is cleared
-        assert_eq!(result, true);
+        UartDriver::clear_error();
 
         // Verify interactions
         mock_read_reg_uart_status().assert_called(1);
@@ -1274,7 +1249,7 @@ mod tests {
     /// - Reads the UART status register
     /// - Detects error condition (bit 7 set) among other flag bits
     /// - Clears the error by setting bit 6 while preserving other bits
-    /// - Returns true to indicate an error was cleared
+    /// - Clears the error condition while preserving unrelated bits
     ///
     /// # Algorithm
     ///
@@ -1282,7 +1257,7 @@ mod tests {
     /// 2. Call clear_error method
     /// 3. Verify the status register was read
     /// 4. Verify the correct value was written back (with bit 6 set and other bits preserved)
-    /// 5. Verify the method returned true
+    /// 5. Verify the clear write was performed
     #[test]
     #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_with_other_bits() {
@@ -1291,10 +1266,7 @@ mod tests {
         mock_read_reg_uart_status().returns(status_with_error);
         mock_write_reg_uart_status(status_with_error | FLD_UART_STATUS::ERR_CLR.bits()).returns(());
 
-        let result = UartDriver::clear_error();
-
-        // Should return true when an error is cleared
-        assert_eq!(result, true);
+        UartDriver::clear_error();
 
         // Verify interactions
         mock_read_reg_uart_status().assert_called(1);
@@ -1372,7 +1344,7 @@ mod tests {
         let result = driver.uart_init(237, 13, true, true, HardwareControl::NoControl);
 
         // Verify initialization succeeded
-        assert_eq!(result, true);
+        assert!(result.is_ok());
 
         // Verify UART register configuration
         mock_write_reg_uart_clk_div(237 | FLD_UART_CLK_DIV::CLK_EN.bits()).assert_called(1); // Clock divider

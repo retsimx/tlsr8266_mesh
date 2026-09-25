@@ -1576,23 +1576,17 @@ The device continuously broadcasts mesh node status via BLE advertisements when 
 
 ### 14.3 Mesh Advertising Data Construction (`mesh_node_adv_status`)
 
-The advertising payload is filled with consecutive `MeshNodeStValT` records. The local device's own entry is always placed at index 0. Subsequent slots cycle through known mesh nodes (round-robin via a module-level `ADV_CURSOR`), up to the buffer capacity. Nodes with `tick == 0` (timed out) are skipped.
+The advertising payload is filled with consecutive `MeshNodeStValT` records. The local device's own entry is always placed at index 0. Subsequent slots cycle through known mesh nodes (round-robin via a module-level `ADV_CURSOR`), up to the buffer capacity. Nodes that are offline (`miss == 0`, i.e. `!is_online`) are skipped.
 
 ### 14.4 Node Tracking and Timeout
 
-`MESH_NODE_ST` holds up to `MESH_NODE_MAX_NUM` entries. Each entry has a `tick` field (16-bit, derived from the upper 16 bits of the 32-bit system tick). A node is marked stale if:
-
-```
-current_tick - node.tick > MESH_NODE_TIMEOUT_THRESHOLD
-```
-
-Stale nodes are flushed by `mesh_node_flush_status()` (sets `tick = 0`) and their slot is set in `MESH_NODE_MASK` to trigger a status update notification.
+`MESH_NODE_ST` holds up to `MESH_NODE_MAX_NUM` entries. Each entry has a `miss` field (8-bit sweep-age counter: `0` = offline, `>= 1` = online with age `miss - 1` sweeps). `mesh_node_flush_status()` sweeps at most once per `MESH_STATUS_SWEEP_MS` (500 ms) and ages every online remote; a node is marked stale when `miss > mesh_status_offline_sweeps(M)`, at which point `miss` is reset to 0 and its slot is set in `MESH_NODE_MASK` to trigger a status update notification.
 
 ### 14.5 Self-Keep-Alive (`mesh_node_keep_alive`)
 
 `mesh_node_keep_alive()` refreshes the device's own entry (index 0):
 - Updates `sn` to `DEVICE_NODE_SN`
-- Sets `tick` to `(read_reg_system_tick() >> 16) | 1`
+- Sets `miss = 1` (online, age 0); self is never swept
 
 ### 14.6 Mesh Packet Relay
 
@@ -2161,26 +2155,25 @@ Offset  Size  Field    Description
  2       2    par      Parameters: par[0]=lumen, par[1]=reserved
 ```
 
-### 24.2 `MeshNodeStT` — Full Status Entry (6 bytes)
+### 24.2 `MeshNodeStT` — Full Status Entry (5 bytes)
 
-The runtime table stores each node's status with a tick counter for timeout detection:
+The runtime table stores each node's status with a saturating per-sweep age counter:
 
 ```
 Offset  Size  Field  Description
 ──────  ────  ─────  ─────────────────────────────────────────
- 0       2    tick   Scaled system tick at last update (0 = offline)
- 2       4    val    MeshNodeStValT (dev_adr, sn, par)
+ 0       1    miss   Sweep age: 0 = offline/never seen, >=1 = online, age = miss-1 sweeps
+ 1       4    val    MeshNodeStValT (dev_adr, sn, par)
 ```
 
-Tick values are stored as `(clock_time() as u16)` for compact representation. Timeout is detected by comparing the stored tick with the current time using a scaled threshold derived from the current table size:
+The all-zero struct means offline, so the table stays in `.bss` and needs no runtime fill. `is_online(node)` is simply `miss != 0`. `mesh_node_flush_status()` runs at most once per `MESH_STATUS_SWEEP_MS` (500 ms) and increments every online remote's `miss` by one; when `miss > mesh_status_offline_sweeps(M)` the node is set to `miss = 0` and reported offline. Any observation (new node, accepted update, keep-alive, self status update) resets `miss` to 1.
 
 ```
-timeout_threshold = (CLOCK_SYS_CLOCK_1US × mesh_status_timeout_ms(node_count) × 1000) >> 16
+mesh_status_offline_sweeps(M) = clamp(ceil(mesh_status_timeout_ms(M) / 500), 1, 254)
+mesh_status_timeout_ms(M)     = max(3000, ceil((M-1)/5) × 250 × 4) ms
 ```
 
-where `mesh_status_timeout_ms(M) = max(3000, ceil((M-1)/5) × 250 × 4)` ms. The deadline is derived from the status-broadcast cadence so it always exceeds the round-robin sweep period of a relayed node (a fixed 3 s would be shorter than the sweep at 40–64 nodes).
-
-If `current_tick - stored_tick > timeout_threshold`, the node is marked offline (`tick = 0`).
+The deadline is derived from the status-broadcast cadence so it always exceeds the round-robin sweep period of a relayed node (a fixed 3 s would be shorter than the sweep at 40–64 nodes). The `1..=254` clamp guarantees an online `miss` (which starts at 1 and increments once per sweep) is reset to 0 before it can wrap.
 
 ### 24.3 Status Update Algorithm
 
@@ -2191,14 +2184,15 @@ For each incoming node record:
   1. If dev_adr == self address: skip (no self-update)
   2. Search existing table for matching dev_adr
   3. If found:
-     a. Accept update if new_sn - old_sn < 0x3F (forward progress)
-        OR if node was offline (tick == 0)
-        OR if significant time has elapsed
-     b. Update tick, sn, par
-     c. Set MESH_NODE_MASK bit for this node (triggers status report)
+     a. Accept update if the sn advance is plausible (<= 65)
+        OR the node was offline (miss == 0)
+        OR the node has been unseen longer than the escape gate
+           (mesh_status_offline_sweeps(M) / 2, min 1, in sweeps)
+     b. Update val; set miss = 1 (online, age 0)
+     c. Set MESH_NODE_MASK bit on a par change or on revival
   4. If not found AND table not full:
      a. Allocate new entry
-     b. Initialise tick, sn, par
+     b. Initialise val and miss = 1
      c. Set MESH_NODE_MASK bit
 ```
 
@@ -2212,7 +2206,7 @@ The 32-bit bitmask `MESH_NODE_MASK` tracks which nodes have pending status updat
 For each set bit in MESH_NODE_MASK:
   1. Clear the bit (one-shot reporting)
   2. Copy MeshNodeStValT into output buffer
-  3. If tick == 0 (offline), set sn = 0 in report
+  3. If !is_online(node) (miss == 0), set sn = 0 in report
   4. Advance buffer pointer by MESH_NODE_ST_VAL_LEN (4 bytes)
   5. Stop if output buffer is full (chunked reporting across multiple packets)
 ```
@@ -2231,17 +2225,18 @@ This keeps the entire mesh informed of every node's current lumen level and sequ
 
 ### 24.6 Timeout and Flush
 
-`mesh_node_flush_status()` is called periodically to detect stale nodes:
+`mesh_node_flush_status()` sweeps at most once per `MESH_STATUS_SWEEP_MS` (500 ms), gated by embassy-time `Instant`/`Duration`, and ages each online remote:
 
 ```
 For node index 1..MESH_NODE_MAX:
-  if tick != 0 AND (now - tick) > timeout_threshold:
-    tick = 0           // mark offline
-    sn   = 0           // clear sequence
-    set MESH_NODE_MASK bit  // trigger status report to BLE master
+  if is_online(node):              // miss != 0
+    miss += 1
+    if miss > mesh_status_offline_sweeps(M):
+      miss = 0                     // mark offline
+      set MESH_NODE_MASK bit       // trigger offline report (sn forced to 0)
 ```
 
-A node is removed from the active set after the cadence-derived deadline of silence (floor `ONLINE_STATUS_TIMEOUT = 3000 ms`; 8 s at 40 nodes, 13 s at 64).
+`sn` is not cleared in the table; the offline report path in `mesh_node_report_status()` forces it to 0. A node is removed from the active set after the cadence-derived deadline of silence (floor `ONLINE_STATUS_TIMEOUT = 3000 ms`; 8 s at 40 nodes, 13 s at 64).
 
 ---
 
@@ -2385,8 +2380,10 @@ With BRIDGE_MAX_CNT=8:        ≤8 relay hops possible
 | Parameter | Value | Derived From |
 |-----------|-------|-------------|
 | Status broadcast period | 800 ms | `100 ms × 8` |
+| Status sweep cadence | 500 ms | `MESH_STATUS_SWEEP_MS` |
 | Node timeout | derived (floor 3000 ms) | `mesh_status_timeout_ms(M) = max(3000, ceil((M-1)/5) × 250 × 4)` |
-| Node timeout examples | 8 s @ M=40; 13 s @ M=64 | derived |
+| Node timeout in sweeps | `ceil(timeout_ms / 500)`, clamped `1..=254` | `mesh_status_offline_sweeps(M)` |
+| Node timeout examples | 8 s / 16 sweeps @ M=40; 13 s / 26 sweeps @ M=64 | derived |
 | Re-pairing credential window | ~3 s | 6 × 500 ms frames |
 | Re-pairing timeout | 10 s | `MESH_PAIR_TIMEOUT` |
 | Post-credential apply delay | 1000 ms | `MESH_PAIR_CMD_INTERVAL × 2` |

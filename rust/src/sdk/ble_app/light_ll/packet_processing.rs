@@ -2702,7 +2702,7 @@ mod tests {
             let mut mesh_node_st = MESH_NODE_ST.lock();
             for i in 0..mesh_node_st.len() {
                 mesh_node_st[i] = MeshNodeStT {
-                    tick: 0,
+                    miss: 0,
                     val: MeshNodeStValT {
                         dev_adr: if i == 0 { 0x34 } else { 0 },
                         sn: 0,
@@ -2785,8 +2785,8 @@ mod tests {
                 [0x80, 0x00],
                 "First remote node par"
             );
-            let tick1 = mesh_node_st[1].tick;
-            assert_ne!(tick1, 0, "First remote node should be online");
+            let miss1 = mesh_node_st[1].miss;
+            assert_ne!(miss1, 0, "First remote node should be online");
 
             // Node at index 2: addr=0x14 (20), sn=5, par=[0xFF, 0x01]
             assert_eq!(
@@ -2799,8 +2799,8 @@ mod tests {
                 [0xFF, 0x01],
                 "Second remote node par"
             );
-            let tick2 = mesh_node_st[2].tick;
-            assert_ne!(tick2, 0, "Second remote node should be online");
+            let miss2 = mesh_node_st[2].miss;
+            assert_ne!(miss2, 0, "Second remote node should be online");
         }
 
         // Verify MESH_NODE_MASK has bits set for the new nodes

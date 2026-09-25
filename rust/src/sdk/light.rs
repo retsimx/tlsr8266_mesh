@@ -66,6 +66,24 @@ pub fn mesh_status_timeout_ms(node_count: u32) -> u32 {
     (coverage_ms * MESH_STATUS_TIMEOUT_SAFETY_FACTOR).max(ONLINE_STATUS_TIMEOUT)
 }
 
+/// Status sweep cadence in ms: `mesh_node_flush_status` runs at most this often.
+///
+/// Each run advances every online remote's `miss` counter by one, so a node's
+/// age in sweeps is `miss - 1` and the offline deadline in sweeps is the
+/// deadline in ms divided by this cadence.
+pub const MESH_STATUS_SWEEP_MS: u32 = 500;
+
+/// Offline deadline expressed in [`MESH_STATUS_SWEEP_MS`] sweeps for a mesh of
+/// `node_count` nodes, clamped to `1..=254`.
+///
+/// Derived from [`mesh_status_timeout_ms`] so the two cannot disagree. The cap
+/// keeps an online `miss` (which starts at 1 and increments once per sweep)
+/// from wrapping before it is reset to 0 on timeout.
+pub fn mesh_status_offline_sweeps(node_count: u32) -> u8 {
+    let sweeps = mesh_status_timeout_ms(node_count).div_ceil(MESH_STATUS_SWEEP_MS);
+    sweeps.clamp(1, 254) as u8
+}
+
 pub const AUTH_TIME: u32 = 60;
 pub const MAX_GROUP_COUNT: u8 = 8;
 
@@ -798,6 +816,26 @@ mod tests {
     fn test_mesh_status_timeout_ms_max_mesh_bound() {
         assert_eq!(MESH_NODE_MAX_NUM, 64, "deadline math assumes <= 64 nodes");
         assert_eq!(mesh_status_timeout_ms(MESH_NODE_MAX_NUM as u32), 13000);
+    }
+
+    /// The sweep deadline is the ms deadline rounded up to whole sweeps, so the
+    /// two derivations cannot drift apart.
+    #[test]
+    fn test_mesh_status_offline_sweeps_scaling() {
+        assert_eq!(MESH_STATUS_SWEEP_MS, 500);
+        // Floor deadline 3000 ms -> 6 sweeps.
+        assert_eq!(mesh_status_offline_sweeps(0), 6);
+        assert_eq!(mesh_status_offline_sweeps(1), 6);
+        assert_eq!(mesh_status_offline_sweeps(6), 6);
+        // M=40/41: 8000 ms -> 16 sweeps.
+        assert_eq!(mesh_status_offline_sweeps(40), 16);
+        assert_eq!(mesh_status_offline_sweeps(41), 16);
+        // M=42: 9000 ms -> 18 sweeps.
+        assert_eq!(mesh_status_offline_sweeps(42), 18);
+        // M=64: 13000 ms -> 26 sweeps.
+        assert_eq!(mesh_status_offline_sweeps(64), 26);
+        // The cap exists so an online miss (1..=deadline) never wraps to 0.
+        assert!(mesh_status_offline_sweeps(MESH_NODE_MAX_NUM as u32) <= 254);
     }
 
     /// Tests that enum discriminant values are correct.

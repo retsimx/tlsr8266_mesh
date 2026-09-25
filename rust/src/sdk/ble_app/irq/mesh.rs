@@ -14,7 +14,7 @@ use core::slice;
 
 use crate::app;
 use crate::common::SYS_CHN_LISTEN;
-use crate::mesh::MESH_NODE_ST_VAL_LEN;
+use crate::mesh::{is_online, MESH_NODE_ST_VAL_LEN};
 use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable_mask, mesh_send_online_status,
@@ -46,7 +46,7 @@ use crate::state::*;
 /// - Each mesh node has a status structure containing state information
 /// - A bitmask tracks which nodes have pending status updates
 /// - Status reports are sent in chunks to avoid packet size limits
-/// - Offline nodes (tick == 0) have their sequence numbers cleared
+/// - Offline nodes (miss == 0) have their sequence numbers cleared
 ///
 /// ## Buffer Management:
 /// - Uses atomic operations to prevent race conditions
@@ -97,9 +97,9 @@ pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize {
                 .copy_from_slice(bytemuck::bytes_of(&mesh_node_st[idx].val));
 
             // Special handling for offline devices:
-            // If the tick is 0 (device offline), set the sequence number to 0
+            // If the node is offline (miss == 0), set the sequence number to 0
             // This indicates to the master that the device is not responding
-            if mesh_node_st[idx].tick == 0 {
+            if !is_online(&mesh_node_st[idx]) {
                 params[params_idx + 1] = 0;
             }
 
@@ -287,7 +287,7 @@ mod tests {
         let mut mesh_node_st = MESH_NODE_ST.lock();
         for i in 0..mesh_node_st.len() {
             mesh_node_st[i] = MeshNodeStT {
-                tick: 0,
+                miss: 0,
                 val: MeshNodeStValT {
                     dev_adr: 0,
                     sn: 0,
@@ -302,7 +302,7 @@ mod tests {
         idx: usize,
         dev_adr: u8,
         sn: u8,
-        tick: u16,
+        miss: u8,
         par: [u8; MESH_NODE_ST_PAR_LEN],
     ) {
         let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -315,7 +315,7 @@ mod tests {
 
         // Set the node status data
         mesh_node_st[idx] = MeshNodeStT {
-            tick,
+            miss,
             val: MeshNodeStValT { dev_adr, sn, par },
         };
     }
@@ -339,8 +339,8 @@ mod tests {
         MESH_NODE_REPORT_ENABLE.set(false);
 
         // Setup some mock nodes that would normally be reported
-        setup_mock_mesh_node(0, 0x01, 0x10, 1000, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 2000, [0xCC, 0xDD]);
+        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
 
         // Prepare output buffer
         let mut params = [0xFF; 20]; // Initialize with non-zero to verify no changes
@@ -405,7 +405,7 @@ mod tests {
 
         // Setup: Reporting enabled with one online node
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1500, [0xAA, 0xBB]); // tick > 0 = online
+        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]); // miss > 0 = online
 
         // Prepare output buffer
         let mut params = [0xFF; 20];
@@ -444,7 +444,7 @@ mod tests {
 
         // Setup: Reporting enabled with one offline node
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(2, 0x03, 0x30, 0, [0xCC, 0xDD]); // tick == 0 = offline
+        setup_mock_mesh_node(2, 0x03, 0x30, 0, [0xCC, 0xDD]); // miss == 0 = offline
 
         // Prepare output buffer
         let mut params = [0xFF; 20];
@@ -487,8 +487,8 @@ mod tests {
 
         // Setup: Reporting enabled with multiple nodes
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1000, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 2000, [0xCC, 0xDD]);
+        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
         setup_mock_mesh_node(3, 0x04, 0x40, 0, [0xEE, 0xFF]); // offline node
 
         // Prepare output buffer
@@ -543,9 +543,9 @@ mod tests {
 
         // Setup: Reporting enabled with more nodes than buffer can hold
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1000, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 2000, [0xCC, 0xDD]);
-        setup_mock_mesh_node(2, 0x03, 0x30, 3000, [0xEE, 0xFF]);
+        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
+        setup_mock_mesh_node(2, 0x03, 0x30, 1, [0xEE, 0xFF]);
 
         // Prepare small output buffer (only room for 2 nodes)
         let mut params = [0x00; 8]; // 2 nodes * 4 bytes each

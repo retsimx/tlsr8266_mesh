@@ -92,6 +92,27 @@ stack-check:
 	fi
 	python3 sdk/stack_analysis.py --elf $(BUILD_DIR)/$(TARGET)
 
+# Flashable image must fit the 128 KiB (131072 B) application slot.
+IMAGE_SIZE_LIMIT = 131072
+
+.PHONY: image-size-check
+# Fails if the built .bin exceeds IMAGE_SIZE_LIMIT. Does not rebuild.
+image-size-check:
+	@if [ ! -f $(BUILD_DIR)/$(TARGET).bin ]; then \
+		echo "image-size-check: $(BUILD_DIR)/$(TARGET).bin not found; run 'make' first" >&2; \
+		exit 2; \
+	fi
+	@size=$$(wc -c < $(BUILD_DIR)/$(TARGET).bin); \
+	echo "firmware image: $$size bytes (limit $(IMAGE_SIZE_LIMIT))"; \
+	if [ $$size -gt $(IMAGE_SIZE_LIMIT) ]; then \
+		echo "ERROR: firmware image $$size B exceeds $(IMAGE_SIZE_LIMIT) B" >&2; \
+		exit 1; \
+	fi
+
+.PHONY: check
+# All non-rebuilding static gates.
+check: stack-check image-size-check
+
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)

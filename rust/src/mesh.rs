@@ -39,6 +39,13 @@ pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
 
+/// Size of the status value region in one status advertisement packet.
+///
+/// `mesh_node_adv_status` fills `MESH_STATUS_VALUE_LEN` bytes and
+/// `rf_link_rc_data` decodes exactly the same span, so this is the single
+/// source of truth for the per-packet record capacity.
+pub const MESH_STATUS_VALUE_LEN: usize = 24;
+
 /// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
 ///
 /// Credentials are transmitted in 6 messages (Name1/2, Pwd1/2, Ltk1/2), then
@@ -102,9 +109,17 @@ unsafe impl Zeroable for MeshNodeStValT {}
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct MeshNodeStT {
-    pub tick: u16,
+    /// Sweep-age counter: `0` = offline/never seen, `>= 1` = online with age
+    /// `miss - 1` status sweeps since the last observation. All-zero init in
+    /// `.bss` therefore means offline without an explicit runtime fill.
+    pub miss: u8,
     // don't change include type
     pub val: MeshNodeStValT,
+}
+
+/// A node is online iff it has a non-zero sweep-age counter (`miss`).
+pub fn is_online(node: &MeshNodeStT) -> bool {
+    node.miss != 0
 }
 
 struct SendPkt {
@@ -540,7 +555,7 @@ impl MeshManager {
 
     pub fn mesh_node_buf_init(&self) {
         MESH_NODE_ST.lock().fill(MeshNodeStT {
-            tick: 0,
+            miss: 0,
             val: MeshNodeStValT {
                 dev_adr: 0,
                 sn: 0,
@@ -1869,9 +1884,9 @@ mod tests {
         // Setup
         MESH_NODE_MAX.set(3);
         let mut mesh_node_st = MESH_NODE_ST.lock();
-        mesh_node_st[0].tick = 100;
-        mesh_node_st[1].tick = 200;
-        mesh_node_st[2].tick = 300;
+        mesh_node_st[0].miss = 100;
+        mesh_node_st[1].miss = 150;
+        mesh_node_st[2].miss = 200;
         drop(mesh_node_st);
 
         let mut app = App::default();
@@ -1887,8 +1902,8 @@ mod tests {
         let mesh_node_st = MESH_NODE_ST.lock();
         for i in 0..3 {
             // Use local variable to avoid unaligned reference to packed field
-            let tick = mesh_node_st[i].tick;
-            assert_eq!(tick, 0);
+            let miss = mesh_node_st[i].miss;
+            assert_eq!(miss, 0);
         }
         drop(mesh_node_st);
 

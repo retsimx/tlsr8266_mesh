@@ -421,6 +421,8 @@ pub fn mesh_node_init() {
     // Register self as first tracked node
     mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8; // Lower byte of device address
     mesh_node_st[0].val.sn = DEVICE_NODE_SN.get(); // Current sequence number
+                                                   // Self starts online (miss >= 1) and is never swept (sweep starts at index 1).
+    mesh_node_st[0].miss = 1;
     MESH_NODE_MAX.set(1); // Only this device is known
 }
 
@@ -1608,6 +1610,8 @@ mod tests {
         let mesh_node_st = MESH_NODE_ST.lock();
         assert_eq!(mesh_node_st[0].val.dev_adr, 0x34); // Lower byte
         assert_eq!(mesh_node_st[0].val.sn, 0x56);
+        // Self is left explicitly online (miss = 1).
+        assert_eq!(mesh_node_st[0].miss, 1);
         assert_eq!(MESH_NODE_MAX.get(), 1);
 
         // Verify mock was called

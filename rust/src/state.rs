@@ -39,7 +39,7 @@ pub static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COU
 pub static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> =
     CriticalSectionMutex::new(
         [MeshNodeStT {
-            tick: 0,
+            miss: 0,
             val: MeshNodeStValT {
                 dev_adr: 0,
                 sn: 0,

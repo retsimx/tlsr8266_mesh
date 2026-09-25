@@ -82,6 +82,16 @@ $(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
 .PHONY: all
 all: $(BUILD_DIR)/$(TARGET).bin
 
+.PHONY: stack-check
+# Static stack/RAM gate: reads the linked ELF's symbols and fails on call cycles
+# or a main/IRQ margin below 400 B. Does not rebuild the firmware itself.
+stack-check:
+	@if [ ! -f $(BUILD_DIR)/$(TARGET) ]; then \
+		echo "stack-check: $(BUILD_DIR)/$(TARGET) not found; run 'make' first" >&2; \
+		exit 2; \
+	fi
+	python3 sdk/stack_analysis.py --elf $(BUILD_DIR)/$(TARGET)
+
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)

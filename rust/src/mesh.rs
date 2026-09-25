@@ -39,6 +39,13 @@ pub const MESH_NODE_ST_VAL_LEN: usize = 4;
 // MIN: 4,   MAX: 10
 pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
 
+/// Size of the status value region in one status advertisement packet.
+///
+/// `mesh_node_adv_status` fills `MESH_STATUS_VALUE_LEN` bytes and
+/// `rf_link_rc_data` decodes exactly the same span, so this is the single
+/// source of truth for the per-packet record capacity.
+pub const MESH_STATUS_VALUE_LEN: usize = 24;
+
 /// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
 ///
 /// Credentials are transmitted in 6 messages (Name1/2, Pwd1/2, Ltk1/2), then

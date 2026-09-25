@@ -195,6 +195,11 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
+      - name: Check static stack/RAM budget
+        run: make stack-check
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:

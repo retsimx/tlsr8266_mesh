@@ -848,7 +848,7 @@ __irq:
 - `irq_handler` must be a plain C function with external linkage and the symbol name `irq_handler` (no name-mangling). Do **not** mark it with any ISR attribute — all register save/restore is performed by `__irq`.
 - The C function sees a normal calling environment on entry.
 - The function **must reside in RAM** (`.ram_code` section) because the flash instruction cache may be disabled during RF operations.
-- The startup code allocates a dedicated IRQ stack of **0x800 bytes** (`IRQ_STK_SIZE`) and sets `r13` to the top-of-stack in IRQ mode (`mode = 0x12`). No stack setup is required in `irq_handler` itself.
+- The startup code allocates a dedicated IRQ stack of **0x700 bytes (1792)** (`IRQ_STK_SIZE`) and sets `r13` to the top-of-stack in IRQ mode (`mode = 0x12`). No stack setup is required in `irq_handler` itself. The size is validated against the deepest IRQ call chain by `sdk/stack_analysis.py` (`make stack-check`).
 
 ### 6.4 IRQ Dispatch Flow (`irq_handler`)
 
@@ -1576,7 +1576,7 @@ The device continuously broadcasts mesh node status via BLE advertisements when 
 
 ### 14.3 Mesh Advertising Data Construction (`mesh_node_adv_status`)
 
-The advertising payload is filled with consecutive `MeshNodeStValT` records. The local device's own entry is always placed at index 0. Subsequent slots cycle through known mesh nodes (round-robin via `MESH_NODE_CUR`), up to the buffer capacity. Nodes with `tick == 0` (timed out) are skipped.
+The advertising payload is filled with consecutive `MeshNodeStValT` records. The local device's own entry is always placed at index 0. Subsequent slots cycle through known mesh nodes (round-robin via a module-level `ADV_CURSOR`), up to the buffer capacity. Nodes with `tick == 0` (timed out) are skipped.
 
 ### 14.4 Node Tracking and Timeout
 
@@ -1846,7 +1846,7 @@ All mesh nodes are peers. There is no designated coordinator, router, or gateway
 | `ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL` | `8` | `sdk/light.rs` | Send online status every 8th cycle |
 | `MESH_LISTEN_INTERVAL_US` | `100_000` (100 ms) | `status_management.rs` | Duration of one listen cycle |
 | `BRIDGE_MAX_CNT` | `8` | `sdk/light.rs` | Maximum relay hops per packet |
-| `ONLINE_STATUS_TIMEOUT` | `3000` ms | `mesh_management.rs` | Inactivity before node marked offline |
+| `ONLINE_STATUS_TIMEOUT` | `3000` ms | `sdk/light.rs` | **Floor** for the cadence-derived offline deadline; the deadline is `max(floor, ceil((M-1)/5) × 250 ms × 4)` (`mesh_status_timeout_ms`, e.g. 8 s at M=40, 13 s at M=64) |
 | `MESH_PAIR_CMD_INTERVAL` | `500` ms | `mesh.rs` | Interval between mesh-pair credential frames |
 | `MESH_PAIR_TIMEOUT` | `10` s | `mesh.rs` | Total time allowed to complete re-pairing |
 | `MESH_NODE_MAX_NUM` | (compile-time) | `state.rs` | Maximum nodes tracked in status table |
@@ -2172,11 +2172,13 @@ Offset  Size  Field  Description
  2       4    val    MeshNodeStValT (dev_adr, sn, par)
 ```
 
-Tick values are stored as `(clock_time() as u16)` for compact representation. Timeout is detected by comparing the stored tick with the current time using a scaled threshold:
+Tick values are stored as `(clock_time() as u16)` for compact representation. Timeout is detected by comparing the stored tick with the current time using a scaled threshold derived from the current table size:
 
 ```
-timeout_threshold = (CLOCK_SYS_CLOCK_1US × ONLINE_STATUS_TIMEOUT × 1000) >> 16
+timeout_threshold = (CLOCK_SYS_CLOCK_1US × mesh_status_timeout_ms(node_count) × 1000) >> 16
 ```
+
+where `mesh_status_timeout_ms(M) = max(3000, ceil((M-1)/5) × 250 × 4)` ms. The deadline is derived from the status-broadcast cadence so it always exceeds the round-robin sweep period of a relayed node (a fixed 3 s would be shorter than the sweep at 40–64 nodes).
 
 If `current_tick - stored_tick > timeout_threshold`, the node is marked offline (`tick = 0`).
 
@@ -2239,7 +2241,7 @@ For node index 1..MESH_NODE_MAX:
     set MESH_NODE_MASK bit  // trigger status report to BLE master
 ```
 
-A node is removed from the active set after `ONLINE_STATUS_TIMEOUT = 3000 ms` of silence.
+A node is removed from the active set after the cadence-derived deadline of silence (floor `ONLINE_STATUS_TIMEOUT = 3000 ms`; 8 s at 40 nodes, 13 s at 64).
 
 ---
 
@@ -2383,8 +2385,8 @@ With BRIDGE_MAX_CNT=8:        ≤8 relay hops possible
 | Parameter | Value | Derived From |
 |-----------|-------|-------------|
 | Status broadcast period | 800 ms | `100 ms × 8` |
-| Node timeout | 3000 ms | `ONLINE_STATUS_TIMEOUT` |
-| Max missed broadcasts before timeout | ~3–4 | `3000 / 800` |
+| Node timeout | derived (floor 3000 ms) | `mesh_status_timeout_ms(M) = max(3000, ceil((M-1)/5) × 250 × 4)` |
+| Node timeout examples | 8 s @ M=40; 13 s @ M=64 | derived |
 | Re-pairing credential window | ~3 s | 6 × 500 ms frames |
 | Re-pairing timeout | 10 s | `MESH_PAIR_TIMEOUT` |
 | Post-credential apply delay | 1000 ms | `MESH_PAIR_CMD_INTERVAL × 2` |

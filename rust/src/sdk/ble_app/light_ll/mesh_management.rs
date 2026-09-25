@@ -47,7 +47,9 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
+use crate::mesh::{
+    MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN, MESH_STATUS_VALUE_LEN,
+};
 use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1US};
@@ -56,6 +58,62 @@ use crate::sdk::packet_types::*;
 use crate::state::*;
 use crate::uart_manager::UartMsg;
 use crate::{app, BIT};
+
+/// Advertisement round-robin cursor: index (1..MESH_NODE_MAX) of the next remote
+/// node to advertise. Persists across packets so every remote is eventually
+/// covered; not a per-call local because coverage spans many packets.
+static ADV_CURSOR: AtomicUsize = AtomicUsize::new(1);
+
+/// M4: the deadline model's remote-records-per-packet must equal the wire
+/// capacity. A status value region holds `MESH_STATUS_VALUE_LEN /
+/// MESH_NODE_ST_VAL_LEN` records; the first is always this device, so the rest
+/// are the remotes advertised per packet. Drift fails the build here.
+const _: () = assert!(
+    MESH_STATUS_RECORDS_PER_PACKET as usize == MESH_STATUS_VALUE_LEN / MESH_NODE_ST_VAL_LEN - 1
+);
+
+/// Borrowed view over the locked node table (index 0 is this device).
+///
+/// The active length is passed per call rather than stored so the lock guard
+/// remains the single source of truth for the table contents.
+struct NodeTable<'a> {
+    nodes: &'a mut [MeshNodeStT],
+}
+
+impl<'a> NodeTable<'a> {
+    fn new(nodes: &'a mut [MeshNodeStT]) -> Self {
+        Self { nodes }
+    }
+
+    /// Index of the remote node with `addr`, searching the active range `1..max`.
+    fn position(&self, max: usize, addr: u8) -> Option<usize> {
+        self.nodes[1..max]
+            .iter()
+            .position(|node| node.val.dev_adr == addr)
+            .map(|offset| offset + 1)
+    }
+
+    /// Store a freshly-heard remote record at `index`.
+    fn store(&mut self, index: usize, entry: &MeshNodeStValT, tick: u16) {
+        self.nodes[index] = MeshNodeStT { tick, val: *entry };
+    }
+}
+
+/// Mark a node's status as changed so it is included in the next report.
+fn mark_status_changed(index: usize) {
+    MESH_NODE_MASK.lock()[index >> 5] |= 1 << (index & 0x1f);
+}
+
+/// Raw bytes of a status value for direct wire copies.
+fn node_val_bytes(value: &MeshNodeStValT) -> &[u8] {
+    bytemuck::bytes_of(value)
+}
+
+/// Convert a millisecond deadline into the node table's scaled tick units
+/// (`CLOCK_SYS_CLOCK_1US` ticks/us, packed into the high 16 bits).
+fn status_timeout_scaled(timeout_ms: u32) -> u32 {
+    (CLOCK_SYS_CLOCK_1US * timeout_ms * 1000) >> 0x10
+}
 
 /// Sends node status change events to the UART daemon as a NodeStatus message.
 ///
@@ -140,155 +198,86 @@ fn send_uart_node_changes(entries: &[(u8, u8, u8)]) {
 /// * Space: O(1) additional space beyond existing node table
 #[cfg_attr(test, mry::mry)]
 pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
-    let mut mesh_node_st = MESH_NODE_ST.lock();
-
-    let mut src_index = 0;
-    let mut result = 0xfffffffe;
-
-    // Track nodes whose status changed for UART reporting
-    let mut changed: [(u8, u8, u8); 6] = [(0, 0, 0); 6];
-    let mut changed_count = 0;
-
-    // Generate current timestamp using scaled timing format (16-bit precision)
-    // The | 1 ensures timestamp is never zero (reserved value)
+    // Scaled 16-bit timestamp; |1 keeps it non-zero (zero marks a node offline).
     let tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 
-    // Process each node status entry in the received packet
-    while src_index < pkt.len() && pkt[src_index].dev_adr != 0 {
-        // Skip our own device address - we don't track our own status in the remote node table
-        // (Our own status is maintained separately at index 0)
-        if DEVICE_ADDRESS.get() as u8 != pkt[src_index].dev_adr {
-            let mesh_node_max = MESH_NODE_MAX.get();
-            let mut current_index = 1; // Start search from index 1 (index 0 is reserved for this device)
-            let mut mesh_node = &mut mesh_node_st[current_index];
+    // Half the derived deadline. A large, implausible sn jump is only trusted
+    // once the node has been quiet this long: a sequence-sanity / resurrection
+    // hysteresis gate, not the offline detector. Scaling it from the deadline
+    // keeps it below the offline window at every mesh size.
+    let escape_scaled =
+        status_timeout_scaled(mesh_status_timeout_ms(MESH_NODE_MAX.get() as u32)) / 2;
 
-            // NODE LOOKUP ALGORITHM: Find existing node or allocate new slot
-            if mesh_node_max >= 2 {
-                // Check if the first available slot (index 1) matches the device address
-                if mesh_node.val.dev_adr != pkt[src_index].dev_adr {
-                    // Linear search through existing nodes to find matching device address
-                    for tidx in 1..MESH_NODE_MAX_NUM {
-                        current_index = tidx;
-                        mesh_node = &mut mesh_node_st[current_index];
+    // A packet carries at most 6 records, so 6 UART entries is the worst case.
+    let mut changed: heapless::Vec<(u8, u8, u8), 6> = heapless::Vec::new();
 
-                        // Break if we've reached the end of active nodes OR found matching address
-                        if mesh_node_max <= tidx as u8
-                            || pkt[src_index].dev_adr == mesh_node.val.dev_adr
-                        {
-                            break;
+    {
+        let mut st = MESH_NODE_ST.lock();
+        let mut table = NodeTable::new(&mut st[..]);
+
+        // Entries are terminated by a zero address (trailing padding).
+        for entry in pkt.iter().take_while(|entry| entry.dev_adr != 0) {
+            // Our own status lives at index 0 and is never a remote record.
+            if entry.dev_adr == DEVICE_ADDRESS.get() as u8 {
+                continue;
+            }
+
+            let max = MESH_NODE_MAX.get() as usize;
+            if max == 0 {
+                continue;
+            }
+
+            match table.position(max, entry.dev_adr) {
+                // EXISTING NODE: accept only a genuinely newer sequence number.
+                //
+                // THE CRITICAL INVARIANT: only accept packets where sn has
+                // actually advanced (sn_difference > 0). Refreshing tick for
+                // same-sn packets would let neighbours re-broadcast a dead
+                // node's frozen state forever and keep it alive. A live node
+                // increments sn on every advertisement (mesh_node_keep_alive).
+                //
+                // Given sn_difference > 0, accept if ANY of:
+                // 1. The advance is plausible (<= 65).
+                // 2. The node was offline (tick == 0) - always revive.
+                // 3. A large jump (> 65) has persisted for `escape_scaled`
+                //    scaled ticks, i.e. half the derived deadline.
+                Some(index) => {
+                    let node = &mut table.nodes[index];
+                    let sn_difference = entry.sn.wrapping_sub(node.val.sn);
+                    let par_match = entry.par == node.val.par;
+
+                    if sn_difference > 0
+                        && (sn_difference <= 65
+                            || node.tick == 0
+                            || (escape_scaled as u16) < tick.wrapping_sub(node.tick))
+                    {
+                        node.val = *entry;
+
+                        // Report on a parameter change, or on revival.
+                        if !par_match || node.tick == 0 {
+                            mark_status_changed(index);
+                            let _ = changed.push((entry.dev_adr, 1, u8::from(entry.par[0] != 0)));
                         }
+
+                        node.tick = tick;
                     }
                 }
-            }
-
-            // TABLE FULL CHECK: Ensure we haven't exceeded maximum node capacity
-            if MESH_NODE_MAX_NUM == current_index {
-                // Send any status changes collected so far before returning
-                drop(mesh_node_st);
-                send_uart_node_changes(&changed[..changed_count]);
-                return 1; // Table full, cannot add more nodes
-            }
-
-            // NEW NODE ALLOCATION: current_index == mesh_node_max means we need a new slot
-            if mesh_node_max as usize == current_index {
-                // Expand the active node table to include this new node
-                MESH_NODE_MAX.inc();
-
-                // Initialize new node with received status data
-                mesh_node.val = pkt[src_index];
-                mesh_node.tick = tick;
-
-                // Mark new node for status reporting using bitmask
-                // Word index = mesh_node_max >> 5, Bit index = mesh_node_max & 0x1f
-                MESH_NODE_MASK.lock()[mesh_node_max as usize >> 5] |= 1 << (mesh_node_max & 0x1f);
-
-                // Record for UART notification
-                if changed_count < changed.len() {
-                    changed[changed_count] = (
-                        pkt[src_index].dev_adr,
-                        1,
-                        if pkt[src_index].par[0] != 0 { 1 } else { 0 },
-                    );
-                    changed_count += 1;
-                }
-
-                result = mesh_node_max as u32;
-            }
-            // EXISTING NODE UPDATE: Node already exists in table, check if we should update
-            else if current_index < mesh_node_max as usize {
-                // SEQUENCE NUMBER VALIDATION: Check if this is a newer status update
-                // Use wrapping subtraction to handle u8 overflow/underflow correctly
-                let sn_difference = pkt[src_index].sn.wrapping_sub(mesh_node.val.sn);
-                let par_match = pkt[src_index].par == mesh_node.val.par;
-
-                // TIMEOUT CALCULATION: Use half the standard timeout for update acceptance
-                // The division by 2 provides a more aggressive update policy, accepting
-                // updates from nodes that haven't been seen recently even if sequence
-                // numbers are questionable
-                let timeout = (ONLINE_STATUS_TIMEOUT * 1000) / 2;
-
-                result = current_index as u32;
-
-                // UPDATE ACCEPTANCE ALGORITHM: Multi-condition check for status update validity
-                //
-                // THE CRITICAL INVARIANT: only accept packets where sn has actually advanced
-                // (sn_difference > 0).  If we refresh tick for same-sn packets (sn_difference == 0)
-                // then neighbours running old firmware that keep re-broadcasting a dead node's
-                // last-known state will permanently prevent that node from ever timing out —
-                // because every relay arrives with the same frozen sn and keeps resetting the
-                // clock.  A live node's sn increments on every advertisement (mesh_node_keep_alive
-                // is called before each outgoing status packet), so any genuinely live node will
-                // always produce advancing sequence numbers.  Only dead nodes produce stale relays
-                // with a frozen sn.
-                //
-                // Given sn_difference > 0, accept the update if ANY of these conditions are met:
-                // 1. Sequence number advance is reasonable (1–65).  Handles normal operation and
-                //    u8 wraparound: 64→1 gives sn_difference=193 which exceeds 65, but that is
-                //    unusual; the timeout path (condition 3) catches it.
-                // 2. Node was previously offline (tick == 0): always revive with any new sn.
-                // 3. Large sn jump (>65) after enough time has passed: handles recovery from
-                //    clock drift or long network partition.
-                if sn_difference > 0
-                    && (sn_difference <= 65
-                        || mesh_node.tick == 0
-                        || (((timeout * CLOCK_SYS_CLOCK_1US) >> 0x10) as u16)
-                            < tick.wrapping_sub(mesh_node.tick))
-                {
-                    // Update accepted - copy new status data
-                    mesh_node.val = pkt[src_index];
-
-                    // CHANGE DETECTION: Mark node for status reporting if parameters changed
-                    // OR if this is the first update after the node was offline (tick == 0)
-                    if !par_match || mesh_node.tick == 0 {
-                        // Set corresponding bit in status reporting mask
-                        MESH_NODE_MASK.lock()[current_index >> 5] |= 1 << (current_index & 0x1f);
-
-                        // Record for UART notification
-                        if changed_count < changed.len() {
-                            changed[changed_count] = (
-                                pkt[src_index].dev_adr,
-                                1,
-                                if pkt[src_index].par[0] != 0 { 1 } else { 0 },
-                            );
-                            changed_count += 1;
-                        }
+                // NEW NODE: take the next slot, or reject at capacity.
+                None => {
+                    if max >= MESH_NODE_MAX_NUM {
+                        break; // table full: reject without overwriting any slot
                     }
-
-                    // Update timestamp to mark node as recently seen
-                    mesh_node.tick = tick;
+                    table.store(max, entry, tick);
+                    MESH_NODE_MAX.inc();
+                    mark_status_changed(max);
+                    let _ = changed.push((entry.dev_adr, 1, u8::from(entry.par[0] != 0)));
                 }
             }
         }
-
-        // Advance to next status entry in packet
-        src_index += 1;
     }
 
-    // Send UART status for all changed nodes (after releasing MESH_NODE_ST lock)
-    drop(mesh_node_st);
-    send_uart_node_changes(&changed[..changed_count]);
-
-    return 1; // Success - packet processed
+    send_uart_node_changes(changed.as_slice());
+    1 // Packet processed.
 }
 
 /// Implements mesh node timeout detection and garbage collection algorithm.
@@ -312,7 +301,7 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 /// The timeout algorithm accounts for system clock precision:
 /// - **Clock Scaling**: Right-shifts system tick by 16 bits to reduce precision requirements
 /// - **Guard Bit**: ORs with 1 to prevent zero timestamp issues
-/// - **Timeout Calculation**: `(ONLINE_STATUS_TIMEOUT * 1000µs) >> 16` for scaled comparison
+/// - **Deadline**: cadence-derived (`mesh_status_timeout_ms`) then scaled `>> 16`
 ///
 /// This approach allows for longer timeout periods while maintaining reasonable
 /// precision and preventing overflow in timeout calculations.
@@ -353,59 +342,61 @@ pub fn mesh_node_flush_status() {
         return;
     }
 
-    // Update last execution timestamp
     let tick = read_reg_system_tick();
     TICK_NODE_REPORT.store(tick, Ordering::Relaxed);
 
-    let mut mesh_node_st = MESH_NODE_ST.lock();
+    // Deadline scales with the current table size; a fixed 3 s is crossed by the
+    // gossip coverage period for relayed nodes once the mesh is large enough.
+    let timeout_scaled = status_timeout_scaled(mesh_status_timeout_ms(MESH_NODE_MAX.get() as u32));
+    let now = ((tick >> 0x10) | 1) as u16;
 
-    // Track timed-out nodes for UART reporting
-    let mut timed_out: [(u8, u8, u8); 9] = [(0, 0, 0); 9];
-    let mut timed_out_count = 0;
+    // Emit offline events in 13-entry batches (one UART packet each) and resume
+    // the scan from a cursor so the table is visited once per flush (O(n))
+    // instead of being rescanned per batch. This keeps one sweep from dropping
+    // events when many nodes expire at once, without a 64-entry stack buffer on
+    // this IRQ path. send_uart_node_changes runs after the lock is dropped.
+    const BATCH: usize = 13;
+    let mut cursor = 1usize;
+    loop {
+        let mut batch: heapless::Vec<(u8, u8, u8), BATCH> = heapless::Vec::new();
+        let mut exhausted = true;
+        {
+            let max = MESH_NODE_MAX.get() as usize;
+            if cursor < max {
+                let mut st = MESH_NODE_ST.lock();
+                let mut table = NodeTable::new(&mut st[..]);
 
-    // Scan all known mesh nodes for timeout detection (skip index 0 = this device)
-    for count in 1..MESH_NODE_MAX.get() as usize {
-        // Check if node is online and whether it has timed out
-        if mesh_node_st[count].tick != 0 {
-            // Calculate timeout threshold using scaled timing for precision
-            let timeout_threshold = (CLOCK_SYS_CLOCK_1US * ONLINE_STATUS_TIMEOUT * 1000) >> 0x10;
-            let current_time_scaled = (tick >> 0x10) | 1; // Guard bit prevents zero
+                for index in cursor..max {
+                    let node = &mut table.nodes[index];
+                    if node.tick == 0 {
+                        continue;
+                    }
 
-            // Use wrapping u16 subtraction so the elapsed time is computed correctly
-            // when the 16-bit scaled tick counter wraps (~every 134 s at 32 MHz).
-            // Widening to u32 before subtracting would underflow after a wrap and
-            // falsely mark every online node as timed-out simultaneously.
-            let elapsed =
-                (current_time_scaled as u16).wrapping_sub(mesh_node_st[count].tick) as u32;
-
-            if timeout_threshold < elapsed {
-                // Node has timed out - mark as offline
-                mesh_node_st[count].tick = 0;
-
-                // Set status change flag to trigger network reporting
-                // Calculate bit position: word index = count >> 5, bit index = count & 0x1f
-                MESH_NODE_MASK.lock()[count >> 5] |= 1 << (count & 0x1f);
-
-                // Record for UART notification (online=0 = timed out/offline)
-                if timed_out_count < timed_out.len() {
-                    timed_out[timed_out_count] = (
-                        mesh_node_st[count].val.dev_adr,
-                        0,
-                        if mesh_node_st[count].val.par[0] != 0 {
-                            1
-                        } else {
-                            0
-                        },
-                    );
-                    timed_out_count += 1;
+                    // 16-bit wrapping subtraction so a scaled-tick wrap (~every
+                    // 134 s) cannot underflow and falsely time out every node.
+                    let elapsed = now.wrapping_sub(node.tick) as u32;
+                    if timeout_scaled < elapsed {
+                        node.tick = 0;
+                        mark_status_changed(index);
+                        let _ = batch.push((node.val.dev_adr, 0, u8::from(node.val.par[0] != 0)));
+                        if batch.is_full() {
+                            cursor = index + 1;
+                            exhausted = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
-    }
 
-    // Send UART status for timed-out nodes (after releasing MESH_NODE_ST lock)
-    drop(mesh_node_st);
-    send_uart_node_changes(&timed_out[..timed_out_count]);
+        if batch.is_empty() {
+            return;
+        }
+        send_uart_node_changes(batch.as_slice());
+        if exhausted {
+            return;
+        }
+    }
 }
 
 /// Updates this device's own status record to maintain mesh network presence.
@@ -468,21 +459,17 @@ pub fn mesh_node_flush_status() {
 /// * Affects subsequent status broadcasts
 /// * Influences network topology as seen by other nodes
 fn mesh_node_keep_alive() {
-    // Increment monotonic sequence number for status updates
+    // Increment monotonic sequence number, avoiding the reserved 0 value.
     DEVICE_NODE_SN.inc();
-
-    // Prevent sequence number 0 (reserved value) by wrapping to 1
     if DEVICE_NODE_SN.get() == 0 {
         DEVICE_NODE_SN.set(1);
     }
 
-    let mut mesh_node_st = MESH_NODE_ST.lock();
-
-    // Update this device's status record (index 0)
-    mesh_node_st[0].val.sn = DEVICE_NODE_SN.get();
-
-    // Update timestamp using scaled timing format for consistency
-    mesh_node_st[0].tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
+    let mut st = MESH_NODE_ST.lock();
+    let mut table = NodeTable::new(&mut st[..]);
+    let local = &mut table.nodes[0];
+    local.val.sn = DEVICE_NODE_SN.get();
+    local.tick = ((read_reg_system_tick() >> 0x10) | 1) as u16;
 }
 
 /// Generates mesh network status advertisement with round-robin node selection.
@@ -560,68 +547,52 @@ fn mesh_node_keep_alive() {
 /// * Advances advertisement rotation for next call
 #[cfg_attr(test, mry::mry)]
 fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
-    static MESH_NODE_CUR: AtomicUsize = AtomicUsize::new(1);
-
-    // Initialize output buffer to clean state
+    // Initialize output buffer to clean state.
     p_data.fill(0);
+    let capacity = p_data.len() / MESH_NODE_ST_VAL_LEN;
 
-    // Calculate maximum node entries that fit in available space
-    let mut elems = p_data.len() / MESH_NODE_ST_VAL_LEN;
-    if (MESH_NODE_MAX.get() as usize) < p_data.len() / MESH_NODE_ST_VAL_LEN {
-        elems = MESH_NODE_MAX.get() as usize;
-    }
-
+    // Our own record always goes first (pre-refresh, as before).
     {
-        let mut mesh_node_st = MESH_NODE_ST.lock();
-
-        // Always place this device's status first in advertisement
-        p_data[0..MESH_NODE_ST_VAL_LEN].copy_from_slice(unsafe {
-            slice::from_raw_parts(
-                addr_of!(mesh_node_st[0].val) as *const u8,
-                MESH_NODE_ST_VAL_LEN,
-            )
-        });
+        let st = MESH_NODE_ST.lock();
+        p_data[..MESH_NODE_ST_VAL_LEN].copy_from_slice(node_val_bytes(&st[0].val));
     }
 
-    // Update local status to ensure current information
+    // Refresh local status so the record we advertise is current.
     mesh_node_keep_alive();
 
-    let mut mesh_node_st = MESH_NODE_ST.lock();
+    let mut st = MESH_NODE_ST.lock();
+    let mut table = NodeTable::new(&mut st[..]);
+    let max = MESH_NODE_MAX.get() as usize;
+    let slots = min(capacity, max);
 
-    let max_node = MESH_NODE_MAX.get() as usize;
-    let mut count = 1; // Start from 1 (skip self at index 0)
+    let mut written = 1usize;
+    if slots > 1 && max > 1 {
+        // Rotate the remote range so each packet covers a different window;
+        // `chain` keeps this a single finite iterator, no index loop.
+        let remotes = &table.nodes[1..max];
+        let cursor = ADV_CURSOR.load(Ordering::Relaxed).clamp(1, remotes.len());
+        let start = cursor - 1;
+        let (before, from_cursor) = remotes.split_at(start);
 
-    let mut out_index = count; // Output position in advertisement packet
-
-    // Round-robin selection of other nodes for advertisement
-    while out_index < elems && count < max_node {
-        let mnc = MESH_NODE_CUR.load(Ordering::Relaxed);
-
-        // Only advertise nodes that are online (tick != 0)
-        if mnc < max_node && mesh_node_st[mnc].tick != 0 {
-            // Copy node status to advertisement packet
-            let ptr = MESH_NODE_ST_VAL_LEN * out_index;
-            out_index = out_index + 1;
-            p_data[ptr..ptr + MESH_NODE_ST_VAL_LEN].copy_from_slice(unsafe {
-                slice::from_raw_parts(
-                    addr_of!(mesh_node_st[mnc].val) as *const u8,
-                    MESH_NODE_ST_VAL_LEN,
-                )
-            });
+        let mut scanned = 0usize;
+        for node in from_cursor.iter().chain(before.iter()) {
+            if written >= slots {
+                break;
+            }
+            scanned += 1;
+            if node.tick == 0 {
+                continue; // skip offline nodes
+            }
+            let dst = written * MESH_NODE_ST_VAL_LEN;
+            p_data[dst..dst + MESH_NODE_ST_VAL_LEN].copy_from_slice(node_val_bytes(&node.val));
+            written += 1;
         }
 
-        // Advance round-robin cursor for next advertisement cycle
-        MESH_NODE_CUR.store(mnc + 1, Ordering::Relaxed);
-
-        // Wraparound to node 1 when reaching end (node 0 is always self)
-        if max_node <= MESH_NODE_CUR.load(Ordering::Relaxed) {
-            MESH_NODE_CUR.store(1, Ordering::Relaxed);
-        }
-
-        count += 1;
+        // Resume after the last candidate inspected so coverage advances.
+        ADV_CURSOR.store((start + scanned) % remotes.len() + 1, Ordering::Relaxed);
     }
 
-    return out_index as u32;
+    written as u32
 }
 
 /// Transmits periodic status advertisement to maintain mesh network topology.
@@ -755,7 +726,7 @@ pub fn mesh_send_online_status() {
 
     // Process node timeouts and collect current status information
     mesh_node_flush_status();
-    mesh_node_adv_status(&mut pktdata[..24]);
+    mesh_node_adv_status(&mut pktdata[..MESH_STATUS_VALUE_LEN]);
 
     // Generate and embed advertisement sequence number
     ADV_ST_SN.store(ADV_ST_SN.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
@@ -767,7 +738,7 @@ pub fn mesh_send_online_status() {
     }
 
     // Add packet signature for validation and type identification
-    pktdata[24..28].fill(0xa5);
+    pktdata[MESH_STATUS_VALUE_LEN..MESH_STATUS_VALUE_LEN + 4].fill(0xa5);
 
     // Queue packet for mesh network transmission
     // TODO: Consider increasing retransmit count for better reliability
@@ -971,24 +942,42 @@ pub fn mesh_report_status_enable(enable: bool) {
     MESH_NODE_REPORT_ENABLE.set(enable);
 
     // Send an initial dump of all known nodes when enabling UART status reporting,
-    // so the host can immediately see the full current state of the mesh.
+    // so the host can immediately see the full current state of the mesh. Emit in
+    // 13-entry batches (one UART packet each), advancing a cursor, so this
+    // IRQ-reachable path never needs a 64-entry stack buffer; the MESH_NODE_ST
+    // lock is dropped before each send.
     if enable {
-        let mut initial: [(u8, u8, u8); MESH_NODE_MAX_NUM] = [(0, 0, 0); MESH_NODE_MAX_NUM];
-        let mut count = 0;
-        {
-            let mesh_node_st = MESH_NODE_ST.lock();
-            for idx in 0..MESH_NODE_MAX.get() as usize {
-                let node = &mesh_node_st[idx];
-                if node.val.dev_adr == 0 {
-                    continue;
+        const BATCH: usize = 13;
+        let mut start = 0usize;
+        loop {
+            let mut batch: heapless::Vec<(u8, u8, u8), BATCH> = heapless::Vec::new();
+            let mut next = start;
+            {
+                let mesh_node_st = MESH_NODE_ST.lock();
+                let max = MESH_NODE_MAX.get() as usize;
+                for (offset, node) in mesh_node_st[start..max].iter().enumerate() {
+                    next = start + offset + 1;
+                    if node.val.dev_adr == 0 {
+                        continue;
+                    }
+                    let online = u8::from(node.tick != 0);
+                    let on_off = u8::from(node.val.par[0] != 0);
+                    let _ = batch.push((node.val.dev_adr, online, on_off));
+                    if batch.is_full() {
+                        break;
+                    }
                 }
-                let online = if node.tick != 0 { 1u8 } else { 0u8 };
-                let on_off = if node.val.par[0] != 0 { 1u8 } else { 0u8 };
-                initial[count] = (node.val.dev_adr, online, on_off);
-                count += 1;
             }
+            if batch.is_empty() {
+                break;
+            }
+            let full = batch.is_full();
+            send_uart_node_changes(batch.as_slice());
+            if !full {
+                break;
+            }
+            start = next;
         }
-        send_uart_node_changes(&initial[..count]);
     }
 }
 
@@ -2267,6 +2256,69 @@ mod tests {
         app().uart_manager.mock_send_message(Any).assert_called(1);
     }
 
+    /// The initial dump must emit every known node even when more than one UART
+    /// batch (13 entries) is required, in table order, without a large stack
+    /// buffer. Guards the M1 batching rewrite.
+    #[test]
+    fn test_mesh_report_status_enable_initial_dump_batches_over_thirteen() {
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let total = 20usize;
+        {
+            let mut st = MESH_NODE_ST.lock();
+            for i in 0..total {
+                st[i] = MeshNodeStT {
+                    tick: 1,
+                    val: MeshNodeStValT {
+                        dev_adr: (0xA0 + i) as u8,
+                        sn: 1,
+                        par: [1, 0],
+                    },
+                };
+            }
+        }
+        MESH_NODE_MAX.set(total as u8);
+
+        let expected = |first_id: u8, count: usize| {
+            let mut pkt = UartData {
+                len: UART_DATA_LEN as u32,
+                data: [0; UART_DATA_LEN],
+            };
+            pkt.data[2] = UartMsg::NodeStatus as u8;
+            for i in 0..count {
+                pkt.data[3 + i * 3] = first_id + i as u8;
+                pkt.data[3 + i * 3 + 1] = 1; // online
+                pkt.data[3 + i * 3 + 2] = 1; // on
+            }
+            pkt
+        };
+
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager
+                .mock_send_message(expected(0xA0, 13))
+                .returns(Ok(()));
+            app.uart_manager
+                .mock_send_message(expected(0xAD, 7))
+                .returns(Ok(()));
+        }
+
+        mesh_report_status_enable(true);
+
+        app()
+            .uart_manager
+            .mock_send_message(expected(0xA0, 13))
+            .assert_called(1);
+        app()
+            .uart_manager
+            .mock_send_message(expected(0xAD, 7))
+            .assert_called(1);
+    }
+
     // ================================================================================
     // Tests for mesh_report_status_enable_mask function
     // ================================================================================
@@ -3159,9 +3211,461 @@ mod tests {
     }
 
     // ================================================================================
-    // UART calls from ll_device_status_update
+    // Cadence-derived deadline + table/flush capacity regression tests
     // ================================================================================
 
+    /// At a full table a genuinely new address must be rejected without
+    /// overwriting any existing slot (regression: the old lookup treated the
+    /// last active slot as a match for an unknown address).
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_update_status_table_full_rejects_new_address() {
+        mock_read_reg_system_tick().returns(0x12345678);
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        // Fill all 64 slots: index 0 = self, indices 1..63 = remotes 11..73.
+        {
+            let mut st = MESH_NODE_ST.lock();
+            for i in 0..MESH_NODE_MAX_NUM {
+                st[i].tick = 0x1235; // online, matches the mocked scaled tick
+                st[i].val = MeshNodeStValT {
+                    dev_adr: if i == 0 { 0x01 } else { (i + 10) as u8 },
+                    sn: 5,
+                    par: [0x11, 0x22],
+                };
+            }
+        }
+        MESH_NODE_MAX.set(MESH_NODE_MAX_NUM as u8);
+
+        // New address with a plausible sn advance (would pass the update check).
+        let newcomer = create_test_mesh_node(0xFE, 6, &[0x33, 0x44]);
+        mesh_node_update_status(&[newcomer]);
+
+        assert_eq!(
+            MESH_NODE_MAX.get(),
+            MESH_NODE_MAX_NUM as u8,
+            "table must stay full"
+        );
+        let st = MESH_NODE_ST.lock();
+        // Last slot untouched: no unknown address overwrote it.
+        let last_addr = st[63].val.dev_adr;
+        let last_sn = st[63].val.sn;
+        assert_eq!(last_addr, 73);
+        assert_eq!(last_sn, 5);
+        assert_eq!(st[63].val.par, [0x11, 0x22]);
+        assert!(
+            st.iter().all(|n| n.val.dev_adr != 0xFE),
+            "rejected address must not appear anywhere in the table"
+        );
+    }
+
+    /// More than 9 nodes timing out in one sweep must all produce offline
+    /// events (regression: the old fixed 9-entry buffer silently dropped them).
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_node_flush_status_emits_all_timeouts_over_nine() {
+        mock_read_reg_system_tick().returns(0x60000000);
+        mock_clock_time_exceed(Any, Any).returns(true);
+
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let n = 15usize;
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].tick = 1;
+            st[0].val.dev_adr = 0x01;
+            for i in 1..=n {
+                st[i].tick = 1; // far older than any deadline
+                st[i].val = MeshNodeStValT {
+                    dev_adr: (0x40 + i) as u8,
+                    sn: 1,
+                    par: [1, 0],
+                };
+            }
+        }
+        MESH_NODE_MAX.set((n + 1) as u8);
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
+        }
+
+        mesh_node_flush_status();
+
+        // 15 offline entries -> 2 UART packets (13 + 2); the old 9-cap sent 1.
+        app().uart_manager.mock_send_message(Any).assert_called(2);
+
+        let st = MESH_NODE_ST.lock();
+        for i in 1..=n {
+            let tick = st[i].tick;
+            assert_eq!(tick, 0, "node {i} must be marked offline");
+        }
+        drop(st);
+
+        // Every timed-out node has a pending status bit (proves all 15 events).
+        let mask = MESH_NODE_MASK.lock();
+        let set_bits: u32 = mask.iter().map(|w| w.count_ones()).sum();
+        assert_eq!(set_bits, n as u32);
+    }
+
+    /// A full 63-remote table timing out at once must emit exactly
+    /// ceil(63/13) = 5 batches, zero every tick, and set one mask bit per node.
+    /// Guards the single-pass resumable cursor introduced for M3.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_node_flush_status_full_table_all_timeout() {
+        mock_read_reg_system_tick().returns(0x60000000);
+        mock_clock_time_exceed(Any, Any).returns(true);
+
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let remotes = MESH_NODE_MAX_NUM - 1; // 63 remotes + self
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].tick = 1;
+            st[0].val.dev_adr = 0x01;
+            for i in 1..=remotes {
+                st[i].tick = 1; // far older than any deadline
+                st[i].val = MeshNodeStValT {
+                    dev_adr: (0x10 + i) as u8,
+                    sn: 1,
+                    par: [1, 0],
+                };
+            }
+        }
+        MESH_NODE_MAX.set(MESH_NODE_MAX_NUM as u8);
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
+        }
+
+        mesh_node_flush_status();
+
+        // 63 offline entries -> 5 UART packets (13*4 + 11).
+        app().uart_manager.mock_send_message(Any).assert_called(5);
+
+        let st = MESH_NODE_ST.lock();
+        for i in 1..=remotes {
+            let tick = st[i].tick;
+            assert_eq!(tick, 0, "node {i} must be marked offline exactly once");
+        }
+        drop(st);
+
+        let mask = MESH_NODE_MASK.lock();
+        let set_bits: u32 = mask.iter().map(|w| w.count_ones()).sum();
+        assert_eq!(set_bits, remotes as u32);
+    }
+
+    /// M4: the deadline model's remote-records-per-packet constant must equal
+    /// the wire capacity of a status value region (one of its slots is self).
+    /// The `const _` assertion enforces this at compile time; this is the test
+    /// twin so drift also fails loudly here.
+    #[test]
+    fn test_mesh_status_records_per_packet_matches_wire_capacity() {
+        let records_per_packet = MESH_STATUS_VALUE_LEN / MESH_NODE_ST_VAL_LEN;
+        assert_eq!(
+            MESH_STATUS_RECORDS_PER_PACKET as usize,
+            records_per_packet - 1,
+            "records-per-packet must match the wire value region minus the self slot"
+        );
+    }
+
+    /// At M=64 the derived deadline is 13 s: a 5 s accepted-update gap must not
+    /// emit an offline edge.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_status_deadline_five_second_gap_stays_online() {
+        mock_clock_time_exceed(Any, Any).returns(true);
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let raw: u32 = 0x9000_0000;
+        mock_read_reg_system_tick().returns(raw);
+        let now = ((raw >> 16) | 1) as u16;
+        let five_seconds = (5_000_000u64 * CLOCK_SYS_CLOCK_1US as u64 / 65536) as u16;
+
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].val.dev_adr = 0x01;
+            st[1].tick = now.wrapping_sub(five_seconds);
+            st[1].val = MeshNodeStValT {
+                dev_adr: 0x40,
+                sn: 1,
+                par: [1, 0],
+            };
+        }
+        MESH_NODE_MAX.set(64);
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
+        }
+
+        mesh_node_flush_status();
+
+        let st = MESH_NODE_ST.lock();
+        let tick = st[1].tick;
+        assert_ne!(tick, 0, "5 s gap is within the 13 s deadline at M=64");
+        app().uart_manager.mock_send_message(Any).assert_called(0);
+    }
+
+    /// Just past the derived deadline the node goes offline exactly once; a
+    /// later accepted update revives it and it does not immediately re-timeout.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_mesh_status_deadline_offline_then_revive() {
+        mock_clock_time_exceed(Any, Any).returns(true);
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let raw: u32 = 0x9000_0000;
+        mock_read_reg_system_tick().returns(raw);
+        let now = ((raw >> 16) | 1) as u16;
+        // M=64 => 13 s deadline; use 14 s to cross it.
+        let fourteen_seconds = (14_000_000u64 * CLOCK_SYS_CLOCK_1US as u64 / 65536) as u16;
+
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].val.dev_adr = 0x01;
+            st[1].tick = now.wrapping_sub(fourteen_seconds);
+            st[1].val = MeshNodeStValT {
+                dev_adr: 0x40,
+                sn: 5,
+                par: [1, 0],
+            };
+        }
+        MESH_NODE_MAX.set(64);
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
+        }
+
+        // Go offline exactly once.
+        mesh_node_flush_status();
+        {
+            let st = MESH_NODE_ST.lock();
+            let tick = st[1].tick;
+            assert_eq!(tick, 0, "past the derived deadline the node is offline");
+        }
+        app().uart_manager.mock_send_message(Any).assert_called(1);
+
+        // A fresh sn resurrects it; tick resets to now and an online event fires.
+        mesh_node_update_status(&[create_test_mesh_node(0x40, 6, &[1, 0])]);
+        {
+            let st = MESH_NODE_ST.lock();
+            let tick = st[1].tick;
+            assert_eq!(tick, now, "revived node refreshes its tick");
+        }
+
+        // Clearing the pending mask and flushing again must not re-timeout it.
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+        mesh_node_flush_status();
+        {
+            let st = MESH_NODE_ST.lock();
+            let tick = st[1].tick;
+            assert_ne!(tick, 0, "a revived node stays online until the deadline");
+        }
+    }
+
+    /// A large (>65) sequence jump on a still-fresh node is held back until the
+    /// escape hatch (half the derived deadline) has elapsed.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_update_status_large_sn_jump_escape_hatch() {
+        let raw: u32 = 0x8000_0000;
+        mock_read_reg_system_tick().returns(raw);
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        let now = ((raw >> 16) | 1) as u16;
+        MESH_NODE_MAX.set(64); // derived 13 s, escape gate ~6.5 s
+
+        let original = MeshNodeStValT {
+            dev_adr: 0x40,
+            sn: 10,
+            par: [1, 0],
+        };
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].val.dev_adr = 0x01;
+            st[1].val = original;
+            st[1].tick = now.wrapping_sub(100); // fresh
+        }
+
+        // Fresh node + implausible jump: ignored (val and tick unchanged).
+        mesh_node_update_status(&[MeshNodeStValT {
+            dev_adr: 0x40,
+            sn: 110,
+            par: [9, 9],
+        }]);
+        {
+            let st = MESH_NODE_ST.lock();
+            let tick = st[1].tick;
+            assert_eq!(st[1].val.sn, 10, "large jump on a fresh node is ignored");
+            assert_eq!(tick, now.wrapping_sub(100));
+        }
+
+        // Same jump once the node has been quiet past the gate: accepted.
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[1].tick = now.wrapping_sub(4000);
+        }
+        mesh_node_update_status(&[MeshNodeStValT {
+            dev_adr: 0x40,
+            sn: 110,
+            par: [9, 9],
+        }]);
+        {
+            let st = MESH_NODE_ST.lock();
+            let tick = st[1].tick;
+            assert_eq!(st[1].val.sn, 110, "jump accepted after the gate");
+            assert_eq!(st[1].val.par, [9, 9]);
+            assert_eq!(tick, now);
+        }
+    }
+
+    /// Offline integration: observe via update, time out via the derived
+    /// deadline, then report; report must surface the node with sn forced to 0.
+    #[test]
+    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
+    fn test_status_pipeline_update_timeout_then_report_offline() {
+        use crate::sdk::ble_app::irq::mesh_node_report_status;
+
+        mock_clock_time_exceed(Any, Any).returns(true);
+        let raw: u32 = 0x7000_0000;
+        mock_read_reg_system_tick().returns(raw);
+        let now = ((raw >> 16) | 1) as u16;
+
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+        MESH_NODE_MAX.set(1);
+        MESH_NODE_REPORT_ENABLE.set(true);
+        {
+            let mut mask = MESH_NODE_MASK.lock();
+            for m in mask.iter_mut() {
+                *m = 0;
+            }
+        }
+
+        // Observe two remote nodes.
+        mesh_node_update_status(&[
+            create_test_mesh_node(0x40, 1, &[0x80, 0x00]),
+            create_test_mesh_node(0x50, 2, &[0x00, 0x00]),
+        ]);
+        assert_eq!(MESH_NODE_MAX.get(), 3);
+
+        // Age both beyond the 3 s floor (M=3 -> derived floor).
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[1].tick = now.wrapping_sub(2000);
+            st[2].tick = now.wrapping_sub(2000);
+        }
+        {
+            let mut app = app();
+            app.uart_manager
+                .mock_uart_status_reporting_enabled()
+                .returns(true);
+            app.uart_manager.mock_send_message(Any).returns(Ok(()));
+        }
+        mesh_node_flush_status();
+
+        // The pending mask now reports both nodes as offline (sn == 0).
+        let mut report = [0u8; 16];
+        let reported = mesh_node_report_status(&mut report, 4);
+        assert_eq!(reported, 2);
+        assert_eq!(report[0], 0x40);
+        assert_eq!(report[1], 0, "offline node reports sn 0");
+        assert_eq!(report[4], 0x50);
+        assert_eq!(report[5], 0, "offline node reports sn 0");
+    }
+
+    /// Air status advertisement payload keeps the exact 4-byte record layout
+    /// `[dev_adr, sn, par0, par1]` with self first.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_mesh_node_adv_status_wire_layout_unchanged() {
+        mock_read_reg_system_tick().returns(0x12345678);
+        reset_mesh_state();
+        DEVICE_ADDRESS.set(0x01);
+
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].val = MeshNodeStValT {
+                dev_adr: 0x01,
+                sn: 42,
+                par: [0xAA, 0xBB],
+            };
+            st[1].val = MeshNodeStValT {
+                dev_adr: 0x0A,
+                sn: 1,
+                par: [0x80, 0x00],
+            };
+            st[1].tick = 0x1235;
+            st[2].val = MeshNodeStValT {
+                dev_adr: 0x0B,
+                sn: 2,
+                par: [0x11, 0x22],
+            };
+            st[2].tick = 0x1235;
+        }
+        MESH_NODE_MAX.set(3);
+        ADV_CURSOR.store(1, Ordering::Relaxed);
+
+        let mut buf = [0u8; 24];
+        let written = mesh_node_adv_status(&mut buf);
+
+        assert_eq!(written, 3, "self + two online remotes");
+        // Self record is copied before keep_alive refreshes it.
+        assert_eq!(&buf[0..4], &[0x01, 42, 0xAA, 0xBB]);
+        assert_eq!(&buf[4..8], &[0x0A, 1, 0x80, 0x00]);
+        assert_eq!(&buf[8..12], &[0x0B, 2, 0x11, 0x22]);
+    }
+
+    // ================================================================================
+    // UART calls from ll_device_status_update
+    // ================================================================================
     /// Tests that ll_device_status_update sends own device status via UART when enabled.
     #[test]
     #[mry::lock(read_reg_system_tick)]

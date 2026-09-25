@@ -82,7 +82,7 @@ use crate::common::rf_update_conn_para;
 use crate::config::VENDOR_ID;
 use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MeshNodeStValT, MESH_NODE_ST_VAL_LEN};
+use crate::mesh::{MeshNodeStValT, MESH_NODE_ST_VAL_LEN, MESH_STATUS_VALUE_LEN};
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet;
 use crate::sdk::ble_app::rf_drv_8266::*;
@@ -703,7 +703,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 
         if signature_slice == SIGNATURE {
             // Extract node status array from packet and update mesh database
-            // Status data is in the first 24 bytes of PacketAttValue (written by mesh_node_adv_status)
+            // Status data is in the first MESH_STATUS_VALUE_LEN bytes of PacketAttValue (written by mesh_node_adv_status)
             // This overlays the sno, src, dst, and val fields of PacketAttValue
             // We need to extract from the value field, not from MeshPkt metadata fields
 
@@ -711,12 +711,12 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             let value_bytes = unsafe {
                 core::slice::from_raw_parts(
                     addr_of!(packet.att_write().value) as *const u8,
-                    24, // Status data is 24 bytes
+                    MESH_STATUS_VALUE_LEN, // Status data bytes
                 )
             };
 
             // Convert to mesh_node_st_val_t array safely using bytemuck
-            let status_entries = 24 / MESH_NODE_ST_VAL_LEN;
+            let status_entries = MESH_STATUS_VALUE_LEN / MESH_NODE_ST_VAL_LEN;
             let bytes_needed = status_entries * MESH_NODE_ST_VAL_LEN;
             let status_bytes = &value_bytes[0..bytes_needed];
             let status_slice = bytemuck::cast_slice::<u8, MeshNodeStValT>(status_bytes);

@@ -23,6 +23,49 @@ pub const IRQ_TIMER1_ENABLE: bool = true;
 
 pub const ONLINE_STATUS_TIMEOUT: u32 = 3000;
 
+/// Effective measured status advertisement period in ms.
+///
+/// The configured interval is [`SEND_MESH_STATUS_INTERVAL_MS`] (200 ms) but the
+/// measured mean is ~226 ms and the worst case ~277 ms, so the deadline derives
+/// from this conservative round-up rather than the optimistic nominal value.
+pub const MESH_STATUS_TX_CADENCE_MS: u32 = 250;
+
+/// Loss/jitter safety margin applied to the coverage period.
+///
+/// This is deliberately *not* a hop-count multiplier: a relayed record is
+/// refreshed once per coverage sweep, so the margin absorbs packet loss and
+/// jitter (one successful window plus three missed windows).
+pub const MESH_STATUS_TIMEOUT_SAFETY_FACTOR: u32 = 4;
+
+/// Remote node records carried per status advertisement packet.
+///
+/// A status value region holds `MESH_STATUS_VALUE_LEN / MESH_NODE_ST_VAL_LEN`
+/// records and the first is always this device, leaving 5 remote records. The
+/// `const _` assertion in `mesh_management` fails the build if this drifts from
+/// the wire capacity used by `mesh_node_adv_status`/`rf_link_rc_data`.
+pub const MESH_STATUS_RECORDS_PER_PACKET: u32 = 5;
+
+/// Cadence-derived offline deadline in ms for a mesh of `node_count` known
+/// nodes (self included), clamped to [`ONLINE_STATUS_TIMEOUT`].
+///
+/// Every remote record is exposed once per round-robin coverage sweep:
+/// `ceil((node_count - 1) / MESH_STATUS_RECORDS_PER_PACKET)` packets at
+/// `MESH_STATUS_TX_CADENCE_MS`. A fixed 3 s deadline is crossed by this sweep
+/// for relayed nodes at larger `node_count`, so the deadline scales with it.
+pub fn mesh_status_timeout_ms(node_count: u32) -> u32 {
+    // L1: callers pass MESH_NODE_MAX, bounded by MESH_NODE_MAX_NUM (64). At that
+    // bound the product stays far inside u32 (remotes=63, sweeps=13,
+    // coverage=3250 ms, scaled deadline=13000), so no wrapping can occur.
+    debug_assert!(
+        node_count <= MESH_NODE_MAX_NUM as u32,
+        "mesh_status_timeout_ms assumes at most MESH_NODE_MAX_NUM nodes"
+    );
+    let remotes = node_count.saturating_sub(1);
+    let sweeps = remotes.div_ceil(MESH_STATUS_RECORDS_PER_PACKET);
+    let coverage_ms = sweeps * MESH_STATUS_TX_CADENCE_MS;
+    (coverage_ms * MESH_STATUS_TIMEOUT_SAFETY_FACTOR).max(ONLINE_STATUS_TIMEOUT)
+}
+
 pub const AUTH_TIME: u32 = 60;
 pub const MAX_GROUP_COUNT: u8 = 8;
 
@@ -707,6 +750,9 @@ mod tests {
 
         // Timeout and interval constants
         assert_eq!(ONLINE_STATUS_TIMEOUT, 3000);
+        assert_eq!(MESH_STATUS_TX_CADENCE_MS, 250);
+        assert_eq!(MESH_STATUS_TIMEOUT_SAFETY_FACTOR, 4);
+        assert_eq!(MESH_STATUS_RECORDS_PER_PACKET, 5);
         assert_eq!(AUTH_TIME, 60);
         assert_eq!(LOOP_INTERVAL_US, 10000);
         assert_eq!(UPDATE_CONNECT_PARA_DELAY_MS, 1000);
@@ -724,6 +770,34 @@ mod tests {
 
         // OTA constants
         assert_eq!(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, 30);
+    }
+
+    /// Tests the cadence-derived offline deadline, including the documented
+    /// examples M=40 -> 8 s and M=64 -> 13 s and the small-mesh floor.
+    #[test]
+    fn test_mesh_status_timeout_ms_floor_and_scaling() {
+        // Small meshes stay on the historical floor.
+        assert_eq!(mesh_status_timeout_ms(0), ONLINE_STATUS_TIMEOUT);
+        assert_eq!(mesh_status_timeout_ms(1), ONLINE_STATUS_TIMEOUT);
+        assert_eq!(mesh_status_timeout_ms(5), ONLINE_STATUS_TIMEOUT);
+        // 5 remotes = one full sweep, whose x4 margin is still under the floor.
+        assert_eq!(mesh_status_timeout_ms(6), ONLINE_STATUS_TIMEOUT);
+        // M=40: ceil(39/5)=8 sweeps -> 8*250*4 = 8000.
+        assert_eq!(mesh_status_timeout_ms(40), 8000);
+        // M=41: ceil(40/5)=8 sweeps -> 8000.
+        assert_eq!(mesh_status_timeout_ms(41), 8000);
+        // M=42: ceil(41/5)=9 sweeps -> 9000.
+        assert_eq!(mesh_status_timeout_ms(42), 9000);
+        // M=64: ceil(63/5)=13 sweeps -> 13000.
+        assert_eq!(mesh_status_timeout_ms(64), 13000);
+    }
+
+    /// L1: `MESH_NODE_MAX_NUM` is the documented bound the deadline math relies
+    /// on; at that bound the sweep product is far inside u32 and yields 13 s.
+    #[test]
+    fn test_mesh_status_timeout_ms_max_mesh_bound() {
+        assert_eq!(MESH_NODE_MAX_NUM, 64, "deadline math assumes <= 64 nodes");
+        assert_eq!(mesh_status_timeout_ms(MESH_NODE_MAX_NUM as u32), 13000);
     }
 
     /// Tests that enum discriminant values are correct.

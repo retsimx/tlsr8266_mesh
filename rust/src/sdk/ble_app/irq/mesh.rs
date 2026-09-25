@@ -49,68 +49,40 @@ use crate::state::*;
 /// - Offline nodes (miss == 0) have their sequence numbers cleared
 ///
 /// ## Buffer Management:
-/// - Uses atomic operations to prevent race conditions
-/// - Clears processed status bits to prevent duplicate reports
-/// - Handles partial reports when buffer space is limited
+/// - The node mask and table are read under a critical-section mutex
+/// - Each processed status bit is cleared so it isn't reported again
+/// - Stops once `len` statuses have been written; remaining bits are
+///   left for the next call
 pub fn mesh_node_report_status(params: &mut [u8], len: usize) -> usize {
-    // Check if mesh node status reporting is enabled
     if !MESH_NODE_REPORT_ENABLE.get() {
         return 0;
     }
 
-    let mut result = 0;
+    params[..MESH_NODE_ST_VAL_LEN * len].fill(0);
 
-    // Clear the output buffer to ensure clean data
-    params[0..MESH_NODE_ST_VAL_LEN * len].fill(0);
+    let mut mask = MESH_NODE_MASK.lock();
+    let nodes = MESH_NODE_ST.lock();
 
-    // The algorithm:
-    // 1. Iterate over each 32-bit value in the mask
-    // 2. For each 32-bit value, check if it's 0 (no pending reports)
-    // 3. Iterate over each bit in the 32-bit value and find any set bits
-    // 4. Report the status of nodes at any set bits and clear the bit from the mask
-
-    // Lock the mesh node data structures for atomic access
-    let mut mesh_node_mask = MESH_NODE_MASK.lock();
-    let mut mesh_node_st = MESH_NODE_ST.lock();
-
-    // Process each mesh node to check for pending status reports
-    mesh_node_st.iter().enumerate().for_each(|(idx, val)| {
-        // Stop if we've filled the output buffer
-        if result >= len {
-            return;
+    let mut written = 0;
+    for (idx, node) in nodes.iter().enumerate() {
+        if written == len {
+            break;
         }
-
-        // Calculate which 32-bit mask word and which bit within that word
-        let mask_index = idx / 32;
-        let mask_bit = idx % 32;
-        let mask = mesh_node_mask[mask_index];
-
-        // Check if this node has a pending status update
-        if mask & (1 << mask_bit) != 0 {
-            // Clear the bit from the mask so it isn't reported again
-            // This prevents duplicate status reports
-            mesh_node_mask[mask_index] = mask & !(1 << mask_bit);
-
-            // Copy the node status value to the output parameters
-            let params_idx = MESH_NODE_ST_VAL_LEN * result;
-            params[params_idx..params_idx + MESH_NODE_ST_VAL_LEN]
-                .copy_from_slice(bytemuck::bytes_of(&mesh_node_st[idx].val));
-
-            // Special handling for offline devices:
-            // If the node is offline (miss == 0), set the sequence number to 0
-            // This indicates to the master that the device is not responding
-            if !is_online(&mesh_node_st[idx]) {
-                params[params_idx + 1] = 0;
-            }
-
-            // Increment the result count
-            // If we've exhausted the params buffer size, we'll stop processing
-            // The next call to this function will send the next chunk of statuses
-            result += 1;
+        let word = idx >> 5;
+        let bit = 1u32 << (idx & 0x1f);
+        if mask[word] & bit == 0 {
+            continue;
         }
-    });
+        mask[word] &= !bit;
 
-    return result;
+        let slot = &mut params[written * MESH_NODE_ST_VAL_LEN..][..MESH_NODE_ST_VAL_LEN];
+        slot.copy_from_slice(bytemuck::bytes_of(&node.val));
+        if !is_online(node) {
+            slot[1] = 0;
+        }
+        written += 1;
+    }
+    written
 }
 
 /// Configures the RF transceiver to listen for mesh network packets.

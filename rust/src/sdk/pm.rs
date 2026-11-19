@@ -213,97 +213,100 @@ pub const TCMD_WAREG: u8 = 0x8;
 const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
     TBLCMDSET {
         adr: 0x60,
-        dat: 0,
+        dat: 0, // reg_rst0: release module resets (0 = not in reset)
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x61,
-        dat: 0,
+        dat: 0, // reg_rst1: release module resets (0 = not in reset)
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x62,
-        dat: 0,
+        dat: 0, // reg_rst2: release module resets (0 = not in reset)
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x63,
-        dat: 0xff,
+        dat: 0xff, // reg_clk_en0 (CLKEN0): enable all peripheral clocks
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x64,
-        dat: 0xff,
+        dat: 0xff, // reg_clk_en1 (CLKEN1): enable GPIO/DMA/UART/PWM/AES/SWIRE clocks
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x74,
-        dat: 0x53,
+        dat: 0x53, // reg_id_wr_en = REG_ID_WR_EN_UNLOCK (0x53): unlock reg_func_id writes
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x7c,
-        dat: 0xf7,
+        dat: 0xf7, // reg_func_id = 0b1111_0111: enable chip functions, RF_ENABLE (bit6) set,
+        // RISC32_ENABLE (bit3) cleared
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x74,
-        dat: 0,
+        dat: 0, // reg_id_wr_en = 0: re-lock reg_func_id after the modification above
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x67,
-        dat: 0,
+        dat: 0, // reg_i2s_step = 0: I2S clock disabled
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x66,
-        dat: 0,
+        dat: 0, // reg_clk_sel = 0: clock divider/source cleared (configured later by clock_init)
         cmd: 0xc3, // 0b11000011
     },
     TBLCMDSET {
         adr: 0x73,
-        dat: 0,
+        dat: 0, // reg_clk_mux_sel: 32k from internal RC, USB PHY clock from 48M PLL, LPR div 0
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x620,
-        dat: 1,
+        dat: 1, // reg_tmr_ctrl8: TMR0_EN (start timer 0)
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x74f,
-        dat: 1,
+        dat: 1, // reg_system_tick_ctrl: START (start the system tick)
         cmd: 0xc3,
     },
     TBLCMDSET {
         adr: 0x81,
-        dat: 0xc0,
+        dat: 0xc0, // rega_xtal_csel: crystal oscillator supply/bias/freq trim
         cmd: 0xc8,
     },
     TBLCMDSET {
         adr: 0x20,
-        dat: 0xd0,
+        dat: 0xd0, // ana 0x20 (3V PM/wakeup domain): exact bitfields undocumented; sits just
+        // before the pad wakeup polarity/enable registers 0x21-0x2b (DS Table 2-2)
         cmd: 0xc8,
     },
     TBLCMDSET {
         adr: 0x2d,
-        dat: 0x0f,
+        dat: 0x0f, // ana 0x2d: retention/scratch byte (rega_pkt_seq_no); survives sleep
         cmd: 0xc8,
     },
     TBLCMDSET {
         adr: 0x81,
-        dat: 0xc0,
+        dat: 0xc0, // rega_xtal_csel: same crystal oscillator setting, re-applied
         cmd: 0xc8,
     },
     TBLCMDSET {
         adr: 0x2c,
-        dat: 0,
+        dat: 0, // ana 0x2c: retention/scratch byte (cleared)
         cmd: 0xc8,
     },
     TBLCMDSET {
         adr: 0x05,
-        dat: 0x62,
+        dat: 0x62, // rega_pwdn_setting1 = 0b0110_0010: power down 32K_XTAL (bit1),
+        // BGIREF_3V (bit5), COMP (bit6); keep 32K_RC, 32M_RC, 32M_XTAL, LDO, TEMPSEN
         cmd: 0xc8,
     },
 ];

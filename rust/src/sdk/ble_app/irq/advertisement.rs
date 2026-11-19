@@ -64,8 +64,8 @@ pub fn handle_ble_advertisement_state() {
     // Static counter to track which advertisement channel we're currently using
     static ST_PNO: AtomicU32 = AtomicU32::new(0);
 
-    // Clear RF interrupt status and stop any ongoing transmission/reception
-    write_reg8(0x80050f, 0);
+    // Clear DMA3 (RF TX) mode byte before stopping TRX
+    write_reg_dma3_mode(0);
     rf_stop_trx();
 
     // Set link state to advertisement mode (state 1)
@@ -156,7 +156,7 @@ mod tests {
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use crate::sdk::mcu::register::{
         mock_read_reg_rf_mode, mock_read_reg_system_tick, mock_write_reg8,
-        mock_write_reg_dma3_addr, mock_write_reg_pll_rx_fine_div_tune,
+        mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_pll_rx_fine_div_tune,
         mock_write_reg_rf_access_code, mock_write_reg_rf_channel, mock_write_reg_rf_crc,
         mock_write_reg_rf_irq_status, mock_write_reg_rf_mode, mock_write_reg_rf_mode_control,
         mock_write_reg_rf_rx_mode, mock_write_reg_rf_sched_tick, mock_write_reg_rf_txrx_state,
@@ -253,6 +253,7 @@ mod tests {
     #[test]
     #[mry::lock(
         write_reg8,
+        write_reg_dma3_mode,
         rf_stop_trx,
         write_reg_system_tick_irq,
         read_reg_system_tick,
@@ -261,6 +262,7 @@ mod tests {
     fn test_advertisement_completion_with_online_status() {
         // Setup mocks
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_rf_stop_trx().returns(());
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_read_reg_system_tick().returns(10000);
@@ -286,10 +288,10 @@ mod tests {
             "Link state should be set to advertising mode"
         );
 
-        // Verify RF operations are stopped and status cleared
+        // Verify RF operations are stopped and the DMA3 (RF TX) mode byte is cleared
         // Note: rf_stop_trx is called twice - once during reset and once during the actual test
         mock_rf_stop_trx().assert_called(2);
-        mock_write_reg8(0x80050f, 0).assert_called(2);
+        mock_write_reg_dma3_mode(0).assert_called(2);
 
         // Verify advertisement flag remains cleared
         assert_eq!(
@@ -330,6 +332,7 @@ mod tests {
     #[test]
     #[mry::lock(
         write_reg8,
+        write_reg_dma3_mode,
         rf_stop_trx,
         write_reg_system_tick_irq,
         read_reg_system_tick,
@@ -338,6 +341,7 @@ mod tests {
     fn test_advertisement_completion_without_online_status() {
         // Setup mocks
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_rf_stop_trx().returns(());
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_read_reg_system_tick().returns(15000);
@@ -366,7 +370,7 @@ mod tests {
         // Verify RF operations are stopped
         // Note: rf_stop_trx is called twice - once during reset and once during the actual test
         mock_rf_stop_trx().assert_called(2);
-        mock_write_reg8(0x80050f, 0).assert_called(2);
+        mock_write_reg_dma3_mode(0).assert_called(2);
 
         // Verify longer delay is scheduled (500µs) - called during both reset and test
         let expected_tick = CLOCK_SYS_CLOCK_1US * 500 + 15000;
@@ -402,6 +406,7 @@ mod tests {
     #[test]
     #[mry::lock(
         write_reg8,
+        write_reg_dma3_mode,
         rf_stop_trx,
         write_reg_rf_access_code,
         write_reg_rf_crc,
@@ -422,6 +427,7 @@ mod tests {
     fn test_advertisement_continuation_first_channel() {
         // Setup basic mocks
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_rf_stop_trx().returns(());
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_read_reg_system_tick().returns(20000);
@@ -452,7 +458,7 @@ mod tests {
         // Verify RF operations are stopped initially
         // Note: rf_stop_trx is called twice - once during reset and once during the actual test
         mock_rf_stop_trx().assert_called(2);
-        mock_write_reg8(0x80050f, 0).assert_called(2);
+        mock_write_reg_dma3_mode(0).assert_called(2);
 
         // Verify BLE advertisement access code is set
         mock_write_reg_rf_access_code(0xd6be898e).assert_called(1);

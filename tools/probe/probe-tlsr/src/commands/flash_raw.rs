@@ -452,6 +452,7 @@ mod tests {
     #[test]
     fn run_dispatches_to_the_flash_handlers() {
         let mut ctx = test_ctx([Response::Ack, stopped(0x05), data([0xaa, 0xbb])]);
+        let mut out = Vec::new();
 
         let output = run(
             Command::FlashRead {
@@ -460,8 +461,10 @@ mod tests {
                 out: None,
             },
             &mut ctx,
+            &mut out,
         )
-        .expect("flash-read runs");
+        .expect("flash-read runs")
+        .expect("flash-read returns an output");
 
         assert_eq!(
             output,

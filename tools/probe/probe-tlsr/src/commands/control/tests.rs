@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::run;
 use crate::commands::test_support::*;
+use crate::commands::WATCHDOG_CTRL_ADDR;
 use crate::output::FlashInfo;
 use crate::Command;
 
@@ -312,6 +313,7 @@ fn invalid_analog_arguments_are_rejected_before_any_request() {
 #[test]
 fn run_dispatches_to_the_control_handlers() {
     let mut ctx = test_ctx([Response::Ack]);
+    let mut out = Vec::new();
 
     let output = run(
         Command::Reset {
@@ -319,8 +321,10 @@ fn run_dispatches_to_the_control_handlers() {
             soft: false,
         },
         &mut ctx,
+        &mut out,
     )
-    .expect("reset runs");
+    .expect("reset runs")
+    .expect("reset returns an output");
 
     assert_eq!(
         output,

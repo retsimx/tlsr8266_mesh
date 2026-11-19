@@ -136,7 +136,7 @@ fn write_span(
 ///
 /// Without `--elf` there is no symbol table, so only the numeric forms `0x...`
 /// and decimal are accepted; anything else needs an ELF.
-fn resolve_addr(elf: Option<&ElfImage>, spec: &str) -> Result<AddrSpec, CliError> {
+pub(super) fn resolve_addr(elf: Option<&ElfImage>, spec: &str) -> Result<AddrSpec, CliError> {
     if let Some(image) = elf {
         return image.parse_addr(spec);
     }

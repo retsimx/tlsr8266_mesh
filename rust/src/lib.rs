@@ -9,6 +9,7 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
 use app::App;
 use core::ptr::null_mut;
+use core::sync::atomic::AtomicU32;
 use embassy_executor::Spawner;
 use fixed::types::I16F16;
 use ota::OtaManager;
@@ -16,6 +17,7 @@ use ota::OtaManager;
 mod app;
 mod common;
 mod config;
+mod diagnostics;
 mod embassy;
 mod light_manager;
 mod main_light;
@@ -40,6 +42,10 @@ static mut APP: Lazy<App> = Lazy::new(|| {
 });
 
 static mut SPAWNER: *const Spawner = null_mut();
+
+/// Bumped once per main-loop pass so a host can tell "alive" from "hung".
+#[no_mangle]
+pub static HEARTBEAT: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(not(test))]
 pub fn app() -> &'static mut App {

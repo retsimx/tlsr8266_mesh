@@ -1,4 +1,5 @@
 use crate::common::REGA_LIGHT_OFF;
+use crate::diagnostics::{REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT, SENTINEL_PANIC};
 use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
@@ -350,6 +351,12 @@ fn light_sw_reboot_ll() {
 #[cfg_attr(test, mry::mry)]
 pub fn light_sw_reboot() {
     irq_disable();
+
+    // A pending panic keeps its sentinel so the next boot can still report it
+    if analog_read(REGA_RESET_SENTINEL) != SENTINEL_PANIC {
+        analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT);
+    }
+
     light_sw_reboot_callback();
     light_sw_reboot_ll();
     return;
@@ -359,6 +366,7 @@ pub fn light_sw_reboot() {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::diagnostics::SENTINEL_RUNNING;
     use crate::sdk::common::compat::mock_load_tbl_cmd_set;
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
     use crate::sdk::mcu::irq_i::mock_irq_disable;
@@ -502,11 +510,19 @@ mod tests {
     /// Verifies that light_sw_reboot calls irq_disable,
     /// light_sw_reboot_callback, and light_sw_reboot_ll in sequence.
     #[test]
-    #[mry::lock(irq_disable, light_sw_reboot_callback, light_sw_reboot_ll)]
+    #[mry::lock(
+        irq_disable,
+        light_sw_reboot_callback,
+        light_sw_reboot_ll,
+        analog_read,
+        analog_write
+    )]
     fn test_light_sw_reboot() {
         mock_irq_disable().returns(0);
         mock_light_sw_reboot_callback().returns(());
         mock_light_sw_reboot_ll().returns(());
+        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
+        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).returns(());
 
         // Execute
         light_sw_reboot();
@@ -515,6 +531,54 @@ mod tests {
         mock_irq_disable().assert_called(1);
         mock_light_sw_reboot_callback().assert_called(1);
         mock_light_sw_reboot_ll().assert_called(1);
+    }
+
+    /// A watchdog or user reboot overwrites the running sentinel with "clean",
+    /// so the next boot does not report a phantom watchdog reset.
+    #[test]
+    #[mry::lock(
+        irq_disable,
+        light_sw_reboot_callback,
+        light_sw_reboot_ll,
+        analog_read,
+        analog_write
+    )]
+    fn test_light_sw_reboot_sets_clean_sentinel() {
+        mock_irq_disable().returns(0);
+        mock_light_sw_reboot_callback().returns(());
+        mock_light_sw_reboot_ll().returns(());
+        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
+        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).returns(());
+
+        // Execute
+        light_sw_reboot();
+
+        // Verify: the running sentinel was cleared exactly once
+        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).assert_called(1);
+    }
+
+    /// A panic reboot keeps the panic sentinel intact so the next boot can
+    /// stream the panic message left in flash.
+    #[test]
+    #[mry::lock(
+        irq_disable,
+        light_sw_reboot_callback,
+        light_sw_reboot_ll,
+        analog_read,
+        analog_write
+    )]
+    fn test_light_sw_reboot_preserves_panic_sentinel() {
+        mock_irq_disable().returns(0);
+        mock_light_sw_reboot_callback().returns(());
+        mock_light_sw_reboot_ll().returns(());
+        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
+        mock_analog_write(Any, Any).returns(());
+
+        // Execute
+        light_sw_reboot();
+
+        // Verify: no clean-reboot write, which would hide the panic
+        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).assert_called(0);
     }
 
     /// Tests PM_WAKEUP enum values

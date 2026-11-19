@@ -1,0 +1,16 @@
+[package]
+name = "probe-tlsr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+object = "0.37"
+probe-proto = { path = "../probe-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# libudev headers are not required for Linux port enumeration: without the
+# `libudev` feature `serialport` scans /sys/class/tty itself.
+serialport = { version = "4.10", default-features = false }

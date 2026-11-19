@@ -1,4 +1,5 @@
 [workspace]
 resolver = "2"
-members = ["probe-proto", "probe-tlsr"]
+members = ["probe-proto", "probe-tlsr", "probe-pico"]
+# Only host-buildable crates: probe-pico is a thumbv6m-none-eabi binary.
 default-members = ["probe-proto", "probe-tlsr"]

@@ -1,0 +1,19 @@
+[package]
+name = "probe-pico"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+embassy-executor = { version = "0.10", features = ["executor-thread"] }
+embassy-rp = { version = "0.10", features = ["rp2040", "time-driver", "critical-section-impl", "executor-thread"] }
+embassy-usb = "0.6"
+embassy-time = "0.5"
+pio = "0.3"
+cortex-m-rt = "0.7"
+fixed = "1.31"
+static_cell = "2"
+# thumbv6m has no atomic CAS; static_cell needs portable-atomic's critical-section fallback.
+portable-atomic = { version = "1", features = ["critical-section"] }
+heapless = "0.9"
+probe-proto = { path = "../probe-proto" }

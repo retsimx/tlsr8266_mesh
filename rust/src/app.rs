@@ -1,7 +1,10 @@
 #![coverage(off)]
+use core::sync::atomic::Ordering;
+
 use embassy_executor::Spawner;
 
 use crate::config::MESH_PWD_ENCODE_SK;
+use crate::diagnostics::{boot_init, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP};
 use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
@@ -73,6 +76,9 @@ impl App {
         // Get uart ready to go early
         self.uart_manager.init();
 
+        // Report why the previous boot ended and mark this one as running
+        boot_init();
+
         uprintln!(
             "Booting FW version {}, 16MHz: {}",
             BUILD_VERSION & 0x7fffffff,
@@ -81,6 +87,7 @@ impl App {
 
         // Configure the rest of the system
         self.init();
+        record_breadcrumb(CRUMB_INIT_DONE);
 
         // Start the mesh packet sender
         #[embassy_executor::task]
@@ -100,6 +107,7 @@ impl App {
 
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
+        record_breadcrumb(CRUMB_MAIN_LOOP);
 
         // Start the light manager
         #[embassy_executor::task]
@@ -126,6 +134,11 @@ impl App {
         spawner.spawn(panic_check(spawner)).unwrap();
 
         loop {
+            // Prove to a host that the loop is still turning (`fetch_add` does
+            // not exist on thumbv6m)
+            let next = crate::HEARTBEAT.load(Ordering::Relaxed).wrapping_add(1);
+            crate::HEARTBEAT.store(next, Ordering::Relaxed);
+
             // Clear the watchdog timer
             wd_clear();
 

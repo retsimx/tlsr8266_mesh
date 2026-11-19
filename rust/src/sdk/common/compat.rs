@@ -155,8 +155,23 @@ impl<const size: usize> UartStream<size> {
         Ok(())
     }
 
+    /// The bytes written so far.
+    ///
+    /// Uses `from_raw_parts` (as `send` already does) because an upstream bounds
+    /// check would put `slice_end_index_len_fail` on the panic handler's call
+    /// graph, which the static stack gate rejects.
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) }
+    }
+
     pub fn send(&self, is_panic: bool, doasync: bool) {
-        let mut buffer = unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) };
+        let mut buffer = self.as_bytes();
+
+        // Every log line is mirrored into the SWire ring as it is sent, so a
+        // panic's text is readable before the sector is written and rebooted.
+        #[cfg(feature = "rtt")]
+        crate::diagnostics::rtt::rtt_write_bytes(buffer);
+
         while !buffer.is_empty() {
             // Use the correct payload size to avoid overwriting CRC
             let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
@@ -283,10 +298,19 @@ pub async fn check_panic_info() {
 #[cfg(target_os = "none")]
 #[panic_handler]
 pub fn panic(info: &PanicInfo) -> ! {
+    use crate::diagnostics::{CRUMB_PANIC, REGA_BREADCRUMB, REGA_RESET_SENTINEL, SENTINEL_PANIC};
+
     critical_section::with(|_| {
+        // Mark the panic before anything that can itself fail. Formatting the
+        // panic info into the 256-byte stream panics if it overflows, and a
+        // double panic must not cost the next boot its breadcrumb.
+        analog_write(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        analog_write(REGA_BREADCRUMB, CRUMB_PANIC);
+
         let mut stream = UartStream::<256>::new();
 
         let _ = write!(stream, "{}", info);
+
         stream.send(true, false);
         write_panic_info(&stream);
 

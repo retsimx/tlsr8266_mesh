@@ -46,7 +46,17 @@ LDFLAGS = --gc-sections -T ./sdk/boot.link
 LIB = ./toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a
 
 BUILD_DIR  = _build
-RUST_DEPS  = rust/target/thumbv6m-none-eabi/release/deps
+
+# Cargo IR file names embed our crate's metadata hash, which changes with
+# FEATURES. A shared target dir therefore accumulates one stale module set per
+# selection and llvm-link fails with multiply-defined symbols. One dir per
+# selection keeps each `*.ll` set coherent; warm switches cost ~nothing.
+FEATURES ?=
+empty :=
+space := $(empty) $(empty)
+FEATURE_SLUG     = $(if $(strip $(FEATURES)),$(subst $(space),-,$(strip $(FEATURES))),default)
+CARGO_TARGET_DIR = target/features/$(FEATURE_SLUG)
+RUST_DEPS        = rust/$(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps
 
 STARTUP_SRC = ./sdk/cstartup_8266.S
 STARTUP_OBJ = $(addprefix $(BUILD_DIR)/asm/, $(notdir $(STARTUP_SRC:%.S=%.o)))
@@ -62,16 +72,20 @@ $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ) $(RUST_SRCS)
 	 _LLVM_LINK=$${LLVM_LINK:-$(LLVM_LINK)}; \
 	 _OPT=$${OPT:-$(OPT)}; \
 	 cd rust && \
-	 RUSTFLAGS="--emit=llvm-ir" cargo build --lib --color=always --release -Z build-std=core --all-features --target thumbv6m-none-eabi && \
+	 RUSTFLAGS="--emit=llvm-ir" cargo build --lib --color=always --release -Z build-std=core $(if $(FEATURES),--features "$(FEATURES)",) --target-dir $(CARGO_TARGET_DIR) --target thumbv6m-none-eabi && \
 	 echo "Linking IR modules..." && \
-	 $$_LLVM_LINK target/thumbv6m-none-eabi/release/deps/*.ll -o target/thumbv6m-none-eabi/release/deps/merged.bc && \
+	 $$_LLVM_LINK $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/*.ll -o $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged.bc && \
 	 echo "Optimising IR..." && \
-	 $$_OPT -passes="$(OPT_PASSES)" -inline-threshold=$(OPT_INLINE_THRESHOLD) target/thumbv6m-none-eabi/release/deps/merged.bc -o target/thumbv6m-none-eabi/release/deps/merged_opt.bc && \
+	 $$_OPT -passes="$(OPT_PASSES)" -inline-threshold=$(OPT_INLINE_THRESHOLD) $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged.bc -o $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged_opt.bc && \
 	 echo "Compiling optimised IR to assembly..." && \
-	 $$_LLC $(LLC_FLAGS) target/thumbv6m-none-eabi/release/deps/merged_opt.bc -o target/thumbv6m-none-eabi/release/deps/merged.s && \
+	 $$_LLC $(LLC_FLAGS) $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged_opt.bc -o $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged.s && \
 	 echo "Assembling..." && \
-	 ../$(AS) -o target/thumbv6m-none-eabi/release/deps/merged.o target/thumbv6m-none-eabi/release/deps/merged.s
+	 ../$(AS) -o $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged.o $(CARGO_TARGET_DIR)/thumbv6m-none-eabi/release/deps/merged.s
 	$(LD) $(LDFLAGS) -o $@ $(RUST_DEPS)/merged.o $(STARTUP_OBJ) $(LIB)
+
+# FEATURES is not a file: always re-evaluate so a selection change can never
+# leave a stale $(TARGET) in place.
+.PHONY: $(BUILD_DIR)/$(TARGET)
 
 # Startup.
 $(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
@@ -117,8 +131,9 @@ check: stack-check image-size-check
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(RUST_DEPS)/*.s $(RUST_DEPS)/*.o $(RUST_DEPS)/merged.bc $(RUST_DEPS)/merged_opt.bc
+	rm -rf rust/target/features
 
 .PHONY: distclean
 distclean: clean
 	cd rust && cargo clean
-	rm -f $(RUST_DEPS)/*.ll
+	rm -rf rust/target/features

@@ -376,14 +376,17 @@ fn hex_payloads_tolerate_prefixes_and_separators() {
 #[test]
 fn run_dispatches_to_the_memory_handlers() {
     let mut read_ctx = test_ctx([Response::Ack, data([0x01, 0x02, 0x03, 0x04])]);
+    let mut out = Vec::new();
     let output = run(
         Command::Read {
             addr_or_symbol: "0x8000".to_owned(),
             len: Some("4".to_owned()),
         },
         &mut read_ctx,
+        &mut out,
     )
-    .expect("read runs");
+    .expect("read runs")
+    .expect("read returns an output");
 
     assert_eq!(
         output,
@@ -394,14 +397,17 @@ fn run_dispatches_to_the_memory_handlers() {
     );
 
     let mut write_ctx = test_ctx([Response::Ack, Response::Ack]);
+    let mut out = Vec::new();
     let output = run(
         Command::Write {
             addr_or_symbol: "0x8000".to_owned(),
             hex: "0x01 0x02 0x03 0x04".to_owned(),
         },
         &mut write_ctx,
+        &mut out,
     )
-    .expect("write runs");
+    .expect("write runs")
+    .expect("write returns an output");
 
     assert_eq!(
         output,

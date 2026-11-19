@@ -75,7 +75,9 @@ pub fn test_ctx(responses: impl IntoIterator<Item = Response>) -> Ctx {
     Ctx {
         transport: Box::new(crate::transport::MockTransport::new(responses)),
         elf: None,
+        elf_path: None,
         json: false,
+        timeout_ms: None,
     }
 }
 

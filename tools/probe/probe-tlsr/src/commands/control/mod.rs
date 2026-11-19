@@ -7,8 +7,8 @@
 use probe_proto::{CpuMode, Request, Response};
 
 use super::{
-    expect_ack, read_flash, read_mem, sws_activate, unexpected, CPU_STATUS_ADDR, FLASH_HEADER_ADDR,
-    FLASH_HEADER_LEN, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
+    expect_ack, read_flash, read_mem, read_word, stall_core, sws_activate, unexpected,
+    CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
 };
 use crate::output::{FlashInfo, Output};
 use crate::transport::ProbeTransport;
@@ -17,25 +17,18 @@ use crate::CliError;
 /// SWire address of the core program counter.
 const PC_ADDR: u16 = 0x06bc;
 
-/// SWire address of the Timer 2 watchdog control byte.
-const WATCHDOG_CTRL_ADDR: u16 = 0x0622;
-
-/// `TMR_WD_EN`, bit 7 of [`WATCHDOG_CTRL_ADDR`].
-const TMR_WD_EN: u8 = 0x80;
-
 /// `info`: PC and CPU status, plus the flash header when the core is not
 /// running (or `--halt` stops it first). A live target gets no MSPI traffic.
 pub(super) fn info(transport: &mut dyn ProbeTransport, halt: bool) -> Result<Output, CliError> {
     sws_activate(transport)?;
 
-    let pc_bytes = read_mem(transport, PC_ADDR, 4)?;
-    let pc = u32::from_le_bytes([pc_bytes[0], pc_bytes[1], pc_bytes[2], pc_bytes[3]]);
+    let pc = read_word(transport, PC_ADDR)?;
 
     let cpu_status = read_mem(transport, CPU_STATUS_ADDR, 1)?[0];
 
     let flash_info = if halt || matches!(cpu_status, 0x05 | 0x06) {
         if halt {
-            halt_core(transport)?;
+            stall_core(transport)?;
         }
         Some(read_flash_info(transport)?)
     } else {
@@ -74,28 +67,8 @@ fn read_flash_info(transport: &mut dyn ProbeTransport) -> Result<FlashInfo, CliE
 /// The stall is terminal until `reset`.
 pub(super) fn halt(transport: &mut dyn ProbeTransport) -> Result<Output, CliError> {
     sws_activate(transport)?;
-    halt_core(transport)?;
+    stall_core(transport)?;
     Ok(Output::Halt)
-}
-
-/// Stalls the core, then clears `TMR_WD_EN` so Timer 2 cannot reset the chip
-/// while it is stalled.
-fn halt_core(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
-    expect_ack(
-        transport,
-        Request::CpuCtrl {
-            mode: CpuMode::Stall,
-        },
-    )?;
-
-    let watchdog_ctrl = read_mem(transport, WATCHDOG_CTRL_ADDR, 1)?[0] & !TMR_WD_EN;
-    expect_ack(
-        transport,
-        Request::WriteMem {
-            addr: WATCHDOG_CTRL_ADDR,
-            data: [watchdog_ctrl].into_iter().collect(),
-        },
-    )
 }
 
 /// `reset`: hard reset (optionally leaving the core stopped) or a SWire soft

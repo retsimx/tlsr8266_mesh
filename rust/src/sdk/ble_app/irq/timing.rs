@@ -42,15 +42,16 @@ use crate::state::*;
 /// - Uses connection-specific channel map and hop increment
 #[cfg_attr(test, mry::mry)]
 pub fn configure_ble_receive_state() {
-    // Clear RF interrupt status and stop current radio operations
-    write_reg8(0x080050f, 0x80);
+    // DMA3 (RF TX) mode byte (reg_dma3_ctrl[15:8]): bit7 is part of FIFO8 mode, exact role undocumented
+    write_reg_dma3_mode(0x80);
     rf_stop_trx();
 
     // Set link state to BLE receive mode (state 7)
     BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Receiving);
 
-    // Configure RF timing: TX wait and settle time for optimal performance
-    write_reg8(0x00800f04, 0x67);
+    // RF TX wait/settle timing: low byte of the 32-bit reg_rf_tx_wail_settle_time (0xf04).
+    // 0x67 = 32/48 MHz SYSTEM CLOCK (not the crystal frequency).
+    write_reg_rf_tx_wail_settle_time_lo(0x67);
 
     // Determine the next data channel using BLE frequency hopping
     let chn_map = PKT_INIT.lock().ll_init().chm;
@@ -128,7 +129,8 @@ mod tests {
 
     use crate::sdk::mcu::register::{
         mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
-        mock_write_reg_rf_access_code, mock_write_reg_rf_crc, mock_write_reg_system_tick_irq,
+        mock_write_reg_dma3_mode, mock_write_reg_rf_access_code, mock_write_reg_rf_crc,
+        mock_write_reg_rf_tx_wail_settle_time_lo, mock_write_reg_system_tick_irq,
     };
 
     /// Helper function to reset global state to known values for test isolation.
@@ -159,6 +161,7 @@ mod tests {
 
         // Register operation mocks
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_write_reg_rf_access_code(Any).returns(());
         mock_write_reg_rf_crc(Any).returns(());
         mock_read_reg_system_tick().returns(50000);
@@ -191,6 +194,8 @@ mod tests {
     #[mry::lock(rf_set_ble_channel)]
     #[mry::lock(rf_start_brx)]
     #[mry::lock(write_reg8)]
+    #[mry::lock(write_reg_rf_tx_wail_settle_time_lo)]
+    #[mry::lock(write_reg_dma3_mode)]
     #[mry::lock(write_reg_rf_access_code)]
     #[mry::lock(write_reg_rf_crc)]
     #[mry::lock(read_reg_system_tick)]
@@ -202,6 +207,7 @@ mod tests {
     fn test_configure_ble_receive_state_basic() {
         // Setup mocks
         setup_rf_and_register_mocks();
+        mock_write_reg_rf_tx_wail_settle_time_lo(Any).returns(());
 
         // Reset state for clean test
         reset_global_state();
@@ -221,8 +227,8 @@ mod tests {
         mock_rf_set_ble_channel(Any).assert_called(1); // Channel selection is not mocked
 
         // Verify register operations
-        mock_write_reg8(0x080050f, 0x80).assert_called(1); // RF interrupt clear
-        mock_write_reg8(0x00800f04, 0x67).assert_called(1); // RF timing
+        mock_write_reg_dma3_mode(0x80).assert_called(1); // DMA3 (RF TX) mode byte
+        mock_write_reg_rf_tx_wail_settle_time_lo(0x67).assert_called(1); // RF TX wait/settle time
 
         // Verify access code calculation: ((aa[2] << 8) | (aa[1] << 16) | aa[3] | (aa[0] << 24))
         // aa = [0xAA, 0xBB, 0xCC, 0xDD]
@@ -260,6 +266,7 @@ mod tests {
     #[mry::lock(rf_set_ble_channel)]
     #[mry::lock(rf_start_brx)]
     #[mry::lock(write_reg8)]
+    #[mry::lock(write_reg_dma3_mode)]
     #[mry::lock(write_reg_rf_access_code)]
     #[mry::lock(write_reg_rf_crc)]
     #[mry::lock(read_reg_system_tick)]
@@ -306,6 +313,7 @@ mod tests {
     #[mry::lock(rf_set_ble_channel)]
     #[mry::lock(rf_start_brx)]
     #[mry::lock(write_reg8)]
+    #[mry::lock(write_reg_dma3_mode)]
     #[mry::lock(write_reg_rf_access_code)]
     #[mry::lock(write_reg_rf_crc)]
     #[mry::lock(read_reg_system_tick)]
@@ -345,6 +353,7 @@ mod tests {
     #[mry::lock(rf_set_ble_channel)]
     #[mry::lock(rf_start_brx)]
     #[mry::lock(write_reg8)]
+    #[mry::lock(write_reg_dma3_mode)]
     #[mry::lock(write_reg_rf_access_code)]
     #[mry::lock(write_reg_rf_crc)]
     #[mry::lock(read_reg_system_tick)]

@@ -196,9 +196,9 @@ fn process_received_packet_slow_path(
 
     // Handle cleanup when in BLE receive state but packet was invalid
     if BLE_PERIPHERAL_LINK_STATE.get() == crate::sdk::light::BlePeripheralLinkState::Receiving {
-        // Clear RF interrupt status and stop radio operations
+        // Clear DMA3 (RF TX) mode byte before stopping TRX
         // This handles the case where we were expecting a BLE packet but received invalid data
-        write_reg8(0x80050f, 0);
+        write_reg_dma3_mode(0);
         rf_stop_trx();
     }
 }
@@ -425,8 +425,8 @@ mod tests {
     use crate::sdk::mcu::register::{
         mock_read_reg_rf_rx_status, mock_read_reg_system_tick, mock_read_reg_system_tick_irq,
         mock_write_reg8, mock_write_reg_dma2_addr, mock_write_reg_dma3_addr,
-        mock_write_reg_rf_irq_status, mock_write_reg_rf_mode_control, mock_write_reg_rf_sched_tick,
-        mock_write_reg_system_tick_irq,
+        mock_write_reg_dma3_mode, mock_write_reg_rf_irq_status, mock_write_reg_rf_mode_control,
+        mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
     };
     use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
     use crate::state::*;
@@ -1317,12 +1317,13 @@ mod tests {
     /// This test focuses on the packet validation logic and state transitions
     /// in the slow path processing function.
     #[test]
-    #[mry::lock(write_reg8, rf_stop_trx)]
+    #[mry::lock(write_reg8, write_reg_dma3_mode, rf_stop_trx)]
     fn test_process_received_packet_slow_path_invalid_packet_cleanup() {
         reset_global_state();
 
         // Setup mocks
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_rf_stop_trx().returns(());
 
         // Setup state for BLE receiving mode (triggers cleanup on invalid packet)
@@ -1339,7 +1340,7 @@ mod tests {
         process_received_packet_slow_path(0, 10, &mut light_rx_buff);
 
         // Verify cleanup operations for invalid packet in receiving state
-        mock_write_reg8(0x80050f, 0).assert_called(1);
+        mock_write_reg_dma3_mode(0).assert_called(1);
         mock_rf_stop_trx().assert_called(1);
     }
 

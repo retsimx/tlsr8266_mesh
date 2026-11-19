@@ -177,12 +177,12 @@ pub fn cleanup_ble_disconnection() {
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
     }
 
-    // Configure hardware timing registers based on system clock
-    // These values adjust RF timing parameters for the specific clock frequency
+    // Configure the RF TX wait/settle timing low byte based on the SYSTEM CLOCK
+    // (not the crystal frequency): 0x5e = 16 MHz sysclk, 0x68 = 32/48 MHz sysclk
     if CLOCK_SYS_CLOCK_1US == 0x10 {
-        write_reg8(0xf04, 0x5e); // 16MHz clock timing
+        write_reg_rf_tx_wail_settle_time_lo(0x5e); // 16 MHz system clock
     } else {
-        write_reg8(0xf04, 0x68); // Other clock frequencies
+        write_reg_rf_tx_wail_settle_time_lo(0x68); // 32/48 MHz system clock
     }
 
     // Reset connection parameter update state
@@ -215,8 +215,8 @@ pub fn cleanup_ble_disconnection() {
 /// This function sets up the hardware state for bridge mode operation:
 /// - Sets link state to bridge mode (state 5)
 /// - Increments operation counter for debugging
-/// - Clears RF status and stops ongoing operations
-/// - Configures RF timing registers based on system clock frequency
+/// - Clears the DMA3 (RF TX) mode byte and stops ongoing operations
+/// - Configures RF TX wait/settle timing based on system clock frequency
 #[cfg_attr(test, mry::mry)]
 fn initialize_connection_hardware() {
     // Set link state to bridge mode - active BLE connection
@@ -225,16 +225,16 @@ fn initialize_connection_hardware() {
     // Increment bridge operation counter for statistics/debugging
     BRIDGE_SEQUENCE_NUMBER.inc();
 
-    // Clear RF status and stop any ongoing radio operations
-    write_reg8(0x50f, 0);
+    // Clear DMA3 (RF TX) mode byte before stopping TRX
+    write_reg_dma3_mode(0);
     rf_stop_trx();
 
-    // Configure RF timing registers based on system clock frequency
-    // These settings optimize RF performance for the specific hardware clock
+    // Configure RF TX wait/settle timing (low byte of reg_rf_tx_wail_settle_time)
+    // based on the SYSTEM CLOCK (not the crystal frequency)
     if CLOCK_SYS_CLOCK_1US == 0x10 {
-        write_reg8(0xf04, 0x5e); // 16MHz clock: optimized RF timing
+        write_reg_rf_tx_wail_settle_time_lo(0x5e); // 16 MHz system clock
     } else {
-        write_reg8(0xf04, 0x68); // Other frequencies: standard RF timing
+        write_reg_rf_tx_wail_settle_time_lo(0x68); // 32/48 MHz system clock
     }
 }
 
@@ -644,7 +644,8 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use crate::sdk::mcu::register::{
-        mock_read_reg_system_tick, mock_write_reg8, mock_write_reg_dma_tx_rptr,
+        mock_read_reg_system_tick, mock_write_reg8, mock_write_reg_dma3_mode,
+        mock_write_reg_dma_tx_rptr, mock_write_reg_rf_tx_wail_settle_time_lo,
         mock_write_reg_system_tick_irq,
     };
     use crate::sdk::packet_types::{Packet, PacketAttData};
@@ -1599,7 +1600,9 @@ mod tests {
         }
 
         // For now, just document that this test exists for 16MHz systems
-        println!("16MHz clock hardware config test would verify write_reg8(0xf04, 0x5e)");
+        println!(
+            "16MHz clock hardware config test would verify write_reg_rf_tx_wail_settle_time_lo(0x5e)"
+        );
     }
 
     /// Tests hardware register configuration for non-16MHz clock.
@@ -1624,7 +1627,9 @@ mod tests {
         }
 
         // For now, just document that this test exists for non-16MHz systems
-        println!("Non-16MHz clock hardware config test would verify write_reg8(0xf04, 0x68)");
+        println!(
+            "Non-16MHz clock hardware config test would verify write_reg_rf_tx_wail_settle_time_lo(0x68)"
+        );
     }
 
     /// Tests comprehensive state reset after cleanup.
@@ -1855,13 +1860,20 @@ mod tests {
     /// Verifies that hardware initialization correctly:
     /// - Sets link state to bridge mode (state 5)
     /// - Increments bridge operation counter
-    /// - Clears RF status and stops ongoing operations
-    /// - Configures RF timing registers based on system clock
+    /// - Clears the DMA3 (RF TX) mode byte and stops ongoing operations
+    /// - Configures RF TX wait/settle timing based on system clock
     #[test]
-    #[mry::lock(write_reg8, rf_stop_trx)]
+    #[mry::lock(
+        write_reg8,
+        write_reg_rf_tx_wail_settle_time_lo,
+        write_reg_dma3_mode,
+        rf_stop_trx
+    )]
     fn test_initialize_connection_hardware() {
         // Mock hardware functions
         mock_write_reg8(Any, Any).returns(());
+        mock_write_reg_rf_tx_wail_settle_time_lo(Any).returns(());
+        mock_write_reg_dma3_mode(Any).returns(());
         mock_rf_stop_trx().returns(());
 
         // Reset state for clean test
@@ -1888,14 +1900,14 @@ mod tests {
         // Verify RF operations are stopped
         mock_rf_stop_trx().assert_called(1);
 
-        // Verify RF status is cleared
-        mock_write_reg8(0x50f, 0).assert_called(1);
+        // Verify DMA3 (RF TX) mode byte is cleared
+        mock_write_reg_dma3_mode(0).assert_called(1);
 
         // Verify RF timing registers are configured (depends on clock frequency)
         if CLOCK_SYS_CLOCK_1US == 0x10 {
-            mock_write_reg8(0xf04, 0x5e).assert_called(1);
+            mock_write_reg_rf_tx_wail_settle_time_lo(0x5e).assert_called(1);
         } else {
-            mock_write_reg8(0xf04, 0x68).assert_called(1);
+            mock_write_reg_rf_tx_wail_settle_time_lo(0x68).assert_called(1);
         }
     }
 

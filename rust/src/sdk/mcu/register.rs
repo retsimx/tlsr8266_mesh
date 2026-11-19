@@ -488,6 +488,22 @@ regrw!(reg_clk_en, 0x64, 16);
 regrw!(reg_clk_en1, 0x64, 8);
 regrw!(reg_clk_en2, 0x65, 8);
 
+// CLKEN0: peripheral clock enable (1 = enabled). Written as 0xff by
+// `tbl_cpu_wakeup_init` in pm.rs.
+regrw!(reg_clk_en0, 0x63, 8);
+bitflags! {
+    pub struct FLD_CLK0_EN: u8 {
+        const SPI = BIT!(0);
+        const I2C = BIT!(1);
+        const USB = BIT!(2);
+        const USB_PHY = BIT!(3);
+        const MCU = BIT!(4);
+        const MAC = BIT!(5);
+        const AIF = BIT!(6);
+        const ZB = BIT!(7);
+    }
+}
+
 bitflags! {
     pub struct FLD_CLK_EN: u32 {
         const GPIO_EN = BIT!(0);
@@ -737,7 +753,36 @@ bitflags! {
     }
 }
 
+// Clock mux select. Fields are only partially documented (DS_TLSR8266-E Table 4-1):
+// - bit 0: 32 kHz clock select — 0 = internal 32k RC osc, 1 = 32k pad
+// - bit 1: reserved
+// - bit 2: USB PHY clock select — 0 = 48 MHz PLL
+// - bit 3: undocumented
+// - bits 7:4: `r_lpr_div` — system clock divider used in low-power mode
+regrw!(reg_clk_mux_sel, 0x73, 8);
+
+// Function-ID write unlock latch. `reg_func_id` is only writable while this
+// holds `REG_ID_WR_EN_UNLOCK`.
+regrw!(reg_id_wr_en, 0x74, 8);
+
 regrw!(reg_mcu_wakeup_mask, 0x78, 32);
+
+// Chip function enable (only writable while reg_id_wr_en == REG_ID_WR_EN_UNLOCK).
+regrw!(reg_func_id, 0x7c, 8);
+bitflags! {
+    pub struct FLD_FUNC_ID: u8 {
+        const USB_SYS_CLOCK = BIT!(0);
+        const MAC_CLOCK = BIT!(1);
+        const SBC_CLOCK = BIT!(2);
+        const RISC32_ENABLE = BIT!(3);
+        const I2S_ENABLE = BIT!(4);
+        const SDM_ENABLE = BIT!(5);
+        const RF_ENABLE = BIT!(6); // DS_TLSR8266 §3.2.1: bit6=1 enables the RF transceiver
+        const ZB_ENABLE = BIT!(7);
+    }
+}
+/// Magic key written to `reg_id_wr_en` to unlock writes to `reg_func_id`.
+pub const REG_ID_WR_EN_UNLOCK: u8 = 0x53;
 
 //****************************************************
 // Analog control registers (0xB8 - 0xBA)
@@ -1219,6 +1264,21 @@ regrw!(reg_dma5_ctrl, 0x516, 16);
 // DMA mode registers
 regrw!(reg_dma0_mode, 0x503, 8); // DMA0 mode register
 regrw!(reg_dma1_mode, 0x507, 8); // DMA1 mode register
+
+// DMA2 (RF RX) mode register: upper byte of `reg_dma2_ctrl`, i.e. the byte
+// view of `ctrl[15:8]` (`bit N` here == ctrl `bit N + 8`; `FLD_DMA` documents
+// the 16-bit view). Bit 7 (`0x80`) is part of FIFO8 mode: Telink's
+// `FLD_DMA_FIFO8 = BIT(15)|BIT(14)|WR_MEM|PINGPONG_EN`, i.e. ctrl bits 15,14
+// (this byte's bits 7,6) plus WR_MEM and PINGPONG_EN. Its exact effect in the
+// RX path is undocumented for the TLSR8266.
+regrw!(reg_dma2_mode, 0x50b, 8);
+// DMA3 (RF TX) mode register: upper byte of `reg_dma3_ctrl`, i.e. the byte
+// view of `ctrl[15:8]` (`bit N` here == ctrl `bit N + 8`; `FLD_DMA` documents
+// the 16-bit view). Bit 7 (`0x80`) is part of FIFO8 mode: Telink's
+// `FLD_DMA_FIFO8 = BIT(15)|BIT(14)|WR_MEM|PINGPONG_EN`, i.e. ctrl bits 15,14
+// (this byte's bits 7,6) plus WR_MEM and PINGPONG_EN. Its exact effect in the
+// TX path is undocumented for the TLSR8266.
+regrw!(reg_dma3_mode, 0x50f, 8);
 
 // DMA control registers
 regrw!(reg_dma_chn_en, 0x520, 8);
@@ -2002,6 +2062,14 @@ regrw!(reg_pwm_irq_sta, 0x7b1, 8);
 regrw!(reg_rf_txrx_state, 0xf02, 8);
 regrw!(reg_rf_mode_control, 0xf00, 8);
 regrw!(reg_rf_sn, 0xf01, 8);
+// RF TX wait/settle timing, low byte. Callers write only this byte so the upper
+// bytes of the 32-bit word at 0xf04 are preserved. The split between the wait and
+// settle fields within the word is not documented.
+//
+// Note: the receive/mesh paths use 0x67 while the connection paths use 0x68 for
+// the same register. Both run at a 32 MHz system clock; the reason for the 1 LSB
+// difference is not documented, so do not "normalise" them without evidence.
+regrw!(reg_rf_tx_wail_settle_time_lo, 0xf04, 8);
 regrw!(reg_rf_tx_wail_settle_time, 0xf04, 32);
 regrw!(reg_rf_sys_timer_config, 0xf0a, 16);
 regrw!(reg_rf_mode, 0xf16, 8);
@@ -2056,3 +2124,51 @@ pub const raga_gpio_wkup_pol: u8 = 0x44;
 
 pub const raga_pga_gain0: u8 = 0x86;
 pub const raga_pga_gain1: u8 = 0x87;
+
+// Analog (indirect) RF register addresses. Values are indices for
+// `analog_read`/`analog_write`, not memory-mapped offsets.
+pub const REGA_RF_PA_BIAS: u8 = 0x04; // PA bias control (TBL_RF_POWER.b)
+pub const REGA_RF_OUTPUT_POWER: u8 = 0x8d; // RF output power (TBL_RF_POWER.d)
+pub const REGA_RF_TX_POWER: u8 = 0x93; // per-channel TX power (two-point calibration)
+pub const REGA_RF_PA_GAIN: u8 = 0xa2; // PA gain control (TBL_RF_POWER.a)
+pub const REGA_RF_OUTPUT_MATCH: u8 = 0xa7; // RF output match network (TBL_RF_POWER.c)
+/// Ambiguous. This project's `docs/ble_hardware_reference.md` describes 0x06 as
+/// "SAR ADC power (0 = off)", but Telink's 8267/8258 SDK headers call the same
+/// address `areg_06_pll_bg` with `FLD_PLL_BG_POWER_DOWN = BIT(4)` (1 = power
+/// down). The two descriptions disagree. Behaviour is left unchanged; the intent
+/// of `analog_write(0x06, 0)` is therefore not certain.
+pub const REGA_SAR_ADC_PWR: u8 = 0x06;
+
+#[cfg(test)]
+#[coverage(off)]
+mod tests {
+    use super::*;
+    use mry::Any;
+
+    #[test]
+    #[mry::lock(write_reg8)]
+    fn test_reg_dma3_mode_address() {
+        // pins reg_dma3_mode to the upper byte of reg_dma3_ctrl (0x50e)
+        mock_write_reg8(0x50f, Any).returns(());
+        write_reg_dma3_mode(0x80);
+        mock_write_reg8(0x50f, 0x80).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(write_reg32)]
+    fn test_reg_rf_event_clear_address() {
+        // pins reg_rf_event_clear to 0xf28
+        mock_write_reg32(0xf28, Any).returns(());
+        write_reg_rf_event_clear(0xffffffff);
+        mock_write_reg32(0xf28, 0xffffffff).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(write_reg8)]
+    fn test_reg_rf_tx_wail_settle_time_lo_address() {
+        // pins the low-byte accessor to 0xf04 (32-bit word reg_rf_tx_wail_settle_time)
+        mock_write_reg8(0xf04, Any).returns(());
+        write_reg_rf_tx_wail_settle_time_lo(0x67);
+        mock_write_reg8(0xf04, 0x67).assert_called(1);
+    }
+}

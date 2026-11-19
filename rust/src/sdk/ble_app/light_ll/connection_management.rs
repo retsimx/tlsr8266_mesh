@@ -326,9 +326,9 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
             // The | 1 ensures the timestamp is never exactly zero
             GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
-            // Configure RF transmit timing parameters for optimal performance
-            // 0x67 = specific timing value for tx wait & settle time on TLSR8266
-            write_reg8(0x00800f04, 0x67);
+            // RF TX wait/settle timing: low byte of the 32-bit
+            // reg_rf_tx_wail_settle_time (0xf04). 0x67 = 32/48 MHz SYSTEM CLOCK.
+            write_reg_rf_tx_wail_settle_time_lo(0x67);
 
             return;
         }

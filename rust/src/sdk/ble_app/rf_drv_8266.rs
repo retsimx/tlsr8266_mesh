@@ -46,10 +46,12 @@ use crate::sdk::mcu::register::{
     write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl,
     write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src,
     write_reg_pll_rx_fine_div_tune, write_reg_rf_access_code, write_reg_rf_channel,
-    write_reg_rf_crc, write_reg_rf_irq_mask, write_reg_rf_irq_status, write_reg_rf_mode,
-    write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn,
-    write_reg_rf_sys_timer_config, write_reg_rf_timing_config, write_reg_rf_txrx_state,
-    write_reg_system_tick_irq, write_reg_system_tick_mode, FLD_RF_IRQ_MASK, FLD_RF_RX_MODE,
+    write_reg_rf_crc, write_reg_rf_event_clear, write_reg_rf_irq_mask, write_reg_rf_irq_status,
+    write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn,
+    write_reg_rf_sys_timer_config, write_reg_rf_timing_config, write_reg_rf_tx_wail_settle_time_lo,
+    write_reg_rf_txrx_state, write_reg_system_tick_irq, write_reg_system_tick_mode,
+    FLD_RF_IRQ_MASK, FLD_RF_RX_MODE, REGA_RF_OUTPUT_MATCH, REGA_RF_OUTPUT_POWER, REGA_RF_PA_BIAS,
+    REGA_RF_PA_GAIN, REGA_RF_TX_POWER, REGA_SAR_ADC_PWR,
 };
 use crate::sdk::mcu::register::{
     rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode,
@@ -136,8 +138,10 @@ pub fn rf_drv_init(enable: bool) -> u8 {
                 }
             }
         } else {
-            // When RF module is disabled, power off the SAR (Successive Approximation Register) ADC
-            analog_write(6, 0);
+            // When RF module is disabled, power off the SAR ADC (REGA_SAR_ADC_PWR).
+            // Note: 0x06 is ambiguous — project docs say SAR ADC power, Telink
+            // 8267/8258 headers call it the PLL bandgap power-down.
+            analog_write(REGA_SAR_ADC_PWR, 0);
         }
     });
 
@@ -178,7 +182,8 @@ pub fn rf_set_rxmode() {
  */
 #[cfg_attr(test, mry::mry)]
 pub fn rf_set_tx_rx_off() {
-    write_reg_rf_mode(0x29); // Set specific RF mode
+    // reg_rf_mode (0xf16): TX_EN_DLY_EN (bit0) | R_TX_EN_DLY=2 (bits7:4) | bit3 (0x08) undocumented
+    write_reg_rf_mode(0x29);
     write_reg_rf_rx_mode(FLD_RF_RX_MODE::LOW_PASS_FILTER.bits()); // rx disable (replacing write_reg8(0x800428, RF_TRX_MODE))
     write_reg_rf_txrx_state(RF_TRX_OFF); // reset tx/rx state machine
 }
@@ -666,7 +671,7 @@ pub fn rf_link_slave_init(interval: u32) {
         write_reg_system_tick_irq(SLAVE_CONNECTED_TICK.get());
 
         // Set RF hardware configuration
-        write_reg8(0xf04, 0x68);
+        write_reg_rf_tx_wail_settle_time_lo(0x68);
 
         // Generate a MAC address if one doesn't exist in flash
         let mut mac_check: [u32; 1] = [0];
@@ -748,10 +753,10 @@ pub fn rf_set_power_level_index(index: u32) {
 
     // Configure the four analog registers that control RF power
     unsafe {
-        analog_write(0xa2, TBL_RF_POWER[tbl_index].a); // Power amplifier (PA) gain control
-        analog_write(4, TBL_RF_POWER[tbl_index].b); // Power amplifier (PA) bias control
-        analog_write(0xa7, TBL_RF_POWER[tbl_index].c); // RF output match network control
-        analog_write(0x8d, TBL_RF_POWER[tbl_index].d); // RF output power control
+        analog_write(REGA_RF_PA_GAIN, TBL_RF_POWER[tbl_index].a); // PA gain control
+        analog_write(REGA_RF_PA_BIAS, TBL_RF_POWER[tbl_index].b); // PA bias control
+        analog_write(REGA_RF_OUTPUT_MATCH, TBL_RF_POWER[tbl_index].c); // RF output match network
+        analog_write(REGA_RF_OUTPUT_POWER, TBL_RF_POWER[tbl_index].d); // RF output power
     }
 }
 
@@ -804,10 +809,12 @@ pub fn rf_set_ble_channel(chn: u8) {
     // Determine channel type and calculate parameters
     let params = calculate_channel_params(chn);
 
-    // Power off the SAR (Successive Approximation Register) ADC
-    analog_write(6, 0);
+    // Power off the SAR ADC (REGA_SAR_ADC_PWR). Note: 0x06 is ambiguous —
+    // project docs say SAR ADC, Telink 8267/8258 headers say PLL bandgap.
+    analog_write(REGA_SAR_ADC_PWR, 0);
 
     // Turn on LDO and baseband PLL
+    // reg_rf_mode (0xf16): TX_EN_DLY_EN (bit0) | R_TX_EN_DLY=2 (bits7:4) | bit3 (0x08) undocumented
     write_reg_rf_mode(0x29);
 
     // Disable receiver and reset TX/RX state machine
@@ -915,7 +922,8 @@ fn calculate_channel_params(chn: u8) -> ChannelParams {
  *
  * This function adjusts the RF transmission power for a specific channel by:
  * 1. Calculating an appropriate analog register value from the base and gain parameters
- * 2. Writing this value to analog register 0x93 which controls output power
+ * 2. Writing this value to analog register REGA_RF_TX_POWER (0x93), which controls
+ *    output power
  *
  * The calculation uses RF_TP_BASE and RF_TP_GAIN global variables that are
  * calibrated during initialization based on values stored in flash.
@@ -935,8 +943,8 @@ fn rf_set_tp_gain(gain: u8) {
         base_value - power_adjustment
     };
 
-    // Write final power value to analog register 0x93 (power control register)
-    analog_write(0x93, power_value);
+    // Write final power value to analog register REGA_RF_TX_POWER (0x93, TX power control)
+    analog_write(REGA_RF_TX_POWER, power_value);
 }
 
 /**
@@ -984,7 +992,7 @@ pub fn rf_start_stx2rx(addr: u32, tick: u32) {
  */
 #[cfg_attr(test, mry::mry)]
 pub fn rf_start_brx(addr: u32, tick: u32) {
-    write_reg32(0xf28, 0xffffffff); // Clear pending events
+    write_reg_rf_event_clear(0xffffffff); // Clear pending events
     write_reg_rf_sched_tick(tick); // Setting schedule trigger time
     write_reg_rf_mode(read_reg_rf_mode() | 0x04); // Enable cmd_schedule mode
     write_reg_rf_mode_control(0x82); // Set mode to brx
@@ -1228,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
+    #[mry::lock(write_reg_rf_event_clear)]
     #[mry::lock(write_reg_rf_sched_tick)]
     #[mry::lock(read_reg_rf_mode)]
     #[mry::lock(write_reg_rf_mode)]
@@ -1236,7 +1244,7 @@ mod tests {
     #[mry::lock(write_reg_dma3_addr)]
     fn test_rf_start_brx() {
         mock_read_reg_rf_mode().returns(3);
-        mock_write_reg32(0xf28, Any).returns(());
+        mock_write_reg_rf_event_clear(Any).returns(());
         mock_write_reg_rf_sched_tick(0x87654321).returns(());
         mock_write_reg_rf_mode(4 | 3).returns(());
         mock_write_reg_rf_mode_control(0x82).returns(());
@@ -1244,7 +1252,7 @@ mod tests {
 
         rf_start_brx(0x12345678, 0x87654321);
 
-        mock_write_reg32(0xf28, 0xffffffff).assert_called(1);
+        mock_write_reg_rf_event_clear(0xffffffff).assert_called(1);
         mock_write_reg_rf_sched_tick(0x87654321).assert_called(1);
         mock_write_reg_rf_mode(4 | 3).assert_called(1);
         mock_write_reg_rf_mode_control(0x82).assert_called(1);

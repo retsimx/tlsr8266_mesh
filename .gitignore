@@ -3,6 +3,7 @@ _build
 .gradle
 venv
 rust/target/
+tools/probe/target/
 local.py
 __pycache__
 .env

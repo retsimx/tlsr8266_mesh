@@ -37,7 +37,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install 32-bit build dependencies
-        run: sudo apt-get install -y gcc-multilib
+        # Refresh the package index first: runner images bake an apt list that
+        # can point at libc6-dev-i386/libc6-x32 versions the archive has since
+        # superseded, which fails the install with 404s.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2

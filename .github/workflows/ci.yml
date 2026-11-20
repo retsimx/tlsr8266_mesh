@@ -128,6 +128,14 @@ jobs:
         run: cargo build --manifest-path probe-pico/Cargo.toml --release --target thumbv6m-none-eabi
         working-directory: tools/probe
 
+  sdk-tests:
+    name: SDK tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run build driver tests
+        run: python3 -m unittest discover -s sdk/tests -v
+
   llvm:
     name: Build LLVM tools
     runs-on: ubuntu-latest
@@ -257,6 +265,39 @@ jobs:
             LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
             OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
           make check
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Verify manifest cache hit on no-op rebuild
+        run: |
+          set -euo pipefail
+          if [ ! -f _build/default/merged.o ]; then
+            echo "::error::_build/default/merged.o not found; the default build did not produce per-feature intermediates" >&2
+            exit 1
+          fi
+          before=$(stat -c %y _build/default/merged.o)
+          echo "merged.o mtime before: ${before}"
+          if ! output=$(make \
+            LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
+            LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" 2>&1); then
+            echo "$output"
+            echo "::error::no-op rebuild failed: make exited non-zero" >&2
+            exit 1
+          fi
+          echo "$output"
+          after=$(stat -c %y _build/default/merged.o)
+          echo "merged.o mtime after:  ${after}"
+          failed=0
+          if [ "$before" != "$after" ]; then
+            echo "::error::_build/default/merged.o was rewritten on a no-op rebuild (mtime ${before} -> ${after})" >&2
+            failed=1
+          fi
+          if ! printf '%s\n' "$output" | grep -Fq "Build manifest unchanged for 'default'; skipping LLVM/TC32 link."; then
+            echo "::error::missing manifest cache-hit message; no-op rebuild did not skip the LLVM/TC32 link" >&2
+            failed=1
+          fi
+          exit "$failed"
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 

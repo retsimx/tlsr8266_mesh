@@ -34,7 +34,7 @@ The entire build process can be run using:
 make clean && make
 ```
 
-from the repository root. The built firmware will be in the `_build` directory. The Makefile assumes `llc` is at `../../llvm/build/bin/llc` relative to this repo; override with `LLC=/path/to/llc make` if needed.
+from the repository root. The built firmware will be in the `_build` directory. `sdk/build_firmware.py` resolves `llc`, `llvm-link`, and `opt` from, in order, the `--llc`/`--llvm-link`/`--opt` flags, the `LLC`/`LLVM_LINK`/`OPT` environment variables, a `.env` file at the repository root, and finally `../llvm/build/bin/<tool>`; `LLC=/path/to/llc make` still works because the Makefile forwards these as flags. Repeated `make` runs are incremental thanks to the per-feature manifest cache, and `make bump-version` is the explicit way to bump `BUILD_VERSION`.
 
 ## Testing
 
@@ -109,8 +109,8 @@ sudo apt-get install -y cmake ninja-build clang lld
    ninja -j$(nproc) llc llvm-link opt
    ```
 
-5. **Locate the binaries**: The outputs will be at `build/bin/llc`, `build/bin/llvm-link`, and `build/bin/opt`. Update the `LLC`, `LLVM_LINK`, and `OPT` variables in the `Makefile` (or pass them on the command line) if your build directory differs from the default:
+5. **Locate the binaries**: The outputs will be at `build/bin/llc`, `build/bin/llvm-link`, and `build/bin/opt`. If your build directory differs from the default, pass the paths as command-line flags or environment variables (equivalent to `--llc`/`--llvm-link`/`--opt`), or set them in a `.env` file at the repository root:
 
    ```bash
-   LLC=/path/to/llc LLVM_LINK=/path/to/llvm-link OPT=/path/to/opt make
+   make LLC=/path/to/llc LLVM_LINK=/path/to/llvm-link OPT=/path/to/opt
    ```

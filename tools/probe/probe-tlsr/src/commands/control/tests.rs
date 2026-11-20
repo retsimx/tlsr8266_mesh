@@ -71,6 +71,62 @@ fn info_on_stopped_or_stalled_target_reads_flash() {
 }
 
 #[test]
+fn info_decodes_the_real_12mhz_header() {
+    let mut mock = crate::transport::MockTransport::new([
+        Response::Ack,
+        pc_bytes(),
+        data([0x05]),
+        jedec_id(),
+        data(REAL_12MHZ_HEADER),
+    ]);
+
+    let output = info(&mut mock, false).expect("info succeeds");
+
+    assert_eq!(
+        output,
+        Output::Info {
+            pc: 0x0001_10f0,
+            cpu_status: 0x05,
+            cpu_state: "stopped",
+            flash_info: Some(FlashInfo {
+                jedec_id: "ef4018".to_owned(),
+                xtal_mhz: 12,
+                build_version: 0x0dd4,
+                magic_ok: true,
+            }),
+        }
+    );
+}
+
+#[test]
+fn info_decodes_the_real_16mhz_header() {
+    let mut mock = crate::transport::MockTransport::new([
+        Response::Ack,
+        pc_bytes(),
+        data([0x05]),
+        jedec_id(),
+        data(REAL_16MHZ_HEADER),
+    ]);
+
+    let output = info(&mut mock, false).expect("info succeeds");
+
+    assert_eq!(
+        output,
+        Output::Info {
+            pc: 0x0001_10f0,
+            cpu_status: 0x05,
+            cpu_state: "stopped",
+            flash_info: Some(FlashInfo {
+                jedec_id: "ef4018".to_owned(),
+                xtal_mhz: 16,
+                build_version: 0x0dd5,
+                magic_ok: true,
+            }),
+        }
+    );
+}
+
+#[test]
 fn info_halt_stalls_core_and_clears_watchdog_before_flash_reads() {
     let mut mock = crate::transport::MockTransport::new([
         Response::Ack,

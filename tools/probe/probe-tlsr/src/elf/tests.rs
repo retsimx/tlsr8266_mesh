@@ -1,8 +1,10 @@
 //! Unit tests for the ELF helpers.
 //!
 //! One synthetic ELF per fixture: `fixture` for the flat image and the symbol
-//! lookup, and [`code_symbols`](self::code_symbols) for the code ranges. Both
-//! hand-build the bytes the reader actually touches, so no toolchain is needed.
+//! lookup, [`header_fixture`](self::header_fixture) for a real firmware header
+//! in the flash segment, and [`code_symbols`](self::code_symbols) for the code
+//! ranges. All hand-build the bytes the reader actually touches, so no
+//! toolchain is needed.
 
 use super::*;
 
@@ -86,6 +88,17 @@ fn put_section_header(buf: &mut [u8], at: usize, fields: SectionFields) {
     put_u32(buf, at + 36, fields.entsize);
 }
 
+/// Builds a fixture whose first 16-byte loadable payload starts with `header`.
+///
+/// The crystal-guard test in `commands::flash` uses this to prove that the
+/// 12-byte firmware header at `p_paddr` 0 survives ELF flattening. `fixture`
+/// keeps the original payload.
+pub(crate) fn header_fixture(header: [u8; 12]) -> Vec<u8> {
+    let mut seg0 = SEG0_BYTES;
+    seg0[..header.len()].copy_from_slice(&header);
+    fixture_with_seg0(seg0)
+}
+
 /// Builds a little-endian ELF32 with two loadable segments:
 ///
 /// - `PT_LOAD[0]`: `p_vaddr = p_paddr = 0`, 16 bytes (flash).
@@ -94,6 +107,11 @@ fn put_section_header(buf: &mut [u8], at: usize, fields: SectionFields) {
 ///
 /// `.symtab` holds `fixture_symbol`, `zero_size_symbol` and `__reset`.
 fn fixture() -> Vec<u8> {
+    fixture_with_seg0(SEG0_BYTES)
+}
+
+/// Fills the shared fixture layout with `seg0` as the 16-byte flash payload.
+fn fixture_with_seg0(seg0: [u8; 16]) -> Vec<u8> {
     let mut buf = vec![0u8; FILE_SIZE];
 
     buf[0..4].copy_from_slice(b"\x7fELF");
@@ -136,7 +154,7 @@ fn fixture() -> Vec<u8> {
         },
     );
 
-    buf[SEG0..SEG0 + 16].copy_from_slice(&SEG0_BYTES);
+    buf[SEG0..SEG0 + 16].copy_from_slice(&seg0);
     buf[SEG1..SEG1 + 4].copy_from_slice(&SEG1_BYTES);
 
     put_symbol(&mut buf, SYMTAB + 16, 1, 0x808000, 0x24, 1);

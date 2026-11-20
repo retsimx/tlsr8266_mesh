@@ -48,6 +48,13 @@ const FLASH_HEADER_ADDR: u32 = 0x00;
 /// Length of the firmware header.
 const FLASH_HEADER_LEN: u16 = 12;
 
+/// Byte offset of the firmware version/crystal word in the 12-byte header.
+///
+/// `sdk/cstartup_8266.S` emits a 2-byte `tj __reset` at address 0 and the
+/// `.word (XTAL_16MHZ << 31 | BUILD_VERSION)` immediately after it, so the
+/// word sits at 2..6; `KNLT` follows at 8..12.
+const HEADER_VERSION_OFFSET: usize = 2;
+
 /// KNLT magic stored little-endian at header bytes `8..12`.
 const KNLT_MAGIC: u32 = 0x544c_4e4b;
 

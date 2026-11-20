@@ -107,6 +107,27 @@ jobs:
               });
             }
 
+  probe:
+    name: Probe tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install probe toolchain
+        run: rustup show  # triggers tools/probe/rust-toolchain.toml
+        working-directory: tools/probe
+      - name: Check formatting
+        run: cargo fmt --check
+        working-directory: tools/probe
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+        working-directory: tools/probe
+      - name: Run tests
+        run: cargo test
+        working-directory: tools/probe
+      - name: Build probe-pico for RP2040
+        run: cargo build --manifest-path probe-pico/Cargo.toml --release --target thumbv6m-none-eabi
+        working-directory: tools/probe
+
   llvm:
     name: Build LLVM tools
     runs-on: ubuntu-latest
@@ -207,6 +228,35 @@ jobs:
 
       - name: Check firmware image size (< 128 KiB)
         run: make image-size-check
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Build firmware with RTT logging
+        run: |
+          make FEATURES=rtt \
+            LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
+            LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Check RTT build stack/RAM budget
+        run: make stack-check
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Check RTT build image size (< 128 KiB)
+        run: make image-size-check
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Rebuild default firmware
+        run: |
+          make \
+            LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
+            LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
+          make check
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 

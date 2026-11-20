@@ -4,7 +4,7 @@
 Comprehensive guide to building custom firmware for TLSR8266 devices, including the unique process of using Rust with LLVM to generate TC32 compatible bytecode. Covers toolchain setup, build process workflow, and LLVM compilation instructions.
 
 ### [SWire Interface](swire.md)
-Details about the Single-Wire Interface (SWire) protocol using a Raspberry Pi Pico/W with micropython to program TLSR chips. Includes circuit diagram, pin mappings, timing considerations for different crystal speeds, and usage instructions for flashing firmware.
+Guide to the Rust SWire probe: `probe-pico` firmware for a Raspberry Pi Pico/Pico W and the `probe-tlsr` host CLI. Covers the circuit diagram and pin mapping, 12 MHz vs 16 MHz crystal guidance, flashing, RTT logs, crash inspection, and ready-to-run stack-watermark and NVM backup/restore recipes.
 
 ### [BLE OTA Updater](ble.md)
 Complete guide for over-the-air firmware updates via Bluetooth Low Energy. Features critical warnings about clock speed compatibility, detailed command line arguments, secure update process workflow, and troubleshooting tips to prevent device bricking.

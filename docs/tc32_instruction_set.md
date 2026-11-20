@@ -23,8 +23,8 @@ The strongest available 8266-specific scope is therefore:
 
 1. instructions accepted in `.code 16` by the shipped assembler;
 2. encodings recognized by the shipped TC32 disassembler;
-3. instructions observed in `sdk/cstartup_8266.S` and the supplied TC32
-   `libgcc.a`.
+3. instructions observed in `sdk/cstartup_8266.S` and the previously supplied
+   TC32 `libgcc.a` (since removed from the repository).
 
 This is an executable syntax/encoding specification, not a complete
 architectural manual. The binaries do not establish:
@@ -54,7 +54,7 @@ The reconstructed tables come from unstripped x86-64 vendor executables:
 | `toolchain/tc32/bin/tc32-elf-as` | `4787d1e6ee1284439a470ca9bb9802dd892f2d86a575bc38ce6ffd5cc52ce4e1` | `insns`, 6,272 bytes, 112 generic parser records |
 | `toolchain/tc32/bin/tc32-elf-objdump` | `8f5c7879a32b82475714d9cef8fbf7bf94d8a685b377ca3c07dc9f6193713f8f` | `tc32_opcodes`, 1,608 bytes; `thumb32_opcodes`, 128 bytes |
 | `toolchain/tc32/bin/tc32-elf-gcc` | `a37f0013e2a3359624384d0188c3dce8f65ff83421c8422d24de6d54118a1dc8` | 4.5.1.tc32-elf-1.5 host driver |
-| `toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a` | `064fec41e011be6c05d6bc9253e706425628f597134e2eec0ceb4e7990c3d348` | 139 TC32 runtime objects used as emitted-code evidence |
+| `toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a` (removed) | `064fec41e011be6c05d6bc9253e706425628f597134e2eec0ceb4e7990c3d348` | 139 TC32 runtime objects used as emitted-code evidence; the archive was removed after the analysis |
 
 The disassembler advertises `tc32` as both `elf32-littletc32` and
 `elf32-little`. GCC defines:
@@ -498,9 +498,9 @@ test it on HIL before using it as an executor idle mechanism.
   to `r0`-`r7`.
 - Immediate boundaries and alignment were probed for 3-bit, 8-bit, PC/SP
   word, byte, halfword, and stack offsets.
-- The 139 objects in the supplied `libgcc.a` were checked for emitted
-  mnemonics. They use the same 16-bit TC32 family; none emits a wait or
-  atomic instruction.
+- The 139 objects in the previously supplied `libgcc.a` (since removed from
+  the repository) were checked for emitted mnemonics. They use the same 16-bit
+  TC32 family; none emits a wait or atomic instruction.
 - The repository startup file was preprocessed/assembled with the actual
   Makefile `-B .../tc32-elf-` tool selection and produced `tj`, `tjl`,
   `tloadr`, `tmcsr`, `tmrss`, `tmssr`, stack, branch, and store encodings

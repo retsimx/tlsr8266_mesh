@@ -24,7 +24,7 @@ The process to convert Rust code into TC32 bytecode is somewhat roundabout. Sinc
 
 3. **Generate TC32 assembly**: A patched `llc` from our LLVM fork (`-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6`) lowers `merged_opt.bc` into a single TC32-compatible assembly file (`merged.s`). The fork handles instruction renaming, section layout, and TC32-specific fixups natively — no post-processing scripts required. The forked LLVM is available at: https://github.com/retsimx/llvm-project (see [LLVM build instructions](#llvm) below).
 
-4. **Assemble and link**: `tc32-elf-as` assembles `merged.s` into `merged.o`, while `tc32-elf-gcc` separately compiles `sdk/cstartup_8266.S` into `cstartup_8266.o`. `tc32-elf-ld` links `merged.o`, `cstartup_8266.o`, and `libgcc.a` using `sdk/boot.link` and `--gc-sections` into `_build/lightblemesh`, and `tc32-elf-objcopy` produces `_build/lightblemesh.bin`.
+4. **Assemble and link**: `tc32-elf-as` assembles `merged.s` into `merged.o`, while `tc32-elf-gcc` separately compiles `sdk/cstartup_8266.S` into `cstartup_8266.o`. `tc32-elf-ld` links `merged.o` and `cstartup_8266.o` using `sdk/boot.link` and `--gc-sections` into `_build/lightblemesh`, and `tc32-elf-objcopy` produces `_build/lightblemesh.bin`. No C runtime archive is linked; Rust's `compiler_builtins` supplies the helpers emitted by the backend.
 
 5. **Flash the firmware**: The binary is flashed to the MCU via SWire (`probe-tlsr`) or BLE/UART OTA.
 

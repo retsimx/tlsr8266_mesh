@@ -14,8 +14,8 @@ that made no-op and feature-switching builds unsafe:
 2. **Unconditional relink.** ``_build/lightblemesh`` was ``.PHONY``, so a no-op
    ``make`` still ran cargo, ``llvm-link``, ``opt``, ``llc``, ``as``, ``ld`` and
    ``objcopy`` (~7.6 s wasted). A deterministic manifest of the exact inputs (IR
-   file hashes, startup object, linker script, libgcc, tool identity, flag
-   strings) is compared before the pipeline; on a match the six commands are
+   file hashes, startup object, linker script, tool identity, flag strings)
+   is compared before the pipeline; on a match the six commands are
    skipped and ``merged.o`` is left untouched.
 3. **Dirty tree on build.** The startup-object recipe unconditionally ran
    ``sdk/increment_version.sh``, mutating tracked ``sdk/version.in`` and
@@ -69,7 +69,7 @@ from typing import TextIO
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TARGET = "lightblemesh"
 DEFAULT_MANIFEST = "rust/Cargo.toml"
 DEFAULT_OUT_DIR = "_build"
@@ -111,7 +111,6 @@ STARTUP_INPUTS = ("sdk/cstartup_8266.S", "sdk/version.in", "sdk/version.h")
 VERSION_IN_REL = "sdk/version.in"
 VERSION_RS_REL = "rust/src/version.rs"
 LINKER_SCRIPT_REL = "sdk/boot.link"
-LIBGCC_REL = "toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a"
 TC32_BIN_REL = "toolchain/tc32/bin"
 
 DEFAULT_TOOLS = {
@@ -633,7 +632,6 @@ def compute_manifest(
     ll_paths: Sequence[Path],
     startup_obj: Path,
     linker_script: Path,
-    libgcc: Path,
     tools: dict[str, Path],
     toolchain: dict[str, object] | None = None,
 ) -> dict:
@@ -650,7 +648,6 @@ def compute_manifest(
         "ll_inputs": ll_inputs,
         "startup_obj_sha256": _sha256(startup_obj),
         "linker_script_sha256": _sha256(linker_script),
-        "libgcc_sha256": _sha256(libgcc),
         "tools": {name: _tool_entry(tools[name]) for name in TOOL_ORDER},
         "toolchain": dict(toolchain) if toolchain is not None else {},
         "flags": _flags_block(),
@@ -825,7 +822,6 @@ def _pipeline_commands(
     stage_dir: Path,
     ll_paths: Sequence[Path],
     startup_obj: Path,
-    libgcc: Path,
     tools: dict[str, Path],
 ) -> list[tuple[str, list[str]]]:
     """The six LLVM/TC32 commands, with the pre-driver flags and object order."""
@@ -866,7 +862,6 @@ def _pipeline_commands(
                 paths["elf"],
                 paths["obj"],
                 str(startup_obj),
-                str(libgcc),
             ],
         ),
         (
@@ -935,13 +930,11 @@ def _run_build(args: argparse.Namespace) -> int:
     ll_paths = _cargo_build(manifest_path, features)
 
     linker_script = repo_root / LINKER_SCRIPT_REL
-    libgcc = repo_root / LIBGCC_REL
     manifest = compute_manifest(
         features,
         ll_paths,
         startup_obj,
         linker_script,
-        libgcc,
         tools,
         toolchain=toolchain,
     )
@@ -959,9 +952,7 @@ def _run_build(args: argparse.Namespace) -> int:
         print(f"Build manifest unchanged for '{slug}'; skipping LLVM/TC32 link.")
     else:
         stage_dir.mkdir(parents=True, exist_ok=True)
-        for label, cmd in _pipeline_commands(
-            stage_dir, ll_paths, startup_obj, libgcc, tools
-        ):
+        for label, cmd in _pipeline_commands(stage_dir, ll_paths, startup_obj, tools):
             _run_step(cmd, cwd=repo_root, what=label)
         _write_json(stage_dir / "manifest.json", manifest)
 

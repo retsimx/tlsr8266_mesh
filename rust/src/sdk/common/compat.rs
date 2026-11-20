@@ -24,8 +24,8 @@ use mry::mry;
 
 // UART packet structure constants
 // Packet layout: [counter(1)][cmd_type(1)][cmd_code(1)][payload(39)][crc(2)] = 44 bytes total
-const UART_PAYLOAD_OFFSET: usize = 3; // Payload starts at index 3
-const UART_CRC_OFFSET: usize = 42; // CRC starts at index 42
+pub(crate) const UART_PAYLOAD_OFFSET: usize = 3; // Payload starts at index 3
+pub(crate) const UART_CRC_OFFSET: usize = 42; // CRC starts at index 42
 const UART_PAYLOAD_MAX_SIZE: usize = UART_CRC_OFFSET - UART_PAYLOAD_OFFSET; // 39 bytes
 
 struct TlsrCriticalSection;

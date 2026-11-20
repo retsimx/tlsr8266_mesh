@@ -72,7 +72,7 @@ Check what you built before flashing: the version word starts at byte 2 of the i
 
 The image header carries the speed as a bit, and `probe-tlsr flash` compares it against the header it reads from the target. On a mismatch it refuses with exit 3 and leaves the core stopped; `--force` skips the guard. The guard only runs when both headers are readable, so a truncated or non-firmware `.bin` is not protected.
 
-A wrong-speed image is not a brick: SWire still works, so reflashing the correct build recovers the board. That is the reliability model's bad-image recovery property — a refused flash or a mis-flashed board is never lost.
+A wrong-speed image is not a brick: SWire still works, so reflashing the correct build recovers the board. Because the target now advertises the wrong crystal, that recovery flash needs `--force`; the guard cannot tell a repair from a mistake. That is the reliability model's bad-image recovery property — a refused flash or a mis-flashed board is never lost.
 
 ## Command Reference
 
@@ -97,8 +97,11 @@ A wrong-speed image is not a brick: SWire still works, so reflashing the correct
 
 Field notes:
 
-- `info` on a running target deliberately sends no MSPI traffic, so it has no JEDEC id, crystal or build version. Use `probe-tlsr info --halt` to read the header; that stall is terminal, so finish with `probe-tlsr reset --soft`.
-- `cpu_state` names only the documented status bytes (`0x00`/`0x04` running, `0x05` stopped, `0x06` stalled) and prints `unknown` otherwise. A real target reporting `unknown` is normal; treat `cpu_status` as a raw hardware byte, not a reliable run/stop indicator.
+- `info` on a running target deliberately sends no MSPI traffic, so it has no JEDEC id, crystal or build version. Use `probe-tlsr info --halt` to read the header; that stall is terminal, so finish with `probe-tlsr reset --soft`. The reported `pc` and `cpu_status` are sampled just before the halt, so `cpu_state` can read `running` even though the core is stalled by the time the header is read.
+- `cpu_state` names only the documented status bytes (`0x00`/`0x04`/`0x08` running, `0x05` stopped, `0x06` stalled) and prints `unknown` otherwise. Treat `cpu_status` as a raw hardware byte, not a reliable run/stop indicator.
+- A hard `reset` clears the retained analog sentinel in hardware; `reset --soft` and a `trap` hit write `0x00` first (a pending panic `0xE1` is preserved), so the next boot does not log a false `[WD_RESET]`. A real watchdog reset still does.
+- `rtt` retries poll errors for a 2 s grace period while a panic or watchdog reset reboots the target, so the `[PANIC]` line from the next boot is not lost. The window restarts after any successful poll. If the target's 256-byte ring overflowed before the stream attached, `rtt` prints a `[probe] target RTT ring overflowed …` line first.
+- `flash` (without `--reset`), `flash-read`, `flash-erase` and `flash-write` leave the core stopped and disarm the Timer 2 watchdog before touching MSPI, so a multi-second erase/program/read cannot be interrupted by a watchdog reset.
 - `read` and `write` accept a symbol name with `--elf`, or an address in a SWire window: `0x0..=0xfff`, `0x8000..=0xbfff`, `0x800000..=0x800fff` or `0x808000..=0x80bfff`. Without `--elf` only numeric addresses work. `read` defaults to the symbol size, else 4 bytes.
 
 Global flags:

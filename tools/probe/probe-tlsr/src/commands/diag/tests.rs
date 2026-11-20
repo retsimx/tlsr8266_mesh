@@ -82,7 +82,7 @@ fn decodes_registers_psr_and_shadow_and_reads_the_stack_tail() {
 
     assert_stall_requests(&mock);
     assert_eq!(
-        &mock.requests[4..],
+        &mock.requests[5..],
         [
             Request::ReadRegs,
             read_mem_req(0xbfc0, 64),
@@ -122,8 +122,8 @@ fn sp_at_the_stack_top_reads_no_stack() {
         .filter(|request| matches!(request, Request::ReadMem { .. }))
         .count();
     assert_eq!(
-        reads, 1,
-        "only the watchdog read may happen: {:?}",
+        reads, 2,
+        "only the status and watchdog reads may happen: {:?}",
         mock.requests
     );
 }
@@ -145,7 +145,7 @@ fn sp_below_the_floor_clamps_to_the_floor() {
     assert_eq!(report.stack.addr, MAIN_STACK_FLOOR);
     assert_eq!(report.stack.len, STACK_SPAN);
     assert_eq!(report.stack.words.len(), 32);
-    assert_eq!(mock.requests[5], read_mem_req(0x8000, 128));
+    assert_eq!(mock.requests[6], read_mem_req(0x8000, 128));
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn irq_stack_reads_the_top_128_bytes_of_the_symbol() {
             words: vec![0x11; 32],
         })
     );
-    assert_eq!(mock.requests[5], read_mem_req(0xb580, 128));
+    assert_eq!(mock.requests[6], read_mem_req(0xb580, 128));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn zero_sized_irq_stack_uses_the_documented_default() {
     assert_eq!(irq.addr, 0x0080_b000 + IRQ_STK_DEFAULT - STACK_SPAN);
     assert_eq!(irq.len, STACK_SPAN);
     assert_eq!(
-        mock.requests[5],
+        mock.requests[6],
         read_mem_req(
             (0x0080_b000 + IRQ_STK_DEFAULT - STACK_SPAN - SRAM_WINDOW_BASE) as u16,
             128
@@ -220,8 +220,8 @@ fn absent_irq_stk_symbol_reads_nothing() {
         .filter(|request| matches!(request, Request::ReadMem { .. }))
         .count();
     assert_eq!(
-        reads, 1,
-        "only the watchdog read may happen: {:?}",
+        reads, 2,
+        "only the status and watchdog reads may happen: {:?}",
         mock.requests
     );
 }

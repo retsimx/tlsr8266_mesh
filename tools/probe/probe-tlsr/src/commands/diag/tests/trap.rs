@@ -26,28 +26,45 @@ fn hit_word(addr: u32) -> Response {
     data((BREAKPOINT_HIT | 0x0100_0000 | addr).to_le_bytes())
 }
 
-/// Every reply one hit needs: activate, arm, the hit poll, the inspect capture,
-/// the slot clear and the soft reboot.
+/// Every reply one hit needs: activate, the pre-arm latch check, arm, the hit
+/// poll, the inspect capture, the slot clear, the clean sentinel marker and the
+/// soft reboot.
 fn hit_replies(addr: u32) -> Vec<Response> {
-    let mut replies = vec![Response::Ack, Response::Ack, hit_word(addr)];
+    let mut replies = vec![
+        Response::Ack,
+        data(0u32.to_le_bytes()), // the shared hit word is clear before arming
+        Response::Ack,
+        hit_word(addr),
+    ];
     replies.extend(stall_prefix());
     replies.push(regs_data(regs(0x0080_bfc0, 0, 0x104), 0, shadow()));
     replies.push(words_data(&[0u32; 16]));
     replies.extend(tail(0x00, 0x2a));
     replies.push(Response::Ack); // clear the slot
+    replies.push(Response::Ack); // mark the next boot clean: activate
+    replies.push(Response::Byte(0x00)); // read sentinel
+    replies.push(Response::Ack); // write clean sentinel
     replies.push(Response::Ack); // soft reboot
     replies
 }
 
-/// The whole hit sequence: arm, poll `poll_reg`, capture, clear, reboot.
-fn hit_requests(addr: u32, slot: u8, poll_reg: u16) -> Vec<Request> {
+/// The whole hit sequence: check the latch is clear, arm, poll the shared hit
+/// word, capture, clear, mark the reboot clean and reboot.
+fn hit_requests(addr: u32, slot: u8) -> Vec<Request> {
     let mut requests = vec![
         sws_activate_req(),
+        read_mem_req(BREAKPOINT_BASE, 4),
         Request::SetBreakpoint { slot, addr },
-        read_mem_req(poll_reg, 4),
+        read_mem_req(BREAKPOINT_BASE, 4),
     ];
     requests.extend(inspect_requests());
     requests.push(Request::SetBreakpoint { slot, addr: 0 });
+    requests.push(sws_activate_req());
+    requests.push(Request::ReadAnalog { addr: 0x3b });
+    requests.push(Request::WriteAnalog {
+        addr: 0x3b,
+        val: 0x00,
+    });
     requests.push(Request::CpuCtrl {
         mode: probe_proto::CpuMode::SoftReboot,
     });
@@ -92,7 +109,7 @@ fn a_hit_emits_the_capture_before_it_clears_the_slot() {
     assert_eq!(value["hit"], true);
     assert_eq!(value["inspect"]["sentinel"], 0x00);
     assert_eq!(value["inspect"]["breadcrumb"], 0x2a);
-    assert_eq!(mock.requests, hit_requests(0x100, 0, 0x0610));
+    assert_eq!(mock.requests, hit_requests(0x100, 0));
 }
 
 #[test]
@@ -100,7 +117,9 @@ fn a_failing_clear_still_emits_the_capture() {
     // The clear fails after the capture: the one-shot dump must already be on
     // stdout, and the error must say the slot state.
     let mut replies = hit_replies(0x100);
-    let clear = replies.len() - 2;
+    // The clear is the fifth reply from the end (clear + 4 reboot/marker
+    // replies); failing it must not send any of the reboot sequence.
+    let clear = replies.len() - 5;
     replies[clear] = Response::Error(ProtoError::SwsTimeout);
     let mut mock = MockTransport::new(replies);
     let mut out = Vec::new();
@@ -141,7 +160,12 @@ fn a_failing_clear_still_emits_the_capture() {
 fn a_failing_capture_clears_the_slot_and_says_so() {
     // The capture stops at `ReadRegs`: the slot is still armed and the core is
     // stalled, so the clear is sent and the error names both facts.
-    let mut replies = vec![Response::Ack, Response::Ack, hit_word(0x100)];
+    let mut replies = vec![
+        Response::Ack,
+        data(0u32.to_le_bytes()),
+        Response::Ack,
+        hit_word(0x100),
+    ];
     replies.extend(stall_prefix());
     replies.push(Response::Error(ProtoError::SwsTimeout)); // ReadRegs fails
     replies.push(Response::Ack); // the unconditional clear
@@ -172,7 +196,7 @@ fn a_failing_capture_clears_the_slot_and_says_so() {
 }
 
 #[test]
-fn slot_two_polls_its_own_control_word() {
+fn every_slot_polls_the_shared_hit_word() {
     let mut mock = MockTransport::new(hit_replies(0x104));
     let mut out = Vec::new();
 
@@ -186,11 +210,11 @@ fn slot_two_polls_its_own_control_word() {
     )
     .expect("the hit succeeds");
 
-    assert_eq!(mock.requests, hit_requests(0x104, 2, 0x0618));
+    assert_eq!(mock.requests, hit_requests(0x104, 2));
     assert_eq!(
-        BREAKPOINT_BASE + 2 * 4,
-        0x0618,
-        "the fixture registers agree"
+        mock.requests[3],
+        read_mem_req(BREAKPOINT_BASE, 4),
+        "slot 2's hit is latched in the shared 0x0610 word, not 0x0618"
     );
     assert_eq!(rendered(&out)["slot"], 2);
 }
@@ -199,6 +223,7 @@ fn slot_two_polls_its_own_control_word() {
 fn a_deadline_clears_the_slot_before_it_times_out() {
     let mut mock = MockTransport::new([
         Response::Ack,
+        data(0u32.to_le_bytes()), // no latch before arming
         Response::Ack,
         data(0u32.to_le_bytes()), // no bit 31: the core is still running
         Response::Ack,            // the unconditional clear
@@ -230,6 +255,7 @@ fn a_deadline_clears_the_slot_before_it_times_out() {
         mock.requests,
         [
             sws_activate_req(),
+            read_mem_req(BREAKPOINT_BASE, 4),
             Request::SetBreakpoint {
                 slot: 0,
                 addr: 0x100
@@ -245,6 +271,7 @@ fn a_deadline_clears_the_slot_before_it_times_out() {
 fn a_failing_clear_keeps_the_timeout_and_names_both_facts() {
     let mut mock = MockTransport::new([
         Response::Ack,
+        data(0u32.to_le_bytes()),
         Response::Ack,
         data(0u32.to_le_bytes()),
         Response::Error(ProtoError::SwsTimeout),
@@ -278,6 +305,7 @@ fn a_failing_poll_still_clears_the_slot() {
     // A probe-reported error: the clear is still sent, and the read fault wins.
     let mut mock = MockTransport::new([
         Response::Ack,
+        data(0u32.to_le_bytes()),
         Response::Ack,
         Response::Error(ProtoError::SwsTimeout),
         Response::Ack,
@@ -299,6 +327,7 @@ fn a_failing_poll_still_clears_the_slot() {
         mock.requests,
         [
             sws_activate_req(),
+            read_mem_req(BREAKPOINT_BASE, 4),
             Request::SetBreakpoint {
                 slot: 0,
                 addr: 0x100
@@ -309,7 +338,12 @@ fn a_failing_poll_still_clears_the_slot() {
     );
 
     // A read with no reply left is a `Device` fault; the clear is sent anyway.
-    let mut mock = MockTransport::new([Response::Ack, Response::Ack]);
+    let mut mock = MockTransport::new([
+        Response::Ack,
+        data(0u32.to_le_bytes()),
+        Response::Ack,
+        Response::Ack,
+    ]);
     let mut out = Vec::new();
 
     let err = wait(
@@ -328,6 +362,38 @@ fn a_failing_poll_still_clears_the_slot() {
         Some(&Request::SetBreakpoint { slot: 0, addr: 0 }),
         "an armed slot must never be left behind: {:?}",
         mock.requests
+    );
+}
+
+#[test]
+fn a_stale_latch_is_refused_before_arming() {
+    // A `trap` killed before its timeout disarm (or a clear that failed) leaves
+    // the shared bit set. It cannot say which slot owns it, so reporting it as
+    // this slot's hit would name the wrong address and leave the real slot
+    // armed; the guard must refuse instead.
+    let mut mock = MockTransport::new([Response::Ack, data(BREAKPOINT_HIT.to_le_bytes())]);
+    let mut out = Vec::new();
+
+    let err = wait(
+        &mut mock,
+        &mut capture(&mut out),
+        0x100,
+        0,
+        None,
+        Duration::from_millis(1),
+    )
+    .expect_err("an already-latched hit word is refused");
+
+    let CliError::Device(message) = &err else {
+        panic!("expected Device, got {err:?}");
+    };
+    assert!(message.contains("already latched"), "{message}");
+    assert!(message.contains("reset --soft"), "{message}");
+    assert!(out.is_empty(), "a refused arm renders nothing");
+    assert_eq!(
+        mock.requests,
+        [sws_activate_req(), read_mem_req(BREAKPOINT_BASE, 4)],
+        "nothing is armed over a stale latch"
     );
 }
 
@@ -399,7 +465,7 @@ fn a_thumb_symbol_is_armed_at_its_even_address() {
     )
     .expect("the hit succeeds");
 
-    assert_eq!(mock.requests, hit_requests(0x5af4, 0, 0x0610));
+    assert_eq!(mock.requests, hit_requests(0x5af4, 0));
     assert_eq!(rendered(&out)["addr"], 0x5af4);
 }
 

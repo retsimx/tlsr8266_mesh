@@ -23,7 +23,9 @@ pub(crate) mod trap;
 use probe_proto::{is_valid_swire_range, Request, Response};
 use serde::Serialize;
 
-use super::{expect_len, read_flash, read_mem, stall_core, sws_activate, unexpected};
+use super::{
+    expect_len, read_analog_value, read_flash, read_mem, stall_core, sws_activate, unexpected,
+};
 use crate::elf::{symbolize, ElfImage, SymbolRange};
 use crate::output::Output;
 use crate::transport::ProbeTransport;
@@ -192,8 +194,8 @@ pub(crate) fn inspect_report(
 
     let irq_stack = read_irq_stack(transport, elf)?;
 
-    let sentinel = read_analog(transport, RESET_SENTINEL_ADDR)?;
-    let breadcrumb = read_analog(transport, BREADCRUMB_ADDR)?;
+    let sentinel = read_analog_value(transport, RESET_SENTINEL_ADDR)?;
+    let breadcrumb = read_analog_value(transport, BREADCRUMB_ADDR)?;
 
     let panic = panic_record(transport)?;
 
@@ -343,14 +345,6 @@ fn panic_record(transport: &mut dyn ProbeTransport) -> Result<Option<PanicBody>,
         len: u32::from(len),
         message: String::from_utf8_lossy(&body).into_owned(),
     }))
-}
-
-/// Reads one analog register.
-fn read_analog(transport: &mut dyn ProbeTransport, addr: u8) -> Result<u8, CliError> {
-    match transport.exchange(&Request::ReadAnalog { addr })? {
-        Response::Byte(value) => Ok(value),
-        other => Err(unexpected("Byte", &other)),
-    }
 }
 
 /// Names the retained sentinel value.

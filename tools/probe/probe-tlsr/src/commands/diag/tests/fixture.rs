@@ -12,6 +12,7 @@ use probe_proto::{CpuMode, Request, Response};
 use super::super::*;
 use crate::commands::diag::rtt::{HEARTBEAT_SYMBOL, RTT_SYMBOL};
 use crate::commands::test_support::*;
+use crate::commands::CPU_STATUS_ADDR;
 use crate::commands::WATCHDOG_CTRL_ADDR;
 use crate::transport::MockTransport;
 
@@ -245,17 +246,25 @@ pub(super) fn words_data(words: &[u32]) -> Response {
     data(bytes)
 }
 
-/// The four replies every inspect run needs before the register block:
-/// `SwsActivate`, `CpuCtrl::Stall`, the watchdog read and its write-back.
-pub(super) fn stall_prefix() -> [Response; 4] {
-    [Response::Ack, Response::Ack, data([0xb5]), Response::Ack]
+/// The five replies every inspect run needs before the register block:
+/// `SwsActivate`, the status sample, `CpuCtrl::Stall`, the watchdog read and
+/// its write-back.
+pub(super) fn stall_prefix() -> [Response; 5] {
+    [
+        Response::Ack,
+        data([0x08]),
+        Response::Ack,
+        data([0xb5]),
+        Response::Ack,
+    ]
 }
 
 pub(super) fn assert_stall_requests(mock: &MockTransport) {
     assert_eq!(
-        &mock.requests[..4],
+        &mock.requests[..5],
         [
             sws_activate_req(),
+            read_mem_req(CPU_STATUS_ADDR, 1),
             Request::CpuCtrl {
                 mode: CpuMode::Stall,
             },
@@ -273,6 +282,7 @@ pub(super) fn assert_stall_requests(mock: &MockTransport) {
 pub(super) fn inspect_requests() -> Vec<Request> {
     vec![
         sws_activate_req(),
+        read_mem_req(CPU_STATUS_ADDR, 1),
         Request::CpuCtrl {
             mode: CpuMode::Stall,
         },

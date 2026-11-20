@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use probe_proto::{CpuMode, Request, FLASH_SECTOR_SIZE, FLASH_SIZE, MAX_DATA_PAYLOAD};
 
 use super::flash::write_pages;
-use super::{expect_ack, read_flash, read_mem, sws_activate, CPU_STATUS_ADDR};
+use super::{expect_ack, pause_watchdog, read_flash, read_mem, sws_activate, CPU_STATUS_ADDR};
 use crate::output::Output;
 use crate::transport::ProbeTransport;
 use crate::CliError;
@@ -115,7 +115,8 @@ pub(super) fn flash_write(
     Ok(Output::FlashWrite { addr, len, pages })
 }
 
-/// Stops the core unless it already is (0x05) or is stalled (0x06).
+/// Stops the core unless it already is (0x05) or is stalled (0x06), then
+/// disarms the watchdog for the duration of the flash operation.
 fn ensure_stopped(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
     sws_activate(transport)?;
     let status = read_mem(transport, CPU_STATUS_ADDR, 1)?[0];
@@ -127,7 +128,7 @@ fn ensure_stopped(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
             },
         )?;
     }
-    Ok(())
+    pause_watchdog(transport)
 }
 
 /// Parses and validates a `flash-*` command span before any request.
@@ -183,6 +184,8 @@ mod tests {
         let mut mock = MockTransport::new([
             Response::Ack,
             stopped(0x06),
+            data([0x80]),
+            Response::Ack,
             data(vec![0x11; 1024]),
             data(vec![0x22; 1024]),
             data(vec![0x33; 452]),
@@ -209,6 +212,8 @@ mod tests {
             [
                 sws_activate_req(),
                 read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 read_flash_req(0x100, 1024),
                 read_flash_req(0x500, 1024),
                 read_flash_req(0x900, 452),
@@ -220,7 +225,13 @@ mod tests {
     fn flash_read_out_writes_the_exact_bytes() {
         let bytes: Vec<u8> = (0..12_u8).map(|byte| byte ^ 0xa5).collect();
         let file = TempFile::new("flash-read-out", &[]);
-        let mut mock = MockTransport::new([Response::Ack, stopped(0x05), data(bytes.clone())]);
+        let mut mock = MockTransport::new([
+            Response::Ack,
+            stopped(0x05),
+            data([0x80]),
+            Response::Ack,
+            data(bytes.clone()),
+        ]);
 
         let output =
             flash_read(&mut mock, "0x20", "12", Some(file.path())).expect("flash-read --out");
@@ -249,7 +260,13 @@ mod tests {
         // A directory at the temp path makes the backup write fail.
         std::fs::create_dir(&tmp).expect("temp path fixture");
 
-        let mut mock = MockTransport::new([Response::Ack, stopped(0x05), data([0x5a; 4])]);
+        let mut mock = MockTransport::new([
+            Response::Ack,
+            stopped(0x05),
+            data([0x80]),
+            Response::Ack,
+            data([0x5a; 4]),
+        ]);
 
         let err = flash_read(&mut mock, "0x20", "4", Some(dest.path()))
             .expect_err("a blocked temp path must fail the backup");
@@ -312,7 +329,13 @@ mod tests {
 
     #[test]
     fn flash_read_of_the_last_flash_byte_succeeds() {
-        let mut mock = MockTransport::new([Response::Ack, stopped(0x05), data([0x42])]);
+        let mut mock = MockTransport::new([
+            Response::Ack,
+            stopped(0x05),
+            data([0x80]),
+            Response::Ack,
+            data([0x42]),
+        ]);
 
         let output =
             flash_read(&mut mock, "0x7ffff", "1", None).expect("the last byte is in flash");
@@ -331,6 +354,8 @@ mod tests {
             [
                 sws_activate_req(),
                 read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 read_flash_req(0x7ffff, 1),
             ]
         );
@@ -341,6 +366,8 @@ mod tests {
         let mut mock = MockTransport::new([
             Response::Ack,
             stopped(0x05),
+            data([0x80]),
+            Response::Ack,
             Response::Ack,
             Response::Ack,
             Response::Ack,
@@ -361,6 +388,8 @@ mod tests {
             [
                 sws_activate_req(),
                 read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 erase_req(0x0000),
                 erase_req(0x1000),
                 erase_req(0x2000),
@@ -368,7 +397,13 @@ mod tests {
         );
 
         // A span ending unaligned at FLASH_SIZE still erases only its sector.
-        let mut mock = MockTransport::new([Response::Ack, stopped(0x05), Response::Ack]);
+        let mut mock = MockTransport::new([
+            Response::Ack,
+            stopped(0x05),
+            data([0x80]),
+            Response::Ack,
+            Response::Ack,
+        ]);
         let output = flash_erase(&mut mock, "0x7f812", "0x7ee").expect("tail erase succeeds");
         assert_eq!(
             output,
@@ -383,6 +418,8 @@ mod tests {
             [
                 sws_activate_req(),
                 read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 erase_req(0x7f000),
             ]
         );
@@ -395,6 +432,8 @@ mod tests {
         let mut mock = MockTransport::new([
             Response::Ack,
             stopped(0x06),
+            data([0x80]),
+            Response::Ack,
             Response::Ack,
             Response::Ack,
             Response::Ack,
@@ -416,6 +455,8 @@ mod tests {
             [
                 sws_activate_req(),
                 read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 write_page_req(0x80f0, &payload[..16]),
                 write_page_req(0x8100, &payload[16..272]),
                 write_page_req(0x8200, &payload[272..528]),
@@ -437,6 +478,8 @@ mod tests {
             if stops {
                 responses.push(Response::Ack);
             }
+            responses.push(data([0x80]));
+            responses.push(Response::Ack);
             let mut mock = MockTransport::new(responses);
 
             ensure_stopped(&mut mock).expect("ensure_stopped succeeds");
@@ -445,13 +488,21 @@ mod tests {
             if stops {
                 expected.push(stop_req());
             }
+            expected.push(read_mem_req(0x0622, 1));
+            expected.push(write_mem_req(0x0622, &[0x00]));
             assert_eq!(mock.requests, expected, "status 0x{status:02x}");
         }
     }
 
     #[test]
     fn run_dispatches_to_the_flash_handlers() {
-        let mut ctx = test_ctx([Response::Ack, stopped(0x05), data([0xaa, 0xbb])]);
+        let mut ctx = test_ctx([
+            Response::Ack,
+            stopped(0x05),
+            data([0x80]),
+            Response::Ack,
+            data([0xaa, 0xbb]),
+        ]);
         let mut out = Vec::new();
 
         let output = run(

@@ -19,7 +19,7 @@ use crate::state::*;
 use crate::version::BUILD_VERSION;
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
-* @{
+ * @{
  */
 pub const CHAR_PROP_BROADCAST: u8 = 0x01;
 // permit broadcasts of the Characteristic Value
@@ -40,7 +40,7 @@ pub const CHAR_PROP_EXTENDED: u8 = 0x80;
 /** @} end of group GATT_Characteristic_Property */
 
 /** @addtogroup GATT_CCCC_Bits Client CharacteristicConfiguration bits
-* @{
+ * @{
  */
 pub const CLIENT_CHAR_CFG_NOTI: u16 = 0x0001;
 // permit broadcasts of the Characteristic Value
@@ -49,13 +49,13 @@ pub const CLIENT_CHAR_CFG_IND: u16 = 0x0002;
 /** @} end of group GATT_CCCC_Bits */
 
 /** @addtogroup GATT_Property_length GATT characteristic property length
-* @{
+ * @{
  */
 pub const CHAR_PROP_SIZE: u8 = 1;
 /** @} end of group GATT_Property_length */
 
 /** @addtogroup GATT_Char_Cfg_Bit_length GATT characteristic configuration Bits length
-* @{
+ * @{
  */
 pub const CHAR_CFG_BITS_SIZE: u8 = 2;
 /** @} end of group GATT_Char_Cfg_Bit_length */

@@ -2,39 +2,43 @@
 
 ## Toolchain Versions
 
-The required Rust toolchain for this project includes:
-- `nightly-i686-unknown-linux-gnu` for building and running tests
-- `thumbv6m-none-eabi` for targeting the MCU (currently `nightly-2025-03-30`)
+`rust/rust-toolchain.toml` pins the Rust toolchain to `nightly-2026-11-20` (`minimal` profile) with:
+- **Components**: `rust-src` (for `-Z build-std=core`), `rustc`, `rustfmt`, `clippy`, and `llvm-tools`
+- **Targets**:
+  - `thumbv6m-none-eabi` for compiling the firmware to LLVM IR
+  - `i686-unknown-linux-gnu` for running host tests (`./rust/run_tests.sh`) and Clippy
 
-> **Note:** Make sure you have `rustup` installed. The correct toolchain will be installed automatically by the `rust/rust-toolchain.toml` file, which will install the correct compiler, targets and components.
+> **Note:** Make sure you have `rustup` installed. Running Cargo or `rustup show` inside `rust/` automatically installs the pinned `nightly-2026-11-20` toolchain, targets, and components from `rust/rust-toolchain.toml`. Additionally, `rustc`'s LLVM major version must not exceed the `retsimx/llvm-project` (`tc32` branch) fork's LLVM major version (`sdk/build_firmware.py` enforces this check).
 
 ## Building the Firmware
 
-The process to convert Rust code into TC32 bytecode is somewhat roundabout. Since the toolchain provided by Telink only supports C and their changes are not open sourced, it's necessary to use their compiler - or at least toolchain. Thankfully LLVM can generate more optimised code than the provided TC32 GCC, and using LLVM in this manner also means it's theoretically possible to compile any language that has an LLVM frontend for the TLSR8266.
+The process to convert Rust code into TC32 bytecode is somewhat roundabout. Since the toolchain provided by Telink only supports C and their changes are not open sourced, it's necessary to use their binutils (`tc32-elf-{gcc,as,ld,objcopy}`). Using LLVM allows whole-program IR optimization and emits TC32-compatible assembly natively via a patched ARM backend.
 
 ### Build Process
 
-The compilation process follows these steps:
+`sdk/build_firmware.py` (invoked by `make`) orchestrates the whole-module LLVM IR pipeline:
 
-1. **Generate LLVM IR**: Using a Rust compiler that supports the same word size (8266 is a Thumb16 MCU with 32bit word size - so i686 target is used), the Rust crates are compiled to LLVM IR (`.ll` files).
+1. **Generate per-crate LLVM IR**: Cargo builds `rust/Cargo.toml` (`--lib --release -Z build-std=core --target thumbv6m-none-eabi --message-format=json`) with `RUSTFLAGS="--emit=llvm-ir"`, emitting `.ll` IR files for `core`, dependencies, and `tlsr8266_mesh`. `sdk/build_firmware.py` maps Cargo's JSON `compiler-artifact` records to their exact `.ll` modules.
 
-2. **Generate TC32 assembly**: The LLVM IR is compiled by a patched `llc` from our LLVM fork which emits TC32-compatible assembly directly. The fork handles all instruction renaming, section layout, and TC32-specific fixups natively — no post-processing scripts required. The forked LLVM is available at: https://github.com/retsimx/llvm-project (see [LLVM build instructions](#llvm) below)
+2. **Link and optimize whole-program IR**: `llvm-link` merges all selected `.ll` modules into a single bitcode module (`merged.bc`), and `opt` runs the project optimization pipeline (`OPT_PASSES`, inline threshold `50`) to produce `merged_opt.bc`.
 
-3. **Generate object files**: The TC32 assembly is assembled directly by the TC32 `as` into object files (one per Rust crate, plus the C startup file).
+3. **Generate TC32 assembly**: A patched `llc` from our LLVM fork (`-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6`) lowers `merged_opt.bc` into a single TC32-compatible assembly file (`merged.s`). The fork handles instruction renaming, section layout, and TC32-specific fixups natively — no post-processing scripts required. The forked LLVM is available at: https://github.com/retsimx/llvm-project (see [LLVM build instructions](#llvm) below).
 
-4. **Link object files**: All the generated object files are linked together using the vendor linker script with `--gc-sections` to eliminate unused code.
+4. **Assemble and link**: `tc32-elf-as` assembles `merged.s` into `merged.o`, while `tc32-elf-gcc` separately compiles `sdk/cstartup_8266.S` into `cstartup_8266.o`. `tc32-elf-ld` links `merged.o`, `cstartup_8266.o`, and `libgcc.a` using `sdk/boot.link` and `--gc-sections` into `_build/lightblemesh`, and `tc32-elf-objcopy` produces `_build/lightblemesh.bin`.
 
-5. **Flash the firmware**: The binary is flashed to the MCU (or BLE/UART OTA it across)
+5. **Flash the firmware**: The binary is flashed to the MCU via SWire (`probe-tlsr`) or BLE/UART OTA.
 
 ### Building Instructions
 
-The entire build process can be run using:
+From the repository root, run:
 
 ```bash
-make clean && make
+make
 ```
 
-from the repository root. The built firmware will be in the `_build` directory. `sdk/build_firmware.py` resolves `llc`, `llvm-link`, and `opt` from, in order, the `--llc`/`--llvm-link`/`--opt` flags, the `LLC`/`LLVM_LINK`/`OPT` environment variables, a `.env` file at the repository root, and finally `../llvm/build/bin/<tool>`; `LLC=/path/to/llc make` still works because the Makefile forwards these as flags. Repeated `make` runs are incremental thanks to the per-feature manifest cache, and `make bump-version` is the explicit way to bump `BUILD_VERSION`.
+The built firmware will be in the `_build` directory (`_build/lightblemesh` and `_build/lightblemesh.bin`; use `make FEATURES=rtt` for RTT logging and `make check` to run `stack-check` and `image-size-check`). `sdk/build_firmware.py` resolves `llc`, `llvm-link`, and `opt` from, in order, the `--llc`/`--llvm-link`/`--opt` flags, the `LLC`/`LLVM_LINK`/`OPT` environment variables, a `.env` file at the repository root, and finally `../llvm/build/bin/<tool>`; `LLC=/path/to/llc make` still works because the Makefile forwards these as flags. Repeated `make` runs are incremental thanks to the per-feature manifest cache, and `make bump-version` is the explicit way to bump `BUILD_VERSION`.
+
+> **Clean builds on toolchain bumps:** Whenever `rust/rust-toolchain.toml` is bumped — especially across Cargo target-layout changes (such as Cargo 1.100+ moving build outputs from `deps/` to `build/<crate>/<hash>/out/`) — run `cd rust && cargo clean` (or `make distclean`) before rebuilding so stale `deps/` artifacts and new `build/` artifacts do not linger together in `rust/target/`. Use `make clean` to wipe `_build` alone, or `make distclean` to wipe `_build` and `rust/target/`.
 
 ## Testing
 
@@ -47,6 +51,8 @@ To run the test suite, an x86 compatible machine is needed, and there is a helpe
 ```bash
 ./rust/run_tests.sh
 ```
+
+> **Coverage tool version:** `nightly-2026-11-20` (Cargo 1.100+ target layout) requires `cargo-llvm-cov >= 0.8.6`. If an older version is already installed locally, upgrade it with `cargo install cargo-llvm-cov --force`.
 
 **Todo:** Allow mocking complex processes such as flash operations which require sequences of responding to register changes.
 

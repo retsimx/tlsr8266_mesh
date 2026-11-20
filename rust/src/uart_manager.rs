@@ -18,15 +18,15 @@ use crate::SPAWNER;
 use crate::{app, uprintln};
 use heapless::Vec;
 
-const MSG_TYPE_INDEX: usize = 2;
+pub(crate) const MSG_TYPE_INDEX: usize = 2;
 const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;
 const CTRL_PAYLOAD_RANGE: Range<usize> = 5..18;
 const CTRL_FINGERPRINT_RANGE: Range<usize> = 3..18;
 const CTRL_RETRANSMIT_INDEX: usize = 18;
 const CTRL_ACK_FLAG_INDEX: usize = 19;
 const OUTGOING_FINGERPRINT_RANGE: Range<usize> = 7..22;
-const CRC_RANGE: Range<usize> = 0..42;
-const SNO_RANGE: Range<usize> = 2..5;
+pub(crate) const CRC_RANGE: Range<usize> = 0..42;
+pub(crate) const SNO_RANGE: Range<usize> = 2..5;
 const CTRL_PAYLOAD_LEN: usize = CTRL_PAYLOAD_RANGE.end - CTRL_PAYLOAD_RANGE.start;
 const CTRL_FINGERPRINT_LEN: usize = CTRL_FINGERPRINT_RANGE.end - CTRL_FINGERPRINT_RANGE.start;
 

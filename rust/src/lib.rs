@@ -30,6 +30,9 @@ mod vendor_light;
 pub mod version;
 
 #[cfg(test)]
+mod wire_contract_tests;
+
+#[cfg(test)]
 use once_cell::sync::Lazy;
 
 #[cfg(not(test))]

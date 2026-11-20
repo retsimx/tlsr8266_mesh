@@ -44,7 +44,7 @@ pub struct LightState {
 
 #[derive(Copy, Clone)]
 #[repr(C, packed)]
-struct LumSaveT {
+pub(crate) struct LumSaveT {
     save_flag: u8,
     brightness: u16,
     cw: u16,

@@ -47,14 +47,14 @@ use crate::state::{PairState, *};
 //------------------------------------------------------------------------------
 
 // Pairing Opcodes - Used in pair_write to identify the command type
-const PAIR_OP_EXCHANGE_RANDOM: u8 = 0x01; // Exchange random challenge
-const PAIR_OP_SET_MESH_NAME: u8 = 0x04; // Set mesh network name
-const PAIR_OP_SET_MESH_PASSWORD: u8 = 0x05; // Set mesh network password
-const PAIR_OP_SET_MESH_LTK: u8 = 0x06; // Set long-term key
-const PAIR_OP_GET_MESH_LTK: u8 = 0x08; // Request long-term key
-const PAIR_OP_RESET_MESH: u8 = 0x0A; // Reset mesh configuration
-const PAIR_OP_VERIFY_CREDENTIALS: u8 = 0x0C; // Verify credentials
-const PAIR_OP_DELETE_PAIRING: u8 = 0x0E; // Delete pairing information
+pub(crate) const PAIR_OP_EXCHANGE_RANDOM: u8 = 0x01; // Exchange random challenge
+pub(crate) const PAIR_OP_SET_MESH_NAME: u8 = 0x04; // Set mesh network name
+pub(crate) const PAIR_OP_SET_MESH_PASSWORD: u8 = 0x05; // Set mesh network password
+pub(crate) const PAIR_OP_SET_MESH_LTK: u8 = 0x06; // Set long-term key
+pub(crate) const PAIR_OP_GET_MESH_LTK: u8 = 0x08; // Request long-term key
+pub(crate) const PAIR_OP_RESET_MESH: u8 = 0x0A; // Reset mesh configuration
+pub(crate) const PAIR_OP_VERIFY_CREDENTIALS: u8 = 0x0C; // Verify credentials
+pub(crate) const PAIR_OP_DELETE_PAIRING: u8 = 0x0E; // Delete pairing information
 
 // Packet field constants
 const ATT_READ_RESPONSE_OPCODE: u8 = 0x0B; // ATT Read Response opcode

@@ -75,6 +75,7 @@ impl HardwareControl {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 ///
 /// This struct must be a multiple of 16 bytes in size to ensure proper
 /// DMA alignment for efficient data transfer.

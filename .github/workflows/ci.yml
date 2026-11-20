@@ -107,6 +107,17 @@ jobs:
               });
             }
 
+  python-wire-contracts:
+    name: Python Wire Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r utilities/meshutils/requirements.txt
+      - run: PYTHONPATH=utilities/meshutils python3 -m unittest discover -s utilities/meshutils/tests -v
+
   probe:
     name: Probe tools
     runs-on: ubuntu-latest

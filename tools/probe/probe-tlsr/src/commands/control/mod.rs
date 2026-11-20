@@ -7,9 +7,9 @@
 use probe_proto::{CpuMode, Request, Response};
 
 use super::{
-    expect_ack, read_flash, read_mem, read_word, stall_core, sws_activate, unexpected,
-    CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN, HEADER_VERSION_OFFSET, KNLT_MAGIC,
-    RESET_HOLD_MS, XTAL_BIT,
+    expect_ack, mark_clean_reboot, read_analog_value, read_flash, read_mem, read_word, stall_core,
+    sws_activate, unexpected, CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN,
+    HEADER_VERSION_OFFSET, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
 };
 use crate::output::{FlashInfo, Output};
 use crate::transport::ProbeTransport;
@@ -78,13 +78,21 @@ pub(super) fn halt(transport: &mut dyn ProbeTransport) -> Result<Output, CliErro
 
 /// `reset`: hard reset (optionally leaving the core stopped) or a SWire soft
 /// reboot.
+///
+/// A soft reboot (`reset --soft`) writes the clean sentinel before rebooting,
+/// because the analog register retains the previous `Running` value and the
+/// next boot would otherwise report a watchdog reset. A pending `Panic`
+/// sentinel is preserved so the panic is still reported. A hard `reset` sends
+/// no SWire write: the reset pulse clears the analog registers in hardware.
 pub(super) fn reset(
     transport: &mut dyn ProbeTransport,
     stop: bool,
     soft: bool,
 ) -> Result<Output, CliError> {
     if soft {
-        sws_activate(transport)?;
+        if !mark_clean_reboot(transport) {
+            sws_activate(transport)?;
+        }
         expect_ack(
             transport,
             Request::CpuCtrl {
@@ -92,6 +100,8 @@ pub(super) fn reset(
             },
         )?;
     } else {
+        // A GP14 hard reset clears the analog sentinel itself, so there is
+        // nothing to mark and no added latency on the recovery path.
         expect_ack(
             transport,
             Request::Reset {
@@ -111,10 +121,7 @@ pub(super) fn analog_read(
     let addr = parse_byte(addr).map_err(|message| CliError::InvalidAddress { message })?;
 
     sws_activate(transport)?;
-    let value = match transport.exchange(&Request::ReadAnalog { addr })? {
-        Response::Byte(value) => value,
-        other => return Err(unexpected("Byte", &other)),
-    };
+    let value = read_analog_value(transport, addr)?;
 
     Ok(Output::AnalogRead { addr, value })
 }
@@ -137,7 +144,7 @@ pub(super) fn analog_write(
 /// Maps the CPU status byte to its documented state name.
 fn cpu_state(status: u8) -> &'static str {
     match status {
-        0x00 | 0x04 => "running",
+        0x00 | 0x04 | 0x08 => "running",
         0x05 => "stopped",
         0x06 => "stalled",
         _ => "unknown",

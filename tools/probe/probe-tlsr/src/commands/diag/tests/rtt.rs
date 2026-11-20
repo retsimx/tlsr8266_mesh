@@ -5,7 +5,7 @@
 //! last requests are exactly the `inspect` sequence, which is what proves the
 //! core was stalled and reported before the error was returned.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use probe_proto::{CpuMode, Request, Response};
 use serde_json::Value;
@@ -52,7 +52,7 @@ fn the_required_symbols_map_onto_wire_addresses() {
 #[test]
 fn until_match_exits_zero_after_emitting_the_lines() {
     let elf = rtt_image();
-    let mut mock = MockTransport::new([Response::Ack, data(*b"boot\nready\n")]);
+    let mut mock = MockTransport::new([Response::Ack, data([0x00, 0x00]), data(*b"boot\nready\n")]);
     let mut out = Vec::new();
 
     stream(
@@ -70,6 +70,7 @@ fn until_match_exits_zero_after_emitting_the_lines() {
         mock.requests,
         [
             sws_activate_req(),
+            read_mem_req(RTT_WIRE + 14, 2),
             Request::RttPoll {
                 ctrl_addr: RTT_WIRE
             }
@@ -81,7 +82,8 @@ fn until_match_exits_zero_after_emitting_the_lines() {
 #[test]
 fn until_wins_over_a_panic_marker_on_the_same_line() {
     let elf = rtt_image();
-    let mut mock = MockTransport::new([Response::Ack, data(*b"[PANIC] boom\n")]);
+    let mut mock =
+        MockTransport::new([Response::Ack, data([0x00, 0x00]), data(*b"[PANIC] boom\n")]);
     let mut out = Vec::new();
 
     stream(
@@ -105,9 +107,233 @@ fn until_wins_over_a_panic_marker_on_the_same_line() {
 }
 
 #[test]
+fn a_pre_existing_ring_overflow_is_reported_before_the_lines() {
+    let elf = rtt_image();
+    let mut mock = MockTransport::new([
+        Response::Ack,
+        data([0x01, 0x00]), // sticky overflow flag
+        data(*b"boot\n"),
+    ]);
+    let mut out = Vec::new();
+
+    stream(
+        &mut mock,
+        &mut out,
+        Some(&elf),
+        None,
+        &config(Some("boot")),
+        Duration::from_millis(1),
+    )
+    .expect("the stream still matches");
+
+    let text = String::from_utf8(out).expect("output is utf-8");
+    assert!(
+        text.starts_with("[probe] target RTT ring overflowed"),
+        "{text}"
+    );
+    assert!(text.ends_with("boot\n"), "{text}");
+}
+
+#[test]
+fn a_rebooting_target_is_retried_until_the_ring_reappears() {
+    // A panic reboot leaves the control block uninitialised for a few
+    // milliseconds; the probe reports InvalidArg. The stream must retry rather
+    // than exit before the next boot's `[PANIC]` line arrives.
+    let elf = rtt_image();
+    let mut responses = vec![
+        Response::Ack,
+        data([0x00, 0x00]),
+        Response::Error(probe_proto::ProtoError::InvalidArg),
+        data(*b"[PANIC] after reboot\n"),
+    ];
+    responses.extend(inspect_replies());
+    let mut mock = MockTransport::new(responses);
+    let mut out = Vec::new();
+
+    let err = stream(
+        &mut mock,
+        &mut out,
+        Some(&elf),
+        None,
+        &Config {
+            json: true,
+            ..config(None)
+        },
+        Duration::from_millis(1),
+    )
+    .expect_err("the panic is still a fault");
+
+    assert_eq!(err.exit_code(), 3);
+    let text = String::from_utf8(out).expect("output is utf-8");
+    assert!(text.contains("[PANIC] after reboot"), "{text}");
+}
+
+#[test]
+fn a_reboot_with_the_same_heartbeat_does_not_trip_the_watchdog() {
+    // A reboot zeroes `HEARTBEAT`, so the first post-reboot value can equal the
+    // pre-reboot baseline (both `0x2a` here). The retry run must re-arm the
+    // baseline, otherwise the reboot gap is measured against the old one and a
+    // healthy boot exits 2 as `HeartbeatStalled`.
+    let elf = rtt_image();
+    let mut mock = MockTransport::new([
+        Response::Ack,
+        data([0x00, 0x00]),
+        data(Vec::new()),             // drain before the reboot
+        data(0x2a_u32.to_le_bytes()), // heartbeat before the reboot
+        Response::Error(probe_proto::ProtoError::InvalidArg), // the target reboots
+        data(Vec::new()),             // drain after the reboot
+        data(0x2a_u32.to_le_bytes()), // same value, fresh baseline
+        data(*b"ready\n"),
+    ]);
+    let mut out = Vec::new();
+
+    stream(
+        &mut mock,
+        &mut out,
+        Some(&elf),
+        None,
+        &Config {
+            watchdog_ms: 1,
+            ..config(Some("ready"))
+        },
+        Duration::from_millis(2),
+    )
+    .expect("a healthy reboot must not look like a frozen loop");
+
+    assert_eq!(out, b"ready\n");
+    assert!(
+        !mock
+            .requests
+            .iter()
+            .any(|request| matches!(request, Request::CpuCtrl { .. })),
+        "no stall may follow the reboot: {:?}",
+        mock.requests
+    );
+}
+
+#[test]
+fn a_partial_line_is_dropped_at_a_reboot_boundary() {
+    // Bytes buffered before the target rebooted must not be concatenated with
+    // the first line after it; the panic report would name a garbled line.
+    let elf = rtt_image();
+    let mut responses = vec![
+        Response::Ack,
+        data([0x00, 0x00]),
+        data(*b"pre-reboot"),     // unterminated line
+        data(1u32.to_le_bytes()), // heartbeat
+        Response::Error(probe_proto::ProtoError::InvalidArg), // the target reboots mid-line
+        data(*b"[PANIC] after reboot\n"),
+    ];
+    responses.extend(inspect_replies());
+    let mut mock = MockTransport::new(responses);
+    let mut out = Vec::new();
+
+    let err = stream(
+        &mut mock,
+        &mut out,
+        Some(&elf),
+        None,
+        &config(None),
+        Duration::from_millis(1),
+    )
+    .expect_err("the post-reboot panic is still a fault");
+
+    assert_eq!(err.exit_code(), 3);
+    let CliError::TargetPanic { line } = &err else {
+        panic!("expected TargetPanic, got {err:?}");
+    };
+    assert_eq!(line, "[PANIC] after reboot");
+    let text = String::from_utf8(out).expect("output is utf-8");
+    assert!(text.contains("[PANIC] after reboot"), "{text}");
+    assert!(!text.contains("pre-reboot"), "{text}");
+}
+
+#[test]
+fn a_transient_heartbeat_poll_is_retried() {
+    // The reboot grace covers the heartbeat arm too, not just the drain: a
+    // target that answers `RttPoll` but not `ReadMem` for a few ms still
+    // recovers once its SRAM is mapped again.
+    let elf = rtt_image();
+    let mut mock = MockTransport::new([
+        Response::Ack,
+        data([0x00, 0x00]),
+        data(Vec::new()),                                     // drain succeeds
+        Response::Error(probe_proto::ProtoError::InvalidArg), // the heartbeat read does not
+        data(*b"ready\n"),
+    ]);
+    let mut out = Vec::new();
+
+    stream(
+        &mut mock,
+        &mut out,
+        Some(&elf),
+        None,
+        &config(Some("ready")),
+        Duration::from_millis(1),
+    )
+    .expect("the heartbeat retry lets the stream continue");
+
+    assert_eq!(out, b"ready\n");
+    assert_eq!(
+        mock.requests,
+        [
+            sws_activate_req(),
+            read_mem_req(RTT_WIRE + 14, 2),
+            Request::RttPoll {
+                ctrl_addr: RTT_WIRE
+            },
+            read_mem_req(HEARTBEAT_WIRE, 4),
+            Request::RttPoll {
+                ctrl_addr: RTT_WIRE
+            },
+        ],
+        "the transient heartbeat read is retried, not returned"
+    );
+}
+
+#[test]
+fn within_grace_bounds_one_run_to_the_ready_window() {
+    use super::super::rtt::within_grace;
+
+    // A fresh run starts its window on the first failure.
+    assert!(within_grace(&mut None), "a fresh run is inside the window");
+
+    // Three seconds is past the 2 s `RTT_READY_GRACE_MS` bound.
+    assert!(
+        !within_grace(&mut Some(Instant::now() - Duration::from_secs(3))),
+        "3 s must be outside the 2 s grace window"
+    );
+
+    // A run that has only just started is still inside it.
+    assert!(within_grace(&mut Some(Instant::now())));
+}
+
+#[test]
+fn transient_errors_are_the_reboot_classes_only() {
+    use super::super::rtt::transient;
+    assert!(transient(&CliError::Protocol(
+        probe_proto::ProtoError::InvalidArg
+    )));
+    assert!(transient(&CliError::Protocol(
+        probe_proto::ProtoError::SwsTimeout
+    )));
+    assert!(transient(&CliError::Transport("timeout".to_owned())));
+    assert!(!transient(&CliError::Protocol(
+        probe_proto::ProtoError::FlashVerifyFailed
+    )));
+    assert!(!transient(&CliError::InvalidAddress {
+        message: "x".to_owned()
+    }));
+}
+
+#[test]
 fn a_panic_line_emits_the_report_then_exits_three() {
     let elf = rtt_image();
-    let mut responses = vec![Response::Ack, data(*b"boot\n[PANIC] boom\n")];
+    let mut responses = vec![
+        Response::Ack,
+        data([0x00, 0x00]),
+        data(*b"boot\n[PANIC] boom\n"),
+    ];
     responses.extend(inspect_replies());
     let mut mock = MockTransport::new(responses);
     let mut out = Vec::new();
@@ -147,6 +373,7 @@ fn a_panic_line_emits_the_report_then_exits_three() {
 
     let mut expected = vec![
         sws_activate_req(),
+        read_mem_req(RTT_WIRE + 14, 2),
         Request::RttPoll {
             ctrl_addr: RTT_WIRE,
         },
@@ -163,6 +390,7 @@ fn a_frozen_heartbeat_emits_the_report_then_exits_two() {
     // baseline one, so the 1 ms watchdog trips there deterministically.
     let mut responses = vec![
         Response::Ack,
+        data([0x00, 0x00]),
         data(Vec::new()),
         data(0x2a_u32.to_le_bytes()),
         data(Vec::new()),
@@ -209,7 +437,7 @@ fn a_frozen_heartbeat_emits_the_report_then_exits_two() {
         .expect("the fault stalls the core");
     assert_eq!(
         &mock.requests[stall..],
-        &inspect_requests()[1..],
+        &inspect_requests()[2..],
         "the inspect sequence must follow the stall"
     );
 }
@@ -219,7 +447,7 @@ fn the_stream_deadline_expires_as_a_timeout() {
     let elf = rtt_image();
 
     // A moving heartbeat, so only the deadline can end the stream.
-    let mut responses = vec![Response::Ack];
+    let mut responses = vec![Response::Ack, data([0x00, 0x00])];
     for beat in 0..40u32 {
         responses.push(data(Vec::new()));
         responses.push(data(beat.to_le_bytes()));
@@ -245,12 +473,15 @@ fn the_stream_deadline_expires_as_a_timeout() {
     assert!(out.is_empty(), "a deadline writes no lines");
 }
 
-/// A 1 ms deadline over a stream whose first poll leaves an unterminated line.
+/// A 20 ms deadline over a stream whose first poll leaves an unterminated line.
+///
+/// The margin over the 1 ms cadence matters: the deadline is checked before the
+/// first poll, so a loaded CI runner must still complete a drain inside it.
 fn stream_with_one_partial_line(
     until: Option<&str>,
     out: &mut Vec<u8>,
 ) -> (MockTransport, Result<(), CliError>) {
-    let mut responses = vec![Response::Ack];
+    let mut responses = vec![Response::Ack, data([0x00, 0x00])];
     for beat in 0..40u32 {
         responses.push(data(if beat == 0 {
             b"tail".to_vec()
@@ -266,7 +497,7 @@ fn stream_with_one_partial_line(
         Some(&rtt_image()),
         None,
         &Config {
-            timeout_ms: Some(1),
+            timeout_ms: Some(20),
             ..config(until)
         },
         Duration::from_millis(1),
@@ -327,6 +558,7 @@ fn a_line_split_across_two_polls_is_reassembled() {
     let elf = rtt_image();
     let mut mock = MockTransport::new([
         Response::Ack,
+        data([0x00, 0x00]),
         data(*b"hel"),
         data(1u32.to_le_bytes()),
         data(*b"lo\n"),
@@ -348,6 +580,7 @@ fn a_line_split_across_two_polls_is_reassembled() {
         mock.requests,
         [
             sws_activate_req(),
+            read_mem_req(RTT_WIRE + 14, 2),
             Request::RttPoll {
                 ctrl_addr: RTT_WIRE
             },
@@ -362,7 +595,7 @@ fn a_line_split_across_two_polls_is_reassembled() {
 #[test]
 fn carriage_returns_are_stripped_even_with_no_deadline() {
     let elf = rtt_image();
-    let mut mock = MockTransport::new([Response::Ack, data(*b"boot\r\n")]);
+    let mut mock = MockTransport::new([Response::Ack, data([0x00, 0x00]), data(*b"boot\r\n")]);
     let mut out = Vec::new();
 
     // `--watchdog-ms 0` and `--timeout-ms 0` both mean "no limit".
@@ -400,7 +633,11 @@ fn the_dispatch_streams_and_returns_no_output() {
     // `commands::run` must not print a second object after the lines `rtt`
     // already wrote, so the dispatch returns `None`.
     let mut ctx = Ctx {
-        transport: Box::new(MockTransport::new([Response::Ack, data(*b"boot\n")])),
+        transport: Box::new(MockTransport::new([
+            Response::Ack,
+            data([0x00, 0x00]),
+            data(*b"boot\n"),
+        ])),
         elf: Some(rtt_image()),
         elf_path: None,
         json: true,

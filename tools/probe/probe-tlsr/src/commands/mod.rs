@@ -39,6 +39,15 @@ const WATCHDOG_CTRL_ADDR: u16 = 0x0622;
 /// `TMR_WD_EN`, bit 7 of [`WATCHDOG_CTRL_ADDR`].
 const TMR_WD_EN: u8 = 0x80;
 
+/// Analog register holding the retained reset sentinel.
+const RESET_SENTINEL_ADDR: u8 = 0x3b;
+
+/// Sentinel value written before an intentional probe-initiated reboot.
+const SENTINEL_CLEAN_REBOOT: u8 = 0x00;
+
+/// Sentinel value left by the panic handler; never overwritten by a reset.
+const SENTINEL_PANIC: u8 = 0xe1;
+
 /// Reset hold time used by `reset` and the flash path.
 const RESET_HOLD_MS: u16 = 2;
 
@@ -126,14 +135,30 @@ pub fn run(cmd: Command, ctx: &mut Ctx, out: &mut dyn Write) -> Result<Option<Ou
 /// while it is stalled.
 ///
 /// The stall is terminal until `reset`; every caller leaves the core stopped.
+///
+/// A core that is already stopped (`0x05`) or stalled (`0x06`) is left alone.
+/// Writing `0x06` while `[0x0602] == 0x05` is not a no-op on this silicon: it
+/// releases the reset hold and starts the core, which then races any MSPI
+/// read. A stopped core is already safe for register reads and flash access,
+/// so the only thing left to do is hold the watchdog.
 pub(super) fn stall_core(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
-    expect_ack(
-        transport,
-        Request::CpuCtrl {
-            mode: CpuMode::Stall,
-        },
-    )?;
+    let status = read_mem(transport, CPU_STATUS_ADDR, 1)?[0];
+    if !matches!(status, 0x05 | 0x06) {
+        expect_ack(
+            transport,
+            Request::CpuCtrl {
+                mode: CpuMode::Stall,
+            },
+        )?;
+    }
+    pause_watchdog(transport)
+}
 
+/// Clears `TMR_WD_EN` (bit 7 of `0x0622`) without touching `0x0602`.
+///
+/// Timer 2 keeps counting after `CpuCtrl::Stop`/`Reset` and during a stall, so
+/// a long erase/program/read must disarm it or the chip resets mid-operation.
+pub(super) fn pause_watchdog(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
     let watchdog_ctrl = read_mem(transport, WATCHDOG_CTRL_ADDR, 1)?[0] & !TMR_WD_EN;
     expect_ack(
         transport,
@@ -142,6 +167,44 @@ pub(super) fn stall_core(transport: &mut dyn ProbeTransport) -> Result<(), CliEr
             data: [watchdog_ctrl].into_iter().collect(),
         },
     )
+}
+
+/// Best-effort "this reset is intentional" marker for the next boot.
+///
+/// The analog sentinel survives a soft reboot (and a watchdog reset), so a
+/// probe-initiated soft reboot without this would log `[WD_RESET]`. A panic
+/// sentinel is kept: the next boot must still report the panic. Returns whether
+/// SWire was activated, so the caller can skip a second `SwsActivate`; any
+/// failure is ignored because a target that cannot answer SWire must still be
+/// resettable.
+pub(super) fn mark_clean_reboot(transport: &mut dyn ProbeTransport) -> bool {
+    if sws_activate(transport).is_err() {
+        return false;
+    }
+    let Ok(sentinel) = read_analog_value(transport, RESET_SENTINEL_ADDR) else {
+        return true;
+    };
+    if sentinel != SENTINEL_PANIC {
+        let _ = expect_ack(
+            transport,
+            Request::WriteAnalog {
+                addr: RESET_SENTINEL_ADDR,
+                val: SENTINEL_CLEAN_REBOOT,
+            },
+        );
+    }
+    true
+}
+
+/// Reads one analog register; the caller has already activated SWire.
+pub(super) fn read_analog_value(
+    transport: &mut dyn ProbeTransport,
+    addr: u8,
+) -> Result<u8, CliError> {
+    match transport.exchange(&Request::ReadAnalog { addr })? {
+        Response::Byte(value) => Ok(value),
+        other => Err(unexpected("Byte", &other)),
+    }
 }
 
 /// Activates SWire and accepts either reply the probe firmware sends.

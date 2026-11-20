@@ -16,10 +16,10 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use probe_proto::{Request, Response};
+use probe_proto::{ProtoError, Request, Response};
 
 use super::inspect_report;
-use crate::commands::{read_word, sws_activate, unexpected};
+use crate::commands::{read_mem, read_word, sws_activate, unexpected};
 use crate::elf::{to_swire, AddrSpec, ElfImage};
 use crate::output::{print_output, Output};
 use crate::transport::ProbeTransport;
@@ -33,6 +33,25 @@ pub(crate) const HEARTBEAT_SYMBOL: &str = "HEARTBEAT";
 
 /// Delay between one drain/heartbeat pass and the next.
 const RTT_POLL_MS: u64 = 50;
+
+/// Offset of the `flags` word inside `_TLSR_RTT`; bit 0 is sticky overflow.
+const RTT_FLAGS_OFFSET: u16 = 14;
+
+/// Sticky bit 0 of the RTT `flags` word.
+const RTT_FLAG_OVERFLOW: u16 = 1;
+
+/// One-line warning emitted when the target dropped log bytes before attach.
+const RTT_OVERFLOW_WARNING: &str =
+    "[probe] target RTT ring overflowed before this stream; some log lines were lost";
+
+/// How long a probe/target that is rebooting may fail polls before the stream
+/// gives up.
+///
+/// A panic or watchdog reset leaves `_TLSR_RTT` uninitialised for the first few
+/// milliseconds of the next boot, and the probe answers `InvalidArg` until the
+/// firmware writes the magic. Treating that as fatal would lose the `[PANIC]`
+/// line that the reboot was about to produce.
+const RTT_READY_GRACE_MS: u64 = 2000;
 
 /// Longest line buffered before it is flushed with no newline.
 const RTT_LINE_MAX: usize = 4096;
@@ -137,14 +156,51 @@ pub(super) fn stream(
             .map(|at| Deadline { at, ms })
     });
     sws_activate(transport)?;
+    report_start_overflow(transport, out, config)?;
 
     let mut line = Vec::with_capacity(RTT_LINE_MAX);
     let mut heartbeat: Option<u32> = None;
     let mut beat_at = Instant::now();
+    // Start of the current run of transient poll failures (target rebooting).
+    let mut not_ready_since: Option<Instant> = None;
 
     loop {
-        // 1. Drain the ring and emit every complete line.
-        drain(transport, config.ctrl_addr, &mut line)?;
+        // 0. Deadline first, so a reboot grace period cannot outlive it and a
+        // final unterminated line is still reported.
+        if let Some(deadline) = deadline {
+            if deadline.remaining().is_zero() {
+                if !line.is_empty() {
+                    let end = line.len();
+                    let text = take_line(&mut line, end);
+                    if emit_line(transport, out, elf, elf_path, config, &text)? {
+                        return Ok(());
+                    }
+                }
+                return Err(CliError::Timeout(format!(
+                    "rtt: stream deadline of {} ms expired; no --until match",
+                    deadline.ms
+                )));
+            }
+        }
+
+        // 1. Drain the ring and emit every complete line. A target that is
+        // mid-reboot answers `InvalidArg` until `rtt_init()` writes the magic;
+        // retry for a bounded grace period instead of losing the panic report.
+        match drain(transport, config.ctrl_addr, &mut line) {
+            Ok(()) => recovered(&mut not_ready_since, &mut heartbeat, &mut beat_at),
+            Err(error) if transient(&error) => {
+                if not_ready_since.is_none() {
+                    // The target rebooted mid-line; pre- and post-reboot bytes
+                    // must not be concatenated into one garbled line.
+                    line.clear();
+                }
+                if !transient_pause(deadline, poll_interval, &mut not_ready_since) {
+                    return Err(error);
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         while let Some(end) = line.iter().position(|byte| *byte == b'\n') {
             let text = take_line(&mut line, end + 1);
             if emit_line(transport, out, elf, elf_path, config, &text)? {
@@ -162,7 +218,22 @@ pub(super) fn stream(
         }
 
         // 2. The heartbeat: unchanged for long enough means the loop is dead.
-        let beat = read_word(transport, config.heartbeat)?;
+        let beat = match read_word(transport, config.heartbeat) {
+            Ok(beat) => {
+                recovered(&mut not_ready_since, &mut heartbeat, &mut beat_at);
+                beat
+            }
+            Err(error) if transient(&error) => {
+                if not_ready_since.is_none() {
+                    line.clear();
+                }
+                if !transient_pause(deadline, poll_interval, &mut not_ready_since) {
+                    return Err(error);
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if heartbeat == Some(beat) {
             if config.watchdog_ms > 0
                 && beat_at.elapsed() >= Duration::from_millis(config.watchdog_ms)
@@ -178,30 +249,75 @@ pub(super) fn stream(
             beat_at = Instant::now();
         }
 
-        // 3. Deadline, then sleep so expiry is accurate.
-        let Some(deadline) = deadline else {
-            std::thread::sleep(poll_interval);
-            continue;
-        };
-        let remaining = deadline.remaining();
-        if remaining.is_zero() {
-            // A tail with no newline is still the last thing the target said,
-            // so it is emitted before the deadline is reported. It goes through
-            // the same per-line policy as a complete line: an `--until` match
-            // or a panic marker wins over the bare timeout.
-            if !line.is_empty() {
-                let end = line.len();
-                let text = take_line(&mut line, end);
-                if emit_line(transport, out, elf, elf_path, config, &text)? {
-                    return Ok(());
-                }
-            }
-            return Err(CliError::Timeout(format!(
-                "rtt: stream deadline of {} ms expired; no --until match",
-                deadline.ms
-            )));
-        }
-        std::thread::sleep(remaining.min(poll_interval));
+        // 3. Sleep at most the remaining time so expiry is accurate.
+        let sleep_for = deadline.map_or(poll_interval, |at| at.remaining().min(poll_interval));
+        std::thread::sleep(sleep_for);
+    }
+}
+
+/// Whether a poll failure is the target rebooting rather than a real fault.
+pub(super) fn transient(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::Protocol(ProtoError::InvalidArg | ProtoError::SwsTimeout)
+            | CliError::Transport(_)
+    )
+}
+
+/// Emits one warning when the target's sticky overflow flag is already set.
+///
+/// The flag is sticky and survives until the target reboots, so checking once
+/// on attach catches the common case: firmware logged more than the 256 B ring
+/// before the host connected. A failure to read it is ignored; the log stream
+/// itself is the feature, not this diagnostic.
+fn report_start_overflow(
+    transport: &mut dyn ProbeTransport,
+    out: &mut dyn Write,
+    config: &Config<'_>,
+) -> Result<(), CliError> {
+    let Some(addr) = config.ctrl_addr.checked_add(RTT_FLAGS_OFFSET) else {
+        return Ok(());
+    };
+    let Ok(flags) = read_mem(transport, addr, 2) else {
+        return Ok(());
+    };
+    if u16::from_le_bytes([flags[0], flags[1]]) & RTT_FLAG_OVERFLOW != 0 {
+        emit(out, config.json, RTT_OVERFLOW_WARNING)?;
+    }
+    Ok(())
+}
+
+/// Bounds one uninterrupted run of transient failures to
+/// [`RTT_READY_GRACE_MS`]. A success ends the run, so a target that alternates
+/// success and failure is allowed to keep making progress until its deadline.
+pub(super) fn within_grace(since: &mut Option<Instant>) -> bool {
+    let start = *since.get_or_insert_with(Instant::now);
+    start.elapsed() < Duration::from_millis(RTT_READY_GRACE_MS)
+}
+
+/// Sleeps one poll while a transient run is inside its grace window; `false`
+/// means the run exceeded it and the caller must report the original error.
+fn transient_pause(
+    deadline: Option<Deadline>,
+    poll_interval: Duration,
+    since: &mut Option<Instant>,
+) -> bool {
+    if !within_grace(since) {
+        return false;
+    }
+    let sleep_for = deadline.map_or(poll_interval, |at| at.remaining().min(poll_interval));
+    std::thread::sleep(sleep_for);
+    true
+}
+
+/// Re-arms the heartbeat baseline after a transient run.
+///
+/// A reboot resets `HEARTBEAT`; comparing a post-reboot value against the
+/// pre-reboot baseline would report a healthy boot as a frozen loop.
+fn recovered(since: &mut Option<Instant>, heartbeat: &mut Option<u32>, beat_at: &mut Instant) {
+    if since.take().is_some() {
+        *heartbeat = None;
+        *beat_at = Instant::now();
     }
 }
 

@@ -9,7 +9,7 @@ use std::path::Path;
 use probe_proto::{Request, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE, FLASH_SIZE};
 
 use super::{
-    expect_ack, read_flash, sws_activate, FLASH_HEADER_ADDR, FLASH_HEADER_LEN,
+    expect_ack, pause_watchdog, read_flash, sws_activate, FLASH_HEADER_ADDR, FLASH_HEADER_LEN,
     HEADER_VERSION_OFFSET, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
 };
 use crate::elf::ElfImage;
@@ -41,6 +41,10 @@ pub(super) fn flash(
         },
     )?;
     sws_activate(transport)?;
+    // A target that was already booting can have Timer 2 armed when the reset
+    // hold releases; disarm it so a multi-second erase/program cannot be
+    // interrupted by a watchdog reset.
+    pause_watchdog(transport)?;
 
     let target = read_flash(transport, FLASH_HEADER_ADDR, FLASH_HEADER_LEN)?;
     let target_xtal_mhz = header_xtal_mhz(&target);
@@ -173,6 +177,8 @@ mod tests {
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,       // Reset (hold, stop)
             Response::Ack,       // SwsActivate
+            data([0x80]),        // watchdog read
+            Response::Ack,       // watchdog write
             header(0x0000_0dd3), // target header, 12 MHz
             Response::Ack,       // erase sector 0x000
             Response::Ack,       // page 0x000
@@ -201,6 +207,8 @@ mod tests {
                     stop_cpu: true,
                 },
                 sws_activate_req(),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 read_flash_req(0, 12),
                 erase_req(0),
                 write_page_req(0, &image[..256]),
@@ -235,6 +243,8 @@ mod tests {
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
             Response::Ack,
+            data([0x80]),
+            Response::Ack,
             data(REAL_12MHZ_HEADER),
         ]);
 
@@ -260,6 +270,8 @@ mod tests {
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
             Response::Ack,
+            data([0x80]),
+            Response::Ack,
             data(REAL_12MHZ_HEADER),
         ]);
 
@@ -284,6 +296,8 @@ mod tests {
         let file = TempFile::new("flash-real-force", &image);
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
+            Response::Ack,
+            data([0x80]),
             Response::Ack,
             data(REAL_12MHZ_HEADER),
             Response::Ack,
@@ -311,7 +325,13 @@ mod tests {
         let image = firmware_image(0x0000_0dd3, 0x1200);
         let file = TempFile::new("flash-sectors", &image);
         let pages = image.len().div_ceil(FLASH_PAGE_SIZE as usize);
-        let mut responses = vec![Response::Ack, Response::Ack, header(0x0000_0dd3)];
+        let mut responses = vec![
+            Response::Ack,
+            Response::Ack,
+            data([0x80]),
+            Response::Ack,
+            header(0x0000_0dd3),
+        ];
         responses.extend(std::iter::repeat_n(Response::Ack, 2 + pages));
         let mut mock = crate::transport::MockTransport::new(responses);
 
@@ -355,6 +375,8 @@ mod tests {
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
             Response::Ack,
+            data([0x80]),
+            Response::Ack,
             header(0x0000_0dd3), // target is 12 MHz
         ]);
 
@@ -377,6 +399,8 @@ mod tests {
                     stop_cpu: true,
                 },
                 sws_activate_req(),
+                read_mem_req(0x0622, 1),
+                write_mem_req(0x0622, &[0x00]),
                 read_flash_req(0, 12),
             ]
         );
@@ -388,6 +412,8 @@ mod tests {
         let file = TempFile::new("flash-force", &image);
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
+            Response::Ack,
+            data([0x80]),
             Response::Ack,
             header(0x0000_0dd3),
             Response::Ack,
@@ -441,7 +467,13 @@ mod tests {
             let file = TempFile::new(name, &image);
             let sectors = image.len().div_ceil(FLASH_SECTOR_SIZE as usize);
             let pages = image.len().div_ceil(FLASH_PAGE_SIZE as usize);
-            let mut responses = vec![Response::Ack, Response::Ack, target];
+            let mut responses = vec![
+                Response::Ack,
+                Response::Ack,
+                data([0x80]),
+                Response::Ack,
+                target,
+            ];
             responses.extend(std::iter::repeat_n(Response::Ack, sectors + pages));
             let mut mock = crate::transport::MockTransport::new(responses);
 
@@ -470,6 +502,8 @@ mod tests {
         let file = TempFile::new("flash-reset", &image);
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
+            Response::Ack,
+            data([0x80]),
             Response::Ack,
             header(0x0000_0dd3),
             Response::Ack,

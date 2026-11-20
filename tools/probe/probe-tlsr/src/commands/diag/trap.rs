@@ -1,11 +1,14 @@
 //! `trap`: arm one hardware breakpoint and wait for it to fire.
 //!
 //! The probe programs the slot from `SetBreakpoint`; while the core runs, the
-//! host polls the slot's control word (`0x0610 + slot * 4`) for bit 31. A hit
-//! stops the core terminally, so the wait ends with the full `inspect` capture,
-//! an explicit slot clear and a soft reboot — the only way back to a running
-//! target. A wait deadline clears the slot *before* it fails, because an
-//! orphaned armed slot would re-trap the next boot.
+//! host polls the shared hit word (`0x0610`) for bit 31, because silicon
+//! latches every slot's hit there and keeps the armed address in that slot's
+//! own register (`0x0610 + slot * 4`). A hit stops the core terminally, so the
+//! wait ends with the full `inspect` capture, an explicit slot clear and a soft
+//! reboot — the only way back to a running target. A wait deadline clears the
+//! slot *before* it fails, because an orphaned armed slot would re-trap the
+//! next boot. A latch that is already set before arming is refused: the shared
+//! bit cannot name the slot that owns it, so the operator must clear it first.
 //!
 //! The capture is one-shot: the report is written to stdout **before** the
 //! clear and the reboot, so a failure in either cannot discard the only copy of
@@ -23,18 +26,18 @@ use std::time::{Duration, Instant};
 
 use probe_proto::{CpuMode, Request};
 
+use super::super::{expect_ack, mark_clean_reboot, read_word, sws_activate};
 use super::inspect_report;
 use crate::commands::mem::resolve_addr;
-use crate::commands::{expect_ack, read_word, sws_activate};
 use crate::elf::{AddrSpec, ElfImage};
 use crate::output::{print_output, Output};
 use crate::transport::ProbeTransport;
 use crate::{CliError, Ctx};
 
-/// First breakpoint control register; slot `n` lives at `BASE + n * 4`.
+/// Shared breakpoint hit word; slot `n`'s armed address lives at `BASE + n * 4`.
 pub(super) const BREAKPOINT_BASE: u16 = 0x0610;
 
-/// Bit 31 of the slot's control word: the core stopped on this breakpoint.
+/// Bit 31 of the shared `0x0610` word: the core stopped on a breakpoint.
 pub(super) const BREAKPOINT_HIT: u32 = 1 << 31;
 
 /// Delay between two polls of the slot; production cadence, like `rtt`.
@@ -136,6 +139,7 @@ pub(super) fn wait(
     });
 
     sws_activate(transport)?;
+    guard_unlatched(transport)?;
     expect_ack(transport, Request::SetBreakpoint { slot, addr })?;
 
     loop {
@@ -152,7 +156,7 @@ pub(super) fn wait(
             }
         };
 
-        match poll_hit(transport, slot) {
+        match poll_hit(transport) {
             Ok(true) => return hit(transport, capture, addr, slot),
             Ok(false) => {}
             // A failed read leaves the slot armed, so clear it before reporting
@@ -248,9 +252,30 @@ fn capture_failed(transport: &mut dyn ProbeTransport, slot: u8, error: CliError)
     }
 }
 
-/// One `ReadMem` of the slot's control word; `true` when bit 31 is set.
-fn poll_hit(transport: &mut dyn ProbeTransport, slot: u8) -> Result<bool, CliError> {
-    let word = read_word(transport, slot_reg(slot))?;
+/// Rejects a hit word that is already latched before the slot is armed.
+///
+/// Bit 31 is shared by all four slots, so a latch left behind by a killed
+/// `trap` (or a disarm that failed) would be reported as *this* slot's hit and
+/// leave the real slot armed. Refusing early names the orphan instead of
+/// producing a wrong capture the operator cannot unwind.
+fn guard_unlatched(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
+    if read_word(transport, BREAKPOINT_BASE)? & BREAKPOINT_HIT == 0 {
+        return Ok(());
+    }
+    Err(CliError::Device(format!(
+        "trap: the shared breakpoint word 0x{BREAKPOINT_BASE:04x} is already latched; a previous \
+         trap left a slot armed — run `probe-tlsr reset --soft` to clear it, then retry"
+    )))
+}
+
+/// One `ReadMem` of the shared hit word; `true` when bit 31 is set.
+///
+/// The TLSR8266 latches a hit in **`0x0610` bit 31 for every slot**; the armed
+/// address stays in that slot's own register (`0x0610 + slot * 4`). Polling the
+/// slot register misses slots 1..3 and then misreports a halted core as a
+/// timeout, so this deliberately reads the shared word.
+fn poll_hit(transport: &mut dyn ProbeTransport) -> Result<bool, CliError> {
+    let word = read_word(transport, BREAKPOINT_BASE)?;
     Ok(word & BREAKPOINT_HIT != 0)
 }
 
@@ -261,15 +286,14 @@ fn disarm(transport: &mut dyn ProbeTransport, slot: u8) -> Result<(), CliError> 
 
 /// Soft-reboots the core: the only way out of a terminal breakpoint hit.
 fn reboot(transport: &mut dyn ProbeTransport) -> Result<(), CliError> {
+    // This reboot is intentional; without the clean marker the next boot would
+    // report the retained `Running` sentinel as `[WD_RESET]`. A panic sentinel
+    // is preserved so a real panic is still reported.
+    let _ = mark_clean_reboot(transport);
     expect_ack(
         transport,
         Request::CpuCtrl {
             mode: CpuMode::SoftReboot,
         },
     )
-}
-
-/// The control register of `slot`: `0x0610 + slot * 4`.
-fn slot_reg(slot: u8) -> u16 {
-    BREAKPOINT_BASE + u16::from(slot) * 4
 }

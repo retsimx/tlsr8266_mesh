@@ -2,6 +2,7 @@ use super::*;
 use crate::commands::run;
 use crate::commands::test_support::*;
 use crate::commands::WATCHDOG_CTRL_ADDR;
+use crate::commands::{RESET_SENTINEL_ADDR, SENTINEL_CLEAN_REBOOT};
 use crate::output::FlashInfo;
 use crate::Command;
 
@@ -132,7 +133,8 @@ fn info_halt_stalls_core_and_clears_watchdog_before_flash_reads() {
         Response::Ack,
         pc_bytes(),
         data([0x00]),
-        // halt_core: stall, read 0x0622, write it back with bit 7 cleared
+        // stall_core: status sample, stall, watchdog read, write-back
+        data([0x08]),
         Response::Ack,
         data([0xb5]),
         Response::Ack,
@@ -163,6 +165,7 @@ fn info_halt_stalls_core_and_clears_watchdog_before_flash_reads() {
             sws_activate_req(),
             read_mem_req(PC_ADDR, 4),
             read_mem_req(CPU_STATUS_ADDR, 1),
+            read_mem_req(CPU_STATUS_ADDR, 1),
             Request::CpuCtrl {
                 mode: CpuMode::Stall,
             },
@@ -178,6 +181,7 @@ fn info_halt_stalls_core_and_clears_watchdog_before_flash_reads() {
 fn halt_stalls_core_and_clears_watchdog_bit_seven() {
     let mut mock = crate::transport::MockTransport::new([
         Response::Ack,
+        data([0x08]),
         Response::Ack,
         data([0x80]),
         Response::Ack,
@@ -190,12 +194,106 @@ fn halt_stalls_core_and_clears_watchdog_bit_seven() {
         mock.requests,
         [
             sws_activate_req(),
+            read_mem_req(CPU_STATUS_ADDR, 1),
             Request::CpuCtrl {
                 mode: CpuMode::Stall,
             },
             read_mem_req(WATCHDOG_CTRL_ADDR, 1),
             write_mem_req(WATCHDOG_CTRL_ADDR, &[0x00]),
         ]
+    );
+}
+
+#[test]
+fn halt_does_not_write_stall_to_an_already_stopped_core() {
+    // 0x05 -> 0x06 releases the reset hold on this silicon: the core starts
+    // running again, which makes any following MSPI read race XIP. `halt` on a
+    // stopped core must only hold the watchdog.
+    for status in [0x05_u8, 0x06] {
+        let mut mock = crate::transport::MockTransport::new([
+            Response::Ack,
+            data([status]),
+            data([0x80]),
+            Response::Ack,
+        ]);
+
+        halt(&mut mock).expect("halt on a held core succeeds");
+
+        assert_eq!(
+            mock.requests,
+            [
+                sws_activate_req(),
+                read_mem_req(CPU_STATUS_ADDR, 1),
+                read_mem_req(WATCHDOG_CTRL_ADDR, 1),
+                write_mem_req(WATCHDOG_CTRL_ADDR, &[0x00]),
+            ],
+            "status 0x{status:02x}"
+        );
+    }
+}
+
+#[test]
+fn info_halt_on_a_stopped_core_keeps_it_stopped_before_the_flash_read() {
+    let mut mock = crate::transport::MockTransport::new([
+        Response::Ack,
+        pc_bytes(),
+        data([0x05]),
+        data([0x05]),
+        data([0x80]),
+        Response::Ack,
+        jedec_id(),
+        header(0x0000_0dd3),
+    ]);
+
+    let output = info(&mut mock, true).expect("info --halt on a stopped core succeeds");
+
+    assert_eq!(
+        output,
+        Output::Info {
+            pc: 0x0001_10f0,
+            cpu_status: 0x05,
+            cpu_state: "stopped",
+            flash_info: Some(FlashInfo {
+                jedec_id: "ef4018".to_owned(),
+                xtal_mhz: 12,
+                build_version: 0x0dd3,
+                magic_ok: true,
+            }),
+        }
+    );
+    assert!(
+        !mock.requests.iter().any(|request| matches!(
+            request,
+            Request::CpuCtrl {
+                mode: CpuMode::Stall
+            }
+        )),
+        "a 0x05 core must not be switched to 0x06: {:?}",
+        mock.requests
+    );
+}
+
+#[test]
+fn reset_soft_preserves_a_panic_sentinel() {
+    let mut mock = crate::transport::MockTransport::new([
+        Response::Ack,
+        Response::Byte(0xe1),
+        Response::Ack,
+        Response::Ack,
+    ]);
+
+    reset(&mut mock, false, true).expect("reset --soft after a panic succeeds");
+
+    assert!(
+        !mock.requests.iter().any(|request| matches!(
+            request,
+            Request::WriteAnalog {
+                addr: RESET_SENTINEL_ADDR,
+                ..
+            }
+        )),
+        "a pending panic must survive the reset: {:?}",
+        mock.requests
     );
 }
 
@@ -217,7 +315,8 @@ fn reset_default_holds_for_two_ms_without_stopping() {
         [Request::Reset {
             hold_ms: 2,
             stop_cpu: false,
-        }]
+        }],
+        "a GP14 reset clears the analog sentinel itself: no SWire traffic"
     );
 }
 
@@ -238,7 +337,14 @@ fn reset_stop_leaves_the_core_stopped() {
 
 #[test]
 fn reset_soft_activates_swire_then_soft_reboots() {
-    let mut mock = crate::transport::MockTransport::new([Response::Ack, Response::Ack]);
+    // `mark_clean_reboot` activates SWire itself, so the soft reboot must not
+    // send a second `SwsActivate`.
+    let mut mock = crate::transport::MockTransport::new([
+        Response::Ack,
+        Response::Byte(0xa5),
+        Response::Ack,
+        Response::Ack,
+    ]);
 
     let output = reset(&mut mock, false, true).expect("reset --soft succeeds");
 
@@ -253,6 +359,13 @@ fn reset_soft_activates_swire_then_soft_reboots() {
         mock.requests,
         [
             sws_activate_req(),
+            Request::ReadAnalog {
+                addr: RESET_SENTINEL_ADDR,
+            },
+            Request::WriteAnalog {
+                addr: RESET_SENTINEL_ADDR,
+                val: SENTINEL_CLEAN_REBOOT,
+            },
             Request::CpuCtrl {
                 mode: CpuMode::SoftReboot,
             },
@@ -316,6 +429,7 @@ fn analog_write_accepts_hex_and_decimal() {
 fn cpu_state_mapping_is_pinned() {
     assert_eq!(cpu_state(0x00), "running");
     assert_eq!(cpu_state(0x04), "running");
+    assert_eq!(cpu_state(0x08), "running");
     assert_eq!(cpu_state(0x05), "stopped");
     assert_eq!(cpu_state(0x06), "stalled");
     assert_eq!(cpu_state(0x07), "unknown");
@@ -345,8 +459,9 @@ fn unexpected_response_variants_are_device_errors() {
         "{err:?}"
     );
 
-    let mut mock = crate::transport::MockTransport::new([Response::JedecId([1, 2, 3])]);
-    let err = halt(&mut mock).expect_err("JedecId is not an Ack reply");
+    let mut mock =
+        crate::transport::MockTransport::new([Response::Ack, data([0x08]), Response::Byte(0x00)]);
+    let err = halt(&mut mock).expect_err("Byte is not an Ack reply");
     assert!(
         matches!(&err, CliError::Device(message) if message.contains("expected Ack")),
         "{err:?}"

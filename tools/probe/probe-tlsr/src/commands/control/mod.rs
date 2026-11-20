@@ -8,7 +8,8 @@ use probe_proto::{CpuMode, Request, Response};
 
 use super::{
     expect_ack, read_flash, read_mem, read_word, stall_core, sws_activate, unexpected,
-    CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
+    CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN, HEADER_VERSION_OFFSET, KNLT_MAGIC,
+    RESET_HOLD_MS, XTAL_BIT,
 };
 use crate::output::{FlashInfo, Output};
 use crate::transport::ProbeTransport;
@@ -51,7 +52,11 @@ fn read_flash_info(transport: &mut dyn ProbeTransport) -> Result<FlashInfo, CliE
     };
 
     let header = read_flash(transport, FLASH_HEADER_ADDR, FLASH_HEADER_LEN)?;
-    let version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    let version = u32::from_le_bytes(
+        header[HEADER_VERSION_OFFSET..HEADER_VERSION_OFFSET + 4]
+            .try_into()
+            .expect("header is exactly FLASH_HEADER_LEN bytes"),
+    );
     let magic = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
 
     Ok(FlashInfo {

@@ -104,4 +104,4 @@ If the firmware update fails:
 If a device becomes unresponsive after a failed update (but not due to clock mismatch):
 1. Try resetting the device by power cycling
 2. Attempt the firmware update process again
-3. For devices with accessible SWIRE (SWS) pads, use direct programming via the Raspberry Pi Pico SWIRE tools included in the `utilities/picow_swire` directory. See [SWIRE Interface](swire.md) for detailed instructions on wiring connections and usage.
+3. For devices with accessible SWIRE (SWS) pads, use direct programming through the `tools/probe/` SWire probe (`probe-pico` firmware plus the `probe-tlsr` host CLI). See [SWIRE Interface](swire.md) for detailed instructions on wiring connections and usage.

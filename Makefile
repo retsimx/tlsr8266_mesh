@@ -88,8 +88,26 @@ $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ) $(RUST_SRCS)
 .PHONY: $(BUILD_DIR)/$(TARGET)
 
 # Startup.
-$(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC)
-	bash sdk/increment_version.sh
+# rust/Cargo.toml is a prerequisite because the `xtal-16mhz` feature must stay
+# declared for FEATURES=xtal-16mhz to be accepted.
+#
+# The startup object also carries the crystal bit (sdk/version.in), and the bit
+# follows the FEATURES selection, so the object must be rebuilt whenever that
+# selection changes: a stale stamp would label a 16 MHz build as 12 MHz (or the
+# reverse) and the flash crystal guard would trust the label. This stamp file
+# exposes that dependency to make instead of relying on rust/Cargo.toml's mtime.
+FEATURE_STAMP = $(BUILD_DIR)/features.stamp
+
+.PHONY: FORCE
+FORCE:
+
+$(FEATURE_STAMP): FORCE
+	@mkdir -p $(BUILD_DIR)
+	@printf '%s\n' '$(strip $(FEATURES))' | cmp -s - $@ || printf '%s\n' '$(strip $(FEATURES))' > $@
+
+$(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC) rust/Cargo.toml $(FEATURE_STAMP)
+	xtal=$$(case " $(FEATURES) " in *" xtal-16mhz "*) echo 1 ;; *) echo 0 ;; esac); \
+	bash sdk/increment_version.sh $$xtal
 	mkdir -p $(BUILD_DIR)/asm
 	$(CC) -c $(CCFLAGS) $< -o $@
 

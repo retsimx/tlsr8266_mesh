@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use probe_proto::{CpuMode, Request, Response};
 
-use super::{FLASH_HEADER_LEN, KNLT_MAGIC, SWS_DIV};
+use super::{FLASH_HEADER_LEN, HEADER_VERSION_OFFSET, KNLT_MAGIC, SWS_DIV};
 use crate::Ctx;
 
 pub fn sws_activate_req() -> Request {
@@ -58,7 +58,7 @@ pub fn stopped(status: u8) -> Response {
 /// A 12-byte header with `version` and the KNLT magic.
 pub fn header(version: u32) -> Response {
     let mut bytes = vec![0u8; usize::from(FLASH_HEADER_LEN)];
-    bytes[4..8].copy_from_slice(&version.to_le_bytes());
+    bytes[HEADER_VERSION_OFFSET..HEADER_VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
     bytes[8..12].copy_from_slice(&KNLT_MAGIC.to_le_bytes());
     data(bytes)
 }
@@ -86,10 +86,22 @@ pub fn test_ctx(responses: impl IntoIterator<Item = Response>) -> Ctx {
 pub fn firmware_image(version: u32, len: usize) -> Vec<u8> {
     assert!(len >= usize::from(FLASH_HEADER_LEN));
     let mut image = vec![0x5a_u8; len];
-    image[4..8].copy_from_slice(&version.to_le_bytes());
+    image[HEADER_VERSION_OFFSET..HEADER_VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
     image[8..12].copy_from_slice(&KNLT_MAGIC.to_le_bytes());
     image
 }
+
+/// 12-byte firmware headers taken byte-for-byte from real images.
+///
+/// These are the first 12 bytes of `lightblemesh` builds. The version/crystal
+/// word lives at bytes `2..6` because `sdk/cstartup_8266.S` emits a 2-byte
+/// `tj __reset` at address 0. Do not "tidy" these back to offset 4.
+pub const REAL_12MHZ_HEADER: [u8; 12] = [
+    0x0e, 0x80, 0xd4, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x4b, 0x4e, 0x4c, 0x54,
+];
+pub const REAL_16MHZ_HEADER: [u8; 12] = [
+    0x0e, 0x80, 0xd5, 0x0d, 0x00, 0x80, 0x00, 0x00, 0x4b, 0x4e, 0x4c, 0x54,
+];
 
 /// Temp file removed when the test ends (or unwinds).
 pub struct TempFile(PathBuf);

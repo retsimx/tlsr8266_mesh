@@ -2,53 +2,230 @@
 
 ## Overview
 
-This project includes a Raspberry Pi Pico/W MicroPython implementation for SWire communication with TLSR chips. It uses PIO to communicate with the MCU at the bit level, and the MicroPython Raw REPL to interface with the Pico from a host PC. The Python client is based on [rbaron's SWire client](https://github.com/rbaron/m6-reveng), with a custom MicroPython device implementation.
+The SWire programmer is Rust end to end. `probe-pico` is RP2040 firmware that drives the TLSR8266 single-wire interface from PIO with a self-syncing bit-level implementation, and `probe-tlsr` is the host CLI that talks to it over USB CDC. Together they cover flashing, memory access, RTT logs, crash inspection and hardware breakpoints. Both are compiled Rust: flashing a device needs no scripting runtime on the host.
+
+The protocol was reverse-engineered by Raphael Baron ([rbaron/m6-reveng](https://github.com/rbaron/m6-reveng); see also the [blog post](https://rbaron.net/blog/2021/07/06/Reverse-engineering-the-M6-smart-fitness-band.html)), and this repository adapts his client to an RP2040 probe.
 
 ## Prerequisites
 
-- A Raspberry Pi Pico or Pico W with [MicroPython firmware](https://micropython.org/download/RPI_PICO/) installed
-- Python 3 and the dependencies from `utilities/picow_swire/requirements.txt` installed on the host
+- A Raspberry Pi Pico or Pico W.
+- Rust. The probe workspace pins its own compiler in [`tools/probe/rust-toolchain.toml`](../tools/probe/rust-toolchain.toml), which also installs the `thumbv6m-none-eabi` target; `probe-pico` needs rustc 1.93 or newer. Run `rustup show` in `tools/probe` to fetch it. This is separate from the `rust/` firmware toolchain.
+- A UF2 converter, `picotool` or `elf2uf2-rs`. On Linux, install the lighter one with `cargo install elf2uf2-rs --locked --no-default-features`; the flag avoids the `libudev` dependency, which only the unused deploy path needs.
+- Serial access to the probe's CDC port. Either add yourself to `dialout` (`sudo usermod -aG dialout "$USER"`, then log out and back in) or drop a udev rule in `/etc/udev/rules.d/99-tlsr-probe.rules`: `SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", GROUP="dialout", MODE="0660"`.
 
-There is no need to manually copy any code to the Pico — `client.py` automatically uploads `remote.py` to the device via the MicroPython Raw REPL on each run.
+## One-Time Probe Install
 
-## Timing Configuration
+Build the probe firmware and its `.uf2` with `tools/probe/build-pico.sh`. The script builds `probe-pico` for `thumbv6m-none-eabi`, converts the ELF with `picotool` or `elf2uf2-rs`, then prints the path of `tools/probe/target/thumbv6m-none-eabi/release/probe-pico.uf2` and the flashing hint. If no converter is on `PATH` it exits 2 with the install line above.
 
-TLSR8266 devices may use either a 12 MHz or 16 MHz crystal oscillator, which affects SWire timing requirements. If communication is unreliable, the timing constants in `remote.py` may need to be adjusted to match the crystal frequency of the target device. The repository includes timing values that work for both 12 MHz and 16 MHz devices; select the appropriate set for your hardware.
+```bash
+tools/probe/build-pico.sh
+```
+
+Then flash the Pico:
+
+1. Hold **BOOTSEL** and plug the Pico in; it mounts as a `RPI-RP2` volume.
+2. Copy `probe-pico.uf2` onto that volume. The Pico reboots into the probe firmware and the volume disappears.
+
+The host side is the `probe-tlsr` binary, which comes from this repository. Build it once and put it on `PATH`:
+
+```bash
+cd tools/probe
+cargo build --release -p probe-tlsr
+export PATH="$PWD/target/release:$PATH"    # or copy it somewhere already on PATH
+```
+
+Every command in this guide is written as `probe-tlsr …`; from a checkout without it on `PATH`, prefix each one with `cargo run -q -p probe-tlsr --`.
+
+Verify that the probe enumerates and answers:
+
+```bash
+lsusb | grep 2e8a
+# Bus 001 Device 005: ID 2e8a:000a ... tlsr8266_mesh probe-pico
+probe-tlsr info
+```
 
 ## Hardware Connections
 
-The circuit follows the schematic provided by rbaron (see [rbaron's blog post](https://rbaron.net/blog/2021/07/06/Reverse-engineering-the-M6-smart-fitness-band.html)), adapted for a Raspberry Pi Pico instead of an STM32.
+| Signal | Schematic (STM32) | Pico | Notes |
+|---|---|---|---|
+| Target reset | B0 | GP14 | Probe drives the TLSR8266 reset line |
+| SWS RX (target → probe) | A7 | GP15 | Direct connection |
+| SWS TX (probe → target) | A6 | GP17 | 1 kΩ series resistor |
 
-### Pin Mapping
-
-The following table shows the mapping from the original STM32-based schematic to the Raspberry Pi Pico GPIO pins (as defined in `remote.py`; adjust if needed):
-
-| STM32 | RPi Pico |
-|-------|----------|
-| A6    | GP17     |
-| A7    | GP15     |
-| B0    | GP14     |
+The target and the Pico must share ground, and the target must be powered. The 1 kΩ resistor on GP17 is the series protection the schematic puts on the probe's transmit line. Baron's write-up names the single-wire pins `SWDIO` and `SWCLK`; this project calls them SWS TX and SWS RX.
 
 ![RPi Pico programmer + TLSR8266 setup](assets/swire_schematic.png)
 
-## Usage
+## Crystal Speed
 
-Run all commands from the `utilities/picow_swire/` directory.
-
-### Flash firmware
+The firmware build defaults to a 12 MHz crystal. The 16 MHz variant is the `xtal-16mhz` feature in `rust/Cargo.toml`, shipped commented out as `#xtal-16mhz = []`. Switching to 16 MHz takes both steps: uncomment that feature (it also selects the 16 MHz RF/PLL tables) **and** build with `FEATURES=xtal-16mhz`.
 
 ```bash
-python client.py write_flash ../../_build/lightblemesh.bin
+make                                    # 12 MHz firmware (default)
+make FEATURES=rtt                       # 12 MHz firmware with the RTT log mirror
+make FEATURES=xtal-16mhz                # 16 MHz firmware
 ```
 
-### Reset the CPU
+Features can be combined, e.g. `FEATURES="rtt xtal-16mhz"`. The header crystal bit is derived from that same `FEATURES` value by `sdk/increment_version.sh`, so the header describes the build you selected rather than what the manifest declares, and changing the selection restamps it and rebuilds the startup object automatically; `make clean` remains the fallback if anything looks stale.
+
+Check what you built before flashing: the version word starts at byte 2 of the image, so `xxd -l 6 _build/lightblemesh.bin` shows `…d5 0d 00 80` when bit 31 is set (16 MHz) and `…d4 0d 00 00` when it is clear (12 MHz). The bit is stamped from `FEATURES`, so the remaining way to get it wrong is to flash an image that another selection left in `_build`.
+
+The image header carries the speed as a bit, and `probe-tlsr flash` compares it against the header it reads from the target. On a mismatch it refuses with exit 3 and leaves the core stopped; `--force` skips the guard. The guard only runs when both headers are readable, so a truncated or non-firmware `.bin` is not protected.
+
+A wrong-speed image is not a brick: SWire still works, so reflashing the correct build recovers the board. That is the reliability model's bad-image recovery property — a refused flash or a mis-flashed board is never lost.
+
+## Command Reference
+
+"Core left stopped" means the command leaves the target halted; recovery is `probe-tlsr reset`, or `reset --soft` after a stall.
+
+| Command | What it does | Arguments | Core left stopped |
+|---|---|---|---|
+| `info` | Reports `pc`, `cpu_status` and `cpu_state`; reads the flash header only when the core is already stopped | `--halt` stalls the core first | Only with `--halt` |
+| `flash` | Writes an ELF or flat binary image to flash, with the crystal guard | `<PATH>`, `--force`, `--reset` | Yes, unless `--reset` |
+| `flash-read` | Reads a flash span; `--out` saves the raw bytes to a file | `<ADDR> <LEN>`, `--out <FILE>` | Yes |
+| `flash-erase` | Erases the 4 KiB sectors covering a flash span | `<ADDR> <LEN>` | Yes |
+| `flash-write` | Programs a file at a flash address; unlike `flash`, it has no crystal guard, so writing an image at `0` does not check the header or speed | `<ADDR> <FILE>` | Yes |
+| `read` | Reads SWire memory | `<ADDR_OR_SYMBOL> [LEN]` | No |
+| `write` | Writes hex bytes to SWire memory | `<ADDR_OR_SYMBOL> <HEX>` | No |
+| `analog-read` | Reads one analog register | `<ADDR>` | No |
+| `analog-write` | Writes one analog register | `<ADDR> <VAL>` | No |
+| `reset` | Resets the target core; `--soft` reboots through SWire | `--soft`, `--stop` | Only with `--stop` |
+| `halt` | Stalls the core and disables the watchdog | none | Yes |
+| `inspect` | Stalls the core and dumps registers, stacks, reset cause and the panic body | none | Yes |
+| `rtt` | Streams the target's RTT log; fails on a panic line or a frozen heartbeat | requires `--elf`; `--until <SUBSTR>`, `--watchdog-ms <MS>` | Only on a fault |
+| `trap` | Arms a hardware breakpoint, waits for it, reports and soft-reboots | `<ADDR_OR_SYMBOL>`, `--slot <0..3>` | No (a hit reboots the core) |
+
+Field notes:
+
+- `info` on a running target deliberately sends no MSPI traffic, so it has no JEDEC id, crystal or build version. Use `probe-tlsr info --halt` to read the header; that stall is terminal, so finish with `probe-tlsr reset --soft`.
+- `cpu_state` names only the documented status bytes (`0x00`/`0x04` running, `0x05` stopped, `0x06` stalled) and prints `unknown` otherwise. A real target reporting `unknown` is normal; treat `cpu_status` as a raw hardware byte, not a reliable run/stop indicator.
+- `read` and `write` accept a symbol name with `--elf`, or an address in a SWire window: `0x0..=0xfff`, `0x8000..=0xbfff`, `0x800000..=0x800fff` or `0x808000..=0x80bfff`. Without `--elf` only numeric addresses work. `read` defaults to the symbol size, else 4 bytes.
+
+Global flags:
+
+| Flag | Meaning |
+|---|---|
+| `--port <PATH>` | Serial port; auto-detected when omitted (first USB port with vendor ID `0x2e8a`, else `/dev/ttyACM0` if it exists) |
+| `--elf <PATH>` | ELF used for symbol lookup; required by `rtt`, optional elsewhere |
+| `--json` | Prints one JSON object per command on stdout |
+| `--timeout-ms <MS>` | Per-response timeout, default 5000 ms. `rtt` and `trap` also read it as their stream or wait deadline, where absent or `0` means no deadline. |
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Any other failure — transport, protocol, ELF, I/O, invalid address, timeout |
+| 2 | Usage error (clap), or `rtt` saw the heartbeat stop moving |
+| 3 | `rtt` saw a panic line, or `flash` refused a crystal mismatch |
+
+## Workflows
+
+### Build and Flash the Firmware
 
 ```bash
-python client.py cpu_reset
+make
+probe-tlsr flash _build/lightblemesh.bin --reset
 ```
 
-### Flash and reset in one step
+`flash` accepts the ELF (`_build/lightblemesh`) or the flat binary; it flattens an ELF's loadable segments itself. Without `--reset` the core stays stopped.
+
+For a logging build, add the RTT mirror before flashing:
 
 ```bash
-python client.py write_flash ../../_build/lightblemesh.bin && python client.py cpu_reset
+make FEATURES=rtt
+probe-tlsr flash _build/lightblemesh.bin --reset
 ```
+
+Both builds write `_build/lightblemesh` and `_build/lightblemesh.bin`, so the RTT image replaces the default one. Run `make` again to restore the default image.
+
+### Stream Logs
+
+```bash
+probe-tlsr --elf _build/lightblemesh rtt --until "Booting FW version"
+```
+
+`rtt` requires `--elf`: it resolves `_TLSR_RTT` and `HEARTBEAT` from the ELF's `.symtab`, and fails before sending a request without it. The target must run an RTT build (`FEATURES=rtt`); a default image has no ring to stream. `--until` stops at the first matching line and exits 0. Without it the stream runs until interrupted or the `--timeout-ms` deadline.
+
+### Hang Triage
+
+```bash
+probe-tlsr --elf _build/lightblemesh rtt --watchdog-ms 1000
+```
+
+`rtt` reads `HEARTBEAT` after every poll. If it does not change for `--watchdog-ms` (default 1000), the main loop is assumed stopped: the command writes the stall message and an `inspect` block to stdout, exits 2, and leaves the core stalled. Recover with `probe-tlsr reset --soft`. To exercise the path deliberately, run `probe-tlsr halt` first and then start `rtt`; `halt` disables the watchdog, so the stall persists.
+
+### Crash Triage
+
+```bash
+probe-tlsr --elf _build/lightblemesh inspect
+probe-tlsr --elf _build/lightblemesh trap irq_handler --timeout-ms 5000
+```
+
+`inspect` stops the core, dumps the register block, both stacks, the retained reset cause and the flash panic record at `0x7B000`, and symbolizes what it can from `--elf`. With `--elf` and a `tc32-elf-objdump` on `PATH` it also disassembles a short window around `PC`. The core stays stalled; finish with `reset --soft`.
+
+`trap` arms one of four hardware breakpoint slots and waits for the hit. A hit stops the core terminally, so the command prints the report, clears the slot and soft-reboots the target. Slot 0 is the default; `--slot` takes 0–3. Absent or `0` `--timeout-ms` waits forever; a deadline clears the armed slot before failing, so an orphaned breakpoint cannot re-trap the next boot. The address must execute *after* arming: `irq_handler` and per-loop functions work on a running target, while a boot-only symbol such as `main_entrypoint` simply times out once the device has booted. For a one-shot boot path, arm while the core is stopped and start it yourself: `probe-tlsr reset --stop`, then `trap`, then `probe-tlsr reset`. Prefer stable asm or `extern "C"` symbols (`irq_handler`, `main_entrypoint`) or numeric addresses, because Rust symbols are mangled per build.
+
+## Composable Recipes
+
+### Stack Watermark
+
+The startup code fills free SRAM with `0xffffffff` (the loop labelled `FLL_STK` in `sdk/cstartup_8266.S`, a code label — not an address to read); the main stack grows down from the top of RAM at `0x80c000`, so the deepest word that is no longer `0xffffffff` is the watermark. The bottom of that free region is `_end_bss_`, read from the ELF's symbol table:
+
+```bash
+# Peak stack use since boot. Startup fills free SRAM with 0xffffffff
+# (the loop labelled FLL_STK in sdk/cstartup_8266.S); the main stack grows
+# down from the top of RAM (0x80c000), so the deepest word that is no longer
+# 0xffffffff is the watermark. `_end_bss_` is the bottom of that free region.
+ELF=_build/lightblemesh
+END_BSS=0x$(./toolchain/tc32/bin/tc32-elf-nm "$ELF" | awk '$3=="_end_bss_"{print $1}')
+probe-tlsr read "$END_BSS" $((0x80C000 - END_BSS)) --json |
+  python3 -c 'import json, sys
+d = bytes.fromhex(json.load(sys.stdin)["data_hex"])
+base, top = int(sys.argv[1], 16), 0x80C000
+words = [int.from_bytes(d[i:i+4], "little") for i in range(0, len(d), 4)]
+dirty = [base + 4 * i for i, w in enumerate(words) if w != 0xffffffff]
+peak = top - min(dirty) if dirty else 0
+print(f"watermark 0x{top - peak:08x}  peak stack {peak} B  headroom {top - base - peak} B")' "$END_BSS"
+```
+
+The read covers `_end_bss_..0x80c000` and does not stop the core; the span must stay inside the `0x808000..0x80bfff` SWire window. The static gate (`make stack-check`) reports a conservative worst-case call chain, so the live watermark is normally well below it — on the bench, 1148 B live against a 1656 B static worst case. Treat that as an observation, not a guarantee.
+
+### NVM Backup and Restore
+
+The non-volatile block is six 4 KiB sectors ending just below the application:
+
+| Address | Contents |
+|---|---|
+| `0x76000` | MAC address |
+| `0x77000` | Pairing keys |
+| `0x78000` | Luminance |
+| `0x79000` | Group address |
+| `0x7A000` | Reset counter |
+| `0x7B000` | Panic record |
+
+```bash
+probe-tlsr flash-read 0x76000 0x6000 --out nvm-backup.bin   # stops the core; 24576 bytes
+probe-tlsr flash-erase 0x76000 0x6000
+probe-tlsr flash-write 0x76000 nvm-backup.bin
+probe-tlsr reset
+```
+
+All three flash commands stop the core and leave it stopped, and `flash-erase` erases whole 4 KiB sectors, so the span must be sector-aligned or neighbouring data goes with it. A restore has to finish before `reset`; keep the `reset`, or the device stays dark until the next power cycle. Erasing these sectors removes the MAC and pairing keys, so back up first and check that `nvm-backup.bin` is exactly `0x6000` bytes (24576 bytes) before erasing. `flash-read --out` writes through a sibling `.tmp` file and renames it, so a failed backup cannot truncate an existing one.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `transport: no probe found (no USB VID 0x2e8a port and /dev/ttyACM0 missing); pass --port <path>` | No probe firmware, a charge-only cable, or BOOTSEL mode (mounts as `RPI-RP2`, not a serial port) | Reflash `probe-pico.uf2`, use a data cable, or pass `--port /dev/ttyACM0` |
+| `transport: cannot open /dev/ttyACM0: Permission denied` | User not in `dialout`, no udev rule | Add the group or the rule from Prerequisites |
+| `crystal mismatch: target 12 MHz, image 16 MHz (use --force to flash anyway); target left stopped — run \`probe-tlsr reset\`` | 16 MHz build on a 12 MHz part, or the reverse | Flash the matching build; `--force` only when the header is wrong, not the crystal. Run `reset` either way |
+| `transport: timed out waiting for a probe response` | Wiring, missing ground, unpowered target, missing 1 kΩ resistor | Check GP14/GP15/GP17, ground and target power, then retry `probe-tlsr info` |
+| `probe error: ...` | The probe rejected the request, e.g. a span outside the requested window | Re-read the argument forms in the command reference |
+| Core stuck after a crash command | `halt`, `inspect`, `info --halt`, a faulted `rtt` or `flash` without `--reset` left it stopped | `probe-tlsr reset --soft` for a stall, `probe-tlsr reset` for a hard reset |
+| Exit 2 from `rtt` | Frozen heartbeat, or a clap usage error | Triage as in Hang triage; check flags on a usage error |
+| Exit 3 | Panic line on the log, or a refused crystal mismatch | Use `inspect` for the panic body; reflash the correct build for a mismatch |
+
+## CI
+
+The `probe` job in `.github/workflows/ci.yml` checks formatting, clippy and unit tests for `tools/probe`, and cross-builds `probe-pico` for `thumbv6m-none-eabi`. It has no probe and no target attached, so it cannot verify SWire timing, wiring or any workflow on this page — those need hardware.

@@ -28,7 +28,6 @@ sys.path.insert(0, str(REPO_ROOT / "sdk"))
 
 import build_firmware  # noqa: E402  (sys.path set up above)
 
-LIBGCC_REL = "toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a"
 DEPS_REL = "rust/target/thumbv6m-none-eabi/release/deps"
 BUILD_REL = "rust/target/thumbv6m-none-eabi/release/build"
 CACHE_HIT_MESSAGE = "Build manifest unchanged for 'default'; skipping LLVM/TC32 link."
@@ -125,7 +124,6 @@ class _RepoCase(_TempCase):
             self.repo / "rust/src/version.rs", "pub static BUILD_VERSION: u32 = 42;\n"
         )
         self.boot_link = _write(self.repo / "sdk/boot.link", "ENTRY(reset)\n")
-        self.libgcc = _write(self.repo / LIBGCC_REL, b"!<arch>\n")
         self.tools = {
             "llc": _executable(self.repo / "tools/llc"),
             "llvm_link": _executable(self.repo / "tools/llvm-link"),
@@ -176,7 +174,6 @@ class _RepoCase(_TempCase):
             [self.ll_a, self.ll_b] if ll_paths is None else ll_paths,
             self.startup_obj,
             self.boot_link,
-            self.libgcc,
             self.tools if tools is None else tools,
             toolchain=toolchain,
         )
@@ -588,7 +585,6 @@ class TestPipelineCommands(_TempCase):
         tools = {name: Path(f"/tools/{name}") for name in build_firmware.TOOL_ORDER}
         ll_paths = [Path("/ir/alpha-11111111.ll"), Path("/ir/beta-22222222.ll")]
         startup_obj = Path("/repo/_build/asm/cstartup_8266.o")
-        libgcc = Path("/repo/toolchain/libgcc.a")
 
         self.assertEqual(
             build_firmware._stage_paths(stage),
@@ -602,9 +598,7 @@ class TestPipelineCommands(_TempCase):
             },
         )
 
-        commands = build_firmware._pipeline_commands(
-            stage, ll_paths, startup_obj, libgcc, tools
-        )
+        commands = build_firmware._pipeline_commands(stage, ll_paths, startup_obj, tools)
 
         self.assertEqual(
             [label for label, _ in commands],
@@ -652,7 +646,6 @@ class TestPipelineCommands(_TempCase):
                     str(stage / "lightblemesh"),
                     str(stage / "merged.o"),
                     str(startup_obj),
-                    str(libgcc),
                 ],
                 [
                     "/tools/objcopy",
@@ -663,10 +656,10 @@ class TestPipelineCommands(_TempCase):
                 ],
             ],
         )
-        with self.subTest("link order: merged.o, startup object, libgcc.a"):
+        with self.subTest("link order: merged.o, startup object"):
             self.assertEqual(
-                commands[4][1][-3:],
-                [str(stage / "merged.o"), str(startup_obj), str(libgcc)],
+                commands[4][1][-2:],
+                [str(stage / "merged.o"), str(startup_obj)],
             )
 
     def test_startup_compile_argv_is_frozen(self) -> None:

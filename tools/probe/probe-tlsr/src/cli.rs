@@ -27,8 +27,7 @@ use crate::commands::diag::rtt::DEFAULT_WATCHDOG_MS;
                   reported before a bad argument. `flash` without --reset and `halt` leave the\n\
                   core stopped; `inspect` and an `rtt` fault leave it stalled. Run `reset` to\n\
                   restart it (use `reset --soft` after a stall). Exit 2 is both a usage error\n\
-                  and a frozen `rtt` heartbeat; exit 3 is both an `rtt` panic line and a\n\
-                  crystal mismatch."
+                  and a frozen `rtt` heartbeat; exit 3 is an `rtt` panic line."
 )]
 pub struct Cli {
     /// Serial port of the probe; auto-detected when omitted.
@@ -64,9 +63,6 @@ pub enum Command {
     Flash {
         /// Image to write.
         path: PathBuf,
-        /// Skip the crystal-mismatch guard.
-        #[arg(long)]
-        force: bool,
         /// Reset the target after writing (without it the core stays stopped).
         #[arg(long)]
         reset: bool,
@@ -186,10 +182,6 @@ pub enum CliError {
         message: String,
     },
     Device(String),
-    CrystalMismatch {
-        target_mhz: u8,
-        image_mhz: u8,
-    },
     MissingElf,
     /// A wait deadline expired before the stream or trap condition was met.
     Timeout(String),
@@ -205,15 +197,15 @@ pub enum CliError {
 }
 
 impl CliError {
-    /// Process exit code: `2` for a frozen heartbeat, `3` for the two
-    /// safety-relevant aborts, else `1`.
+    /// Process exit code: `2` for a frozen heartbeat, `3` for a `rtt` panic
+    /// line, else `1`.
     ///
     /// Usage errors never reach this: clap exits with `2` while parsing, which
     /// is why `2` is deliberately shared with [`Self::HeartbeatStalled`].
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::HeartbeatStalled { .. } => 2,
-            Self::CrystalMismatch { .. } | Self::TargetPanic { .. } => 3,
+            Self::TargetPanic { .. } => 3,
             _ => 1,
         }
     }
@@ -227,7 +219,6 @@ impl CliError {
             Self::Io(_) => "Io",
             Self::InvalidAddress { .. } => "InvalidAddress",
             Self::Device(_) => "Device",
-            Self::CrystalMismatch { .. } => "CrystalMismatch",
             Self::MissingElf => "MissingElf",
             Self::Timeout(_) => "Timeout",
             Self::HeartbeatStalled { .. } => "HeartbeatStalled",
@@ -253,13 +244,6 @@ impl fmt::Display for CliError {
             Self::Io(message) => write!(f, "io: {message}"),
             Self::InvalidAddress { message } => write!(f, "invalid address: {message}"),
             Self::Device(message) => f.write_str(message),
-            Self::CrystalMismatch {
-                target_mhz,
-                image_mhz,
-            } => write!(
-                f,
-                "crystal mismatch: target {target_mhz} MHz, image {image_mhz} MHz (use --force to flash anyway); target left stopped — run `probe-tlsr reset`"
-            ),
             Self::MissingElf => f.write_str("symbol lookup needs --elf <path>"),
             Self::Timeout(message) => f.write_str(message),
             Self::HeartbeatStalled { last, watchdog_ms } => write!(

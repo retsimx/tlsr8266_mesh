@@ -569,10 +569,12 @@ Command byte: `0xC3` = digital register write, `0xC8` = analog register write.
 | 54 | 0x43A | 0x77 | 0xC3 | RF modem |
 | 55 | 0x43E | 0xC9 | 0xC3 | RF modem |
 | 56 | 0x4CD | 0x06 | 0xC3 | RX DC I/Q |
-| 57 | 0x4EB | 0x60 | 0xC3 | PLL ctrl A (16 MHz xtal BLE mode) |
+| 57 | 0x4EB | 0x60 | 0xC3 | PLL ctrl A — 16 MHz part only (runtime-selected) |
 | 58 | 0x99 | 0x31 | 0xC8 | Gauss filter select (16 MHz) |
 | 59 | 0x82 | 0x34 | 0xC8 | RX ADC clock enable |
 | 60 | 0x9E | 0x41 | 0xC8 | DC_MOD 500K |
+
+Entries 57–60 are the 16 MHz tail of the table. `rf_drv_init()` loads all 61 entries when boot-time detection found a 16 MHz crystal and the first 57 (indices 0–56) on a 12 MHz part, so one image serves both boards.
 
 ### 3.3 AGC Table (TBL_AGC)
 
@@ -995,7 +997,7 @@ Controls system-timer IRQ dispatch. Compiler-assigned sequential discriminants (
 | Min RX window | — | 3,800 µs (0xED8 ticks) | µs |
 | Connection interval | `SLAVE_LINK_INTERVAL` | From CONNECT_IND (× 1250 × 32 ticks) | sys ticks |
 | Supervision timeout | `BLE_PERIPHERAL_CONNECTION_TIMEOUT_US` | From CONNECT_IND (× 10,000 µs) | µs |
-| Scan response delay | `BLE_SCAN_RESPONSE_INTERVAL_US` | 0x92 or 0x93 (varies by xtal) | µs |
+| Scan response delay | `BLE_SCAN_RESPONSE_INTERVAL_US` | 0x92 or 0x93 (set from the post-PLL system clock) | µs |
 | Timing adjust window | — | 700–1100 µs (normal), ±200 µs correction | µs |
 | OTA RX timeout | — | 10,000 µs (10 ms) | µs |
 
@@ -1637,21 +1639,20 @@ When the last packet is received (`cur_idx == ota_pkt_total`):
 1. Read `new_fw_size` from `FLASH_ADR_LIGHT_NEW_FW + 0x18` (4 bytes, little-endian).
 2. Compute `ota_pkt_total = ceil(new_fw_size / packet_len)`.
 3. Verify that at least 3 packets were received.
-4. Read current device firmware version from flash.
-5. Compare crystal frequency flag (`VERSION_16MHZ` bit) — mismatch → `OtaState::Error`.
-6. Check version ≥ current (unless `--force`) — downgrade → `OtaState::Error`.
-7. All checks passed → `OtaState::Ok` → device reboots and applies the staged firmware.
+4. All checks passed → `OtaState::Ok` → device reboots and applies the staged firmware.
 
-### 15.6 Version and Crystal Check
+The firmware itself never compares versions and cannot reject a downgrade — `rust/src/ota.rs` checks only the packet count and CRC. The version check is entirely host-side and runs *before* the first packet is sent: the Python tools read the device version (Firmware Revision characteristic over BLE, `OTA_START_RESP` over UART) and the new version from image offset 2, then refuse to transfer when `dev_ver >= fw_ver` unless `--force` is given (`flash_fw.py`, `flash_fw_uart.py`).
 
-The firmware version word is stored at `FLASH_ADR_LIGHT_NEW_FW + 0x18`. The bit layout:
+### 15.6 Version Word
+
+The version word lives at **image offset 2**, not at `+0x18`: `sdk/cstartup_8266.S` emits a 2-byte `tj __reset` at offset 0 and the `.word (BUILD_VERSION)` immediately after it, so for the staged image the address is `FLASH_ADR_LIGHT_NEW_FW + 2` (`+0x18` holds `new_fw_size`). The bit layout:
 
 | Bit | Name | Description |
 |-----|------|-------------|
-| 31 | `VERSION_16MHZ` | `1` = firmware requires 16 MHz crystal |
+| 31 | — | Always `0`; older 16 MHz firmware set it and host tools mask it |
 | 30–0 | Version number | Monotonically increasing build number |
 
-The `--force` flag bypasses the version number comparison but **never** bypasses the crystal frequency check.
+Bit 31 no longer encodes the crystal: one image serves both speeds, so the firmware writes a plain build number with the bit clear. Host tools still mask it (`VERSION_MASK` = `0x7FFF_FFFF`) when comparing versions, so a deployed 16 MHz device whose header has the bit set accepts the universal image without any override. The host tools' `--force` flag bypasses that host-side version number comparison.
 
 ---
 

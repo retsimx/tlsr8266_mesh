@@ -52,7 +52,7 @@ fn human_info_prints_key_value_lines() {
         human_output(&stopped),
         concat!(
             "pc=0x00000000 cpu_status=0x05 cpu_state=stopped\n",
-            "flash jedec_id=ef4018 xtal_mhz=12 build_version=3539 magic_ok=true"
+            "flash jedec_id=ef4018 build_version=3539 magic_ok=true"
         )
     );
 }

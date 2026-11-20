@@ -149,8 +149,8 @@ mod tests;
 
 /// Fixture ELF whose first loadable segment starts with `header`.
 ///
-/// Only the crystal-guard tests in `commands::flash` need it: they drive an ELF
-/// through the same flattening `flash` uses, so the 12-byte header at `p_paddr`
-/// 0 must survive into the flat image.
+/// The `flash` ELF test needs it: it drives an ELF through the same flattening
+/// `flash` uses, so the 12-byte header at `p_paddr` 0 must survive into the
+/// flat image that is programmed.
 #[cfg(test)]
 pub(crate) use self::tests::header_fixture;

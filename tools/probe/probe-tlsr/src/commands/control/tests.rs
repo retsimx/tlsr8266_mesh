@@ -39,7 +39,7 @@ fn info_on_stopped_or_stalled_target_reads_flash() {
             pc_bytes(),
             data([status]),
             jedec_id(),
-            header(0x8000_0dd3),
+            header(0x0000_0dd3),
         ]);
 
         let output = info(&mut mock, false).expect("info succeeds");
@@ -52,7 +52,6 @@ fn info_on_stopped_or_stalled_target_reads_flash() {
                 cpu_state: state,
                 flash_info: Some(FlashInfo {
                     jedec_id: "ef4018".to_owned(),
-                    xtal_mhz: 16,
                     build_version: 0x0dd3,
                     magic_ok: true,
                 }),
@@ -72,7 +71,7 @@ fn info_on_stopped_or_stalled_target_reads_flash() {
 }
 
 #[test]
-fn info_decodes_the_real_12mhz_header() {
+fn info_reads_the_version_word_of_a_deployed_header() {
     let mut mock = crate::transport::MockTransport::new([
         Response::Ack,
         pc_bytes(),
@@ -91,7 +90,6 @@ fn info_decodes_the_real_12mhz_header() {
             cpu_state: "stopped",
             flash_info: Some(FlashInfo {
                 jedec_id: "ef4018".to_owned(),
-                xtal_mhz: 12,
                 build_version: 0x0dd4,
                 magic_ok: true,
             }),
@@ -100,13 +98,15 @@ fn info_decodes_the_real_12mhz_header() {
 }
 
 #[test]
-fn info_decodes_the_real_16mhz_header() {
+fn info_masks_bit_31_of_the_version_word() {
+    // A pre-#33 16 MHz image labels itself with bit 31 set. The crystal is
+    // detected at runtime now, so the bit is ignored, not decoded.
     let mut mock = crate::transport::MockTransport::new([
         Response::Ack,
         pc_bytes(),
         data([0x05]),
         jedec_id(),
-        data(REAL_16MHZ_HEADER),
+        header(0x8000_0dd4),
     ]);
 
     let output = info(&mut mock, false).expect("info succeeds");
@@ -119,8 +119,7 @@ fn info_decodes_the_real_16mhz_header() {
             cpu_state: "stopped",
             flash_info: Some(FlashInfo {
                 jedec_id: "ef4018".to_owned(),
-                xtal_mhz: 16,
-                build_version: 0x0dd5,
+                build_version: 3540,
                 magic_ok: true,
             }),
         }
@@ -153,7 +152,6 @@ fn info_halt_stalls_core_and_clears_watchdog_before_flash_reads() {
             cpu_state: "running",
             flash_info: Some(FlashInfo {
                 jedec_id: "ef4018".to_owned(),
-                xtal_mhz: 12,
                 build_version: 0x0dd3,
                 magic_ok: true,
             }),
@@ -255,7 +253,6 @@ fn info_halt_on_a_stopped_core_keeps_it_stopped_before_the_flash_read() {
             cpu_state: "stopped",
             flash_info: Some(FlashInfo {
                 jedec_id: "ef4018".to_owned(),
-                xtal_mhz: 12,
                 build_version: 0x0dd3,
                 magic_ok: true,
             }),

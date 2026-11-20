@@ -93,9 +93,12 @@ pub fn firmware_image(version: u32, len: usize) -> Vec<u8> {
 
 /// 12-byte firmware headers taken byte-for-byte from real images.
 ///
-/// These are the first 12 bytes of `lightblemesh` builds. The version/crystal
-/// word lives at bytes `2..6` because `sdk/cstartup_8266.S` emits a 2-byte
+/// These are the first 12 bytes of `lightblemesh` builds. The version word
+/// lives at bytes `2..6` because `sdk/cstartup_8266.S` emits a 2-byte
 /// `tj __reset` at address 0. Do not "tidy" these back to offset 4.
+///
+/// `REAL_16MHZ_HEADER` is a deployed pre-#33 image: bit 31 of its version word
+/// is set, which host tools mask off when they report the build version.
 pub const REAL_12MHZ_HEADER: [u8; 12] = [
     0x0e, 0x80, 0xd4, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x4b, 0x4e, 0x4c, 0x54,
 ];
@@ -123,13 +126,4 @@ impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
-}
-
-pub fn flash_requests(requests: &[Request]) -> bool {
-    requests.iter().any(|req| {
-        matches!(
-            req,
-            Request::FlashEraseSector { .. } | Request::FlashWritePage { .. }
-        )
-    })
 }

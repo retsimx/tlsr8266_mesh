@@ -90,9 +90,8 @@ fn put_section_header(buf: &mut [u8], at: usize, fields: SectionFields) {
 
 /// Builds a fixture whose first 16-byte loadable payload starts with `header`.
 ///
-/// The crystal-guard test in `commands::flash` uses this to prove that the
-/// 12-byte firmware header at `p_paddr` 0 survives ELF flattening. `fixture`
-/// keeps the original payload.
+/// The `flash` ELF test uses this to prove that the 12-byte firmware header at
+/// `p_paddr` 0 survives ELF flattening. `fixture` keeps the original payload.
 pub(crate) fn header_fixture(header: [u8; 12]) -> Vec<u8> {
     let mut seg0 = SEG0_BYTES;
     seg0[..header.len()].copy_from_slice(&header);

@@ -32,12 +32,12 @@ use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::common::compat::load_tbl_cmd_set;
+use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+use crate::sdk::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::random::rand;
@@ -66,6 +66,30 @@ const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
 
 /**
+ * Select the RF initialization table for the crystal detected at boot
+ *
+ * Returns the whole table for a 16MHz crystal, and the table without its last
+ * four commands for the default 12MHz crystal. The final four commands
+ * (0x4eb, analog 0x99, analog 0x82, analog 0x9e) retune the PLL calibration
+ * enable, the gauss filter, the RX ADC clock and the DC modulator for a 16MHz
+ * crystal; they are wrong values on a 12MHz part, so they stay unloaded there.
+ *
+ * The selection lives in this helper because `load_tbl_cmd_set` is declared
+ * `#[cfg_attr(test, mry(skip_args(TBLCMDSET)))]`: its mock cannot observe which
+ * slice it was handed, so the choice is only testable as a pure function.
+ *
+ * @param is_16mhz - Whether a 16MHz crystal was detected at boot
+ * @return The RF initialization command table to load
+ */
+fn rf_init_table(is_16mhz: bool) -> &'static [TBLCMDSET] {
+    if is_16mhz {
+        &TBL_RF_INI
+    } else {
+        &TBL_RF_INI[..TBL_RF_INI.len() - 4]
+    }
+}
+
+/**
  * Initialize the RF driver with specified settings
  *
  * This function sets up the RF hardware by:
@@ -73,7 +97,9 @@ const RF_TRX_OFF: u8 = 0x45;
  * 2. Setting up RF gain values for Automatic Gain Control (AGC)
  * 3. Configuring transmission power parameters based on values stored in flash memory
  *
- * The RF initialization values depend on whether a 16MHz crystal is used (controlled by feature flag).
+ * The RF initialization table is chosen from the crystal measured at boot: a 16MHz
+ * crystal loads the full table, the default 12MHz crystal omits the four commands
+ * that only apply to a 16MHz part (see rf_init_table).
  * If transmission power calibration values are found in flash memory, they will be applied to
  * RF_TP_BASE and RF_TP_GAIN parameters which control output power level.
  *
@@ -86,13 +112,10 @@ pub fn rf_drv_init(enable: bool) -> u8 {
 
     critical_section::with(|_| {
         if enable {
-            // Load initialization values to configure the RF hardware registers
-            // Different register values for 16MHz xtal configuration versus default
-            #[cfg(feature = "xtal-16mhz")]
-            load_tbl_cmd_set(&TBL_RF_INI);
-
-            #[cfg(not(feature = "xtal-16mhz"))]
-            load_tbl_cmd_set(&TBL_RF_INI[0..TBL_RF_INI.len() - 4]);
+            // Load initialization values to configure the RF hardware registers.
+            // The table is selected from the crystal detected at boot, because the
+            // final four entries only apply to a 16MHz crystal.
+            load_tbl_cmd_set(rf_init_table(is_16mhz_xtal()));
 
             // Configure the Automatic Gain Control (AGC) settings
             // Each value corresponds to different RF gain stages
@@ -1081,6 +1104,7 @@ mod tests {
     use crate::sdk::common::compat::*;
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
     use crate::sdk::mcu::analog::*;
+    use crate::sdk::mcu::clock::mock_is_16mhz_xtal;
     use crate::sdk::mcu::crypto::{mock_aes_att_decryption_packet, mock_encode_password};
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::mcu::random::mock_rand;
@@ -1660,6 +1684,82 @@ mod tests {
         mock_analog_write(0x93, 0).assert_called(1);
     }
 
+    /// Tests that rf_init_table selects the full 61-entry table or the 12MHz prefix.
+    ///
+    /// This test verifies that rf_init_table:
+    /// - Returns all 61 commands when a 16MHz crystal was detected
+    /// - Returns only the leading 57 commands on the default 12MHz crystal
+    #[test]
+    fn test_rf_init_table_lengths() {
+        assert_eq!(
+            rf_init_table(true).len(),
+            61,
+            "a 16MHz crystal should load the full table"
+        );
+        assert_eq!(
+            rf_init_table(false).len(),
+            57,
+            "a 12MHz crystal should skip the four 16MHz-only commands"
+        );
+        assert_eq!(
+            TBL_RF_INI.len(),
+            61,
+            "TBL_RF_INI size is part of the contract"
+        );
+    }
+
+    /// Tests that the 12MHz table is a prefix of the 16MHz table.
+    ///
+    /// The two selections must differ only by the trailing entries: every command
+    /// the 12MHz crystal loads must be byte-identical to the 16MHz command at the
+    /// same index, so a 12MHz part never gets a different register value.
+    #[test]
+    fn test_rf_init_table_12mhz_is_prefix_of_16mhz() {
+        let table_16mhz = rf_init_table(true);
+        let table_12mhz = rf_init_table(false);
+
+        for (index, (cmd_12mhz, cmd_16mhz)) in
+            table_12mhz.iter().zip(table_16mhz.iter()).enumerate()
+        {
+            // Field access is copied out of the packed struct instead of
+            // borrowed: a reference to a packed field is unaligned.
+            let (adr_12mhz, dat_12mhz, cmd_12mhz) = (cmd_12mhz.adr, cmd_12mhz.dat, cmd_12mhz.cmd);
+            let (adr_16mhz, dat_16mhz, cmd_16mhz) = (cmd_16mhz.adr, cmd_16mhz.dat, cmd_16mhz.cmd);
+
+            assert_eq!(adr_12mhz, adr_16mhz, "adr differs at index {}", index);
+            assert_eq!(dat_12mhz, dat_16mhz, "dat differs at index {}", index);
+            assert_eq!(cmd_12mhz, cmd_16mhz, "cmd differs at index {}", index);
+        }
+    }
+
+    /// Tests that the entries skipped on a 12MHz crystal are the four 16MHz-only commands.
+    ///
+    /// This pins which commands the runtime selection drops: the PLL calibration
+    /// enable at 0x4eb and the analog gauss filter, RX ADC clock and DC modulator
+    /// retunes at 0x99, 0x82 and 0x9e.
+    #[test]
+    fn test_rf_init_table_drops_16mhz_only_commands() {
+        let table_16mhz = rf_init_table(true);
+        let first_dropped = rf_init_table(false).len();
+
+        // (adr, dat, cmd) of the four commands only a 16MHz crystal receives
+        let expected = [
+            (0x4ebu16, 0x60u8, 0xc3u8), // reg_pll_ctrl_a = CAL_DONE_EN | LOCK_EN
+            (0x99, 0x31, 0xc8),         // gauss filter select, 16M
+            (0x82, 0x34, 0xc8),         // enable RX ADC clock
+            (0x9e, 0x41, 0xc8),         // DC modulator (dc_mod), 500K
+        ];
+
+        for (offset, (adr, dat, cmd)) in expected.iter().enumerate() {
+            let entry = &table_16mhz[first_dropped + offset];
+            // Copy the fields out: taking a reference to a packed field is unaligned.
+            let (entry_adr, entry_dat, entry_cmd) = (entry.adr, entry.dat, entry.cmd);
+            assert_eq!(entry_adr, *adr, "adr of dropped entry {}", offset);
+            assert_eq!(entry_dat, *dat, "dat of dropped entry {}", offset);
+            assert_eq!(entry_cmd, *cmd, "cmd of dropped entry {}", offset);
+        }
+    }
+
     #[test]
     #[mry::lock(analog_read)]
     #[mry::lock(load_tbl_cmd_set)]
@@ -1725,6 +1825,49 @@ mod tests {
 
         // Verify the function returns the deepsleep flag value
         assert_eq!(result, 0x40);
+    }
+
+    /// Tests that rf_drv_init consults the crystal detected at boot.
+    ///
+    /// `load_tbl_cmd_set` skips its argument when mocked, so the mock cannot see
+    /// which table it was handed (that choice is covered by the pure
+    /// `rf_init_table` tests). This test pins the other half of the contract:
+    /// `rf_drv_init` actually reads the detected flag, exactly once, and still
+    /// loads a table.
+    #[test]
+    #[mry::lock(analog_read)]
+    #[mry::lock(load_tbl_cmd_set)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
+    #[mry::lock(flash_read_page)]
+    #[mry::lock(is_16mhz_xtal)]
+    fn test_rf_drv_init_reads_detected_xtal_flag() {
+        mock_analog_read(rega_deepsleep_flag).returns(0);
+        mock_load_tbl_cmd_set().returns(TBL_RF_INI.len() as u32);
+        mock_is_16mhz_xtal().returns(true);
+
+        for i in 0..6 {
+            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
+        }
+
+        // Erased-flash power settings: leave RF_TP_BASE / RF_TP_GAIN alone
+        mock_flash_read_page(Any, Any, Any).returns_with(
+            |_addr, len, buf_ptr: SendWrapper<*mut u8>| {
+                // SAFETY: the caller passes a writable buffer of `len` bytes,
+                // the same contract the other flash_read_page mocks in this
+                // module rely on
+                let buf_slice = unsafe { core::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
+                buf_slice.fill(0xFF);
+            },
+        );
+
+        let result = rf_drv_init(true);
+
+        // The detected crystal is read exactly once, and the table load that
+        // consumes it is still issued
+        mock_is_16mhz_xtal().assert_called(1);
+        mock_load_tbl_cmd_set().assert_called(1);
+
+        assert_eq!(result, 0);
     }
 
     #[test]

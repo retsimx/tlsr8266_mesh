@@ -30,7 +30,35 @@ import build_firmware  # noqa: E402  (sys.path set up above)
 
 LIBGCC_REL = "toolchain/tc32/lib/gcc/tc32-elf/4.5.1.tc32-elf-1.5/libgcc.a"
 DEPS_REL = "rust/target/thumbv6m-none-eabi/release/deps"
+BUILD_REL = "rust/target/thumbv6m-none-eabi/release/build"
 CACHE_HIT_MESSAGE = "Build manifest unchanged for 'default'; skipping LLVM/TC32 link."
+
+RUSTC_VV_SAMPLE = """\
+rustc 1.102.0-nightly (6905905bb 2026-11-19)
+binary: rustc
+commit-hash: 6905905bb7727fd0f9223f5fdc9ad4e62236d5a2
+commit-date: 2026-11-19
+host: x86_64-unknown-linux-gnu
+release: 1.102.0-nightly
+LLVM version: 23.1.6
+"""
+
+LLC_VERSION_SAMPLE = """\
+LLVM (http://llvm.org/):
+  LLVM version 23.1.7
+  Optimized build with assertions.
+  Default target:
+  Host CPU: znver3
+"""
+
+FAKE_TOOLCHAIN = {
+    "rustc_release": "1.102.0-nightly",
+    "rustc_commit": "6905905bb7727fd0f9223f5fdc9ad4e62236d5a2",
+    "rustc_llvm": "23.1.6",
+    "rustc_llvm_major": 23,
+    "fork_llvm": "23.1.7",
+    "fork_llvm_major": 23,
+}
 
 # The pre-#37 flag literals, pinned here *on purpose*: the pipeline-argv test is
 # the CI guard for the normative "flags and object order must not change"
@@ -141,6 +169,7 @@ class _RepoCase(_TempCase):
         features: tuple[str, ...] = (),
         ll_paths: list[Path] | None = None,
         tools: dict[str, Path] | None = None,
+        toolchain: dict[str, object] | None = None,
     ) -> dict:
         return build_firmware.compute_manifest(
             list(features),
@@ -149,6 +178,7 @@ class _RepoCase(_TempCase):
             self.boot_link,
             self.libgcc,
             self.tools if tools is None else tools,
+            toolchain=toolchain,
         )
 
 
@@ -349,6 +379,70 @@ class TestArtifactResolution(_RepoCase):
             os.utime(newer, ns=(same, same))
             self.assertEqual(build_firmware.resolve_ll_paths([root]), [older_ll])
 
+    def test_resolve_ll_paths_cargo_1_100_build_out_layout(self) -> None:
+        build_root = self.repo / BUILD_REL
+        core_out = build_root / "core" / "2f8de896c3184f8b" / "out"
+        builtins_out = build_root / "compiler_builtins" / "67c4781c90c5b76c" / "out"
+        app_out = build_root / "tlsr8266_mesh" / "aeee5356951bbd14" / "out"
+
+        core_rlib = _write(core_out / "libcore-2f8de896c3184f8b.rlib", "core")
+        core_ll = _write(core_out / "core-2f8de896c3184f8b.ll", "core ir")
+        builtins_rlib = _write(
+            builtins_out / "libcompiler_builtins-67c4781c90c5b76c.rlib", "cb"
+        )
+        builtins_ll = _write(
+            builtins_out / "compiler_builtins-67c4781c90c5b76c.ll", "cb ir"
+        )
+        app_rlib = _write(app_out / "libtlsr8266_mesh-aeee5356951bbd14.rlib", "app")
+        app_ll = _write(app_out / "tlsr8266_mesh-aeee5356951bbd14.ll", "app ir")
+
+        stale_build = _write(
+            build_root / "tlsr8266_mesh" / "00000000deadbeef" / "out" / "tlsr8266_mesh-00000000deadbeef.ll",
+            "stale",
+        )
+        stale_deps = _write(self.repo / DEPS_REL / "tlsr8266_mesh-deadbeef.ll", "stale")
+
+        stdout = "\n".join(
+            [
+                _artifact(core_rlib, core_out / "libcore-2f8de896c3184f8b.rmeta"),
+                _artifact(builtins_rlib),
+                _artifact(app_rlib),
+            ]
+        )
+        resolved = build_firmware.resolve_ll_paths(
+            build_firmware.parse_cargo_artifacts(stdout)
+        )
+        self.assertEqual(resolved, sorted([core_ll, builtins_ll, app_ll]))
+        self.assertNotIn(stale_build, resolved)
+        self.assertNotIn(stale_deps, resolved)
+
+    def test_root_rlib_matches_cargo_1_100_build_out_twin(self) -> None:
+        release = self.repo / "rust/target/thumbv6m-none-eabi/release"
+        out_dir = self.repo / BUILD_REL / "root" / "aeee5356951bbd14" / "out"
+        hashed = _write(out_dir / "libroot-aeee5356951bbd14.rlib", "root payload")
+        expected_ll = _write(out_dir / "root-aeee5356951bbd14.ll", "root ir")
+
+        with self.subTest("hardlink twin in build/<crate>/<hash>/out"):
+            root = release / "libroot.rlib"
+            root.parent.mkdir(parents=True, exist_ok=True)
+            os.link(hashed, root)
+            self.assertEqual(build_firmware.resolve_ll_paths([root]), [expected_ll])
+            root.unlink()
+
+        with self.subTest("copied twin in build/<crate>/<hash>/out"):
+            root = release / "libroot.rlib"
+            shutil.copyfile(hashed, root)
+            self.assertEqual(build_firmware.resolve_ll_paths([root]), [expected_ll])
+
+        with self.subTest("ignores prefix-colliding sibling crate in build/<crate>/<hash>/out"):
+            sibling_out = self.repo / BUILD_REL / "root-sibling" / "bbbb2222cccc3333" / "out"
+            _write(sibling_out / "libroot-sibling-bbbb2222cccc3333.rlib", "root payload")
+            _write(sibling_out / "root-sibling-bbbb2222cccc3333.ll", "sibling ir")
+            hashed.unlink()
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware.resolve_ll_paths([root])
+            self.assertEqual(caught.exception.exit_code, 1)
+
 
 class TestManifestAndCache(_RepoCase):
     def _assert_edit_invalidates(self, baseline: dict, label: str, edit, restore) -> None:
@@ -461,8 +555,12 @@ class TestManifestAndCache(_RepoCase):
 
         with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
             self.startup_obj, self.startup_manifest = self._install_startup()
-            build_firmware._write_json(stage / "manifest.json", self.compute())
+            build_firmware._write_json(
+                stage / "manifest.json", self.compute(toolchain=FAKE_TOOLCHAIN)
+            )
             with mock.patch.object(
+                build_firmware, "probe_toolchain", return_value=FAKE_TOOLCHAIN
+            ), mock.patch.object(
                 build_firmware, "_cargo_build", return_value=[self.ll_a, self.ll_b]
             ), mock.patch.object(build_firmware, "run_command") as runner:
                 printed = io.StringIO()
@@ -470,6 +568,7 @@ class TestManifestAndCache(_RepoCase):
                     self.assertEqual(build_firmware._run_build(args), 0)
 
         self.assertIn(CACHE_HIT_MESSAGE, printed.getvalue())
+        self.assertIn("Toolchain: rustc 1.102.0-nightly", printed.getvalue())
         runner.assert_not_called()
         self.assertEqual((stage / "merged.o").read_bytes(), b"untouched object")
         self.assertEqual((self.out / "lightblemesh").read_bytes(), b"elf image")
@@ -626,6 +725,250 @@ class TestVersionSync(_RepoCase):
                 self.assertIn(str(path), str(caught.exception))
                 self.assertEqual(caught.exception.exit_code, 2)
                 _write(path, ".equ BUILD_VERSION,42\n" if path == self.version_in else "pub static BUILD_VERSION: u32 = 42;\n")
+
+
+def _compiler_message(rendered: str | None, level: str = "warning") -> str:
+    return json.dumps(
+        {
+            "reason": "compiler-message",
+            "message": {"level": level, "rendered": rendered},
+        }
+    )
+
+
+class TestCargoDiagnostics(_RepoCase):
+    def test_render_cargo_messages_writes_rendered_diagnostics(self) -> None:
+        deps = self.repo / DEPS_REL
+        lines = [
+            "   Compiling app v0.1.0",
+            "{not json",
+            _artifact(deps / "libalpha-11111111.rlib"),
+            _compiler_message(None),
+            _compiler_message("   \n"),
+            _compiler_message("warning: unused variable\n --> src/lib.rs:3:9\n"),
+            _compiler_message("error[E0425]: cannot find value", level="error"),
+        ]
+        stderr = io.StringIO()
+        count = build_firmware.render_cargo_messages(lines, stream=stderr)
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            stderr.getvalue(),
+            "warning: unused variable\n --> src/lib.rs:3:9\n"
+            "error[E0425]: cannot find value\n",
+        )
+
+    def test_cargo_build_renders_warnings_on_success(self) -> None:
+        deps = self.repo / DEPS_REL
+        alpha_rlib = _write(deps / "libalpha-11111111.rlib", "alpha rlib")
+        stdout = "\n".join(
+            [
+                _compiler_message("warning: sample warning\n"),
+                _artifact(alpha_rlib),
+                json.dumps({"reason": "build-finished", "success": True}),
+            ]
+        )
+        proc = subprocess.CompletedProcess(["cargo"], 0, stdout=stdout)
+        stderr = io.StringIO()
+        with mock.patch.object(
+            build_firmware, "run_command", return_value=proc
+        ), contextlib.redirect_stderr(stderr):
+            ll_paths = build_firmware._cargo_build(self.repo / "rust/Cargo.toml", [])
+
+        self.assertEqual(ll_paths, [self.ll_a])
+        self.assertEqual(stderr.getvalue(), "warning: sample warning\n")
+
+    def test_cargo_build_renders_errors_on_failure_before_raising(self) -> None:
+        stdout = "\n".join(
+            [
+                _compiler_message("warning: earlier warning\n"),
+                _compiler_message(
+                    "error[E0308]: mismatched types\n --> src/lib.rs:10:5\n",
+                    level="error",
+                ),
+                json.dumps({"reason": "build-finished", "success": False}),
+            ]
+        )
+        proc = subprocess.CompletedProcess(["cargo"], 101, stdout=stdout)
+        stderr = io.StringIO()
+        with mock.patch.object(
+            build_firmware, "run_command", return_value=proc
+        ), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware._cargo_build(self.repo / "rust/Cargo.toml", [])
+
+        self.assertEqual(caught.exception.exit_code, 1)
+        self.assertIn("cargo build failed with exit code 101", str(caught.exception))
+        self.assertIn("warning: earlier warning", stderr.getvalue())
+        self.assertIn("error[E0308]: mismatched types", stderr.getvalue())
+
+
+class TestToolchainProvenance(_RepoCase):
+    def test_parse_rustc_version_and_llc_version(self) -> None:
+        rustc = build_firmware.parse_rustc_version(RUSTC_VV_SAMPLE)
+        self.assertEqual(
+            rustc,
+            {
+                "release": "1.102.0-nightly",
+                "commit": "6905905bb7727fd0f9223f5fdc9ad4e62236d5a2",
+                "llvm_version": "23.1.6",
+                "llvm_major": 23,
+            },
+        )
+        llc = build_firmware.parse_llc_version(LLC_VERSION_SAMPLE)
+        self.assertEqual(llc, {"llvm_version": "23.1.7", "llvm_major": 23})
+
+        with self.assertRaises(build_firmware.BuildError) as bad_rustc:
+            build_firmware.parse_rustc_version("rustc 1.0.0\n")
+        self.assertEqual(bad_rustc.exception.exit_code, 2)
+
+        with self.assertRaises(build_firmware.BuildError) as bad_llc:
+            build_firmware.parse_llc_version("no version line\n")
+        self.assertEqual(bad_llc.exception.exit_code, 2)
+
+    def test_probe_toolchain_accepts_older_or_equal_llvm(self) -> None:
+        rust_dir = self.repo / "rust"
+        calls: list[tuple[list[str], Path | None]] = []
+
+        def fake_run(cmd, *, cwd=None, capture=False, env=None):
+            argv = [str(part) for part in cmd]
+            calls.append((argv, cwd))
+            if argv[0] == "rustc":
+                return subprocess.CompletedProcess(argv, 0, stdout=RUSTC_VV_SAMPLE)
+            return subprocess.CompletedProcess(argv, 0, stdout=LLC_VERSION_SAMPLE)
+
+        with mock.patch.object(build_firmware, "run_command", side_effect=fake_run):
+            info = build_firmware.probe_toolchain(rust_dir, self.tools["llc"])
+
+        self.assertEqual(info, FAKE_TOOLCHAIN)
+        self.assertEqual(
+            calls,
+            [
+                (["rustc", "-vV"], rust_dir),
+                ([str(self.tools["llc"]), "--version"], None),
+            ],
+        )
+
+        older_rustc = RUSTC_VV_SAMPLE.replace("23.1.6", "22.1.0")
+        with mock.patch.object(
+            build_firmware,
+            "run_command",
+            side_effect=[
+                subprocess.CompletedProcess(["rustc"], 0, stdout=older_rustc),
+                subprocess.CompletedProcess(["llc"], 0, stdout=LLC_VERSION_SAMPLE),
+            ],
+        ):
+            older_info = build_firmware.probe_toolchain(rust_dir, self.tools["llc"])
+        self.assertEqual(older_info["rustc_llvm_major"], 22)
+        self.assertEqual(older_info["fork_llvm_major"], 23)
+
+    def test_probe_toolchain_rejects_newer_rustc_llvm(self) -> None:
+        newer_rustc = RUSTC_VV_SAMPLE.replace("23.1.6", "24.0.0")
+        with mock.patch.object(
+            build_firmware,
+            "run_command",
+            side_effect=[
+                subprocess.CompletedProcess(["rustc"], 0, stdout=newer_rustc),
+                subprocess.CompletedProcess(["llc"], 0, stdout=LLC_VERSION_SAMPLE),
+            ],
+        ):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware.probe_toolchain(self.repo / "rust", self.tools["llc"])
+
+        self.assertEqual(caught.exception.exit_code, 2)
+        message = str(caught.exception)
+        self.assertIn("24.0.0", message)
+        self.assertIn("23.1.7", message)
+        self.assertIn("retsimx/llvm-project", message)
+        self.assertIn("rust/rust-toolchain.toml", message)
+
+    def test_probe_toolchain_failure_raises_exit_2(self) -> None:
+        with mock.patch.object(
+            build_firmware,
+            "run_command",
+            side_effect=FileNotFoundError("rustc not found"),
+        ):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware.probe_toolchain(self.repo / "rust", self.tools["llc"])
+        self.assertEqual(caught.exception.exit_code, 2)
+
+        with mock.patch.object(
+            build_firmware,
+            "run_command",
+            return_value=subprocess.CompletedProcess(["rustc"], 1, stdout=""),
+        ):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware.probe_toolchain(self.repo / "rust", self.tools["llc"])
+        self.assertEqual(caught.exception.exit_code, 2)
+
+    def test_manifest_invalidated_when_toolchain_changes(self) -> None:
+        baseline = self.compute(toolchain=FAKE_TOOLCHAIN)
+        for key, replacement in (
+            ("rustc_release", "1.103.0-nightly"),
+            ("rustc_commit", "deadbeef00000000000000000000000000000000"),
+            ("rustc_llvm", "23.1.7"),
+            ("fork_llvm", "23.1.8"),
+        ):
+            with self.subTest(changed=key):
+                mutated = dict(FAKE_TOOLCHAIN)
+                mutated[key] = replacement
+                self.assertFalse(
+                    build_firmware.manifests_equal(
+                        baseline, self.compute(toolchain=mutated)
+                    )
+                )
+
+    def test_run_build_probes_toolchain_prints_summary_and_hits_cache(self) -> None:
+        stage = self.out / "default"
+        _write(stage / "lightblemesh", b"elf")
+        _write(stage / "lightblemesh.bin", b"bin")
+        args = build_firmware._build_parser().parse_args(
+            [
+                "--llc",
+                str(self.tools["llc"]),
+                "--llvm-link",
+                str(self.tools["llvm_link"]),
+                "--opt",
+                str(self.tools["opt"]),
+            ]
+        )
+        seen: list[tuple[list[str], Path | None]] = []
+
+        def fake_run(cmd, *, cwd=None, capture=False, env=None):
+            argv = [str(part) for part in cmd]
+            seen.append((argv, cwd))
+            if argv == ["rustc", "-vV"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=RUSTC_VV_SAMPLE)
+            if argv == [str(self.tools["llc"]), "--version"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=LLC_VERSION_SAMPLE)
+            raise AssertionError(f"unexpected pipeline command: {argv}")
+
+        with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
+            self.startup_obj, self.startup_manifest = self._install_startup()
+            build_firmware._write_json(
+                stage / "manifest.json", self.compute(toolchain=FAKE_TOOLCHAIN)
+            )
+            with mock.patch.object(
+                build_firmware, "_cargo_build", return_value=[self.ll_a, self.ll_b]
+            ), mock.patch.object(
+                build_firmware, "run_command", side_effect=fake_run
+            ):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(build_firmware._run_build(args), 0)
+
+        out = printed.getvalue()
+        self.assertIn(
+            "Toolchain: rustc 1.102.0-nightly (6905905bb, LLVM 23.1.6) -> llc LLVM 23.1.7",
+            out,
+        )
+        self.assertIn(CACHE_HIT_MESSAGE, out)
+        self.assertEqual(
+            seen,
+            [
+                (["rustc", "-vV"], self.repo / "rust"),
+                ([str(self.tools["llc"]), "--version"], None),
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ that made no-op and feature-switching builds unsafe:
    ones and ``llvm-link`` failed with ``symbol multiply defined!`` until the
    tree was cleaned. This driver reads Cargo's ``--message-format=json`` stream
    and maps each reported ``.rlib`` to *its own* ``.ll`` (a hashed dependency
-   crate, or the root crate's hardlink/``(size, sha256)`` twin under ``deps/``),
-   so a stray ``stale-deadbeef.ll`` is never selected.
+   crate, or the root crate's hardlink/``(size, sha256)`` twin under ``deps/``
+   or ``build/*/*/out/``), so a stray ``stale-deadbeef.ll`` is never selected.
 2. **Unconditional relink.** ``_build/lightblemesh`` was ``.PHONY``, so a no-op
    ``make`` still ran cargo, ``llvm-link``, ``opt``, ``llc``, ``as``, ``ld`` and
    ``objcopy`` (~7.6 s wasted). A deterministic manifest of the exact inputs (IR
@@ -65,6 +65,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import TextIO
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -131,6 +132,17 @@ VERSION_RS_RE = re.compile(r"pub\s+static\s+BUILD_VERSION\s*:\s*u32\s*=\s*(\d+)\
 HASHED_RLIB_RE = re.compile(r"^lib(?P<name>.+)-(?P<hash>[0-9a-f]{8,})\.rlib$")
 PLAIN_RLIB_RE = re.compile(r"^lib(?P<name>.+)\.rlib$")
 SKIP_ARTIFACT_KINDS = frozenset({"proc-macro", "custom-build"})
+
+RUSTC_RELEASE_RE = re.compile(r"^release:\s*(\S+)\s*$", re.MULTILINE)
+RUSTC_COMMIT_RE = re.compile(r"^commit-hash:\s*(\S+)\s*$", re.MULTILINE)
+RUSTC_LLVM_RE = re.compile(
+    r"^LLVM version:\s*(?P<version>(?P<major>\d+)(?:\.\d+)*\S*)\s*$",
+    re.MULTILINE,
+)
+LLC_LLVM_RE = re.compile(
+    r"^\s*LLVM version\s+(?P<version>(?P<major>\d+)(?:\.\d+)*\S*)\s*$",
+    re.MULTILINE,
+)
 
 
 class BuildError(RuntimeError):
@@ -290,8 +302,126 @@ def check_version_sync(repo_root: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Cargo artifacts -> exact .ll paths
+# Toolchain provenance & LLVM version gate
 # ---------------------------------------------------------------------------
+
+
+def parse_rustc_version(output: str) -> dict[str, object]:
+    """Parse ``rustc -vV`` output into release, commit, and LLVM version."""
+    release_match = RUSTC_RELEASE_RE.search(output)
+    commit_match = RUSTC_COMMIT_RE.search(output)
+    llvm_match = RUSTC_LLVM_RE.search(output)
+    if release_match is None or commit_match is None or llvm_match is None:
+        raise BuildError(
+            "cannot parse `rustc -vV` output; expected release, commit-hash, "
+            "and LLVM version lines",
+            exit_code=2,
+        )
+    return {
+        "release": release_match.group(1),
+        "commit": commit_match.group(1),
+        "llvm_version": llvm_match.group("version"),
+        "llvm_major": int(llvm_match.group("major")),
+    }
+
+
+def parse_llc_version(output: str) -> dict[str, object]:
+    """Parse ``llc --version`` output into LLVM version and major integer."""
+    llvm_match = LLC_LLVM_RE.search(output)
+    if llvm_match is None:
+        raise BuildError(
+            "cannot parse `llc --version` output; expected `LLVM version X.Y.Z`",
+            exit_code=2,
+        )
+    return {
+        "llvm_version": llvm_match.group("version"),
+        "llvm_major": int(llvm_match.group("major")),
+    }
+
+
+def _probe_stdout(
+    cmd: Sequence[str | Path], *, cwd: Path | None = None, what: str
+) -> str:
+    try:
+        proc = run_command(cmd, cwd=cwd, capture=True)
+    except OSError as exc:
+        raise BuildError(f"cannot execute {what}: {exc}", exit_code=2) from exc
+    if proc.returncode != 0:
+        raise BuildError(
+            f"{what} failed with exit code {proc.returncode}",
+            exit_code=2,
+        )
+    return proc.stdout or ""
+
+
+def probe_toolchain(rust_dir: Path, llc_path: Path) -> dict[str, object]:
+    """Probe ``rustc -vV`` and ``llc --version`` and enforce LLVM compatibility.
+
+    ``rustc`` runs inside ``rust_dir`` so ``rustup`` honours
+    ``rust/rust-toolchain.toml``. Raises :class:`BuildError` with exit code 2
+    if ``rustc`` targets a newer LLVM major version than the ``tc32`` fork.
+    """
+    rustc_info = parse_rustc_version(
+        _probe_stdout(["rustc", "-vV"], cwd=Path(rust_dir), what="rustc -vV")
+    )
+    llc_info = parse_llc_version(
+        _probe_stdout([str(llc_path), "--version"], what=f"{llc_path} --version")
+    )
+    rustc_major = int(rustc_info["llvm_major"])
+    fork_major = int(llc_info["llvm_major"])
+    if rustc_major > fork_major:
+        raise BuildError(
+            f"LLVM version mismatch: rustc {rustc_info['release']} emits LLVM "
+            f"{rustc_info['llvm_version']} IR (major {rustc_major}), which is "
+            f"newer than the llc TC32 fork LLVM {llc_info['llvm_version']} "
+            f"(major {fork_major}); rebase retsimx/llvm-project (tc32 branch) "
+            "or pin rust/rust-toolchain.toml to an earlier nightly",
+            exit_code=2,
+        )
+    return {
+        "rustc_release": rustc_info["release"],
+        "rustc_commit": rustc_info["commit"],
+        "rustc_llvm": rustc_info["llvm_version"],
+        "rustc_llvm_major": rustc_major,
+        "fork_llvm": llc_info["llvm_version"],
+        "fork_llvm_major": fork_major,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cargo diagnostics & artifacts -> exact .ll paths
+# ---------------------------------------------------------------------------
+
+
+def render_cargo_messages(
+    stdout_lines: Iterable[str] | str, *, stream: TextIO | None = None
+) -> int:
+    """Render Cargo JSON ``compiler-message`` diagnostics to ``stream``.
+
+    Returns the number of non-empty rendered messages written. Non-JSON lines
+    and other Cargo JSON reasons are ignored.
+    """
+    lines = stdout_lines.splitlines() if isinstance(stdout_lines, str) else stdout_lines
+    target = sys.stderr if stream is None else stream
+    rendered_count = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if record.get("reason") != "compiler-message":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        rendered = message.get("rendered")
+        if isinstance(rendered, str) and rendered.strip():
+            target.write(rendered if rendered.endswith("\n") else f"{rendered}\n")
+            rendered_count += 1
+    return rendered_count
 
 
 def parse_cargo_artifacts(stdout_lines: Iterable[str] | str) -> list[Path]:
@@ -334,16 +464,16 @@ def _require_ll(rlib: Path, ll_path: Path) -> Path:
 
 
 def _ll_for_hashed_rlib(rlib: Path) -> Path:
-    """Map ``deps/lib<name>-<hash>.rlib`` to its ``deps/<name>-<hash>.ll``."""
+    """Map a hashed ``lib<name>-<hash>.rlib`` to its sibling ``<name>-<hash>.ll``."""
     match = HASHED_RLIB_RE.match(rlib.name)
     assert match is not None  # caller checked
     return rlib.parent / f"{match.group('name')}-{match.group('hash')}.ll"
 
 
 def _match_inode(target: Path, candidates: Sequence[Path]) -> Path | None:
-    """Find the ``deps/`` rlib that is the same inode as the root rlib.
+    """Find the hashed sibling rlib that is the same inode as the root rlib.
 
-    Cargo hardlinks ``release/lib<name>.rlib`` to its ``deps/`` sibling on
+    Cargo hardlinks ``release/lib<name>.rlib`` to its hashed sibling on
     filesystems that support hardlinks; that is the strongest identity match.
     """
     target_stat = target.stat()
@@ -378,20 +508,30 @@ def _match_content(target: Path, candidates: Sequence[Path]) -> Path | None:
 
 
 def _root_ll_path(rlib: Path, name: str) -> Path:
-    """Map the unhashed ``release/lib<name>.rlib`` to its hashed ``deps/`` IR."""
+    """Map an unhashed ``release/lib<name>.rlib`` to its hashed IR module."""
     deps_dir = rlib.parent / "deps"
-    candidates = sorted(deps_dir.glob(f"lib{name}-*.rlib"))
+    build_dir = rlib.parent / "build"
+    candidates = sorted(
+        path
+        for path in {
+            *deps_dir.glob(f"lib{name}-*.rlib"),
+            *build_dir.glob(f"*/*/out/lib{name}-*.rlib"),
+        }
+        if (matched := HASHED_RLIB_RE.match(path.name)) is not None
+        and matched.group("name") == name
+    )
     if not candidates:
         raise BuildError(
-            f"cannot resolve the IR module for {rlib}: no "
-            f"{deps_dir}/lib{name}-*.rlib candidate; run `cargo clean` and rebuild",
+            f"cannot resolve the IR module for {rlib}: no lib{name}-*.rlib "
+            f"candidate under {deps_dir} or {build_dir}; run `cargo clean` and rebuild",
             exit_code=1,
         )
     match = _match_inode(rlib, candidates) or _match_content(rlib, candidates)
     if match is None:
         raise BuildError(
-            f"cannot resolve the IR module for {rlib}: no deps/ rlib matches it by "
-            "inode or by (size, sha256); run `cargo clean` and rebuild",
+            f"cannot resolve the IR module for {rlib}: no hashed deps/ or build/ "
+            "rlib matches it by inode or by (size, sha256); run `cargo clean` "
+            "and rebuild",
             exit_code=1,
         )
     return _ll_for_hashed_rlib(match)
@@ -495,6 +635,7 @@ def compute_manifest(
     linker_script: Path,
     libgcc: Path,
     tools: dict[str, Path],
+    toolchain: dict[str, object] | None = None,
 ) -> dict:
     """Build the deterministic manifest that guards the LLVM/TC32 pipeline."""
     missing = [name for name in TOOL_ORDER if name not in tools]
@@ -511,6 +652,7 @@ def compute_manifest(
         "linker_script_sha256": _sha256(linker_script),
         "libgcc_sha256": _sha256(libgcc),
         "tools": {name: _tool_entry(tools[name]) for name in TOOL_ORDER},
+        "toolchain": dict(toolchain) if toolchain is not None else {},
         "flags": _flags_block(),
     }
 
@@ -649,13 +791,19 @@ def _cargo_build(manifest_path: Path, features: Sequence[str]) -> list[Path]:
     env = dict(os.environ)
     env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     env["RUSTFLAGS"] = "--emit=llvm-ir"
-    proc = _run_step(
+    proc = run_command(
         cmd,
         cwd=Path(manifest_path).parent,
-        env=env,
         capture=True,
-        what="cargo build",
+        env=env,
     )
+    render_cargo_messages(proc.stdout or "")
+    if proc.returncode != 0:
+        rendered = " ".join(str(part) for part in cmd)
+        raise BuildError(
+            f"cargo build failed with exit code {proc.returncode}: {rendered}",
+            exit_code=1,
+        )
     rlibs = parse_cargo_artifacts(proc.stdout or "")
     return resolve_ll_paths(rlibs)
 
@@ -775,13 +923,27 @@ def _run_build(args: argparse.Namespace) -> int:
     tools = _resolve_llvm_tools(args, dotenv, repo_root)
     tools.update(_fixed_tools(repo_root))
 
+    toolchain = probe_toolchain(manifest_path.parent, tools["llc"])
+    commit_short = str(toolchain["rustc_commit"])[:9]
+    print(
+        f"Toolchain: rustc {toolchain['rustc_release']} "
+        f"({commit_short}, LLVM {toolchain['rustc_llvm']}) -> "
+        f"llc LLVM {toolchain['fork_llvm']}"
+    )
+
     startup_obj = _ensure_startup_object(out_root, repo_root)
     ll_paths = _cargo_build(manifest_path, features)
 
     linker_script = repo_root / LINKER_SCRIPT_REL
     libgcc = repo_root / LIBGCC_REL
     manifest = compute_manifest(
-        features, ll_paths, startup_obj, linker_script, libgcc, tools
+        features,
+        ll_paths,
+        startup_obj,
+        linker_script,
+        libgcc,
+        tools,
+        toolchain=toolchain,
     )
 
     stage_dir = out_root / slug

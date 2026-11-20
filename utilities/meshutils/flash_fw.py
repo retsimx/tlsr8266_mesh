@@ -33,7 +33,7 @@ from bleak import BleakClient
 
 from mesh_common import (
     # Constants
-    VERSION_MASK, VERSION_16MHZ,
+    VERSION_MASK,
     pair_characteristic_uuid, notify_characteristic_uuid,
     command_characteristic_uuid, ota_characteristic_uuid,
     firmware_revision_uuid,
@@ -154,24 +154,11 @@ async def main():
             dev_ver = struct.unpack("I", dev_ver[:4])[0]
             fw_ver = struct.unpack("I", parser.data[2:6])[0]
 
-            # Check crystal frequency compatibility
-            dev_16mhz = (dev_ver >> 31) == 1
+            # Ignore the legacy bit 31 that pre-unification 16MHz builds set
             dev_ver = dev_ver & VERSION_MASK
-
-            fw_16mhz = (fw_ver >> 31) == 1
             fw_ver = fw_ver & VERSION_MASK
 
             print(f"Device version: {dev_ver}, new version: {fw_ver}")
-
-            # Validate crystal frequency compatibility
-            if dev_16mhz != fw_16mhz:
-                print(f"Attempt to flash incompatible crystal version of firmware. Bailing out. Device is 16MHz? "
-                      f"{dev_16mhz}, FW is 16MHz? {fw_16mhz}", file=sys.stderr)
-                if not args.force:
-                    print("Use --force to override this safety check.")
-                    return 1
-                else:
-                    print("Forcing flash despite crystal mismatch")
 
             # Check version numbers unless forced
             if not args.force:

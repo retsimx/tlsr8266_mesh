@@ -33,8 +33,8 @@ pub(super) fn human_output(output: &Output) -> String {
                 format!("pc=0x{pc:08x} cpu_status=0x{cpu_status:02x} cpu_state={cpu_state}");
             if let Some(flash) = flash_info {
                 text.push_str(&format!(
-                    "\nflash jedec_id={} xtal_mhz={} build_version={} magic_ok={}",
-                    flash.jedec_id, flash.xtal_mhz, flash.build_version, flash.magic_ok
+                    "\nflash jedec_id={} build_version={} magic_ok={}",
+                    flash.jedec_id, flash.build_version, flash.magic_ok
                 ));
             }
             text

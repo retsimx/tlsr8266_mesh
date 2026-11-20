@@ -58,21 +58,16 @@ The target and the Pico must share ground, and the target must be powered. The 1
 
 ## Crystal Speed
 
-The firmware build defaults to a 12 MHz crystal. The 16 MHz variant is the `xtal-16mhz` feature in `rust/Cargo.toml`, shipped commented out as `#xtal-16mhz = []`. Switching to 16 MHz takes both steps: uncomment that feature (it also selects the 16 MHz RF/PLL tables) **and** build with `FEATURES=xtal-16mhz`.
+One image runs on both crystal speeds. At boot, `clock_init()` measures the external crystal against the chip's free-running `32K_RC` reference and records whether the part is 12 MHz or 16 MHz; `rf_drv_init()` then loads the matching RF/PLL table — all 61 `TBL_RF_INI` entries on a 16 MHz part, the first 57 on a 12 MHz part. The choice is made at runtime, so there is no feature to enable and no second image to build.
 
 ```bash
-make                                    # 12 MHz firmware (default)
-make FEATURES=rtt                       # 12 MHz firmware with the RTT log mirror
-make FEATURES=xtal-16mhz                # 16 MHz firmware
+make                                    # firmware for either crystal speed
+make FEATURES=rtt                       # the same firmware with the RTT log mirror
 ```
 
-Features can be combined, e.g. `FEATURES="rtt xtal-16mhz"`. The header crystal bit is derived from that same `FEATURES` value by `sdk/increment_version.sh`, so the header describes the build you selected rather than what the manifest declares, and changing the selection restamps it and rebuilds the startup object automatically; `make clean` remains the fallback if anything looks stale.
+`FEATURES` selects optional extras such as the RTT log mirror; the crystal is not part of it.
 
-Check what you built before flashing: the version word starts at byte 2 of the image, so `xxd -l 6 _build/lightblemesh.bin` shows `…d5 0d 00 80` when bit 31 is set (16 MHz) and `…d4 0d 00 00` when it is clear (12 MHz). The bit is stamped from `FEATURES`, so the remaining way to get it wrong is to flash an image that another selection left in `_build`.
-
-The image header carries the speed as a bit, and `probe-tlsr flash` compares it against the header it reads from the target. On a mismatch it refuses with exit 3 and leaves the core stopped; `--force` skips the guard. The guard only runs when both headers are readable, so a truncated or non-firmware `.bin` is not protected.
-
-A wrong-speed image is not a brick: SWire still works, so reflashing the correct build recovers the board. Because the target now advertises the wrong crystal, that recovery flash needs `--force`; the guard cannot tell a repair from a mistake. That is the reliability model's bad-image recovery property — a refused flash or a mis-flashed board is never lost.
+To confirm what a board carries, read the boot banner from an RTT build: `Booting FW version <n>, xtal: 12MHz` or `Booting FW version <n>, xtal: 16MHz`. Because there is only one image, a board can no longer be given a wrong-speed build: the header word carries the plain build version with bit 31 always clear, so there is nothing for the tooling to compare or override. A device still running an older 16 MHz image has bit 31 set in its header; host tools mask that bit when comparing versions, so the universal image is accepted onto it with no special flags.
 
 ## Command Reference
 
@@ -81,10 +76,10 @@ A wrong-speed image is not a brick: SWire still works, so reflashing the correct
 | Command | What it does | Arguments | Core left stopped |
 |---|---|---|---|
 | `info` | Reports `pc`, `cpu_status` and `cpu_state`; reads the flash header only when the core is already stopped | `--halt` stalls the core first | Only with `--halt` |
-| `flash` | Writes an ELF or flat binary image to flash, with the crystal guard | `<PATH>`, `--force`, `--reset` | Yes, unless `--reset` |
+| `flash` | Writes an ELF or flat binary image to flash | `<PATH>`, `--reset` | Yes, unless `--reset` |
 | `flash-read` | Reads a flash span; `--out` saves the raw bytes to a file | `<ADDR> <LEN>`, `--out <FILE>` | Yes |
 | `flash-erase` | Erases the 4 KiB sectors covering a flash span | `<ADDR> <LEN>` | Yes |
-| `flash-write` | Programs a file at a flash address; unlike `flash`, it has no crystal guard, so writing an image at `0` does not check the header or speed | `<ADDR> <FILE>` | Yes |
+| `flash-write` | Programs a raw file at a flash address; unlike `flash`, it neither flattens an ELF nor erases the target sectors | `<ADDR> <FILE>` | Yes |
 | `read` | Reads SWire memory | `<ADDR_OR_SYMBOL> [LEN]` | No |
 | `write` | Writes hex bytes to SWire memory | `<ADDR_OR_SYMBOL> <HEX>` | No |
 | `analog-read` | Reads one analog register | `<ADDR>` | No |
@@ -97,7 +92,7 @@ A wrong-speed image is not a brick: SWire still works, so reflashing the correct
 
 Field notes:
 
-- `info` on a running target deliberately sends no MSPI traffic, so it has no JEDEC id, crystal or build version. Use `probe-tlsr info --halt` to read the header; that stall is terminal, so finish with `probe-tlsr reset --soft`. The reported `pc` and `cpu_status` are sampled just before the halt, so `cpu_state` can read `running` even though the core is stalled by the time the header is read.
+- `info` on a running target deliberately sends no MSPI traffic, so it has no JEDEC id or build version. Use `probe-tlsr info --halt` to read the header; that stall is terminal, so finish with `probe-tlsr reset --soft`. The reported `pc` and `cpu_status` are sampled just before the halt, so `cpu_state` can read `running` even though the core is stalled by the time the header is read.
 - `cpu_state` names only the documented status bytes (`0x00`/`0x04`/`0x08` running, `0x05` stopped, `0x06` stalled) and prints `unknown` otherwise. Treat `cpu_status` as a raw hardware byte, not a reliable run/stop indicator.
 - A hard `reset` clears the retained analog sentinel in hardware; `reset --soft` and a `trap` hit write `0x00` first (a pending panic `0xE1` is preserved), so the next boot does not log a false `[WD_RESET]`. A real watchdog reset still does.
 - `rtt` retries poll errors for a 2 s grace period while a panic or watchdog reset reboots the target, so the `[PANIC]` line from the next boot is not lost. The window restarts after any successful poll. If the target's 256-byte ring overflowed before the stream attached, `rtt` prints a `[probe] target RTT ring overflowed …` line first.
@@ -120,7 +115,7 @@ Exit codes:
 | 0 | Success |
 | 1 | Any other failure — transport, protocol, ELF, I/O, invalid address, timeout |
 | 2 | Usage error (clap), or `rtt` saw the heartbeat stop moving |
-| 3 | `rtt` saw a panic line, or `flash` refused a crystal mismatch |
+| 3 | `rtt` saw a panic line |
 
 ## Workflows
 
@@ -222,12 +217,11 @@ All three flash commands stop the core and leave it stopped, and `flash-erase` e
 |---|---|---|
 | `transport: no probe found (no USB VID 0x2e8a port and /dev/ttyACM0 missing); pass --port <path>` | No probe firmware, a charge-only cable, or BOOTSEL mode (mounts as `RPI-RP2`, not a serial port) | Reflash `probe-pico.uf2`, use a data cable, or pass `--port /dev/ttyACM0` |
 | `transport: cannot open /dev/ttyACM0: Permission denied` | User not in `dialout`, no udev rule | Add the group or the rule from Prerequisites |
-| `crystal mismatch: target 12 MHz, image 16 MHz (use --force to flash anyway); target left stopped — run \`probe-tlsr reset\`` | 16 MHz build on a 12 MHz part, or the reverse | Flash the matching build; `--force` only when the header is wrong, not the crystal. Run `reset` either way |
 | `transport: timed out waiting for a probe response` | Wiring, missing ground, unpowered target, missing 1 kΩ resistor | Check GP14/GP15/GP17, ground and target power, then retry `probe-tlsr info` |
 | `probe error: ...` | The probe rejected the request, e.g. a span outside the requested window | Re-read the argument forms in the command reference |
 | Core stuck after a crash command | `halt`, `inspect`, `info --halt`, a faulted `rtt` or `flash` without `--reset` left it stopped | `probe-tlsr reset --soft` for a stall, `probe-tlsr reset` for a hard reset |
 | Exit 2 from `rtt` | Frozen heartbeat, or a clap usage error | Triage as in Hang triage; check flags on a usage error |
-| Exit 3 | Panic line on the log, or a refused crystal mismatch | Use `inspect` for the panic body; reflash the correct build for a mismatch |
+| Exit 3 | Panic line on the log | Use `inspect` for the panic body |
 
 ## CI
 

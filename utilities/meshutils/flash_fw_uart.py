@@ -8,8 +8,7 @@ It handles firmware version checking and OTA updates through a serial connection
 The update process consists of the following phases:
 1. UART Communication Initialization
 2. Firmware Version Verification
-3. Crystal Frequency Compatibility Check
-4. Chunked Firmware Transfer
+3. Chunked Firmware Transfer
 
 Usage:
   python flash_fw_uart.py --fw_file <file> --mesh_address <addr> [--force]
@@ -25,13 +24,12 @@ Examples:
 import argparse
 import datetime
 import struct
-import sys
 import threading
 from time import sleep
 
 import serial
 
-from mesh_common import PacketParser, crc16, VERSION_MASK, VERSION_16MHZ
+from mesh_common import PacketParser, crc16, VERSION_MASK
 
 # UART Protocol Constants
 # Packet structure:
@@ -282,9 +280,8 @@ def flash_node(local_id, fw_file, force):
     
     This function:
     1. Checks current firmware version
-    2. Validates crystal frequency compatibility
-    3. Transfers firmware in chunks
-    4. Finalizes the update
+    2. Transfers firmware in chunks
+    3. Finalizes the update
     
     Args:
         local_id (int): Target device mesh ID
@@ -309,20 +306,11 @@ def flash_node(local_id, fw_file, force):
     dev_ver = struct.unpack("I", dev_ver[DEVICE_VER_OFFSET:DEVICE_VER_OFFSET + 4])[0]
     fw_ver = struct.unpack("I", parser.data[2:6])[0]
 
-    # Extract crystal frequency flags and version numbers
-    dev_16mhz = (dev_ver >> 31) == 1
+    # Ignore the legacy bit 31 that pre-unification 16MHz builds set
     dev_ver = dev_ver & VERSION_MASK
-
-    fw_16mhz = (fw_ver >> 31) == 1
     fw_ver = fw_ver & VERSION_MASK
 
-    print(f"Device version: {dev_ver}, new version: {fw_ver}, 16MHz device: {dev_16mhz}")
-
-    # Check crystal frequency compatibility
-    if dev_16mhz != fw_16mhz:
-        print(f"Attempt to flash incompatible crystal version of firmware. Bailing out. Device is 16MHz? "
-              f"{dev_16mhz}, FW is 16MHz? {fw_16mhz}", file=sys.stderr)
-        return
+    print(f"Device version: {dev_ver}, new version: {fw_ver}")
 
     # Check firmware version unless forced
     if dev_ver >= fw_ver:

@@ -34,10 +34,10 @@
 //! # Core state
 //!
 //! `flash` without `--reset` leaves the core stopped, and an aborted flash
-//! (crystal mismatch or a failed erase/page write) also leaves it stopped; run
-//! `probe-tlsr reset` to start it again. The raw flash commands leave the core
-//! stopped too. `trap` soft-reboots the core after a hit, and clears the armed
-//! slot before failing on its wait deadline.
+//! (a failed erase/page write) also leaves it stopped; run `probe-tlsr reset`
+//! to start it again. The raw flash commands leave the core stopped too. `trap`
+//! soft-reboots the core after a hit, and clears the armed slot before failing
+//! on its wait deadline.
 //!
 //! # Exit codes
 //! - `0` — success, including an `rtt --until` match and a `trap` hit.
@@ -46,8 +46,8 @@
 //! - `2` — both the clap usage error and a frozen `rtt` `HEARTBEAT`
 //!   ([`CliError::HeartbeatStalled`]); the overlap is fixed by the issue
 //!   contract.
-//! - `3` — both a `rtt` panic-marker line ([`CliError::TargetPanic`]) and the
-//!   crystal-mismatch abort; both are fixed by the issue contract.
+//! - `3` — a `rtt` panic-marker line ([`CliError::TargetPanic`]); the code is
+//!   fixed by the issue contract.
 //!
 //! `--timeout-ms` is absent by default: the transport then falls back to
 //! [`DEFAULT_TIMEOUT_MS`], so every existing command keeps its 5000 ms

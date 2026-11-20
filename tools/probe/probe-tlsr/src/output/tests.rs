@@ -31,7 +31,7 @@ fn output_cases() -> [(Output, Value); 18] {
                 "command": "info", "pc": 69872, "cpu_status": 5,
                 "cpu_state": "stopped",
                 "flash_info": {
-                    "jedec_id": "ef4018", "xtal_mhz": 12,
+                    "jedec_id": "ef4018",
                     "build_version": 3539, "magic_ok": true
                 }
             }),
@@ -54,13 +54,10 @@ fn output_cases() -> [(Output, Value); 18] {
                 bytes: 78996,
                 sectors_erased: 20,
                 pages_written: 309,
-                target_xtal_mhz: Some(12),
-                image_xtal_mhz: None,
             },
             json!({
                 "command": "flash", "path": "build/app.bin", "bytes": 78996,
-                "sectors_erased": 20, "pages_written": 309,
-                "target_xtal_mhz": 12, "image_xtal_mhz": null
+                "sectors_erased": 20, "pages_written": 309
             }),
         ),
         (
@@ -69,13 +66,10 @@ fn output_cases() -> [(Output, Value); 18] {
                 bytes: 4,
                 sectors_erased: 1,
                 pages_written: 1,
-                target_xtal_mhz: None,
-                image_xtal_mhz: None,
             },
             json!({
                 "command": "flash", "path": "raw.bin", "bytes": 4,
-                "sectors_erased": 1, "pages_written": 1,
-                "target_xtal_mhz": null, "image_xtal_mhz": null
+                "sectors_erased": 1, "pages_written": 1
             }),
         ),
         (

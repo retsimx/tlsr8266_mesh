@@ -13,7 +13,7 @@ use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::common::compat::check_panic_info;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::clock_init;
+use crate::sdk::mcu::clock::{clock_init, is_16mhz_xtal};
 use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
@@ -80,9 +80,9 @@ impl App {
         boot_init();
 
         uprintln!(
-            "Booting FW version {}, 16MHz: {}",
-            BUILD_VERSION & 0x7fffffff,
-            (BUILD_VERSION >> 31) == 1
+            "Booting FW version {}, xtal: {}MHz",
+            BUILD_VERSION,
+            if is_16mhz_xtal() { 16 } else { 12 }
         );
 
         // Configure the rest of the system

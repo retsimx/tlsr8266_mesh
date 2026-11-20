@@ -348,27 +348,29 @@ pub const TBL_RF_INI: [TBLCMDSET; 61] = [
         dat: 0x06,
         cmd: 0xc3,
     },
-    // Enable these for BLE to work with 16mhz xtal
+    // Enable these for BLE to work with a 16MHz xtal. Selected at runtime from
+    // the crystal detected at boot (see rf_init_table), so the whole four-entry
+    // group is loaded on a 16MHz part and skipped on the default 12MHz part.
     TBLCMDSET {
-        // reg_pll_ctrl_a = CAL_DONE_EN | LOCK_EN (loaded only for the xtal-16mhz build)
+        // reg_pll_ctrl_a = CAL_DONE_EN | LOCK_EN (16MHz crystal only)
         adr: 0x4eb,
         dat: 0x60,
         cmd: 0xc3,
     },
     TBLCMDSET {
-        // Analog 0x99: gauss filter select, 16M
+        // Analog 0x99: gauss filter select, 16M (16MHz crystal only)
         adr: 0x99,
         dat: 0x31,
         cmd: 0xc8,
     },
     TBLCMDSET {
-        // Analog 0x82: enable RX ADC clock
+        // Analog 0x82: enable RX ADC clock (16MHz crystal only)
         adr: 0x82,
         dat: 0x34,
         cmd: 0xc8,
     },
     TBLCMDSET {
-        // Analog 0x9e: DC modulator (dc_mod), 500K
+        // Analog 0x9e: DC modulator (dc_mod), 500K (16MHz crystal only)
         adr: 0x9e,
         dat: 0x41,
         cmd: 0xc8,

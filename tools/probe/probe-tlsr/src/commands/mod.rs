@@ -57,18 +57,15 @@ const FLASH_HEADER_ADDR: u32 = 0x00;
 /// Length of the firmware header.
 const FLASH_HEADER_LEN: u16 = 12;
 
-/// Byte offset of the firmware version/crystal word in the 12-byte header.
+/// Byte offset of the firmware version word in the 12-byte header.
 ///
 /// `sdk/cstartup_8266.S` emits a 2-byte `tj __reset` at address 0 and the
-/// `.word (XTAL_16MHZ << 31 | BUILD_VERSION)` immediately after it, so the
-/// word sits at 2..6; `KNLT` follows at 8..12.
+/// `.word (BUILD_VERSION)` immediately after it, so the word sits at 2..6;
+/// `KNLT` follows at 8..12.
 const HEADER_VERSION_OFFSET: usize = 2;
 
 /// KNLT magic stored little-endian at header bytes `8..12`.
 const KNLT_MAGIC: u32 = 0x544c_4e4b;
-
-/// Bit 31 of the header version word selects the 16 MHz crystal.
-const XTAL_BIT: u32 = 1 << 31;
 
 /// Runs one parsed command, returning the output to render.
 ///
@@ -79,9 +76,7 @@ const XTAL_BIT: u32 = 1 << 31;
 pub fn run(cmd: Command, ctx: &mut Ctx, out: &mut dyn Write) -> Result<Option<Output>, CliError> {
     let output = match cmd {
         Command::Info { halt } => control::info(ctx.transport.as_mut(), halt)?,
-        Command::Flash { path, force, reset } => {
-            flash::flash(ctx.transport.as_mut(), &path, force, reset)?
-        }
+        Command::Flash { path, reset } => flash::flash(ctx.transport.as_mut(), &path, reset)?,
         Command::FlashRead { addr, len, out } => {
             flash_raw::flash_read(ctx.transport.as_mut(), &addr, &len, out.as_deref())?
         }

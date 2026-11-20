@@ -7,7 +7,6 @@ use crate::commands::diag::{InspectReport, PanicBody, Regs, StackDump, StackSymb
 pub(super) fn flash_info() -> FlashInfo {
     FlashInfo {
         jedec_id: "ef4018".to_owned(),
-        xtal_mhz: 12,
         build_version: 3539,
         magic_ok: true,
     }

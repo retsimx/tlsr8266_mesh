@@ -9,7 +9,7 @@ use probe_proto::{CpuMode, Request, Response};
 use super::{
     expect_ack, mark_clean_reboot, read_analog_value, read_flash, read_mem, read_word, stall_core,
     sws_activate, unexpected, CPU_STATUS_ADDR, FLASH_HEADER_ADDR, FLASH_HEADER_LEN,
-    HEADER_VERSION_OFFSET, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
+    HEADER_VERSION_OFFSET, KNLT_MAGIC, RESET_HOLD_MS,
 };
 use crate::output::{FlashInfo, Output};
 use crate::transport::ProbeTransport;
@@ -61,8 +61,7 @@ fn read_flash_info(transport: &mut dyn ProbeTransport) -> Result<FlashInfo, CliE
 
     Ok(FlashInfo {
         jedec_id: format!("{:02x}{:02x}{:02x}", jedec[0], jedec[1], jedec[2]),
-        xtal_mhz: if version & XTAL_BIT == 0 { 12 } else { 16 },
-        build_version: version & !XTAL_BIT,
+        build_version: version & 0x7fff_ffff,
         magic_ok: magic == KNLT_MAGIC,
     })
 }

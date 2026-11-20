@@ -32,8 +32,6 @@ pub enum Output {
         bytes: usize,
         sectors_erased: usize,
         pages_written: usize,
-        target_xtal_mhz: Option<u8>,
-        image_xtal_mhz: Option<u8>,
     },
     #[serde(rename = "flash-read")]
     FlashRead {
@@ -93,9 +91,10 @@ pub enum Output {
 pub struct FlashInfo {
     /// JEDEC ID as lower-case hex without separators.
     pub jedec_id: String,
-    /// Crystal selected by the header: 12 or 16 MHz.
-    pub xtal_mhz: u8,
-    /// Firmware version with the crystal bit masked off.
+    /// Firmware version with bit 31 masked off.
+    ///
+    /// Bit 31 is ignored rather than interpreted: pre-#33 images set it to
+    /// label a 16 MHz build, and the crystal is now detected at runtime.
     pub build_version: u32,
     /// Whether the header carried the KNLT magic.
     pub magic_ok: bool,

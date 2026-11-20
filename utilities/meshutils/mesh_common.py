@@ -37,8 +37,7 @@ PAIR_STATE_PAIRING_COMPLETE = 0x0F # Completed state - pairing complete
 PAIR_STATE_REQUESTING_LTK = 0x09   # RequestingLtk state - device returned LTK
 
 # Common constants for firmware updates
-VERSION_MASK = 0x7FFFFFFF  # Mask to extract version number
-VERSION_16MHZ = 0x80000000 # Flag indicating 16MHz variant
+VERSION_MASK = 0x7FFFFFFF  # Mask out legacy bit 31 that pre-unification 16MHz builds set
 
 # Other constants
 KEY_SIZE = 16                      # Size of cryptographic keys (16 bytes)

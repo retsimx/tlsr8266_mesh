@@ -11,8 +11,7 @@ The UART updater implements a firmware update protocol over a serial connection.
 The update process consists of the following phases:
 1. UART Communication Initialization
 2. Firmware Version Verification
-3. Crystal Frequency Compatibility Check
-4. Chunked Firmware Transfer
+3. Chunked Firmware Transfer
 
 ## Prerequisites
 
@@ -33,20 +32,13 @@ The `meshutils/flash_fw_uart.py` script requires the following parameters:
 
 * `--fw_file` (required): The firmware binary file to flash to the target device
 * `--mesh_address` (required): The mesh node address to flash the firmware to (This is the address provided to the node when it was paired)
-* `--force` (optional): Flag to bypass version checks. This will allow flashing older firmware or firmware with the same version number, but will NOT bypass clock speed compatibility checks
+* `--force` (optional): Flag to bypass version checks. This will allow flashing older firmware or firmware with the same version number.
 
 > **Note:** The serial port and baud rate are not configurable via command line arguments. The script uses `/dev/ttyUSB0` at 115200 baud by default. To use a different port, edit the `reset_connection()` function in `flash_fw_uart.py`.
 
-## Critical Warning: Clock Speed Compatibility
+## Clock Speed
 
-> **⚠️ WARNING: Clock Speed Mismatch Will Permanently Brick Your Device ⚠️**
->
-> TLSR8266 devices operate at either 12MHz or 16MHz clock speeds. The firmware **MUST** match the device's hardware clock speed.
->
-> - **TYBT1 devices typically use a 12MHz crystal**
-> - The UART updater includes a safety check that will prevent flashing incompatible firmware
-> - This check CANNOT be bypassed even with the `--force` flag
-> - Recovery from a clock speed mismatch is generally impossible once bricked
+The firmware detects the crystal speed at boot, so one image runs on both 12MHz and 16MHz TLSR8266 parts. The updater does not need to know or check which crystal a device carries, and there is no clock-speed variant of the firmware to pick.
 
 ## Usage Examples
 
@@ -70,7 +62,6 @@ When you run the UART update script, it will:
 4. Verify firmware compatibility:
    - Check current firmware version on the device
    - Compare with the new firmware version
-   - Validate crystal frequency compatibility (12MHz vs 16MHz)
 5. Transfer firmware in small chunks (8 bytes per packet)
 6. Display progress as a percentage along with elapsed time
 7. Send OTA completion command when all chunks are transferred
@@ -101,7 +92,6 @@ If the firmware update fails:
 
 - **Version check failures**:
   - Use `--force` when intentionally downgrading or flashing same version
-  - NEVER try to bypass clock speed mismatch warnings
 
 - **Transfer interruptions**:
   - Keep the UART connection stable during the entire update

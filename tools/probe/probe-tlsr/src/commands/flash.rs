@@ -1,17 +1,14 @@
 //! `flash`: program an ELF or flat binary image.
 //!
 //! The image is erased and written from a stopped core. Without `--reset` the
-//! core stays stopped when the command returns, and an aborted flash (crystal
-//! mismatch or a failed erase/page write) also leaves it stopped.
+//! core stays stopped when the command returns, and an aborted flash (a failed
+//! erase/page write) also leaves it stopped.
 
 use std::path::Path;
 
 use probe_proto::{Request, FLASH_PAGE_SIZE, FLASH_SECTOR_SIZE, FLASH_SIZE};
 
-use super::{
-    expect_ack, pause_watchdog, read_flash, sws_activate, FLASH_HEADER_ADDR, FLASH_HEADER_LEN,
-    HEADER_VERSION_OFFSET, KNLT_MAGIC, RESET_HOLD_MS, XTAL_BIT,
-};
+use super::{expect_ack, pause_watchdog, sws_activate, RESET_HOLD_MS};
 use crate::elf::ElfImage;
 use crate::output::Output;
 use crate::transport::ProbeTransport;
@@ -20,15 +17,13 @@ use crate::CliError;
 /// ELF magic that selects the ELF parser instead of a raw binary image.
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
 
-/// `flash`: load an image, guard the crystal, erase and program it.
+/// `flash`: load an image, erase and program it.
 ///
 /// A file starting with the ELF magic is flattened through [`ElfImage`];
-/// anything else is a raw binary image. The 12-byte header read happens even
-/// when the image cannot be guarded, so the request sequence stays uniform.
+/// anything else is a raw binary image.
 pub(super) fn flash(
     transport: &mut dyn ProbeTransport,
     path: &Path,
-    force: bool,
     reset: bool,
 ) -> Result<Output, CliError> {
     let image = load_image(path)?;
@@ -45,19 +40,6 @@ pub(super) fn flash(
     // hold releases; disarm it so a multi-second erase/program cannot be
     // interrupted by a watchdog reset.
     pause_watchdog(transport)?;
-
-    let target = read_flash(transport, FLASH_HEADER_ADDR, FLASH_HEADER_LEN)?;
-    let target_xtal_mhz = header_xtal_mhz(&target);
-    let image_xtal_mhz = header_xtal_mhz(&image);
-
-    if let (Some(target_mhz), Some(image_mhz)) = (target_xtal_mhz, image_xtal_mhz) {
-        if target_mhz != image_mhz && !force {
-            return Err(CliError::CrystalMismatch {
-                target_mhz,
-                image_mhz,
-            });
-        }
-    }
 
     let sectors_erased = erase_image(transport, image.len())?;
     let pages_written = write_pages(transport, 0, &image)?;
@@ -77,8 +59,6 @@ pub(super) fn flash(
         bytes: image.len(),
         sectors_erased,
         pages_written,
-        target_xtal_mhz,
-        image_xtal_mhz,
     })
 }
 
@@ -103,24 +83,6 @@ fn load_image(path: &Path) -> Result<Vec<u8>, CliError> {
         )));
     }
     Ok(image)
-}
-
-/// Decodes the crystal from a KNLT firmware header; `None` when the bytes are
-/// not a firmware header, so a blank target or a raw blob skips the guard.
-fn header_xtal_mhz(header: &[u8]) -> Option<u8> {
-    if header.len() < usize::from(FLASH_HEADER_LEN) {
-        return None;
-    }
-    let version = u32::from_le_bytes(
-        header[HEADER_VERSION_OFFSET..HEADER_VERSION_OFFSET + 4]
-            .try_into()
-            .expect("header length checked above"),
-    );
-    let magic = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
-    if magic != KNLT_MAGIC {
-        return None;
-    }
-    Some(if version & XTAL_BIT == 0 { 12 } else { 16 })
 }
 
 /// Erases every 4 KB sector covering `0..len`.
@@ -171,22 +133,21 @@ mod tests {
     use probe_proto::Response;
 
     #[test]
-    fn flash_xtal_match_erases_and_writes_page_bounded_chunks() {
+    fn flash_erases_and_writes_page_bounded_chunks() {
         let image = firmware_image(0x0000_0dd3, 600);
         let file = TempFile::new("flash-match", &image);
         let mut mock = crate::transport::MockTransport::new([
-            Response::Ack,       // Reset (hold, stop)
-            Response::Ack,       // SwsActivate
-            data([0x80]),        // watchdog read
-            Response::Ack,       // watchdog write
-            header(0x0000_0dd3), // target header, 12 MHz
-            Response::Ack,       // erase sector 0x000
-            Response::Ack,       // page 0x000
-            Response::Ack,       // page 0x100
-            Response::Ack,       // page 0x200
+            Response::Ack, // Reset (hold, stop)
+            Response::Ack, // SwsActivate
+            data([0x80]),  // watchdog read
+            Response::Ack, // watchdog write
+            Response::Ack, // erase sector 0x000
+            Response::Ack, // page 0x000
+            Response::Ack, // page 0x100
+            Response::Ack, // page 0x200
         ]);
 
-        let output = flash(&mut mock, file.path(), false, false).expect("flash succeeds");
+        let output = flash(&mut mock, file.path(), false).expect("flash succeeds");
 
         assert_eq!(
             output,
@@ -195,8 +156,6 @@ mod tests {
                 bytes: 600,
                 sectors_erased: 1,
                 pages_written: 3,
-                target_xtal_mhz: Some(12),
-                image_xtal_mhz: Some(12),
             }
         );
         assert_eq!(
@@ -209,7 +168,6 @@ mod tests {
                 sws_activate_req(),
                 read_mem_req(0x0622, 1),
                 write_mem_req(0x0622, &[0x00]),
-                read_flash_req(0, 12),
                 erase_req(0),
                 write_page_req(0, &image[..256]),
                 write_page_req(0x100, &image[256..512]),
@@ -219,105 +177,51 @@ mod tests {
     }
 
     #[test]
-    fn flash_guard_decodes_the_crystal_of_a_flattened_elf() {
-        // `flash` accepts ELFs, so the guard must see the header through
-        // `flat_image()`, not just in raw .bin images. TempFile names the file
-        // `.bin`; `load_image` selects the parser by magic, which is the path
-        // under test here.
-        for (header, mhz) in [(REAL_12MHZ_HEADER, 12), (REAL_16MHZ_HEADER, 16)] {
-            let elf = crate::elf::header_fixture(header);
-            let file = TempFile::new(&format!("flash-elf-{mhz}mhz"), &elf);
-
-            let flat = load_image(file.path()).expect("fixture ELF flattens");
-
-            assert_eq!(
-                header_xtal_mhz(&flat),
-                Some(mhz),
-                "{mhz} MHz header lost in ELF flattening"
-            );
-        }
-
-        // And the guard aborts before erasing when the ELF is the wrong speed.
+    fn flash_programs_the_flattened_elf_image_not_the_elf_file() {
+        // `flash` accepts ELFs, so the bytes it programs are the flattened
+        // image. TempFile names the file `.bin`; `load_image` selects the
+        // parser by magic, which is the path under test here.
         let elf = crate::elf::header_fixture(REAL_16MHZ_HEADER);
-        let file = TempFile::new("flash-elf-mismatch", &elf);
-        let mut mock = crate::transport::MockTransport::new([
-            Response::Ack,
-            Response::Ack,
-            data([0x80]),
-            Response::Ack,
-            data(REAL_12MHZ_HEADER),
-        ]);
+        let file = TempFile::new("flash-elf", &elf);
 
-        let err = flash(&mut mock, file.path(), false, false)
-            .expect_err("a 16 MHz ELF must not reach a 12 MHz board");
-
+        let flat = load_image(file.path()).expect("fixture ELF flattens");
+        assert_eq!(flat.len(), 0x104, "flat image ends at p_paddr + p_filesz");
         assert_eq!(
-            err,
-            CliError::CrystalMismatch {
-                target_mhz: 12,
-                image_mhz: 16,
-            }
+            &flat[..REAL_16MHZ_HEADER.len()],
+            &REAL_16MHZ_HEADER,
+            "the header at p_paddr 0 must survive flattening"
         );
-        assert_eq!(err.exit_code(), 3);
-        assert!(!flash_requests(&mock.requests), "{:?}", mock.requests);
-    }
 
-    #[test]
-    fn flash_guard_rejects_a_real_12mhz_target_against_a_16mhz_image() {
-        let mut image = REAL_16MHZ_HEADER.to_vec();
-        image.resize(600, 0x5a);
-        let file = TempFile::new("flash-real-mismatch", &image);
         let mut mock = crate::transport::MockTransport::new([
             Response::Ack,
             Response::Ack,
             data([0x80]),
             Response::Ack,
-            data(REAL_12MHZ_HEADER),
+            Response::Ack, // erase sector 0x000
+            Response::Ack, // page 0x000
+            Response::Ack, // page 0x100
         ]);
 
-        let err = flash(&mut mock, file.path(), false, false)
-            .expect_err("a real 16 MHz image must not reach a 12 MHz board");
-
-        assert_eq!(
-            err,
-            CliError::CrystalMismatch {
-                target_mhz: 12,
-                image_mhz: 16,
-            }
-        );
-        assert_eq!(err.exit_code(), 3);
-        assert!(!flash_requests(&mock.requests), "{:?}", mock.requests);
-    }
-
-    #[test]
-    fn flash_force_still_overrides_a_real_crystal_mismatch() {
-        let mut image = REAL_16MHZ_HEADER.to_vec();
-        image.resize(256, 0x5a);
-        let file = TempFile::new("flash-real-force", &image);
-        let mut mock = crate::transport::MockTransport::new([
-            Response::Ack,
-            Response::Ack,
-            data([0x80]),
-            Response::Ack,
-            data(REAL_12MHZ_HEADER),
-            Response::Ack,
-            Response::Ack,
-        ]);
-
-        let output = flash(&mut mock, file.path(), true, false).expect("--force proceeds");
+        let output = flash(&mut mock, file.path(), false).expect("ELF flash succeeds");
 
         assert_eq!(
             output,
             Output::Flash {
                 path: file.path().display().to_string(),
-                bytes: 256,
+                bytes: flat.len(),
                 sectors_erased: 1,
-                pages_written: 1,
-                target_xtal_mhz: Some(12),
-                image_xtal_mhz: Some(16),
+                pages_written: 2,
             }
         );
-        assert!(flash_requests(&mock.requests));
+        let first_page = mock
+            .requests
+            .iter()
+            .find_map(|req| match req {
+                Request::FlashWritePage { addr: 0, data } => Some(data.as_slice()),
+                _ => None,
+            })
+            .expect("page 0 is programmed");
+        assert_eq!(&first_page[..REAL_16MHZ_HEADER.len()], &REAL_16MHZ_HEADER);
     }
 
     #[test]
@@ -325,17 +229,11 @@ mod tests {
         let image = firmware_image(0x0000_0dd3, 0x1200);
         let file = TempFile::new("flash-sectors", &image);
         let pages = image.len().div_ceil(FLASH_PAGE_SIZE as usize);
-        let mut responses = vec![
-            Response::Ack,
-            Response::Ack,
-            data([0x80]),
-            Response::Ack,
-            header(0x0000_0dd3),
-        ];
+        let mut responses = vec![Response::Ack, Response::Ack, data([0x80]), Response::Ack];
         responses.extend(std::iter::repeat_n(Response::Ack, 2 + pages));
         let mut mock = crate::transport::MockTransport::new(responses);
 
-        let output = flash(&mut mock, file.path(), false, false).expect("flash succeeds");
+        let output = flash(&mut mock, file.path(), false).expect("flash succeeds");
 
         let erased: Vec<u32> = mock
             .requests
@@ -369,134 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_xtal_mismatch_aborts_before_erase() {
-        let image = firmware_image(0x8000_0dd3, 600); // 16 MHz
-        let file = TempFile::new("flash-mismatch", &image);
-        let mut mock = crate::transport::MockTransport::new([
-            Response::Ack,
-            Response::Ack,
-            data([0x80]),
-            Response::Ack,
-            header(0x0000_0dd3), // target is 12 MHz
-        ]);
-
-        let err = flash(&mut mock, file.path(), false, false).expect_err("mismatch must abort");
-
-        assert_eq!(
-            err,
-            CliError::CrystalMismatch {
-                target_mhz: 12,
-                image_mhz: 16,
-            }
-        );
-        assert_eq!(err.exit_code(), 3);
-        assert!(!flash_requests(&mock.requests), "{:?}", mock.requests);
-        assert_eq!(
-            mock.requests,
-            [
-                Request::Reset {
-                    hold_ms: 2,
-                    stop_cpu: true,
-                },
-                sws_activate_req(),
-                read_mem_req(0x0622, 1),
-                write_mem_req(0x0622, &[0x00]),
-                read_flash_req(0, 12),
-            ]
-        );
-    }
-
-    #[test]
-    fn flash_force_overrides_the_crystal_guard() {
-        let image = firmware_image(0x8000_0dd3, 256); // 16 MHz
-        let file = TempFile::new("flash-force", &image);
-        let mut mock = crate::transport::MockTransport::new([
-            Response::Ack,
-            Response::Ack,
-            data([0x80]),
-            Response::Ack,
-            header(0x0000_0dd3),
-            Response::Ack,
-            Response::Ack,
-        ]);
-
-        let output = flash(&mut mock, file.path(), true, false).expect("--force proceeds");
-
-        assert_eq!(
-            output,
-            Output::Flash {
-                path: file.path().display().to_string(),
-                bytes: 256,
-                sectors_erased: 1,
-                pages_written: 1,
-                target_xtal_mhz: Some(12),
-                image_xtal_mhz: Some(16),
-            }
-        );
-        assert!(flash_requests(&mock.requests));
-    }
-
-    #[test]
-    fn flash_skips_the_guard_for_blank_targets_and_non_firmware_images() {
-        let blank = data([0xff; FLASH_HEADER_LEN as usize]);
-        let cases = [
-            (
-                "blank-target",
-                blank,
-                firmware_image(0x0000_0dd3, 300),
-                None,
-                Some(12),
-            ),
-            (
-                "non-knlt-image",
-                header(0x0000_0dd3),
-                vec![0x5a; 300],
-                Some(12),
-                None,
-            ),
-            (
-                "short-image",
-                header(0x0000_0dd3),
-                vec![0x5a; 4],
-                Some(12),
-                None,
-            ),
-        ];
-
-        for (name, target, image, target_xtal, image_xtal) in cases {
-            let file = TempFile::new(name, &image);
-            let sectors = image.len().div_ceil(FLASH_SECTOR_SIZE as usize);
-            let pages = image.len().div_ceil(FLASH_PAGE_SIZE as usize);
-            let mut responses = vec![
-                Response::Ack,
-                Response::Ack,
-                data([0x80]),
-                Response::Ack,
-                target,
-            ];
-            responses.extend(std::iter::repeat_n(Response::Ack, sectors + pages));
-            let mut mock = crate::transport::MockTransport::new(responses);
-
-            let output = flash(&mut mock, file.path(), false, false)
-                .unwrap_or_else(|err| panic!("{name}: {err:?}"));
-
-            assert_eq!(
-                output,
-                Output::Flash {
-                    path: file.path().display().to_string(),
-                    bytes: image.len(),
-                    sectors_erased: sectors,
-                    pages_written: pages,
-                    target_xtal_mhz: target_xtal,
-                    image_xtal_mhz: image_xtal,
-                },
-                "{name}"
-            );
-            assert!(flash_requests(&mock.requests), "{name}");
-        }
-    }
-
-    #[test]
     fn flash_reset_flag_appends_a_release_reset() {
         let image = firmware_image(0x0000_0dd3, 256);
         let file = TempFile::new("flash-reset", &image);
@@ -505,13 +275,12 @@ mod tests {
             Response::Ack,
             data([0x80]),
             Response::Ack,
-            header(0x0000_0dd3),
             Response::Ack,
             Response::Ack,
             Response::Ack,
         ]);
 
-        flash(&mut mock, file.path(), false, true).expect("flash --reset succeeds");
+        flash(&mut mock, file.path(), true).expect("flash --reset succeeds");
 
         assert_eq!(
             mock.requests.last(),
@@ -526,7 +295,7 @@ mod tests {
     fn flash_rejects_empty_oversized_and_malformed_images_before_any_request() {
         let empty = TempFile::new("flash-empty", &[]);
         let mut mock = crate::transport::MockTransport::new([]);
-        let err = flash(&mut mock, empty.path(), false, false).expect_err("empty image fails");
+        let err = flash(&mut mock, empty.path(), false).expect_err("empty image fails");
         assert!(
             matches!(&err, CliError::Device(message) if message.contains("empty")),
             "{err:?}"
@@ -535,7 +304,7 @@ mod tests {
 
         let oversized = TempFile::new("flash-oversized", &vec![0u8; FLASH_SIZE as usize + 1]);
         let mut mock = crate::transport::MockTransport::new([]);
-        let err = flash(&mut mock, oversized.path(), false, false).expect_err("oversized fails");
+        let err = flash(&mut mock, oversized.path(), false).expect_err("oversized fails");
         assert!(
             matches!(&err, CliError::Device(message) if message.contains("larger")),
             "{err:?}"
@@ -545,7 +314,7 @@ mod tests {
         // The ELF magic selects the parser, so a broken ELF fails as such.
         let broken = TempFile::new("flash-broken-elf", b"\x7fELFnot an elf");
         let mut mock = crate::transport::MockTransport::new([]);
-        let err = flash(&mut mock, broken.path(), false, false).expect_err("bad ELF fails");
+        let err = flash(&mut mock, broken.path(), false).expect_err("bad ELF fails");
         assert!(matches!(err, CliError::Elf(_)), "{err:?}");
         assert!(mock.requests.is_empty());
     }

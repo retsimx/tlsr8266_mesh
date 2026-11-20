@@ -67,7 +67,7 @@ $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 	$(CP) -O binary $< $@
 
 $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ) $(RUST_SRCS)
-	@[ -f .env ] && . .env || :; \
+	@[ -f .env ] && . ./.env || :; \
 	 _LLC=$${LLC:-$(LLC)}; \
 	 _LLVM_LINK=$${LLVM_LINK:-$(LLVM_LINK)}; \
 	 _OPT=$${OPT:-$(OPT)}; \
@@ -88,26 +88,15 @@ $(BUILD_DIR)/$(TARGET): $(STARTUP_OBJ) $(RUST_SRCS)
 .PHONY: $(BUILD_DIR)/$(TARGET)
 
 # Startup.
-# rust/Cargo.toml is a prerequisite because the `xtal-16mhz` feature must stay
-# declared for FEATURES=xtal-16mhz to be accepted.
 #
-# The startup object also carries the crystal bit (sdk/version.in), and the bit
-# follows the FEATURES selection, so the object must be rebuilt whenever that
-# selection changes: a stale stamp would label a 16 MHz build as 12 MHz (or the
-# reverse) and the flash crystal guard would trust the label. This stamp file
-# exposes that dependency to make instead of relying on rust/Cargo.toml's mtime.
-FEATURE_STAMP = $(BUILD_DIR)/features.stamp
-
-.PHONY: FORCE
-FORCE:
-
-$(FEATURE_STAMP): FORCE
-	@mkdir -p $(BUILD_DIR)
-	@printf '%s\n' '$(strip $(FEATURES))' | cmp -s - $@ || printf '%s\n' '$(strip $(FEATURES))' > $@
-
-$(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC) rust/Cargo.toml $(FEATURE_STAMP)
-	xtal=$$(case " $(FEATURES) " in *" xtal-16mhz "*) echo 1 ;; *) echo 0 ;; esac); \
-	bash sdk/increment_version.sh $$xtal
+# The startup object carries the BUILD_VERSION word in the image header, and
+# sdk/version.in is the source of that word, so the object must be rebuilt
+# whenever the version changes. Listing sdk/version.in as a prerequisite also
+# keeps the recipe's restamp honest: a bump rewrites version.in first, then the
+# freshly assembled object ends up newer, so make settles instead of rebuilding
+# on every run.
+$(BUILD_DIR)/asm/cstartup_8266.o : $(STARTUP_SRC) sdk/version.in
+	bash sdk/increment_version.sh
 	mkdir -p $(BUILD_DIR)/asm
 	$(CC) -c $(CCFLAGS) $< -o $@
 

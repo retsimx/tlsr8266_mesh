@@ -7,9 +7,12 @@
 //! The system operates at 32MHz by default, derived from a 192MHz PLL clock
 //! that is divided down to the system clock frequency.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sdk::mcu::analog::analog_read;
 use crate::sdk::mcu::register::{
-    read_reg_system_tick, write_reg_clk_sel, write_reg_rst_clk0, write_reg_tmr_ctrl, FLD_CLK_EN,
-    FLD_CLK_SEL, FLD_TMR, WATCHDOG_TIMEOUT_COEFF,
+    read_reg_clk_sel, read_reg_system_tick, write_reg_clk_sel, write_reg_rst_clk0,
+    write_reg_tmr_ctrl, FLD_CLK_EN, FLD_CLK_SEL, FLD_TMR, WATCHDOG_TIMEOUT_COEFF,
 };
 use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 
@@ -41,6 +44,47 @@ pub const CLOCK_MAX_MS: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1MS);
 /// Maximum number of microseconds that can be represented by the clock counter
 pub const CLOCK_MAX_US: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1US);
 
+/// Analog register address of the low byte of the free-running 32K_RC counter
+const ANA_32K_COUNTER_LO: u8 = 0x40;
+/// Analog register address of the high byte of the free-running 32K_RC counter
+const ANA_32K_COUNTER_HI: u8 = 0x41;
+
+/// Number of 32K_RC ticks measured by the crystal detection window (~1ms)
+const XTAL_DETECT_WINDOW_32K_TICKS: u16 = 32;
+
+/// System tick count at or above which the external crystal detected at boot is
+/// 16MHz
+///
+/// Measured over a 32 tick 32K_RC window with the system clock switched to
+/// `SEL_16M_PAD`: a 12MHz board yields 12,483-12,535 ticks and a 16MHz board
+/// yields 16,286-16,656 ticks. The midpoint leaves roughly 14% margin on each
+/// side of the ~31% separation.
+const XTAL_DETECT_16MHZ_THRESHOLD: u32 = 14_500;
+
+/// Maximum number of 32K_RC polls allowed in a single loop of the detection path
+///
+/// The counter advances once every ~30.5us, so the 32 tick measurement window
+/// needs ~32 polls and each poll (three analog reads) takes a few microseconds:
+/// 4096 leaves roughly two orders of magnitude of headroom. The bound exists
+/// because detection runs before the watchdog is armed, where a stuck loop is a
+/// hang that cannot be recovered without SWire.
+const XTAL_DETECT_MAX_POLLS: u16 = 4096;
+
+/// Largest 32K_RC sample delta that is counted as forward progress
+///
+/// The counter free-runs forward, so a delta in the top half of its 16-bit range
+/// can only be a backward glitch (a garbled sample): a real forward step inside
+/// the 32 tick window is a handful of ticks at most. Without this guard a glitch
+/// wraps to a huge delta, closes the window after a couple of samples and
+/// reports a 16MHz part as 12MHz.
+const XTAL_DETECT_MAX_SAMPLE_STEP: u16 = 0x7fff;
+
+/// Whether the external crystal detected at boot is 16MHz (vs. the default 12MHz)
+///
+/// Written once during [`clock_init`] and only read afterwards, so a `Relaxed`
+/// load/store pair is sufficient.
+static IS_16MHZ_XTAL: AtomicBool = AtomicBool::new(false);
+
 /// Clock source selection for the TLSR8266 SoC
 enum CLOCK_SEL {
     /// 32MHz RC oscillator (internal)
@@ -65,14 +109,16 @@ enum CLOCK_SEL {
 ///
 /// This function configures the TLSR8266 system clock by:
 /// 1. Setting up the clock reset register with USB clock enabled if configured
-/// 2. Configuring the clock selector register to use PLL divided down to 32MHz
-/// 3. Enabling system timer and watchdog with appropriate timeout values
+/// 2. Detecting whether the external crystal is 12MHz or 16MHz
+/// 3. Configuring the clock selector register to use PLL divided down to 32MHz
+/// 4. Enabling system timer and watchdog with appropriate timeout values
 ///
 /// # Algorithm
 ///
 /// 1. Reset clock registers and configure USB clock
-/// 2. Set clock source to high-speed divider and configure divider ratio
-/// 3. Enable timer 0 and configure watchdog timeout
+/// 2. Measure the external crystal frequency and cache the result
+/// 3. Set clock source to high-speed divider and configure divider ratio
+/// 4. Enable timer 0 and configure watchdog timeout
 ///
 /// # Notes
 ///
@@ -80,6 +126,9 @@ enum CLOCK_SEL {
 ///   refreshed elsewhere in the code
 /// * PLL clock (192MHz) is divided by 6 to get the 32MHz system clock
 /// * This function must be called early in the boot process
+/// * The crystal measurement in step 2 runs with interrupts masked and before
+///   any interrupt source is enabled (`irq_init()`/`irq_enable()` happen later
+///   in `App::run`), so nothing waits on that mask
 pub fn clock_init() {
     // 1. Reset clock registers and enable USB clock if configured
     write_reg_rst_clk0(
@@ -87,7 +136,25 @@ pub fn clock_init() {
             | FLD_CLK_EN::USB_EN.bits(), // Enable USB clock
     );
 
-    // 2. Configure clock source and divider
+    // 2. Detect the external crystal before the PLL divider is configured.
+    //    Detection restores reg_clk_sel, so step 3 still starts from the
+    //    reset-default clock selection.
+    //
+    //    The whole measure-and-publish sequence runs masked because it is a
+    //    read-measure-restore of the clock selection: an ISR that changed the
+    //    source mid-measurement would invalidate the count and have its own
+    //    change clobbered by the restore. Nesting is deliberate and safe:
+    //    analog_read() takes its own critical section, and the project impl
+    //    (compat::TlsrCriticalSection) saves and restores the interrupt-enable
+    //    register, so the inner acquire sees "already disabled" and restores
+    //    that state faithfully. The section polls registers only (no blocking
+    //    I/O), is bounded by XTAL_DETECT_MAX_POLLS, and runs before irq_init()/
+    //    irq_enable() in `App::run`, so no interrupt waits on the mask.
+    critical_section::with(|_| {
+        IS_16MHZ_XTAL.store(detect_xtal_is_16mhz(), Ordering::Relaxed);
+    });
+
+    // 3. Configure clock source and divider
     //    - Use high-speed divider (SEL_HS_DIV) as clock source
     //    - Divide PLL clock (192MHz) by 6 to get 32MHz system clock
     write_reg_clk_sel(MASK_VAL!(
@@ -97,7 +164,7 @@ pub fn clock_init() {
         CLOCK_SEL::SEL_HS_DIV as u32    // Use HS divider as clock source
     ) as u8);
 
-    // 3. Configure system timer and watchdog
+    // 4. Configure system timer and watchdog
     //    - Enable Timer0
     //    - Set watchdog capture value (timeout period converted to appropriate units)
     //    - Enable watchdog timer
@@ -110,6 +177,154 @@ pub fn clock_init() {
         FLD_TMR::TMR_WD_EN.bits(), // Enable watchdog timer
         1
     ))
+}
+
+/// Returns whether the external crystal detected at boot is 16MHz.
+///
+/// # Returns
+///
+/// * `true` if the boot-time measurement identified a 16MHz crystal
+/// * `false` for the default 12MHz crystal, or before [`clock_init`] has run
+///
+/// # Notes
+///
+/// * Written once by [`clock_init`] and only read afterwards
+/// * Uses a `Relaxed` load because no ordering with other memory is required
+#[cfg_attr(test, mry::mry)]
+pub fn is_16mhz_xtal() -> bool {
+    IS_16MHZ_XTAL.load(Ordering::Relaxed)
+}
+
+/// Reads the free-running 16-bit 32K_RC counter through the 8-bit analog interface.
+///
+/// # Returns
+///
+/// * The current 32K_RC counter value, combined big-endian from `0x41:0x40`
+///
+/// # Algorithm
+///
+/// 1. Read the high byte (`0x41`)
+/// 2. Read the low byte (`0x40`)
+/// 3. Read the high byte again (`0x41`)
+/// 4. Retry from step 1 while the two high-byte samples differ
+///
+/// # Notes
+///
+/// * The counter is 16 bits wide but each analog read returns a single byte, so
+///   the low-byte read can straddle a carry into the high byte
+/// * Retrying while the high byte is stable discards those torn samples instead
+///   of returning a value that is 256 too high
+/// * A high/low pair is only accepted once the same high byte has been observed
+///   on both sides of the low-byte read
+/// * Retrying stops after [`XTAL_DETECT_MAX_POLLS`] attempts: the last low byte
+///   is paired with the newest high byte and returned best effort, because this
+///   runs before the watchdog is armed and must not be able to hang
+fn read_ana_32k() -> u16 {
+    let mut polls: u16 = 0;
+    loop {
+        let hi1 = analog_read(ANA_32K_COUNTER_HI);
+        let lo = analog_read(ANA_32K_COUNTER_LO);
+        let hi2 = analog_read(ANA_32K_COUNTER_HI);
+
+        if hi1 == hi2 {
+            return u16::from_be_bytes([hi1, lo]);
+        }
+
+        if polls >= XTAL_DETECT_MAX_POLLS {
+            // Never settled: hand back the most recent pairing rather than hang
+            return u16::from_be_bytes([hi2, lo]);
+        }
+
+        polls += 1;
+    }
+}
+
+/// Measures the external crystal frequency and reports whether it is 16MHz.
+///
+/// # Returns
+///
+/// * `true` if the external crystal is 16MHz
+/// * `false` if the external crystal is 12MHz
+///
+/// # Algorithm
+///
+/// 1. Save the current clock selector value
+/// 2. Switch the clock source to the crystal pad (`SEL_16M_PAD`) with divider 0
+/// 3. Align to a 32K_RC tick edge
+/// 4. Count system ticks over a fixed window of 32K_RC ticks (~1ms)
+/// 5. Restore the saved clock selector value
+/// 6. Report whether the count reached [`XTAL_DETECT_16MHZ_THRESHOLD`]
+///
+/// # Notes
+///
+/// * `reg_clk_sel` is written as a whole byte, so the measurement write also
+///   sets `DIV = 0`. That is intentional: the pad clock is measured undivided
+///   (÷1), which is how the threshold was derived. The value read before the
+///   measurement is written back verbatim afterwards, divider included
+/// * The window starts on a 32K_RC tick edge because the threshold was derived
+///   from measurements taken from a tick boundary; starting mid-tick would shift
+///   the window by up to one tick and bias the count
+/// * `wrapping_sub` deltas are accumulated so a skipped 32K_RC sample advances
+///   the window by more than one tick instead of stalling the loop; a delta that
+///   can only be a backward glitch is treated as a re-read instead of closing
+///   the window early
+/// * Every loop is bounded by [`XTAL_DETECT_MAX_POLLS`]. A bound being reached
+///   abandons the measurement, still restores `reg_clk_sel` and reports 12MHz: a
+///   16MHz board then loads the 12MHz RF table and loses the radio but still
+///   boots and can be reflashed over SWire, whereas a hang here cannot be
+///   recovered without SWire
+/// * Runs from normal `.text` (not `.ram_code`) so it costs no SRAM
+#[cfg_attr(test, mry::mry)]
+pub fn detect_xtal_is_16mhz() -> bool {
+    // 1. Remember the clock selection so it can be restored afterwards
+    let previous = read_reg_clk_sel();
+
+    // 2. Run the system clock straight from the external crystal pad. The
+    //    register is written as one byte, so DIV is deliberately 0 (÷1): the pad
+    //    clock must be measured undivided for the threshold to hold, and step 5
+    //    restores `previous` (divider included) verbatim.
+    write_reg_clk_sel(MASK_VAL!(
+        FLD_CLK_SEL::SRC.bits() as u32, // DIV = 0, SRC = SEL_16M_PAD
+        CLOCK_SEL::SEL_16M_PAD as u32   // Use the 16MHz pad clock
+    ) as u8);
+
+    // 3. Align to a 32K_RC tick edge before starting the measurement window
+    let edge = read_ana_32k();
+    let mut last = read_ana_32k();
+    let mut polls: u16 = 0;
+    while last == edge && polls < XTAL_DETECT_MAX_POLLS {
+        last = read_ana_32k();
+        polls += 1;
+    }
+
+    // 4. Count system ticks over the fixed 32K_RC window
+    let t0 = read_reg_system_tick();
+    let mut elapsed_32k: u16 = 0;
+    let mut polls: u16 = 0;
+    while elapsed_32k < XTAL_DETECT_WINDOW_32K_TICKS && polls < XTAL_DETECT_MAX_POLLS {
+        let sample = read_ana_32k();
+        let delta = sample.wrapping_sub(last);
+
+        if delta < XTAL_DETECT_MAX_SAMPLE_STEP {
+            // Plausible forward step: count it and move the reference forward
+            elapsed_32k = elapsed_32k.wrapping_add(delta);
+            last = sample;
+        }
+        // Otherwise the counter appears to have gone backwards or the sample is
+        // garbled; keep `last` so the next sample is compared with the last good
+        // one, and let the poll bound cover a counter that never recovers
+        polls += 1;
+    }
+    let window_complete = elapsed_32k >= XTAL_DETECT_WINDOW_32K_TICKS;
+    let elapsed = read_reg_system_tick().wrapping_sub(t0);
+
+    // 5. Restore the clock selection the caller had before the measurement
+    write_reg_clk_sel(previous);
+
+    // 6. ~12,500 ticks means 12MHz, ~16,400 ticks means 16MHz. A window that
+    //    never completed is not a measurement, so it reports the 12MHz default
+    //    (see the fail-safe note above)
+    window_complete && elapsed >= XTAL_DETECT_16MHZ_THRESHOLD
 }
 
 /// Returns the current system tick count.
@@ -198,32 +413,44 @@ mod tests {
     use super::*;
 
     // Import mock functions from register module for testing
+    use crate::sdk::mcu::analog::mock_analog_read;
+    use crate::sdk::mcu::register::mock_read_reg_clk_sel;
     use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use crate::sdk::mcu::register::mock_write_reg_clk_sel;
     use crate::sdk::mcu::register::mock_write_reg_rst_clk0;
     use crate::sdk::mcu::register::mock_write_reg_tmr_ctrl;
+    use mry::Any;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::{Arc, Mutex};
 
     /// Tests clock_init function for proper register configuration.
     ///
     /// This test verifies that the clock_init function correctly:
     /// - Configures the reset register with proper USB settings
+    /// - Detects and caches the external crystal frequency exactly once
     /// - Sets up the clock selector register with correct source and divider
     /// - Configures the timer control register with proper watchdog timing
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock responses for register write functions
+    /// 1. Setup mock responses for register write functions and crystal detection
     /// 2. Call clock_init to trigger the configuration
     /// 3. Verify that each register was written with expected values
     ///
     /// # Notes
     ///
-    /// * Tests all three stages of clock initialization
+    /// * Tests all four stages of clock initialization
     /// * Verifies USB clock configuration based on CLK_USB_ENABLE constant
+    /// * Confirms the detected crystal is published through is_16mhz_xtal()
     /// * Confirms PLL divider calculation is correct
     /// * Verifies watchdog timeout is properly converted to register value
     #[test]
-    #[mry::lock(write_reg_rst_clk0, write_reg_clk_sel, write_reg_tmr_ctrl)]
+    #[mry::lock(
+        write_reg_rst_clk0,
+        write_reg_clk_sel,
+        write_reg_tmr_ctrl,
+        detect_xtal_is_16mhz
+    )]
     fn test_clock_init() {
         // Setup expected values
         let expected_rst_clk0 = 0xff000000 | FLD_CLK_EN::USB_EN.bits();
@@ -248,6 +475,7 @@ mod tests {
         mock_write_reg_rst_clk0(expected_rst_clk0).returns(());
         mock_write_reg_clk_sel(expected_clk_sel).returns(());
         mock_write_reg_tmr_ctrl(expected_tmr_ctrl).returns(());
+        mock_detect_xtal_is_16mhz().returns(true);
 
         // Call the function being tested
         clock_init();
@@ -256,6 +484,17 @@ mod tests {
         mock_write_reg_rst_clk0(expected_rst_clk0).assert_called(1);
         mock_write_reg_clk_sel(expected_clk_sel).assert_called(1);
         mock_write_reg_tmr_ctrl(expected_tmr_ctrl).assert_called(1);
+
+        // Verify the crystal was detected exactly once and its result published
+        mock_detect_xtal_is_16mhz().assert_called(1);
+        assert_eq!(
+            is_16mhz_xtal(),
+            true,
+            "clock_init should publish the detected crystal"
+        );
+
+        // Leave the shared state at its power-on default for other tests
+        IS_16MHZ_XTAL.store(false, Ordering::Relaxed);
     }
 
     /// Tests clock_time function for proper system tick reading.
@@ -638,5 +877,422 @@ mod tests {
 
         // Verify clock_time was called the expected number of times
         mock_clock_time().assert_called(1);
+    }
+
+    /// Tests that read_ana_32k retries when the high byte changes mid-read.
+    ///
+    /// This test verifies that the read_ana_32k function correctly:
+    /// - Rejects a sample whose high byte differs before and after the low byte
+    /// - Retries until the same high byte is observed on both sides
+    /// - Combines the accepted high/low bytes big-endian
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Return `0x12` for the first high-byte read and `0x13` for both reads of
+    ///    the second attempt
+    /// 2. Return a constant low byte
+    /// 3. Call read_ana_32k and verify the second attempt's value is returned
+    ///
+    /// # Notes
+    ///
+    /// * The two low-byte reads prove the retry loop actually ran
+    /// * The final value `0x1334` is only reachable if the stable high byte is
+    ///   combined with the low byte
+    #[test]
+    #[mry::lock(analog_read)]
+    fn test_read_ana_32k_retries_on_torn_high_byte() {
+        // Attempt 1 reads high (0x12), low, high (0x13) and is rejected; attempt
+        // 2 reads high (0x13), low, high (0x13) and is accepted.
+        let mut hi_samples = [0x12u8, 0x13, 0x13, 0x13].into_iter();
+        mock_analog_read(ANA_32K_COUNTER_HI).returns_with(move |_: u8| -> u8 {
+            hi_samples.next().expect("too many high-byte reads")
+        });
+        mock_analog_read(ANA_32K_COUNTER_LO).returns(0x34);
+
+        let value = read_ana_32k();
+
+        assert_eq!(
+            value, 0x1334,
+            "should accept only the high byte that stayed stable"
+        );
+
+        // Two high-byte reads per attempt, one attempt rejected and one accepted
+        mock_analog_read(ANA_32K_COUNTER_HI).assert_called(4);
+        // One low-byte read per attempt proves the retry loop was exercised
+        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(2);
+    }
+
+    /// Tests that read_ana_32k stops retrying when the high byte never settles.
+    ///
+    /// This test verifies that the read_ana_32k function correctly:
+    /// - Stops after [`XTAL_DETECT_MAX_POLLS`] attempts instead of hanging
+    /// - Still returns a value, pairing the last low byte with the newest high
+    ///   byte, so the pre-watchdog boot path cannot stall
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Alternate the high byte on every read so `hi1 != hi2` always
+    /// 2. Call read_ana_32k and verify a best-effort value comes back
+    ///
+    /// # Notes
+    ///
+    /// * 4097 low-byte reads pin the cap; without it this test would never return
+    #[test]
+    #[mry::lock(analog_read)]
+    fn test_read_ana_32k_bounded_when_high_byte_never_settles() {
+        let mut hi_reads: u32 = 0;
+        mock_analog_read(ANA_32K_COUNTER_HI).returns_with(move |_: u8| -> u8 {
+            hi_reads += 1;
+            if hi_reads % 2 == 1 {
+                0x12
+            } else {
+                0x13
+            }
+        });
+        mock_analog_read(ANA_32K_COUNTER_LO).returns(0x34);
+
+        let value = read_ana_32k();
+
+        assert_eq!(
+            value, 0x1334,
+            "should return the last sample instead of retrying forever"
+        );
+        // One attempt past the cap, and every attempt reads the low byte once
+        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(XTAL_DETECT_MAX_POLLS as usize + 1);
+    }
+
+    /// Tests that is_16mhz_xtal reflects the value stored at boot.
+    ///
+    /// This test verifies that the is_16mhz_xtal function correctly:
+    /// - Returns true after a 16MHz result has been stored
+    /// - Returns false after a 12MHz result has been stored
+    ///
+    /// # Notes
+    ///
+    /// * Sets the shared state explicitly rather than relying on test order
+    /// * Restores the power-on default so later tests start from a known state
+    #[test]
+    fn test_is_16mhz_xtal_reflects_stored_value() {
+        IS_16MHZ_XTAL.store(true, Ordering::Relaxed);
+        assert_eq!(is_16mhz_xtal(), true, "Should report a stored 16MHz result");
+
+        IS_16MHZ_XTAL.store(false, Ordering::Relaxed);
+        assert_eq!(
+            is_16mhz_xtal(),
+            false,
+            "Should report a stored 12MHz result"
+        );
+    }
+
+    /// Tests that detect_xtal_is_16mhz reports false for a 12MHz measurement.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Aligns to a 32K_RC tick edge before measuring
+    /// - Counts system ticks over the 32K_RC window
+    /// - Reports false when the count is below the 16MHz threshold
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Mock the 32K_RC counter to advance 1 tick to the edge, then 32 ticks
+    /// 2. Mock the system tick to advance 12,500 ticks over the window
+    /// 3. Call the function and verify it reports false
+    ///
+    /// # Notes
+    ///
+    /// * 12,500 is the measured centre of the 12MHz board range
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_below_threshold() {
+        let start_tick = 0x1000_0000u32;
+        let elapsed = 12_500u32;
+
+        mock_read_reg_clk_sel().returns(0x63);
+
+        // 32K_RC samples: the edge (100), the first sample past the edge (101),
+        // then the sample that closes the 32 tick window (133)
+        let mut lo_samples = [100u8, 101, 133].into_iter();
+        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
+            lo_samples.next().expect("unexpected 32K_RC low-byte read")
+        });
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+
+        let mut tick_calls = 0;
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            tick_calls += 1;
+            if tick_calls == 1 {
+                start_tick
+            } else {
+                start_tick + elapsed
+            }
+        });
+        mock_write_reg_clk_sel(Any).returns(());
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(result, false, "12,500 ticks should be reported as 12MHz");
+        mock_read_reg_clk_sel().assert_called(1);
+        mock_read_reg_system_tick().assert_called(2);
+        // One write to switch sources, one to restore
+        mock_write_reg_clk_sel(Any).assert_called(2);
+    }
+
+    /// Tests that detect_xtal_is_16mhz reports true for a 16MHz measurement.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Reports true when the count is above the 16MHz threshold
+    ///
+    /// # Notes
+    ///
+    /// * 16,400 is the measured centre of the 16MHz board range
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_above_threshold() {
+        let start_tick = 0x2000_0000u32;
+        let elapsed = 16_400u32;
+
+        mock_read_reg_clk_sel().returns(0x63);
+
+        let mut lo_samples = [100u8, 101, 133].into_iter();
+        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
+            lo_samples.next().expect("unexpected 32K_RC low-byte read")
+        });
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+
+        let mut tick_calls = 0;
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            tick_calls += 1;
+            if tick_calls == 1 {
+                start_tick
+            } else {
+                start_tick + elapsed
+            }
+        });
+        mock_write_reg_clk_sel(Any).returns(());
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(result, true, "16,400 ticks should be reported as 16MHz");
+        mock_read_reg_system_tick().assert_called(2);
+    }
+
+    /// Tests the exact threshold boundary of detect_xtal_is_16mhz.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Treats a count exactly equal to the threshold as 16MHz
+    ///
+    /// # Notes
+    ///
+    /// * The threshold is inclusive, so a count of exactly 14,500 is 16MHz
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_at_threshold() {
+        assert_eq!(
+            XTAL_DETECT_16MHZ_THRESHOLD, 14_500,
+            "the documented threshold must not drift"
+        );
+
+        let start_tick = 0x3000_0000u32;
+        let elapsed = XTAL_DETECT_16MHZ_THRESHOLD;
+
+        mock_read_reg_clk_sel().returns(0x63);
+
+        let mut lo_samples = [100u8, 101, 133].into_iter();
+        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
+            lo_samples.next().expect("unexpected 32K_RC low-byte read")
+        });
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+
+        let mut tick_calls = 0;
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            tick_calls += 1;
+            if tick_calls == 1 {
+                start_tick
+            } else {
+                start_tick + elapsed
+            }
+        });
+        mock_write_reg_clk_sel(Any).returns(());
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(
+            result, true,
+            "A count exactly at the threshold should be reported as 16MHz"
+        );
+    }
+
+    /// Tests that detect_xtal_is_16mhz restores the previous clock selection.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Reads the existing reg_clk_sel value before changing it
+    /// - Switches only the source field to the 16MHz pad for the measurement
+    /// - Writes the previously read value back afterwards
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Return `0x63` (divider 3, 32MHz pad) from read_reg_clk_sel
+    /// 2. Record every write_reg_clk_sel value in call order
+    /// 3. Verify the writes are [SEL_16M_PAD source byte, previous value]
+    ///
+    /// # Notes
+    ///
+    /// * The recorded order proves the restore is the second and final write
+    /// * A 16,400 tick count is used so the measurement completes normally
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_restores_previous_clk_sel() {
+        let previous = 0x63u8;
+        let measurement_src = MASK_VAL!(
+            FLD_CLK_SEL::SRC.bits() as u32,
+            CLOCK_SEL::SEL_16M_PAD as u32
+        ) as u8;
+
+        mock_read_reg_clk_sel().returns(previous);
+
+        let writes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_writes = Arc::clone(&writes);
+        mock_write_reg_clk_sel(Any).returns_with(move |value: u8| {
+            recorded_writes.lock().unwrap().push(value);
+        });
+
+        let mut lo_samples = [100u8, 101, 133].into_iter();
+        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
+            lo_samples.next().expect("unexpected 32K_RC low-byte read")
+        });
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+
+        let start_tick = 0x4000_0000u32;
+        let mut tick_calls = 0;
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            tick_calls += 1;
+            if tick_calls == 1 {
+                start_tick
+            } else {
+                start_tick + 16_400
+            }
+        });
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(result, true, "16,400 ticks should be reported as 16MHz");
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![measurement_src, previous],
+            "detection must restore the previously read reg_clk_sel value"
+        );
+    }
+
+    /// Tests that detect_xtal_is_16mhz fails safe when the 32K_RC counter stalls.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Bounds both the edge-alignment and the measurement loops
+    /// - Restores the previous clock selection on that timeout path
+    /// - Reports 12MHz even when the system ticks read high, because an
+    ///   incomplete 32K window is not a measurement
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Hold the 32K_RC counter at a constant value so neither loop progresses
+    /// 2. Have the system tick counter report 16,400 ticks between t0 and the end
+    /// 3. Call the function and verify it returns false and restores the register
+    ///
+    /// # Notes
+    ///
+    /// * Without the fail-safe the 16,400 tick reading would be reported as
+    ///   16MHz; without the bounds the test would never return
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_reports_12mhz_when_32k_stalls() {
+        mock_read_reg_clk_sel().returns(0x63);
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+        mock_analog_read(ANA_32K_COUNTER_LO).returns(100);
+
+        let start_tick = 0x5000_0000u32;
+        let mut tick_calls = 0;
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            tick_calls += 1;
+            if tick_calls == 1 {
+                start_tick
+            } else {
+                start_tick + 16_400
+            }
+        });
+        mock_write_reg_clk_sel(Any).returns(());
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(
+            result, false,
+            "an incomplete 32K_RC window must report the 12MHz default"
+        );
+        // One write to switch sources, one to restore
+        mock_write_reg_clk_sel(Any).assert_called(2);
+        // Two polls for the edge plus the cap on each loop
+        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(2 * XTAL_DETECT_MAX_POLLS as usize + 2);
+    }
+
+    /// Tests that detect_xtal_is_16mhz ignores a backward 32K_RC glitch.
+    ///
+    /// This test verifies that the detect_xtal_is_16mhz function correctly:
+    /// - Discards a sample that appears to move the counter backwards
+    /// - Keeps counting from the last good sample, so the window still spans 32
+    ///   ticks and the measured tick count stays correct
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Emit the edge (100), a sample past it (101), a backward glitch (99),
+    ///    then one incrementing sample per poll
+    /// 2. Model the system tick counter as proportional to the number of 32K_RC
+    ///    samples the measurement actually consumed (~512 system ticks per 32K
+    ///    tick, i.e. a 16MHz part)
+    /// 3. Verify the result is true
+    ///
+    /// # Notes
+    ///
+    /// * Without the guard the glitch wraps to a delta of 65,534, closes the
+    ///   window after three samples and reads ~512 ticks, i.e. 12MHz
+    #[test]
+    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
+    fn test_detect_xtal_is_16mhz_ignores_backward_glitch() {
+        // ~16MHz of system clock per 32K_RC tick
+        const SYS_TICKS_PER_32K_TICK: u32 = 512;
+
+        let start_tick = 0x6000_0000u32;
+        let samples_read = Arc::new(AtomicU32::new(0));
+
+        mock_read_reg_clk_sel().returns(0x63);
+        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
+
+        let mut call: u32 = 0;
+        let counted = Arc::clone(&samples_read);
+        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
+            call += 1;
+            counted.fetch_add(1, Ordering::Relaxed);
+            match call {
+                1 => 100, // edge
+                2 => 101, // first sample past the edge
+                3 => 99,  // backward glitch: 99 - 101 wraps to 65,534
+                n => (100 + n) as u8,
+            }
+        });
+
+        let counted = Arc::clone(&samples_read);
+        mock_read_reg_system_tick().returns_with(move || -> u32 {
+            start_tick + counted.load(Ordering::Relaxed) * SYS_TICKS_PER_32K_TICK
+        });
+        mock_write_reg_clk_sel(Any).returns(());
+
+        let result = detect_xtal_is_16mhz();
+
+        assert_eq!(
+            result, true,
+            "a backward glitch must not truncate the 32K window"
+        );
+        // The window completed, so the samples span the full 32 ticks; a
+        // truncated window would stop after the glitch (three samples)
+        assert!(
+            samples_read.load(Ordering::Relaxed) >= XTAL_DETECT_WINDOW_32K_TICKS as u32,
+            "the ignored glitch should cost one poll, not the window"
+        );
     }
 }

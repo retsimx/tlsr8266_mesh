@@ -23,14 +23,6 @@ fn error_cases() -> Vec<(CliError, &'static str, u8)> {
             1,
         ),
         (CliError::Device("short read".to_owned()), "Device", 1),
-        (
-            CliError::CrystalMismatch {
-                target_mhz: 12,
-                image_mhz: 16,
-            },
-            "CrystalMismatch",
-            3,
-        ),
         (CliError::MissingElf, "MissingElf", 1),
         (
             CliError::Timeout("rtt: stream deadline of 5 ms expired".to_owned()),
@@ -132,15 +124,14 @@ fn fault_messages_name_the_observation_and_the_recovery() {
 
 #[test]
 fn error_object_has_the_documented_shape_and_message() {
-    let mismatch = CliError::CrystalMismatch {
-        target_mhz: 12,
-        image_mhz: 16,
+    let panic = CliError::TargetPanic {
+        line: "[PANIC] boom".to_owned(),
     };
     assert_eq!(
-        error_text(&mismatch, true),
+        error_text(&panic, true),
         concat!(
-            r#"{"command":"error","exit":3,"error":"CrystalMismatch","proto_error":null,"#,
-            r#""message":"crystal mismatch: target 12 MHz, image 16 MHz (use --force to flash anyway); target left stopped — run `probe-tlsr reset`"}"#
+            r#"{"command":"error","exit":3,"error":"TargetPanic","proto_error":null,"#,
+            r#""message":"rtt: panic line \"[PANIC] boom\"; target left stalled — run `probe-tlsr reset --soft`"}"#
         )
     );
 
@@ -209,6 +200,29 @@ fn reset_stop_and_soft_conflict() {
     assert!(Cli::try_parse_from(["probe-tlsr", "reset", "--stop", "--soft"]).is_err());
     assert!(Cli::try_parse_from(["probe-tlsr", "reset", "--stop"]).is_ok());
     assert!(Cli::try_parse_from(["probe-tlsr", "reset", "--soft"]).is_ok());
+}
+
+#[test]
+fn flash_takes_a_path_and_an_optional_reset() {
+    let cli = Cli::try_parse_from(["probe-tlsr", "flash", "app.bin"])
+        .expect("flash parses without its option");
+    let Command::Flash { path, reset } = cli.command else {
+        panic!("expected flash, got {:?}", cli.command);
+    };
+    assert_eq!(path, std::path::PathBuf::from("app.bin"));
+    assert!(!reset);
+
+    let cli =
+        Cli::try_parse_from(["probe-tlsr", "flash", "app.bin", "--reset"]).expect("--reset parses");
+    let Command::Flash { reset, .. } = cli.command else {
+        panic!("expected flash, got {:?}", cli.command);
+    };
+    assert!(reset);
+
+    // The crystal guard is gone, so its override flag is no longer a flag.
+    let err = Cli::try_parse_from(["probe-tlsr", "flash", "app.bin", "--force"])
+        .expect_err("--force is not a flash option");
+    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -310,4 +324,11 @@ fn help_names_every_command_that_leaves_the_core_stopped() {
         "{top}"
     );
     assert!(top.contains("`reset --soft` after a stall"), "{top}");
+}
+
+#[test]
+fn help_documents_exit_three_as_an_rtt_panic_only() {
+    let top = help(&["probe-tlsr", "--help"]);
+    assert!(top.contains("exit 3 is an `rtt` panic line"), "{top}");
+    assert!(!top.contains("crystal"), "{top}");
 }

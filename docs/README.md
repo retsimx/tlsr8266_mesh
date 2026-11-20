@@ -24,3 +24,10 @@ Reference documentation with examples of UART command packets for device control
 ### [BLE & Mesh Hardware/Software Reference](ble_hardware_reference.md)
 Comprehensive technical datasheet covering the complete BLE and proprietary mesh implementation. Includes hardware register reference, RF subsystem configuration, interrupt architecture, BLE link-layer state engine, packet formats, GATT attribute table, pairing protocol, OTA update mechanisms, AES cryptography, flash storage layout, and full documentation of the proprietary flooding mesh protocol: access code derivation, mesh/BLE coexistence state machine, packet routing, node status propagation, over-mesh re-pairing, and timing reference.
 
+### [TLSR8266 TC32 Instruction Set](tc32_instruction_set.md)
+Recovered executable reference for the 8266 `.code 16` instruction set,
+based on the shipped Telink assembler/disassembler opcode tables and validated
+assembler probes. Includes exact 16/32-bit patterns, operand domains,
+assembler/disassembler spelling differences, atomic/wait limitations, and
+explicitly unsupported inherited ARM/Thumb forms.
+

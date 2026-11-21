@@ -580,13 +580,13 @@ pub fn rf_link_slave_add_status(packet: &Packet) {
     // Copy the source address (2 bytes)
     let src_bytes = packet.mesh().src_adr.to_le_bytes();
     st_ptr.att_data_mut().dat[5..7].copy_from_slice(&src_bytes);
-    // Copy the operation code (1 byte) — op precedes vendor_id in the mesh packet layout
-    st_ptr.att_data_mut().dat[7] = packet.mesh().op;
-    // Copy the vendor ID (2 bytes)
-    let vendor_bytes = packet.mesh().vendor_id.to_le_bytes();
-    st_ptr.att_data_mut().dat[8..10].copy_from_slice(&vendor_bytes);
-    // Copy the parameters (10 bytes)
-    st_ptr.att_data_mut().dat[10..20].copy_from_slice(&packet.mesh().par);
+    // Copy op (1 byte), vendor_id (2 bytes), and parameters (10 bytes) from the flat
+    // PacketAttValue.val overlay (MeshPkt is align(4) and inserts a 1-byte padding
+    // hole between op and vendor_id at offset 21).
+    let val = &packet.att_cmd().value.val;
+    st_ptr.att_data_mut().dat[7] = val[0];
+    st_ptr.att_data_mut().dat[8..10].copy_from_slice(&val[1..3]);
+    st_ptr.att_data_mut().dat[10..20].copy_from_slice(&val[3..13]);
 
     // SPECIAL PARAMETER HANDLING: Only format mode 0 is used in practice
     let format_mode = packet.mesh().internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE];
@@ -2120,9 +2120,10 @@ mod tests {
         );
     }
 
-    /// Tests that the assembled BLE notification packet has op at dat[7] and
-    /// vendor_id at dat[8..10], matching the mesh packet memory layout and the
-    /// format expected by the Python client's decrypt_notification parser.
+    /// Tests that the assembled BLE notification packet has op at dat[7],
+    /// vendor_id at dat[8..10], and params at dat[10..18] from the flat
+    /// PacketAttValue.val overlay (matching rf_link_response_callback /
+    /// mesh_construct_packet and the Python client's decrypt_notification parser).
     #[test]
     #[mry::lock()]
     fn test_rf_link_slave_add_status_packet_layout() {
@@ -2135,10 +2136,20 @@ mod tests {
             0x001F, // src_adr = 31
             0x0000, // dst_adr
         );
-        // Set known par values so we can verify them in the output
-        // Use mesh_mut() since rf_link_slave_add_status reads via mesh() (align(4) layout)
-        packet.mesh_mut().par[0] = 0x11; // par[0] = CW lo
-        packet.mesh_mut().par[1] = 0x22; // par[1] = CW hi
+        // Populate the flat PacketAttValue.val[0..13] overlay just as
+        // rf_link_response_callback and mesh_construct_packet do (without MeshPkt's
+        // align(4) padding hole at offset 21).
+        {
+            let val = &mut packet.att_cmd_mut().value.val;
+            val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
+            val[1..3].copy_from_slice(&VENDOR_ID.to_le_bytes());
+            val[3] = 0x11; // par[0] = CW lo
+            val[4] = 0x22; // par[1] = CW hi
+            val[5] = 0x33; // par[2] = WW lo
+            val[6] = 0x44; // par[3] = WW hi
+            val[7] = 0x55; // par[4] = Brightness lo
+            val[8] = 0x66; // par[5] = Brightness hi
+        }
 
         rf_link_slave_add_status(&packet);
 
@@ -2181,9 +2192,95 @@ mod tests {
             ((VENDOR_ID >> 8) & 0xFF) as u8,
             "vendor_id hi"
         );
-        // dat[10..12] = first two par bytes
-        assert_eq!(st.att_data().dat[10], 0x11, "par[0] = CW lo");
-        assert_eq!(st.att_data().dat[11], 0x22, "par[1] = CW hi");
+        // dat[10..16] = unshifted CW / WW / Brightness bytes
+        assert_eq!(
+            &st.att_data().dat[10..16],
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            "par[0..6] must not be shifted by MeshPkt padding"
+        );
+    }
+
+    /// Regression test verifying the full response path:
+    /// rf_link_response_callback(GET_STATUS) -> rf_link_slave_add_status -> BUFF_RESPONSE
+    /// produces exact unshifted VENDOR_ID at dat[8..10] and CW/WW/Brightness at dat[10..16].
+    #[test]
+    #[mry::lock(
+        app_mocker,
+        clock_time,
+        clock_time64,
+        read_reg_tmr_ctrl,
+        write_reg_tmr1_tick,
+        write_reg_tmr_ctrl
+    )]
+    fn test_rf_link_response_callback_to_slave_add_status_layout() {
+        use crate::sdk::mcu::register::{
+            mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
+        };
+
+        reset_test_state();
+        DEVICE_ADDRESS.set(0x001F);
+        SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
+
+        mock_clock_time().returns(1);
+        mock_clock_time64().returns(100);
+        mock_read_reg_tmr_ctrl().returns(0);
+        mock_write_reg_tmr1_tick(Any).returns(());
+        mock_write_reg_tmr_ctrl(Any).returns(());
+
+        let mut app = App::default();
+        app.light_manager
+            .mock_begin_transition(Any, Any, Any)
+            .calls_real_impl();
+        app.light_manager.mock_transition_step().returns(());
+        app.light_manager.begin_transition(8767, 24000, 16384);
+        mock_app_mocker().returns(&mut app);
+
+        let req = PacketAttValue {
+            sno: [0x01, 0x02, 0x03],
+            src: [0x01, 0x00],
+            dst: [0x1F, 0x00],
+            val: [0; 23],
+        };
+
+        let mut pkt_light_status = Packet {
+            mesh: MeshPkt::default(),
+        };
+        pkt_light_status.att_cmd_mut().value.sno = [0xA2, 0x5F, 0xE3];
+        pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] = GET_STATUS;
+
+        rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &req)
+            .expect("GET_STATUS response callback should succeed");
+        rf_link_slave_add_status(&pkt_light_status);
+
+        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 1);
+        let buf = BUFF_RESPONSE.lock();
+        let dat = &buf[0].att_data().dat;
+
+        assert_eq!(&dat[0..3], &[0xA2, 0x5F, 0xE3], "sno mismatch");
+        assert_eq!(&dat[3..5], &[0x1F, 0x00], "dst/src addr mismatch");
+        assert_eq!(&dat[5..7], &[0x1F, 0x00], "src addr mismatch");
+        assert_eq!(dat[7], LGT_CMD_LIGHT_STATUS | 0xc0, "op mismatch");
+        assert_eq!(
+            &dat[8..10],
+            &VENDOR_ID.to_le_bytes(),
+            "VENDOR_ID must not be shifted"
+        );
+        assert_eq!(
+            &dat[10..12],
+            &8767u16.to_le_bytes(),
+            "CW bytes must align at dat[10..12]"
+        );
+        assert_eq!(
+            &dat[12..14],
+            &24000u16.to_le_bytes(),
+            "WW bytes must align at dat[12..14]"
+        );
+        assert_eq!(
+            &dat[14..16],
+            &16384u16.to_le_bytes(),
+            "Brightness bytes must align at dat[14..16]"
+        );
+        assert_eq!(&dat[16..18], &[0x00, 0x00], "trailing params zero");
     }
     // ================================================================================
 

@@ -1,11 +1,24 @@
 #![cfg(target_os = "none")]
 
-//! TC32 reset vector table and low-level startup.
+//! TC32 reset vector table, pre-cache stub and the IRQ entry thunk.
 //!
-//! The image header and the reset/IRQ entry points occupy fixed offsets that
-//! the boot ROM expects.
+//! Only three things must be assembly:
 //!
-//! # Image header (`.vectors`, offsets 0x00-0x1F)
+//! * the **image header** at fixed offsets `0x00`-`0x1f`;
+//! * the **pre-cache stub**: mode-stack setup (`mcsr`, TC32-only), the stack
+//!   watermark fill, and the instruction-cache tag programming, all of which
+//!   must run from the SRAM prefix before any flash-resident code executes;
+//! * the **IRQ frame**, which needs `mrss`/`mssr` and `reti`.
+//!
+//! Everything else is Rust in [`startup_init`]: it clears `.bss` and copies
+//! `.data` using the compiler's `memclr`/`memcpy` helpers.
+//!
+//! The watermark fill deliberately stays in the stub: it paints up to the top
+//! of SRAM, which is exactly where the stack lives, so it must run before the
+//! core uses its stack at all. A Rust callee doing the fill would overwrite its
+//! own frame.
+//!
+//! # Image header (`.vectors`, offsets `0x00`-`0x1f`)
 //!
 //! | Offset | Contents |
 //! |-------:|----------|
@@ -18,23 +31,13 @@
 //! | `0x1c` | `FW_DEV_INFO` (`0x4`) |
 //! | `0x20` | `__reset` |
 //!
-//! # RAM at reset
-//!
-//! | Range | Use |
-//! |---|---|
-//! | `0x808000` + `_ramcode_size_` | image prefix copied to SRAM (the rest runs from flash through the cache) |
-//! | `0x808600`-`0x8086ff` | IC tag/cache control region written by `SETIC` |
-//! | `_start_bss_`-`_end_bss_` | zeroed `.bss`, which contains `irq_stk` |
-//! | `irq_stk`..`irq_stk+0x700` | IRQ-mode stack (top written into the IRQ-mode SP) |
-//! | `_end_bss_`-`0x80c000` | SVC-mode/main stack, grown down from the top of RAM |
-//!
-//! # Why five instructions are `.short`
+//! # Why four instructions are raw `.short` values
 //!
 //! The instruction set is standard ARM Thumb-1 (the TC32 binary encoding only
 //! permutes the top nibble of each halfword, which the LLVM fork applies when
 //! `+tc32` is in the target features) plus five Telink status/IRQ instructions.
-//! `rustc`'s embedded LLVM parses `global_asm!` for validation but does not know
-//! those five mnemonics, so they are written here as their final TC32 encodings:
+//! `rustc`'s embedded LLVM validates `global_asm!` but does not know those five
+//! mnemonics, so they are written as their final TC32 encodings:
 //!
 //! | instruction | TC32 encoding |
 //! |---|---|
@@ -42,20 +45,13 @@
 //! | `mrss r0` | `0x6bd8` (read SPSR into r0) |
 //! | `mssr r0` | `0x6bd0` (write SPSR from r0) |
 //! | `reti {pc}` | `0x6900` (pop PC and restore CPSR from SPSR) |
-//!
-//! Everything else stays readable Thumb-1 and is assembled by the fork.
-//!
-//! # Version word
-//!
-//! `BUILD_VERSION` has exactly one definition (`rust/src/version.rs`); the build
-//! driver passes it to `ld.lld` as `--defsym=BUILD_VERSION=<n>`, so the `.word`
-//! in the header resolves at link time.
 
 use core::arch::global_asm;
+use core::ptr::{copy_nonoverlapping, write_bytes};
 
 // IRQ stack. The symbol `irq_stk` is referenced by name from the assembly below,
-// so it must keep the default Rust symbol name. It lands in `.bss`, which the
-// reset path zeroes before any interrupt can be taken.
+// so it must keep the default Rust symbol name. It lives in `.bss`, which
+// `startup_init` zeroes before interrupts are enabled.
 #[repr(C, align(4))]
 struct IrqStack([u32; 0x700 / 4]);
 
@@ -63,210 +59,210 @@ struct IrqStack([u32; 0x700 / 4]);
 #[used]
 static mut irq_stk: IrqStack = IrqStack([0; 0x700 / 4]);
 
+// Absolute symbols provided by `sdk/boot.link`. Taking the address of one
+// yields its numeric value.
+unsafe extern "C" {
+    static _dstored_: u8;
+    static _start_data_: u8;
+    static _end_data_: u8;
+    static _start_bss_: u8;
+    static _end_bss_: u8;
+}
+
+#[inline(always)]
+unsafe fn symbol(sym: &u8) -> usize {
+    sym as *const u8 as usize
+}
+
+/// Finish SRAM bring-up and return to the reset stub.
+///
+/// Runs with the cache programmed and before `.data` exists; it uses no
+/// statics, only raw pointers and the compiler's own `memclr`/`memcpy`
+/// helpers.
+#[no_mangle]
+pub extern "C" fn startup_init() {
+    unsafe {
+        // 1. Zero `.bss` (Rust globals, executor storage, `irq_stk`).
+        write_bytes(
+            symbol(&_start_bss_) as *mut u8,
+            0,
+            symbol(&_end_bss_) - symbol(&_start_bss_),
+        );
+
+        // 2. Copy initialised data from its flash load address to its RAM VMA.
+        copy_nonoverlapping(
+            symbol(&_dstored_) as *const u8,
+            symbol(&_start_data_) as *mut u8,
+            symbol(&_end_data_) - symbol(&_start_data_),
+        );
+    }
+}
+
 global_asm!(
     r#"
-    /* ==================================================================
-     * Constants shared with the linker script (sdk/boot.link)
-     * ================================================================== */
+    /* =====================================================================
+     * Linker-shared constants (consumed by sdk/boot.link)
+     * ===================================================================== */
 
-    /* Number of 256-byte blocks the boot ROM preloads into SRAM. */
+    /* 256-byte blocks the boot ROM preloads into SRAM. */
     .equ __LOAD_RAM, 0xc
     .global __LOAD_RAM
 
-    /* Base of the 16 KiB SRAM window. */
+    /* Base and size of the SRAM window. */
     .equ __RAM_START_ADDR, 0x808000
     .global __RAM_START_ADDR
-
-    /* Total SRAM size; the main stack grows down from the top of it. */
     .equ __RAM_SIZE_MAX, (16 * 1024)
     .global __RAM_SIZE_MAX
 
-    /* No separate non-retention RAM region on the 8266. */
+    /* The 8266 has no separate non-retention RAM region. */
     .equ __DATA_ADR_OFFSET, 0
     .global __DATA_ADR_OFFSET
 
-    /* IRQ-mode stack size (matches the rust/src/startup.rs IrqStack array). */
+    /* Must match the IrqStack array above. */
     .equ IRQ_STK_SIZE, 0x700
 
-    /* FW_DEV_INFO: DEV_INFO_USER = 0 in sdk/version.h at the time of writing. */
+    /* DEV_INFO_USER is 0, so the header carries only the mode nibble. */
     .equ FW_DEV_INFO, 0x4
 
-    /* ==================================================================
-     * Image header, offsets 0x00-0x1F (see the module docs for the map)
-     * ================================================================== */
+    /* =====================================================================
+     * Image header: fixed offsets 0x00-0x1f (see the module docs)
+     * ===================================================================== */
     .section .vectors,"ax",%progbits
     .code 16
     .global __start
     .type __start,%function
 __start:
-    b __reset                       /* reset vector */
-    .word BUILD_VERSION             /* image version, patched by ld.lld --defsym */
-    .org 0x8                        /* bytes 0x06-0x07 are header padding */
-    .word 0x544c4e4b                /* "TLNK" */
-    .word 0x00880120                /* RAM destination/entry hint */
+    b __reset                       /* 0x00: reset vector */
+    .word BUILD_VERSION             /* 0x02: patched at link time (--defsym) */
+    .org 0x8                        /* 0x06-0x07: header padding */
+    .word 0x544c4e4b                /* 0x08: "TLNK" */
+    .word 0x00880120                /* 0x0c: RAM destination/entry hint */
     .org 0x10
-    b __irq                         /* IRQ vector */
+    b __irq                         /* 0x10: IRQ vector */
     .org 0x18
-    .word _bin_size_                /* provided by sdk/boot.link */
-    .word FW_DEV_INFO
+    .word _bin_size_                /* 0x18: flash bytes to copy (boot.link) */
+    .word FW_DEV_INFO               /* 0x1c */
 
-    /* ==================================================================
-     * Reset path
-     * ================================================================== */
+    /* =====================================================================
+     * Pre-cache stub. Runs from the SRAM prefix; it installs both mode
+     * stacks, paints the stack watermark, and clears + programs the
+     * instruction cache before calling flash-resident Rust.
+     * ===================================================================== */
     .org 0x20
     .type __reset,%function
 __reset:
-    /* 1. Fill free SRAM with 0xffffffff. The main stack later grows down
-     *    from 0x80c000, so the deepest non-0xffffffff word is the stack
-     *    high-water mark (used by docs/swire.md and the HIL checks). */
-    ldr r0, FLL_D                   /* fill value */
-    ldr r1, FLL_D_4                 /* first word of free SRAM */
-    ldr r2, FLL_D_8                 /* top of SRAM (exclusive) */
-FLL_STK:
+    /* 1. Install both mode stacks. The IRQ bank must be valid before
+     *    interrupts can be taken. `mcsr` selects the mode; `mov sp` then
+     *    writes that mode's banked SP. */
+    ldr r0, .Lcpsr_irq_mode         /* CPSR: IRQ mode, IRQs masked */
+    .short 0x6bc0                   /* mcsr r0 */
+    ldr r0, .Lirq_stack_top         /* irq_stk + IRQ_STK_SIZE */
+    mov sp, r0
+
+    ldr r0, .Lcpsr_svc_mode         /* CPSR: SVC mode, IRQs masked */
+    .short 0x6bc0                   /* mcsr r0 */
+    ldr r0, .Lmain_stack_top        /* 0x80c000 */
+    mov sp, r0
+
+    /* 2. Paint the free SRAM the main stack grows into. The deepest
+     *    non-0xffffffff word is the stack high-water mark read by
+     *    docs/swire.md and the HIL checks. This must happen before the core
+     *    uses its stack: the window ends at the stack top. */
+    ldr r0, .Lstack_fill_pattern
+    ldr r1, .Lstack_fill_start
+    ldr r2, .Lstack_fill_end
+.Lfill_free_sram:
     cmp r1, r2
-    bge FLL_STK_END
+    bge .Lfill_free_sram_done
     str r0, [r1, #0]
     adds r1, #4
-    b FLL_STK
-FLL_STK_END:
+    b .Lfill_free_sram
+.Lfill_free_sram_done:
 
-    /* 2. Give each ARM mode its own stack before anything can take an
-     *    interrupt. `mcsr` writes CPSR, switching the active mode; the
-     *    subsequent `mov sp, ...` targets that mode's banked SP. */
-    ldr r0, DAT0                    /* CPSR value for IRQ mode (0x12) */
-    .short 0x6bc0                   /* mcsr r0: switch to IRQ mode */
-    ldr r0, DAT0_8                  /* irq_stk + IRQ_STK_SIZE */
-    mov sp, r0
-    ldr r0, DAT0_4                  /* CPSR value for SVC mode (0x13) */
-    .short 0x6bc0                   /* mcsr r0: back to SVC mode */
-    ldr r0, DAT0_12                 /* 0x80c000: top of SRAM */
-    mov sp, r0
-
-    /* 3. Zero .bss (globals, executor storage and irq_stk itself). */
+    /* 3. Clear the cache-tag region. */
     movs r0, #0
-    ldr r1, DAT0_16                 /* _start_bss_ */
-    ldr r2, DAT0_20                 /* _end_bss_ */
-ZERO:
+    ldr r1, .Lic_tag_start
+    ldr r2, .Lic_tag_end
+.Lzero_ic_tag:
     cmp r1, r2
-    bge ZERO_END
+    bge .Lzero_ic_tag_done
     str r0, [r1, #0]
     adds r1, #4
-    b ZERO
-ZERO_END:
+    b .Lzero_ic_tag
+.Lzero_ic_tag_done:
 
-    /* 4. Zero the IC tag/cache region reserved by the linker script. */
-    ldr r1, DAT0_28                 /* _ictag_start_ */
-    ldr r2, DAT0_32                 /* _ictag_end_ */
-ZERO_TAG:
-    cmp r1, r2
-    bge ZERO_TAG_END
-    str r0, [r1, #0]
-    adds r1, #4
-    b ZERO_TAG
-ZERO_TAG_END:
-
-    /* 5. Program the instruction-cache tag register so the preloaded
-     *    `_ramcode_size_div_256_` blocks are cached: write the block count,
-     *    then count + 1. */
-    ldr r1, DAT0_24                 /* 0x80060c: IC tag control register */
-    ldr r0, DAT0_36                 /* _ramcode_size_div_256_ */
+    /* 4. Program the cache tag register: block count, then count + 1. */
+    ldr r1, .Lic_tag_register       /* 0x80060c */
+    ldr r0, .Lramcode_blocks        /* _ramcode_size_div_256_ */
     strb r0, [r1, #0]
     adds r0, #1
     strb r0, [r1, #1]
 
-    /* 6. Copy initialised data from its flash load address to its RAM
-     *    virtual address (the linker script uses AT() for this). */
-    ldr r1, DATA_I                  /* _dstored_: load address in flash */
-    ldr r2, DATA_I_4                /* _start_data_: RAM destination */
-    ldr r3, DATA_I_8                /* _end_data_ */
-COPY_DATA:
-    cmp r2, r3
-    bge COPY_DATA_END
-    ldr r0, [r1, #0]
-    str r0, [r2, #0]
-    adds r1, #4
-    adds r2, #4
-    b COPY_DATA
-COPY_DATA_END:
+    /* 5. Hand the rest to Rust, which now runs from cache-backed flash. */
+    bl startup_init                 /* clear .bss, copy .data */
+    bl main_entrypoint              /* may never return */
+.Lhalt:
+    b .Lhalt
 
-    /* 7. Enter Rust. `main_entrypoint` is `#[no_mangle]` in lib.rs. */
-    bl main_entrypoint
-END:
-    b END                           /* main_entrypoint must not return */
-
-    /* ==================================================================
-     * Literal pools. Each label is one word, so callers can load a fixed
-     * offset without relying on assembler-generated `label + n` syntax.
-     * ================================================================== */
+    /* Stub literal pool: one word per constant, each with its own label so
+     * the code never depends on assembler `label + n` syntax. */
     .balign 4
-DAT0:                               /* reset-path constants */
-DAT0_0:
+.Lcpsr_irq_mode:
     .word 0x12                      /* CPSR: IRQ mode */
-DAT0_4:
+.Lcpsr_svc_mode:
     .word 0x13                      /* CPSR: SVC mode */
-DAT0_8:
-    .word (irq_stk + IRQ_STK_SIZE)  /* IRQ stack top */
-DAT0_12:
-    .word (__RAM_START_ADDR + 16 * 1024) /* main stack top (0x80c000) */
-DAT0_16:
-    .word _start_bss_
-DAT0_20:
-    .word _end_bss_
-DAT0_24:
-    .word 0x80060c                  /* IC tag control register */
-DAT0_28:
-    .word _ictag_start_
-DAT0_32:
-    .word _ictag_end_
-DAT0_36:
-    .word _ramcode_size_div_256_
-DATA_I:                             /* .data copy window */
-DATA_I_0:
-    .word _dstored_
-DATA_I_4:
-    .word _start_data_
-DATA_I_8:
-    .word _end_data_
-FLL_D:                              /* stack high-water fill window */
-FLL_D_0:
-    .word 0xffffffff
-FLL_D_4:
-    .word _start_data_              /* first word above .data */
-FLL_D_8:
+.Lirq_stack_top:
+    .word (irq_stk + IRQ_STK_SIZE)
+.Lmain_stack_top:
     .word (__RAM_START_ADDR + 16 * 1024)
-FLL_D_12:
-    .word _rstored_                 /* unused by this startup */
+.Lstack_fill_pattern:
+    .word 0xffffffff
+.Lstack_fill_start:
+    .word _end_bss_
+.Lstack_fill_end:
+    .word (__RAM_START_ADDR + 16 * 1024)
+.Lic_tag_register:
+    .word 0x80060c
+.Lic_tag_start:
+    .word _ictag_start_
+.Lic_tag_end:
+    .word _ictag_end_
+.Lramcode_blocks:
+    .word _ramcode_size_div_256_
 
-    /* ==================================================================
-     * IRQ entry/exit.
+    /* =====================================================================
+     * IRQ entry and exit.
      *
-     * The core has no link-register banking for this: `__irq` must save the
-     * interrupted context itself. Saved layout on the IRQ stack (grows down):
+     * Thumb-1 `push` encodes `r0`-`r7` plus `lr`, and only low registers, so
+     * the high registers are staged through low ones and pushed as a second
+     * group. The frame on the IRQ stack is:
      *
-     *   lr                      ( 4 bytes)
-     *   r0-r7                   (32 bytes)
-     *   CPSR/SPSR + r8-r12      (24 bytes)   <- 6 words pushed together
+     *     r0-r7              32 bytes
+     *     lr                  4 bytes   (highest address of the first push)
+     *     spsr + r8-r12      24 bytes
+     *                        --------
+     *                        60 bytes   (`irq_prelude_bytes` in
+     *                                    sdk/stack_analysis.py)
      *
-     * That is 60 bytes; `sdk/stack_analysis.py` adds the same preamble when it
-     * budgets the IRQ stack. `reti` pops PC and restores CPSR from SPSR in one
-     * instruction, which a plain `pop` into PC cannot do.
-     * ================================================================== */
+     * `reti` pops PC and restores CPSR from SPSR in one instruction, which a
+     * plain `pop` into PC cannot do. The Rust handler is an ordinary AAPCS
+     * function; every register it may clobber is restored from this frame.
+     * ===================================================================== */
     .align 4
     .global __irq
     .type __irq,%function
 __irq:
-    push {{lr}}                     /* return address */
-    push {{r0-r7}}                  /* low registers used by the handler */
+    push {{r0-r7, lr}}              /* save low registers + return address */
     .short 0x6bd8                   /* mrss r0: read saved status (SPSR) */
-    mov r1, r8                      /* stash high registers in low ones so */
-    mov r2, r9                      /* they can be pushed by Thumb-1 */
+    mov r1, r8                      /* stage high registers in low ones */
+    mov r2, r9
     mov r3, r10
     mov r4, r11
     mov r5, r12
-    push {{r0-r5}}                  /* saved status + r8-r12 */
-    bl irq_handler                  /* Rust handler, plain AAPCS call */
-    pop {{r0-r5}}                   /* restore status + r8-r12 */
-    mov r8, r1
+    push {{r0-r5}}                  /* save SPSR + r8-r12 */
+    bl irq_handler                  /* run the Rust handler */
+    pop {{r0-r5}}                   /* restore SPSR + r8-r12 */
+    mov r8, r1                      /* unstage the high registers */
     mov r9, r2
     mov r10, r3
     mov r11, r4
@@ -275,8 +271,7 @@ __irq:
     pop {{r0-r7}}                   /* restore low registers */
     .short 0x6900                   /* reti {{pc}}: pop PC, restore CPSR */
 
-    /* Pad the vector section to 16 bytes, matching the old startup object so
-     * the flash layout is unchanged. */
+    /* Pad `.vectors` to 16 bytes. */
     .balign 16
 "#
 );

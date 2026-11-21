@@ -168,11 +168,11 @@ probe-tlsr --elf _build/lightblemesh trap irq_handler --timeout-ms 5000
 
 ### Stack Watermark
 
-The startup code fills free SRAM with `0xffffffff` (the loop labelled `FLL_STK` in `rust/src/startup.rs`, a code label — not an address to read); the main stack grows down from the top of RAM at `0x80c000`, so the deepest word that is no longer `0xffffffff` is the watermark. The bottom of that free region is `_end_bss_`, read from the ELF's symbol table:
+The startup code fills free SRAM with `0xffffffff` (the `.Lfill_free_sram` loop in `rust/src/startup.rs`, a code label — not an address to read); the main stack grows down from the top of RAM at `0x80c000`, so the deepest word that is no longer `0xffffffff` is the watermark. The bottom of that free region is `_end_bss_`, read from the ELF's symbol table:
 
 ```bash
 # Peak stack use since boot. Startup fills free SRAM with 0xffffffff
-# (the loop labelled FLL_STK in rust/src/startup.rs); the main stack grows
+# (the .Lfill_free_sram loop in rust/src/startup.rs); the main stack grows
 # down from the top of RAM (0x80c000), so the deepest word that is no longer
 # 0xffffffff is the watermark. `_end_bss_` is the bottom of that free region.
 ELF=_build/lightblemesh

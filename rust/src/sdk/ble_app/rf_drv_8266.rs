@@ -32,13 +32,12 @@ use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
-use crate::sdk::mcu::crypto::encode_password;
+use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::random::rand;
 use crate::sdk::mcu::register::{
@@ -60,7 +59,7 @@ use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttData, PacketAttVal
 use crate::sdk::pm::light_sw_reboot;
 use crate::state::*;
 use crate::version::BUILD_VERSION;
-use crate::{uprintln, BIT};
+use crate::BIT;
 
 const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
@@ -443,8 +442,6 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
             if dst_addr == 0 {
                 dst_addr = DEVICE_ADDRESS.get() as u32;
             }
-            // Check if forced notification is required (stub implementation currently)
-            uprintln!("stub: mesh_node_check_force_notify")
             // mesh_node_check_force_notify(uVar4, params[0]);
         }
     }
@@ -1101,11 +1098,11 @@ mod tests {
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_par_init;
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
     use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI};
-    use crate::sdk::common::compat::*;
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
     use crate::sdk::mcu::analog::*;
     use crate::sdk::mcu::clock::mock_is_16mhz_xtal;
-    use crate::sdk::mcu::crypto::{mock_aes_att_decryption_packet, mock_encode_password};
+    use crate::sdk::mcu::cmd_table::*;
+    use crate::sdk::mcu::crypto::mock_aes_att_decryption_packet;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::mcu::random::mock_rand;
     use crate::sdk::mcu::register::*;

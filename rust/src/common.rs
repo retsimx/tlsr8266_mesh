@@ -968,8 +968,11 @@ pub fn pair_load_key() {
         let mut config_flag = [0u8; 1];
         flash_read_page(pairing_addr + 0xF, 1, config_flag.as_mut_ptr());
         if config_flag[0] == PAIR_CONFIG_VALID_FLAG {
+            // Copy the key out of the mutex first so the lock is released
+            // before decode_password runs (its AES call masks interrupts).
+            let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
             // Decode password in-place (decode_password returns new array)
-            pair_state.pair_pass = decode_password(&pair_state.pair_pass);
+            pair_state.pair_pass = decode_password(&key, &pair_state.pair_pass);
         }
 
         // STAGE 2E: LOAD LONG-TERM KEY
@@ -2029,10 +2032,12 @@ mod tests {
         mock_pair_update_key().returns(());
 
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
+        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
 
         // Set test pairing data
         {
@@ -2192,10 +2197,12 @@ mod tests {
         mock_pair_update_key().returns(());
 
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
+        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
 
         // First write
         {
@@ -2315,10 +2322,12 @@ mod tests {
         mock_pair_update_key().returns(());
 
         // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
-        mock_decode_password(Any)
-            .returns_with(|password: Vec<u8>| password.as_slice().try_into().unwrap());
+        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
+        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
+            password.as_slice().try_into().unwrap()
+        });
 
         // Write data
         {

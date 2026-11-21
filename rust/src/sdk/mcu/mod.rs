@@ -1,5 +1,6 @@
 pub mod analog;
 pub mod clock;
+pub mod cmd_table;
 pub mod crypto;
 pub mod dma;
 pub mod gpio;

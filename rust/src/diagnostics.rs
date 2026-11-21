@@ -11,11 +11,31 @@
 //! See `docs/plans/designs/005-rtt-target-hooks.md` (sections 4.1-4.5) for the
 //! contract with the host tools.
 
+use core::cmp::min;
 use core::ptr::addr_of_mut;
+use core::slice;
 
+use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
-use crate::sdk::drivers::flash::flash_read_page;
+use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page};
+use crate::sdk::light::LGT_PANIC_MSG;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
+
+// Panic-path imports: `write_panic_info`/`panic` exist only on the target build
+// and in unit tests (which drive the writer), so the plain host library build
+// never sees these.
+#[cfg(any(target_os = "none", test))]
+use crate::logging::UartStream;
+#[cfg(any(target_os = "none", test))]
+use crate::sdk::drivers::flash::flash_write_page;
+#[cfg(target_os = "none")]
+use crate::sdk::pm::light_sw_reboot;
+#[cfg(target_os = "none")]
+use core::fmt::Write;
+#[cfg(target_os = "none")]
+use core::panic::PanicInfo;
+#[cfg(any(target_os = "none", test))]
+use core::ptr::addr_of;
 
 /// Analog register holding why the previous boot ended.
 pub const REGA_RESET_SENTINEL: u8 = 0x3b;
@@ -36,9 +56,12 @@ pub const CRUMB_MAIN_LOOP: u8 = 3;
 #[allow(dead_code)]
 pub const CRUMB_PANIC: u8 = 0xFF;
 
-/// The UART stream behind `uprintln!` holds 128 bytes and panics on overflow, so
-/// a panic message read from flash (up to 256 bytes) must be clipped first: a
-/// panic inside the boot report would reboot into the same panic forever.
+/// The UART stream behind `uprintln!` holds 128 bytes and rejects a write that
+/// would overflow it instead of panicking (the formatter then stops at the first
+/// failed `write_str`, so an over-long log line is clipped rather than
+/// rebooting). A panic message read from flash (up to 256 bytes) must still be
+/// clipped first: a panic inside the boot report would reboot into the same
+/// panic forever.
 const PANIC_LOG_BODY_MAX: usize = 72;
 
 /// Only the first `PANIC_LOG_BODY_MAX` bytes are ever logged, so the flash read
@@ -143,6 +166,131 @@ fn clip_to_uart_budget(msg: &str) -> &str {
     }
 
     &msg[..end]
+}
+
+/// Persists the panic message for the next boot.
+///
+/// Sector layout — a contract with the host tools:
+/// `valid_flag: u8 + 0`, `length: u16 + 1`, `data: [u8; 256] + 3`.
+///
+/// The valid flag is written last: a reset part-way through the erase/write
+/// sequence then leaves a sector without a valid flag, so the next boot reports
+/// nothing rather than a half-written message.
+#[cfg(any(target_os = "none", test))]
+fn write_panic_info<const N: usize>(info: &UartStream<N>) {
+    let panic_addr = FLASH_ADR_PANIC_INFO;
+
+    // Clear the panic info sector for writing just in case
+    flash_erase_sector(panic_addr);
+
+    // Panic section looks as follows
+    // valid_flag: u8   + 0
+    // length: u16      + 1
+    // data: [u8; 256]  + 3
+
+    // Write the length first
+    let length = info.length as u16;
+    flash_write_page(panic_addr + 1, 2, addr_of!(length) as *const u8);
+
+    // Then write the panic message
+    flash_write_page(panic_addr + 3, length as u32, info.out_buffer.as_ptr());
+
+    // Finally write the panic valid flag last
+    let flag = PANIC_VALID_FLAG;
+    flash_write_page(panic_addr, 1, addr_of!(flag));
+}
+
+/// Sends any stored panic message to the mesh, then clears the sector.
+///
+/// Runs once per boot (`app.rs`): the body is chunked into 10-byte
+/// `LGT_PANIC_MSG` payloads with a 100 ms gap so the radio keeps up, an empty
+/// `LGT_PANIC_MSG` terminates the report, and only then is the sector erased.
+pub async fn check_panic_info() {
+    // Function-local so this does not shadow `std::vec::Vec` in the tests below.
+    use heapless::Vec;
+
+    let panic_addr = FLASH_ADR_PANIC_INFO;
+
+    let mut flag: u8 = 0;
+    flash_read_page(panic_addr, 1, addr_of_mut!(flag));
+
+    // If the panic info flag isn't set, there's nothing to do
+    if flag != PANIC_VALID_FLAG {
+        return;
+    }
+
+    // There is panic info, send it in to the mesh
+
+    // Read the length
+    let mut length: u16 = 0;
+    flash_read_page(panic_addr + 1, 2, addr_of_mut!(length) as *mut u8);
+
+    // Read the message
+    let mut message: [u8; 256] = [0; 256];
+    flash_read_page(panic_addr + 3, length as u32, message.as_mut_ptr());
+
+    let mut buffer = unsafe { slice::from_raw_parts(message.as_ptr(), length as usize) };
+    while !buffer.is_empty() {
+        // Wait a moment to send the next message
+        #[cfg(not(test))]
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+
+        let len = min(10, buffer.len());
+
+        let mut data = [0u8; 13];
+        data[0] = LGT_PANIC_MSG;
+        data[3..3 + len].copy_from_slice(&buffer[0..len]);
+
+        app()
+            .mesh_manager
+            .send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+
+        buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) }
+    }
+
+    // Wait a moment to send the next message
+    #[cfg(not(test))]
+    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+
+    // Send an empty panic message to indicate the end of the message
+    let mut data = [0u8; 13];
+    data[0] = LGT_PANIC_MSG;
+
+    app()
+        .mesh_manager
+        .send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+
+    // Finally clear the panic info
+    flash_erase_sector(panic_addr);
+}
+
+/// Panic handler: mark the reset, persist the message, reboot.
+///
+/// This is the emergency path, so the ordering is the contract: the retained
+/// sentinel and breadcrumb are written *before* any formatting, because
+/// formatting the panic info into the 256-byte stream is work that can itself
+/// fail and a double panic must not cost the next boot its breadcrumb. The
+/// message then goes out on the blocking sink (never the async channel) and to
+/// flash, and only then does the device reboot.
+#[cfg(target_os = "none")]
+#[panic_handler]
+pub fn panic(info: &PanicInfo) -> ! {
+    critical_section::with(|_| {
+        // Mark the panic before anything that can itself fail.
+        analog_write(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        analog_write(REGA_BREADCRUMB, CRUMB_PANIC);
+
+        let mut stream = UartStream::<256>::new();
+
+        let _ = write!(stream, "{}", info);
+
+        stream.send_blocking(true);
+        write_panic_info(&stream);
+
+        light_sw_reboot();
+    });
+
+    loop {}
 }
 
 #[cfg(any(feature = "rtt", test))]
@@ -354,7 +502,7 @@ pub mod rtt {
 mod tests {
     use super::*;
     use crate::sdk::drivers::flash::{
-        flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page,
+        flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
     use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
@@ -362,7 +510,7 @@ mod tests {
     use crate::{app_mocker, mock_app_mocker, App};
     use mry::{send_wrapper::SendWrapper, Any};
 
-    /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in `compat.rs`).
+    /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in `logging.rs`).
     const PAYLOAD_CHUNK: usize = 39;
 
     fn expected_print(bytes: &[u8]) -> UartData {
@@ -783,5 +931,109 @@ mod tests {
         assert_eq!(clip_to_uart_budget(&ascii).len(), PANIC_LOG_BODY_MAX);
 
         assert_eq!(clip_to_uart_budget("short"), "short");
+    }
+
+    #[test]
+    #[mry::lock(flash_erase_sector, flash_write_page)]
+    fn test_write_panic_info() {
+        // Create a test stream with some panic data
+        let mut stream = UartStream::<128>::new();
+        let test_data = b"Panic occurred!";
+        let _ = stream.write_all(test_data);
+
+        // Mock flash operations
+        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns(());
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 3, test_data.len() as u32, Any).returns(());
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO, 1, Any).returns(());
+
+        // Call write_panic_info
+        write_panic_info(&stream);
+
+        // Verify flash operations were called correctly
+        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).assert_called(1);
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).assert_called(1);
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 3, test_data.len() as u32, Any)
+            .assert_called(1);
+        mock_flash_write_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(flash_read_page, flash_erase_sector, app_mocker)]
+    fn test_check_panic_info_no_valid_flag() {
+        // Mock reading invalid flag
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
+            |_, _, buf: SendWrapper<*mut u8>| {
+                unsafe {
+                    core::ptr::write_bytes(*buf, 0x00, 1); // Write invalid flag
+                }
+            },
+        );
+
+        // Create mock app (needed for the app() call in the function, but shouldn't be reached)
+        let mut app = App::default();
+        mock_app_mocker().returns(&mut app);
+
+        // Run check_panic_info (should return early)
+        let future = check_panic_info();
+        futures::executor::block_on(future);
+
+        // Verify only the flag read was called
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1);
+        mock_flash_erase_sector(Any).assert_called(0); // Should not clear panic info
+    }
+
+    #[test]
+    #[mry::lock(flash_read_page, flash_erase_sector, app_mocker)]
+    fn test_check_panic_info_with_valid_data() {
+        let test_message = b"Test panic message";
+        let message_len = test_message.len() as u16;
+
+        // Mock reading valid flag
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
+            |_, _, buf: SendWrapper<*mut u8>| unsafe {
+                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
+            },
+        );
+
+        // Mock reading message length
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
+            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
+                let len_bytes = message_len.to_le_bytes();
+                core::ptr::copy_nonoverlapping(len_bytes.as_ptr(), *buf, 2);
+            },
+        );
+
+        // Mock reading message data
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, message_len as u32, Any).returns_with(
+            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
+                core::ptr::copy_nonoverlapping(test_message.as_ptr(), *buf, test_message.len());
+            },
+        );
+
+        // Create mock app with mocked mesh_manager
+        let mut app = App::default();
+        app.mesh_manager
+            .mock_send_mesh_message(Any, Any, Any, Any)
+            .returns([1, 2, 3]);
+        mock_app_mocker().returns(&mut app);
+
+        // Mock final erase
+        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
+
+        // Run check_panic_info
+        let future = check_panic_info();
+        futures::executor::block_on(future);
+
+        // Verify all operations were called
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1); // Flag read
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).assert_called(1); // Length read
+        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, message_len as u32, Any).assert_called(1); // Data read
+        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).assert_called(1); // Final erase
+
+        // Verify mesh messages were sent (3: two data chunks + one empty terminator)
+        app.mesh_manager
+            .mock_send_mesh_message(Any, Any, Any, Any)
+            .assert_called(3);
     }
 }

@@ -1,3 +1,2 @@
 pub mod bit;
-pub mod compat;
 pub mod crc;

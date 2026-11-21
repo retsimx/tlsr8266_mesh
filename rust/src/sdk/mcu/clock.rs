@@ -145,7 +145,7 @@ pub fn clock_init() {
     //    source mid-measurement would invalidate the count and have its own
     //    change clobbered by the restore. Nesting is deliberate and safe:
     //    analog_read() takes its own critical section, and the project impl
-    //    (compat::TlsrCriticalSection) saves and restores the interrupt-enable
+    //    (irq_i::TlsrCriticalSection) saves and restores the interrupt-enable
     //    register, so the inner acquire sees "already disabled" and restores
     //    that state faithfully. The section polls registers only (no blocking
     //    I/O), is bounded by XTAL_DETECT_MAX_POLLS, and runs before irq_init()/

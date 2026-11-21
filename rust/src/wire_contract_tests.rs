@@ -10,13 +10,13 @@
 //! [`PYTHON_ONLY_KEYS`] and are deliberately not consumed here.
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, MESH_LTK, MESH_NAME, MESH_PWD, OUT_OF_MESH};
+use crate::logging::{UART_CRC_OFFSET, UART_PAYLOAD_OFFSET};
 use crate::ota::OtaManager;
 use crate::sdk::ble_app::ble_ll_pair::{
     PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK, PAIR_OP_RESET_MESH,
     PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
     PAIR_OP_VERIFY_CREDENTIALS,
 };
-use crate::sdk::common::compat::{UART_CRC_OFFSET, UART_PAYLOAD_OFFSET};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::UART_DATA_LEN;
 use crate::sdk::light::{

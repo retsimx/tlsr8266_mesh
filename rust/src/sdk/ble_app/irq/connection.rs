@@ -9,9 +9,7 @@
 //! - Channel map updates and frequency hopping management
 //! - Connection event timing synchronization
 
-use crate::app;
 use crate::common::pair_load_key;
-use crate::embassy::time_driver::clock_time64;
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
 use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
 use crate::sdk::ble_app::light_ll::mesh_management::{
@@ -26,12 +24,27 @@ use crate::sdk::ble_app::light_ll::status_management::{
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::light::{
-    ePairState, BlePeripheralLinkState, OtaState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
+    ePairState, BlePeripheralLinkState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
     SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
 use crate::state::*;
+
+/// Outcome of one BLE connected-state dispatch, reported up to the interrupt
+/// composition root (`crate::irq`) which owns the `ota_manager` calls.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BleConnectionEvent {
+    /// Nothing for the composition root to do.
+    None,
+    /// OTA is active: poll the OTA manager's finish handler.
+    OtaFinishCheck,
+    /// Connection supervision timed out during OTA: finish with an error.
+    OtaErrorReboot,
+    /// OTA is active and the timeout counter reached zero: finish, then error-reboot
+    /// only if the finish handler did not refresh the counter.
+    OtaFinishCheckAndErrorReboot,
+}
 
 /// Handles BLE connection parameter and timing updates for the slave device.
 ///
@@ -245,31 +258,29 @@ fn initialize_connection_hardware() {
 /// the timeout detection and appropriate cleanup.
 ///
 /// ## Returns
-/// - `true` if connection timed out and cleanup was performed
-/// - `false` if connection is still valid
+/// - `Some(BleConnectionEvent::OtaErrorReboot)` if the connection timed out while
+///   an OTA update was in progress (cleanup already performed)
+/// - `Some(BleConnectionEvent::None)` if the connection timed out and cleanup was
+///   performed, with nothing left for the composition root to do
+/// - `None` if the connection is still valid
 #[cfg_attr(test, mry::mry)]
-fn check_connection_supervision_timeout() -> Result<(), ()> {
+fn check_connection_supervision_timeout() -> Option<BleConnectionEvent> {
     // Check for BLE connection supervision timeout
     // Per BLE specification, if no communication occurs within the supervision timeout,
     // the connection must be considered lost and terminated
     if BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.get() * CLOCK_SYS_CLOCK_1US
         < read_reg_system_tick() - SLAVE_CONNECTED_TICK.get()
     {
-        // Connection has timed out - handle cleanup
-
-        // If OTA is in progress, notify OTA manager of the error
-        if OTA_UPDATE_IN_PROGRESS.get() {
-            app()
-                .ota_manager
-                .rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
-        }
-
-        // Perform full BLE disconnection cleanup
+        // Connection has timed out - handle cleanup first
         cleanup_ble_disconnection();
 
-        return Ok(());
+        return Some(if OTA_UPDATE_IN_PROGRESS.get() {
+            BleConnectionEvent::OtaErrorReboot
+        } else {
+            BleConnectionEvent::None
+        });
     }
-    Err(())
+    None
 }
 
 /// Handles timeouts for status read operations.
@@ -291,54 +302,52 @@ fn handle_status_read_timeout() {
 
 /// Handles active OTA (Over-The-Air) update operations and timeouts.
 ///
-/// This function manages ongoing OTA operations, including:
-/// - Processing pending OTA operations through the OTA manager
-/// - Tracking OTA timeout in 1-second intervals
-/// - Aborting OTA operations that exceed their timeout
-/// - Scheduling next connection event during OTA
+/// This function observes ongoing OTA operations, including:
+/// - Tracking the OTA timeout in 1-second intervals
+/// - Reporting when the timeout counter has reached zero
+/// - Scheduling the next connection event during OTA
+///
+/// The OTA manager itself is driven by the interrupt composition root
+/// (`crate::irq`), which reacts to the returned event.
 ///
 /// ## Returns
-/// - `Ok(())` if OTA is active and function handled the connection event
-/// - `Err(())` if no OTA is in progress
+/// - `Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)` if OTA is active and
+///   the timeout counter reads zero after this tick's countdown
+/// - `Some(BleConnectionEvent::OtaFinishCheck)` if OTA is active and the counter is
+///   still non-zero
+/// - `None` if no OTA is in progress
 #[cfg_attr(test, mry::mry)]
-fn handle_ota_operations() -> Result<(), ()> {
+fn handle_ota_operations() -> Option<BleConnectionEvent> {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    // Static variable to track OTA timeout intervals (1 second increments)
     static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
 
-    // Handle active OTA (Over-The-Air) update operations
-    if OTA_UPDATE_IN_PROGRESS.get() {
-        // Process any pending OTA operations
-        app().ota_manager.rf_link_slave_ota_finish_handle();
-
-        // Check for OTA timeout (1 second intervals)
-        // This prevents OTA operations from hanging indefinitely
-        if CLOCK_SYS_CLOCK_1US * 1000000
-            < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed)
-        {
-            // Update timeout tick for next second
-            RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
-
-            // Decrement timeout counter if active
-            if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
-                OTA_UPDATE_TIMEOUT_SECONDS.dec();
-
-                // If timeout reached zero, abort OTA with error
-                if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                    app()
-                        .ota_manager
-                        .rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
-                }
-            }
-        }
-
-        // During OTA, schedule next connection event and return to RX state
-        write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
-        *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-        return Ok(());
+    if !OTA_UPDATE_IN_PROGRESS.get() {
+        return None;
     }
-    Err(())
+
+    // Check for OTA timeout (1 second intervals)
+    if CLOCK_SYS_CLOCK_1US * 1000000
+        < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed)
+    {
+        RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
+
+        if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
+            OTA_UPDATE_TIMEOUT_SECONDS.dec();
+        }
+    }
+
+    // During OTA, schedule next connection event and return to RX state
+    write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
+    *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
+
+    // The composition root finishes the OTA, which may refresh the counter, so the
+    // zero check happens there. Report the candidate outcome here.
+    if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
+        Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)
+    } else {
+        Some(BleConnectionEvent::OtaFinishCheck)
+    }
 }
 
 /// Handles bridge packet transmission based on connection conditions.
@@ -550,21 +559,21 @@ fn schedule_next_connection_event() {
 /// - Maintains connection event timing for reliable communication
 /// - Handles connection parameter update procedures
 #[cfg_attr(test, mry::mry)]
-pub fn handle_ble_connected_state() {
+pub fn handle_ble_connected_state() -> BleConnectionEvent {
     // 1. Initialize hardware and registers for active connection
     initialize_connection_hardware();
 
     // 2. Check for connection supervision timeout (early exit if timed out)
-    if check_connection_supervision_timeout().is_ok() {
-        return;
+    if let Some(ev) = check_connection_supervision_timeout() {
+        return ev;
     }
 
     // 3. Handle status read operation timeouts
     handle_status_read_timeout();
 
     // 4. Handle OTA operations (early exit if OTA is active)
-    if handle_ota_operations().is_ok() {
-        return;
+    if let Some(ev) = handle_ota_operations() {
+        return ev;
     }
 
     // 5. Process bridge packet transmission
@@ -578,6 +587,8 @@ pub fn handle_ble_connected_state() {
 
     // 8. Schedule next connection event and transition state
     schedule_next_connection_event();
+
+    BleConnectionEvent::None
 }
 
 /// Processes queued status response packets and sends them to the master.
@@ -649,7 +660,6 @@ mod tests {
         mock_write_reg_system_tick_irq,
     };
     use crate::sdk::packet_types::{Packet, PacketAttData};
-    use crate::uart_manager::UartManager;
 
     // Import mock for functions in the same module
     use super::mock_cleanup_ble_disconnection;
@@ -677,7 +687,7 @@ mod tests {
             *chn_map = [0xff, 0xff, 0xff, 0xff, 0x1f]; // Default all channels enabled
         }
 
-        app().uart_manager = UartManager::default();
+        crate::reset_app_uart_for_test();
     }
 
     /// Tests that the connection event counter is incremented on every call.
@@ -1914,15 +1924,16 @@ mod tests {
     /// Tests connection supervision timeout detection.
     ///
     /// Verifies that check_connection_supervision_timeout correctly:
-    /// - Detects when connection has timed out
-    /// - Handles OTA cleanup if OTA is in progress
-    /// - Calls cleanup_ble_disconnection for proper cleanup
-    /// - Returns appropriate boolean values
+    /// - Reports `None` while the connection is still inside its supervision timeout
+    /// - Reports `Some(BleConnectionEvent::None)` once it times out with no OTA active
+    /// - Reports `Some(BleConnectionEvent::OtaErrorReboot)` when it times out during OTA
+    /// - Always runs `cleanup_ble_disconnection` exactly once on the timeout path
     #[test]
-    #[mry::lock(read_reg_system_tick)]
+    #[mry::lock(read_reg_system_tick, cleanup_ble_disconnection)]
     fn test_check_connection_supervision_timeout_no_timeout() {
         // Mock system tick - connection is still valid
         mock_read_reg_system_tick().returns(10000);
+        mock_cleanup_ble_disconnection().returns(());
 
         // Setup connection state
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000); // 1 second timeout
@@ -1933,10 +1944,11 @@ mod tests {
         let result = check_connection_supervision_timeout();
 
         // Verify no timeout detected
-        assert!(
-            result.is_err(),
-            "Should return Err when connection is valid"
+        assert_eq!(
+            result, None,
+            "Should return None while the connection lives"
         );
+        mock_cleanup_ble_disconnection().assert_called(0);
     }
 
     #[test]
@@ -1956,11 +1968,39 @@ mod tests {
         // Execute function
         let result = check_connection_supervision_timeout();
 
-        // Verify timeout detected
-        assert!(
-            result.is_ok(),
-            "Should return Ok when connection has timed out"
+        // Verify timeout detected and cleanup performed, with nothing left for the
+        // composition root to do.
+        assert_eq!(
+            result,
+            Some(BleConnectionEvent::None),
+            "A non-OTA supervision timeout must report Some(None)"
         );
+        mock_cleanup_ble_disconnection().assert_called(1);
+    }
+
+    /// A supervision timeout while OTA is active must report `OtaErrorReboot` so the
+    /// composition root (and only the composition root) drives the reboot, and it
+    /// must still run the disconnection cleanup first.
+    #[test]
+    #[mry::lock(read_reg_system_tick, cleanup_ble_disconnection)]
+    fn test_check_connection_supervision_timeout_with_timeout_during_ota() {
+        mock_read_reg_system_tick().returns(15000);
+        mock_cleanup_ble_disconnection().returns(());
+
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(100);
+        SLAVE_CONNECTED_TICK.set(10000);
+        OTA_UPDATE_IN_PROGRESS.set(true);
+
+        let result = check_connection_supervision_timeout();
+
+        assert_eq!(
+            result,
+            Some(BleConnectionEvent::OtaErrorReboot),
+            "A supervision timeout during OTA must report OtaErrorReboot"
+        );
+        mock_cleanup_ble_disconnection().assert_called(1);
+
+        OTA_UPDATE_IN_PROGRESS.set(false);
     }
 
     /// Tests status read timeout handling.
@@ -2011,11 +2051,11 @@ mod tests {
     /// Tests OTA operations handling.
     ///
     /// Verifies that handle_ota_operations correctly:
-    /// - Returns false when no OTA is in progress
-    /// - Processes OTA operations when active
-    /// - Handles OTA timeout in 1-second intervals
-    /// - Schedules next connection event during OTA
-    /// - Returns true when OTA is active
+    /// - Returns `None` when no OTA is in progress
+    /// - Returns `Some(OtaFinishCheck)` while the timeout counter is non-zero
+    /// - Returns `Some(OtaFinishCheckAndErrorReboot)` once the counter is zero
+    /// - Still schedules the next connection event and returns to RX on every
+    ///   OTA-active path
     #[test]
     #[mry::lock(write_reg_system_tick_irq)]
     fn test_handle_ota_operations_not_active() {
@@ -2024,12 +2064,13 @@ mod tests {
 
         // Setup: No OTA in progress
         OTA_UPDATE_IN_PROGRESS.set(false);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
 
         // Execute function
         let result = handle_ota_operations();
 
         // Verify no OTA handling
-        assert!(result.is_err(), "Should return Err when OTA is not active");
+        assert_eq!(result, None, "Should return None when OTA is not active");
         mock_write_reg_system_tick_irq(Any).assert_called(0);
     }
 
@@ -2040,21 +2081,60 @@ mod tests {
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_read_reg_system_tick().returns(10000);
 
-        // Setup: OTA in progress
+        // Setup: OTA in progress with plenty of timeout left, so even if the
+        // one-second countdown fires the counter stays non-zero.
         OTA_UPDATE_IN_PROGRESS.set(true);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(7);
         SLAVE_NEXT_CONNECT_TICK.set(15000);
 
         // Execute function
         let result = handle_ota_operations();
 
         // Verify OTA handling
-        assert!(result.is_ok(), "Should return Ok when OTA is active");
+        assert_eq!(
+            result,
+            Some(BleConnectionEvent::OtaFinishCheck),
+            "Should report OtaFinishCheck while the timeout counter is non-zero"
+        );
         mock_write_reg_system_tick_irq(15000).assert_called(1);
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
             RfOperationState::Receiving,
             "Should transition to RX state during OTA"
         );
+
+        OTA_UPDATE_IN_PROGRESS.set(false);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+    }
+
+    /// A zero OTA timeout counter must report `OtaFinishCheckAndErrorReboot` — the
+    /// composition root runs the finish handler first (it may refresh the counter)
+    /// and only then decides whether to reboot.
+    #[test]
+    #[mry::lock(write_reg_system_tick_irq, read_reg_system_tick)]
+    fn test_handle_ota_operations_active_counter_zero() {
+        mock_write_reg_system_tick_irq(Any).returns(());
+        mock_read_reg_system_tick().returns(10000);
+
+        OTA_UPDATE_IN_PROGRESS.set(true);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        SLAVE_NEXT_CONNECT_TICK.set(15000);
+
+        let result = handle_ota_operations();
+
+        assert_eq!(
+            result,
+            Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot),
+            "A zero timeout counter must report OtaFinishCheckAndErrorReboot"
+        );
+        mock_write_reg_system_tick_irq(15000).assert_called(1);
+        assert_eq!(
+            *CURRENT_RF_STATE.lock(),
+            RfOperationState::Receiving,
+            "Should still transition to RX state when the counter is zero"
+        );
+
+        OTA_UPDATE_IN_PROGRESS.set(false);
     }
 
     /// Tests bridge operations handling.
@@ -2270,16 +2350,19 @@ mod tests {
     fn test_handle_ble_connected_state_normal_flow() {
         // Mock all decomposed functions for normal flow (no early exits)
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(Err(())); // No timeout
+        mock_check_connection_supervision_timeout().returns(None); // No timeout
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(Err(())); // No OTA active
+        mock_handle_ota_operations().returns(None); // No OTA active
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
         mock_schedule_next_connection_event().returns(());
 
         // Execute the main function
-        handle_ble_connected_state();
+        let result = handle_ble_connected_state();
+
+        // The normal bridge path reports nothing for the composition root to do
+        assert_eq!(result, BleConnectionEvent::None);
 
         // Verify all steps are executed in correct order
         mock_initialize_connection_hardware().assert_called(1);
@@ -2306,16 +2389,20 @@ mod tests {
     fn test_handle_ble_connected_state_timeout_early_exit() {
         // Mock functions with connection timeout
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(Ok(())); // Timeout occurred
+        mock_check_connection_supervision_timeout().returns(Some(BleConnectionEvent::None));
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(Err(()));
+        mock_handle_ota_operations().returns(None);
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
         mock_schedule_next_connection_event().returns(());
 
         // Execute the main function
-        handle_ble_connected_state();
+        let result = handle_ble_connected_state();
+
+        // A timed-out connection reports Some(None): cleanup already ran and the
+        // state must not be overwritten back to Receiving.
+        assert_eq!(result, BleConnectionEvent::None);
 
         // Verify early exit after timeout detection
         mock_initialize_connection_hardware().assert_called(1);
@@ -2326,6 +2413,37 @@ mod tests {
         mock_handle_bridge_operations().assert_called(0);
         mock_process_mesh_operations().assert_called(0);
         mock_manage_connection_event_timing().assert_called(0);
+        mock_schedule_next_connection_event().assert_called(0);
+    }
+
+    /// A supervision timeout during OTA must propagate `OtaErrorReboot` unchanged so
+    /// the composition root can reboot.
+    #[test]
+    #[mry::lock(
+        initialize_connection_hardware,
+        check_connection_supervision_timeout,
+        handle_status_read_timeout,
+        handle_ota_operations,
+        handle_bridge_operations,
+        process_mesh_operations,
+        manage_connection_event_timing,
+        schedule_next_connection_event
+    )]
+    fn test_handle_ble_connected_state_propagates_ota_error_reboot() {
+        mock_initialize_connection_hardware().returns(());
+        mock_check_connection_supervision_timeout()
+            .returns(Some(BleConnectionEvent::OtaErrorReboot));
+        mock_handle_status_read_timeout().returns(());
+        mock_handle_ota_operations().returns(None);
+        mock_handle_bridge_operations().returns(());
+        mock_process_mesh_operations().returns(());
+        mock_manage_connection_event_timing().returns(());
+        mock_schedule_next_connection_event().returns(());
+
+        let result = handle_ble_connected_state();
+
+        assert_eq!(result, BleConnectionEvent::OtaErrorReboot);
+        mock_handle_ota_operations().assert_called(0);
         mock_schedule_next_connection_event().assert_called(0);
     }
 
@@ -2343,16 +2461,19 @@ mod tests {
     fn test_handle_ble_connected_state_ota_early_exit() {
         // Mock functions with OTA active
         mock_initialize_connection_hardware().returns(());
-        mock_check_connection_supervision_timeout().returns(Err(())); // No timeout
+        mock_check_connection_supervision_timeout().returns(None); // No timeout
         mock_handle_status_read_timeout().returns(());
-        mock_handle_ota_operations().returns(Ok(())); // OTA is active
+        mock_handle_ota_operations().returns(Some(BleConnectionEvent::OtaFinishCheck));
         mock_handle_bridge_operations().returns(());
         mock_process_mesh_operations().returns(());
         mock_manage_connection_event_timing().returns(());
         mock_schedule_next_connection_event().returns(());
 
         // Execute the main function
-        handle_ble_connected_state();
+        let result = handle_ble_connected_state();
+
+        // The OTA event must be propagated unchanged
+        assert_eq!(result, BleConnectionEvent::OtaFinishCheck);
 
         // Verify early exit after OTA handling
         mock_initialize_connection_hardware().assert_called(1);

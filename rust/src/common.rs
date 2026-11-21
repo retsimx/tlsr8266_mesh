@@ -50,7 +50,10 @@ pub const SYS_CHN_LISTEN: [u8; 4] = [2, 12, 23, 34];
 pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
 
 /// Register address for light off state control.
-pub const REGA_LIGHT_OFF: u8 = 0x3a;
+///
+/// Defined in `sdk::pm`, which owns the software-reboot retention writes, and
+/// re-exported here so existing callers keep working.
+pub use crate::sdk::pm::REGA_LIGHT_OFF;
 
 /// Checks if device address parameters include MAC address flag.
 ///

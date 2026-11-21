@@ -266,6 +266,11 @@ impl LightManager {
 
             // Run a single transition now to avoid anything bugging out
             self.transition_step();
+
+            // `begin_at` above made `brightness` the transition target, so the
+            // on/off state is exactly `brightness == 0`. Deriving it locally
+            // keeps this path off the mockable `is_light_off` accessor.
+            crate::sdk::pm::set_reboot_light_off_state(brightness == 0);
         });
     }
 
@@ -463,6 +468,9 @@ impl LightManager {
             write_reg_tmr1_tick(0);
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
             self.transition_step();
+            // `begin_at` above made `target` the transition target, so the
+            // on/off state is exactly `target == 0`.
+            crate::sdk::pm::set_reboot_light_off_state(target == 0);
         });
     }
 

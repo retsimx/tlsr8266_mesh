@@ -107,7 +107,6 @@
 use core::cmp::min;
 use core::convert::TryFrom;
 
-use crate::app;
 use crate::config::{
     FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
@@ -115,7 +114,7 @@ use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_writ
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::pm::light_sw_reboot;
+use crate::sdk::pm::{blink_ota_led_ok, light_sw_reboot};
 use crate::state::*;
 use crate::BIT;
 use critical_section;
@@ -682,7 +681,7 @@ pub fn factory_reset_handle() {
         factory_reset();
 
         // Signal completion via LED indicators
-        app().ota_manager.rf_led_ota_ok();
+        blink_ota_led_ok(crate::config::OTA_LED as u32);
 
         // Reboot the device to apply the factory defaults
         light_sw_reboot();
@@ -999,7 +998,7 @@ pub fn kick_out(par: KickoutReason) {
     }
 
     // Signal operation completion via LED indicators
-    app().ota_manager.rf_led_ota_ok();
+    blink_ota_led_ok(crate::config::OTA_LED as u32);
 }
 
 #[cfg(test)]
@@ -1010,8 +1009,7 @@ mod tests {
     use crate::sdk::mcu::clock::mock_clock_time_exceed;
     use crate::sdk::mcu::crypto::mock_encode_password;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::pm::mock_light_sw_reboot;
-    use crate::{app_mocker, mock_app_mocker, App};
+    use crate::sdk::pm::{mock_blink_ota_led_ok, mock_light_sw_reboot};
     use core::slice;
     use mry::send_wrapper::SendWrapper;
     // factory_reset is defined in this module, so we can reference mock_factory_reset directly
@@ -1569,7 +1567,7 @@ mod tests {
         irq_disable,
         factory_reset,
         light_sw_reboot,
-        app_mocker
+        blink_ota_led_ok
     )]
     fn test_factory_reset_handle_completed_sequence() {
         // Set up initial state
@@ -1592,10 +1590,8 @@ mod tests {
             });
         }
 
-        // Set up mock app with mocked ota_manager
-        let mut app = App::default();
-        app.ota_manager.mock_rf_led_ota_ok().returns(());
-        mock_app_mocker().returns(&mut app);
+        // Set up the LED-success mock
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
 
         // Mock all the functions called during factory reset
         mock_irq_disable().returns(0);
@@ -1608,7 +1604,7 @@ mod tests {
         // Verify factory reset functions were called
         mock_irq_disable().assert_called(1);
         mock_factory_reset().assert_called(1);
-        app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
         mock_light_sw_reboot().assert_called(1);
         // Don't check flash_erase_sector for now - it might be called from within factory_reset()
 
@@ -1618,7 +1614,7 @@ mod tests {
 
     /// Test factory_reset_handle with fresh sector (Clear case)
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page, app_mocker)]
+    #[mry::lock(read_flash_byte, flash_write_page)]
     fn test_factory_reset_handle_clear_case() {
         // Set up initial state - fresh sector
         FACTORY_RESET_STATE.flash_address_index.set(0);
@@ -1634,11 +1630,6 @@ mod tests {
                 0xFF // Entire sector is erased
             });
         }
-
-        // Set up mock app with mocked ota_manager
-        let mut app = App::default();
-        app.ota_manager.mock_rf_led_ota_ok().returns(());
-        mock_app_mocker().returns(&mut app);
 
         // Mock flash_write_page (called during Clear case)
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
@@ -1912,12 +1903,10 @@ mod tests {
 
     /// Test that kick_out with non-OutOfMesh reason only does factory reset
     #[test]
-    #[mry::lock(factory_reset, app_mocker)]
+    #[mry::lock(factory_reset, blink_ota_led_ok)]
     fn test_kick_out_non_out_of_mesh_only_factory_reset() {
-        // Set up mock app
-        let mut app = App::default();
-        app.ota_manager.mock_rf_led_ota_ok().returns(());
-        mock_app_mocker().returns(&mut app);
+        // Mock the success LED blink
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
 
         // Mock factory reset
         mock_factory_reset().returns(());
@@ -1927,7 +1916,7 @@ mod tests {
 
         // Should have called factory reset and LED functions
         mock_factory_reset().assert_called(1);
-        app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
 
         // Should NOT have written any pairing data (since it's not OutOfMesh)
         // We can't easily verify this with mry, but the test ensures no crashes
@@ -1935,7 +1924,12 @@ mod tests {
 
     /// Test that kick_out writes default credentials and pairing flags to flash
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page, encode_password, app_mocker)]
+    #[mry::lock(
+        flash_erase_sector,
+        flash_write_page,
+        encode_password,
+        blink_ota_led_ok
+    )]
     fn test_kick_out_out_of_mesh_writes_credentials_and_flags() {
         // Ensure a known LTK is stored before invoking kick_out
         let expected_ltk = [0xAAu8; 16];
@@ -1984,16 +1978,14 @@ mod tests {
             },
         );
 
-        let mut app = App::default();
-        app.ota_manager.mock_rf_led_ota_ok().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
 
         kick_out(KickoutReason::OutOfMesh);
 
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(4);
         mock_encode_password(mry::Any, mry::Any).assert_called(1);
         assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
-        app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
+        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
 
         // Restore mesh pairing flags for other tests
         MESH_PAIR_ENABLE.set(false);

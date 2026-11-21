@@ -221,9 +221,18 @@ def objdump(elf: str) -> str:
         "../llvm/build/bin/llvm-objdump",
         "../llvm/build-native/bin/llvm-objdump",
     )
-    proc = subprocess.run(
-        [tool, "-d", "--mattr=+tc32", elf], capture_output=True, text=True, check=False
-    )
+    try:
+        proc = subprocess.run(
+            [tool, "-d", "--mattr=+tc32", elf],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        sys.exit(
+            f"stack gate: cannot run {tool} ({exc}); "
+            "set LLVM_OBJDUMP to the LLVM fork's llvm-objdump"
+        )
     if proc.returncode != 0:
         sys.exit(f"objdump failed: {proc.stderr.strip() or proc.returncode}")
     # Fail closed: a disassembler without the TC32 feature warns on stderr and
@@ -309,7 +318,15 @@ def read_symbols(elf: str) -> dict[str, int]:
         "../llvm/build/bin/llvm-nm",
         "../llvm/build-native/bin/llvm-nm",
     )
-    proc = subprocess.run([tool, elf], capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(
+            [tool, elf], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        sys.exit(
+            f"stack gate: cannot run {tool} ({exc}); "
+            "set LLVM_NM to the LLVM fork's llvm-nm"
+        )
     syms: dict[str, int] = {}
     for line in proc.stdout.splitlines():
         parts = line.split()

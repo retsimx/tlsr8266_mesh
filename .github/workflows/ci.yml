@@ -198,7 +198,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           ninja -C llvm-build llc llvm-link opt \
-            ld.lld llvm-objcopy llvm-objdump llvm-nm
+            lld llvm-objcopy llvm-objdump llvm-nm
 
       - name: Install LLVM tools
         if: steps.cache.outputs.cache-hit != 'true'

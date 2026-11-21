@@ -4,8 +4,8 @@
 //! watchdog clear, the 128 B register block, the main and IRQ stacks, the
 //! retained analog reset sentinel and breadcrumb, and the flash panic record.
 //! Addresses are then symbolized against `.symtab` and, when `--elf` and a
-//! `tc32-elf-objdump` are both available, a small window around `PC` is
-//! disassembled.
+//! disassembler (`llvm-objdump`, else `tc32-elf-objdump`) are both available, a
+//! small window around `PC` is disassembled.
 //!
 //! A failing probe request aborts the command; anything that is merely absent
 //! (no `irq_stk` symbol, no panic record, no objdump) degrades to `null`.
@@ -73,8 +73,8 @@ const PANIC_VALID_FLAG: u8 = 0xde;
 /// Largest panic body the record may hold.
 const PANIC_MAX: u16 = 256;
 
-/// Name of the TC32 disassembler.
-const OBJDUMP_NAME: &str = "tc32-elf-objdump";
+/// Disassembler candidates, preferred first.
+const OBJDUMP_NAMES: [&str; 2] = ["llvm-objdump", "tc32-elf-objdump"];
 
 /// Bytes disassembled on either side of `PC`.
 const DISASM_WINDOW: u32 = 32;
@@ -379,29 +379,45 @@ fn disassembly(elf: Option<&ElfImage>, elf_path: Option<&Path>, pc: u32) -> Opti
     disassemble(&tool, elf_path, pc)
 }
 
-/// Finds `tc32-elf-objdump` on `path_env`, else in `root/toolchain/tc32/bin`.
+/// Finds `llvm-objdump` or `tc32-elf-objdump` on `path_env`.
 ///
-/// Returns `None` instead of an error so hosts without the toolchain degrade to
-/// `disassembly: null`.
+/// Returns `None` instead of an error so hosts without a disassembler degrade
+/// to `disassembly: null`. The vendored Telink binutils directory no longer
+/// exists, so `root` is only kept for API stability.
 fn objdump_path(root: &Path, path_env: Option<&OsStr>) -> Option<PathBuf> {
     if let Some(path_env) = path_env {
         for dir in std::env::split_paths(path_env) {
-            let candidate = dir.join(OBJDUMP_NAME);
-            if candidate.is_file() {
-                return Some(candidate);
+            for name in OBJDUMP_NAMES {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
-    let candidate = root.join("toolchain/tc32/bin").join(OBJDUMP_NAME);
-    candidate.is_file().then_some(candidate)
+    let _ = root;
+    None
 }
 
 /// Runs `-d` over `pc - 32 .. pc + 32`, returning `None` on any failure.
+///
+/// `llvm-objdump` needs the TC32 triple and subtarget features spelled out;
+/// the legacy `tc32-elf-objdump` infers them from the ELF.
 fn disassemble(tool: &Path, elf_path: &Path, pc: u32) -> Option<String> {
     let start = pc.saturating_sub(DISASM_WINDOW);
     let stop = pc.saturating_add(DISASM_WINDOW);
-    let output = Command::new(tool)
-        .arg("-d")
+    let mut command = Command::new(tool);
+    command.arg("-d");
+    let is_llvm = tool
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.starts_with("llvm-objdump"));
+    if is_llvm {
+        command
+            .arg("--triple=thumbv6m-none-eabi")
+            .arg("--mattr=+tc32");
+    }
+    let output = command
         .arg(format!("--start-address=0x{start:x}"))
         .arg(format!("--stop-address=0x{stop:x}"))
         .arg(elf_path)

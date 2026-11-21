@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Deterministic, incremental TC32 (LLVM IR) build driver for the TLSR8266 firmware.
+"""Deterministic, incremental LLVM (TC32) build driver for the TLSR8266 firmware.
 
-This replaces the IR/link half of the ``Makefile`` and fixes the three defects
-that made no-op and feature-switching builds unsafe:
+This replaces the IR/link half of the ``Makefile`` with a pure-LLVM pipeline:
+Cargo emits LLVM IR, then ``llvm-link`` -> ``opt`` -> ``llc`` -> ``ld.lld`` ->
+``llvm-objcopy`` produce the image. The vendored ``tc32-elf-*`` toolchain and the
+text-assembly startup path are gone; reset vectors and startup code are emitted
+from Rust (``rust/src/startup.rs``, ``global_asm!``) into an ordinary IR module.
+
+The driver exists to fix two defects that made no-op and feature-switching
+builds unsafe:
 
 1. **Stale ``.ll`` glob.** ``llvm-link .../deps/*.ll`` linked every IR module ever
    emitted, so a Cargo metadata/feature change left old hashes beside the new
@@ -12,23 +18,13 @@ that made no-op and feature-switching builds unsafe:
    crate, or the root crate's hardlink/``(size, sha256)`` twin under ``deps/``
    or ``build/*/*/out/``), so a stray ``stale-deadbeef.ll`` is never selected.
 2. **Unconditional relink.** ``_build/lightblemesh`` was ``.PHONY``, so a no-op
-   ``make`` still ran cargo, ``llvm-link``, ``opt``, ``llc``, ``as``, ``ld`` and
-   ``objcopy`` (~7.6 s wasted). A deterministic manifest of the exact inputs (IR
-   file hashes, startup object, linker script, tool identity, flag strings)
-   is compared before the pipeline; on a match the six commands are
-   skipped and ``merged.o`` is left untouched.
-3. **Dirty tree on build.** The startup-object recipe unconditionally ran
-   ``sdk/increment_version.sh``, mutating tracked ``sdk/version.in`` and
-   ``rust/src/version.rs``. This driver only *reads* the two version files,
-   checks that their ``BUILD_VERSION`` integers agree, and rebuilds
-   ``cstartup_8266.o`` from a SHA-256 manifest. ``make bump-version`` remains the
-   only mutator.
+   ``make`` still ran cargo plus the whole pipeline (~7.6 s wasted). A
+   deterministic manifest of the exact inputs (IR file hashes, linker script,
+   tool identity, flag strings, Cargo features) is compared before the pipeline;
+   on a match the five commands are skipped and ``merged.o`` is left untouched.
 
 Caching model
 -------------
-* ``_build/asm/cstartup_8266.o`` is rebuilt only when it or
-  ``_build/asm/cstartup_8266.manifest.json`` is missing, or when the SHA-256 of
-  ``sdk/cstartup_8266.S``, ``sdk/version.in`` or ``sdk/version.h`` changed.
 * ``_build/<feature_slug>/manifest.json`` records everything that can change
   the linked image. A cache hit requires parsed-JSON equality with the freshly
   computed manifest *and* the presence of both ``lightblemesh`` and
@@ -39,6 +35,8 @@ Caching model
   directory (run from ``rust/`` so rustup finds ``rust-toolchain.toml``); the
   exact-IR selection makes the stale-hash hazard impossible without a second
   target dir.
+* ``rust/src/version.rs`` is the single source of truth for ``BUILD_VERSION``:
+  the driver only reads it (``make bump-version`` stays the only mutator).
 
 All subprocesses go through :func:`run_command`, and every relative path is
 anchored at the repository root, so the driver is cwd-independent.
@@ -46,11 +44,12 @@ anchored at the repository root, so the driver is cwd-independent.
 Usage:
     python3 sdk/build_firmware.py [--features <csv_or_space_list>]
         [--manifest-path rust/Cargo.toml] [--llc <path>] [--llvm-link <path>]
-        [--opt <path>] [--out-dir _build]
+        [--opt <path>] [--ld <path>] [--objcopy <path>] [--out-dir _build]
 
-LLVM tools resolve from ``--llc``/``--llvm-link``/``--opt``, then ``LLC``/
-``LLVM_LINK``/``OPT`` in the environment, then repo-root ``.env`` (only keys not
-already in the environment), then ``../llvm/build/bin/``.
+LLVM tools resolve from ``--llc``/``--llvm-link``/``--opt``/``--ld``/
+``--objcopy``, then ``LLC``/``LLVM_LINK``/``OPT``/``LLD``/``LLVM_OBJCOPY`` in
+the environment, then repo-root ``.env`` (only keys not already in the
+environment), then ``../llvm/build/bin/``.
 """
 
 from __future__ import annotations
@@ -69,63 +68,57 @@ from typing import TextIO
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TARGET = "lightblemesh"
 DEFAULT_MANIFEST = "rust/Cargo.toml"
 DEFAULT_OUT_DIR = "_build"
 
-# Exact flags from the pre-driver Makefile. `OPT_PASSES`/`LLC_FLAGS`/`LDFLAGS`
-# are recorded verbatim in the manifest, so a flag edit invalidates the cache.
+# Pipeline flags. `OPT_PASSES`/`LLC_FLAGS`/`LLD_FLAGS` are recorded verbatim in
+# the manifest, so a flag edit invalidates the cache.
 OPT_INLINE_THRESHOLD = 50
-OPT_SAFE = (
-    "sroa,mem2reg,instcombine<no-verify-fixpoint>,simplifycfg,dce,"
-    "loop-simplify,lcssa,loop-rotate,loop-mssa(licm),"
-    "instcombine<no-verify-fixpoint>,simplifycfg,adce,dse"
-)
-OPT_PASSES = (
-    f"ipsccp,deadargelim,function({OPT_SAFE}),always-inline,cgscc(inline),"
-    f"ipsccp,deadargelim,function({OPT_SAFE})"
-)
-LLC_FLAGS = "-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6"
-LDFLAGS = "--gc-sections -T ./sdk/boot.link"
+# Size-first whole-program pipeline. `rustc` is built with
+# `opt-level = "s"`/`codegen-units = 1`, so functions carry optsize/minisize
+# attributes that `default<O2>` honours; `mergefunc` folds identical Rust
+# monomorphisations and `constmerge`/`globaldce` drop duplicate constants and
+# unreachable globals. There is no separate linker LTO step: every crate
+# (including `core`) is linked into this one module before it is optimised.
+OPT_PASSES = "default<O2>,mergefunc,constmerge,globaldce"
+LLC_FLAGS = "-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6,+tc32"
+LLD_FLAGS = "--tc32 --gc-sections -T ./sdk/boot.link"
 
-CCFLAGS = [
-    "-O2",
-    "-fshort-wchar",
-    "-fms-extensions",
-    "-finline-small-functions",
-    "-fpack-struct",
-    "-fshort-enums",
-    "-Wall",
-    "-std=gnu99",
-    "-DMCU_STARTUP_8266",
-    "-D__PROJECT_LIGHT_8266__=1",
-    "-DPROVISIONING_ENABLE",
-    "-I",
-    "./sdk/",
-    "-ffunction-sections",
-    "-fdata-sections",
-]
-
-STARTUP_INPUTS = ("sdk/cstartup_8266.S", "sdk/version.in", "sdk/version.h")
-VERSION_IN_REL = "sdk/version.in"
 VERSION_RS_REL = "rust/src/version.rs"
+CARGO_MANIFEST_REL = "rust/Cargo.toml"
+RUST_TOOLCHAIN_REL = "rust/rust-toolchain.toml"
 LINKER_SCRIPT_REL = "sdk/boot.link"
-TC32_BIN_REL = "toolchain/tc32/bin"
 
 DEFAULT_TOOLS = {
     "llc": "../llvm/build/bin/llc",
     "llvm_link": "../llvm/build/bin/llvm-link",
     "opt": "../llvm/build/bin/opt",
+    "ld": "../llvm/build/bin/ld.lld",
+    "objcopy": "../llvm/build/bin/llvm-objcopy",
 }
-TOOL_ENV_KEYS = {"llc": "LLC", "llvm_link": "LLVM_LINK", "opt": "OPT"}
-TOOL_FLAGS = {"llc": "--llc", "llvm_link": "--llvm-link", "opt": "--opt"}
-TOOL_ORDER = ("llc", "llvm_link", "opt", "as", "ld", "objcopy")
+TOOL_ENV_KEYS = {
+    "llc": "LLC",
+    "llvm_link": "LLVM_LINK",
+    "opt": "OPT",
+    "ld": "LLD",
+    "objcopy": "LLVM_OBJCOPY",
+}
+TOOL_FLAGS = {
+    "llc": "--llc",
+    "llvm_link": "--llvm-link",
+    "opt": "--opt",
+    "ld": "--ld",
+    "objcopy": "--objcopy",
+}
+TOOL_ORDER = ("llc", "llvm_link", "opt", "ld", "objcopy")
 LLVM_TOOLS = ("llc", "llvm_link", "opt")
-TC32_TOOLS = ("as", "ld", "objcopy")
+LINK_TOOLS = ("ld", "objcopy")
 
-VERSION_IN_RE = re.compile(r"^\s*\.equ\s+BUILD_VERSION\s*,\s*(\d+)\s*$", re.MULTILINE)
-VERSION_RS_RE = re.compile(r"pub\s+static\s+BUILD_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;")
+VERSION_RS_RE = re.compile(
+    r"pub\s+(?:const|static)\s+BUILD_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;"
+)
 # rustc emits IR as `<crate>-<metadata-hash>.ll` (no `lib` prefix), while the
 # rlib that carries it is `lib<crate>-<hash>.rlib`.
 HASHED_RLIB_RE = re.compile(r"^lib(?P<name>.+)-(?P<hash>[0-9a-f]{8,})\.rlib$")
@@ -240,12 +233,8 @@ def _require_tool(path: Path, flag: str, env_key: str) -> Path:
     return tool
 
 
-def _tc32_tool(repo_root: Path, name: str) -> Path:
-    return Path(repo_root) / TC32_BIN_REL / f"tc32-elf-{name}"
-
-
 # ---------------------------------------------------------------------------
-# Version sync (read-only)
+# Version gate (read-only)
 # ---------------------------------------------------------------------------
 
 
@@ -267,37 +256,18 @@ def _read_version(path: Path, pattern: re.Pattern[str], expected: str) -> int:
     return int(match.group(1))
 
 
-def read_version_in(path: Path) -> int:
-    """Read ``.equ BUILD_VERSION,<N>`` from ``sdk/version.in``."""
-    return _read_version(Path(path), VERSION_IN_RE, ".equ BUILD_VERSION,<N>")
+def read_build_version(repo_root: Path) -> int:
+    """Read ``BUILD_VERSION`` from ``rust/src/version.rs``.
 
-
-def read_version_rs(path: Path) -> int:
-    """Read ``pub static BUILD_VERSION: u32 = <N>;`` from ``rust/src/version.rs``."""
-    return _read_version(
-        Path(path), VERSION_RS_RE, "pub static BUILD_VERSION: u32 = <N>;"
-    )
-
-
-def check_version_sync(repo_root: Path) -> int:
-    """Return ``BUILD_VERSION`` after proving both tracked files agree.
-
-    Raises :class:`BuildError` when either file is missing or unparsable, or
-    when the two integers differ. The driver never rewrites either file.
+    That file is the single source of truth: there is no second version file to
+    cross-check. Raises :class:`BuildError` when it is missing or unparsable, and
+    the driver never rewrites it.
     """
-    root = Path(repo_root)
-    version_in = root / VERSION_IN_REL
-    version_rs = root / VERSION_RS_REL
-    from_in = read_version_in(version_in)
-    from_rs = read_version_rs(version_rs)
-    if from_in != from_rs:
-        raise BuildError(
-            f"BUILD_VERSION mismatch: {version_in} has {from_in} but "
-            f"{version_rs} has {from_rs}; run `make bump-version` "
-            "(sdk/increment_version.sh) to sync them",
-            exit_code=2,
-        )
-    return from_in
+    return _read_version(
+        Path(repo_root) / VERSION_RS_REL,
+        VERSION_RS_RE,
+        "pub const BUILD_VERSION: u32 = <N>;",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +323,46 @@ def _probe_stdout(
     return proc.stdout or ""
 
 
+def _probe_tc32_feature(llc_path: Path) -> None:
+    """Fail if the resolved llc does not actually implement ``+tc32``.
+
+    An older or stock llc accepts the flag with a warning on stderr and exits 0,
+    then emits *unscrambled* Thumb bytes: a silently unbootable image. Refuse
+    to build in that case.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "tc32.ll"
+        obj = Path(tmp) / "tc32.o"
+        src.write_text("define void @f() { ret void }\n", encoding="utf-8")
+        try:
+            proc = run_command(
+                [
+                    str(llc_path),
+                    "-march=thumb",
+                    "-mcpu=arm9",
+                    "-mattr=+soft-float,-v6,+tc32",
+                    "-filetype=obj",
+                    str(src),
+                    "-o",
+                    str(obj),
+                ],
+                capture=True,
+                capture_stderr=True,
+            )
+        except OSError as exc:
+            raise BuildError(f"cannot execute {llc_path}: {exc}", exit_code=2) from exc
+    stderr = proc.stderr or ""
+    if proc.returncode != 0 or "not a recognized feature" in stderr:
+        raise BuildError(
+            f"{llc_path} does not support the +tc32 subtarget feature; "
+            "point --llc/LLC at the TC32 LLVM fork (llc --version should report "
+            "this fork's build)",
+            exit_code=2,
+        )
+
+
 def probe_toolchain(rust_dir: Path, llc_path: Path) -> dict[str, object]:
     """Probe ``rustc -vV`` and ``llc --version`` and enforce LLVM compatibility.
 
@@ -366,6 +376,7 @@ def probe_toolchain(rust_dir: Path, llc_path: Path) -> dict[str, object]:
     llc_info = parse_llc_version(
         _probe_stdout([str(llc_path), "--version"], what=f"{llc_path} --version")
     )
+    _probe_tc32_feature(llc_path)
     rustc_major = int(rustc_info["llvm_major"])
     fork_major = int(llc_info["llvm_major"])
     if rustc_major > fork_major:
@@ -582,15 +593,6 @@ def _input_entries(inputs: Sequence[Path]) -> list[dict[str, str]]:
     return [{"path": _display_path(path), "sha256": _sha256(path)} for path in inputs]
 
 
-def _startup_manifest(inputs: Sequence[Path]) -> dict:
-    """The startup-object cache payload.
-
-    Written and re-read through this one shape, so the writer and the
-    ``startup_needs_rebuild`` predicate can never disagree about the schema.
-    """
-    return {"inputs": _input_entries(inputs)}
-
-
 def _read_json(path: Path) -> dict | None:
     """Parsed JSON object, or ``None`` when absent, corrupt or not an object."""
     try:
@@ -623,19 +625,20 @@ def _flags_block() -> dict[str, object]:
         "opt_passes": OPT_PASSES,
         "opt_inline_threshold": OPT_INLINE_THRESHOLD,
         "llc_flags": LLC_FLAGS,
-        "ldflags": LDFLAGS,
+        "ldflags": LLD_FLAGS,
     }
 
 
 def compute_manifest(
     features: Sequence[str],
     ll_paths: Sequence[Path],
-    startup_obj: Path,
+    version: int,
+    build_inputs: Sequence[Path],
     linker_script: Path,
     tools: dict[str, Path],
     toolchain: dict[str, object] | None = None,
 ) -> dict:
-    """Build the deterministic manifest that guards the LLVM/TC32 pipeline."""
+    """Build the deterministic manifest that guards the LLVM pipeline."""
     missing = [name for name in TOOL_ORDER if name not in tools]
     if missing:
         raise BuildError(f"manifest is missing tool entries: {missing}", exit_code=2)
@@ -645,8 +648,9 @@ def compute_manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "features": list(features),
+        "build_version": version,
+        "build_inputs": _input_entries(build_inputs),
         "ll_inputs": ll_inputs,
-        "startup_obj_sha256": _sha256(startup_obj),
         "linker_script_sha256": _sha256(linker_script),
         "tools": {name: _tool_entry(tools[name]) for name in TOOL_ORDER},
         "toolchain": dict(toolchain) if toolchain is not None else {},
@@ -657,21 +661,6 @@ def compute_manifest(
 def manifests_equal(first: dict | None, second: dict | None) -> bool:
     """Cache-hit predicate: parsed-JSON equality, never a partial/absent match."""
     return isinstance(first, dict) and isinstance(second, dict) and first == second
-
-
-def startup_needs_rebuild(
-    obj_path: Path,
-    manifest_path: Path,
-    inputs: Sequence[Path],
-) -> bool:
-    """True when the startup object is missing or any input hash changed."""
-    obj = Path(obj_path)
-    if not obj.is_file():
-        return True
-    recorded = _read_json(manifest_path)
-    if recorded is None:
-        return True
-    return not manifests_equal(recorded, _startup_manifest(inputs))
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +687,7 @@ def run_command(
     *,
     cwd: Path | None = None,
     capture: bool = False,
+    capture_stderr: bool = False,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one argv list (never a shell string).
@@ -710,7 +700,7 @@ def run_command(
         cwd=None if cwd is None else str(cwd),
         env=env,
         stdout=subprocess.PIPE if capture else None,
-        stderr=None,
+        stderr=subprocess.PIPE if capture_stderr else None,
         text=True,
         check=False,
     )
@@ -740,36 +730,6 @@ def _run_step(
 # ---------------------------------------------------------------------------
 
 
-def _startup_command(repo_root: Path, obj_path: Path) -> list[str]:
-    """The pre-driver startup compile, unchanged in flags and order."""
-    return [
-        str(_tc32_tool(repo_root, "gcc")),
-        "-B",
-        str(Path(repo_root) / TC32_BIN_REL / "tc32-elf-"),
-        "-c",
-        *CCFLAGS,
-        str(Path(repo_root) / STARTUP_INPUTS[0]),
-        "-o",
-        str(Path(obj_path)),
-    ]
-
-
-def _ensure_startup_object(out_root: Path, repo_root: Path) -> Path:
-    asm_dir = Path(out_root) / "asm"
-    obj = asm_dir / "cstartup_8266.o"
-    manifest = asm_dir / "cstartup_8266.manifest.json"
-    inputs = [Path(repo_root) / name for name in STARTUP_INPUTS]
-    if startup_needs_rebuild(obj, manifest, inputs):
-        asm_dir.mkdir(parents=True, exist_ok=True)
-        _run_step(
-            _startup_command(repo_root, obj),
-            cwd=repo_root,
-            what="startup compile",
-        )
-        _write_json(manifest, _startup_manifest(inputs))
-    return obj
-
-
 def _cargo_build(manifest_path: Path, features: Sequence[str]) -> list[Path]:
     """Run Cargo from the manifest's directory and resolve the exact IR inputs."""
     cmd = [
@@ -787,7 +747,7 @@ def _cargo_build(manifest_path: Path, features: Sequence[str]) -> list[Path]:
         cmd += ["--features", ",".join(features)]
     env = dict(os.environ)
     env.pop("CARGO_ENCODED_RUSTFLAGS", None)
-    env["RUSTFLAGS"] = "--emit=llvm-ir"
+    env["RUSTFLAGS"] = "--emit=llvm-ir -C target-feature=+tc32"
     proc = run_command(
         cmd,
         cwd=Path(manifest_path).parent,
@@ -811,7 +771,6 @@ def _stage_paths(stage_dir: Path) -> dict[str, str]:
     return {
         "bc": str(stage / "merged.bc"),
         "opt_bc": str(stage / "merged_opt.bc"),
-        "asm": str(stage / "merged.s"),
         "obj": str(stage / "merged.o"),
         "elf": str(stage / TARGET),
         "bin": str(stage / f"{TARGET}.bin"),
@@ -821,10 +780,10 @@ def _stage_paths(stage_dir: Path) -> dict[str, str]:
 def _pipeline_commands(
     stage_dir: Path,
     ll_paths: Sequence[Path],
-    startup_obj: Path,
     tools: dict[str, Path],
+    version: int,
 ) -> list[tuple[str, list[str]]]:
-    """The six LLVM/TC32 commands, with the pre-driver flags and object order."""
+    """The five pure-LLVM commands that turn IR into the flashable image."""
     paths = _stage_paths(stage_dir)
     return [
         (
@@ -847,21 +806,23 @@ def _pipeline_commands(
             [
                 str(tools["llc"]),
                 *LLC_FLAGS.split(),
+                "--filetype=obj",
+                "--function-sections",
+                "--data-sections",
                 paths["opt_bc"],
                 "-o",
-                paths["asm"],
+                paths["obj"],
             ],
         ),
-        ("as", [str(tools["as"]), "-o", paths["obj"], paths["asm"]]),
         (
             "ld",
             [
                 str(tools["ld"]),
-                *LDFLAGS.split(),
+                *LLD_FLAGS.split(),
+                f"--defsym=BUILD_VERSION={version}",
                 "-o",
                 paths["elf"],
                 paths["obj"],
-                str(startup_obj),
             ],
         ),
         (
@@ -876,11 +837,12 @@ def _pipeline_commands(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_llvm_tools(
+def _resolve_tools(
     args: argparse.Namespace, dotenv: dict[str, str], repo_root: Path
 ) -> dict[str, Path]:
+    """Resolve every pipeline tool: CLI flag > environment > ``.env`` > default."""
     resolved: dict[str, Path] = {}
-    for name in LLVM_TOOLS:
+    for name in (*LLVM_TOOLS, *LINK_TOOLS):
         path = resolve_tool(
             getattr(args, name),
             TOOL_ENV_KEYS[name],
@@ -892,15 +854,6 @@ def _resolve_llvm_tools(
     return resolved
 
 
-def _fixed_tools(repo_root: Path) -> dict[str, Path]:
-    """Resolve and validate the vendored ``tc32-elf-{as,ld,objcopy}``."""
-    tools: dict[str, Path] = {}
-    for name in TC32_TOOLS:
-        path = _tc32_tool(repo_root, name)
-        tools[name] = _require_tool(path, f"tc32-elf-{name}", "PATH")
-    return tools
-
-
 def _run_build(args: argparse.Namespace) -> int:
     repo_root = REPO_ROOT
     out_root = _anchor(args.out_dir, repo_root)
@@ -908,15 +861,14 @@ def _run_build(args: argparse.Namespace) -> int:
     features = parse_features(args.features)
     slug = feature_slug(features)
 
-    check_version_sync(repo_root)
+    build_version = read_build_version(repo_root)
 
     dotenv = {
         key: value
         for key, value in parse_dotenv(repo_root / ".env").items()
         if key not in os.environ
     }
-    tools = _resolve_llvm_tools(args, dotenv, repo_root)
-    tools.update(_fixed_tools(repo_root))
+    tools = _resolve_tools(args, dotenv, repo_root)
 
     toolchain = probe_toolchain(manifest_path.parent, tools["llc"])
     commit_short = str(toolchain["rustc_commit"])[:9]
@@ -926,21 +878,25 @@ def _run_build(args: argparse.Namespace) -> int:
         f"llc LLVM {toolchain['fork_llvm']}"
     )
 
-    startup_obj = _ensure_startup_object(out_root, repo_root)
     ll_paths = _cargo_build(manifest_path, features)
 
     linker_script = repo_root / LINKER_SCRIPT_REL
+    build_inputs = [
+        repo_root / CARGO_MANIFEST_REL,
+        repo_root / RUST_TOOLCHAIN_REL,
+    ]
+    stage_dir = out_root / slug
+    stage = _stage_paths(stage_dir)
+
     manifest = compute_manifest(
         features,
         ll_paths,
-        startup_obj,
+        build_version,
+        build_inputs,
         linker_script,
         tools,
         toolchain=toolchain,
     )
-
-    stage_dir = out_root / slug
-    stage = _stage_paths(stage_dir)
     target = Path(stage["elf"])
     target_bin = Path(stage["bin"])
     cache_hit = (
@@ -952,7 +908,7 @@ def _run_build(args: argparse.Namespace) -> int:
         print(f"Build manifest unchanged for '{slug}'; skipping LLVM/TC32 link.")
     else:
         stage_dir.mkdir(parents=True, exist_ok=True)
-        for label, cmd in _pipeline_commands(stage_dir, ll_paths, startup_obj, tools):
+        for label, cmd in _pipeline_commands(stage_dir, ll_paths, tools, build_version):
             _run_step(cmd, cwd=repo_root, what=label)
         _write_json(stage_dir / "manifest.json", manifest)
 
@@ -965,7 +921,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="build_firmware.py",
         description=(
-            "Deterministic, incremental TC32/LLVM IR build driver for the "
+            "Deterministic, incremental LLVM/TC32 build driver for the "
             "TLSR8266 firmware. Relative paths are anchored at the repository root."
         ),
     )
@@ -1000,6 +956,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="PATH",
         help="opt binary (default: $OPT, .env OPT, then ../llvm/build/bin/opt).",
+    )
+    parser.add_argument(
+        "--ld",
+        default="",
+        metavar="PATH",
+        help="ld.lld linker (default: $LLD, .env LLD, then ../llvm/build/bin/ld.lld).",
+    )
+    parser.add_argument(
+        "--objcopy",
+        default="",
+        metavar="PATH",
+        help="llvm-objcopy binary (default: $LLVM_OBJCOPY, .env LLVM_OBJCOPY, "
+        "then ../llvm/build/bin/llvm-objcopy).",
     )
     parser.add_argument(
         "--out-dir",

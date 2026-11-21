@@ -1,7 +1,11 @@
 #!/bin/sh
-# Bumps BUILD_VERSION and regenerates rust/src/version.rs.
+# Bumps BUILD_VERSION in rust/src/version.rs.
 #
 # Usage: sdk/increment_version.sh   (takes no arguments)
+#
+# rust/src/version.rs is the single source of truth for the image header version
+# word: rust/src/startup.rs interpolates the constant straight into the vector
+# table, so nothing else has to be regenerated.
 #
 # The image header is crystal-free: the firmware detects the external crystal at
 # boot, so there is no build-time crystal bit to stamp and bit 31 of the version
@@ -14,11 +18,16 @@ if [ "$#" -ne 0 ]; then
 	exit 2
 fi
 
-cd sdk
-head -n1 version.in > version.in.new
-mv version.in.new version.in
-oldnum=$(cut -d ',' -f2 version.in)
-newnum=$((oldnum + 1))
-sed -i "s/.equ BUILD_VERSION,$oldnum\$/.equ BUILD_VERSION,$newnum/g" version.in
+cd "$(dirname "$0")/.."
+version_rs=rust/src/version.rs
 
-echo "pub static BUILD_VERSION: u32 = $newnum;" > ../rust/src/version.rs
+oldnum=$(sed -n 's/^pub const BUILD_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' "$version_rs")
+if [ -z "$oldnum" ]; then
+	echo "error: no 'pub const BUILD_VERSION: u32 = <N>;' line in $version_rs" >&2
+	exit 1
+fi
+
+newnum=$((oldnum + 1))
+sed -i "s/^pub const BUILD_VERSION: u32 = $oldnum;\$/pub const BUILD_VERSION: u32 = $newnum;/" "$version_rs"
+
+echo "BUILD_VERSION: $oldnum -> $newnum"

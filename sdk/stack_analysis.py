@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """Static stack-depth analyzer for the TLSR8266 (TC32) firmware ELF.
 
-Walks the disassembly produced by ``tc32-elf-objdump -d``, derives each
-function's stack frame from its prologue (``tpush {..}`` + ``tsub sp, #N``),
-builds the directed call graph from ``tjl``/``tj``, and reports the deepest
-root-to-leaf stack path for the main stack and the IRQ stack separately.
+Walks the disassembly produced by ``llvm-objdump -d``, derives each function's
+stack frame from its prologue (``push {..}`` + ``sub sp, #N``), builds the
+directed call graph from ``bl``/``b``, and reports the deepest root-to-leaf
+stack path for the main stack and the IRQ stack separately. The legacy TC32
+spellings (``tpush``, ``tpop``, ``tsub sp``, ``tadd sp``, ``tjl``, ``tj``,
+``tjex``) are accepted too, so both disassemblers feed the same model.
 
 This exists to evidence the RAM budget: the main stack grows down from the top
 of RAM into the free region above ``_end_bss_`` (see ``sdk/boot.link`` and
-``sdk/cstartup_8266.S``), so the deepest reachable chain is the number the RAM
+``rust/src/startup.rs``), so the deepest reachable chain is the number the RAM
 gate must fit. The IRQ stack (``irq_stk``, 2048 B) is separate.
 
 Model and caveats (reported alongside the result):
   * Conservative frame model: a callee's whole frame is charged on top of the
     caller's whole frame, ignoring call-site sp offsets. This is an upper bound.
-  * Tail calls (``tj <sym>`` to a known function) do not grow the stack; the
-    callee replaces the caller's frame.
+  * Tail calls (``b <sym>`` / ``tj <sym>`` to a known function) do not grow the
+    stack; the callee replaces the caller's frame.
   * Interrupt nesting on the IRQ stack is not modelled (assumes non-nested);
     the ``__irq`` register-save preamble is added as a fixed constant.
-  * The firmware contains no indirect ``tloadr pc/r15`` calls, so ``tjl`` edges
-    capture the whole call graph. If that changes this script must be revisited.
+  * The firmware contains no indirect calls (``bx rN`` / legacy ``tjex``), so
+    ``bl`` edges capture the whole call graph. If that changes this script must
+    be revisited.
 
 Usage:
     python3 sdk/stack_analysis.py [--elf _build/lightblemesh] [--top 15]
@@ -43,12 +46,18 @@ from dataclasses import dataclass, field
 IRQ_PREAMBLE_BYTES = 60
 
 HEADER_RE = re.compile(r"^([0-9a-f]+) <(.*)>:\s*$")
-CALL_RE = re.compile(r"\btjl\s+[0-9a-f]+\s+<([^>]+)>")
-TAIL_RE = re.compile(r"\btj\s+[0-9a-f]+\s+<([^>]+)>")
-PUSH_RE = re.compile(r"\btpush\s*\{([^}]*)\}")
-POP_RE = re.compile(r"\btpop\s*\{([^}]*)\}")
-SUB_RE = re.compile(r"\btsub(?:cs)?\s+sp,\s*#(\d+)")
-ADD_RE = re.compile(r"\btadd(?:cs)?\s+sp,\s*#(\d+)")
+# Accept both llvm-objdump's standard ARM Thumb spellings and the legacy TC32
+# `t*` spellings. `\s+` after the mnemonic keeps `bl` from matching `blx`, and
+# the branch target may carry llvm-objdump's `0x` prefix.
+CALL_RE = re.compile(r"\b(?:tjl|bl)\s+(?:0x)?[0-9a-f]+\s+<([^>]+)>")
+TAIL_RE = re.compile(r"\b(?:tj|b)\s+(?:0x)?[0-9a-f]+\s+<([^>]+)>")
+PUSH_RE = re.compile(r"\b(?:tpush|push)\s*\{([^}]*)\}")
+POP_RE = re.compile(r"\b(?:tpop|pop)\s*\{([^}]*)\}")
+_IMM = r"(0x[0-9a-fA-F]+|\d+)"
+SUB_RE = re.compile(rf"\b(?:tsub(?:cs)?|sub)\s+sp,\s*#{_IMM}")
+ADD_RE = re.compile(rf"\b(?:tadd(?:cs)?|add)\s+sp,\s*#{_IMM}")
+# `bx lr` is a return, not an indirect branch; `bx rN` and legacy `tjex` are.
+INDIRECT_RE = re.compile(r"\btjex\b|\bbx\s+(?!lr\b)\w")
 
 
 @dataclass
@@ -57,7 +66,7 @@ class Func:
     frame: int = 0
     calls: list[tuple[str, bool]] = field(default_factory=list)  # (name, is_tail)
     size: int = 0
-    indirect: bool = False  # contains a tjex (register/indirect branch)
+    indirect: bool = False  # contains an indirect branch (bx rN / legacy tjex)
 
 
 def reg_count(spec: str) -> int:
@@ -108,7 +117,7 @@ def parse_functions(disasm: str) -> dict[str, Func]:
 
         sub = SUB_RE.search(line)
         if sub:
-            sp_off += int(sub.group(1))
+            sp_off += int(sub.group(1), 0)
             max_off = max(max_off, sp_off)
 
         pop = POP_RE.search(line)
@@ -117,7 +126,7 @@ def parse_functions(disasm: str) -> dict[str, Func]:
 
         add = ADD_RE.search(line)
         if add:
-            sp_off = max(0, sp_off - int(add.group(1)))
+            sp_off = max(0, sp_off - int(add.group(1), 0))
 
         call = CALL_RE.search(line)
         if call:
@@ -129,7 +138,7 @@ def parse_functions(disasm: str) -> dict[str, Func]:
             current.calls.append((tail.group(1), True))
             continue
 
-        if re.search(r"\btjex\b", line):
+        if INDIRECT_RE.search(line):
             current.indirect = True
 
     if current is not None and name is not None:
@@ -187,15 +196,50 @@ def longest_path(
     return total, chain, cycles
 
 
-def objdump(elf: str) -> str:
+def _llvm_tool(name: str, env_key: str, *defaults: str) -> str:
+    """Resolve an LLVM tool: explicit env var, then the repo build, then PATH."""
+    from os import environ
+    from pathlib import Path
     from shutil import which
 
-    tool = which("tc32-elf-objdump") or "./toolchain/tc32/bin/tc32-elf-objdump"
+    explicit = environ.get(env_key)
+    if explicit:
+        return explicit
+    for candidate in defaults:
+        if Path(candidate).is_file():
+            return candidate
+    found = which(name)
+    if found:
+        return found
+    return defaults[0]
+
+
+def objdump(elf: str) -> str:
+    tool = _llvm_tool(
+        "llvm-objdump",
+        "LLVM_OBJDUMP",
+        "../llvm/build/bin/llvm-objdump",
+        "../llvm/build-native/bin/llvm-objdump",
+    )
     proc = subprocess.run(
-        [tool, "-d", elf], capture_output=True, text=True, check=False
+        [tool, "-d", "--mattr=+tc32", elf], capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         sys.exit(f"objdump failed: {proc.stderr.strip() or proc.returncode}")
+    # Fail closed: a disassembler without the TC32 feature warns on stderr and
+    # then decodes the permuted bytes as gibberish, which would silently shrink
+    # every measured frame. Refuse to report a margin we cannot trust.
+    if proc.stderr.strip():
+        first = proc.stderr.strip().splitlines()[0]
+        sys.exit(
+            f"stack gate: {tool} cannot decode TC32 ({first}); "
+            "set LLVM_OBJDUMP to the LLVM fork's llvm-objdump"
+        )
+    if proc.stdout.count("\n") and proc.stdout.count("<") < 20:
+        sys.exit(
+            f"stack gate: {tool} produced an implausible disassembly; "
+            "set LLVM_OBJDUMP to the LLVM fork's llvm-objdump"
+        )
     return proc.stdout
 
 
@@ -210,7 +254,7 @@ def report(label: str, total: int, chain: list[str], funcs: dict[str, Func]) -> 
 def all_roots(funcs: dict[str, Func]) -> list[str]:
     """Functions never targeted by a direct/tail call.
 
-    Embassy invokes each task's ``poll`` through a function pointer (``tjex``),
+    Embassy invokes each task's ``poll`` through a function pointer (``bx rN``),
     so those poll bodies have no direct caller and must be treated as roots of
     the main stack. Any genuinely dead function also lands here; since the
     linker garbage-collects unreferenced code, address-taken functions are the
@@ -259,9 +303,12 @@ def max_over_roots(
 
 
 def read_symbols(elf: str) -> dict[str, int]:
-    from shutil import which
-
-    tool = which("tc32-elf-nm") or "./toolchain/tc32/bin/tc32-elf-nm"
+    tool = _llvm_tool(
+        "llvm-nm",
+        "LLVM_NM",
+        "../llvm/build/bin/llvm-nm",
+        "../llvm/build-native/bin/llvm-nm",
+    )
     proc = subprocess.run([tool, elf], capture_output=True, text=True, check=False)
     syms: dict[str, int] = {}
     for line in proc.stdout.splitlines():
@@ -297,7 +344,7 @@ def main() -> int:
 
     print(f"parsed {len(funcs)} functions from {args.elf}")
     indirect = sum(1 for f in funcs.values() if f.indirect)
-    print(f"functions with indirect (tjex) branches: {indirect}")
+    print(f"functions with indirect (bx/tjex) branches: {indirect}")
 
     # Root the main stack at every in-degree-0 function, not __start: the
     # __start block contains the hardware vector table (tj __irq / tj __reset),

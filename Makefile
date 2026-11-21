@@ -1,9 +1,9 @@
 # Firmware build front end.
 #
 # Build flags (Cargo features, the LLVM optimisation pipeline, llc/ld arguments),
-# tool resolution, exact IR module selection, startup-object caching and the
-# incremental link manifest all live in sdk/build_firmware.py. This Makefile
-# stays a thin wrapper so there is exactly one source of truth for the build.
+# tool resolution, exact IR module selection and the incremental link manifest
+# all live in sdk/build_firmware.py. This Makefile stays a thin wrapper so there
+# is exactly one source of truth for the build.
 
 TARGET = lightblemesh
 
@@ -18,7 +18,7 @@ FEATURES ?=
 .PHONY: all $(BUILD_DIR)/$(TARGET) $(BUILD_DIR)/$(TARGET).bin bump-version
 all: $(BUILD_DIR)/$(TARGET).bin
 $(BUILD_DIR)/$(TARGET):
-	python3 sdk/build_firmware.py $(if $(FEATURES),--features "$(FEATURES)",) $(if $(LLC),--llc "$(LLC)",) $(if $(LLVM_LINK),--llvm-link "$(LLVM_LINK)",) $(if $(OPT),--opt "$(OPT)",)
+	python3 sdk/build_firmware.py $(if $(FEATURES),--features "$(FEATURES)",) $(if $(LLC),--llc "$(LLC)",) $(if $(LLVM_LINK),--llvm-link "$(LLVM_LINK)",) $(if $(OPT),--opt "$(OPT)",) $(if $(filter-out default undefined,$(origin LD)),--ld "$(LD)",) $(if $(OBJCOPY),--objcopy "$(OBJCOPY)",)
 $(BUILD_DIR)/$(TARGET).bin: $(BUILD_DIR)/$(TARGET)
 	@:
 bump-version:

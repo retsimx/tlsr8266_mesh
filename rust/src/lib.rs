@@ -1,4 +1,3 @@
-#![feature(type_alias_impl_trait)]
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
 
@@ -8,7 +7,6 @@ use crate::sdk::mcu::gpio::*;
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
 use app::App;
-use core::ptr::null_mut;
 use core::sync::atomic::AtomicU32;
 use embassy_executor::Spawner;
 use fixed::types::I16F16;
@@ -44,7 +42,8 @@ static mut APP: Lazy<App> = Lazy::new(|| {
     App::default()
 });
 
-static mut SPAWNER: *const Spawner = null_mut();
+/// Storage for the single executor driven by `main_entrypoint`.
+static EXECUTOR: static_cell::StaticCell<Executor> = static_cell::StaticCell::new();
 
 /// Bumped once per main-loop pass so a host can tell "alive" from "hung".
 #[no_mangle]
@@ -82,6 +81,7 @@ pub fn reset_app_uart_for_test() {
     }
 }
 
+#[cfg(test)]
 unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
     core::mem::transmute(t)
 }
@@ -162,13 +162,8 @@ pub extern "C" fn main_entrypoint() {
     cpu_wakeup_init();
 
     // Run the application
-    let mut executor = Executor::new();
-    let executor = unsafe { __make_static(&mut executor) };
+    let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        unsafe {
-            SPAWNER = &spawner;
-        }
-
-        spawner.must_spawn(run(spawner));
+        spawner.spawn(run(spawner).unwrap());
     });
 }

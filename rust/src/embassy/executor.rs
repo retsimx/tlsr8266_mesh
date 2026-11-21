@@ -1,6 +1,14 @@
 use core::marker::PhantomData;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::{raw, Spawner};
+
+#[cfg(not(test))]
+use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
+#[cfg(not(test))]
+use crate::sdk::mcu::register::{
+    read_reg_irq_en, read_reg_irq_mask, write_reg_mcu_wakeup_mask, write_reg_pwdn_ctrl, FldPwdnCtrl,
+};
 
 /// TC32 Executor
 pub struct Executor {
@@ -8,8 +16,18 @@ pub struct Executor {
     not_send: PhantomData<*mut ()>,
 }
 
+/// Set by [`__pender`] from any context (task or interrupt) when the executor has work.
+static WORK_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Tells the executor that a task has been woken and needs polling.
+///
+/// The executor calls this from any context, so it must not poll. It only records the
+/// request; [`Executor::run`] clears the flag before polling and re-checks it before
+/// entering the CPU idle stall.
 #[export_name = "__pender"]
-fn __pender(_context: *mut ()) {}
+fn __pender(_context: *mut ()) {
+    WORK_PENDING.store(true, Ordering::Relaxed);
+}
 
 impl Executor {
     /// Create a new Executor.
@@ -43,8 +61,25 @@ impl Executor {
         init(self.inner.spawner());
 
         loop {
+            WORK_PENDING.store(false, Ordering::Relaxed);
             unsafe {
                 self.inner.poll();
+            }
+
+            #[cfg(not(test))]
+            {
+                let prev = irq_disable();
+                if !WORK_PENDING.load(Ordering::Relaxed) {
+                    // Wake on exactly the sources we enable: `& 0x00ff_ffff` drops the
+                    // `FLD_IRQ::EN` field (bits 24-31), and sourcing bit 16 from
+                    // `reg_irq_mask` keeps the permanently-latched USB 250 us interrupt
+                    // out of the wake mask because that mask never enables it.
+                    write_reg_mcu_wakeup_mask(read_reg_irq_mask() & 0x00ff_ffff);
+                    write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep.bits()); // 0x80
+                }
+                irq_restore(prev);
+                // Flush bus write so any pending IRQ vectors before next iteration can re-mask.
+                let _ = read_reg_irq_en();
             }
         }
     }

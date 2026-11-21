@@ -4,6 +4,8 @@ use core::ops::Range;
 use core::ptr::addr_of;
 use core::slice;
 
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use heapless::Deque;
 
 use crate::embassy::yield_now::yield_now;
@@ -13,8 +15,6 @@ use crate::sdk::drivers::uart::{UartData, UartDriver, UartIrqMask, UART_DATA_LEN
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{AppCmdValue, Packet};
-#[cfg(not(test))]
-use crate::SPAWNER;
 use crate::{app, uprintln};
 use heapless::Vec;
 
@@ -112,13 +112,13 @@ pub fn light_mesh_rx_cb(data: &Packet) {
 
 #[coverage(off)]
 #[embassy_executor::task]
-async fn uart_sender() {
+pub async fn uart_sender() {
     app().uart_manager.sender().await;
 }
 
 #[coverage(off)]
 #[embassy_executor::task]
-async fn uart_receiver() {
+pub async fn uart_receiver() {
     app().uart_manager.receiver().await;
 }
 
@@ -130,6 +130,7 @@ pub struct UartManager {
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
+    started_signal: Signal<CriticalSectionRawMutex, ()>,
     uart_status_reporting: bool,
     sent: Deque<Fingerprint, 12>,
 }
@@ -145,6 +146,7 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
+            started_signal: Signal::new(),
             uart_status_reporting: false,
             sent: Deque::new(),
         }
@@ -159,6 +161,7 @@ impl UartManager {
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
+            started_signal: Signal::new(),
             uart_status_reporting: false,
             sent: Deque::new(),
             mry: Default::default(),
@@ -251,6 +254,10 @@ impl UartManager {
         }
     }
     pub async fn sender(&mut self) {
+        // Stay parked until a host actually speaks on UART, so boot banners
+        // queued into `send_channel` cost nothing on a headless light.
+        self.started_signal.wait().await;
+
         loop {
             let mut msg = self.wait_for_outgoing_message().await;
             self.prepare_outgoing_message(&mut msg);
@@ -393,14 +400,8 @@ impl UartManager {
         if !self.sender_started {
             self.sender_started = true;
 
-            #[cfg(not(test))]
-            unsafe {
-                // Start the receiver
-                (*SPAWNER).spawn(uart_receiver()).unwrap();
-
-                // Start the sender
-                (*SPAWNER).spawn(uart_sender()).unwrap();
-            }
+            // Wake the already-spawned `uart_sender` task, which parks on this signal.
+            self.started_signal.signal(());
 
             // Enable status reporting before calling mesh_report_status_enable so that the
             // initial dump fired inside that function can actually reach the UART send path.
@@ -946,6 +947,77 @@ mod tests {
         critical_section::with(|_| {
             assert_eq!(manager.recv_channel.len(), 0);
         });
+    }
+
+    /// Builds a `UartData` frame with a valid CRC, matching the pattern used by
+    /// the `handle_rx` tests above.
+    fn frame_with_valid_crc() -> UartData {
+        let mut msg = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        for (idx, byte) in msg.data.iter_mut().take(CRC_RANGE.end).enumerate() {
+            *byte = idx as u8;
+        }
+
+        UartManager::compute_crc(&mut msg);
+        msg
+    }
+
+    /// Tests that a fresh UartManager has not signalled the sender start signal.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager
+    /// 2. Verify `started_signal.signaled()` is false without any RX frame
+    #[test]
+    fn test_started_signal_not_signaled_before_first_frame() {
+        let manager = UartManager::default();
+
+        assert!(!manager.started_signal.signaled());
+    }
+
+    /// Tests that the first valid RX frame signals `started_signal`.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager with `sender_started = false`
+    /// 2. Call `handle_rx` with a frame carrying a valid CRC
+    /// 3. Verify `started_signal` is signalled and `sender_started` is set
+    #[test]
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_handle_rx_with_valid_crc_signals_started_signal() {
+        let mut manager = UartManager::default();
+        manager.sender_started = false;
+        mock_mesh_report_status_enable(true).returns(());
+
+        manager.handle_rx(frame_with_valid_crc());
+
+        assert!(manager.started_signal.signaled());
+        assert!(manager.sender_started);
+        mock_mesh_report_status_enable(true).assert_called(1);
+    }
+
+    /// Tests that an invalid RX frame does not signal `started_signal`.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager with `sender_started = false`
+    /// 2. Call `handle_rx` with a frame whose CRC does not match
+    /// 3. Verify `started_signal` is not signalled and `sender_started` stays false
+    #[test]
+    fn test_handle_rx_with_invalid_crc_does_not_signal_started_signal() {
+        let mut manager = UartManager::default();
+        manager.sender_started = false;
+
+        let mut msg = frame_with_valid_crc();
+        msg.data[42] ^= 0xff;
+
+        manager.handle_rx(msg);
+
+        assert!(!manager.started_signal.signaled());
+        assert!(!manager.sender_started);
     }
 
     /// Tests the started method.

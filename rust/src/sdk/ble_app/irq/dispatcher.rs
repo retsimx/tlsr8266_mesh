@@ -12,8 +12,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::app;
+use crate::embassy::sync::mutex::CriticalSectionMutex;
 use crate::embassy::time_driver::clock_time64;
 use crate::sdk::light::RfOperationState;
+use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1S;
 use crate::sdk::mcu::register::*;
 use crate::state::*;
 
@@ -26,6 +28,13 @@ use super::timing::configure_ble_receive_state;
 /// Global flag to track if we're currently executing within an interrupt context.
 /// This is used by other parts of the system to determine execution context.
 static IS_IRQ_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Timestamp of the last `TMR0` interrupt at which the OTA timeout was decremented.
+///
+/// `TMR0` is reprogrammed dynamically for embassy timers, so it no longer ticks at a
+/// fixed 1 Hz. Stamping the tick here lets `OTA_UPDATE_TIMEOUT_SECONDS` keep counting
+/// real seconds. Module-scoped (rather than function-local) so unit tests can reset it.
+static LAST_OTA_TIMEOUT_TICK: CriticalSectionMutex<u64> = CriticalSectionMutex::new(0);
 
 /// RAII guard for tracking interrupt execution context.
 ///
@@ -87,7 +96,7 @@ impl Drop for IrqTracker {
 /// ## Interrupt Types Handled:
 /// 1. **RF Interrupts**: TX complete, RX complete for BLE/mesh communication
 /// 2. **System Timer**: BLE state machine transitions (Adv, Bridge, Rx, Listen)
-/// 3. **Timer 0**: Clock overflow detection and OTA timeout management
+/// 3. **Timer 0**: Embassy timer alarms, clock overflow detection, OTA timeouts
 /// 4. **Timer 1**: Light transition stepping for smooth dimming effects
 /// 5. **UART**: Serial communication with external systems
 ///
@@ -144,23 +153,38 @@ fn handle_system_interrupts() {
         }
     }
 
-    // Handle Timer 0: Clock overflow detection and OTA timeout management
-    // This timer runs once per second to prevent clock overflow issues
+    // Handle Timer 0: embassy timer alarms, clock overflow detection and OTA
+    // timeout management. `TMR0` fires whenever the earliest embassy deadline or
+    // the one-second clock-overflow cap is reached, so the OTA countdown below is
+    // gated on elapsed time instead of on the interrupt rate.
     if irq_source & FLD_IRQ::TMR0_EN.bits() != 0 {
         write_reg_tmr_sta(FLD_TMR_STA::TMR0.bits());
 
-        // Update 64-bit clock to handle 32-bit overflow
-        clock_time64();
+        // Deliver expired embassy timers and re-arm TMR0 for the next deadline.
+        crate::embassy::time_driver::on_timer0_interrupt();
 
-        // Handle mesh OTA timeout countdown
-        if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
-            if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
-                OTA_UPDATE_TIMEOUT_SECONDS.dec();
-                if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                    // OTA timeout reached: finish with current status
-                    app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(
-                        *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
-                    );
+        // Update 64-bit clock to handle 32-bit overflow
+        let now = clock_time64();
+
+        if !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+            // Restamp while OTA is idle so the first interrupt after OTA begins
+            // cannot decrement the timeout immediately.
+            *LAST_OTA_TIMEOUT_TICK.lock() = now;
+        } else {
+            let mut last = LAST_OTA_TIMEOUT_TICK.lock();
+            if now.saturating_sub(*last) >= CLOCK_SYS_CLOCK_1S as u64 {
+                *last = now;
+                drop(last);
+
+                // Handle mesh OTA timeout countdown
+                if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
+                    OTA_UPDATE_TIMEOUT_SECONDS.dec();
+                    if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
+                        // OTA timeout reached: finish with current status
+                        app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(
+                            *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
+                        );
+                    }
                 }
             }
         }
@@ -185,7 +209,9 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::embassy::time_driver::mock_clock_time64;
+    use crate::embassy::time_driver::{
+        mock_clock_time64, mock_on_timer0_interrupt, on_timer0_interrupt,
+    };
     use crate::sdk::ble_app::irq::advertisement::mock_handle_ble_advertisement_state;
     use crate::sdk::ble_app::irq::connection::mock_handle_ble_connected_state;
     use crate::sdk::ble_app::irq::mesh::mock_handle_mesh_listening_state;
@@ -193,7 +219,8 @@ mod tests {
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
     use crate::sdk::ble_app::irq::timing::mock_configure_ble_receive_state;
-    use crate::sdk::light::{OtaState, RfOperationState};
+    use crate::sdk::light::{OtaState, RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
+    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1S;
     use crate::sdk::mcu::register::{
         mock_read_reg_irq_src, mock_read_reg_rf_irq_status, mock_read_reg_system_tick_irq,
         mock_write_reg_irq_src, mock_write_reg_rf_irq_status, mock_write_reg_tmr_sta,
@@ -202,7 +229,21 @@ mod tests {
         OTA_UPDATE_IN_PROGRESS, OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS,
         RF_SLAVE_OTA_FINISHED_FLAG,
     };
-    use crate::{app_mocker, mock_app_mocker};
+    use crate::{app::App, app_mocker, mock_app_mocker};
+
+    /// Timeout used by the OTA countdown tests; any non-zero value that cannot be
+    /// decremented to zero in a single interrupt works.
+    const TEST_OTA_TIMEOUT_SECONDS: u16 = 7;
+
+    /// Restores the module-scoped tick and the OTA statics between tests.
+    ///
+    /// Tests run in one process with `--test-threads=1`, so process-wide resetting
+    /// is safe.
+    fn reset_ota_timeout_state() {
+        *LAST_OTA_TIMEOUT_TICK.lock() = 0;
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+    }
 
     // ================================================================================
     // Tests for IrqTracker struct and interrupt context tracking
@@ -499,6 +540,163 @@ mod tests {
         assert_eq!(
             has_system_timer, false,
             "Should not have system timer interrupt when source is 0"
+        );
+    }
+
+    // ================================================================================
+    // Tests for handle_system_interrupts function - Timer 0 (Embassy alarms & OTA)
+    // ================================================================================
+
+    /// Tests that a `TMR0` interrupt flushes the embassy time driver exactly once.
+    ///
+    /// Acceptance: the dispatcher must hand `TMR0` interrupts to the dynamic embassy
+    /// time driver, which delivers expired timers and re-arms the hardware alarm.
+    #[test]
+    #[mry::lock(
+        read_reg_irq_src,
+        write_reg_tmr_sta,
+        clock_time64,
+        on_timer0_interrupt,
+        app_mocker
+    )]
+    fn test_tmr0_irq_flushes_embassy_timers() {
+        reset_ota_timeout_state();
+
+        mock_read_reg_irq_src().returns(FLD_IRQ::TMR0_EN.bits());
+        mock_write_reg_tmr_sta(Any).returns(());
+        mock_clock_time64().returns(1000);
+        mock_on_timer0_interrupt().returns(());
+
+        let mut app = App::default();
+        app.uart_manager.mock_check_irq().returns(());
+        mock_app_mocker().returns(&mut app);
+
+        handle_system_interrupts();
+
+        mock_on_timer0_interrupt().assert_called(1);
+        mock_write_reg_tmr_sta(Any).assert_called(1);
+    }
+
+    /// Tests that the OTA tick is restamped while OTA is inactive.
+    ///
+    /// Acceptance: no countdown may happen outside OTA, and restamping on every
+    /// interrupt is what prevents an immediate off-by-one decrement on the first
+    /// interrupt after OTA begins.
+    #[test]
+    #[mry::lock(
+        read_reg_irq_src,
+        write_reg_tmr_sta,
+        clock_time64,
+        on_timer0_interrupt,
+        app_mocker
+    )]
+    fn test_tmr0_irq_restamps_ota_tick_when_ota_inactive() {
+        reset_ota_timeout_state();
+        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
+
+        mock_read_reg_irq_src().returns(FLD_IRQ::TMR0_EN.bits());
+        mock_write_reg_tmr_sta(Any).returns(());
+        mock_clock_time64().returns(50_000);
+        mock_on_timer0_interrupt().returns(());
+
+        let mut app = App::default();
+        app.uart_manager.mock_check_irq().returns(());
+        mock_app_mocker().returns(&mut app);
+
+        handle_system_interrupts();
+
+        assert_eq!(
+            *LAST_OTA_TIMEOUT_TICK.lock(),
+            50_000,
+            "OTA tick should track the latest interrupt while OTA is inactive"
+        );
+        assert_eq!(
+            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            TEST_OTA_TIMEOUT_SECONDS,
+            "OTA inactive must not decrement the timeout"
+        );
+    }
+
+    /// Tests that the OTA countdown stays idle until a full second has elapsed.
+    ///
+    /// Acceptance: `TMR0` now fires at embassy alarm deadlines, so the countdown
+    /// must be gated on elapsed clock ticks rather than on interrupt frequency.
+    #[test]
+    #[mry::lock(
+        read_reg_irq_src,
+        write_reg_tmr_sta,
+        clock_time64,
+        on_timer0_interrupt,
+        app_mocker
+    )]
+    fn test_tmr0_irq_ota_elapsed_under_one_second_does_not_decrement() {
+        reset_ota_timeout_state();
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
+        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
+
+        mock_read_reg_irq_src().returns(FLD_IRQ::TMR0_EN.bits());
+        mock_write_reg_tmr_sta(Any).returns(());
+        mock_clock_time64().returns(1_000 + CLOCK_SYS_CLOCK_1S as u64 - 1);
+        mock_on_timer0_interrupt().returns(());
+
+        let mut app = App::default();
+        app.uart_manager.mock_check_irq().returns(());
+        mock_app_mocker().returns(&mut app);
+
+        handle_system_interrupts();
+
+        assert_eq!(
+            *LAST_OTA_TIMEOUT_TICK.lock(),
+            1_000,
+            "OTA tick should not move before one second of clock ticks elapses"
+        );
+        assert_eq!(
+            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            TEST_OTA_TIMEOUT_SECONDS,
+            "OTA timeout must not decrement before one second elapses"
+        );
+    }
+
+    /// Tests that one second of elapsed clock ticks decrements the OTA timeout once.
+    ///
+    /// Acceptance: during OTA the timeout still counts real seconds, decrements by
+    /// exactly one per second, and restamps the tick that gates the next decrement.
+    #[test]
+    #[mry::lock(
+        read_reg_irq_src,
+        write_reg_tmr_sta,
+        clock_time64,
+        on_timer0_interrupt,
+        app_mocker
+    )]
+    fn test_tmr0_irq_ota_elapsed_one_second_decrements_once() {
+        reset_ota_timeout_state();
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
+        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
+
+        let now = 1_000 + CLOCK_SYS_CLOCK_1S as u64;
+        mock_read_reg_irq_src().returns(FLD_IRQ::TMR0_EN.bits());
+        mock_write_reg_tmr_sta(Any).returns(());
+        mock_clock_time64().returns(now);
+        mock_on_timer0_interrupt().returns(());
+
+        let mut app = App::default();
+        app.uart_manager.mock_check_irq().returns(());
+        mock_app_mocker().returns(&mut app);
+
+        handle_system_interrupts();
+
+        assert_eq!(
+            *LAST_OTA_TIMEOUT_TICK.lock(),
+            now,
+            "OTA tick should be restamped when the timeout decrements"
+        );
+        assert_eq!(
+            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            TEST_OTA_TIMEOUT_SECONDS - 1,
+            "exactly one second should be consumed by one interrupt"
         );
     }
 }

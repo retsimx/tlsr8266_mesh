@@ -813,37 +813,41 @@ Additional sources enabled at runtime:
 
 ### 6.3 TC32 Interrupt Vector and ISR Calling Convention
 
-The TC32 core uses a fixed interrupt vector table in flash, defined in `sdk/cstartup_8266.S`:
+The TC32 core uses a fixed interrupt vector table in flash, defined in `rust/src/startup.rs` (`global_asm!`):
 
 ```asm
-.org 0x0   tj  __reset          ; Reset vector at flash offset 0x0
-.org 0x10  tj  __irq            ; IRQ vector at flash offset 0x10
+.org 0x0   b   __reset          ; Reset vector at flash offset 0x0
+.org 0x10  b   __irq            ; IRQ vector at flash offset 0x10
 ```
 
 The `__irq` thunk saves all registers, calls `irq_handler`, then restores them:
 
 ```asm
 __irq:
-    tpush   {r14}           ; save LR
-    tpush   {r0-r7}         ; save low registers
-    tmrss   r0              ; read CPSR into r0
-    tmov    r1, r8          ; move high registers to r1-r5
-    tmov    r2, r9
-    tmov    r3, r10
-    tmov    r4, r11
-    tmov    r5, r12
-    tpush   {r0-r5}         ; save CPSR + r8-r12
-    tjl     irq_handler     ; call C/Rust handler
-    tpop    {r0-r5}         ; restore CPSR + r8-r12
-    tmov    r8,  r1
-    tmov    r9,  r2
-    tmov    r10, r3
-    tmov    r11, r4
-    tmov    r12, r5
-    tmssr   r0              ; restore CPSR
-    tpop    {r0-r7}         ; restore low registers
-    treti   {r15}           ; return from IRQ (restores PC from r15)
+    push    {lr}            ; save LR
+    push    {r0-r7}         ; save low registers
+    .short  0x6bd8          ; mrss r0: read saved status into r0
+    mov     r1, r8          ; move high registers to r1-r5
+    mov     r2, r9
+    mov     r3, r10
+    mov     r4, r11
+    mov     r5, r12
+    push    {r0-r5}         ; save status + r8-r12
+    bl      irq_handler     ; call Rust handler
+    pop     {r0-r5}         ; restore status + r8-r12
+    mov     r8,  r1
+    mov     r9,  r2
+    mov     r10, r3
+    mov     r11, r4
+    mov     r12, r5
+    .short  0x6bd0          ; mssr r0: write saved status
+    pop     {r0-r7}         ; restore low registers
+    .short  0x6900          ; reti {pc}: return from IRQ
 ```
+
+The mnemonics are standard ARM Thumb-1; the three `.short` words are the
+TC32-only status/IRQ instructions (see `llvm/docs/TC32InstructionSet.md` in the
+LLVM fork).
 
 **Implications for a C/Rust firmware implementation:**
 
@@ -1645,7 +1649,7 @@ The firmware itself never compares versions and cannot reject a downgrade — `r
 
 ### 15.6 Version Word
 
-The version word lives at **image offset 2**, not at `+0x18`: `sdk/cstartup_8266.S` emits a 2-byte `tj __reset` at offset 0 and the `.word (BUILD_VERSION)` immediately after it, so for the staged image the address is `FLASH_ADR_LIGHT_NEW_FW + 2` (`+0x18` holds `new_fw_size`). The bit layout:
+The version word lives at **image offset 2**, not at `+0x18`: `rust/src/startup.rs` emits a 2-byte `b __reset` at offset 0 and the `.word (BUILD_VERSION)` immediately after it, so for the staged image the address is `FLASH_ADR_LIGHT_NEW_FW + 2` (`+0x18` holds `new_fw_size`). The bit layout:
 
 | Bit | Name | Description |
 |-----|------|-------------|

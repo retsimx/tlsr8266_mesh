@@ -1338,11 +1338,12 @@ pub fn is_add_packet_buf_ready() -> bool {
 /// * Safe for concurrent access from multiple contexts
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
-    use crate::embassy::sync::mutex::{CriticalSectionMutex, Mutex};
+    use crate::embassy::sync::mutex::CriticalSectionMutex;
 
     // STATIC BUFFER ALLOCATION: Pre-allocated transmission buffer for zero-allocation operation
-    static BLT_TX_FIFO: CriticalSectionMutex<[Packet; BLT_FIFO_TX_PACKET_COUNT]> = Mutex::new(
-        [
+    static BLT_TX_FIFO: CriticalSectionMutex<[Packet; BLT_FIFO_TX_PACKET_COUNT]> =
+        CriticalSectionMutex::new(
+            [
             // Initialize all buffer slots with zero-filled packet structures
             Packet {
                 att_write: PacketAttWrite {
@@ -1366,7 +1367,7 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
             };
             BLT_FIFO_TX_PACKET_COUNT
         ],
-    );
+        );
 
     // ATOMIC WRITE POINTER: Thread-safe write pointer for circular buffer management
     static BLT_TX_WPTR: AtomicUsize = AtomicUsize::new(0);

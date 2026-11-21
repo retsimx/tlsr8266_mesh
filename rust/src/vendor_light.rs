@@ -28,19 +28,20 @@ pub fn vendor_set_adv_data() {
     // --------------------------------------------------
 
     // Get the MAC address for device identification
-    let mac_address = u32::from_le_bytes([
-        MAC_ID.lock()[0],
-        MAC_ID.lock()[1],
-        MAC_ID.lock()[2],
-        MAC_ID.lock()[3],
-    ]);
+    // Take one lock: repeated `MAC_ID.lock()` calls in one expression would hold
+    // several guards on the same mutex simultaneously.
+    let mac_address = {
+        let mac_id = MAC_ID.lock();
+        u32::from_le_bytes([mac_id[0], mac_id[1], mac_id[2], mac_id[3]])
+    };
 
-    // Lock and configure the primary advertisement data structure
-    let mut adv_pri_data = ADV_PRI_DATA.lock();
-    adv_pri_data.mac_address = mac_address;
-
-    // Create a temporary copy of the data before serialization
-    let tmp = *adv_pri_data;
+    // Configure the primary advertisement data structure, then copy it out: the
+    // guard is released before the RF call so interrupts are not masked across it.
+    let tmp = {
+        let mut adv_pri_data = ADV_PRI_DATA.lock();
+        adv_pri_data.mac_address = mac_address;
+        *adv_pri_data
+    };
 
     // Serialize the AdvPrivate struct to bytes and send to the RF driver
     // This makes the device visible/discoverable in the mesh network

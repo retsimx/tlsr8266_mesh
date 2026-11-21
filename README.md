@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/retsimx/tlsr8266_mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/retsimx/tlsr8266_mesh/actions/workflows/ci.yml)
 
-A 100% Rust BLE mesh firmware for TLSR8266-based smart lights (such as the TYBT1), with a Rust SWire probe for initial flashing and Python utilities for BLE/UART OTA updates and mesh management. The firmware runs without any Telink proprietary library dependency, using a custom LLVM backend to generate TC32-compatible code from Rust source.
+A 100% Rust BLE mesh firmware for TLSR8266-based smart lights (such as the TYBT1), with a Rust SWire probe for initial flashing and Python utilities for BLE/UART OTA updates and mesh management. The firmware runs without any Telink proprietary library dependency, using a custom LLVM fork that emits TC32 objects directly (no Telink `tc32-elf-*` toolchain).
 
 For the unmodified mesh SDK, see the project releases or the early commits of this repository.
 
@@ -16,7 +16,7 @@ This project targets the following hardware:
 
 ## Includes
 
-- TC32 toolchain
+- Native LLVM TC32 backend (no vendor assembler, linker or C compiler)
 - 100% Rust BLE mesh firmware with Makefile (no `libble` or vendor library dependency)
 - Rust SWire probe — `probe-pico` RP2040 firmware plus the `probe-tlsr` host CLI, for direct flash programming, RTT logs and crash inspection
 - Original TYBT1 firmware backup

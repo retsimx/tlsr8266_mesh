@@ -160,7 +160,7 @@ probe-tlsr --elf _build/lightblemesh inspect
 probe-tlsr --elf _build/lightblemesh trap irq_handler --timeout-ms 5000
 ```
 
-`inspect` stops the core, dumps the register block, both stacks, the retained reset cause and the flash panic record at `0x7B000`, and symbolizes what it can from `--elf`. With `--elf` and a `tc32-elf-objdump` on `PATH` it also disassembles a short window around `PC`. The core stays stalled; finish with `reset --soft`.
+`inspect` stops the core, dumps the register block, both stacks, the retained reset cause and the flash panic record at `0x7B000`, and symbolizes what it can from `--elf`. With `--elf` and an `llvm-objdump` (or legacy `tc32-elf-objdump`) on `PATH` it also disassembles a short window around `PC`. The core stays stalled; finish with `reset --soft`.
 
 `trap` arms one of four hardware breakpoint slots and waits for the hit. A hit stops the core terminally, so the command prints the report, clears the slot and soft-reboots the target. Slot 0 is the default; `--slot` takes 0–3. Absent or `0` `--timeout-ms` waits forever; a deadline clears the armed slot before failing, so an orphaned breakpoint cannot re-trap the next boot. The address must execute *after* arming: `irq_handler` and per-loop functions work on a running target, while a boot-only symbol such as `main_entrypoint` simply times out once the device has booted. For a one-shot boot path, arm while the core is stopped and start it yourself: `probe-tlsr reset --stop`, then `trap`, then `probe-tlsr reset`. Prefer stable asm or `extern "C"` symbols (`irq_handler`, `main_entrypoint`) or numeric addresses, because Rust symbols are mangled per build.
 
@@ -168,15 +168,15 @@ probe-tlsr --elf _build/lightblemesh trap irq_handler --timeout-ms 5000
 
 ### Stack Watermark
 
-The startup code fills free SRAM with `0xffffffff` (the loop labelled `FLL_STK` in `sdk/cstartup_8266.S`, a code label — not an address to read); the main stack grows down from the top of RAM at `0x80c000`, so the deepest word that is no longer `0xffffffff` is the watermark. The bottom of that free region is `_end_bss_`, read from the ELF's symbol table:
+The startup code fills free SRAM with `0xffffffff` (the `.Lfill_free_sram` loop in `rust/src/startup.rs`, a code label — not an address to read); the main stack grows down from the top of RAM at `0x80c000`, so the deepest word that is no longer `0xffffffff` is the watermark. The bottom of that free region is `_end_bss_`, read from the ELF's symbol table:
 
 ```bash
 # Peak stack use since boot. Startup fills free SRAM with 0xffffffff
-# (the loop labelled FLL_STK in sdk/cstartup_8266.S); the main stack grows
+# (the .Lfill_free_sram loop in rust/src/startup.rs); the main stack grows
 # down from the top of RAM (0x80c000), so the deepest word that is no longer
 # 0xffffffff is the watermark. `_end_bss_` is the bottom of that free region.
 ELF=_build/lightblemesh
-END_BSS=0x$(./toolchain/tc32/bin/tc32-elf-nm "$ELF" | awk '$3=="_end_bss_"{print $1}')
+END_BSS=0x$(${LLVM_NM:-llvm-nm} "$ELF" | awk '$3=="_end_bss_"{print $1}')
 probe-tlsr read "$END_BSS" $((0x80C000 - END_BSS)) --json |
   python3 -c 'import json, sys
 d = bytes.fromhex(json.load(sys.stdin)["data_hex"])

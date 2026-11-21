@@ -1,11 +1,11 @@
-"""Unit tests for the deterministic, incremental TC32 build driver.
+"""Unit tests for the deterministic, incremental LLVM build driver.
 
 Run from the repository root::
 
     python3 -m unittest discover -s sdk/tests -v
 
-The suite is pure stdlib and never invokes cargo, LLVM, or the TC32 toolchain:
-every subprocess goes through ``build_firmware.run_command``, which is patched.
+The suite is pure stdlib and never invokes cargo, LLVM, or the linker: every
+subprocess goes through ``build_firmware.run_command``, which is patched.
 """
 
 from __future__ import annotations
@@ -67,10 +67,7 @@ OPT_SAFE_LITERAL = (
     "loop-simplify,lcssa,loop-rotate,loop-mssa(licm),"
     "instcombine<no-verify-fixpoint>,simplifycfg,adce,dse"
 )
-OPT_PASSES_LITERAL = (
-    f"ipsccp,deadargelim,function({OPT_SAFE_LITERAL}),always-inline,cgscc(inline),"
-    f"ipsccp,deadargelim,function({OPT_SAFE_LITERAL})"
-)
+OPT_PASSES_LITERAL = "default<O2>,mergefunc,constmerge,globaldce"
 
 
 def _write(path: Path, content: str | bytes = b"x\n") -> Path:
@@ -115,51 +112,23 @@ class _RepoCase(_TempCase):
         # rustc emits IR as `<crate>-<hash>.ll`; the rlib carries the `lib` prefix.
         self.ll_a = _write(self.repo / DEPS_REL / "alpha-11111111.ll", "alpha\n")
         self.ll_b = _write(self.repo / DEPS_REL / "beta-22222222.ll", "beta\n")
-        self.startup_s = _write(self.repo / "sdk/cstartup_8266.S", ".section .text\n")
-        self.version_in = _write(
-            self.repo / "sdk/version.in", ".equ BUILD_VERSION,42\n"
-        )
-        self.version_h = _write(self.repo / "sdk/version.h", "#define BUILD_VERSION 42\n")
         self.version_rs = _write(
-            self.repo / "rust/src/version.rs", "pub static BUILD_VERSION: u32 = 42;\n"
+            self.repo / "rust/src/version.rs", "pub const BUILD_VERSION: u32 = 3543;\n"
         )
         self.boot_link = _write(self.repo / "sdk/boot.link", "ENTRY(reset)\n")
+        self.cargo_toml = _write(
+            self.repo / "rust/Cargo.toml", "[profile.release]\nopt-level = \"s\"\n"
+        )
+        self.rust_toolchain = _write(
+            self.repo / "rust/rust-toolchain.toml", "[toolchain]\nchannel = \"nightly\"\n"
+        )
         self.tools = {
             "llc": _executable(self.repo / "tools/llc"),
             "llvm_link": _executable(self.repo / "tools/llvm-link"),
             "opt": _executable(self.repo / "tools/opt"),
-            "as": _executable(self.repo / "toolchain/tc32/bin/tc32-elf-as"),
-            "ld": _executable(self.repo / "toolchain/tc32/bin/tc32-elf-ld"),
-            "objcopy": _executable(self.repo / "toolchain/tc32/bin/tc32-elf-objcopy"),
+            "ld": _executable(self.repo / "tools/ld.lld"),
+            "objcopy": _executable(self.repo / "tools/llvm-objcopy"),
         }
-        self.startup_inputs = [self.repo / name for name in build_firmware.STARTUP_INPUTS]
-        self.startup_obj, self.startup_manifest = self._install_startup()
-
-    def _install_startup(self) -> tuple[Path, Path]:
-        """Create/replace the startup object through the driver's own cache path.
-
-        The fake compiler writes a digest of the startup inputs as the object
-        bytes, so a changed input produces a changed object, exactly as a real
-        recompile would.
-
-        Note: this runs with the real ``REPO_ROOT`` because ``_ensure_startup_object``
-        is given ``self.repo`` explicitly, so the recorded input paths are
-        absolute. A test that compares manifests against a freshly computed one
-        must therefore reinstall the cache under a patched ``REPO_ROOT`` (see
-        ``test_cache_hit_skips_pipeline``); otherwise it sees a cache *miss*.
-        """
-
-        def fake_compiler(cmd, **_kwargs):
-            digest = hashlib.sha256(
-                b"".join(path.read_bytes() for path in self.startup_inputs)
-            ).hexdigest()
-            argv = list(cmd)
-            _write(Path(argv[argv.index("-o") + 1]), digest.encode())
-            return subprocess.CompletedProcess(argv, 0)
-
-        with mock.patch.object(build_firmware, "run_command", side_effect=fake_compiler):
-            obj = build_firmware._ensure_startup_object(self.out, self.repo)
-        return obj, self.out / "asm" / "cstartup_8266.manifest.json"
 
     def compute(
         self,
@@ -172,7 +141,8 @@ class _RepoCase(_TempCase):
         return build_firmware.compute_manifest(
             list(features),
             [self.ll_a, self.ll_b] if ll_paths is None else ll_paths,
-            self.startup_obj,
+            3543,
+            [self.cargo_toml, self.rust_toolchain],
             self.boot_link,
             self.tools if tools is None else tools,
             toolchain=toolchain,
@@ -195,6 +165,44 @@ class TestFeatureSelection(unittest.TestCase):
                 features = build_firmware.parse_features(raw)
                 self.assertEqual(features, expected_features)
                 self.assertEqual(build_firmware.feature_slug(features), expected_slug)
+
+
+class TestToolTable(unittest.TestCase):
+    def test_pipeline_is_llvm_only(self) -> None:
+        self.assertEqual(build_firmware.SCHEMA_VERSION, 3)
+        self.assertEqual(
+            build_firmware.TOOL_ORDER, ("llc", "llvm_link", "opt", "ld", "objcopy")
+        )
+        self.assertEqual(build_firmware.LLVM_TOOLS, ("llc", "llvm_link", "opt"))
+        self.assertEqual(build_firmware.LINK_TOOLS, ("ld", "objcopy"))
+        self.assertEqual(
+            build_firmware.DEFAULT_TOOLS,
+            {
+                "llc": "../llvm/build/bin/llc",
+                "llvm_link": "../llvm/build/bin/llvm-link",
+                "opt": "../llvm/build/bin/opt",
+                "ld": "../llvm/build/bin/ld.lld",
+                "objcopy": "../llvm/build/bin/llvm-objcopy",
+            },
+        )
+        self.assertEqual(
+            build_firmware.TOOL_ENV_KEYS,
+            {
+                "llc": "LLC",
+                "llvm_link": "LLVM_LINK",
+                "opt": "OPT",
+                "ld": "LLD",
+                "objcopy": "LLVM_OBJCOPY",
+            },
+        )
+        self.assertEqual(build_firmware.TOOL_FLAGS["ld"], "--ld")
+        self.assertEqual(build_firmware.TOOL_FLAGS["objcopy"], "--objcopy")
+        self.assertEqual(
+            build_firmware.LLC_FLAGS, "-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6,+tc32"
+        )
+        self.assertEqual(
+            build_firmware.LLD_FLAGS, "--tc32 --gc-sections -T ./sdk/boot.link"
+        )
 
 
 class TestDotenvAndToolResolution(_TempCase):
@@ -282,6 +290,34 @@ class TestDotenvAndToolResolution(_TempCase):
             build_firmware.resolve_tool(None, "BUILD_FIRMWARE_TEST_UNSET", {}, "../llvm/build/bin/opt", repo),
             repo / "../llvm/build/bin/opt",
         )
+
+    def test_resolve_tools_prefers_cli_then_environment(self) -> None:
+        repo = self.root / "repo"
+        names = build_firmware.TOOL_ORDER
+        cli_paths = {name: _executable(repo / f"cli/{name}") for name in names}
+        env_paths = {name: _executable(repo / f"env/{name}") for name in names}
+        args = build_firmware._build_parser().parse_args(
+            ["--ld", str(cli_paths["ld"]), "--objcopy", str(cli_paths["objcopy"])]
+        )
+        environ = {
+            build_firmware.TOOL_ENV_KEYS[name]: str(env_paths[name]) for name in names
+        }
+        with mock.patch.dict(os.environ, environ, clear=True):
+            tools = build_firmware._resolve_tools(args, {}, repo)
+
+        self.assertEqual(set(tools), set(names))
+        self.assertEqual(tools["ld"], cli_paths["ld"])
+        self.assertEqual(tools["objcopy"], cli_paths["objcopy"])
+        for name in build_firmware.LLVM_TOOLS:
+            self.assertEqual(tools[name], env_paths[name])
+
+    def test_resolve_tools_rejects_a_missing_binary(self) -> None:
+        args = build_firmware._build_parser().parse_args([])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware._resolve_tools(args, {}, self.root / "repo")
+        self.assertEqual(caught.exception.exit_code, 2)
+        self.assertIn("--llc", str(caught.exception))
 
 
 class TestArtifactResolution(_RepoCase):
@@ -453,23 +489,45 @@ class TestManifestAndCache(_RepoCase):
                 build_firmware.manifests_equal(baseline, self.compute()), label
             )
 
-    def _assert_startup_edit_invalidates(self, baseline: dict, path: Path) -> None:
-        original = path.read_bytes()
-
-        def edit() -> None:
-            path.write_bytes(original + b"\n/* edited */\n")
-            self.assertTrue(
-                build_firmware.startup_needs_rebuild(
-                    self.startup_obj, self.startup_manifest, self.startup_inputs
-                )
-            )
-            self.startup_obj, self.startup_manifest = self._install_startup()
-
-        def restore() -> None:
-            path.write_bytes(original)
-            self.startup_obj, self.startup_manifest = self._install_startup()
-
-        self._assert_edit_invalidates(baseline, path.name, edit, restore)
+    def test_manifest_shape_is_llvm_only(self) -> None:
+        baseline = self.compute()
+        self.assertEqual(baseline["schema_version"], 3)
+        self.assertEqual(baseline["build_version"], 3543)
+        self.assertEqual(set(baseline), {
+            "schema_version",
+            "features",
+            "build_version",
+            "build_inputs",
+            "ll_inputs",
+            "linker_script_sha256",
+            "tools",
+            "toolchain",
+            "flags",
+        })
+        self.assertEqual(list(baseline["tools"]), list(build_firmware.TOOL_ORDER))
+        self.assertEqual(
+            baseline["flags"],
+            {
+                "opt_passes": build_firmware.OPT_PASSES,
+                "opt_inline_threshold": build_firmware.OPT_INLINE_THRESHOLD,
+                "llc_flags": build_firmware.LLC_FLAGS,
+                "ldflags": build_firmware.LLD_FLAGS,
+            },
+        )
+        self.assertEqual(
+            baseline["linker_script_sha256"],
+            hashlib.sha256(self.boot_link.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            {entry["sha256"] for entry in baseline["ll_inputs"]},
+            {
+                hashlib.sha256(self.ll_a.read_bytes()).hexdigest(),
+                hashlib.sha256(self.ll_b.read_bytes()).hexdigest(),
+            },
+        )
+        paths = [entry["path"] for entry in baseline["ll_inputs"]]
+        self.assertEqual(paths, sorted(paths))
+        self.assertNotIn("startup_obj_sha256", baseline)
 
     def test_manifest_is_stable_then_invalidated_per_input(self) -> None:
         baseline = self.compute()
@@ -483,9 +541,6 @@ class TestManifestAndCache(_RepoCase):
             lambda: self.ll_a.write_bytes(original_ll),
         )
 
-        self._assert_startup_edit_invalidates(baseline, self.startup_s)
-        self._assert_startup_edit_invalidates(baseline, self.version_h)
-
         original_link = self.boot_link.read_bytes()
         self._assert_edit_invalidates(
             baseline,
@@ -497,6 +552,10 @@ class TestManifestAndCache(_RepoCase):
         with self.subTest("OPT_PASSES"):
             changed = build_firmware.OPT_PASSES + ",tailcallelim"
             with mock.patch.object(build_firmware, "OPT_PASSES", changed):
+                self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
+
+        with self.subTest("LLD_FLAGS"):
+            with mock.patch.object(build_firmware, "LLD_FLAGS", "--tc32 --gc-sections"):
                 self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
 
         with self.subTest("feature list"):
@@ -515,25 +574,6 @@ class TestManifestAndCache(_RepoCase):
             opt.write_bytes(opt.read_bytes() + b"# grow\n")
             self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
 
-    def test_startup_needs_rebuild(self) -> None:
-        fresh_obj = self.out / "asm" / "absent.o"
-        self.assertTrue(
-            build_firmware.startup_needs_rebuild(
-                fresh_obj, self.out / "asm" / "absent.json", self.startup_inputs
-            )
-        )
-        self.assertFalse(
-            build_firmware.startup_needs_rebuild(
-                self.startup_obj, self.startup_manifest, self.startup_inputs
-            )
-        )
-        _write(self.version_h, "#define BUILD_VERSION 43\n")
-        self.assertTrue(
-            build_firmware.startup_needs_rebuild(
-                self.startup_obj, self.startup_manifest, self.startup_inputs
-            )
-        )
-
     def test_cache_hit_skips_pipeline(self) -> None:
         stage = self.out / "default"
         _write(stage / "merged.o", b"untouched object")
@@ -547,11 +587,14 @@ class TestManifestAndCache(_RepoCase):
                 str(self.tools["llvm_link"]),
                 "--opt",
                 str(self.tools["opt"]),
+                "--ld",
+                str(self.tools["ld"]),
+                "--objcopy",
+                str(self.tools["objcopy"]),
             ]
         )
 
         with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
-            self.startup_obj, self.startup_manifest = self._install_startup()
             build_firmware._write_json(
                 stage / "manifest.json", self.compute(toolchain=FAKE_TOOLCHAIN)
             )
@@ -573,36 +616,34 @@ class TestManifestAndCache(_RepoCase):
 
 
 class TestPipelineCommands(_TempCase):
-    """Pin the normative argv of the six-step pipeline and the startup compile.
+    """Pin the normative argv of the five-step pure-LLVM pipeline.
 
-    The flags and the link object order are a contract shared with the recorded
-    byte-identical image; this is the only CI-visible guard on them, so every
-    element below is asserted literally rather than read back from the module.
+    The flags are a contract shared with the recorded byte-identical image; this
+    is the only CI-visible guard on them, so every element below is asserted
+    literally rather than read back from the module.
     """
 
     def test_stage_paths_and_argv_are_frozen(self) -> None:
         stage = self.root / "_build" / "default"
         tools = {name: Path(f"/tools/{name}") for name in build_firmware.TOOL_ORDER}
         ll_paths = [Path("/ir/alpha-11111111.ll"), Path("/ir/beta-22222222.ll")]
-        startup_obj = Path("/repo/_build/asm/cstartup_8266.o")
 
         self.assertEqual(
             build_firmware._stage_paths(stage),
             {
                 "bc": str(stage / "merged.bc"),
                 "opt_bc": str(stage / "merged_opt.bc"),
-                "asm": str(stage / "merged.s"),
                 "obj": str(stage / "merged.o"),
                 "elf": str(stage / "lightblemesh"),
                 "bin": str(stage / "lightblemesh.bin"),
             },
         )
 
-        commands = build_firmware._pipeline_commands(stage, ll_paths, startup_obj, tools)
+        commands = build_firmware._pipeline_commands(stage, ll_paths, tools, 3543)
 
         self.assertEqual(
             [label for label, _ in commands],
-            ["llvm-link", "opt", "llc", "as", "ld", "objcopy"],
+            ["llvm-link", "opt", "llc", "ld", "objcopy"],
         )
         self.assertEqual(
             [argv for _, argv in commands],
@@ -626,26 +667,24 @@ class TestPipelineCommands(_TempCase):
                     "/tools/llc",
                     "-march=thumb",
                     "-mcpu=arm9",
-                    "-mattr=+soft-float,-v6",
+                    "-mattr=+soft-float,-v6,+tc32",
+                    "--filetype=obj",
+                    "--function-sections",
+                    "--data-sections",
                     str(stage / "merged_opt.bc"),
                     "-o",
-                    str(stage / "merged.s"),
-                ],
-                [
-                    "/tools/as",
-                    "-o",
                     str(stage / "merged.o"),
-                    str(stage / "merged.s"),
                 ],
                 [
                     "/tools/ld",
+                    "--tc32",
                     "--gc-sections",
                     "-T",
                     "./sdk/boot.link",
+                    "--defsym=BUILD_VERSION=3543",
                     "-o",
                     str(stage / "lightblemesh"),
                     str(stage / "merged.o"),
-                    str(startup_obj),
                 ],
                 [
                     "/tools/objcopy",
@@ -656,68 +695,35 @@ class TestPipelineCommands(_TempCase):
                 ],
             ],
         )
-        with self.subTest("link order: merged.o, startup object"):
-            self.assertEqual(
-                commands[4][1][-2:],
-                [str(stage / "merged.o"), str(startup_obj)],
-            )
-
-    def test_startup_compile_argv_is_frozen(self) -> None:
-        repo = self.root / "repo"
-        obj = repo / "_build/asm/cstartup_8266.o"
-        self.assertEqual(
-            build_firmware._startup_command(repo, obj),
-            [
-                str(repo / "toolchain/tc32/bin/tc32-elf-gcc"),
-                "-B",
-                str(repo / "toolchain/tc32/bin/tc32-elf-"),
-                "-c",
-                "-O2",
-                "-fshort-wchar",
-                "-fms-extensions",
-                "-finline-small-functions",
-                "-fpack-struct",
-                "-fshort-enums",
-                "-Wall",
-                "-std=gnu99",
-                "-DMCU_STARTUP_8266",
-                "-D__PROJECT_LIGHT_8266__=1",
-                "-DPROVISIONING_ENABLE",
-                "-I",
-                "./sdk/",
-                "-ffunction-sections",
-                "-fdata-sections",
-                str(repo / "sdk/cstartup_8266.S"),
-                "-o",
-                str(obj),
-            ],
-        )
+        with self.subTest("llc emits the final object directly"):
+            self.assertEqual(commands[2][1][-1], str(stage / "merged.o"))
+            self.assertIn("--filetype=obj", commands[2][1])
+            self.assertIn("+tc32", " ".join(commands[2][1]))
+        with self.subTest("ld.lld links the single merged object"):
+            self.assertEqual(commands[3][1][-1], str(stage / "merged.o"))
+            self.assertIn("--tc32", commands[3][1])
 
 
-class TestVersionSync(_RepoCase):
-    def test_check_version_sync_returns_matching_version(self) -> None:
-        self.assertEqual(build_firmware.check_version_sync(self.repo), 42)
+class TestBuildVersion(_RepoCase):
+    def test_reads_static_and_const_declarations(self) -> None:
+        _write(self.version_rs, "pub static BUILD_VERSION: u32 = 42;\n")
+        self.assertEqual(build_firmware.read_build_version(self.repo), 42)
+        _write(self.version_rs, "pub const BUILD_VERSION: u32 = 3543;\n")
+        self.assertEqual(build_firmware.read_build_version(self.repo), 3543)
 
-    def test_check_version_sync_rejects_mismatch(self) -> None:
-        _write(self.version_rs, "pub static BUILD_VERSION: u32 = 43;\n")
+    def test_rejects_missing_file(self) -> None:
+        self.version_rs.unlink()
         with self.assertRaises(build_firmware.BuildError) as caught:
-            build_firmware.check_version_sync(self.repo)
-        message = str(caught.exception)
-        self.assertIn("42", message)
-        self.assertIn("43", message)
-        self.assertIn(str(self.version_in), message)
-        self.assertIn(str(self.version_rs), message)
+            build_firmware.read_build_version(self.repo)
+        self.assertIn(str(self.version_rs), str(caught.exception))
         self.assertEqual(caught.exception.exit_code, 2)
 
-    def test_check_version_sync_rejects_missing_file(self) -> None:
-        for path in (self.version_in, self.version_rs):
-            with self.subTest(missing=path.name):
-                path.unlink()
-                with self.assertRaises(build_firmware.BuildError) as caught:
-                    build_firmware.check_version_sync(self.repo)
-                self.assertIn(str(path), str(caught.exception))
-                self.assertEqual(caught.exception.exit_code, 2)
-                _write(path, ".equ BUILD_VERSION,42\n" if path == self.version_in else "pub static BUILD_VERSION: u32 = 42;\n")
+    def test_rejects_unparsable_file(self) -> None:
+        _write(self.version_rs, "// no version here\n")
+        with self.assertRaises(build_firmware.BuildError) as caught:
+            build_firmware.read_build_version(self.repo)
+        self.assertIn("no BUILD_VERSION", str(caught.exception))
+        self.assertEqual(caught.exception.exit_code, 2)
 
 
 def _compiler_message(rendered: str | None, level: str = "warning") -> str:
@@ -818,18 +824,36 @@ class TestToolchainProvenance(_RepoCase):
             build_firmware.parse_llc_version("no version line\n")
         self.assertEqual(bad_llc.exception.exit_code, 2)
 
+    def test_probe_toolchain_rejects_llc_without_tc32(self) -> None:
+        with mock.patch.object(
+            build_firmware,
+            "run_command",
+            return_value=subprocess.CompletedProcess(
+                ["llc"],
+                0,
+                stdout="",
+                stderr="'+tc32' is not a recognized feature (ignoring feature)",
+            ),
+        ):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware._probe_tc32_feature(self.tools["llc"])
+        self.assertEqual(caught.exception.exit_code, 2)
+        self.assertIn("+tc32", str(caught.exception))
+
     def test_probe_toolchain_accepts_older_or_equal_llvm(self) -> None:
         rust_dir = self.repo / "rust"
         calls: list[tuple[list[str], Path | None]] = []
 
-        def fake_run(cmd, *, cwd=None, capture=False, env=None):
+        def fake_run(cmd, *, cwd=None, capture=False, capture_stderr=False, env=None):
             argv = [str(part) for part in cmd]
             calls.append((argv, cwd))
             if argv[0] == "rustc":
                 return subprocess.CompletedProcess(argv, 0, stdout=RUSTC_VV_SAMPLE)
             return subprocess.CompletedProcess(argv, 0, stdout=LLC_VERSION_SAMPLE)
 
-        with mock.patch.object(build_firmware, "run_command", side_effect=fake_run):
+        with mock.patch.object(
+            build_firmware, "_probe_tc32_feature"
+        ), mock.patch.object(build_firmware, "run_command", side_effect=fake_run):
             info = build_firmware.probe_toolchain(rust_dir, self.tools["llc"])
 
         self.assertEqual(info, FAKE_TOOLCHAIN)
@@ -843,6 +867,8 @@ class TestToolchainProvenance(_RepoCase):
 
         older_rustc = RUSTC_VV_SAMPLE.replace("23.1.6", "22.1.0")
         with mock.patch.object(
+            build_firmware, "_probe_tc32_feature"
+        ), mock.patch.object(
             build_firmware,
             "run_command",
             side_effect=[
@@ -857,6 +883,8 @@ class TestToolchainProvenance(_RepoCase):
     def test_probe_toolchain_rejects_newer_rustc_llvm(self) -> None:
         newer_rustc = RUSTC_VV_SAMPLE.replace("23.1.6", "24.0.0")
         with mock.patch.object(
+            build_firmware, "_probe_tc32_feature"
+        ), mock.patch.object(
             build_firmware,
             "run_command",
             side_effect=[
@@ -922,11 +950,15 @@ class TestToolchainProvenance(_RepoCase):
                 str(self.tools["llvm_link"]),
                 "--opt",
                 str(self.tools["opt"]),
+                "--ld",
+                str(self.tools["ld"]),
+                "--objcopy",
+                str(self.tools["objcopy"]),
             ]
         )
         seen: list[tuple[list[str], Path | None]] = []
 
-        def fake_run(cmd, *, cwd=None, capture=False, env=None):
+        def fake_run(cmd, *, cwd=None, capture=False, capture_stderr=False, env=None):
             argv = [str(part) for part in cmd]
             seen.append((argv, cwd))
             if argv == ["rustc", "-vV"]:
@@ -936,11 +968,12 @@ class TestToolchainProvenance(_RepoCase):
             raise AssertionError(f"unexpected pipeline command: {argv}")
 
         with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
-            self.startup_obj, self.startup_manifest = self._install_startup()
             build_firmware._write_json(
                 stage / "manifest.json", self.compute(toolchain=FAKE_TOOLCHAIN)
             )
             with mock.patch.object(
+                build_firmware, "_probe_tc32_feature"
+            ), mock.patch.object(
                 build_firmware, "_cargo_build", return_value=[self.ll_a, self.ll_b]
             ), mock.patch.object(
                 build_firmware, "run_command", side_effect=fake_run

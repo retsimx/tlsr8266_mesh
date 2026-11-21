@@ -347,10 +347,12 @@ fn inspect_succeeds_without_a_usable_disassembler() {
 }
 
 #[test]
-fn objdump_path_prefers_path_then_the_toolchain_directory() {
+fn objdump_path_prefers_llvm_then_legacy_on_path() {
     let dir = TempDir::new("objdump-path");
-    let on_path = dir.path().join(OBJDUMP_NAME);
+    let on_path = dir.path().join(OBJDUMP_NAMES[0]);
     std::fs::write(&on_path, b"").expect("tool fixture writes");
+    // The legacy tool is a fallback, never preferred over llvm-objdump.
+    std::fs::write(dir.path().join(OBJDUMP_NAMES[1]), b"").expect("fallback writes");
 
     assert_eq!(
         objdump_path(Path::new("/nonexistent"), Some(dir.path().as_os_str())),
@@ -363,14 +365,7 @@ fn objdump_path_prefers_path_then_the_toolchain_directory() {
         ),
         None
     );
-
-    let root = TempDir::new("objdump-root");
-    let bin = root.path().join("toolchain/tc32/bin");
-    std::fs::create_dir_all(&bin).expect("toolchain fixture creates");
-    let fallback = bin.join(OBJDUMP_NAME);
-    std::fs::write(&fallback, b"").expect("fallback fixture writes");
-
-    assert_eq!(objdump_path(root.path(), None), Some(fallback));
+    assert_eq!(objdump_path(Path::new("/nonexistent"), None), None);
 }
 
 #[test]
@@ -391,6 +386,16 @@ fn disassemble_runs_the_pc_window_and_degrades_on_failure() {
         disassemble(&tool, &elf, 0),
         Some(format!(
             "-d --start-address=0x0 --stop-address=0x20 {}",
+            elf.display()
+        ))
+    );
+
+    let llvm = script(dir.path(), "llvm-objdump", "#!/bin/sh\necho \"$@\"\n");
+    assert_eq!(
+        disassemble(&llvm, &elf, 0x104),
+        Some(format!(
+            "-d --triple=thumbv6m-none-eabi --mattr=+tc32 \
+             --start-address=0xe4 --stop-address=0x124 {}",
             elf.display()
         ))
     );

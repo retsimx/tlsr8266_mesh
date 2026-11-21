@@ -187,6 +187,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang++ \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
             -DLLVM_TARGETS_TO_BUILD=ARM \
+            -DLLVM_ENABLE_PROJECTS=lld \
             -DLLVM_TOOLS_TO_BUILD="llc;llvm-link;opt" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -195,7 +196,9 @@ jobs:
 
       - name: Build LLVM tools
         if: steps.cache.outputs.cache-hit != 'true'
-        run: ninja -C llvm-build llc llvm-link opt
+        run: |
+          ninja -C llvm-build llc llvm-link opt \
+            lld llvm-objcopy llvm-objdump llvm-nm
 
       - name: Install LLVM tools
         if: steps.cache.outputs.cache-hit != 'true'
@@ -204,6 +207,10 @@ jobs:
           cp llvm-build/bin/llc llvm-install/bin/llc
           cp llvm-build/bin/llvm-link llvm-install/bin/llvm-link
           cp llvm-build/bin/opt llvm-install/bin/opt
+          cp llvm-build/bin/ld.lld llvm-install/bin/ld.lld
+          cp llvm-build/bin/llvm-objcopy llvm-install/bin/llvm-objcopy
+          cp llvm-build/bin/llvm-objdump llvm-install/bin/llvm-objdump
+          cp llvm-build/bin/llvm-nm llvm-install/bin/llvm-nm
 
       - name: Upload LLVM tools artifact
         uses: actions/upload-artifact@v4
@@ -216,6 +223,9 @@ jobs:
     name: Build Firmware
     runs-on: ubuntu-latest
     needs: llvm
+    env:
+      LLVM_OBJDUMP: ${{ github.workspace }}/llvm-bin/llvm-objdump
+      LLVM_NM: ${{ github.workspace }}/llvm-bin/llvm-nm
     steps:
       - uses: actions/checkout@v4
 
@@ -226,7 +236,7 @@ jobs:
           path: llvm-bin
 
       - name: Make LLVM tools executable
-        run: chmod +x llvm-bin/llc llvm-bin/llvm-link llvm-bin/opt
+        run: chmod +x llvm-bin/llc llvm-bin/llvm-link llvm-bin/opt llvm-bin/ld.lld llvm-bin/llvm-objcopy llvm-bin/llvm-objdump llvm-bin/llvm-nm
 
       - name: Install Rust toolchain
         run: rustup show  # triggers rust-toolchain.toml
@@ -237,7 +247,9 @@ jobs:
           make \
             LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
             LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
-            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" \
+            LD="$GITHUB_WORKSPACE/llvm-bin/ld.lld" \
+            OBJCOPY="$GITHUB_WORKSPACE/llvm-bin/llvm-objcopy"
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
@@ -256,7 +268,9 @@ jobs:
           make FEATURES=rtt \
             LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
             LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
-            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" \
+            LD="$GITHUB_WORKSPACE/llvm-bin/ld.lld" \
+            OBJCOPY="$GITHUB_WORKSPACE/llvm-bin/llvm-objcopy"
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
@@ -275,10 +289,13 @@ jobs:
           make \
             LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
             LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
-            OPT="$GITHUB_WORKSPACE/llvm-bin/opt"
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" \
+            LD="$GITHUB_WORKSPACE/llvm-bin/ld.lld" \
+            OBJCOPY="$GITHUB_WORKSPACE/llvm-bin/llvm-objcopy"
           make check
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
+
 
       - name: Verify manifest cache hit on no-op rebuild
         run: |
@@ -292,7 +309,9 @@ jobs:
           if ! output=$(make \
             LLC="$GITHUB_WORKSPACE/llvm-bin/llc" \
             LLVM_LINK="$GITHUB_WORKSPACE/llvm-bin/llvm-link" \
-            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" 2>&1); then
+            OPT="$GITHUB_WORKSPACE/llvm-bin/opt" \
+            LD="$GITHUB_WORKSPACE/llvm-bin/ld.lld" \
+            OBJCOPY="$GITHUB_WORKSPACE/llvm-bin/llvm-objcopy" 2>&1); then
             echo "$output"
             echo "::error::no-op rebuild failed: make exited non-zero" >&2
             exit 1

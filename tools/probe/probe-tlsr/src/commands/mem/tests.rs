@@ -227,12 +227,12 @@ fn flash_symbols_are_rejected_before_any_request() {
 #[test]
 fn symbols_need_an_elf() {
     let mut mock = MockTransport::new([]);
-    let err = read(&mut mock, None, "FLL_STK", None).expect_err("symbol needs --elf");
+    let err = read(&mut mock, None, "__irq", None).expect_err("symbol needs --elf");
     assert_eq!(err, CliError::MissingElf);
     assert!(mock.requests.is_empty());
 
     let mut mock = MockTransport::new([]);
-    let err = write(&mut mock, None, "FLL_STK", "00").expect_err("symbol needs --elf");
+    let err = write(&mut mock, None, "__irq", "00").expect_err("symbol needs --elf");
     assert_eq!(err, CliError::MissingElf);
     assert!(mock.requests.is_empty());
 

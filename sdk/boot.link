@@ -7,8 +7,8 @@ SECTIONS
     . = 0x0;
         .vectors :
         {
-        *(.vectors)
-        *(.vectors.*)	/* MUST as follows, when compile with -ffunction-sections -fdata-sections, session name may changed */
+        KEEP(*(.vectors))
+        KEEP(*(.vectors.*))	/* MUST as follows, when compile with -ffunction-sections -fdata-sections, session name may changed */
         }
         .ram_code :
         {
@@ -103,5 +103,9 @@ SECTIONS
     PROVIDE(_ictag_end_ = __RAM_START_ADDR + (_ramcode_size_div_256_ + 1) * 0x100);	/*not for retention*/
     
 	/*PROVIDE(_ram_use_size_div_16_ = (_retention_data_end_ - 0x840000  + 15 ) / 16); only for 825x*/
-    
+
+    /* Never let unwinder metadata reach the image: anything placed after the
+       sections above would shift _dstored_ and break the bootloader's copy
+       window, so drop these outright rather than laying them out. */
+    /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.note.GNU-stack) *(.comment) }
 }

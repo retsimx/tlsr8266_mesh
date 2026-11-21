@@ -222,7 +222,7 @@ aes.packet.2.plain = 20 21 22 23 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f 30 31 32 33
 aes.packet.2.cipher = ec d4 5c 54 29 6b 42 92 53 c3 da 2b bc 06 d5 fa 70 be 07 96 86 73 43 29
 aes.packet.2.mic = a6 50
 
-# --- Firmware header (first 32 bytes of the image, sdk/cstartup_8266.S) --
+# --- Firmware header (first 32 bytes of the image, rust/src/startup.rs) --
 # [0:2]   reset branch opcode   -- SYNTHETIC, see ota.header.reset_opcode
 # [2:6]   BUILD_VERSION u32 LE, bit 31 clear (rust/src/version.rs)
 # [6:8]   zero (the .org 0x8 gap)

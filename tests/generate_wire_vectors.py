@@ -627,7 +627,7 @@ for idx, key, ivm, plain, cipher, mic in packets:
     w("aes.packet.%d.mic = %s" % (idx, bytesval(mic)))
 w("")
 
-w("# --- Firmware header (first 32 bytes of the image, sdk/cstartup_8266.S) --")
+w("# --- Firmware header (first 32 bytes of the image, rust/src/startup.rs) --")
 w("# [0:2]   reset branch opcode   -- SYNTHETIC, see ota.header.reset_opcode")
 w("# [2:6]   BUILD_VERSION u32 LE, bit 31 clear (rust/src/version.rs)")
 w("# [6:8]   zero (the .org 0x8 gap)")

@@ -59,9 +59,8 @@ const FLASH_HEADER_LEN: u16 = 12;
 
 /// Byte offset of the firmware version word in the 12-byte header.
 ///
-/// `sdk/cstartup_8266.S` emits a 2-byte `tj __reset` at address 0 and the
-/// `.word (BUILD_VERSION)` immediately after it, so the word sits at 2..6;
-/// `KNLT` follows at 8..12.
+/// The reset branch is 2 bytes at address 0, the version `.word` follows
+/// immediately (2..6), and `KNLT` starts at 8..12.
 const HEADER_VERSION_OFFSET: usize = 2;
 
 /// KNLT magic stored little-endian at header bytes `8..12`.

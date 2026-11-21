@@ -1,10 +1,9 @@
 #![cfg(target_os = "none")]
 
-//! TC32 reset vector table and low-level startup, formerly `sdk/cstartup_8266.S`.
+//! TC32 reset vector table and low-level startup.
 //!
-//! This is a byte-compatible translation of the vendor startup: the image header
-//! and the reset/IRQ entry points keep the same offsets and instruction
-//! encodings, so the bootloader and the flash layout are unchanged.
+//! The image header and the reset/IRQ entry points occupy fixed offsets that
+//! the boot ROM expects.
 //!
 //! # Image header (`.vectors`, offsets 0x00-0x1F)
 //!
@@ -167,8 +166,8 @@ ZERO_TAG:
 ZERO_TAG_END:
 
     /* 5. Program the instruction-cache tag register so the preloaded
-     *    `_ramcode_size_div_256_` blocks are cached. This is the vendor
-     *    sequence: write the block count, then count + 1. */
+     *    `_ramcode_size_div_256_` blocks are cached: write the block count,
+     *    then count + 1. */
     ldr r1, DAT0_24                 /* 0x80060c: IC tag control register */
     ldr r0, DAT0_36                 /* _ramcode_size_div_256_ */
     strb r0, [r1, #0]
@@ -236,7 +235,7 @@ FLL_D_4:
 FLL_D_8:
     .word (__RAM_START_ADDR + 16 * 1024)
 FLL_D_12:
-    .word _rstored_                 /* unused here; kept for layout parity */
+    .word _rstored_                 /* unused by this startup */
 
     /* ==================================================================
      * IRQ entry/exit.

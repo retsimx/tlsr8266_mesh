@@ -94,8 +94,8 @@ pub fn firmware_image(version: u32, len: usize) -> Vec<u8> {
 /// 12-byte firmware headers taken byte-for-byte from real images.
 ///
 /// These are the first 12 bytes of `lightblemesh` builds. The version word
-/// lives at bytes `2..6` because `sdk/cstartup_8266.S` emits a 2-byte
-/// `tj __reset` at address 0. Do not "tidy" these back to offset 4.
+/// lives at bytes `2..6` because the reset branch is 2 bytes at address 0.
+/// Do not "tidy" these back to offset 4.
 ///
 /// `REAL_16MHZ_HEADER` is a deployed pre-#33 image: bit 31 of its version word
 /// is set, which host tools mask off when they report the build version.

@@ -1,14 +1,16 @@
 use core::ptr::addr_of;
 
 use bytemuck::{Pod, Zeroable};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 #[cfg(not(test))]
-use embassy_time::{Duration, Timer};
-use heapless::{Deque, Vec};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
+use heapless::Vec;
 
 use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::embassy::time_driver::clock_time64;
-use crate::embassy::yield_now::yield_now;
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
 use crate::sdk::ble_app::light_ll::mesh_management::rf_link_match_group_mac;
@@ -29,6 +31,10 @@ use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2cap
 use crate::state::*;
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{app, uprintln, BIT};
+
+/// Raw mutex backing the mesh channel/signal: masks interrupts for the
+/// (short, allocation-free) critical sections inside `embassy-sync`.
+type CsRawMutex = CriticalSectionRawMutex;
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -128,6 +134,16 @@ struct SendPkt {
     pub send_count: u8,
 }
 
+/// Outcome of the send-buffer scan, computed inside the send critical section.
+enum SendScan {
+    /// Nothing is queued: park on `send_wake` until `add_send_mesh_msg` pushes.
+    Empty,
+    /// Packets are queued but none is due: park until the earliest due tick.
+    Wait(u64),
+    /// The first due packet, removed from the buffer.
+    Ready(SendPkt),
+}
+
 #[cfg_attr(test, mry::mry)]
 pub struct MeshManager {
     mesh_pair_start_time: u32,
@@ -144,7 +160,8 @@ pub struct MeshManager {
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
     pkt_send_buf: Vec<SendPkt, 8>,
-    pkt_rcv_buf: Deque<Packet, 8>,
+    pkt_rcv_buf: Channel<CsRawMutex, Packet, 8>,
+    send_wake: Signal<CsRawMutex, ()>,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const)))]
@@ -166,7 +183,8 @@ impl MeshManager {
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
             pkt_send_buf: Vec::new(),
-            pkt_rcv_buf: Deque::new(),
+            pkt_rcv_buf: Channel::new(),
+            send_wake: Signal::new(),
         }
     }
 
@@ -187,7 +205,8 @@ impl MeshManager {
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
             pkt_send_buf: Vec::new(),
-            pkt_rcv_buf: Deque::new(),
+            pkt_rcv_buf: Channel::new(),
+            send_wake: Signal::new(),
             mry: Default::default(),
         }
     }
@@ -576,42 +595,96 @@ impl MeshManager {
             && packet.ll_app().value.dst == DEVICE_ADDRESS.get()
         {
             light_mesh_rx_cb(packet);
-        } else if self
-            .pkt_send_buf
-            .push(SendPkt {
-                delay,
-                pkt: *packet,
-                send_count,
-            })
-            .is_err()
-        {
-            uprintln!("pkt send buf is full, dropping packet...");
+        } else {
+            // Only the buffer mutation runs with interrupts masked; the signal
+            // and the log are emitted outside so no MMIO happens inside the CS.
+            let pushed = critical_section::with(|_| {
+                self.pkt_send_buf
+                    .push(SendPkt {
+                        delay,
+                        pkt: *packet,
+                        send_count,
+                    })
+                    .is_ok()
+            });
+
+            if pushed {
+                self.send_wake.signal(());
+            } else {
+                uprintln!("pkt send buf is full, dropping packet...");
+            }
         }
     }
 
-    /// Process a single iteration of the mesh message sending task
+    /// Process a single iteration of the mesh message sending task.
+    ///
+    /// The scheduling scan is a three-state machine driven by one critical
+    /// section:
+    /// - [`SendScan::Empty`]: nothing queued; the buffer check happens before
+    ///   `clock_time64()`, so host tests never touch MMIO. Park on `send_wake`
+    ///   until `add_send_mesh_msg` pushes a packet.
+    /// - [`SendScan::Wait`]: packets are queued but none is due yet; park on
+    ///   `send_wake` with a deadline of the earliest due tick.
+    /// - [`SendScan::Ready`]: the first due packet was removed and is
+    ///   transmitted inline below.
+    ///
+    /// The parked arms `return`, so the outer `loop` in
+    /// [`Self::send_mesh_msg_task`] re-enters and rescans instead of looping
+    /// internally.
     async fn send_mesh_msg_iteration(&mut self) {
-        yield_now().await;
+        let result = match critical_section::with(|_| {
+            // Reset before the scan: a push that lands after this critical
+            // section leaves the signal set, so the wake cannot be lost.
+            self.send_wake.reset();
 
-        let result = critical_section::with(|_| {
+            if self.pkt_send_buf.is_empty() {
+                return SendScan::Empty;
+            }
+
+            // Sample the clock exactly once for the whole scan.
+            let now = clock_time64();
+
             let found = self
                 .pkt_send_buf
                 .iter()
                 .enumerate()
-                .find(|(_, elem)| clock_time64() > elem.delay);
+                .find(|(_, elem)| now >= elem.delay);
 
-            let (index, _) = found?;
+            let (index, _) = match found {
+                Some(found) => found,
+                None => {
+                    let earliest = self.pkt_send_buf.iter().map(|e| e.delay).min().unwrap();
+                    return SendScan::Wait(earliest);
+                }
+            };
 
-            let pkt = self.pkt_send_buf.swap_remove(index);
+            SendScan::Ready(self.pkt_send_buf.swap_remove(index))
+        }) {
+            SendScan::Empty => {
+                self.send_wake.wait().await;
+                return;
+            }
+            SendScan::Wait(earliest) => {
+                #[cfg(not(test))]
+                let _ = self
+                    .send_wake
+                    .wait()
+                    .with_deadline(Instant::from_ticks(earliest))
+                    .await;
 
-            Some(pkt)
-        });
+                #[cfg(test)]
+                {
+                    // Host tests have no time driver deadline; the wake signal
+                    // from `add_send_mesh_msg` is the only exit.
+                    let _ = earliest;
+                    self.send_wake.wait().await;
+                }
 
-        if result.is_none() {
-            return;
-        }
+                return;
+            }
+            SendScan::Ready(pkt) => pkt,
+        };
 
-        let result = result.unwrap();
         let mut pkt = result.pkt;
 
         pkt.mesh_mut().src_tx = DEVICE_ADDRESS.get();
@@ -642,14 +715,10 @@ impl MeshManager {
                 );
             });
 
+            // Let the transmission on this channel finish before hopping.
+            // Host tests have no time driver, so they skip the spacing delay.
             #[cfg(not(test))]
             Timer::after(Duration::from_micros(600)).await;
-
-            #[cfg(test)]
-            {
-                // In test builds, skip the timer delay
-                yield_now().await;
-            }
         }
 
         rf_set_rxmode();
@@ -681,20 +750,16 @@ impl MeshManager {
     }
 
     pub fn add_rcv_mesh_msg(&mut self, packet: &Packet) {
-        if self.pkt_rcv_buf.push_back(*packet).is_err() {
+        if self.pkt_rcv_buf.try_send(*packet).is_err() {
             uprintln!("pkt rcv buf is full, dropping packet...");
         }
     }
 
     /// Process a single iteration of the mesh message receiving task
     async fn rcv_mesh_msg_iteration(&mut self) {
-        yield_now().await;
+        let mut result = self.pkt_rcv_buf.receive().await;
 
-        if !self.pkt_rcv_buf.is_empty() {
-            let mut result = critical_section::with(|_| self.pkt_rcv_buf.pop_front().unwrap());
-
-            rf_link_rc_data(&mut result);
-        }
+        rf_link_rc_data(&mut result);
     }
 
     pub async fn rcv_mesh_msg_task(&mut self) {
@@ -2037,20 +2102,45 @@ mod tests {
         assert_eq!(mesh_manager.pkt_rcv_buf.len(), 8);
     }
 
-    /// Tests send_mesh_msg_iteration with no packets to send
+    /// Tests send_mesh_msg_iteration parks on send_wake and wakes on a push
     #[test]
     fn test_send_mesh_msg_iteration_no_packets() {
-        use futures::executor::block_on;
+        use core::future::Future;
+        use core::task::{Context, Poll};
+        use futures::task::noop_waker;
 
         // Setup
         let mut mesh_manager = MeshManager::default();
-        // pkt_send_buf is empty by default
+        // The future parks on `&mut self`, so drive it through a raw pointer.
+        let mesh_manager_ptr: *mut MeshManager = &mut mesh_manager;
 
-        // Execute - should return immediately with no error
-        block_on(mesh_manager.send_mesh_msg_iteration());
+        // pkt_send_buf is empty by default, so the iteration parks on send_wake
+        let future = mesh_manager.send_mesh_msg_iteration();
+        futures::pin_mut!(future);
 
-        // Verify - should still be empty
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+        // Enqueue a ready packet; add_send_mesh_msg signals send_wake
+        let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+        // SAFETY: the pinned `send_mesh_msg_iteration` future is the only
+        // accessor of `mesh_manager`, so the `&mut self` borrow is logically
+        // transferred to `add_send_mesh_msg` for the duration of this block.
+        unsafe {
+            (*mesh_manager_ptr).add_send_mesh_msg(&test_pkt, 0, 0);
+            assert_eq!((&(*mesh_manager_ptr).pkt_send_buf).len(), 1);
+        }
+
+        // The wake signal releases the parked iteration without sending; the
+        // outer task loop re-enters and picks the packet up.
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+
+        // Verify - the packet is still queued for the next iteration
+        // SAFETY: the future is parked (not completed), and it is the only
+        // accessor of `mesh_manager`; this is a read-only reborrow.
+        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 1);
     }
 
     /// Tests send_mesh_msg_iteration with ready packet
@@ -2100,22 +2190,111 @@ mod tests {
         mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
     }
 
-    // --- rcv_mesh_msg_iteration Tests ---
-
-    /// Tests rcv_mesh_msg_iteration with no packets to receive
+    /// Tests send_mesh_msg_iteration parks on the earliest queued deadline and
+    /// wakes when a new packet is pushed.
+    ///
+    /// This is the `SendScan::Wait(earliest)` arm: the buffer is non-empty but
+    /// nothing is due yet, so the only exit is `send_wake`. Every mesh
+    /// retransmission takes this path.
     #[test]
-    fn test_rcv_mesh_msg_iteration_no_packets() {
-        use futures::executor::block_on;
+    #[mry::lock(clock_time64)]
+    fn test_send_mesh_msg_iteration_parks_until_earliest_deadline() {
+        use core::future::Future;
+        use core::task::{Context, Poll};
+        use futures::task::noop_waker;
 
         // Setup
         let mut mesh_manager = MeshManager::default();
-        // pkt_rcv_buf is empty by default
+        // The future parks on `&mut self`, so drive it through a raw pointer.
+        let mesh_manager_ptr: *mut MeshManager = &mut mesh_manager;
 
-        // Execute - should return immediately with no error
-        block_on(mesh_manager.rcv_mesh_msg_iteration());
+        // The scan samples the clock once (after the empty check).
+        mock_clock_time64().returns(0);
 
-        // Verify - should still be empty
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 0);
+        // Deadline far in the future: the buffer is not empty, but no packet is
+        // due, so the scan must take `SendScan::Wait(earliest)`, not `Empty`.
+        let far_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+        mesh_manager.add_send_mesh_msg(&far_pkt, u64::MAX / 2, 0);
+        assert_eq!(mesh_manager.pkt_send_buf.len(), 1);
+
+        let future = mesh_manager.send_mesh_msg_iteration();
+        futures::pin_mut!(future);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: parked on the deadline wait.
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+        // The not-yet-due packet must NOT have been consumed by the scan.
+        // SAFETY: the pinned `send_mesh_msg_iteration` future is the only
+        // accessor of `mesh_manager`; this is a read-only reborrow.
+        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 1);
+
+        // A due packet signals `send_wake`, which releases the parked wait.
+        let ready_pkt = create_test_packet(0x9abc, 0xdef0, [4, 5, 6]);
+        // SAFETY: the pinned future is the only accessor of `mesh_manager`, so
+        // the `&mut self` borrow is logically transferred to this call.
+        unsafe {
+            (*mesh_manager_ptr).add_send_mesh_msg(&ready_pkt, 0, 0);
+            assert_eq!((&(*mesh_manager_ptr).pkt_send_buf).len(), 2);
+        }
+
+        // Second poll: the wake completes the iteration without sending; the
+        // outer task loop re-enters and rescans.
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+
+        // Nothing was consumed by this iteration.
+        // SAFETY: the future has completed and is the only accessor of
+        // `mesh_manager`; this is a read-only reborrow.
+        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 2);
+
+        // The clock was sampled exactly once for the scan.
+        mock_clock_time64().assert_called(1);
+    }
+
+    // --- rcv_mesh_msg_iteration Tests ---
+
+    /// Tests rcv_mesh_msg_iteration parks on receive and wakes on a push
+    #[test]
+    #[mry::lock(rf_link_rc_data)]
+    fn test_rcv_mesh_msg_iteration_no_packets() {
+        use core::future::Future;
+        use core::task::{Context, Poll};
+        use futures::task::noop_waker;
+
+        // Setup
+        let mut mesh_manager = MeshManager::default();
+        // The future parks on `&mut self`, so drive it through a raw pointer.
+        let mesh_manager_ptr: *mut MeshManager = &mut mesh_manager;
+        mock_rf_link_rc_data(Any).returns(());
+
+        // pkt_rcv_buf is empty by default, so the iteration parks on receive()
+        let future = mesh_manager.rcv_mesh_msg_iteration();
+        futures::pin_mut!(future);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+        // Enqueue a packet; Channel::try_send wakes the parked receiver
+        let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+        // SAFETY: the pinned `rcv_mesh_msg_iteration` future is the only
+        // accessor of `mesh_manager`, so the `&mut self` borrow is logically
+        // transferred to `add_rcv_mesh_msg` for the duration of this block.
+        unsafe {
+            (*mesh_manager_ptr).add_rcv_mesh_msg(&test_pkt);
+            assert_eq!((&(*mesh_manager_ptr).pkt_rcv_buf).len(), 1);
+        }
+
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+
+        // Verify - the packet was received and handed to the mesh decoder
+        // SAFETY: the future is pinned and is the only accessor of
+        // `mesh_manager`; this is a read-only reborrow.
+        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_rcv_buf).len() }, 0);
+        mock_rf_link_rc_data(Any).assert_called(1);
     }
 
     /// Tests rcv_mesh_msg_iteration with packet to receive

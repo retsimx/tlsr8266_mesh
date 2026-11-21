@@ -4,14 +4,12 @@ use core::ptr::addr_of;
 
 use const_format::formatcp;
 use embassy_executor::Spawner;
+use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
 use fixed::types::{I16F16, U16F16};
-use heapless::Deque;
 
 use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
-#[cfg(not(test))]
-use crate::embassy::yield_now::yield_now;
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
@@ -28,6 +26,10 @@ use crate::sdk::mcu::register::{
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
+
+/// Raw mutex backing the light command channel: masks interrupts for the
+/// (short, allocation-free) critical section inside `embassy-sync`.
+type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 #[derive(Copy, Clone, Debug)]
 struct Message {
@@ -137,7 +139,7 @@ impl Transition {
 
 #[cfg_attr(test, mry::mry)]
 pub struct LightManager {
-    channel: Deque<Message, 10>,
+    channel: Channel<CsRawMutex, Message, 10>,
 
     brightness_tr: Transition,
     cw_tr: Transition,
@@ -155,7 +157,7 @@ impl LightManager {
     #[cfg(not(test))]
     pub const fn default_const() -> Self {
         Self {
-            channel: Deque::new(),
+            channel: Channel::new(),
             brightness_tr: Transition::new(I16F16::lit(formatcp!("{}", 0u16))),
             cw_tr: Transition::new(I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE))),
             ww_tr: Transition::new(I16F16::lit(formatcp!("{}", 0u16))),
@@ -168,7 +170,7 @@ impl LightManager {
     #[cfg(test)]
     pub fn default() -> Self {
         Self {
-            channel: Deque::new(),
+            channel: Channel::new(),
             brightness_tr: Transition::new(I16F16::from_num(0u16)),
             cw_tr: Transition::new(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE)),
             ww_tr: Transition::new(I16F16::from_num(0u16)),
@@ -226,20 +228,11 @@ impl LightManager {
     }
 
     pub fn send_message(&mut self, cmd: u8, params: [u8; 16]) {
-        critical_section::with(|_| {
-            if !self.channel.is_full() {
-                self.channel.push_back(Message { cmd, params }).unwrap();
-            }
-        });
+        let _ = self.channel.try_send(Message { cmd, params });
     }
 
     async fn process_message_impl(&mut self) {
-        #[cfg(not(test))]
-        while self.channel.is_empty() {
-            yield_now().await;
-        }
-
-        let msg = critical_section::with(|_| self.channel.pop_front().unwrap());
+        let msg = self.channel.receive().await;
         match msg.cmd {
             LGT_CMD_LIGHT_ONOFF => self.handle_on_off(msg.params[0]),
             LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
@@ -648,12 +641,10 @@ mod tests {
 
         manager.send_message(LGT_CMD_LIGHT_ONOFF, test_params);
 
-        critical_section::with(|_| {
-            assert_eq!(manager.channel.len(), 1);
-            let msg = manager.channel.front().unwrap();
-            assert_eq!(msg.cmd, LGT_CMD_LIGHT_ONOFF);
-            assert_eq!(msg.params, test_params);
-        });
+        assert_eq!(manager.channel.len(), 1);
+        let msg = manager.channel.try_receive().unwrap();
+        assert_eq!(msg.cmd, LGT_CMD_LIGHT_ONOFF);
+        assert_eq!(msg.params, test_params);
     }
 
     #[test]
@@ -662,24 +653,19 @@ mod tests {
 
         let mut manager = create_test_light_manager();
 
-        // Fill the channel (capacity is 5)
+        // Fill the channel (capacity is 10)
         for i in 0..10 {
             manager.send_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
         }
 
-        critical_section::with(|_| {
-            assert_eq!(manager.channel.len(), 10);
-        });
-
         // Try to add one more - should be ignored
         manager.send_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
 
-        critical_section::with(|_| {
-            assert_eq!(manager.channel.len(), 10);
-            // Verify the last message is still the 5th one, not the 99
-            let msg = manager.channel.back().unwrap();
-            assert_eq!(msg.params[0], 9);
-        });
+        // All 10 retained messages are received in order and the 11th was dropped
+        for i in 0..10 {
+            assert_eq!(manager.channel.try_receive().unwrap().params[0], i);
+        }
+        assert!(manager.channel.try_receive().is_err());
     }
 
     // --- On/Off Handling Tests ---
@@ -1615,6 +1601,66 @@ mod tests {
         block_on(manager.process_message_impl());
 
         assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 500);
+    }
+
+    #[test]
+    #[mry::lock(
+        read_reg_tmr_ctrl,
+        write_reg_tmr1_tick,
+        write_reg_tmr_ctrl,
+        ll_device_status_update,
+        pwm_set_cmp,
+        clock_time64
+    )]
+    fn test_process_message_impl_parks_until_send_message() {
+        use core::future::Future;
+        use core::task::{Context, Poll};
+        use futures::task::noop_waker;
+
+        // Setup
+        let mut manager = create_test_light_manager();
+        manager.brightness = 500;
+        // The future parks on `&mut self`, so drive it through a raw pointer.
+        let manager_ptr: *mut LightManager = &mut manager;
+
+        mock_read_reg_tmr_ctrl().returns(0x00);
+        mock_write_reg_tmr1_tick(0).returns(());
+        mock_write_reg_tmr_ctrl(Any).returns(());
+        mock_ll_device_status_update(Any).returns(());
+        mock_pwm_set_cmp(Any, Any).returns(());
+        mock_clock_time64().returns(1000);
+
+        let future = manager.process_message_impl();
+        futures::pin_mut!(future);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // The channel is empty on entry, so the iteration parks on receive().
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        // SAFETY: the pinned future is the only accessor of `manager`; this is
+        // a read-only reborrow.
+        assert!(unsafe { (&(*manager_ptr).channel).is_empty() });
+
+        // A message wakes the parked receive.
+        let msg = create_onoff_message(LIGHT_ON_PARAM);
+        // SAFETY: the pinned future is the only accessor of `manager`, so the
+        // `&mut self` borrow is logically transferred to this call.
+        unsafe {
+            (*manager_ptr).send_message(msg.cmd, msg.params);
+        }
+
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+
+        // The command took effect and the channel is drained.
+        // SAFETY: the future has completed and is the only accessor of
+        // `manager`; this is a read-only reborrow.
+        assert_eq!(
+            unsafe { (*manager_ptr).brightness_tr.to.to_num::<u16>() },
+            500
+        );
+        // SAFETY: as above; read-only reborrow after completion.
+        assert!(unsafe { (&(*manager_ptr).channel).is_empty() });
     }
 
     #[test]

@@ -4,16 +4,15 @@ use core::ops::Range;
 use core::ptr::addr_of;
 use core::slice;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
+#[cfg(not(test))]
+use embassy_time::{Duration, Instant, WithTimeout};
 use heapless::Deque;
 
-use crate::embassy::yield_now::yield_now;
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UartData, UartDriver, UartIrqMask, UART_DATA_LEN};
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
-use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{AppCmdValue, Packet};
 use crate::{app, uprintln};
 use heapless::Vec;
@@ -31,6 +30,11 @@ const CTRL_PAYLOAD_LEN: usize = CTRL_PAYLOAD_RANGE.end - CTRL_PAYLOAD_RANGE.star
 const CTRL_FINGERPRINT_LEN: usize = CTRL_FINGERPRINT_RANGE.end - CTRL_FINGERPRINT_RANGE.start;
 
 type Fingerprint = [u8; CTRL_FINGERPRINT_LEN];
+
+/// Raw mutex backing the UART channels/signals: masks interrupts for the
+/// (short, allocation-free) critical sections inside `embassy-sync`.
+type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
 use crate::state::{SimplifyLS, DEVICE_ADDRESS};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -125,28 +129,30 @@ pub async fn uart_receiver() {
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Deque<UartData, 12>,
-    recv_channel: Deque<UartData, 12>,
+    send_channel: Channel<CsRawMutex, UartData, 12>,
+    recv_channel: Channel<CsRawMutex, UartData, 12>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
-    started_signal: Signal<CriticalSectionRawMutex, ()>,
+    started_signal: Signal<CsRawMutex, ()>,
+    ack_signal: Signal<CsRawMutex, u8>,
     uart_status_reporting: bool,
     sent: Deque<Fingerprint, 12>,
 }
 
-#[cfg_attr(test, mry::mry(skip_fns(default_const, wait_for_message)))]
+#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
 impl UartManager {
     #[cfg(not(test))]
     pub const fn default_const() -> Self {
         Self {
             driver: UartDriver::default_const(),
-            send_channel: Deque::new(),
-            recv_channel: Deque::new(),
+            send_channel: Channel::new(),
+            recv_channel: Channel::new(),
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
             started_signal: Signal::new(),
+            ack_signal: Signal::new(),
             uart_status_reporting: false,
             sent: Deque::new(),
         }
@@ -156,12 +162,13 @@ impl UartManager {
     pub fn default() -> Self {
         Self {
             driver: UartDriver::default(),
-            send_channel: Deque::new(),
-            recv_channel: Deque::new(),
+            send_channel: Channel::new(),
+            recv_channel: Channel::new(),
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
             started_signal: Signal::new(),
+            ack_signal: Signal::new(),
             uart_status_reporting: false,
             sent: Deque::new(),
             mry: Default::default(),
@@ -190,14 +197,11 @@ impl UartManager {
     }
 
     pub fn send_message(&mut self, msg: &UartData) -> Result<(), ()> {
-        critical_section::with(|_| {
-            if !self.send_channel.is_full() {
-                let _ = self.send_channel.push_back(*msg);
-                return Ok(());
-            }
-
+        if self.send_channel.try_send(*msg).is_ok() {
+            Ok(())
+        } else {
             Err(())
-        })
+        }
     }
 
     #[inline(always)]
@@ -222,6 +226,7 @@ impl UartManager {
         // If data[1] is 0xff, it means this message is an ack from the client
         if msg.data[1] == u8::from(UartMsg::Ack) {
             self.last_ack = msg.data[0];
+            self.ack_signal.signal(msg.data[0]);
             return;
         }
 
@@ -265,32 +270,12 @@ impl UartManager {
         }
     }
 
-    async fn wait_for_message<F, P>(&mut self, is_empty: F, mut pop: P) -> UartData
-    where
-        F: Fn(&Self) -> bool,
-        P: FnMut(&mut Self) -> Option<UartData>,
-    {
-        while is_empty(self) {
-            yield_now().await;
-        }
-
-        critical_section::with(|_| pop(self)).expect("message should be available")
-    }
-
     async fn wait_for_received_message(&mut self) -> UartData {
-        self.wait_for_message(
-            |this| this.recv_channel.is_empty(),
-            |this| this.recv_channel.pop_front(),
-        )
-        .await
+        self.recv_channel.receive().await
     }
 
     async fn wait_for_outgoing_message(&mut self) -> UartData {
-        self.wait_for_message(
-            |this| this.send_channel.is_empty(),
-            |this| this.send_channel.pop_front(),
-        )
-        .await
+        self.send_channel.receive().await
     }
 
     fn record_sent_fingerprint(&mut self, fingerprint: Fingerprint) {
@@ -373,16 +358,36 @@ impl UartManager {
 
     async fn send_with_retry(&mut self, msg: &UartData) {
         loop {
+            // Arm the wake-up before transmitting so an ack that lands between
+            // the send and the wait is still observed (the value is latched).
+            self.ack_signal.reset();
             self.driver_send_async(msg).await;
-
-            let t_timeout = clock_time();
-            while self.last_ack != self.ack_counter && !clock_time_exceed(t_timeout, 100 * 1000) {
-                wd_clear();
-                yield_now().await;
-            }
 
             if self.last_ack == self.ack_counter {
                 break;
+            }
+
+            // One deadline for the whole wait: stale acks must not extend it.
+            #[cfg(not(test))]
+            let deadline = Instant::now() + Duration::from_millis(100);
+
+            loop {
+                #[cfg(not(test))]
+                {
+                    match wait_ack_or_timeout(&self.ack_signal, deadline).await {
+                        Ok(ack) if ack == self.ack_counter => return,
+                        Ok(_) => continue,
+                        Err(()) => break,
+                    }
+                }
+                #[cfg(test)]
+                {
+                    match wait_ack_or_timeout(&self.ack_signal) {
+                        Ok(ack) if ack == self.ack_counter => return,
+                        Ok(_) => continue,
+                        Err(()) => break,
+                    }
+                }
             }
         }
     }
@@ -409,10 +414,25 @@ impl UartManager {
             mesh_report_status_enable(true);
         }
 
-        if self.recv_channel.push_back(msg).is_err() {
+        if self.recv_channel.try_send(msg).is_err() {
             uprintln!("uart rx handler recv_channel full");
         }
     }
+}
+
+/// Waits for the next UART ack counter, giving up at `deadline`.
+///
+/// Free function on purpose: `Signal` appears in no `mry`-mocked method
+/// signature, and the target/host timeout split lives in one place.
+#[cfg(not(test))]
+async fn wait_ack_or_timeout(signal: &Signal<CsRawMutex, u8>, deadline: Instant) -> Result<u8, ()> {
+    signal.wait().with_deadline(deadline).await.map_err(|_| ())
+}
+
+/// Host tests have no time driver, so a missing ack is simply "not ready yet".
+#[cfg(test)]
+fn wait_ack_or_timeout(signal: &Signal<CsRawMutex, u8>) -> Result<u8, ()> {
+    signal.try_take().ok_or(())
 }
 
 #[cfg(test)]
@@ -420,8 +440,6 @@ impl UartManager {
 mod tests {
     use super::*;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
     use crate::sdk::packet_types::{PacketL2capHead, PacketLlApp};
     use core::future::Future;
     use core::sync::atomic::{AtomicU8, Ordering};
@@ -503,7 +521,7 @@ mod tests {
         msg.data[0] = 0xAA;
         let expected_len = msg.len;
         let expected_data = msg.data;
-        critical_section::with(|_| manager.recv_channel.push_back(msg).unwrap());
+        manager.recv_channel.try_send(msg).unwrap();
 
         let result = block_on(manager.wait_for_received_message());
 
@@ -522,7 +540,7 @@ mod tests {
         msg.data[1] = 0xCD;
         let expected_len = msg.len;
         let expected_data = msg.data;
-        critical_section::with(|_| manager.send_channel.push_back(msg).unwrap());
+        manager.send_channel.try_send(msg).unwrap();
 
         let result = block_on(manager.wait_for_outgoing_message());
 
@@ -533,7 +551,7 @@ mod tests {
     #[test]
     fn test_wait_for_outgoing_message_waits_until_message_available() {
         let mut manager = UartManager::default();
-        let mut manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
+        let manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
         let future = manager.wait_for_outgoing_message();
         futures::pin_mut!(future);
 
@@ -548,7 +566,7 @@ mod tests {
         };
         msg.data[0] = 0xEF;
         unsafe {
-            (*(*manager_ptr)).send_channel.push_back(msg).unwrap();
+            (*(*manager_ptr)).send_channel.try_send(msg).unwrap();
         }
 
         let poll_result = future.as_mut().poll(&mut cx);
@@ -666,7 +684,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time, clock_time_exceed, wd_clear)]
     fn test_send_with_retry_exits_when_ack_already_received() {
         let mut manager = UartManager::default();
         manager.ack_counter = 5;
@@ -679,9 +696,6 @@ mod tests {
 
         manager.mock_driver_send_async(Any).returns(());
         manager.mock_send_with_retry(Any).calls_real_impl();
-        mock_wd_clear().returns(());
-        mock_clock_time().returns(10);
-        mock_clock_time_exceed(10, 100 * 1000).returns(false);
 
         block_on(manager.send_with_retry(&msg));
 
@@ -689,7 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time, clock_time_exceed, wd_clear)]
     fn test_send_with_retry_retries_until_ack_is_received() {
         let mut manager = UartManager::default();
         manager.ack_counter = 1;
@@ -712,19 +725,63 @@ mod tests {
             }
         });
         manager.mock_send_with_retry(Any).calls_real_impl();
-        mock_wd_clear().returns(());
 
-        // First check should continue waiting, second indicates timeout and then we mark the ack.
-        let exceed_calls = AtomicU8::new(0);
-        mock_clock_time().returns(10);
-        mock_clock_time_exceed(Any, Any).returns_with(move |_, _| {
-            let count = exceed_calls.fetch_add(1, Ordering::SeqCst);
-            count >= 1
-        });
-
+        // The first wait finds no ack (host mode: `try_take` -> Err) and
+        // retransmits; the second send marks the ack, so the loop exits.
         block_on(manager.send_with_retry(&msg));
 
         manager.mock_driver_send_async(Any).assert_called(2);
+    }
+
+    /// Tests that an incoming ack frame wakes a waiter parked on `ack_signal`.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create a UartManager and pin `ack_signal.wait()`
+    /// 2. Poll once with a noop waker: must be `Pending`
+    /// 3. Feed an ack frame (`data[1] == 0xff`) through `ack_msg`
+    /// 4. Poll again: must be `Ready` with the acked counter
+    #[test]
+    fn test_ack_signal_wakes_waiter_after_ack_msg() {
+        let mut manager = UartManager::default();
+        let mut manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
+        let future = manager.ack_signal.wait();
+        futures::pin_mut!(future);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(
+            matches!(future.as_mut().poll(&mut cx), Poll::Pending),
+            "ack_signal should start unsignalled"
+        );
+
+        let expected = 3u8;
+        let mut ack = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+        ack.data[0] = expected;
+        ack.data[1] = u8::from(UartMsg::Ack);
+        let sno = Vec::from_slice(&[0u8, 0, 0]).unwrap();
+
+        // SAFETY: the pinned `ack_signal.wait()` future is the only accessor of
+        // `manager`, so the `&mut self` borrow is logically transferred to
+        // `ack_msg` for the duration of this call.
+        block_on(unsafe { (*(*manager_ptr)).ack_msg(&ack, &sno) });
+
+        let poll_result = future.as_mut().poll(&mut cx);
+        assert!(
+            matches!(poll_result, Poll::Ready(_)),
+            "future should be ready after the ack frame is handled"
+        );
+        let Poll::Ready(result) = poll_result else {
+            unreachable!()
+        };
+        assert_eq!(result, expected);
+        // SAFETY: the pinned future is the only accessor of `manager`, so this
+        // raw-pointer read cannot alias a live `&mut`.
+        assert_eq!(unsafe { (*(*manager_ptr)).last_ack }, expected);
     }
 
     #[test]
@@ -808,7 +865,7 @@ mod tests {
         };
 
         // Fill the channel to capacity
-        let capacity = 12; // This matches the capacity in UartManager (Deque<UartData, 6>)
+        let capacity = 12; // This matches the capacity in UartManager (Channel<CsRawMutex, UartData, 12>)
         for _ in 0..capacity {
             let result = manager.send_message(&msg);
             assert!(result.is_ok());
@@ -1219,7 +1276,7 @@ mod tests {
             assert_eq!(app().uart_manager.send_channel.len(), 1);
 
             // Get the sent message
-            let sent_msg = app().uart_manager.send_channel.front().unwrap();
+            let sent_msg = app().uart_manager.send_channel.try_receive().unwrap();
 
             // Verify message format
             assert_eq!(sent_msg.data[2], u8::from(UartMsg::MeshMessage));
@@ -1307,12 +1364,12 @@ mod tests {
             assert_eq!(app().uart_manager.send_channel.len(), 2);
 
             // Check first message by popping and checking
-            let msg1 = app().uart_manager.send_channel.pop_front().unwrap();
+            let msg1 = app().uart_manager.send_channel.try_receive().unwrap();
             assert_eq!(msg1.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg1.data[10], 0x02); // op code
 
             // Check second message
-            let msg2 = app().uart_manager.send_channel.pop_front().unwrap();
+            let msg2 = app().uart_manager.send_channel.try_receive().unwrap();
             assert_eq!(msg2.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg2.data[10], 0x03); // op code
         });

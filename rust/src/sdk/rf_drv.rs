@@ -643,9 +643,17 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
                 OLDEST_POS.store(0, Ordering::Relaxed);
             }
 
-            // Remove the oldest group
+            // Remove the oldest group. Copy the id out before dropping the
+            // guard: `remove_group` re-locks `GROUP_ADDRESS` through
+            // `clear_specific_group_from_memory`, so holding the guard across
+            // the call would be the same-mutex nested lock that the test-mode
+            // re-entrancy assert rejects.
             let oldest_index = OLDEST_POS.load(Ordering::Relaxed);
-            let _ = remove_group(GROUP_ADDRESS.lock()[oldest_index]);
+            let oldest_group = {
+                let groups = GROUP_ADDRESS.lock();
+                groups[oldest_index]
+            };
+            let _ = remove_group(oldest_group);
 
             // Add new group in its place
             GROUP_ADDRESS.lock()[oldest_index] = group_id;

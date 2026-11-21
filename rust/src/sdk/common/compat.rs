@@ -6,12 +6,11 @@ use core::{fmt, slice};
 
 use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
-use crate::embassy::yield_now::yield_now;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
 use crate::sdk::light::LGT_PANIC_MSG;
 use crate::sdk::mcu::analog::analog_write;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
 use crate::sdk::mcu::register::write_reg8;
 use crate::sdk::pm::light_sw_reboot;
@@ -63,7 +62,11 @@ where
     critical_section::with(|_| {
         let mut stream = get_uart_stream();
         let _ = f(&mut stream);
-        stream.send(false, doasync);
+        if doasync {
+            stream.send_async(false);
+        } else {
+            stream.send_blocking(false);
+        }
     });
 }
 
@@ -140,6 +143,43 @@ pub struct UartStream<const size: usize> {
     pub out_buffer: [u8; size],
 }
 
+/// Builds one chunked UART frame from the head of `buffer`.
+///
+/// Deliberately uses raw pointer copies: a bounds check here would put
+/// `panic_fmt` on the panic handler's call graph (the same reason `as_bytes`
+/// uses `from_raw_parts`), and the static stack gate rejects the resulting
+/// cycle. `copy_from_slice` is not usable for the same reason: its length
+/// mismatch check carries a panic edge.
+#[inline]
+fn build_uart_frame(buffer: &[u8], is_panic: bool) -> UartData {
+    // Use the correct payload size to avoid overwriting CRC
+    let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
+
+    let mut msg = UartData {
+        len: UART_DATA_LEN as u32,
+        data: [0; UART_DATA_LEN],
+    };
+
+    msg.data[2] = if is_panic {
+        UartMsg::PanicMessage
+    } else {
+        UartMsg::PrintMessage
+    } as u8;
+
+    // SAFETY: `len <= UART_PAYLOAD_MAX_SIZE` so `3..3 + len` is inside the
+    // 44-byte `data` array, and `len <= buffer.len()` so the source range is
+    // in bounds. `copy_nonoverlapping` cannot panic.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            buffer.as_ptr(),
+            msg.data.as_mut_ptr().add(UART_PAYLOAD_OFFSET),
+            len,
+        );
+    }
+
+    msg
+}
+
 impl<const size: usize> UartStream<size> {
     pub const fn new() -> UartStream<size> {
         UartStream::<size> {
@@ -157,48 +197,61 @@ impl<const size: usize> UartStream<size> {
 
     /// The bytes written so far.
     ///
-    /// Uses `from_raw_parts` (as `send` already does) because an upstream bounds
-    /// check would put `slice_end_index_len_fail` on the panic handler's call
-    /// graph, which the static stack gate rejects.
+    /// Uses `from_raw_parts` (as the send sinks already do) because an upstream
+    /// bounds check would put `slice_end_index_len_fail` on the panic handler's
+    /// call graph, which the static stack gate rejects.
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) }
     }
 
-    pub fn send(&self, is_panic: bool, doasync: bool) {
+    /// Queues the stream on the async UART channel, one chunk at a time.
+    ///
+    /// Every log line is mirrored into the SWire ring as it is sent. This sink
+    /// is the one that can reach the channel's `try_send`, so it must never be
+    /// called from the panic handler.
+    pub fn send_async(&self, is_panic: bool) {
         let mut buffer = self.as_bytes();
 
-        // Every log line is mirrored into the SWire ring as it is sent, so a
-        // panic's text is readable before the sector is written and rebooted.
         #[cfg(feature = "rtt")]
         crate::diagnostics::rtt::rtt_write_bytes(buffer);
 
         while !buffer.is_empty() {
-            // Use the correct payload size to avoid overwriting CRC
             let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
 
-            let mut msg = UartData {
-                len: UART_DATA_LEN as u32,
-                data: [0; UART_DATA_LEN],
-            };
-
-            msg.data[2] = if is_panic {
-                UartMsg::PanicMessage
-            } else {
-                UartMsg::PrintMessage
-            } as u8;
-            for i in 0..len {
-                msg.data[UART_PAYLOAD_OFFSET + i] = buffer[i];
-            }
-
-            if doasync {
-                app().uart_manager.send_message(&msg);
-            } else {
-                app().uart_manager.driver.send(&msg);
-            }
+            app()
+                .uart_manager
+                .send_message(&build_uart_frame(buffer, is_panic));
 
             buffer = unsafe {
                 slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len)
-            }
+            };
+        }
+    }
+
+    /// Hands the stream straight to the UART driver, one chunk at a time.
+    ///
+    /// This is the panic-path sink. It must never touch the async channel: a
+    /// panic while sending would re-enter `panic_fmt` through `try_send`, a
+    /// call-graph cycle the static stack gate rejects.
+    pub fn send_blocking(&self, is_panic: bool) {
+        let mut buffer = self.as_bytes();
+
+        // Panic text is mirrored too, so it is readable in the ring before the
+        // panic sector is written and the device reboots.
+        #[cfg(feature = "rtt")]
+        crate::diagnostics::rtt::rtt_write_bytes(buffer);
+
+        while !buffer.is_empty() {
+            let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
+
+            app()
+                .uart_manager
+                .driver
+                .send(&build_uart_frame(buffer, is_panic));
+
+            buffer = unsafe {
+                slice::from_raw_parts(buffer.as_ptr().offset(len as isize), buffer.len() - len)
+            };
         }
     }
 }
@@ -232,13 +285,6 @@ fn write_panic_info<const size: usize>(info: &UartStream<size>) {
     flash_write_page(panic_addr, 1, addr_of!(flag));
 }
 
-async fn delay(ms: u32) {
-    let t_timeout = clock_time();
-    while !clock_time_exceed(t_timeout, ms * 1000) {
-        yield_now().await;
-    }
-}
-
 pub async fn check_panic_info() {
     let panic_addr = FLASH_ADR_PANIC_INFO;
 
@@ -263,7 +309,8 @@ pub async fn check_panic_info() {
     let mut buffer = unsafe { slice::from_raw_parts(message.as_ptr(), length as usize) };
     while !buffer.is_empty() {
         // Wait a moment to send the next message
-        delay(100).await;
+        #[cfg(not(test))]
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
 
         let len = min(10, buffer.len());
 
@@ -281,7 +328,8 @@ pub async fn check_panic_info() {
     }
 
     // Wait a moment to send the next message
-    delay(100).await;
+    #[cfg(not(test))]
+    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
 
     // Send an empty panic message to indicate the end of the message
     let mut data = [0u8; 13];
@@ -311,7 +359,7 @@ pub fn panic(info: &PanicInfo) -> ! {
 
         let _ = write!(stream, "{}", info);
 
-        stream.send(true, false);
+        stream.send_blocking(true);
         write_panic_info(&stream);
 
         light_sw_reboot();
@@ -324,19 +372,16 @@ pub fn panic(info: &PanicInfo) -> ! {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::embassy::yield_now::mock_yield_now;
     use crate::sdk::drivers::flash::{
         mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
     use crate::sdk::drivers::uart::UartDriver;
     use crate::sdk::mcu::analog::*;
     use crate::sdk::mcu::clock::*;
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
     use crate::sdk::mcu::register::*;
     use crate::uart_manager::UartManager;
     use crate::{app_mocker, mock_app_mocker, App};
     use mry::{send_wrapper::SendWrapper, Any};
-    use std::sync::atomic::{AtomicU8, Ordering};
 
     #[test]
     fn test_load_tbl_cmd_set_empty() {
@@ -523,8 +568,9 @@ mod tests {
         app.uart_manager = uart_manager;
         mock_app_mocker().returns(&mut app);
 
-        // Call send with doasync = false (synchronous) to cover line 172
-        stream.send(false, false);
+        // Call the blocking sink with doasync = false (synchronous) to cover the
+        // driver path
+        stream.send_blocking(false);
 
         // Verify that the synchronous send was called
         app.uart_manager.driver.mock_send(Any).assert_called(1);
@@ -552,8 +598,9 @@ mod tests {
         app.uart_manager = uart_manager;
         mock_app_mocker().returns(&mut app);
 
-        // Call send with is_panic = true and doasync = false (synchronous panic mode) to cover line 170
-        stream.send(true, false);
+        // Call the blocking panic sink with is_panic = true to cover the panic
+        // message type
+        stream.send_blocking(true);
 
         // Verify that the synchronous send was called
         app.uart_manager.driver.mock_send(Any).assert_called(1);
@@ -610,14 +657,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        flash_read_page,
-        flash_erase_sector,
-        app_mocker,
-        clock_time,
-        clock_time_exceed,
-        yield_now
-    )]
+    #[mry::lock(flash_read_page, flash_erase_sector, app_mocker)]
     fn test_check_panic_info_with_valid_data() {
         let test_message = b"Test panic message";
         let message_len = test_message.len() as u16;
@@ -651,11 +691,6 @@ mod tests {
             .returns([1, 2, 3]);
         mock_app_mocker().returns(&mut app);
 
-        // Mock delay function components
-        mock_clock_time().returns(1000); // Initial time
-        mock_clock_time_exceed(1000, 100 * 1000).returns(true); // Make delays complete immediately
-        mock_yield_now().returns(());
-
         // Mock final erase
         mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
 
@@ -673,40 +708,5 @@ mod tests {
         app.mesh_manager
             .mock_send_mesh_message(Any, Any, Any, Any)
             .assert_called(3);
-    }
-
-    #[test]
-    #[mry::lock(clock_time, clock_time_exceed, yield_now)]
-    fn test_delay_function_waits_until_timeout() {
-        let start_time = 1000;
-        let delay_ms = 50; // 50ms delay = 50,000 microseconds
-        let expected_timeout = start_time + delay_ms * 1000;
-
-        // Mock initial clock time
-        mock_clock_time().returns(start_time);
-
-        // Track how many times clock_time_exceed is called
-        let exceed_calls = AtomicU8::new(0);
-
-        // Mock clock_time_exceed to return false for first 3 calls, then true
-        mock_clock_time_exceed(Any, Any).returns_with(move |_, _| {
-            let count = exceed_calls.fetch_add(1, Ordering::SeqCst);
-            count >= 3 // Return true on the 4th call (after 3 yields)
-        });
-
-        // Mock yield_now to do nothing
-        mock_yield_now().returns(());
-
-        // Run the delay function
-        futures::executor::block_on(delay(delay_ms));
-
-        // Verify clock_time was called once to get start time
-        mock_clock_time().assert_called(1);
-
-        // Verify clock_time_exceed was called 4 times (3 false + 1 true)
-        mock_clock_time_exceed(Any, Any).assert_called(4);
-
-        // Verify yield_now was called 3 times (once for each loop iteration before timeout)
-        mock_yield_now().assert_called(3);
     }
 }

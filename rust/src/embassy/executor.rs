@@ -1,5 +1,7 @@
 use core::marker::PhantomData;
 use core::ptr;
+#[cfg(feature = "rtt")]
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::{raw, Spawner};
 
@@ -18,6 +20,24 @@ pub struct Executor {
 
 /// Set by [`__pender`] from any context (task or interrupt) when the executor has work.
 static WORK_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Host-tool contract: `probe-tlsr read --elf ... EXECUTOR_POLLS` resolves this
+/// exact symbol name, so it may not be renamed.
+///
+/// Counts `Executor::run` loop iterations: a busy-polling executor grows this
+/// without bound while `EXECUTOR_STALLS` stays flat.
+#[cfg(feature = "rtt")]
+#[no_mangle]
+pub static EXECUTOR_POLLS: AtomicU32 = AtomicU32::new(0);
+
+/// Host-tool contract: `probe-tlsr read --elf ... EXECUTOR_STALLS` resolves this
+/// exact symbol name, so it may not be renamed.
+///
+/// Counts entries into the `0x6f = 0x80` CPU idle stall, i.e. iterations where
+/// the executor actually parked instead of immediately re-polling.
+#[cfg(feature = "rtt")]
+#[no_mangle]
+pub static EXECUTOR_STALLS: AtomicU32 = AtomicU32::new(0);
 
 /// Tells the executor that a task has been woken and needs polling.
 ///
@@ -61,6 +81,13 @@ impl Executor {
         init(self.inner.spawner());
 
         loop {
+            // TC32 has no read-modify-write atomics, so count with load + store.
+            #[cfg(feature = "rtt")]
+            EXECUTOR_POLLS.store(
+                EXECUTOR_POLLS.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
+
             WORK_PENDING.store(false, Ordering::Relaxed);
             unsafe {
                 self.inner.poll();
@@ -75,6 +102,12 @@ impl Executor {
                     // `reg_irq_mask` keeps the permanently-latched USB 250 us interrupt
                     // out of the wake mask because that mask never enables it.
                     write_reg_mcu_wakeup_mask(read_reg_irq_mask() & 0x00ff_ffff);
+                    // Only the path that actually parks counts as a stall.
+                    #[cfg(feature = "rtt")]
+                    EXECUTOR_STALLS.store(
+                        EXECUTOR_STALLS.load(Ordering::Relaxed).wrapping_add(1),
+                        Ordering::Relaxed,
+                    );
                     write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep.bits()); // 0x80
                 }
                 irq_restore(prev);

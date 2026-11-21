@@ -154,23 +154,24 @@ __reset:
     /* 1. Install both mode stacks. The IRQ bank must be valid before
      *    interrupts can be taken. `mcsr` selects the mode; `mov sp` then
      *    writes that mode's banked SP. */
-    ldr r0, .Lcpsr_irq_mode         /* CPSR: IRQ mode, IRQs masked */
+    movs r0, #0x12                  /* CPSR: IRQ mode, IRQs masked */
     .short 0x6bc0                   /* mcsr r0 */
     ldr r0, .Lirq_stack_top         /* irq_stk + IRQ_STK_SIZE */
     mov sp, r0
 
-    ldr r0, .Lcpsr_svc_mode         /* CPSR: SVC mode, IRQs masked */
+    movs r0, #0x13                  /* CPSR: SVC mode, IRQs masked */
     .short 0x6bc0                   /* mcsr r0 */
-    ldr r0, .Lmain_stack_top        /* 0x80c000 */
+    ldr r0, .Lram_top               /* 0x80c000 */
     mov sp, r0
 
     /* 2. Paint the free SRAM the main stack grows into. The deepest
      *    non-0xffffffff word is the stack high-water mark read by
      *    docs/swire.md and the HIL checks. This must happen before the core
      *    uses its stack: the window ends at the stack top. */
-    ldr r0, .Lstack_fill_pattern
+    movs r0, #0
+    mvns r0, r0                     /* 0xffffffff */
     ldr r1, .Lstack_fill_start
-    ldr r2, .Lstack_fill_end
+    ldr r2, .Lram_top
 .Lfill_free_sram:
     cmp r1, r2
     bge .Lfill_free_sram_done
@@ -207,20 +208,12 @@ __reset:
     /* Stub literal pool: one word per constant, each with its own label so
      * the code never depends on assembler `label + n` syntax. */
     .balign 4
-.Lcpsr_irq_mode:
-    .word 0x12                      /* CPSR: IRQ mode */
-.Lcpsr_svc_mode:
-    .word 0x13                      /* CPSR: SVC mode */
 .Lirq_stack_top:
     .word (irq_stk + IRQ_STK_SIZE)
-.Lmain_stack_top:
+.Lram_top:
     .word (__RAM_START_ADDR + 16 * 1024)
-.Lstack_fill_pattern:
-    .word 0xffffffff
 .Lstack_fill_start:
     .word _end_bss_
-.Lstack_fill_end:
-    .word (__RAM_START_ADDR + 16 * 1024)
 .Lic_tag_register:
     .word 0x80060c
 .Lic_tag_start:
@@ -233,42 +226,36 @@ __reset:
     /* =====================================================================
      * IRQ entry and exit.
      *
-     * Thumb-1 `push` encodes `r0`-`r7` plus `lr`, and only low registers, so
-     * the high registers are staged through low ones and pushed as a second
-     * group. The frame on the IRQ stack is:
+     * `irq_handler` is an ordinary AAPCS function, so it and everything it
+     * calls already preserve the callee-saved registers r4-r11. Only the
+     * caller-saved set has to survive the call: r0-r3, r12, lr, plus the
+     * saved status. The frame on the IRQ stack is:
      *
-     *     r0-r7              32 bytes
-     *     lr                  4 bytes   (highest address of the first push)
-     *     spsr + r8-r12      24 bytes
-     *                        --------
-     *                        60 bytes   (`irq_prelude_bytes` in
-     *                                    sdk/stack_analysis.py)
+     *     r0-r3 + lr         20 bytes
+     *     r12                 4 bytes
+     *     spsr                4 bytes
+     *                       --------
+     *                       28 bytes   (`IRQ_PREAMBLE_BYTES` in
+     *                                   sdk/stack_analysis.py)
      *
      * `reti` pops PC and restores CPSR from SPSR in one instruction, which a
-     * plain `pop` into PC cannot do. The Rust handler is an ordinary AAPCS
-     * function; every register it may clobber is restored from this frame.
+     * plain `pop` into PC cannot do.
      * ===================================================================== */
     .align 4
     .global __irq
     .type __irq,%function
 __irq:
-    push {{r0-r7, lr}}              /* save low registers + return address */
+    push {{r0-r3, lr}}              /* caller-saved regs + return address */
+    mov r0, r12                     /* stage r12 (r0 is already saved) */
+    push {{r0}}                     /* save r12 */
     .short 0x6bd8                   /* mrss r0: read saved status (SPSR) */
-    mov r1, r8                      /* stage high registers in low ones */
-    mov r2, r9
-    mov r3, r10
-    mov r4, r11
-    mov r5, r12
-    push {{r0-r5}}                  /* save SPSR + r8-r12 */
+    push {{r0}}                     /* save SPSR */
     bl irq_handler                  /* run the Rust handler */
-    pop {{r0-r5}}                   /* restore SPSR + r8-r12 */
-    mov r8, r1                      /* unstage the high registers */
-    mov r9, r2
-    mov r10, r3
-    mov r11, r4
-    mov r12, r5
+    pop {{r0}}                      /* restore SPSR */
     .short 0x6bd0                   /* mssr r0: write saved status (SPSR) */
-    pop {{r0-r7}}                   /* restore low registers */
+    pop {{r0}}                      /* restore r12 */
+    mov r12, r0
+    pop {{r0-r3}}                   /* restore caller-saved regs */
     .short 0x6900                   /* reti {{pc}}: pop PC, restore CPSR */
 
     /* Pad `.vectors` to 16 bytes. */

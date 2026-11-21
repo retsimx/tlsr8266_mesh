@@ -41,9 +41,10 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
-# __irq saves r14, r0-r7, then r0-r5 before calling irq_handler on irq_stk.
-# 1 + 8 + 6 registers * 4 bytes = 60 bytes.
-IRQ_PREAMBLE_BYTES = 60
+# __irq saves r0-r3 + lr, then r12 and the saved status, before calling
+# irq_handler on irq_stk. 5 + 1 + 1 registers * 4 bytes = 28 bytes. r4-r11 are
+# callee-saved, so the AAPCS handler preserves them itself.
+IRQ_PREAMBLE_BYTES = 28
 
 HEADER_RE = re.compile(r"^([0-9a-f]+) <(.*)>:\s*$")
 # Accept both llvm-objdump's standard ARM Thumb spellings and the legacy TC32

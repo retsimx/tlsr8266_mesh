@@ -19,7 +19,7 @@ use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
-use crate::uart_manager::UartManager;
+use crate::uart_manager::{uart_receiver, uart_sender, UartManager};
 use crate::version::BUILD_VERSION;
 use crate::{app, uprintln};
 use heapless::Vec;
@@ -95,7 +95,7 @@ impl App {
             app().mesh_manager.send_mesh_msg_task().await;
         }
 
-        spawner.spawn(mesh_packet_sender()).unwrap();
+        spawner.spawn(mesh_packet_sender().unwrap());
 
         // Start the mesh packet receive handler
         #[embassy_executor::task]
@@ -103,7 +103,13 @@ impl App {
             app().mesh_manager.rcv_mesh_msg_task().await;
         }
 
-        spawner.spawn(mesh_packet_rcv()).unwrap();
+        spawner.spawn(mesh_packet_rcv().unwrap());
+
+        // Start the UART tasks. `uart_sender` parks on `started_signal` until the
+        // first valid host frame arrives, so a headless light never retries DMA TX
+        // for the boot banners.
+        spawner.spawn(uart_receiver().unwrap());
+        spawner.spawn(uart_sender().unwrap());
 
         // Ready to go, enable interrupts and run the main loop
         irq_enable();
@@ -115,7 +121,7 @@ impl App {
             app().light_manager.run(spawner).await;
         }
 
-        spawner.spawn(light_manager(spawner)).unwrap();
+        spawner.spawn(light_manager(spawner).unwrap());
 
         // Send a message to the network saying that we just booted up
         let mut data = [0_u8; 13];
@@ -131,7 +137,7 @@ impl App {
             check_panic_info().await;
         }
 
-        spawner.spawn(panic_check(spawner)).unwrap();
+        spawner.spawn(panic_check(spawner).unwrap());
 
         loop {
             // Prove to a host that the loop is still turning (`fetch_add` does

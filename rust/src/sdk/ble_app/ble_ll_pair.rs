@@ -394,8 +394,11 @@ pub fn pair_save_key() {
     // Make a copy of the password before encoding
     pass = pair_state.pair_pass;
 
-    // Encode password before saving to flash for security
-    pass = encode_password(&pass);
+    // Encode password before saving to flash for security.
+    // Copy the key out of the mutex first so the lock is released before
+    // encode_password runs (its AES call masks interrupts).
+    let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+    pass = encode_password(&key, &pass);
 
     // Save encoded password
     pair_flash_save_config(OFFSET_PASSWORD, &pass);
@@ -1996,7 +1999,7 @@ mod tests {
         setup_save_key_state(true, true, test_nn, test_pass, test_ltk);
 
         // Mock expectations
-        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_encode_password(Any, test_pass.to_vec()).returns(encoded_pass);
         mock_pair_flash_save_config(Any, Any).returns(()); // General mock for all calls
         mock_pair_update_key().returns(());
 
@@ -2005,7 +2008,7 @@ mod tests {
 
         // Assert
         // Verify encode_password call
-        mock_encode_password(test_pass.to_vec()).assert_called(1);
+        mock_encode_password(Any, test_pass.to_vec()).assert_called(1);
 
         // Verify pair_flash_save_config calls
         let mut expected_header = [0u8; 16];
@@ -2037,7 +2040,7 @@ mod tests {
         setup_save_key_state(true, false, test_nn, test_pass, test_ltk);
 
         // Mock expectations
-        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_encode_password(Any, test_pass.to_vec()).returns(encoded_pass);
         mock_pair_flash_save_config(Any, Any).returns(());
         mock_pair_update_key().returns(());
 
@@ -2045,7 +2048,7 @@ mod tests {
         pair_save_key();
 
         // Assert
-        mock_encode_password(test_pass.to_vec()).assert_called(1);
+        mock_encode_password(Any, test_pass.to_vec()).assert_called(1);
 
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
@@ -2075,7 +2078,7 @@ mod tests {
         setup_save_key_state(false, true, test_nn, test_pass, test_ltk); // MESH_DEVICE_ADDRESS_VALIDATION_PENDING doesn't matter if mesh is disabled
 
         // Mock expectations
-        mock_encode_password(test_pass.to_vec()).returns(encoded_pass);
+        mock_encode_password(Any, test_pass.to_vec()).returns(encoded_pass);
         mock_pair_flash_save_config(Any, Any).returns(());
         mock_pair_update_key().returns(());
 
@@ -2083,7 +2086,7 @@ mod tests {
         pair_save_key();
 
         // Assert
-        mock_encode_password(test_pass.to_vec()).assert_called(1);
+        mock_encode_password(Any, test_pass.to_vec()).assert_called(1);
 
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;

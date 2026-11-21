@@ -10,7 +10,7 @@
 //! - `advertisement`: BLE advertisement and scan response handling
 //! - `packet_handling`: RF packet reception, validation, and processing
 //! - `timing`: BLE timing, synchronization, and channel hopping
-//! - `dispatcher`: Main interrupt dispatcher and context tracking
+//! - `dispatcher`: Pure BLE/RF interrupt helpers (RF TX/RX, system timer state)
 //! - `tests`: Comprehensive test suite for all functionality
 //!
 //! ## Key Responsibilities:
@@ -32,8 +32,8 @@ pub mod mesh;
 pub mod packet_handling;
 pub mod timing;
 
-// Re-export the main interrupt handler and key functions for compatibility
-pub use dispatcher::{irq_handler, IrqTracker};
+// Re-export the BLE/RF interrupt helpers used by the interrupt composition root
+pub use dispatcher::{handle_ble_system_timer_irq, handle_rf_irq};
 pub use mesh::mesh_node_report_status;
 
 // Re-export state management functions used by other modules

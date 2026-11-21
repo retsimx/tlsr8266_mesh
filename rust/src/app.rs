@@ -4,13 +4,14 @@ use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 
 use crate::config::MESH_PWD_ENCODE_SK;
-use crate::diagnostics::{boot_init, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP};
+use crate::diagnostics::{
+    boot_init, check_panic_info, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP,
+};
 use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
-use crate::sdk::common::compat::check_panic_info;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_init, is_16mhz_xtal};

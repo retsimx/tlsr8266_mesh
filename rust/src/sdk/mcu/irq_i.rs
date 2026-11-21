@@ -12,6 +12,32 @@
 //!
 
 use crate::sdk::mcu::register::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
+use critical_section::RawRestoreState;
+
+/// The crate-wide `critical_section` implementation.
+///
+/// Interrupt masking is owned by this module, so the `critical_section` crate's
+/// single global impl lives here: `acquire` masks interrupts and returns the
+/// previous enable state, `release` restores that saved state. Under host tests
+/// (`cfg!(test)`) no hardware is touched and the state is always `0`.
+struct TlsrCriticalSection;
+critical_section::set_impl!(TlsrCriticalSection);
+
+#[coverage(off)]
+unsafe impl critical_section::Impl for TlsrCriticalSection {
+    unsafe fn acquire() -> RawRestoreState {
+        if !cfg!(test) {
+            return irq_disable();
+        };
+        0
+    }
+
+    unsafe fn release(state: RawRestoreState) {
+        if !cfg!(test) {
+            irq_restore(state)
+        }
+    }
+}
 
 /// Default interrupt configuration value used during initialization.
 ///

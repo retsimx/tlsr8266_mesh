@@ -858,11 +858,14 @@ LLVM fork).
 
 ### 6.4 IRQ Dispatch Flow (`irq_handler`)
 
-`irq_handler()` is placed in `.ram_code`. Execution sequence:
+`irq_handler()` is placed in `.ram_code`. `irq_handler` itself lives in
+`rust/src/irq.rs` (the composition root) and delegates the RF path to
+`sdk/ble_app/irq::handle_rf_irq` and the BLE system-timer path to
+`sdk/ble_app/irq::handle_ble_system_timer_irq`; both are `#[inline(always)]`, so
+the RF code stays inlined into `.ram_code`. Execution sequence:
 
 ```
 irq_handler()
-├── Create IrqTracker (sets IS_IRQ_MODE = true; auto-clears on drop/return)
 ├── Read reg_rf_irq_status (0xF20)
 ├── If IRQ_TX set:
 │   └── handle_rf_transmission_complete()

@@ -394,9 +394,9 @@ impl UartDriver {
     ///   purpose: logging from the UART TX path would itself use the UART.
     /// * **`tx_lock` serialises only the two async senders**
     ///   (`uart_sender`/`uart_receiver`). The synchronous [`Self::send`] path —
-    ///   used by `uprintln_fast!` and the panic path — does not take it, so it
-    ///   can re-point DMA1 during an async transfer. The lock makes the async
-    ///   pair mutually exclusive; it is not a whole-driver lock.
+    ///   used by `send_blocking` for plain prints and the panic path — does not
+    ///   take it, so it can re-point DMA1 during an async transfer. The lock
+    ///   makes the async pair mutually exclusive; it is not a whole-driver lock.
     ///
     /// # Parameters
     ///

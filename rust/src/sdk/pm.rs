@@ -1,8 +1,8 @@
 use crate::common::REGA_LIGHT_OFF;
 use crate::diagnostics::{REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT, SENTINEL_PANIC};
-use crate::sdk::common::compat::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
+use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
 use crate::state::*;
@@ -367,8 +367,8 @@ pub fn light_sw_reboot() {
 mod tests {
     use super::*;
     use crate::diagnostics::SENTINEL_RUNNING;
-    use crate::sdk::common::compat::mock_load_tbl_cmd_set;
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
+    use crate::sdk::mcu::cmd_table::mock_load_tbl_cmd_set;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::mcu::register::mock_write_reg_pwdn_ctrl;
     use crate::{app_mocker, mock_app_mocker, App};

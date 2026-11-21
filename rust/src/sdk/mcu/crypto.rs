@@ -1,7 +1,6 @@
 use crate::sdk::mcu::register::{
     read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key,
 };
-use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
 use core::cmp::min;
 use core::ptr::addr_of;
 
@@ -145,44 +144,43 @@ pub fn aes_att_decryption(key: &[u8; 16], source: &[u8; 16]) -> [u8; 16] {
     result
 }
 
-/// Encodes (encrypts) a 16-byte password using a predefined global key.
+/// Encodes (encrypts) a 16-byte password using a caller-supplied key.
 ///
-/// This function retrieves a specific, globally defined AES key (`PAIR_CONFIG_PWD_ENCODE_SK`)
-/// and uses it to encrypt the provided password data via `aes_att_encryption`.
-/// This is typically used for securing passwords during pairing or configuration processes.
+/// This function uses the provided AES key to encrypt the password data via
+/// `aes_att_encryption`. The caller owns the key: this module never reads global
+/// state, so the caller is responsible for copying the key out of any lock and
+/// releasing that lock before calling this function (the AES call masks
+/// interrupts inside a critical section).
 ///
 /// # Parameters
+/// * `key` - A 16-byte array representing the AES key.
 /// * `password` - A 16-byte array representing the plaintext password to be encoded.
 ///
 /// # Returns
 /// A 16-byte array containing the encrypted password.
 #[cfg_attr(test, mry::mry)]
-pub fn encode_password(password: &[u8; 16]) -> [u8; 16] {
-    // Lock the mutex protecting the global password encoding key.
-    // This ensures thread-safe access to the key.
-    let key_array: &[u8; 16] = &*PAIR_CONFIG_PWD_ENCODE_SK.lock();
-    // Perform AES ATT encryption using the retrieved global key and the provided password.
-    aes_att_encryption(key_array, password)
+pub fn encode_password(key: &[u8; 16], password: &[u8; 16]) -> [u8; 16] {
+    aes_att_encryption(key, password)
 }
 
-/// Decodes (decrypts) a 16-byte password using a predefined global key.
+/// Decodes (decrypts) a 16-byte password using a caller-supplied key.
 ///
-/// This function retrieves a specific, globally defined AES key (`PAIR_CONFIG_PWD_ENCODE_SK`)
-/// and uses it to decrypt the provided encoded password data via `aes_att_decryption`.
-/// This is the counterpart to `encode_password` and is used to recover the original
-/// password from its encrypted form.
+/// This function uses the provided AES key to decrypt the encoded password data
+/// via `aes_att_decryption`. This is the counterpart to `encode_password` and is
+/// used to recover the original password from its encrypted form. The caller owns
+/// the key: this module never reads global state, so copy the key out of any lock
+/// and release that lock before calling (the AES call masks interrupts inside a
+/// critical section).
 ///
 /// # Parameters
+/// * `key` - A 16-byte array representing the AES key.
 /// * `password` - A 16-byte array representing the encrypted password to be decoded.
 ///
 /// # Returns
 /// A 16-byte array containing the decrypted (plaintext) password.
 #[cfg_attr(test, mry::mry)]
-pub fn decode_password(password: &[u8; 16]) -> [u8; 16] {
-    // Lock the mutex protecting the global password encoding/decoding key.
-    let key_array: &[u8; 16] = &*PAIR_CONFIG_PWD_ENCODE_SK.lock();
-    // Perform AES ATT decryption using the retrieved global key and the provided encrypted password.
-    aes_att_decryption(key_array, password)
+pub fn decode_password(key: &[u8; 16], password: &[u8; 16]) -> [u8; 16] {
+    aes_att_decryption(key, password)
 }
 
 /// Decrypts a packet using the AES-128 algorithm with authenticated encryption (CCM-like mode).
@@ -453,7 +451,6 @@ mod tests {
         mock_read_reg_aes_ctrl, mock_read_reg_aes_data, mock_write_reg_aes_ctrl,
         mock_write_reg_aes_data, mock_write_reg_aes_key,
     };
-    use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
     use mry::{self, Any};
 
     #[test]
@@ -892,19 +889,19 @@ mod tests {
         // Arrange
         let password = [0xAAu8; 16];
         let encoded_password = [0xBBu8; 16];
-        // Get the actual key from the mutex for verification
-        let expected_key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+        // Test-local key: this module is a pure leaf HAL and reads no global state
+        let key = [0x42u8; 16];
 
         // Mock aes_att_encryption to return the expected encoded password
-        // when called with the correct key and password
-        mock_aes_att_encryption(&expected_key, &password).returns(encoded_password);
+        // when called with the supplied key and password
+        mock_aes_att_encryption(&key, &password).returns(encoded_password);
 
         // Act
-        let result = encode_password(&password);
+        let result = encode_password(&key, &password);
 
         // Assert
-        // Verify aes_att_encryption was called with the global key and the password
-        mock_aes_att_encryption(&expected_key, &password).assert_called(1);
+        // Verify aes_att_encryption was called with the supplied key and the password
+        mock_aes_att_encryption(&key, &password).assert_called(1);
         // Verify the result is what the mocked function returned
         assert_eq!(result, encoded_password);
     }
@@ -915,18 +912,18 @@ mod tests {
         // Arrange
         let encoded_password = [0xCCu8; 16];
         let decoded_password = [0xDDu8; 16];
-        // Get the actual key from the mutex for verification
-        let expected_key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+        // Test-local key: this module is a pure leaf HAL and reads no global state
+        let key = [0x43u8; 16];
 
         // Mock aes_att_decryption to return the expected decoded password
-        mock_aes_att_decryption(&expected_key, &encoded_password).returns(decoded_password);
+        mock_aes_att_decryption(&key, &encoded_password).returns(decoded_password);
 
         // Act
-        let result = decode_password(&encoded_password);
+        let result = decode_password(&key, &encoded_password);
 
         // Assert
-        // Verify aes_att_decryption was called with the global key and the encoded password
-        mock_aes_att_decryption(&expected_key, &encoded_password).assert_called(1);
+        // Verify aes_att_decryption was called with the supplied key and the encoded password
+        mock_aes_att_decryption(&key, &encoded_password).assert_called(1);
         // Verify the result is what the mocked function returned
         assert_eq!(result, decoded_password);
     }

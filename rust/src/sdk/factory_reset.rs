@@ -962,8 +962,11 @@ pub fn kick_out(par: KickoutReason) {
         let len = min(MESH_PWD.len(), buff.len());
         // Copy password bytes into the buffer
         buff[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-        // Encrypt the password before storing
-        buff = encode_password(&buff);
+        // Encrypt the password before storing.
+        // Copy the key out of the mutex first so the lock is released before
+        // encode_password runs (its AES call masks interrupts).
+        let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+        buff = encode_password(&key, &buff);
         // Write encrypted password to flash at pairing_addr + 32
         flash_write_page(pairing_addr + 32, 16, buff.as_mut_ptr());
 
@@ -1946,7 +1949,7 @@ mod tests {
         MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
 
         let encoded_password = [0x5Au8; 16];
-        mock_encode_password(mry::Any).returns(encoded_password);
+        mock_encode_password(mry::Any, mry::Any).returns(encoded_password);
 
         let mut expected_name = [0u8; 16];
         let name_bytes = OUT_OF_MESH.as_bytes();
@@ -1988,7 +1991,7 @@ mod tests {
         kick_out(KickoutReason::OutOfMesh);
 
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(4);
-        mock_encode_password(mry::Any).assert_called(1);
+        mock_encode_password(mry::Any, mry::Any).assert_called(1);
         assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
         app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
 

@@ -57,6 +57,13 @@ impl App {
     }
 
     pub fn init(&mut self) {
+        // Wire the SDK's callback seams to the application before any RF or pairing
+        // path can run, so neither slot is ever observed empty.
+        crate::sdk::app_att_light::set_ota_write_handler(crate::ota::rf_link_slave_data_ota);
+        crate::sdk::rf_drv::set_light_event_handler(
+            crate::main_light::rf_link_light_event_callback,
+        );
+
         // Copy the password in to the pair config
         PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()]
             .copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
@@ -155,5 +162,49 @@ impl App {
             // Clear any uart errors if they've occurred
             UartDriver::clear_error();
         }
+    }
+}
+
+#[cfg(test)]
+#[coverage(off)]
+mod tests {
+    /// `App::init()` is the composition root for the two SDK callback seams, but
+    /// it cannot be executed on the host: `rf_drv_init` and `user_init` are not
+    /// `mry`-mockable and both touch hardware registers, and the slots they fill
+    /// are private statics owned by `sdk::app_att_light` and `sdk::rf_drv`.
+    ///
+    /// What can be pinned here is the structural invariant that makes the wiring
+    /// safe: both registrations live in `App::init()`'s body and both precede
+    /// `rf_drv_init(true)`, so an accidental reorder or deletion fails this test.
+    /// That the slots are populated afterwards is proven on target by the HIL
+    /// acceptance run (boot, pairing LED flash, OTA).
+    #[test]
+    fn test_init_registers_both_sdk_handlers_before_rf_drv_init() {
+        let src = include_str!("app.rs");
+
+        let init_start = src
+            .find("pub fn init(&mut self)")
+            .expect("App::init must exist");
+        // Search only the method body: the tail of the file includes this test,
+        // whose own string literals would otherwise satisfy the needles below.
+        let init_tail = &src[init_start..];
+        let init_body = &init_tail[..init_tail
+            .find("\n    }\n")
+            .expect("App::init must be a well-formed method body")];
+
+        let ota = init_body
+            .find("set_ota_write_handler(crate::ota::rf_link_slave_data_ota)")
+            .expect("App::init must register the OTA write handler");
+        let light = init_body
+            .find("set_light_event_handler(")
+            .expect("App::init must register the light event handler");
+        let rf_drv = init_body
+            .find("rf_drv_init(true)")
+            .expect("App::init must initialise the RF driver");
+
+        assert!(
+            ota < rf_drv && light < rf_drv,
+            "both handler registrations must precede rf_drv_init(true)"
+        );
     }
 }

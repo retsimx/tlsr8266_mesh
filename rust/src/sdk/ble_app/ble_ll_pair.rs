@@ -2,7 +2,6 @@ use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 
 use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
-use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair;
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{
@@ -660,7 +659,7 @@ pub fn pair_proc() -> Option<Packet> {
 
             // Delete pairing data and notify application
             rf_link_delete_pair();
-            rf_link_light_event_callback(LGT_CMD_DEL_PAIR);
+            crate::sdk::rf_drv::emit_light_event(LGT_CMD_DEL_PAIR);
         }
 
         PairState::Completed => {
@@ -873,7 +872,7 @@ pub fn pair_write(data: &Packet) {
                     aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-                rf_link_light_event_callback(LGT_CMD_PAIR_OK);
+                crate::sdk::rf_drv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
             // Simple mode handling
@@ -897,7 +896,7 @@ pub fn pair_write(data: &Packet) {
                 pair_state.pair_ltk.copy_from_slice(&src[0..KEY_SIZE]);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-                rf_link_light_event_callback(LGT_CMD_PAIR_OK);
+                crate::sdk::rf_drv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
 
@@ -1004,7 +1003,6 @@ mod tests {
     use crate::common::{
         mock_pair_flash_clean, mock_pair_load_key, mock_pair_update_key, mock_save_pair_info,
     }; // Ensure mock_pair_load_key is imported
-    use crate::main_light::mock_rf_link_light_event_callback; // Added mock for callback
     use crate::sdk::ble_app::light_ll::pairing_management::mock_rf_link_delete_pair;
     use crate::sdk::mcu::crypto::{
         mock_aes_att_decryption, mock_aes_att_decryption_packet, mock_aes_att_encryption,
@@ -1014,6 +1012,7 @@ mod tests {
     use crate::sdk::packet_types::{
         MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
     }; // Added PacketAttReadRsp
+    use crate::sdk::rf_drv::{emit_light_event, mock_emit_light_event}; // Added mock for callback
     use core::mem::size_of;
     use mry::send_wrapper::SendWrapper;
     use mry::{self, Any}; // Added mock for delete pair
@@ -2617,12 +2616,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_link_delete_pair, rf_link_light_event_callback)]
+    #[mry::lock(rf_link_delete_pair, emit_light_event)]
     fn test_pair_proc_delete_pairing_mesh_disabled() {
         // Arrange
         setup_proc_state(PairState::DeletePairing, true, true, true, false, false); // Mesh disabled
         mock_rf_link_delete_pair().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_DEL_PAIR).returns(());
+        mock_emit_light_event(LGT_CMD_DEL_PAIR).returns(());
 
         // Act
         let result = pair_proc();
@@ -2631,7 +2630,7 @@ mod tests {
         assert!(result.is_some());
         let pkt = result.unwrap();
         mock_rf_link_delete_pair().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_DEL_PAIR).assert_called(1);
+        mock_emit_light_event(LGT_CMD_DEL_PAIR).assert_called(1);
 
         // Check packet header (minimal response)
         let l2cap_len = pkt.head().l2cap_len;
@@ -2653,12 +2652,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_link_delete_pair, rf_link_light_event_callback)]
+    #[mry::lock(rf_link_delete_pair, emit_light_event)]
     fn test_pair_proc_delete_pairing_mesh_enabled() {
         // Arrange
         setup_proc_state(PairState::DeletePairing, true, true, true, true, false); // Mesh enabled, MESH_DEVICE_ADDRESS_VALIDATION_PENDING initially false
         mock_rf_link_delete_pair().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_DEL_PAIR).returns(());
+        mock_emit_light_event(LGT_CMD_DEL_PAIR).returns(());
 
         // Act
         let result = pair_proc();
@@ -2667,7 +2666,7 @@ mod tests {
         assert!(result.is_some());
         let pkt = result.unwrap();
         mock_rf_link_delete_pair().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_DEL_PAIR).assert_called(1);
+        mock_emit_light_event(LGT_CMD_DEL_PAIR).assert_called(1);
 
         // Check packet header (minimal response)
         let l2cap_len = pkt.head().l2cap_len;
@@ -3255,7 +3254,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback, aes_att_decryption)]
+    #[mry::lock(pair_save_key, emit_light_event, aes_att_decryption)]
     fn test_pair_write_set_mesh_ltk_security_enabled() {
         // Arrange
         setup_proc_state(
@@ -3299,7 +3298,7 @@ mod tests {
 
         // Mock save key and callback
         mock_pair_save_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
+        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
 
         // Act
         pair_write(&pkt);
@@ -3314,7 +3313,7 @@ mod tests {
 
         // Verify callbacks
         mock_pair_save_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(1);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
     }
 
     #[test]
@@ -3375,7 +3374,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled() {
         // Arrange
         setup_proc_state(
@@ -3412,7 +3411,7 @@ mod tests {
 
         // Mock save key and callback
         mock_pair_save_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
+        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
 
         // Act
         pair_write(&pkt);
@@ -3427,7 +3426,7 @@ mod tests {
 
         // Verify callbacks
         mock_pair_save_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(1);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
     }
 
     #[test]
@@ -4140,7 +4139,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_flag_0x80() {
         // Arrange
         setup_proc_state(
@@ -4191,11 +4190,11 @@ mod tests {
 
         // Verify callbacks were NOT called for this path
         mock_pair_save_key().assert_called(0);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(0);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(0);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_flag_other_bits() {
         // Arrange
         setup_proc_state(
@@ -4234,7 +4233,7 @@ mod tests {
 
         // Mock save key
         mock_pair_save_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
+        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
 
         // Act
         pair_write(&pkt);
@@ -4251,11 +4250,11 @@ mod tests {
 
         // Verify normal path was called
         mock_pair_save_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(1);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_disabled() {
         // Arrange
         setup_proc_state(
@@ -4294,7 +4293,7 @@ mod tests {
 
         // Mock save key
         mock_pair_save_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
+        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
 
         // Act
         pair_write(&pkt);
@@ -4311,11 +4310,11 @@ mod tests {
 
         // Verify normal path was called
         mock_pair_save_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(1);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_packet_too_short() {
         // Arrange
         setup_proc_state(
@@ -4356,7 +4355,7 @@ mod tests {
 
         // Mock save key
         mock_pair_save_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).returns(());
+        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
 
         // Act
         pair_write(&pkt);
@@ -4373,7 +4372,7 @@ mod tests {
 
         // Verify normal path was called
         mock_pair_save_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_PAIR_OK).assert_called(1);
+        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
     }
 
     #[test]

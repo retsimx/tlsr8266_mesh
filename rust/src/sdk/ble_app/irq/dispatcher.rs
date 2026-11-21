@@ -15,7 +15,7 @@ use crate::sdk::mcu::register::*;
 use crate::state::*;
 
 use super::advertisement::handle_ble_advertisement_state;
-use super::connection::handle_ble_connected_state;
+use super::connection::{handle_ble_connected_state, BleConnectionEvent};
 use super::mesh::handle_mesh_listening_state;
 use super::packet_handling::{handle_rf_packet_reception, handle_rf_transmission_complete};
 use super::timing::configure_ble_receive_state;
@@ -65,20 +65,33 @@ pub fn handle_rf_irq() {
 /// frame. It inlines into `crate::irq::handle_system_interrupts`, which is
 /// `#[inline(never)]` and therefore stays in `.text` (only `irq_handler` itself
 /// is `.ram_code`) — the same placement the dispatch had before the move.
+///
+/// Returns the [`BleConnectionEvent`] reported by the connected-state handler so
+/// the interrupt composition root can own the `ota_manager` calls. Every other
+/// state reports [`BleConnectionEvent::None`].
 #[inline(always)]
 #[cfg_attr(test, mry::mry)]
-pub fn handle_ble_system_timer_irq() {
+pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
     // Clear the interrupt source
     write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits());
 
     // Get current BLE state and dispatch to appropriate handler
     let state = { *CURRENT_RF_STATE.lock() };
     match state {
-        RfOperationState::Advertising => handle_ble_advertisement_state(), // Advertisement state
-        RfOperationState::Connected => handle_ble_connected_state(),       // Connected bridge state
-        RfOperationState::Receiving => configure_ble_receive_state(),      // BLE receive state
-        RfOperationState::MeshListening => handle_mesh_listening_state(),  // Mesh listening state
-        RfOperationState::Idle => {}                                       // Idle state
+        RfOperationState::Advertising => {
+            handle_ble_advertisement_state(); // Advertisement state
+            BleConnectionEvent::None
+        }
+        RfOperationState::Connected => handle_ble_connected_state(), // Connected bridge state
+        RfOperationState::Receiving => {
+            configure_ble_receive_state(); // BLE receive state
+            BleConnectionEvent::None
+        }
+        RfOperationState::MeshListening => {
+            handle_mesh_listening_state(); // Mesh listening state
+            BleConnectionEvent::None
+        }
+        RfOperationState::Idle => BleConnectionEvent::None, // Idle state
     }
 }
 
@@ -175,7 +188,7 @@ mod tests {
     // ================================================================================
 
     /// Tests that the system timer source is cleared before dispatching, and that
-    /// the advertising state handler runs.
+    /// the advertising state handler runs and reports nothing to the composition root.
     #[test]
     #[mry::lock(write_reg_irq_src, handle_ble_advertisement_state)]
     fn test_handle_ble_system_timer_irq_clears_source_and_dispatches_advertising() {
@@ -185,13 +198,15 @@ mod tests {
         mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_advertisement_state().returns(());
 
-        handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq();
 
+        assert_eq!(event, BleConnectionEvent::None);
         mock_write_reg_irq_src(Any).assert_called(1);
         mock_handle_ble_advertisement_state().assert_called(1);
     }
 
-    /// Tests dispatch to the connected state handler.
+    /// Tests dispatch to the connected state handler and that its event is
+    /// propagated unchanged to the caller.
     #[test]
     #[mry::lock(write_reg_irq_src, handle_ble_connected_state)]
     fn test_handle_ble_system_timer_irq_dispatches_connected() {
@@ -199,14 +214,20 @@ mod tests {
         *CURRENT_RF_STATE.lock() = RfOperationState::Connected;
 
         mock_write_reg_irq_src(Any).returns(());
-        mock_handle_ble_connected_state().returns(());
+        mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaFinishCheckAndErrorReboot);
 
-        handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq();
 
+        assert_eq!(
+            event,
+            BleConnectionEvent::OtaFinishCheckAndErrorReboot,
+            "the Connected arm must propagate the connection event unchanged"
+        );
         mock_handle_ble_connected_state().assert_called(1);
     }
 
     /// Tests dispatch to the receiving and mesh-listening state handlers.
+    /// Neither of them reports anything to the composition root.
     #[test]
     #[mry::lock(
         write_reg_irq_src,
@@ -220,15 +241,18 @@ mod tests {
         mock_handle_mesh_listening_state().returns(());
 
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-        handle_ble_system_timer_irq();
+        let receiving_event = handle_ble_system_timer_irq();
         mock_configure_ble_receive_state().assert_called(1);
+        assert_eq!(receiving_event, BleConnectionEvent::None);
 
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
-        handle_ble_system_timer_irq();
+        let mesh_event = handle_ble_system_timer_irq();
         mock_handle_mesh_listening_state().assert_called(1);
+        assert_eq!(mesh_event, BleConnectionEvent::None);
     }
 
-    /// Tests that the idle state clears the source but runs no state handler.
+    /// Tests that the idle state clears the source, runs no state handler and
+    /// reports nothing to the composition root.
     #[test]
     #[mry::lock(
         write_reg_irq_src,
@@ -242,12 +266,13 @@ mod tests {
 
         mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_advertisement_state().returns(());
-        mock_handle_ble_connected_state().returns(());
+        mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaErrorReboot);
         mock_configure_ble_receive_state().returns(());
         mock_handle_mesh_listening_state().returns(());
 
-        handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq();
 
+        assert_eq!(event, BleConnectionEvent::None);
         mock_write_reg_irq_src(Any).assert_called(1);
         mock_handle_ble_advertisement_state().assert_called(0);
         mock_handle_ble_connected_state().assert_called(0);

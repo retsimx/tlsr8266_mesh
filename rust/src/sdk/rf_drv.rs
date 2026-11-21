@@ -9,10 +9,31 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
-use crate::main_light::rf_link_light_event_callback;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
 use crate::state::*;
+
+/// Mesh light-event handler, registered once from `App::init()` so this module
+/// never imports the application layer.
+static LIGHT_EVENT_CB: critical_section::Mutex<core::cell::Cell<Option<fn(u8)>>> =
+    critical_section::Mutex::new(core::cell::Cell::new(None));
+
+/// Registers the handler that receives mesh light event codes.
+pub fn set_light_event_handler(cb: fn(u8)) {
+    critical_section::with(|cs| LIGHT_EVENT_CB.borrow(cs).set(Some(cb)));
+}
+
+/// Forwards a mesh light event code to the registered handler, if any.
+///
+/// `#[inline(never)]` is required so `mry` can intercept the call in tests.
+#[cfg_attr(test, mry::mry)]
+#[inline(never)]
+pub fn emit_light_event(code: u8) {
+    let cb = critical_section::with(|cs| LIGHT_EVENT_CB.borrow(cs).get());
+    if let Some(cb) = cb {
+        cb(code);
+    }
+}
 
 /// Radio frequency power levels available for the BLE radio
 /// Values are in dBm (decibels relative to 1 milliwatt)
@@ -511,7 +532,7 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
         MESH_DEVICE_ADDRESS_NEXT_POSITION.set(MESH_GROUP_ADDRESS_NEXT_POSITION.get());
 
         // Notify application of address change
-        rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED);
+        emit_light_event(EVENT_DEVICE_ADDR_CHANGED);
 
         success = true;
     }
@@ -687,7 +708,6 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
 mod tests {
     use super::mock_remove_group;
     use super::*;
-    use crate::main_light::mock_rf_link_light_event_callback;
     use crate::sdk::drivers::flash::{
         mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
@@ -1161,13 +1181,13 @@ mod tests {
     /// Verifies that a valid device address is correctly added to both
     /// memory and flash storage.
     #[test]
-    #[mry::lock(flash_write_page, rf_link_light_event_callback)]
+    #[mry::lock(flash_write_page, emit_light_event)]
     fn test_add_dev_addr_valid() {
         reset_test_state();
 
         // Mock flash operations
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        mock_rf_link_light_event_callback(mry::Any).returns(());
+        mock_emit_light_event(mry::Any).returns(());
 
         let dev_id = 0x1234;
         let result = add_device_address(dev_id);
@@ -1191,7 +1211,7 @@ mod tests {
         // Verify flash write was called
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
         // Verify callback was called
-        mock_rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+        mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
     }
 
     /// Tests rf_link_add_dev_addr with invalid device ID (zero)
@@ -1249,13 +1269,13 @@ mod tests {
     /// Verifies that replacing an existing device address correctly
     /// clears the old address in flash.
     #[test]
-    #[mry::lock(flash_write_page, rf_link_light_event_callback)]
+    #[mry::lock(flash_write_page, emit_light_event)]
     fn test_add_dev_addr_replace_existing() {
         reset_test_state();
 
         // Mock flash operations
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        mock_rf_link_light_event_callback(mry::Any).returns(());
+        mock_emit_light_event(mry::Any).returns(());
 
         // Set up existing address
         DEVICE_ADDRESS.set(0x1111);
@@ -1278,7 +1298,7 @@ mod tests {
         // Verify flash operations: clear old + write new
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(2);
         // Verify callback was called
-        mock_rf_link_light_event_callback(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+        mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
     }
 
     /// Tests rf_link_del_group with no groups stored
@@ -1620,5 +1640,50 @@ mod tests {
         assert!(delete_groups_from_flash(0, true).is_ok());
         // The guard fires after the 8th deletion.
         mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(8);
+    }
+
+    /// Last light event code delivered to the test handler.
+    static TEST_LIGHT_EVENT_CODE: AtomicUsize = AtomicUsize::new(usize::MAX);
+    /// Number of times the test handler ran.
+    static TEST_LIGHT_EVENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn record_light_event(code: u8) {
+        TEST_LIGHT_EVENT_CODE.store(code as usize, Ordering::SeqCst);
+        TEST_LIGHT_EVENT_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// `LIGHT_EVENT_CB` is process-wide, so every test clears it on entry and exit.
+    fn clear_light_event_slot() {
+        critical_section::with(|cs| LIGHT_EVENT_CB.borrow(cs).set(None));
+    }
+
+    #[test]
+    fn test_emit_light_event_delivers_code_to_registered_handler() {
+        clear_light_event_slot();
+        TEST_LIGHT_EVENT_CODE.store(usize::MAX, Ordering::SeqCst);
+        TEST_LIGHT_EVENT_CALLS.store(0, Ordering::SeqCst);
+
+        set_light_event_handler(record_light_event);
+        emit_light_event(EVENT_DEVICE_ADDR_CHANGED);
+
+        assert_eq!(
+            TEST_LIGHT_EVENT_CODE.load(Ordering::SeqCst),
+            EVENT_DEVICE_ADDR_CHANGED as usize
+        );
+        assert_eq!(TEST_LIGHT_EVENT_CALLS.load(Ordering::SeqCst), 1);
+
+        clear_light_event_slot();
+    }
+
+    #[test]
+    fn test_emit_light_event_without_handler_is_noop() {
+        clear_light_event_slot();
+        TEST_LIGHT_EVENT_CALLS.store(0, Ordering::SeqCst);
+
+        emit_light_event(EVENT_DEVICE_ADDR_CHANGED);
+
+        assert_eq!(TEST_LIGHT_EVENT_CALLS.load(Ordering::SeqCst), 0);
+
+        clear_light_event_slot();
     }
 }

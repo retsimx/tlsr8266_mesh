@@ -1,13 +1,43 @@
-use crate::common::REGA_LIGHT_OFF;
-use crate::diagnostics::{REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT, SENTINEL_PANIC};
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
+use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
+use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
+use crate::sdk::mcu::watchdog::wd_clear;
 use crate::state::*;
-use crate::{app, BIT};
+use crate::BIT;
 use critical_section;
+
+// Analog-retention register addresses and their sentinel values. These live in the
+// SDK because `light_sw_reboot` owns the retention writes; `common` and
+// `diagnostics` re-export them for application callers.
+
+/// Analog register holding the light on/off state seen across a software reboot.
+pub const REGA_LIGHT_OFF: u8 = 0x3a;
+/// Analog register holding why the previous boot ended.
+pub const REGA_RESET_SENTINEL: u8 = 0x3b;
+/// Analog register holding the last breadcrumb written before the reset.
+pub const REGA_BREADCRUMB: u8 = 0x3c;
+
+/// The previous boot ended cleanly (power-on or software reboot).
+pub const SENTINEL_CLEAN_REBOOT: u8 = 0x00;
+/// The firmware is running; a watchdog reset leaves this value behind.
+pub const SENTINEL_RUNNING: u8 = 0xA5;
+/// The firmware panicked; `FLASH_ADR_PANIC_INFO` holds the message.
+pub const SENTINEL_PANIC: u8 = 0xE1;
+
+/// Last published light on/off state, so the reboot path can record whether the
+/// lamp was off without reaching into `LightManager`.
+static REBOOT_LIGHT_OFF: AtomicBool = AtomicBool::new(true);
+
+/// Publishes the current on/off state for `light_sw_reboot_callback`.
+pub fn set_reboot_light_off_state(is_off: bool) {
+    REBOOT_LIGHT_OFF.store(is_off, Ordering::Relaxed);
+}
 
 #[cfg_attr(test, mry::mry)]
 pub fn usb_dp_pullup_en(en: bool) {
@@ -323,7 +353,7 @@ fn light_sw_reboot_callback() {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,
-            if app().light_manager.is_light_off() {
+            if REBOOT_LIGHT_OFF.load(Ordering::Relaxed) {
                 RecoverStatus::LightOff as u8
             } else {
                 0
@@ -362,17 +392,38 @@ pub fn light_sw_reboot() {
     return;
 }
 
+/// Blinks the OTA LED six times at 1 Hz to signal success. `pin` is passed by
+/// the caller so this module needs no `crate::config` dependency.
+#[cfg_attr(test, mry::mry)]
+pub fn blink_ota_led_ok(pin: u32) {
+    gpio_set_func(pin, AS_GPIO);
+    gpio_set_output_en(pin, 1);
+    let mut led_on = true;
+    for _ in 0..6 {
+        gpio_write(pin, u32::from(led_on));
+        led_on = !led_on;
+        wd_clear();
+        sleep_us(1000 * 1000);
+    }
+}
+
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::diagnostics::SENTINEL_RUNNING;
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
+    use crate::sdk::mcu::clock::mock_sleep_us;
     use crate::sdk::mcu::cmd_table::mock_load_tbl_cmd_set;
+    use crate::sdk::mcu::gpio::mock_gpio_set_func;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::mcu::register::mock_write_reg_pwdn_ctrl;
-    use crate::{app_mocker, mock_app_mocker, App};
+    use crate::sdk::mcu::register::{
+        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
+        mock_write_reg_gpio_out, mock_write_reg_pwdn_ctrl, read_reg_gpio_oen, read_reg_gpio_out,
+        write_reg_gpio_oen, write_reg_gpio_out,
+    };
+    use crate::sdk::mcu::watchdog::mock_wd_clear;
     use mry::Any;
+    use std::sync::{Arc, Mutex};
 
     /// Tests usb_dp_pullup_en function with enable=true
     ///
@@ -435,74 +486,123 @@ mod tests {
     /// Verifies that when neither OTA_UPDATE_IN_PROGRESS nor
     /// OTA_UPDATE_MESH_OPERATIONS_BLOCKED are set, no analog_write occurs.
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_no_ota() {
         // Setup: No OTA flags set
         crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
         crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        // Light state must not leak in from another test
+        set_reboot_light_off_state(false);
 
-        // Create mock app
-        let mut app = App::default();
-        app.light_manager.mock_is_light_off().returns(false);
-        mock_app_mocker().returns(&mut app);
+        mock_analog_write(Any, Any).returns(());
 
         // Execute
         light_sw_reboot_callback();
 
-        // The callback should not call analog_write when no OTA is in progress
-        // Since we can't directly verify analog_write wasn't called without locking it,
-        // this test mainly ensures the function doesn't panic
+        // Verify: the callback writes nothing when no OTA is in progress
+        mock_analog_write(Any, Any).assert_called(0);
     }
 
     /// Tests light_sw_reboot_callback when OTA is in progress and light is off
     ///
-    /// Verifies that when OTA flags are set and light is off,
-    /// analog_write is called with RecoverStatus::LightOff.
+    /// Verifies that when OTA flags are set and the published state says the
+    /// light is off, analog_write is called with RecoverStatus::LightOff.
     #[test]
-    #[mry::lock(analog_write, app_mocker)]
+    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_off() {
         // Setup: OTA flags set, light is off
         crate::state::OTA_UPDATE_IN_PROGRESS.set(true);
         crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        set_reboot_light_off_state(true);
 
-        // Create mock app
-        let mut app = App::default();
-        app.light_manager.mock_is_light_off().returns(true);
-        mock_app_mocker().returns(&mut app);
-
-        mock_analog_write(crate::common::REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
+        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
 
         // Execute
         light_sw_reboot_callback();
 
         // Verify: analog_write called with correct parameters
-        mock_analog_write(crate::common::REGA_LIGHT_OFF, RecoverStatus::LightOff as u8)
-            .assert_called(1);
+        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).assert_called(1);
     }
 
     /// Tests light_sw_reboot_callback when OTA is in progress and light is on
     ///
-    /// Verifies that when OTA flags are set and light is on,
-    /// analog_write is called with 0.
+    /// Verifies that when OTA flags are set and the published state says the
+    /// light is on, analog_write is called with 0.
     #[test]
-    #[mry::lock(analog_write, app_mocker)]
+    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_on() {
         // Setup: OTA flags set, light is on
         crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
         crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        set_reboot_light_off_state(false);
 
-        // Create mock app
-        let mut app = App::default();
-        app.light_manager.mock_is_light_off().returns(false);
-        mock_app_mocker().returns(&mut app);
-
-        mock_analog_write(crate::common::REGA_LIGHT_OFF, 0).returns(());
+        mock_analog_write(REGA_LIGHT_OFF, 0).returns(());
 
         // Execute
         light_sw_reboot_callback();
 
         // Verify: analog_write called with correct parameters
-        mock_analog_write(crate::common::REGA_LIGHT_OFF, 0).assert_called(1);
+        mock_analog_write(REGA_LIGHT_OFF, 0).assert_called(1);
+    }
+
+    /// `blink_ota_led_ok` configures the pin as an output and genuinely
+    /// alternates it high/low over six cycles, 1 s apart, with the watchdog
+    /// cleared between writes.
+    ///
+    /// `gpio_write`/`gpio_set_output_en` carry no `mry` annotation, so the
+    /// assertion is made one level down: the OUT register they drive. Each
+    /// `gpio_write` reads the (mocked) zeroed OUT register, sets or clears the
+    /// pin bit, and writes it back, so the recorded write sequence is the level
+    /// sequence shifted into the pin's bit: `[0x02, 0x00, 0x02, 0x00, 0x02, 0x00]`.
+    ///
+    /// The old `led_onoff: u32` toggle produced `1, 0xFFFF_FFFE, 1, ...`, all of
+    /// which `gpio_write` treats as "high", so the old sequence was six set
+    /// writes and the LED never blinked.
+    #[test]
+    #[mry::lock(
+        gpio_set_func,
+        read_reg_gpio_oen,
+        write_reg_gpio_oen,
+        read_reg_gpio_out,
+        write_reg_gpio_out,
+        wd_clear,
+        sleep_us
+    )]
+    fn test_blink_ota_led_ok_alternates_pin_six_times() {
+        const PIN: u32 = 0x02; // port A, pin id low byte is the bit mask itself
+        const PIN_MASK: u8 = 0x02;
+
+        mock_gpio_set_func(Any, Any).returns(());
+        mock_read_reg_gpio_oen(Any).returns(0);
+        mock_write_reg_gpio_oen(Any, Any).returns(());
+        mock_read_reg_gpio_out(Any).returns(0);
+
+        // Record every OUT register write in call order.
+        let writes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_writes = Arc::clone(&writes);
+        mock_write_reg_gpio_out(Any, Any).returns_with(move |value: u8, _offset: u32| {
+            recorded_writes.lock().unwrap().push(value);
+        });
+
+        mock_wd_clear().returns(());
+        mock_sleep_us(Any).returns(());
+
+        blink_ota_led_ok(PIN);
+
+        mock_gpio_set_func(PIN, AS_GPIO).assert_called(1);
+        // Output enabled once, before the first write.
+        mock_write_reg_gpio_oen(Any, Any).assert_called(1);
+        // Six writes that alternate high, low, high, low, high, low.
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![PIN_MASK, 0, PIN_MASK, 0, PIN_MASK, 0],
+            "the OTA LED must be driven high and low alternately, six times"
+        );
+        mock_write_reg_gpio_out(PIN_MASK, Any).assert_called(3);
+        mock_write_reg_gpio_out(0, Any).assert_called(3);
+        mock_write_reg_gpio_out(Any, Any).assert_called(6);
+        mock_wd_clear().assert_called(6);
+        mock_sleep_us(1000 * 1000).assert_called(6);
     }
 
     /// Tests light_sw_reboot function

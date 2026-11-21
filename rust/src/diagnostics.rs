@@ -38,16 +38,15 @@ use core::panic::PanicInfo;
 use core::ptr::addr_of;
 
 /// Analog register holding why the previous boot ended.
-pub const REGA_RESET_SENTINEL: u8 = 0x3b;
-/// Analog register holding the last breadcrumb written before the reset.
-pub const REGA_BREADCRUMB: u8 = 0x3c;
-
-/// The previous boot ended cleanly (power-on or software reboot).
-pub const SENTINEL_CLEAN_REBOOT: u8 = 0x00;
-/// The firmware is running; a watchdog reset leaves this value behind.
-pub const SENTINEL_RUNNING: u8 = 0xA5;
-/// The firmware panicked; `FLASH_ADR_PANIC_INFO` holds the message.
-pub const SENTINEL_PANIC: u8 = 0xE1;
+///
+/// The register addresses and sentinel values are hardware contracts owned by
+/// the software-reboot path, so they are defined in `sdk::pm` and re-exported
+/// here for existing callers.
+pub use crate::sdk::pm::{REGA_BREADCRUMB, REGA_RESET_SENTINEL, SENTINEL_PANIC, SENTINEL_RUNNING};
+// Only this module's tests read the clean-reboot sentinel, so the re-export is
+// test-only rather than a blanket lint allowance on a production item.
+#[cfg(test)]
+pub use crate::sdk::pm::SENTINEL_CLEAN_REBOOT;
 
 pub const CRUMB_BOOT: u8 = 1;
 pub const CRUMB_INIT_DONE: u8 = 2;

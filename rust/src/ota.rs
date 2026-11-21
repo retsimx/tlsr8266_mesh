@@ -336,24 +336,16 @@ impl OtaManager {
     }
 
     pub fn rf_led_ota_ok(&self) {
-        gpio_set_func(OTA_LED as u32, AS_GPIO);
-        gpio_set_output_en(OTA_LED as u32, 1);
-        let mut led_onoff = 1;
-        for _ in 0..6 {
-            gpio_write(OTA_LED as u32, led_onoff);
-            led_onoff = !led_onoff;
-            wd_clear();
-            sleep_us(1000 * 1000);
-        }
+        crate::sdk::pm::blink_ota_led_ok(OTA_LED as u32);
     }
 
     pub fn rf_led_ota_error(&self) {
         gpio_set_func(OTA_LED as u32, AS_GPIO);
         gpio_set_output_en(OTA_LED as u32, 1);
-        let mut led_onoff = 1;
+        let mut led_on = true;
         for _ in 0..60 {
-            gpio_write(OTA_LED as u32, led_onoff);
-            led_onoff = !led_onoff;
+            gpio_write(OTA_LED as u32, u32::from(led_on));
+            led_on = !led_on;
             wd_clear();
             sleep_us(100 * 1000);
         }
@@ -432,4 +424,73 @@ impl OtaManager {
 #[coverage(off)]
 pub fn rf_link_slave_data_ota(data: &Packet) {
     app().ota_manager.rf_link_slave_data_ota(data);
+}
+
+#[cfg(test)]
+#[coverage(off)]
+mod tests {
+    use super::*;
+    use crate::sdk::mcu::clock::mock_sleep_us;
+    use crate::sdk::mcu::gpio::mock_gpio_set_func;
+    use crate::sdk::mcu::register::{
+        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
+        mock_write_reg_gpio_out, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_oen,
+        write_reg_gpio_out,
+    };
+    use crate::sdk::mcu::watchdog::mock_wd_clear;
+    use mry::Any;
+    use std::sync::{Arc, Mutex};
+
+    /// The failure indicator must genuinely alternate: `gpio_write` drives the pin
+    /// high for any non-zero value, so the old `!`-on-`u32` toggle (`0xFFFF_FFFE`)
+    /// held the pin high for the whole 6 s and looked identical to success.
+    #[test]
+    #[mry::lock(
+        gpio_set_func,
+        read_reg_gpio_oen,
+        write_reg_gpio_oen,
+        read_reg_gpio_out,
+        write_reg_gpio_out,
+        wd_clear,
+        sleep_us
+    )]
+    fn test_rf_led_ota_error_alternates_pin_sixty_times() {
+        const PIN: u32 = OTA_LED as u32; // port C, pin id low byte is the bit mask itself
+        const PIN_MASK: u8 = 0x01;
+        const REG_OFFSET: u32 = 0x10; // port C: (pin >> 8) << 3
+
+        mock_gpio_set_func(Any, Any).returns(());
+        mock_read_reg_gpio_oen(Any).returns(0);
+        mock_write_reg_gpio_oen(Any, Any).returns(());
+        mock_read_reg_gpio_out(Any).returns(0);
+
+        // Record every OUT register write in call order.
+        let writes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_writes = Arc::clone(&writes);
+        mock_write_reg_gpio_out(Any, Any).returns_with(move |value: u8, _offset: u32| {
+            recorded_writes.lock().unwrap().push(value);
+        });
+
+        mock_wd_clear().returns(());
+        mock_sleep_us(Any).returns(());
+
+        OtaManager::default().rf_led_ota_error();
+
+        mock_gpio_set_func(PIN, AS_GPIO).assert_called(1);
+        // Output enabled once, before the first write.
+        mock_write_reg_gpio_oen(Any, Any).assert_called(1);
+        // Sixty writes that alternate high, low, high, low, ...
+        let expected: Vec<u8> = (0..60)
+            .map(|i| if i % 2 == 0 { PIN_MASK } else { 0 })
+            .collect();
+        assert_eq!(
+            *writes.lock().unwrap(),
+            expected,
+            "the OTA error LED must be driven high and low alternately, sixty times"
+        );
+        mock_write_reg_gpio_out(Any, REG_OFFSET).assert_called(60);
+        mock_wd_clear().assert_called(60);
+        // Cadence unchanged: 60 iterations of 100 ms.
+        mock_sleep_us(100 * 1000).assert_called(60);
+    }
 }

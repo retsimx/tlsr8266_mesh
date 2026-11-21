@@ -3,7 +3,6 @@ use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 
 use crate::config::{DEVICE_NAME, MESH_NAME};
-use crate::ota::rf_link_slave_data_ota;
 use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_report_status_enable, mesh_report_status_enable_mask,
@@ -17,6 +16,24 @@ use crate::sdk::service::{
 };
 use crate::state::*;
 use crate::version::BUILD_VERSION;
+
+/// OTA GATT write handler, registered once from `App::init()` so this module
+/// never imports the application's OTA manager.
+static OTA_WRITE_CB: critical_section::Mutex<core::cell::Cell<Option<fn(&Packet)>>> =
+    critical_section::Mutex::new(core::cell::Cell::new(None));
+
+/// Registers the handler that receives `TELINK_SPP_DATA_OTA_UUID` writes.
+pub fn set_ota_write_handler(cb: fn(&Packet)) {
+    critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).set(Some(cb)));
+}
+
+/// Forwards an OTA GATT write to the registered handler, if any.
+fn ota_write_trampoline(p: &Packet) {
+    let cb = critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).get());
+    if let Some(cb) = cb {
+        cb(p);
+    }
+}
 
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
  * @{
@@ -428,7 +445,7 @@ static mut gAttributes: GAttributesType = GAttributesType([
         16,
         TELINK_SPP_DATA_OTA_UUID,
         SPP_DATA_OTA_DATA,
-        Some(rf_link_slave_data_ota),
+        Some(ota_write_trampoline),
         None
     ), //value
     attrdef!(
@@ -751,5 +768,89 @@ mod tests {
             assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0xCC);
             assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0xDD);
         }
+    }
+
+    // OTA write slot tests. `OTA_WRITE_CB` is process-wide, so these tests must
+    // run with `--test-threads=1` and each one resets the slot on entry and exit.
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static OTA_WRITE_HITS: AtomicUsize = AtomicUsize::new(0);
+    static OTA_WRITE_L2CAP_LEN: AtomicUsize = AtomicUsize::new(0);
+    static OTA_WRITE_FIRST_WORD: AtomicUsize = AtomicUsize::new(0);
+
+    /// Clears the registered handler and the observation counters.
+    fn reset_ota_write_slot() {
+        critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).set(None));
+        OTA_WRITE_HITS.store(0, Ordering::SeqCst);
+        OTA_WRITE_L2CAP_LEN.store(0, Ordering::SeqCst);
+        OTA_WRITE_FIRST_WORD.store(0, Ordering::SeqCst);
+    }
+
+    /// Test handler: records how often it ran and what it received.
+    fn recording_ota_handler(p: &Packet) {
+        OTA_WRITE_HITS.fetch_add(1, Ordering::SeqCst);
+        OTA_WRITE_L2CAP_LEN.store(p.head().l2cap_len as usize, Ordering::SeqCst);
+        let value = &p.att_val().value;
+        OTA_WRITE_FIRST_WORD.store(
+            u32::from_le_bytes([value[0], value[1], value[2], value[3]]) as usize,
+            Ordering::SeqCst,
+        );
+    }
+
+    #[test]
+    fn test_ota_write_trampoline_dispatches_to_registered_handler() {
+        reset_ota_write_slot();
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0x1b,
+                rf_len: 0x18,
+                l2cap_len: 0x0014,
+                chan_id: 0x0004,
+            },
+        };
+        pkt.att_val_mut().value[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        set_ota_write_handler(recording_ota_handler);
+
+        // Act
+        ota_write_trampoline(&pkt);
+
+        // Assert: exactly one delivery with the packet contents intact
+        assert_eq!(OTA_WRITE_HITS.load(Ordering::SeqCst), 1);
+        assert_eq!(OTA_WRITE_L2CAP_LEN.load(Ordering::SeqCst), 0x0014);
+        assert_eq!(
+            OTA_WRITE_FIRST_WORD.load(Ordering::SeqCst),
+            u32::from_le_bytes([0xDE, 0xAD, 0xBE, 0xEF]) as usize
+        );
+
+        reset_ota_write_slot();
+    }
+
+    #[test]
+    fn test_ota_write_trampoline_noop_when_no_handler_registered() {
+        reset_ota_write_slot();
+
+        let mut pkt = Packet {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0x1b,
+                rf_len: 0x18,
+                l2cap_len: 0x0014,
+                chan_id: 0x0004,
+            },
+        };
+        pkt.att_val_mut().value[0..4].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+
+        // Act - nothing registered, must not panic
+        ota_write_trampoline(&pkt);
+
+        // Assert: no handler ran
+        assert_eq!(OTA_WRITE_HITS.load(Ordering::SeqCst), 0);
+        assert_eq!(OTA_WRITE_L2CAP_LEN.load(Ordering::SeqCst), 0);
+        assert_eq!(OTA_WRITE_FIRST_WORD.load(Ordering::SeqCst), 0);
+
+        reset_ota_write_slot();
     }
 }

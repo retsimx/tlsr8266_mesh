@@ -5,10 +5,12 @@
 //!
 //! ## Why this lives outside the SDK
 //!
-//! Formatting a log line and pushing it at the UART manager is application
-//! work: it needs the global `app()` singleton for the queue/driver and it is
-//! reached from the panic handler. Keeping it here leaves `crate::sdk/` free of
-//! upward imports.
+//! Formatting a log line and pushing it at the UART transport is application
+//! work, and it is reached from the panic handler. Both sinks therefore call the
+//! transport's free functions directly: the async path queues through
+//! [`send_message`] (which forwards to `queues::enqueue_uart_tx`) and the panic
+//! path calls [`send_sync_panic`]. No manager, driver or `App` singleton sits in
+//! between. Keeping this here leaves `crate::sdk/` free of upward imports.
 //!
 //! ## Key Responsibilities:
 //! - `UartStream<const N: usize>`: a fixed-capacity byte sink implementing
@@ -21,9 +23,8 @@ use core::cmp::min;
 use core::fmt::{self, Write};
 use core::slice;
 
-use crate::app;
 use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
-use crate::uart_manager::UartMsg;
+use crate::uart_manager::{send_message, send_sync_panic, UartMsg};
 
 // UART packet structure constants
 // Packet layout: [counter(1)][cmd_type(1)][cmd_code(1)][payload(39)][crc(2)] = 44 bytes total
@@ -156,8 +157,9 @@ impl<const N: usize> UartStream<N> {
     /// Queues the stream on the async UART channel, one chunk at a time.
     ///
     /// Every log line is mirrored into the SWire ring as it is sent. This sink
-    /// is the one that can reach the channel's `try_send`, so it must never be
-    /// called from the panic handler.
+    /// is the one that can reach the transport queue (`send_message` →
+    /// `queues::enqueue_uart_tx`), so it must never be called from the panic
+    /// handler.
     pub fn send_async(&self, is_panic: bool) {
         let mut buffer = self.as_bytes();
 
@@ -167,15 +169,14 @@ impl<const N: usize> UartStream<N> {
         while !buffer.is_empty() {
             let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
 
-            let _ = app()
-                .uart_manager
-                .send_message(&build_uart_frame(buffer, is_panic));
+            let _ = send_message(&build_uart_frame(buffer, is_panic));
 
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) };
         }
     }
 
-    /// Hands the stream straight to the UART driver, one chunk at a time.
+    /// Hands the stream straight to the blocking UART panic sink, one chunk at a
+    /// time.
     ///
     /// This is the panic-path sink. It must never touch the async channel: a
     /// panic while sending would re-enter `panic_fmt` through `try_send`, a
@@ -191,10 +192,7 @@ impl<const N: usize> UartStream<N> {
         while !buffer.is_empty() {
             let len = min(UART_PAYLOAD_MAX_SIZE, buffer.len());
 
-            app()
-                .uart_manager
-                .driver
-                .send(&build_uart_frame(buffer, is_panic));
+            send_sync_panic(&build_uart_frame(buffer, is_panic));
 
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) };
         }
@@ -217,91 +215,98 @@ impl<const N: usize> Write for UartStream<N> {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::drivers::uart::UartDriver;
-    use crate::uart_manager::UartManager;
-    use crate::{app_mocker, mock_app_mocker};
+    use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
+    use crate::uart_manager::{mock_send_message, mock_send_sync_panic, reset_for_test};
     use mry::Any;
 
+    /// The 44-byte frame `build_uart_frame` must produce for `payload`.
+    ///
+    /// Built independently of `build_uart_frame` so the assertions pin the wire
+    /// layout (command byte at 2, payload from 3, declared length) rather than
+    /// restating the production code.
+    fn expected_frame(payload: &[u8], cmd: UartMsg) -> UartData {
+        let mut data = [0u8; UART_DATA_LEN];
+        data[2] = cmd as u8;
+        data[3..3 + payload.len()].copy_from_slice(payload);
+
+        UartData {
+            len: UART_DATA_LEN as u32,
+            data,
+        }
+    }
+
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(send_sync_panic)]
     fn test_uart_stream_send_synchronous() {
-        // Create a test stream with some data
+        reset_for_test();
+        mock_send_sync_panic(Any).returns(());
+
         let mut stream = UartStream::<128>::new();
         let test_data = b"Hello UART";
-        let _ = stream.write_all(test_data);
+        assert_eq!(stream.write_all(test_data), Ok(()));
 
-        // Create a UartDriver (mry makes it mockable)
-        let mut driver = UartDriver::default();
-        // Mock the send method to return true
-        driver.mock_send(Any).returns(());
-
-        // Create a UartManager with the mocked driver
-        let mut uart_manager = UartManager::default();
-        uart_manager.driver = driver;
-
-        // Set up mock app with the uart_manager
-        let mut app = crate::App::default();
-        app.uart_manager = uart_manager;
-        mock_app_mocker().returns(&mut app);
-
-        // Call the blocking sink with doasync = false (synchronous) to cover the
-        // driver path
+        // doasync = false routes to the blocking panic sink, never the queue.
         stream.send_blocking(false);
 
-        // Verify that the synchronous send was called
-        app.uart_manager.driver.mock_send(Any).assert_called(1);
+        mock_send_sync_panic(expected_frame(test_data, UartMsg::PrintMessage)).assert_called(1);
+        mock_send_sync_panic(Any).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(send_sync_panic)]
     fn test_uart_stream_send_panic_mode() {
-        // Create a test stream with some data
+        reset_for_test();
+        mock_send_sync_panic(Any).returns(());
+
         let mut stream = UartStream::<128>::new();
         let test_data = b"Panic message!";
-        let _ = stream.write_all(test_data);
+        assert_eq!(stream.write_all(test_data), Ok(()));
 
-        // Create a UartDriver (mry makes it mockable)
-        let mut driver = UartDriver::default();
-        // Mock the send method to return true
-        driver.mock_send(Any).returns(());
-
-        // Create a UartManager with the mocked driver
-        let mut uart_manager = UartManager::default();
-        uart_manager.driver = driver;
-
-        // Set up mock app with the uart_manager
-        let mut app = crate::App::default();
-        app.uart_manager = uart_manager;
-        mock_app_mocker().returns(&mut app);
-
-        // Call the blocking panic sink with is_panic = true to cover the panic
-        // message type
+        // is_panic = true flags the frame as a panic message.
         stream.send_blocking(true);
 
-        // Verify that the synchronous send was called
-        app.uart_manager.driver.mock_send(Any).assert_called(1);
+        mock_send_sync_panic(expected_frame(test_data, UartMsg::PanicMessage)).assert_called(1);
+        mock_send_sync_panic(Any).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(send_sync_panic)]
     fn test_print_to_uart_blocking_sink() {
-        let mut driver = UartDriver::default();
-        driver.mock_send(Any).returns(());
-
-        let mut uart_manager = UartManager::default();
-        uart_manager.driver = driver;
-
-        let mut app = crate::App::default();
-        app.uart_manager = uart_manager;
-        mock_app_mocker().returns(&mut app);
+        reset_for_test();
+        mock_send_sync_panic(Any).returns(());
 
         // A default stream is empty; this also covers the `Default` impl.
         assert_eq!(UartStream::<128>::default().as_bytes(), b"");
 
-        // doasync = false routes straight to the driver instead of the queue.
+        // doasync = false routes straight to the panic sink instead of the queue.
         print_to_uart(false, |stream| write!(stream, "sync"));
 
-        app.uart_manager.driver.mock_send(Any).assert_called(1);
+        mock_send_sync_panic(expected_frame(b"sync", UartMsg::PrintMessage)).assert_called(1);
+        mock_send_sync_panic(Any).assert_called(1);
+    }
+
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_uart_stream_send_async_routes_through_queue() {
+        reset_for_test();
+        // Keep the call observable but let it reach the real `enqueue_uart_tx`,
+        // so the assertion is on actual queue delivery, not on the mock.
+        mock_send_message(Any).calls_real_impl();
+
+        let mut stream = UartStream::<128>::new();
+        let test_data = b"Hello async";
+        assert_eq!(stream.write_all(test_data), Ok(()));
+
+        // doasync = true routes through the transport queue, never the driver.
+        stream.send_async(false);
+
+        let queued = UART_TX_CHANNEL.try_receive().expect("one frame queued");
+        assert_eq!(queued, expected_frame(test_data, UartMsg::PrintMessage));
+        assert!(
+            UART_TX_CHANNEL.try_receive().is_err(),
+            "one chunk means exactly one frame"
+        );
+        mock_send_message(Any).assert_called(1);
     }
 
     #[test]

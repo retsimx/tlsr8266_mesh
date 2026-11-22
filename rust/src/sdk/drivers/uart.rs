@@ -1,11 +1,6 @@
 use core::mem::size_of;
 use core::ptr::addr_of;
 
-use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
-#[cfg(not(test))]
-use embassy_time::{Duration, Instant, WithTimeout};
-
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
 use crate::sdk::mcu::register::{
@@ -92,15 +87,13 @@ pub struct UartData {
     pub data: [u8; UART_DATA_LEN],
 }
 
-/// Raw mutex backing the async TX serialisation and the TX-done signal.
-type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
 /// Driver for UART communication on the TLSR8266.
 ///
-/// This driver provides functionality for initializing, transmitting, and receiving
-/// data over UART using DMA for efficient transfers. It handles the low-level
-/// register access and timing requirements of the UART peripheral.
-#[cfg_attr(test, mry::mry)]
+/// This driver is a pure synchronous peripheral: it owns the DMA buffers and the
+/// TX busy flag, and does nothing else. Serialisation, wake-ups and async
+/// coordination belong to the manager that owns the driver
+/// (`uart_manager::UART_HW`), so this type has no application-layer imports and
+/// no async methods.
 pub struct UartDriver {
     /// Internal buffer used for transmitting data.
     /// This buffer should not be accessed directly by users.
@@ -111,18 +104,10 @@ pub struct UartDriver {
     /// rather than using it directly, as it may be overwritten by new data.
     pub rx_data_buf: UartData,
 
-    /// Serialises the two async senders (`uart_sender` and `uart_receiver`)
-    /// that share this driver.
-    tx_lock: Mutex<CsRawMutex, ()>,
-
-    /// Signalled from the TX-complete ISR path so a parked sender can wake.
-    tx_done: Signal<CsRawMutex, ()>,
-
     /// Flag indicating whether a transmission is currently in progress.
     is_tx_busy: bool,
 }
 
-#[cfg_attr(test, mry::mry(skip_fns(default_const)))]
 impl UartDriver {
     /// Creates a new instance of the UART driver with default settings.
     ///
@@ -133,7 +118,6 @@ impl UartDriver {
     /// # Returns
     ///
     /// * A new UartDriver instance with default settings
-    #[cfg(not(test))]
     pub const fn default_const() -> Self {
         Self {
             tx_data_buf: UartData {
@@ -144,29 +128,10 @@ impl UartDriver {
                 len: 0,
                 data: [0; UART_DATA_LEN],
             },
-            tx_lock: Mutex::new(()),
-            tx_done: Signal::new(),
             is_tx_busy: false,
         }
     }
 
-    #[cfg(test)]
-    pub fn default() -> Self {
-        Self {
-            tx_data_buf: UartData {
-                len: 0,
-                data: [0; UART_DATA_LEN],
-            },
-            rx_data_buf: UartData {
-                len: 0,
-                data: [0; UART_DATA_LEN],
-            },
-            tx_lock: Mutex::new(()),
-            tx_done: Signal::new(),
-            is_tx_busy: false,
-            mry: Default::default(),
-        }
-    }
     /// Checks if the UART transmitter is currently busy.
     ///
     /// # Returns
@@ -353,98 +318,41 @@ impl UartDriver {
     #[inline(always)]
     pub fn clear_tx_busy_flag(&mut self) {
         self.is_tx_busy = false;
-        // Wake any async sender parked in `send_async`.
-        self.tx_done.signal(());
     }
 
-    /// Checks if the UART transmitter is currently busy.
+    /// Arms a DMA1 transfer immediately, without waiting for the previous one.
     ///
-    /// This is an internal helper function that checks the busy flag.
+    /// This is the raw "start sending" primitive: it marks the transmitter busy,
+    /// copies `msg` into the TX buffer, points DMA1 at that buffer and triggers
+    /// the transfer. It does **not** wait, rate-limit or serialise anything.
     ///
-    /// # Returns
+    /// # Caller contract
     ///
-    /// * `true` if a transmission is in progress
-    /// * `false` if the transmitter is idle
-    ///
-    /// # Notes
-    ///
-    /// * Internal method used by send
-    #[inline(always)]
-    fn uart_tx_is_busy(&self) -> bool {
-        return self.is_tx_busy;
-    }
-
-    /// Sends data asynchronously over UART using DMA.
-    ///
-    /// This async function waits for any previous transmission to complete,
-    /// then initiates a new DMA transfer. Two async senders share this driver,
-    /// so the wait and the DMA arm are serialised by `tx_lock`. A parked sender
-    /// is woken by `clear_tx_busy_flag` signalling `tx_done`; a transfer whose
-    /// busy flag is never cleared is abandoned after a 100ms deadline.
-    ///
-    /// # Timeout and serialisation limits (by design, not accidents)
-    ///
-    /// * **A 100 ms TX timeout still arms the next transfer.** When
-    ///   `wait_tx_done` expires, the loop breaks and the DMA arm below runs
-    ///   anyway, so `tx_data_buf` may be overwritten (and DMA1 re-pointed) while
-    ///   the stuck transfer is still reading the old contents — the frame on the
-    ///   wire can be corrupted. The `critical_section::with` below prevents a
-    ///   *late completion ISR* from interleaving between `is_tx_busy()` and the
-    ///   arm; it does **not** make that overwrite safe. The timeout is silent on
-    ///   purpose: logging from the UART TX path would itself use the UART.
-    /// * **`tx_lock` serialises only the two async senders**
-    ///   (`uart_sender`/`uart_receiver`). The synchronous [`Self::send`] path —
-    ///   used by `send_blocking` for plain prints and the panic path — does not
-    ///   take it, so it can re-point DMA1 during an async transfer. The lock
-    ///   makes the async pair mutually exclusive; it is not a whole-driver lock.
+    /// The wait/serialise/wake-up policy lives with the owner of the driver
+    /// (`uart_manager`). The caller must keep a late TX-complete interrupt from
+    /// interleaving with the arm below, typically by calling this inside a
+    /// critical section or under the manager's TX lock.
     ///
     /// # Parameters
     ///
     /// * `msg` - The UART data packet to transmit
     ///
-    /// # Returns
-    ///
     /// # Notes
     ///
-    /// * This function returns after initiating the transfer, not when the transfer completes
-    /// * The busy flag remains set until cleared by `clear_tx_busy_flag`
-    /// * Maximum wait time for previous transmission is 100ms
-    pub async fn send_async(&mut self, msg: &UartData) {
-        // Serialise the two async senders (uart_sender + uart_receiver) that
-        // share this driver.
-        let _guard = self.tx_lock.lock().await;
+    /// * Returns after initiating the transfer, not when the transfer completes
+    /// * The busy flag stays set until cleared by
+    ///   [`Self::clear_tx_busy_flag`]
+    pub fn start_tx_unchecked(&mut self, msg: &UartData) {
+        self.is_tx_busy = true;
 
-        // Deadline for a stuck-but-not-cleared TX busy flag.
-        #[cfg(not(test))]
-        let deadline = Instant::now() + Duration::from_millis(100);
-        #[cfg(test)]
-        let t_timeout = clock_time();
+        // Copy message to TX buffer
+        self.tx_data_buf = *msg;
 
-        while self.is_tx_busy() {
-            #[cfg(not(test))]
-            if wait_tx_done(&self.tx_done, deadline).await.is_err() {
-                break;
-            }
+        // Configure DMA1 with address of TX buffer
+        write_reg_dma1_addr(addr_of!(self.tx_data_buf) as u16);
 
-            #[cfg(test)]
-            {
-                if clock_time_exceed(t_timeout, 100 * 1000) {
-                    break;
-                }
-                self.tx_done.wait().await;
-            }
-        }
-
-        // Release the lock BEFORE the &mut self DMA arm below (no .await follows).
-        drop(_guard);
-
-        // Arm the transfer atomically so a late TX-complete ISR cannot interleave.
-        critical_section::with(|_| {
-            self.set_tx_busy_flag();
-            self.tx_data_buf = *msg;
-            write_reg_dma1_addr(addr_of!(self.tx_data_buf) as u16);
-            write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
-        });
+        // Trigger DMA transfer to start transmission
+        write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
     }
 
     /// Sends data synchronously over UART using DMA.
@@ -476,15 +384,8 @@ impl UartDriver {
                 wd_clear();
             }
 
-            // Copy message to TX buffer
-            self.set_tx_busy_flag();
-            self.tx_data_buf = *msg;
-
-            // Configure DMA1 with address of TX buffer
-            write_reg_dma1_addr(addr_of!(self.tx_data_buf) as u16);
-
-            // Trigger DMA transfer to start transmission
-            write_reg_dma_tx_rdy0(FLD_DMA::ETH_TX.bits() as u8);
+            // Arm the transfer while still inside the critical section.
+            self.start_tx_unchecked(msg);
         })
     }
 
@@ -509,20 +410,6 @@ impl UartDriver {
         write_reg_dma0_ctrl(buf_len as u16);
     }
 
-    /// Sets the UART TX busy flag to indicate transmission in progress.
-    ///
-    /// This is an internal helper function used before initiating a new
-    /// transmission to prevent concurrent transmissions.
-    ///
-    /// # Notes
-    ///
-    /// * Internal method used by send and send_async
-    fn set_tx_busy_flag(&mut self) {
-        self.is_tx_busy = true;
-        // Drop any stale completion from the previous transfer before arming.
-        self.tx_done.reset();
-    }
-
     /// Clears UART error conditions by checking and resetting the error flags.
     ///
     /// This static function reads the UART status register, checks for errors,
@@ -545,24 +432,10 @@ impl UartDriver {
     }
 }
 
-/// Waits for a UART TX-complete signal, giving up at `deadline`.
-///
-/// Free function (outside `impl UartDriver`) so the `mry` mocks do not need to
-/// understand `Signal`.
-#[cfg(not(test))]
-async fn wait_tx_done(signal: &Signal<CsRawMutex, ()>, deadline: Instant) -> Result<(), ()> {
-    signal.wait().with_deadline(deadline).await.map_err(|_| ())
-}
-
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use core::future::Future;
-    use core::task::{Context, Poll};
-    use futures::task::noop_waker;
-    use mry::send_wrapper::SendWrapper;
-    use std::vec::Vec;
 
     // Import mock versions of the functions from their original modules
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
@@ -581,7 +454,7 @@ mod tests {
 
     /// Tests the default constructor for the UART driver.
     ///
-    /// This test verifies that the UartDriver::default constructor:
+    /// This test verifies that the UartDriver::default_const constructor:
     /// - Initializes transmit and receive buffers correctly
     /// - Sets the busy flag to false
     /// - Creates a ready-to-use driver instance
@@ -592,7 +465,7 @@ mod tests {
     #[test]
     fn test_uart_driver_default() {
         // Create a new driver instance using the default constructor
-        let driver = UartDriver::default();
+        let driver = UartDriver::default_const();
 
         // Verify transmit buffer is initialized empty
         assert_eq!(driver.tx_data_buf.len, 0);
@@ -617,7 +490,7 @@ mod tests {
     #[test]
     fn test_tx_busy() {
         // Create a driver with default settings
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
 
         // Initially, the busy flag should be false
         assert_eq!(driver.is_tx_busy(), false);
@@ -705,7 +578,7 @@ mod tests {
         mock_write_reg_dma_chn_en(mry::Any).returns(());
 
         // Create a new driver and initialize it
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
         driver.init();
 
         // Verify GPIO configuration
@@ -757,7 +630,7 @@ mod tests {
     #[test]
     fn test_uart_init_invalid_bit_width() {
         // Create a new driver with default settings
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
 
         // Call uart_init with an invalid bit width (below minimum of 3)
         let result = driver.uart_init(69, 2, true, true, HardwareControl::NoControl);
@@ -909,27 +782,38 @@ mod tests {
 
     /// Tests the TX busy flag manipulation methods.
     ///
-    /// This test verifies that the set_tx_busy_flag and clear_tx_busy_flag methods:
-    /// - Properly set the is_tx_busy flag to true or false
-    /// - uart_tx_is_busy returns the current state of the flag
+    /// This test verifies that start_tx_unchecked and clear_tx_busy_flag:
+    /// - Arm a transfer (busy flag set, DMA1 pointed and triggered)
+    /// - Report the busy state through is_tx_busy
+    /// - Clear the busy flag on completion
     ///
     /// # Notes
     ///
     /// * Simple state manipulation test
     #[test]
+    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_tx_busy_flag_manipulation() {
-        let mut driver = UartDriver::default();
+        mock_write_reg_dma1_addr(mry::Any).returns(());
+        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
+
+        let mut driver = UartDriver::default_const();
 
         // Initial state should be not busy
-        assert_eq!(driver.uart_tx_is_busy(), false);
+        assert_eq!(driver.is_tx_busy(), false);
 
-        // Set busy flag
-        driver.set_tx_busy_flag();
-        assert_eq!(driver.uart_tx_is_busy(), true);
+        // Arm a transfer: busy flag set, DMA1 configured and triggered
+        let msg = UartData {
+            len: 0,
+            data: [0; UART_DATA_LEN],
+        };
+        driver.start_tx_unchecked(&msg);
+        assert_eq!(driver.is_tx_busy(), true);
+        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
+        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
 
         // Clear busy flag
         driver.clear_tx_busy_flag();
-        assert_eq!(driver.uart_tx_is_busy(), false);
+        assert_eq!(driver.is_tx_busy(), false);
     }
 
     /// Tests the synchronous UART data transmission function when the driver is not busy.
@@ -981,7 +865,7 @@ mod tests {
         msg.data[3] = 0xDD;
 
         // Driver is not busy
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
         driver.send(&msg);
 
         // Verify result and busy flag
@@ -1057,7 +941,7 @@ mod tests {
         msg.data[3] = 0xDD;
 
         // Driver is initially busy
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
         driver.is_tx_busy = true;
 
         driver.send(&msg);
@@ -1073,206 +957,6 @@ mod tests {
         mock_clock_time().assert_called(1);
         mock_clock_time_exceed(mry::Any, mry::Any).assert_called(2);
         mock_wd_clear().assert_called(1);
-    }
-
-    /// Tests the asynchronous UART data transmission function when the driver is not busy.
-    ///
-    /// This test verifies that the send_async method correctly:
-    /// - Sets the busy flag
-    /// - Copies message data to the internal TX buffer
-    /// - Configures DMA with the buffer address
-    /// - Triggers the DMA transfer
-    /// - Returns without awaiting the TX-done signal
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access functions
-    /// 2. Create test message data
-    /// 3. Call send_async with test message
-    /// 4. Verify DMA configuration and trigger
-    /// 5. Verify the busy-wait loop never ran
-    ///
-    /// # Notes
-    ///
-    /// * Tests the case where the driver is not busy
-    /// * The deadline sample still happens once, but the loop body is skipped
-    #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
-    fn test_send_async_not_busy() {
-        // Setup mock responses for timing functions
-        mock_clock_time().returns(1000);
-        mock_clock_time_exceed(1000, 100 * 1000).returns(false);
-
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
-
-        // Create a test message
-        let mut msg = UartData {
-            len: 4,
-            data: [0; UART_DATA_LEN],
-        };
-        msg.data[0] = 0xAA;
-        msg.data[1] = 0xBB;
-        msg.data[2] = 0xCC;
-        msg.data[3] = 0xDD;
-
-        // Driver is not busy
-        let mut driver = UartDriver::default();
-        futures::executor::block_on(driver.send_async(&msg));
-
-        // Verify result and busy flag
-        assert_eq!(driver.is_tx_busy, true);
-
-        // Verify DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
-
-        // The busy loop never ran: the deadline was sampled once and never checked
-        mock_clock_time().assert_called(1);
-        mock_clock_time_exceed(mry::Any, mry::Any).assert_called(0);
-    }
-
-    /// Tests that send_async gives up waiting when the TX busy flag never clears.
-    ///
-    /// This test verifies that the send_async method correctly:
-    /// - Breaks out of the busy-wait loop when the 100ms deadline is exceeded
-    /// - Still arms the DMA transfer
-    /// - Leaves the busy flag set
-    ///
-    /// # Notes
-    ///
-    /// * Uses the timeout path so `block_on` can never deadlock
-    #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
-    fn test_send_async_busy_times_out() {
-        // Setup mock responses for timing functions
-        mock_clock_time().returns(2000);
-
-        // The 100ms deadline is already exceeded on the first check
-        mock_clock_time_exceed(2000, 100 * 1000).returns(true);
-
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
-
-        // Create a test message
-        let mut msg = UartData {
-            len: 4,
-            data: [0; UART_DATA_LEN],
-        };
-        msg.data[0] = 0xAA;
-        msg.data[1] = 0xBB;
-        msg.data[2] = 0xCC;
-        msg.data[3] = 0xDD;
-
-        // Driver is initially busy
-        let mut driver = UartDriver::default();
-        driver.is_tx_busy = true;
-
-        futures::executor::block_on(driver.send_async(&msg));
-
-        // Verify result and final busy state
-        assert_eq!(driver.is_tx_busy, true);
-
-        // Verify DMA was configured despite the timeout
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
-
-        // Verify the deadline was sampled once and checked exactly once
-        mock_clock_time().assert_called(1);
-        mock_clock_time_exceed(2000, 100 * 1000).assert_called(1);
-    }
-
-    /// Tests that a parked send_async wakes when the TX-complete ISR clears the flag.
-    ///
-    /// This test verifies that the send_async method correctly:
-    /// - Parks on the `tx_done` signal while the driver is busy
-    /// - Wakes and arms the DMA transfer once `clear_tx_busy_flag` signals
-    ///
-    /// # Notes
-    ///
-    /// * The future borrows `&mut self`, so it is driven through a raw pointer
-    ///   (same pattern as `uart_manager`'s wake test)
-    /// * `block_on` is never used here: an un-signalled wait would hang
-    #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
-    fn test_send_async_busy_wakes_on_tx_done() {
-        // Setup mock responses for timing functions
-        mock_clock_time().returns(2000);
-        mock_clock_time_exceed(mry::Any, mry::Any).returns(false);
-
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
-
-        // Create a test message
-        let mut msg = UartData {
-            len: 4,
-            data: [0; UART_DATA_LEN],
-        };
-        msg.data[0] = 0xAA;
-        msg.data[1] = 0xBB;
-        msg.data[2] = 0xCC;
-        msg.data[3] = 0xDD;
-
-        // Driver is initially busy
-        let mut driver = UartDriver::default();
-        driver.is_tx_busy = true;
-
-        // The future parks on `&mut self`, so drive it through a raw pointer.
-        let mut driver_ptr = SendWrapper::new(&mut driver as *mut UartDriver);
-
-        let future = driver.send_async(&msg);
-        futures::pin_mut!(future);
-
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        // First poll: busy, deadline not exceeded, so it parks on tx_done
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-
-        // TX-complete ISR path: clears the flag and signals tx_done
-        // SAFETY: the pinned future is the only accessor of `driver`, so the
-        // `&mut self` borrow is logically transferred to this call.
-        unsafe {
-            (*(*driver_ptr)).clear_tx_busy_flag();
-        }
-
-        // Second poll: the signal released the wait, DMA is armed, future completes
-        let poll_result = future.as_mut().poll(&mut cx);
-        assert!(
-            matches!(poll_result, Poll::Ready(())),
-            "future should be ready after clear_tx_busy_flag signals tx_done"
-        );
-
-        // Verify DMA was configured exactly once and the flag is busy again
-        // SAFETY: the pinned future is the only accessor of `driver`; it has
-        // completed above, so this reborrow cannot alias a live `&mut`.
-        unsafe {
-            assert_eq!((*(*driver_ptr)).is_tx_busy, true);
-        }
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
-
-        // Verify the loop ran a single busy iteration
-        mock_clock_time().assert_called(1);
-        mock_clock_time_exceed(mry::Any, mry::Any).assert_called(1);
     }
 
     /// Tests the DMA buffer initialization for UART reception.
@@ -1295,7 +979,7 @@ mod tests {
         mock_write_reg_dma0_ctrl(mry::Any).returns(());
 
         // Create a driver and call buffer initialization
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
         driver.init_buffers();
 
         // Calculate expected buffer size
@@ -1466,7 +1150,7 @@ mod tests {
 
         // Create a new driver and initialize UART with 9600 baud parameters
         // For 32MHz system clock, 9600 baud: clkdiv=237, bwpc=13
-        let mut driver = UartDriver::default();
+        let mut driver = UartDriver::default_const();
         let result = driver.uart_init(237, 13, true, true, HardwareControl::NoControl);
 
         // Verify initialization succeeded

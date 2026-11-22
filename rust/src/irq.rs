@@ -7,8 +7,8 @@
 //! ## Why this lives outside the SDK
 //!
 //! Fanning hardware interrupts out to BLE/RF, the Embassy time driver, the
-//! light transition engine and the UART manager is composition-root work. It
-//! belongs next to `app()` rather than inside the BLE link-layer SDK, so the
+//! light transition engine and the UART transport is composition-root work. It
+//! belongs in this module rather than inside the BLE link-layer SDK, so the
 //! SDK keeps only pure BLE/RF helpers (`crate::sdk::ble_app::irq`).
 //!
 //! ## Key Responsibilities:
@@ -17,7 +17,6 @@
 //! - System timer, Embassy timer, light transition and UART interrupt dispatch
 //! - OTA timeout countdown driven by `TMR0` elapsed time
 
-use crate::app;
 use crate::sdk::ble_app::irq::BleConnectionEvent;
 use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::light::OtaState;
@@ -77,21 +76,17 @@ fn handle_system_interrupts() {
         match crate::sdk::ble_app::irq::handle_ble_system_timer_irq() {
             BleConnectionEvent::None => {}
             BleConnectionEvent::OtaFinishCheck => {
-                app().ota_manager.rf_link_slave_ota_finish_handle();
+                crate::ota::rf_link_slave_ota_finish_handle();
             }
             BleConnectionEvent::OtaErrorReboot => {
-                app()
-                    .ota_manager
-                    .rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+                crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
             }
             BleConnectionEvent::OtaFinishCheckAndErrorReboot => {
                 // rf_link_slave_ota_finish_handle() -> rf_link_slave_data_ota_save() can
                 // refresh the counter to 30s, so it MUST run before the zero check.
-                app().ota_manager.rf_link_slave_ota_finish_handle();
+                crate::ota::rf_link_slave_ota_finish_handle();
                 if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                    app()
-                        .ota_manager
-                        .rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+                    crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
                 }
             }
         }
@@ -124,10 +119,13 @@ fn handle_system_interrupts() {
                 if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
                     OTA_UPDATE_TIMEOUT_SECONDS.dec();
                     if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                        // OTA timeout reached: finish with current status
-                        app().ota_manager.rf_link_slave_ota_finish_led_and_reboot(
-                            *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
-                        );
+                        // OTA timeout reached: finish with current status.
+                        //
+                        // Copy the flag out before rebooting: the reboot path
+                        // erases the OTA staging area and burns the reboot
+                        // latch, so the guard must not be alive across it.
+                        let finished_state = *RF_SLAVE_OTA_FINISHED_FLAG.lock();
+                        crate::ota::rf_link_slave_ota_finish_led_and_reboot(finished_state);
                     }
                 }
             }
@@ -139,11 +137,11 @@ fn handle_system_interrupts() {
     if irq_source & FLD_IRQ::TMR1_EN.bits() != 0 {
         write_reg_tmr_sta(FLD_TMR_STA::TMR1.bits());
 
-        app().light_manager.transition_step();
+        crate::light_manager::transition_step();
     }
 
     // Handle UART interrupts for external communication
-    app().uart_manager.check_irq();
+    crate::uart_manager::check_irq();
 }
 
 #[cfg(test)]
@@ -154,6 +152,11 @@ mod tests {
 
     // Import mock functions from their original modules
     use crate::embassy::time_driver::{mock_on_timer0_interrupt, on_timer0_interrupt};
+    use crate::light_manager::{mock_transition_step, transition_step};
+    use crate::ota::{
+        mock_rf_link_slave_ota_finish_handle, mock_rf_link_slave_ota_finish_led_and_reboot,
+        rf_link_slave_ota_finish_handle, rf_link_slave_ota_finish_led_and_reboot,
+    };
     use crate::sdk::ble_app::irq::dispatcher::{
         handle_ble_system_timer_irq, handle_rf_irq, mock_handle_ble_system_timer_irq,
         mock_handle_rf_irq,
@@ -169,7 +172,7 @@ mod tests {
         mock_write_reg_tmr_sta,
     };
     use crate::state::{OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS};
-    use crate::{app::App, app_mocker, mock_app_mocker};
+    use crate::uart_manager::{check_irq, mock_check_irq};
 
     /// Timeout used by the OTA countdown tests; any non-zero value that cannot be
     /// decremented to zero in a single interrupt works.
@@ -330,7 +333,7 @@ mod tests {
         write_reg_tmr_sta,
         clock_time64,
         on_timer0_interrupt,
-        app_mocker
+        check_irq
     )]
     fn test_tmr0_irq_flushes_embassy_timers() {
         reset_ota_timeout_state();
@@ -340,9 +343,7 @@ mod tests {
         mock_clock_time64().returns(1000);
         mock_on_timer0_interrupt().returns(());
 
-        let mut app = App::default();
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
@@ -361,7 +362,7 @@ mod tests {
         write_reg_tmr_sta,
         clock_time64,
         on_timer0_interrupt,
-        app_mocker
+        check_irq
     )]
     fn test_tmr0_irq_restamps_ota_tick_when_ota_inactive() {
         reset_ota_timeout_state();
@@ -372,9 +373,7 @@ mod tests {
         mock_clock_time64().returns(50_000);
         mock_on_timer0_interrupt().returns(());
 
-        let mut app = App::default();
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
@@ -400,7 +399,7 @@ mod tests {
         write_reg_tmr_sta,
         clock_time64,
         on_timer0_interrupt,
-        app_mocker
+        check_irq
     )]
     fn test_tmr0_irq_ota_elapsed_under_one_second_does_not_decrement() {
         reset_ota_timeout_state();
@@ -413,9 +412,7 @@ mod tests {
         mock_clock_time64().returns(1_000 + CLOCK_SYS_CLOCK_1S as u64 - 1);
         mock_on_timer0_interrupt().returns(());
 
-        let mut app = App::default();
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
@@ -441,7 +438,7 @@ mod tests {
         write_reg_tmr_sta,
         clock_time64,
         on_timer0_interrupt,
-        app_mocker
+        check_irq
     )]
     fn test_tmr0_irq_ota_elapsed_one_second_decrements_once() {
         reset_ota_timeout_state();
@@ -455,9 +452,7 @@ mod tests {
         mock_clock_time64().returns(now);
         mock_on_timer0_interrupt().returns(());
 
-        let mut app = App::default();
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
@@ -471,6 +466,47 @@ mod tests {
             TEST_OTA_TIMEOUT_SECONDS - 1,
             "exactly one second should be consumed by one interrupt"
         );
+    }
+
+    /// Tests that the OTA timeout copies the finish flag out of its lock before
+    /// handing it to the reboot path.
+    ///
+    /// Acceptance: `rf_link_slave_ota_finish_led_and_reboot` erases the OTA staging
+    /// area and then blocks for six seconds blinking the error LED, so a
+    /// `RF_SLAVE_OTA_FINISHED_FLAG` guard held across the call would mask interrupts
+    /// for that whole window. The mock body re-locks the flag; the `cfg(test)`
+    /// re-entrancy probe turns that into a panic if the guard is still alive.
+    #[test]
+    #[mry::lock(
+        read_reg_irq_src,
+        write_reg_tmr_sta,
+        clock_time64,
+        on_timer0_interrupt,
+        rf_link_slave_ota_finish_led_and_reboot,
+        check_irq
+    )]
+    fn test_tmr0_irq_ota_timeout_copies_finish_flag_before_reboot() {
+        reset_ota_timeout_state();
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        OTA_UPDATE_TIMEOUT_SECONDS.set(1);
+        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
+        *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok;
+
+        mock_read_reg_irq_src().returns(FLD_IRQ::TMR0_EN.bits());
+        mock_write_reg_tmr_sta(Any).returns(());
+        mock_clock_time64().returns(1_000 + CLOCK_SYS_CLOCK_1S as u64);
+        mock_on_timer0_interrupt().returns(());
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns_with(|st: OtaState| {
+            // Panics if the caller still holds the flag's critical section.
+            drop(RF_SLAVE_OTA_FINISHED_FLAG.lock());
+            assert_eq!(st, OtaState::Ok, "the reboot must see the copied flag");
+        });
+        mock_check_irq().returns(());
+
+        handle_system_interrupts();
+
+        mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Ok).assert_called(1);
+        *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
     }
 
     // ================================================================================
@@ -489,7 +525,7 @@ mod tests {
         read_reg_irq_src,
         write_reg_irq_src,
         handle_ble_system_timer_irq,
-        app_mocker
+        check_irq
     )]
     fn test_system_timer_irq_clears_source_and_dispatches_ble_helper() {
         *CURRENT_RF_STATE.lock() = RfOperationState::Idle;
@@ -498,9 +534,7 @@ mod tests {
         mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_system_timer_irq().calls_real_impl();
 
-        let mut app = App::default();
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
@@ -514,31 +548,23 @@ mod tests {
         read_reg_irq_src,
         write_reg_irq_src,
         handle_ble_system_timer_irq,
-        app_mocker
+        rf_link_slave_ota_finish_handle,
+        rf_link_slave_ota_finish_led_and_reboot,
+        check_irq
     )]
     fn test_system_timer_irq_ota_finish_check_only_polls() {
         mock_read_reg_irq_src().returns(FLD_IRQ::SYSTEM_TIMER.bits());
         mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_system_timer_irq().returns(BleConnectionEvent::OtaFinishCheck);
 
-        let mut app = App::default();
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .returns(());
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .returns(());
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_rf_link_slave_ota_finish_handle().returns(());
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .assert_called(1);
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .assert_called(0);
+        mock_rf_link_slave_ota_finish_handle().assert_called(1);
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).assert_called(0);
     }
 
     /// `OtaErrorReboot` reboots with `OtaState::Error` without polling the finish
@@ -548,31 +574,23 @@ mod tests {
         read_reg_irq_src,
         write_reg_irq_src,
         handle_ble_system_timer_irq,
-        app_mocker
+        rf_link_slave_ota_finish_handle,
+        rf_link_slave_ota_finish_led_and_reboot,
+        check_irq
     )]
     fn test_system_timer_irq_ota_error_reboots_with_error_state() {
         mock_read_reg_irq_src().returns(FLD_IRQ::SYSTEM_TIMER.bits());
         mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_system_timer_irq().returns(BleConnectionEvent::OtaErrorReboot);
 
-        let mut app = App::default();
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .returns(());
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .returns(());
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_rf_link_slave_ota_finish_handle().returns(());
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Error)
-            .assert_called(1);
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .assert_called(0);
+        mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Error).assert_called(1);
+        mock_rf_link_slave_ota_finish_handle().assert_called(0);
     }
 
     /// `OtaFinishCheckAndErrorReboot` must reboot when the finish handler leaves the
@@ -582,7 +600,9 @@ mod tests {
         read_reg_irq_src,
         write_reg_irq_src,
         handle_ble_system_timer_irq,
-        app_mocker
+        rf_link_slave_ota_finish_handle,
+        rf_link_slave_ota_finish_led_and_reboot,
+        check_irq
     )]
     fn test_system_timer_irq_finish_check_and_zero_counter_reboots() {
         reset_ota_timeout_state();
@@ -593,25 +613,15 @@ mod tests {
         mock_handle_ble_system_timer_irq()
             .returns(BleConnectionEvent::OtaFinishCheckAndErrorReboot);
 
-        let mut app = App::default();
         // The finish handler does not refresh the counter in this scenario.
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .returns(());
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .returns(());
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_rf_link_slave_ota_finish_handle().returns(());
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .assert_called(1);
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Error)
-            .assert_called(1);
+        mock_rf_link_slave_ota_finish_handle().assert_called(1);
+        mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Error).assert_called(1);
 
         OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
     }
@@ -624,7 +634,9 @@ mod tests {
         read_reg_irq_src,
         write_reg_irq_src,
         handle_ble_system_timer_irq,
-        app_mocker
+        rf_link_slave_ota_finish_handle,
+        rf_link_slave_ota_finish_led_and_reboot,
+        check_irq
     )]
     fn test_system_timer_irq_finish_check_refreshed_counter_skips_reboot() {
         reset_ota_timeout_state();
@@ -635,27 +647,17 @@ mod tests {
         mock_handle_ble_system_timer_irq()
             .returns(BleConnectionEvent::OtaFinishCheckAndErrorReboot);
 
-        let mut app = App::default();
         // The finish handler refreshes the counter to the OTA default (30s).
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .returns_with(|| {
-                OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
-            });
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .returns(());
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_rf_link_slave_ota_finish_handle().returns_with(|| {
+            OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+        });
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_handle()
-            .assert_called(1);
-        app.ota_manager
-            .mock_rf_link_slave_ota_finish_led_and_reboot(Any)
-            .assert_called(0);
+        mock_rf_link_slave_ota_finish_handle().assert_called(1);
+        mock_rf_link_slave_ota_finish_led_and_reboot(Any).assert_called(0);
         assert_eq!(
             OTA_UPDATE_TIMEOUT_SECONDS.get(),
             RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
@@ -671,19 +673,17 @@ mod tests {
     /// Acceptance: `TMR1` drives smooth dimming, so a missing acknowledge would
     /// re-enter the handler forever and a missing step would freeze transitions.
     #[test]
-    #[mry::lock(read_reg_irq_src, write_reg_tmr_sta, app_mocker)]
+    #[mry::lock(read_reg_irq_src, write_reg_tmr_sta, transition_step, check_irq)]
     fn test_tmr1_irq_clears_status_and_steps_light_transition() {
         mock_read_reg_irq_src().returns(FLD_IRQ::TMR1_EN.bits());
         mock_write_reg_tmr_sta(Any).returns(());
 
-        let mut app = App::default();
-        app.light_manager.mock_transition_step().returns(());
-        app.uart_manager.mock_check_irq().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_transition_step().returns(());
+        mock_check_irq().returns(());
 
         handle_system_interrupts();
 
         mock_write_reg_tmr_sta(FLD_TMR_STA::TMR1.bits()).assert_called(1);
-        app.light_manager.mock_transition_step().assert_called(1);
+        mock_transition_step().assert_called(1);
     }
 }

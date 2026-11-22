@@ -1565,7 +1565,6 @@ mod tests {
     use mry::Any;
 
     // Import mock functions for dependencies
-    use crate::reset_app_uart_for_test;
     use crate::sdk::ble_app::callbacks::{
         mock_on_light_data, mock_on_light_response, mock_on_uart_mesh_rx,
     };
@@ -1701,8 +1700,10 @@ mod tests {
             },
         };
 
-        // Reset UartManager to clear mock state from previous tests
-        reset_app_uart_for_test();
+        // Reset the UART statics, the echo-suppression deque and the shared
+        // queues (this also drains MESH_TX_QUEUE and MESH_RX_CHANNEL) so each
+        // test starts from a known-clean transport state.
+        crate::uart_manager::reset_for_test();
     }
 
     // ================================================================================

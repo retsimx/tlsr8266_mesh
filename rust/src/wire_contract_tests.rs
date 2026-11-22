@@ -11,7 +11,7 @@
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, MESH_LTK, MESH_NAME, MESH_PWD, OUT_OF_MESH};
 use crate::logging::{UART_CRC_OFFSET, UART_PAYLOAD_OFFSET};
-use crate::ota::OtaManager;
+use crate::ota::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
 use crate::sdk::ble_app::ble_ll_pair::{
     PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK, PAIR_OP_RESET_MESH,
     PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
@@ -808,13 +808,11 @@ fn check_firmware_header(p: &mut Parser) {
     );
 
     assert_eq!(
-        OtaManager::FLASH_ADR_OTA_READY_FLAG,
-        vectors.ready_flag_address,
+        FLASH_ADR_OTA_READY_FLAG, vectors.ready_flag_address,
         "`ota.flash_adr_ota_ready_flag` mismatch"
     );
     assert_eq!(
-        OtaManager::FLASH_OTA_READY_FLAG,
-        vectors.ready_flag,
+        FLASH_OTA_READY_FLAG, vectors.ready_flag,
         "`ota.flash_ota_ready_flag` mismatch"
     );
     assert_eq!(

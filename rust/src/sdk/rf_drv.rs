@@ -9,9 +9,13 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::FLASH_ADR_DEV_GRP_ADR;
+use crate::sdk::ble_app::rf_drv_8266::{
+    DEVICE_ADDRESS, GROUP_ADDRESS, MESH_DEVICE_ADDRESS_NEXT_POSITION,
+    MESH_GROUP_ADDRESS_NEXT_POSITION, PKT_ADV, SET_UUID_FLAG,
+};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
-use crate::state::*;
 
 /// Mesh light-event handler, registered once from `App::init()` so this module
 /// never imports the application layer.
@@ -221,6 +225,10 @@ fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
 
 fn read_group_address(flash_addr: u32) -> u16 {
     let mut bytes = [0u8; 2];
+    // SAFETY: (2) flash-driver raw-pointer handoff. `bytes` is a live 2-byte local
+    // and `flash_read_page` is documented to write exactly `len` = 2 bytes into it.
+    // No unsafe operation remains inside the block; the driver fn is safe, and the
+    // stale braces only survive because `sdk/mod.rs` sets `#![allow(warnings)]`.
     unsafe {
         flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
     }
@@ -229,6 +237,9 @@ fn read_group_address(flash_addr: u32) -> u16 {
 
 fn write_group_address(flash_addr: u32, value: u16) {
     let bytes = value.to_le_bytes();
+    // SAFETY: (2) flash-driver raw-pointer handoff. `bytes` is the 2-byte
+    // `value.to_le_bytes()` array and `DEVICE_ADDR_SIZE` is 2, so the driver reads
+    // exactly that buffer. No unsafe operation remains; see the read path above.
     unsafe {
         flash_write_page(flash_addr, DEVICE_ADDR_SIZE, bytes.as_ptr());
     }

@@ -14,27 +14,41 @@
  */
 
 use core::cmp::min;
+use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize};
 
-use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
+use crate::config::{
+    FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG, VENDOR_ID,
+};
+use crate::const_assert;
+use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
 use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response};
 use crate::sdk::ble_app::flash_config::{
     dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address,
 };
+use crate::sdk::ble_app::light_ll::connection_management::{
+    BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_LINK_STATE, BUFF_RESPONSE, SLAVE_CONNECTED_TICK,
+    SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
+};
 use crate::sdk::ble_app::light_ll::mesh_management::{
-    mesh_node_table_init, rf_link_match_group_mac,
+    mesh_node_table_init, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
+    MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA, PKT_LIGHT_STATUS, STATUS_MESSAGE_SEQUENCE_NUMBER,
 };
 use crate::sdk::ble_app::light_ll::packet_processing::{
     parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_slave_add_status,
 };
 use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
+    DEVICE_STATUS_READ_BUSY_TIMESTAMP, DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX,
+    DEVICE_STATUS_TICK_COUNTER, NOTIFICATION_REQUEST_MASK_INDEX, SLAVE_READ_STATUS_BUSY,
+    SLAVE_STATUS_RECORD,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
 use crate::sdk::common::crc::crc16;
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
@@ -57,14 +71,223 @@ use crate::sdk::mcu::register::{
 use crate::sdk::mcu::register::{
     rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode,
 };
-use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttData, PacketAttValue};
+use crate::sdk::packet_types::{
+    Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttValue, PacketCtrlUnknown,
+    PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::*;
 use crate::version::BUILD_VERSION;
 use crate::BIT;
 
 const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
+
+/// Private advertising data structure used in BLE advertisements.
+/// Contains manufacturer ID, mesh product UUID, and MAC address for device identification.
+/// Broadcast during BLE advertising to allow discovery by mesh controllers.
+pub(crate) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
+    CriticalSectionMutex::new(AdvPrivate {
+        manufacture_id: VENDOR_ID,
+        mesh_product_uuid: VENDOR_ID,
+        mac_address: 0,
+    });
+
+/// Private advertising response data sent in response to scan requests.
+/// Extended version of advertising data including device status, product UUID,
+/// device address, and additional reserved fields for future use.
+pub(crate) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
+    CriticalSectionMutex::new(AdvRspPrivate {
+        manufacture_id: VENDOR_ID,
+        mesh_product_uuid: VENDOR_ID,
+        mac_address: 0,
+        product_uuid: 0x1234,
+        status: 0x01,
+        device_address: 0,
+        rsv: [0; 16],
+    });
+
+/// Current RF operation state indicating which mode is active.
+/// Tracks whether the device is in advertising, connected, receiving, mesh listening, or idle state.
+pub(crate) static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> =
+    CriticalSectionMutex::new(RfOperationState::Idle);
+
+/// Group addresses that this device belongs to (up to 8 groups).
+/// Used for group-based lighting control where multiple devices respond to the same command.
+pub(crate) static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
+    CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
+
+/// Device MAC address used for network identification.
+/// 6-byte IEEE MAC address uniquely identifying this device in the mesh network.
+pub(crate) static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
+
+/// BLE advertising data payload.
+/// Contains flags and service information broadcast during BLE advertising.
+pub const ADV_DATA_INIT: [u8; 3] = [2, 1, 5];
+pub(crate) static ADV_DATA: CriticalSectionMutex<[u8; ADV_DATA_INIT.len()]> =
+    CriticalSectionMutex::new(ADV_DATA_INIT);
+/// Advertising packet structure used for BLE advertisements.
+/// Pre-configured packet with advertising data, device address, and payload.
+/// Transmitted during advertising intervals to announce device presence.
+pub(crate) static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    adv_ind_module: RfPacketAdvIndModuleT {
+        dma_len: 0x27,
+        _type: 0,
+        rf_len: 0x25,
+        adv_a: [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5],
+        data: [0; 31],
+    },
+});
+
+/// BLE connection initialization packet template.
+/// Contains connection parameters, access address, channel map, and timing information.
+/// Used when establishing BLE connections with central devices.
+pub(crate) static PKT_INIT: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    ll_init: PacketLlInit {
+        dma_len: 0x24,
+        _type: 0x5,
+        rf_len: 0x22,
+        scan_a: [0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5],
+        adv_a: [0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5],
+        aa: [0xaa, 0x55, 0x55, 0xaa],
+        crcinit: [0x55, 0x55, 0x55],
+        wsize: 2,
+        woffset: 0x1f,
+        interval: 0x20,
+        latency: 0,
+        timeout: 0x48,
+        chm: [0xff, 0xff, 0xff, 0xff, 0x1f],
+        hop: 0xac,
+    },
+});
+
+/// Receive buffer array for incoming light control packets.
+/// Contains 4 buffers storing received packet data including RSSI, timing, sequence numbers,
+/// and MAC addresses. Used for processing incoming mesh communications.
+pub(crate) static LIGHT_RX_BUFF: CriticalSectionMutex<[LightRxBuff; LIGHT_RX_BUFF_COUNT]> =
+    CriticalSectionMutex::new(
+        [LightRxBuff {
+            dma_len: 0,
+            unk1: [0; 3],
+            rssi: 0,
+            unk2: [0; 3],
+            rx_time: 0,
+            sno: [0; 3],
+            unk3: [0; 5],
+            mac: [0; 4],
+            unk4: [0; 40],
+        }; LIGHT_RX_BUFF_COUNT],
+    );
+
+/// Empty packet template used for BLE layer control.
+/// Must be in RAM (.data section) because DMA cannot access flash memory.
+/// Used for link layer control and empty data transmissions.
+// This needs to be forced in to .data otherwise the DMA module will try to fetch from flash, which
+// doesn't work
+#[link_section = ".data"]
+pub(crate) static PKT_EMPTY: Packet = Packet {
+    head: PacketL2capHead {
+        dma_len: 2,
+        _type: 1,
+        rf_len: 0,
+        l2cap_len: 0,
+        chan_id: 0,
+    },
+};
+
+/// BLE connection termination packet.
+/// Must be in RAM (.data section) for DMA access. Used to terminate active BLE connections
+/// by sending the appropriate control packet with termination opcode.
+#[link_section = ".data"]
+pub(crate) static PKT_TERMINATE: Packet = Packet {
+    ctrl_unknown: PacketCtrlUnknown {
+        dma_len: 4,
+        _type: 3,
+        rf_len: 2,
+        opcode: 2,
+        data: [0x13],
+    },
+};
+
+/// ATT error response packet template.
+/// Must be in RAM (.data section) for DMA access. Used to send error responses
+/// when ATT operations fail, containing error codes and handles.
+#[link_section = ".data"]
+pub(crate) static PKT_ERR_RSP: Packet = Packet {
+    att_err_rsp: PacketAttErrRsp {
+        head: PacketL2capHead {
+            dma_len: 0x0b,
+            _type: 0x02,
+            rf_len: 0x09,
+            l2cap_len: 0x05,
+            chan_id: 0x04,
+        },
+        opcode: 0x01,
+        err_opcode: 0,
+        err_handle: 0,
+        err_reason: 0x0a,
+    },
+};
+
+/// Write pointer for the light receive buffer circular queue.
+/// Points to the next available slot for storing incoming light control packets.
+pub(crate) static LIGHT_RX_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Unique 16-bit address assigned to this device within the mesh network.
+/// Used for addressing and routing messages to/from this specific device.
+pub(crate) static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
+
+/// RF transmit power base setting controlling signal strength.
+/// Hardware register value determining the baseline transmission power level.
+static RF_TP_BASE: AtomicU32 = AtomicU32::new(0x1D);
+
+/// RF transmit power gain adjustment for fine-tuning signal strength.
+/// Additional gain control applied on top of the base power setting.
+static RF_TP_GAIN: AtomicU32 = AtomicU32::new(0xC);
+
+/// BLE scan response interval timing control.
+/// Determines the delay between receiving scan requests and sending responses.
+pub(crate) static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
+
+/// Flag indicating UUID configuration has been set.
+/// Tracks whether device UUID has been properly configured.
+pub(crate) static SET_UUID_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Maximum allowed length for mesh network names.
+/// Enforces string length limits for mesh configuration.
+const ADV_PRIVATE_SIZE: usize = ADV_DATA_INIT.len() + size_of::<AdvPrivate>() + 2;
+const_assert!(ADV_PRIVATE_SIZE < 31);
+
+pub const MAX_MESH_NAME_LEN: usize = if 31 - ADV_PRIVATE_SIZE - 2 < 16 {
+    31 - ADV_PRIVATE_SIZE - 2
+} else {
+    16
+};
+
+/// Flag indicating mesh device address configuration is pending MAC validation.
+/// When true: Device address configuration requires MAC address validation before completion.
+/// When false: MAC address validation completed successfully, device address is configured.
+/// Used during mesh pairing to track the device address configuration state.
+pub(crate) static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Next position index for device group address allocation.
+/// Points to the next available slot in the group address table.
+pub(crate) static MESH_GROUP_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0);
+
+/// Flash configuration index for persistent storage operations.
+/// Current position in flash memory for configuration data.
+pub(crate) static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
+
+/// Next position for device address allocation in mesh network.
+/// Used for assigning unique addresses to new mesh devices.
+pub(crate) static MESH_DEVICE_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0);
+
+/// Flag controlling BLE advertising state.
+/// When true, device actively advertises its presence for discovery.
+pub(crate) static BLE_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Flag enabling BLE peripheral advertising functionality.
+/// Controls whether the peripheral device can advertise for BLE connections.
+pub(crate) static BLE_PERIPHERAL_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /**
  * Select the RF initialization table for the crystal detected at boot
@@ -677,6 +900,11 @@ fn rf_link_slave_set_adv(adv_data_ptr: &[u8]) {
  */
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_init(interval: u32) {
+    // SAFETY: (2) startup RF-init boundary; no unsafe operation remains. Every
+    // callee is a safe `fn` (register accessors, `flash_read_page`, `pair_load_key`)
+    // and the raw pointers they take come from live locals/statics. Retained because
+    // `sdk/mod.rs` sets `#![allow(warnings)]`, which hides the `unused_unsafe` this
+    // block would otherwise raise; removing it is a separate change.
     unsafe {
         // Initialize the basic MCU link layer functionality
         blc_ll_init_basic_mcu();
@@ -774,6 +1002,10 @@ pub fn rf_set_power_level_index(index: u32) {
     };
 
     // Configure the four analog registers that control RF power
+    // SAFETY: (2) analog-register writes; no unsafe operation remains. `tbl_index`
+    // is bounded by the `TBL_RF_POWER.len()` check above, so the table reads are in
+    // bounds, and `analog_write` is a safe `fn`. Same retained no-op as in
+    // `rf_link_slave_init` (`sdk/mod.rs`'s `#![allow(warnings)]`).
     unsafe {
         analog_write(REGA_RF_PA_GAIN, TBL_RF_POWER[tbl_index].a); // PA gain control
         analog_write(REGA_RF_PA_BIAS, TBL_RF_POWER[tbl_index].b); // PA bias control
@@ -1088,7 +1320,9 @@ pub fn rf_set_ble_access_code_adv() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_pair::mock_pair_dec_packet;
+    use crate::sdk::ble_app::ble_ll_pair::{
+        mock_pair_dec_packet, MESH_PAIR_ENABLE, SECURITY_ENABLE,
+    };
     use crate::sdk::ble_app::callbacks::{mock_on_light_data, mock_on_light_response};
     use crate::sdk::ble_app::flash_config::mock_retrieve_dev_grp_address;
     use crate::sdk::ble_app::flash_config::{mock_dev_addr_with_mac_flag, mock_pair_load_key};
@@ -1100,6 +1334,7 @@ mod tests {
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_par_init;
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
     use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI};
+    use crate::sdk::common::sync::SimplifyLS;
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
     use crate::sdk::mcu::analog::*;
     use crate::sdk::mcu::clock::mock_is_16mhz_xtal;
@@ -1111,8 +1346,6 @@ mod tests {
     use crate::sdk::packet_types::Packet;
     use crate::sdk::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use crate::sdk::pm::mock_light_sw_reboot;
-    use crate::state::SimplifyLS;
-    use crate::state::{MESH_PAIR_ENABLE, PAIR_LOGIN_OK, SECURITY_ENABLE};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 

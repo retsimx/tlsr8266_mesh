@@ -16,17 +16,26 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
 use crate::sdk::ble_app::light_ll::connection_management::{
-    rf_link_slave_connect, rf_link_timing_adjust,
+    rf_link_slave_connect, rf_link_timing_adjust, BLE_PERIPHERAL_CONNECTION_ACTIVE,
+    BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG,
+    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME, LAST_PACKET_RECEIVED_TIMESTAMP,
+    LIGHT_CONN_SN_MASTER, SLAVE_CONNECTED_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK,
+    SLAVE_WINDOW_SIZE, SLAVE_WINDOW_SIZE_UPDATE,
 };
+use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_exist_in_rc_pkt_buf, parse_ble_packet_op_params, rf_link_slave_data,
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{
+    ADV_RSP_PRI_DATA, BLE_SCAN_RESPONSE_INTERVAL_US, DEVICE_ADDRESS, LIGHT_RX_BUFF,
+    LIGHT_RX_BUFFER_WRITE_POINTER, MAC_ID, PKT_EMPTY,
+};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{AdvRspPrivate, LightRxBuff, LIGHT_RX_BUFF_COUNT};
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
 use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
-use crate::state::*;
 
 /// Handles RF transmission complete interrupt.
 ///
@@ -151,9 +160,16 @@ fn process_received_packet_slow_path(
     //    - This verifies successful RF reception without errors
     if dma_len > 0xe
         && dma_len == (entry.sno[1] & 0x3f) + 0x11
+        // SAFETY: (4) audited RF-DMA view. `entry` is one `LightRxBuff` slot of the
+        // contiguous RX DMA buffer; the radio appends the status byte three bytes past
+        // the `dma_len` frame it just wrote, so the read stays inside that DMA region.
         && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40
     {
         // Cast receive buffer to packet structure for processing
+        // SAFETY: (4) audited `Packet`-union view. `entry.rx_time` is the start of the
+        // DMA payload the radio filled with a full `Packet` (validated above); the view
+        // is packed and all-integer, so every bit pattern is valid, and it borrows the
+        // caller's `light_rx_buff` slot for as long as `packet` lives.
         let packet = unsafe { &*(addr_of!(entry.rx_time) as *const Packet) };
 
         // Extract command type from packet header (lower 4 bits of first sequence byte)
@@ -428,7 +444,6 @@ mod tests {
         mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
     };
     use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
-    use crate::state::*;
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.

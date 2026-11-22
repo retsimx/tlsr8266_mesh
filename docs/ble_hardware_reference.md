@@ -1851,7 +1851,7 @@ All mesh nodes are peers. There is no designated coordinator, router, or gateway
 | `ONLINE_STATUS_TIMEOUT` | `3000` ms | `sdk/light.rs` | **Floor** for the cadence-derived offline deadline; the deadline is `max(floor, ceil((M-1)/5) × 250 ms × 4)` (`mesh_status_timeout_ms`, e.g. 8 s at M=40, 13 s at M=64) |
 | `MESH_PAIR_CMD_INTERVAL` | `500` ms | `mesh.rs` | Interval between mesh-pair credential frames |
 | `MESH_PAIR_TIMEOUT` | `10` s | `mesh.rs` | Total time allowed to complete re-pairing |
-| `MESH_NODE_MAX_NUM` | (compile-time) | `state.rs` | Maximum nodes tracked in status table |
+| `MESH_NODE_MAX_NUM` | (compile-time) | `rust/src/sdk/ble_app/light_ll/mesh_management.rs` | Maximum nodes tracked in status table |
 
 ### 19.3 Channel Strategy
 

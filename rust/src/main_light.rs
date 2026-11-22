@@ -1,5 +1,6 @@
 use core::cmp::min;
 use core::ptr::addr_of;
+use core::sync::atomic::AtomicU32;
 
 #[cfg(not(test))]
 use embassy_time::{Duration, Timer};
@@ -15,15 +16,23 @@ use crate::mesh::{
     mesh_security_enable,
 };
 use crate::ota::{check_ota_area_startup, rf_mesh_data_ota};
+use crate::sdk::ble_app::ble_ll_pair::{
+    PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK,
+    SECURITY_ENABLE,
+};
 use crate::sdk::ble_app::flash_config::{
     dev_addr_with_mac_flag, dev_addr_with_mac_match, dev_addr_with_mac_rsp,
 };
 use crate::sdk::ble_app::light_ll::connection_management::{
     light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
+    BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
 };
 use crate::sdk::ble_app::light_ll::mesh_management::{mesh_construct_packet, mesh_node_table_init};
+use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_MESH_OPERATIONS_BLOCKED;
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
+use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS, MAC_ID, MAX_MESH_NAME_LEN};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{
@@ -42,7 +51,6 @@ use crate::sdk::mcu::register::{
 use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
-use crate::state::*;
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
@@ -69,6 +77,45 @@ pub const LED_EVENT_FLASH_1HZ_4S: u32 = config_led_event!(8, 8, 4, LED_MASK);
 // pub const LED_EVENT_FLASH_4HZ_3T: u32 = config_led_event!(2,2,3,LED_MASK);
 // pub const LED_EVENT_FLASH_1HZ_3T: u32 = config_led_event!(8,8,3,LED_MASK);
 // pub const LED_EVENT_FLASH_0P25HZ_1T: u32 = config_led_event!(4, 60, 1, LED_MASK);
+
+/// LED controller state managing all LED operations.
+/// Encapsulates timing, patterns, and current state for LED control.
+struct LedControllerState {
+    /// Bitmask of pending LED events waiting to be processed
+    event_pending: AtomicU32,
+    /// Counter for LED blink cycles in current sequence
+    blink_count: AtomicU32,
+    /// LED on-time duration in microseconds for blink patterns
+    on_duration_us: AtomicU32,
+    /// LED off-time duration in microseconds for blink patterns
+    off_duration_us: AtomicU32,
+    /// LED selection mask indicating which LEDs are active
+    led_selection_mask: AtomicU32,
+    /// Current timestamp for LED timing control
+    timing_tick: AtomicU32,
+    /// LED pattern number or sequence identifier
+    pattern_number: AtomicU32,
+    /// Current LED state: 1 for on, 0 for off
+    is_on: AtomicU32,
+}
+
+impl LedControllerState {
+    const fn new() -> Self {
+        Self {
+            event_pending: AtomicU32::new(0),
+            blink_count: AtomicU32::new(0),
+            on_duration_us: AtomicU32::new(0),
+            off_duration_us: AtomicU32::new(0),
+            led_selection_mask: AtomicU32::new(0),
+            timing_tick: AtomicU32::new(0),
+            pattern_number: AtomicU32::new(0),
+            is_on: AtomicU32::new(0),
+        }
+    }
+}
+
+/// Global LED controller state for device status indication.
+static LED_CONTROLLER: LedControllerState = LedControllerState::new();
 
 fn cfg_led_event(e: u32) {
     LED_CONTROLLER.event_pending.set(e);
@@ -523,13 +570,19 @@ mod tests {
     use crate::sdk::ble_app::flash_config::{
         mock_dev_addr_with_mac_flag, mock_dev_addr_with_mac_match, mock_dev_addr_with_mac_rsp,
     };
+    use crate::sdk::ble_app::light_ll::connection_management::BUFF_RESPONSE;
     use crate::sdk::ble_app::light_ll::connection_management::{
         mock_light_check_tick_per_us, mock_rf_link_slave_pairing_enable, mock_rf_link_slave_proc,
     };
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
+    use crate::sdk::ble_app::light_ll::status_management::{
+        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
+        DEVICE_STATUS_RECORD_INDEX, SLAVE_READ_STATUS_BUSY,
+    };
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
+    use crate::sdk::ble_app::rf_drv_8266::ADV_DATA;
     use crate::sdk::drivers::flash::{
         flash_read_page, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
@@ -553,6 +606,7 @@ mod tests {
     use crate::sdk::pm::mock_light_sw_reboot;
     use crate::sdk::pm::mock_usb_dp_pullup_en;
     use crate::vendor_light::mock_vendor_set_adv_data;
+    use core::sync::atomic::Ordering;
     use futures::executor::block_on;
     use mry::Any;
 
@@ -2352,5 +2406,19 @@ mod tests {
         DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
         DEVICE_STATUS_RECORD_INDEX.set(0);
+    }
+
+    #[test]
+    fn test_led_controller_state_new_initializes_zero() {
+        let state = LedControllerState::new();
+
+        assert_eq!(state.event_pending.load(Ordering::Relaxed), 0);
+        assert_eq!(state.blink_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.on_duration_us.load(Ordering::Relaxed), 0);
+        assert_eq!(state.off_duration_us.load(Ordering::Relaxed), 0);
+        assert_eq!(state.led_selection_mask.load(Ordering::Relaxed), 0);
+        assert_eq!(state.timing_tick.load(Ordering::Relaxed), 0);
+        assert_eq!(state.pattern_number.load(Ordering::Relaxed), 0);
+        assert_eq!(state.is_on.load(Ordering::Relaxed), 0);
     }
 }

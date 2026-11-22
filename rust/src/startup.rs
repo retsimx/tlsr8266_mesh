@@ -51,16 +51,33 @@ use core::ptr::{copy_nonoverlapping, write_bytes};
 
 // IRQ stack. The symbol `irq_stk` is referenced by name from the assembly below,
 // so it must keep the default Rust symbol name. It lives in `.bss`, which
-// `startup_init` zeroes before interrupts are enabled.
+// `startup_init` zeroes before interrupts are enabled. The `UnsafeCell` records
+// that the memory is mutated behind Rust's back (by the hardware stack pointer),
+// which is what lets this be a plain `static` instead of a `static mut`.
 #[repr(C, align(4))]
-struct IrqStack([u32; 0x700 / 4]);
+struct IrqStack(core::cell::UnsafeCell<[u32; 0x700 / 4]>);
+
+// SAFETY: (4) `Sync` wrapper. The hardware IRQ stack is written only by
+// interrupt entry/exit assembly through the stack pointer. Rust code never
+// reads or writes the bytes, and only its address is ever taken (by
+// `global_asm!` and by `probe-tlsr diag`), so no `&IrqStack` can alias live
+// stack memory.
+unsafe impl Sync for IrqStack {}
 
 #[no_mangle]
 #[used]
-static mut irq_stk: IrqStack = IrqStack([0; 0x700 / 4]);
+static irq_stk: IrqStack = IrqStack(core::cell::UnsafeCell::new([0; 0x700 / 4]));
+
+// The assembler reserves the same stack with `.equ IRQ_STK_SIZE, 0x700`
+// (`irq_stk + IRQ_STK_SIZE` is loaded as the initial `sp` below); this keeps the
+// Rust array and the asm constant from drifting apart silently.
+const _: () = assert!(core::mem::size_of::<IrqStack>() == 0x700);
 
 // Absolute symbols provided by `sdk/boot.link`. Taking the address of one
 // yields its numeric value.
+// SAFETY: (2) linker-provided ABI. These symbols are defined by
+// `sdk/boot.link`; none is ever dereferenced - only their addresses are taken
+// through `symbol` - so no storage behind the declaration is assumed.
 unsafe extern "C" {
     static _dstored_: u8;
     static _start_data_: u8;
@@ -70,6 +87,9 @@ unsafe extern "C" {
 }
 
 #[inline(always)]
+// SAFETY: (2) linker-symbol ABI. Every caller passes one of the extern statics
+// above, so `sym` is a linker address and the cast yields it unchanged; the
+// result is used only as a raw start/end pointer.
 unsafe fn symbol(sym: &u8) -> usize {
     sym as *const u8 as usize
 }
@@ -81,6 +101,10 @@ unsafe fn symbol(sym: &u8) -> usize {
 /// helpers.
 #[no_mangle]
 pub extern "C" fn startup_init() {
+    // SAFETY: (2) startup memory bring-up. `startup_init` runs from the reset stub
+    // before any Rust code, task or interrupt exists; the ranges are the linker
+    // script's symbols and `symbol` maps each to its address, so the `.bss` zeroing
+    // and `.data` copy touch exactly the linker-declared regions.
     unsafe {
         // 1. Zero `.bss` (Rust globals, executor storage, `irq_stk`).
         write_bytes(

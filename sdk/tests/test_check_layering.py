@@ -1,11 +1,12 @@
-"""Unit tests for the ``rust/src/sdk/`` layering gate.
+"""Unit tests for the layering and universal ``unsafe`` gates.
 
 Run from the repository root::
 
     python3 -m unittest discover -s sdk/tests -v
 
 Every test is hermetic: synthetic trees live in a temporary directory and the
-only real tree touched is ``rust/src/sdk/`` (read-only).
+only real tree touched is ``rust/src/`` (read-only), by the handful of tests
+that assert the shipped tree is clean.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT / "sdk"))
 import check_layering  # noqa: E402  (sys.path set up above)
 
 SDK_ROOT = REPO_ROOT / "rust" / "src" / "sdk"
+SRC_ROOT = REPO_ROOT / "rust" / "src"
 
 
 def _write(path: Path, content: str) -> Path:
@@ -73,6 +75,11 @@ class TestRealSdkTree(unittest.TestCase):
     def test_default_root_is_the_repo_sdk(self) -> None:
         self.assertEqual(Path(check_layering.DEFAULT_ROOT).resolve(), SDK_ROOT.resolve())
 
+    def test_default_src_root_is_the_repo_src(self) -> None:
+        self.assertEqual(
+            Path(check_layering.DEFAULT_SRC_ROOT).resolve(), SRC_ROOT.resolve()
+        )
+
     def test_real_sdk_tree_is_clean(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -80,6 +87,68 @@ class TestRealSdkTree(unittest.TestCase):
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIn("0 violations", out.getvalue())
         self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 40)
+
+    def test_real_tree_reports_both_passes(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main([])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn("sdk layering OK", out.getvalue())
+        self.assertIn("rust src audit OK", out.getvalue())
+
+    def test_production_unsafe_ceiling_equals_the_measured_count(self) -> None:
+        # The ratchet may be lowered, never raised: raising it without removing
+        # `unsafe` sites leaves the measured count below the ceiling and fails
+        # this assertion, and so does lowering it without the removals.
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(SRC_ROOT)), str(SRC_ROOT)
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, check_layering.MAX_PRODUCTION_UNSAFE)
+
+
+class _TempSrcTree(unittest.TestCase):
+    """A disposable ``rust/src`` plus a disposable SDK root for one test.
+
+    The gate runs both passes here: ``--root`` keeps the layering pass on the
+    fake SDK tree and ``--src-root`` points the universal pass at the fake
+    source tree, so the real ``rust/src`` is never read.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.src_root = Path(tmp.name) / "src"
+        self.root = self.src_root / "sdk"
+        self.root.mkdir(parents=True)
+        _write(self.root / "clean.rs", _lines("pub fn f() {}"))
+        _write(self.src_root / "clean.rs", _lines("pub fn f() {}"))
+
+    def write_src(self, relative: str, content: str) -> Path:
+        return _write(self.src_root / relative, content)
+
+    def write(self, relative: str, content: str) -> Path:
+        return _write(self.root / relative, content)
+
+    def run_gate(self) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(
+                ["--root", str(self.root), "--src-root", str(self.src_root)]
+            )
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_clean(self) -> None:
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("rust src audit OK", out)
+
+    def assert_violations(self, *expected: str) -> str:
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 1, out + err)
+        for text in expected:
+            self.assertIn(text, out)
+        return out
 
 
 class TestViolationFormat(_TempTree):
@@ -141,11 +210,12 @@ class TestGlobalBans(_TempTree):
         out = self.assert_violations(*[f"crate::{m}" for m in banned])
         self.assertEqual(len(out.splitlines()), len(banned))
 
-    def test_deferred_modules_are_legal(self) -> None:
+    def test_config_and_sdk_imports_are_legal(self) -> None:
+        # `crate::state` used to be legal here; the universal `state-removed`
+        # rule now bans it outright (see TestStateRemovedRule).
         self.write(
             "x.rs",
             _lines(
-                "use crate::state::PAIR_LOGIN_OK;",
                 "use crate::config::VENDOR_ID;",
                 "use crate::sdk::common::sync::CriticalSectionMutex;",
                 "use crate::BIT;",
@@ -330,6 +400,91 @@ class TestTestCodeStripping(_TempTree):
             ),
         )
         self.assert_violations("7: upward-dep: crate::light_manager")
+
+    def test_cfg_test_on_a_struct_field_does_not_mask_the_next_item(self) -> None:
+        # H-1: the field attribute used to run to the next brace block, hiding
+        # the production item that followed it.
+        self.write(
+            "trap.rs",
+            _lines(
+                "pub struct S {",
+                "    #[cfg(test)]",
+                "    locked: u8,",
+                "}",
+                "",
+                "pub fn production() { let _ = crate::app::App; }",
+            ),
+        )
+        self.assert_violations("6: upward-dep: crate::app")
+
+    def test_cfg_test_on_a_statement_does_not_mask_the_rest_of_the_body(self) -> None:
+        # Same root cause, statement shape (`uart_manager::uart_send_async`).
+        self.write(
+            "trap.rs",
+            _lines(
+                "pub fn f() {",
+                "    #[cfg(test)]",
+                "    let scratch = 0;",
+                "    let _ = crate::ota::plan();",
+                "    loop {",
+                "        break;",
+                "    }",
+                "}",
+            ),
+        )
+        self.assert_violations("4: upward-dep: crate::ota")
+
+
+class TestTestStrippingExtent(_TempTree):
+    """The stripper's extent: an item is removed whole, a field/statement unit
+    only up to its own `,`/`;` (the H-1 root cause)."""
+
+    def _masked(self, *lines: str) -> str:
+        return check_layering.production_code(_lines(*lines))
+
+    def test_item_extent_removes_the_whole_item(self) -> None:
+        code = self._masked(
+            "#[cfg(test)]",
+            "mod tests {",
+            "    pub static mut SCRATCH: u8 = 0;",
+            "}",
+            "pub fn production() {}",
+        )
+        self.assertNotIn("SCRATCH", code)
+        self.assertIn("pub fn production", code)
+
+    def test_field_extent_stops_at_the_comma_and_keeps_array_types_whole(self) -> None:
+        code = self._masked(
+            "pub struct S {",
+            "    #[cfg(test)]",
+            "    scratch: [u8; 4],",
+            "    data: u8,",
+            "}",
+        )
+        self.assertNotIn("scratch", code)
+        self.assertIn("data: u8", code)
+
+    def test_statement_extent_stops_at_the_semicolon(self) -> None:
+        code = self._masked(
+            "pub fn f() {",
+            "    #[cfg(test)]",
+            "    let scratch = 0;",
+            "    let kept = 1;",
+            "}",
+        )
+        self.assertNotIn("scratch", code)
+        self.assertIn("let kept = 1;", code)
+
+    def test_block_bodied_annotation_stops_at_its_own_brace_group(self) -> None:
+        code = self._masked(
+            "pub fn f() {",
+            "    #[cfg(test)]",
+            "    unsafe { probe() }",
+            "    unsafe { production() }",
+            "}",
+        )
+        self.assertNotIn("probe", code)
+        self.assertIn("unsafe { production() }", code)
 
 
 class TestCommentAndStringPolicy(_TempTree):
@@ -524,8 +679,318 @@ class TestCli(_TempTree):
 
     def test_stray_non_rust_files_are_ignored(self) -> None:
         self.write("notes.txt", "use crate::app::App;\n")
-        self.write("clean.rs", _lines("use crate::state::PAIR_LOGIN_OK;"))
+        self.write("clean.rs", _lines("use crate::config::VENDOR_ID;"))
         self.assert_clean()
+
+    def test_explicit_root_skips_the_universal_pass(self) -> None:
+        # Hermeticity: `--root` alone must never read the real `rust/src`.
+        self.write("x.rs", _lines("pub fn f() {}"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(["--root", str(self.root)])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertNotIn("rust src audit", out.getvalue())
+        self.assertEqual(len(out.getvalue().splitlines()), 1)
+
+
+class TestStateRemovedRule(_TempSrcTree):
+    """`crate::state` is gone: any reference fails, tests included."""
+
+    def test_crate_state_reference_fails(self) -> None:
+        path = self.write_src("x.rs", _lines("use crate::state::PairState;"))
+        out = self.assert_violations("1: state-removed: crate::state")
+        self.assertEqual(out.splitlines()[0], f"{path}:1: state-removed: crate::state")
+
+    def test_whitespace_around_the_path_separator_fails(self) -> None:
+        # `::` is whitespace-insensitive to the lexer.  A crate alias needs no
+        # rule: `c::state` is a compile error once the module is deleted.
+        self.write_src("x.rs", _lines("use crate :: state :: X;"))
+        self.assert_violations("1: state-removed: crate::state")
+
+    def test_crate_state_inside_cfg_test_also_fails(self) -> None:
+        # The rule reads the raw file: test modules import the deleted module
+        # too, so the test mask must not hide it.
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub fn f() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::state::PAIR_LOGIN_OK;",
+                "}",
+            ),
+        )
+        self.assert_violations("5: state-removed: crate::state")
+
+    def test_other_root_modules_are_legal(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines("use crate::config::VENDOR_ID;", "use crate::BIT;"),
+        )
+        self.assert_clean()
+
+
+class TestStaticMutRule(_TempSrcTree):
+    """Production `static mut` items are banned; references are not items."""
+
+    def test_static_mut_item_fails(self) -> None:
+        self.write_src("x.rs", _lines("static mut X: u8 = 0;"))
+        self.assert_violations("1: static-mut: static mut X")
+
+    def test_pub_crate_static_mut_item_fails(self) -> None:
+        self.write_src("x.rs", _lines("pub(crate) static mut X: u8 = 0;"))
+        self.assert_violations("1: static-mut: static mut X")
+
+    def test_static_mut_reference_forms_are_legal(self) -> None:
+        # Both patterns exist in the tree: the #44 executor receiver and the
+        # attribute-table accessor.
+        self.write_src(
+            "executor.rs",
+            _lines(
+                "pub fn run(&'static mut self, init: u32) {",
+                "    let _ = init;",
+                "}",
+            ),
+        )
+        self.write_src(
+            "attribute.rs",
+            _lines(
+                "pub fn get_g_attributes() -> &'static mut [AttributeT; 29] {",
+                "    todo!()",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_cfg_test_static_mut_is_ignored(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "pub static mut SCRATCH: u32 = 0;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_struct_field_cfg_test_does_not_hide_a_following_static_mut(self) -> None:
+        # H-1: the field attribute used to mask everything up to the next brace
+        # block, so a production `static mut` in that position was invisible.
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub struct S {",
+                "    #[cfg(test)]",
+                "    locked: u8,",
+                "}",
+                "",
+                "pub static mut HIDDEN: u8 = 0;",
+            ),
+        )
+        self.assert_violations("6: static-mut: static mut HIDDEN")
+
+    def test_inline_attribute_static_mut_fails(self) -> None:
+        # M-4: an attribute on the item's own line used to defeat the anchor.
+        self.write_src(
+            "x.rs",
+            _lines('#[link_section = ".data"] pub static mut X: u8 = 0;'),
+        )
+        self.assert_violations("1: static-mut: static mut X")
+
+    def test_static_mut_inside_a_macro_body_fails(self) -> None:
+        # M-6: a single-line macro body used to defeat the line anchor.
+        self.write_src(
+            "x.rs",
+            _lines("macro_rules! m { () => { pub static mut X: u8 = 0; } }"),
+        )
+        self.assert_violations("1: static-mut: static mut X")
+
+    def test_cfg_test_field_inside_a_test_module_is_ignored(self) -> None:
+        # No false positive: a field/statement attribute *inside* a test module
+        # is test code like the module itself.
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    struct S {",
+                "        #[cfg(test)]",
+                "        scratch: u8,",
+                "    }",
+                "    fn helper() {",
+                "        #[cfg(test)]",
+                "        static mut SCRATCH: u32 = 0;",
+                "    }",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+
+class TestUndocumentedUnsafeRule(_TempSrcTree):
+    """Every production `unsafe` needs `// SAFETY:` directly above it."""
+
+    def test_documented_sites_pass(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines(
+                "// SAFETY: caller guarantees `ptr` points at one valid u8.",
+                "pub unsafe fn read(ptr: *const u8) -> u8 {",
+                "    // SAFETY: same contract as the caller.",
+                "    unsafe { *ptr }",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_undocumented_unsafe_fails(self) -> None:
+        self.write_src("x.rs", _lines("pub unsafe fn f() {}"))
+        self.assert_violations(
+            "1: undocumented-unsafe: no `// SAFETY:` comment directly above"
+        )
+
+    def test_cfg_test_safety_comment_does_not_launder_production_unsafe(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines(
+                "#[cfg(test)]",
+                "mod tests {",
+                "    // SAFETY: test-only justification.",
+                "    unsafe fn helper() {}",
+                "}",
+                "",
+                "pub unsafe fn production() {}",
+            ),
+        )
+        out = self.assert_violations("7: undocumented-unsafe")
+        self.assertEqual(len(out.splitlines()), 1)
+
+    def test_unsafe_inside_cfg_test_is_ignored(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    unsafe fn helper() {}",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_safety_comment_above_a_blank_line_does_not_count(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines("// SAFETY: stale note.", "", "pub unsafe fn f() {}"),
+        )
+        self.assert_violations("3: undocumented-unsafe")
+
+    def test_struct_field_cfg_test_does_not_hide_a_following_unsafe(self) -> None:
+        # H-1, undocumented-unsafe half of the same defect.
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub struct S {",
+                "    #[cfg(test)]",
+                "    locked: u8,",
+                "}",
+                "",
+                "pub unsafe fn hidden() {}",
+            ),
+        )
+        self.assert_violations("6: undocumented-unsafe")
+
+    def test_cfg_test_statement_does_not_hide_a_following_unsafe(self) -> None:
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub fn f() {",
+                "    #[cfg(test)]",
+                "    let deadline = 0u32;",
+                "    unsafe {}",
+                "}",
+            ),
+        )
+        self.assert_violations("4: undocumented-unsafe")
+
+    def test_cfg_test_field_before_documented_unsafe_impls_is_clean(self) -> None:
+        # The exact shape shipped in `sdk/common/sync.rs`: the attribute is on a
+        # field, and both production `unsafe impl`s must stay visible *and*
+        # documented, so the real tree stays clean with the corrected count.
+        self.write_src(
+            "x.rs",
+            _lines(
+                "pub struct CriticalSectionMutex<T: ?Sized> {",
+                "    #[cfg(test)]",
+                "    locked: AtomicBool,",
+                "    data: UnsafeCell<T>,",
+                "}",
+                "",
+                "// SAFETY: (4) `Send` wrapper.",
+                "unsafe impl<T: ?Sized + Send> Send for CriticalSectionMutex<T> {}",
+                "// SAFETY: (4) `Sync` wrapper.",
+                "unsafe impl<T: ?Sized + Send> Sync for CriticalSectionMutex<T> {}",
+            ),
+        )
+        self.assert_clean()
+
+
+class TestUnsafeBudgetRule(_TempSrcTree):
+    """The production `unsafe` count is a one-way ratchet."""
+
+    def _documented_sites(self, count: int) -> str:
+        blocks = [
+            f"// SAFETY: generated probe {index}.\nunsafe fn probe_{index}() {{}}"
+            for index in range(count)
+        ]
+        return "\n".join(blocks) + "\n"
+
+    def test_at_the_ceiling_passes(self) -> None:
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
+        self.write_src("budget.rs", self._documented_sites(ceiling))
+        self.assert_clean()
+
+    def test_exceeding_the_ceiling_fails(self) -> None:
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
+        self.write_src("budget.rs", self._documented_sites(ceiling + 1))
+        out = self.assert_violations("unsafe-budget")
+        self.assertIn(f"exceeds ceiling {ceiling}", out)
+        self.assertNotIn("undocumented-unsafe", out)
+
+
+class TestUniversalPassCli(_TempSrcTree):
+    """Each pass reports independently; either failure exits 1."""
+
+    def test_universal_only_failure_exits_1(self) -> None:
+        self.write_src("x.rs", _lines("static mut GLOBAL: u8 = 0;"))
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("static-mut", out)
+        self.assertNotIn("upward-dep", out)
+        self.assertIn("rust src audit FAILED", err)
+        self.assertNotIn("sdk layering FAILED", err)
+
+    def test_layering_only_failure_exits_1(self) -> None:
+        self.write("x.rs", _lines("use crate::app::App;"))
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("upward-dep: crate::app", out)
+        self.assertIn("sdk layering FAILED", err)
+        self.assertNotIn("static-mut", out)
+        self.assertNotIn("undocumented-unsafe", out)
+
+    def test_both_passes_clean_prints_two_summaries(self) -> None:
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(
+            [line.split(":")[0] for line in out.splitlines()],
+            ["sdk layering OK", "rust src audit OK"],
+        )
 
 
 if __name__ == "__main__":

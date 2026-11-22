@@ -6,8 +6,13 @@ use heapless::Vec;
 
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
-use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
+use crate::sdk::ble_app::ble_ll_pair::{
+    pair_enc_packet_mesh, pair_save_key, MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK,
+    PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK, PAIR_SETTING_FLAG, PAIR_STATE,
+    SECURITY_ENABLE,
+};
 use crate::sdk::ble_app::flash_config::{access_code, pair_load_key, SYS_CHN_LISTEN};
+use crate::sdk::ble_app::light_ll::connection_management::BLE_PERIPHERAL_CONNECTION_ACTIVE;
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_table_init, rf_link_match_group_mac,
 };
@@ -19,7 +24,11 @@ use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
+use crate::sdk::ble_app::rf_drv_8266::{
+    DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
+};
 use crate::sdk::common::sync::CriticalSectionMutex;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{
@@ -29,7 +38,6 @@ use crate::sdk::mcu::register::{
     read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
 };
 use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
-use crate::state::*;
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
 

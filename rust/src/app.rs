@@ -8,6 +8,7 @@ use crate::diagnostics::{
     boot_init, check_panic_info, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP,
 };
 use crate::main_light::{main_loop, user_init};
+use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, BleAppHooks};
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::light::*;
@@ -16,7 +17,6 @@ use crate::sdk::mcu::dma::dma_init;
 use crate::sdk::mcu::gpio::gpio_init;
 use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::state::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::uart_manager::{uart_receiver, uart_sender};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;

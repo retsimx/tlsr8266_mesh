@@ -46,10 +46,38 @@
 //! 4. **Error**: Write/verify failure detected, update aborted
 //! 5. **Complete**: All firmware data received and verified
 
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32};
+
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::OtaState;
-use crate::state::{SimplifyLS, OTA_UPDATE_CURRENT_FLASH_ADDRESS};
+use crate::sdk::light::{OtaState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
+
+/// Over-The-Air (OTA) update completion status flag.
+/// Indicates whether an OTA firmware update has finished successfully or with errors.
+pub(crate) static RF_SLAVE_OTA_FINISHED_FLAG: CriticalSectionMutex<OtaState> =
+    CriticalSectionMutex::new(OtaState::Continue);
+
+/// Flag indicating OTA update is busy with mesh operations.
+/// Prevents mesh interference during firmware update process.
+pub(crate) static OTA_UPDATE_MESH_OPERATIONS_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Flag indicating OTA update is currently in progress.
+/// Blocks other RF operations during firmware update.
+pub(crate) static OTA_UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Current flash address for OTA firmware update operations.
+/// Points to the next location where firmware data will be written.
+pub(crate) static OTA_UPDATE_CURRENT_FLASH_ADDRESS: AtomicU32 = AtomicU32::new(0);
+
+/// Flag to terminate ongoing OTA update process.
+/// Set to abort firmware update and return to normal operation.
+pub(crate) static OTA_UPDATE_TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// OTA operation timeout in seconds (default 30 seconds).
+/// Maximum time allowed for firmware update operations.
+pub(crate) static OTA_UPDATE_TIMEOUT_SECONDS: AtomicU16 =
+    AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
 
 /// Saves OTA firmware data to flash memory with verification.
 ///

@@ -18,7 +18,6 @@ mod ota;
 mod sdk;
 #[cfg(target_os = "none")]
 mod startup;
-mod state;
 mod uart_manager;
 mod vendor_light;
 pub mod version;

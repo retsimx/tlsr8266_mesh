@@ -337,170 +337,292 @@ pub union Packet {
 
 impl Packet {
     pub fn head(&self) -> &PacketL2capHead {
+        // SAFETY: (4) audited `Packet`-union view. `PacketL2capHead` - every variant starts with this
+        // 10-byte L2CAP header, so it is initialized by the same dma_len/rf_len read; the view is
+        // packed and all-integer, so every bit pattern is valid.
         unsafe { &self.head }
     }
 
     pub fn head_mut(&mut self) -> &mut PacketL2capHead {
+        // SAFETY: (4) audited `Packet`-union view. `PacketL2capHead` - every variant starts with this
+        // 10-byte L2CAP header, so it is initialized by the same dma_len/rf_len read; the view is
+        // packed and all-integer, so every bit pattern is valid; `&mut self` additionally proves
+        // exclusive access to the union.
         unsafe { &mut self.head }
     }
 
     pub fn att_write(&self) -> &PacketAttWrite {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttWrite` - callers select it only after the
+        // ATT opcode (0x12/0x52) is decoded; the view is packed and all-integer, so every bit pattern
+        // is valid.
         unsafe { &self.att_write }
     }
 
     pub fn att_write_mut(&mut self) -> &mut PacketAttWrite {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttWrite` - callers select it only after the
+        // ATT opcode (0x12/0x52) is decoded; the view is packed and all-integer, so every bit pattern
+        // is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_write }
     }
 
     pub fn mesh(&self) -> &MeshPkt {
+        // SAFETY: (4) audited `Packet`-union view. `MeshPkt` - the relay path addresses the whole
+        // 48-byte buffer as `MeshPkt` (size asserted below); the view is packed and all-integer, so
+        // every bit pattern is valid.
         unsafe { &self.mesh }
     }
 
     pub fn mesh_mut(&mut self) -> &mut MeshPkt {
+        // SAFETY: (4) audited `Packet`-union view. `MeshPkt` - the relay path addresses the whole
+        // 48-byte buffer as `MeshPkt` (size asserted below); the view is packed and all-integer, so
+        // every bit pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.mesh }
     }
 
     pub fn att_cmd(&self) -> &PacketAttCmd {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttCmd` - the light-command path selects it
+        // only after the ATT opcode is decoded; the view is packed and all-integer, so every bit
+        // pattern is valid.
         unsafe { &self.att_cmd }
     }
 
     pub fn att_cmd_mut(&mut self) -> &mut PacketAttCmd {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttCmd` - the light-command path selects it
+        // only after the ATT opcode is decoded; the view is packed and all-integer, so every bit
+        // pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_cmd }
     }
 
     pub fn att_val(&self) -> &PacketAttRawValue {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttRawValue` - pairing and app-ATT paths
+        // treat the 30-byte value span as untyped bytes; the view is packed and all-integer, so every
+        // bit pattern is valid.
         unsafe { &self.att_val }
     }
 
     pub fn att_val_mut(&mut self) -> &mut PacketAttRawValue {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttRawValue` - pairing and app-ATT paths
+        // treat the 30-byte value span as untyped bytes; the view is packed and all-integer, so every
+        // bit pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_val }
     }
 
     pub fn ll_data(&self) -> &PacketLlData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlData` - read only for link-layer control
+        // PDUs whose `_type` selected this view; the view is packed and all-integer, so every bit
+        // pattern is valid.
         unsafe { &self.ll_data }
     }
 
     pub fn ll_data_mut(&mut self) -> &mut PacketLlData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlData` - read only for link-layer control
+        // PDUs whose `_type` selected this view; the view is packed and all-integer, so every bit
+        // pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.ll_data }
     }
 
     pub fn ll_app(&self) -> &PacketLlApp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlApp` - read only after the pairing
+        // encryption opcode and handle matched; the view is packed and all-integer, so every bit
+        // pattern is valid.
         unsafe { &self.ll_app }
     }
 
     pub fn ll_app_mut(&mut self) -> &mut PacketLlApp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlApp` - read only after the pairing
+        // encryption opcode and handle matched; the view is packed and all-integer, so every bit
+        // pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.ll_app }
     }
 
     pub fn sig_conn_para_up_rsp(&self) -> &PktL2capSigConnParaUpRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PktL2capSigConnParaUpRsp` - read only from the
+        // stored L2CAP conn-param-update response; the view is packed and all-integer, so every bit
+        // pattern is valid.
         unsafe { &self.sig_conn_para_up_rsp }
     }
 
     pub fn sig_conn_para_up_rsp_mut(&mut self) -> &mut PktL2capSigConnParaUpRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PktL2capSigConnParaUpRsp` - read only from the
+        // stored L2CAP conn-param-update response; the view is packed and all-integer, so every bit
+        // pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.sig_conn_para_up_rsp }
     }
 
     pub fn att_data(&self) -> &PacketAttData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttData` - read only for ATT data PDUs
+        // (att/hl/hh plus a 23-byte payload); the view is packed and all-integer, so every bit pattern
+        // is valid.
         unsafe { &self.att_data }
     }
 
     pub fn att_data_mut(&mut self) -> &mut PacketAttData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttData` - read only for ATT data PDUs
+        // (att/hl/hh plus a 23-byte payload); the view is packed and all-integer, so every bit pattern
+        // is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_data }
     }
 
     pub fn version_ind(&self) -> &PacketVersionInd {
+        // SAFETY: (4) audited `Packet`-union view. `PacketVersionInd` - read only for a link-layer
+        // version-indication PDU; the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.version_ind }
     }
 
     pub fn version_ind_mut(&mut self) -> &mut PacketVersionInd {
+        // SAFETY: (4) audited `Packet`-union view. `PacketVersionInd` - read only for a link-layer
+        // version-indication PDU; the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.version_ind }
     }
 
     pub fn ctrl_unknown(&self) -> &PacketCtrlUnknown {
+        // SAFETY: (4) audited `Packet`-union view. `PacketCtrlUnknown` - read only for an unrecognised
+        // link-layer control PDU with a 1-byte payload; the view is packed and all-integer, so every
+        // bit pattern is valid.
         unsafe { &self.ctrl_unknown }
     }
 
     pub fn ctrl_unknown_mut(&mut self) -> &mut PacketCtrlUnknown {
+        // SAFETY: (4) audited `Packet`-union view. `PacketCtrlUnknown` - read only for an unrecognised
+        // link-layer control PDU with a 1-byte payload; the view is packed and all-integer, so every
+        // bit pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.ctrl_unknown }
     }
 
     pub fn feature_rsp(&self) -> &PacketFeatureRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketFeatureRsp` - read only for a link-layer
+        // feature response with 8 data bytes; the view is packed and all-integer, so every bit pattern
+        // is valid.
         unsafe { &self.feature_rsp }
     }
 
     pub fn feature_rsp_mut(&mut self) -> &mut PacketFeatureRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketFeatureRsp` - read only for a link-layer
+        // feature response with 8 data bytes; the view is packed and all-integer, so every bit pattern
+        // is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.feature_rsp }
     }
 
     pub fn att_mtu(&self) -> &PacketAttMtu {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttMtu` - read only for an ATT MTU exchange
+        // response (opcode 0x03); the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.att_mtu }
     }
 
     pub fn att_mtu_mut(&mut self) -> &mut PacketAttMtu {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttMtu` - read only for an ATT MTU exchange
+        // response (opcode 0x03); the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_mtu }
     }
 
     pub fn att_err_rsp(&self) -> &PacketAttErrRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttErrRsp` - read only for an ATT error
+        // response (opcode 0x01); the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.att_err_rsp }
     }
 
     pub fn att_err_rsp_mut(&mut self) -> &mut PacketAttErrRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttErrRsp` - read only for an ATT error
+        // response (opcode 0x01); the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_err_rsp }
     }
 
     pub fn att_read_rsp(&self) -> &PacketAttReadRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttReadRsp` - read only for an ATT read
+        // response (opcode 0x0B); the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.att_read_rsp }
     }
 
     pub fn att_read_rsp_mut(&mut self) -> &mut PacketAttReadRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttReadRsp` - read only for an ATT read
+        // response (opcode 0x0B); the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_read_rsp }
     }
 
     pub fn att_write_rsp(&self) -> &PacketAttWriteRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttWriteRsp` - read only for an ATT write
+        // response (opcode 0x13); the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.att_write_rsp }
     }
 
     pub fn att_write_rsp_mut(&mut self) -> &mut PacketAttWriteRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketAttWriteRsp` - read only for an ATT write
+        // response (opcode 0x13); the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.att_write_rsp }
     }
 
     pub fn adv_ind_module(&self) -> &RfPacketAdvIndModuleT {
+        // SAFETY: (4) audited `Packet`-union view. `RfPacketAdvIndModuleT` - used only for advertising
+        // PDUs the radio itself filled in; the view is packed and all-integer, so every bit pattern is
+        // valid.
         unsafe { &self.adv_ind_module }
     }
 
     pub fn adv_ind_module_mut(&mut self) -> &mut RfPacketAdvIndModuleT {
+        // SAFETY: (4) audited `Packet`-union view. `RfPacketAdvIndModuleT` - used only for advertising
+        // PDUs the radio itself filled in; the view is packed and all-integer, so every bit pattern is
+        // valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.adv_ind_module }
     }
 
     pub fn scan_rsp(&self) -> &PacketScanRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketScanRsp` - used only for scan-response PDUs
+        // built on the advertising path; the view is packed and all-integer, so every bit pattern is
+        // valid.
         unsafe { &self.scan_rsp }
     }
 
     pub fn scan_rsp_mut(&mut self) -> &mut PacketScanRsp {
+        // SAFETY: (4) audited `Packet`-union view. `PacketScanRsp` - used only for scan-response PDUs
+        // built on the advertising path; the view is packed and all-integer, so every bit pattern is
+        // valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.scan_rsp }
     }
 
     pub fn ll_init(&self) -> &PacketLlInit {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlInit` - CONNECT_IND is copied into
+        // `PKT_INIT` once and read back only as this view; the view is packed and all-integer, so every
+        // bit pattern is valid.
         unsafe { &self.ll_init }
     }
 
     pub fn ll_init_mut(&mut self) -> &mut PacketLlInit {
+        // SAFETY: (4) audited `Packet`-union view. `PacketLlInit` - CONNECT_IND is copied into
+        // `PKT_INIT` once and read back only as this view; the view is packed and all-integer, so every
+        // bit pattern is valid; `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.ll_init }
     }
 
     pub fn l2cap_data(&self) -> &PacketL2capData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketL2capData` - read by `l2cap_att_handler` for
+        // any ATT PDU on chan_id 4; the view is packed and all-integer, so every bit pattern is valid.
         unsafe { &self.l2cap_data }
     }
 
     pub fn l2cap_data_mut(&mut self) -> &mut PacketL2capData {
+        // SAFETY: (4) audited `Packet`-union view. `PacketL2capData` - read by `l2cap_att_handler` for
+        // any ATT PDU on chan_id 4; the view is packed and all-integer, so every bit pattern is valid;
+        // `&mut self` additionally proves exclusive access to the union.
         unsafe { &mut self.l2cap_data }
     }
 
     pub fn channel_map_update(&self) -> &PacketChannelMapUpdate {
+        // SAFETY: (4) audited `Packet`-union view. `PacketChannelMapUpdate` - read only for a
+        // link-layer channel-map-update control PDU (map at offset 7); the view is packed and
+        // all-integer, so every bit pattern is valid.
         unsafe { &self.channel_map_update }
     }
 
     pub fn channel_map_update_mut(&mut self) -> &mut PacketChannelMapUpdate {
+        // SAFETY: (4) audited `Packet`-union view. `PacketChannelMapUpdate` - read only for a
+        // link-layer channel-map-update control PDU (map at offset 7); the view is packed and
+        // all-integer, so every bit pattern is valid; `&mut self` additionally proves exclusive access
+        // to the union.
         unsafe { &mut self.channel_map_update }
     }
 }
@@ -576,6 +698,9 @@ pub struct MeshNodeStValT {
 // 2. All fields are u8 which are safe to transmute
 // 3. The struct size is fixed and known at compile time
 unsafe impl Pod for MeshNodeStValT {}
+// SAFETY: (4) audited packed-wire view: all-zero bytes are a valid `MeshNodeStValT`
+// (`dev_adr` and `sn` are `u8`, `par` is `[u8; MESH_NODE_ST_PAR_LEN]`), which is all
+// `Zeroable` requires.
 unsafe impl Zeroable for MeshNodeStValT {}
 
 #[derive(Clone, Copy)]

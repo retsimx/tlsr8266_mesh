@@ -24,7 +24,14 @@ struct TlsrCriticalSection;
 critical_section::set_impl!(TlsrCriticalSection);
 
 #[coverage(off)]
+// SAFETY: (2) `critical_section::Impl` contract. The trait is unsafe because
+// `acquire`/`release` must nest 1:1 and mask every preemption source; this impl
+// delegates to `irq_disable`/`irq_restore` (whole enable register saved and
+// restored) and it is the crate's single registered impl.
 unsafe impl critical_section::Impl for TlsrCriticalSection {
+    // SAFETY: (2) critical-section acquire. Masks interrupts and returns the
+    // previous enable state for `release`; it never allocates or panics, and the
+    // `critical_section` depth counter is the only caller.
     unsafe fn acquire() -> RawRestoreState {
         if !cfg!(test) {
             return irq_disable();
@@ -32,6 +39,8 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
         0
     }
 
+    // SAFETY: (2) critical-section release. Restores the state returned by the
+    // matching `acquire`; pairing is enforced by the `critical_section` crate.
     unsafe fn release(state: RawRestoreState) {
         if !cfg!(test) {
             irq_restore(state)

@@ -3,14 +3,24 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, FLASH_SECTOR_SIZE, OTA_LED};
-use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
+use crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK;
+use crate::sdk::ble_app::light_ll::connection_management::BUFF_RESPONSE;
+use crate::sdk::ble_app::light_ll::ota_management::{
+    rf_ota_save_data, OTA_UPDATE_CURRENT_FLASH_ADDRESS, OTA_UPDATE_IN_PROGRESS,
+    OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TERMINATION_REQUESTED,
+    OTA_UPDATE_TIMEOUT_SECONDS, RF_SLAVE_OTA_FINISHED_FLAG,
+};
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_add_packet_buf_ready, rf_link_add_tx_packet,
 };
-use crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop;
+use crate::sdk::ble_app::light_ll::status_management::{
+    rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY,
+};
+use crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE;
 use crate::sdk::common::bit::ONES_32;
 use crate::sdk::common::crc::crc16;
 use crate::sdk::common::sync::CriticalSectionMutex;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{
     flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE,
 };
@@ -24,7 +34,6 @@ use crate::sdk::mcu::register::{
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::packet_types::{Packet, PacketAttData};
 use crate::sdk::pm::light_sw_reboot;
-use crate::state::*;
 
 /// The mutable OTA runtime scalars shared by the GATT write handler, the mesh
 /// OTA command path and the system-timer interrupt.
@@ -100,6 +109,9 @@ pub const ERASE_SECTORS_FOR_OTA: u32 = FW_SIZE_MAX_K.div_ceil(4);
 #[coverage(off)]
 pub fn handle_ota_update() {
     // This function requires that *everything* be in ram
+    // SAFETY: (2) boot-OTA flag read. `FLASH_ADR_OTA_READY_FLAG` is a fixed byte
+    // address in the flash window, read as one `u8` before any code from the staged
+    // image runs; no reference to it is created.
     unsafe {
         if *(FLASH_ADR_OTA_READY_FLAG as *const u8) != FLASH_OTA_READY_FLAG {
             // Nothing to do
@@ -119,6 +131,10 @@ pub fn handle_ota_update() {
     flash_read_page(FLASH_ADR_LIGHT_NEW_FW, PAGE_SIZE, buff.as_mut_ptr());
 
     // Get the size of the binary being copied
+    // SAFETY: (2) boot-OTA image header. `buff` is the 256-byte page just read from
+    // the staged image, so the 4-byte word at offset 0x18 (the `_bin_size_` field
+    // of the header contract in `startup.rs`) is in bounds. The load needs a
+    // 4-byte-aligned page; the 256-byte TC32 frame slot provides that alignment.
     let new_fw_size = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
 
     let mut current_addr = 0;

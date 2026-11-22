@@ -3,18 +3,18 @@ use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 
 use crate::config::{DEVICE_NAME, MESH_NAME};
-use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write};
+use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write, PAIR_LOGIN_OK};
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_report_status_enable, mesh_report_status_enable_mask,
 };
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use crate::state::*;
 use crate::version::BUILD_VERSION;
 
 /// OTA GATT write handler, registered once from `App::init()` so this module
@@ -188,16 +188,17 @@ static SPP_DATA_CLIENT2SERVER_PROP: u8 =
 static SPP_DATA_OTA_PROP: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE_WITHOUT_RSP;
 static SPP_DATA_OTA_DATA: [u8; 20] = [0xe0; 20];
 
-static mut SPP_DATA_SERVER2CLIENT_DATA: [u8; 4] = [0; 4];
+static SPP_DATA_SERVER2CLIENT_DATA: CriticalSectionMutex<[u8; 4]> =
+    CriticalSectionMutex::new([0; 4]);
 static STATUS_CCC: [u8; 2] = [0x01, 0x00];
 
 // Spp data for OTA characteristic variables
 static SPP_DATA_PAIR_PROP: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE;
 static SPP_DATA_PAIR_DATA: [u8; 20] = [0xe0; 20];
 
-pub static mut SEND_TO_MASTER: [u8; 16] = [0; 16];
-
-static SPP_DATA_CLIENT2SERVER_DATA: &[u8; 16] = unsafe { &SEND_TO_MASTER };
+/// Client → server SPP value. Owned here rather than aliased through a second
+/// `static`, so the GATT table's `p_attr_value` pointer has one canonical name.
+pub static SEND_TO_MASTER: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex::new([0; 16]);
 
 static USERDESC_UUID: u16 = GATT_UUID_CHAR_USER_DESC;
 
@@ -216,9 +217,9 @@ fn mesh_status_write(p: &Packet) {
     let pktdata = &p.att_val().value;
 
     // Copy first 4 bytes to SPP_DATA_SERVER2CLIENT_DATA
-    unsafe {
-        SPP_DATA_SERVER2CLIENT_DATA.copy_from_slice(&pktdata[0..4]);
-    }
+    SPP_DATA_SERVER2CLIENT_DATA
+        .lock()
+        .copy_from_slice(&pktdata[0..4]);
 
     // Route based on packet length
     let l2cap_len = p.head().l2cap_len as usize;
@@ -251,8 +252,8 @@ macro_rules! attrdef {
             uuid_len: $uuidLen as u8,
             attr_len: $attrLen as u8,
             attr_max_len: $attrMaxLen as u8,
-            uuid: unsafe { addr_of!($uuid) as *const u8 },
-            p_attr_value: unsafe { $pAttrValue.as_ptr() as *mut u8 },
+            uuid: addr_of!($uuid) as *const u8,
+            p_attr_value: $pAttrValue.as_ptr() as *mut u8,
             w: $w,
             r: $r,
         }
@@ -264,8 +265,8 @@ macro_rules! attrdef {
             uuid_len: $uuidLen as u8,
             attr_len: $attrLen as u8,
             attr_max_len: $attrMaxLen as u8,
-            uuid: unsafe { addr_of!($uuid) as *const u8 },
-            p_attr_value: unsafe { $pAttrValue.as_ptr() as *mut u8 },
+            uuid: addr_of!($uuid) as *const u8,
+            p_attr_value: $pAttrValue.as_ptr() as *mut u8,
             w: None,
             r: None,
         }
@@ -332,12 +333,26 @@ const fn size_of_val<T>(_: &T) -> usize {
     core::mem::size_of::<T>()
 }
 
-#[repr(C, align(4))]
-struct GAttributesType([AttributeT; 29]);
+/// Number of entries in the GATT attribute table. Entry 0 carries the last
+/// valid handle in its `att_num`, so the table length is the single source of
+/// truth for that value.
+const GATT_ATT_COUNT: usize = 29;
 
-#[allow(non_upper_case_globals)]
-static mut gAttributes: GAttributesType = GAttributesType([
-    attrdef!((unsafe { gAttributes.0.len() - 1 }) as u8, 0, 0, 0),
+#[repr(C, align(4))]
+struct GAttributesType([AttributeT; GATT_ATT_COUNT]);
+
+// SAFETY: (4) audited `Sync` wrapper — the table itself is never mutated in
+// production. Each entry points at immutable statics, at the
+// `SPP_DATA_SERVER2CLIENT_DATA` / `SEND_TO_MASTER` `CriticalSectionMutex` cells
+// (written only through their locks), or at the pair/OTA scratch arrays written
+// only from the ATT handler. Under `cfg(test)` the table lives in a
+// `TestGAttributes` cell and the host test harness is its only writer.
+unsafe impl Sync for GAttributesType {}
+
+/// Single definition of the table, shared by the production and test statics so
+/// their contents cannot drift apart.
+const GATT_TABLE: GAttributesType = GAttributesType([
+    attrdef!((GATT_ATT_COUNT - 1) as u8, 0, 0, 0),
     // gatt
     attrdefu!(6, 2, 2, 2, PRIMARY_SERVICE_UUID, GAP_SERVICE_UUID),
     attrdefu!(0, 2, 1, 1, CHARACTER_UUID, DEV_NAME_CHARACTER),
@@ -425,7 +440,7 @@ static mut gAttributes: GAttributesType = GAttributesType([
         16,
         16,
         TELINK_SPP_DATA_CLIENT2SERVICE_UUID,
-        SPP_DATA_CLIENT2SERVER_DATA,
+        SEND_TO_MASTER,
         Some(rf_link_slave_data_write),
         None
     ), //value
@@ -477,8 +492,35 @@ static mut gAttributes: GAttributesType = GAttributesType([
     ),
 ]);
 
-pub fn get_gAttributes() -> &'static mut [AttributeT; 29] {
-    unsafe { &mut gAttributes.0 }
+#[cfg(not(test))]
+static G_ATTRIBUTES: GAttributesType = GATT_TABLE;
+
+#[cfg(test)]
+struct TestGAttributes(core::cell::UnsafeCell<GAttributesType>);
+
+#[cfg(test)]
+// SAFETY: host tests are the only writers and they serialise through the
+// single `&mut` handed out by `get_gAttributes()`; production has no access to
+// this type at all.
+unsafe impl Sync for TestGAttributes {}
+
+#[cfg(test)]
+static G_ATTRIBUTES: TestGAttributes = TestGAttributes(core::cell::UnsafeCell::new(GATT_TABLE));
+
+/// The GATT attribute table.
+#[cfg(not(test))]
+pub fn get_gAttributes() -> &'static [AttributeT; GATT_ATT_COUNT] {
+    &G_ATTRIBUTES.0
+}
+
+/// The GATT attribute table, writable for tests that temporarily patch entries.
+#[cfg(test)]
+pub fn get_gAttributes() -> &'static mut [AttributeT; GATT_ATT_COUNT] {
+    // SAFETY: the cell is a `static`, so the pointer is non-null and aligned;
+    // the returned lifetime is unconstrained because tests own the table for the
+    // whole process and each call re-borrows the same cell without keeping the
+    // previous borrow alive.
+    unsafe { &mut (*G_ATTRIBUTES.0.get()).0 }
 }
 
 #[cfg(test)]
@@ -489,7 +531,6 @@ mod tests {
         mock_mesh_report_status_enable, mock_mesh_report_status_enable_mask,
     };
     use crate::sdk::packet_types::PacketL2capHead;
-    use crate::state::PAIR_LOGIN_OK;
 
     #[test]
     #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
@@ -636,12 +677,10 @@ mod tests {
         mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
             .assert_called(1);
         // Verify the first 4 bytes were copied
-        unsafe {
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0x01);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x02);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x03);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x04);
-        }
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0x01);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x02);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x03);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x04);
     }
 
     #[test]
@@ -679,12 +718,10 @@ mod tests {
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&test_data[..]).assert_called(1);
         // Verify the first 4 bytes were copied
-        unsafe {
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0xFF);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x01);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x02);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x03);
-        }
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0xFF);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x01);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x02);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x03);
     }
 
     #[test]
@@ -721,12 +758,10 @@ mod tests {
         mock_mesh_report_status_enable(true).assert_called(1);
         mock_mesh_report_status_enable_mask(&[0x11][..]).assert_called(0);
         // Verify the first 4 bytes were copied to SPP_DATA_SERVER2CLIENT_DATA
-        unsafe {
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0x11);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0x22);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0x33);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0x44);
-        }
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0x11);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x22);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x33);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x44);
     }
 
     #[test]
@@ -762,12 +797,10 @@ mod tests {
         mock_mesh_report_status_enable(true).assert_called(0);
         mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).assert_called(1);
         // Verify the first 4 bytes were copied
-        unsafe {
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[0], 0xAA);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[1], 0xBB);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[2], 0xCC);
-            assert_eq!(SPP_DATA_SERVER2CLIENT_DATA[3], 0xDD);
-        }
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0xAA);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0xBB);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0xCC);
+        assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0xDD);
     }
 
     // OTA write slot tests. `OTA_WRITE_CB` is process-wide, so these tests must

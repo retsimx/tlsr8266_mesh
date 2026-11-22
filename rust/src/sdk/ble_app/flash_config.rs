@@ -1,8 +1,8 @@
 //! BLE connection-parameter negotiation, device-address helpers and
 //! pairing/flash configuration.
 //!
-//! Everything here is a free function over the `crate::state` statics plus the
-//! SDK flash, crypto and RF primitives. This module deliberately has **no**
+//! Everything here is a free function over the BLE/RF statics owned by
+//! `crate::sdk::ble_app` plus the SDK flash, crypto and RF primitives. This module deliberately has **no**
 //! application-layer dependencies: it must not import the application's `app`,
 //! `mesh`, `light_manager`, `uart_manager` or `ota` modules, nor any other
 //! module above the SDK layer.
@@ -16,13 +16,24 @@
 //! [`pair_flash_config_init`].
 
 use crate::config::*;
-use crate::sdk::ble_app::light_ll::connection_management::setup_ble_parameter_start;
+use crate::sdk::ble_app::ble_ll_pair::{
+    MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
+    PAIR_CONFIG_PWD_ENCODE_SK, PAIR_STATE,
+};
+use crate::sdk::ble_app::light_ll::connection_management::{
+    setup_ble_parameter_start, CONN_UPDATE_CNT, CONN_UPDATE_SUCCESSED,
+};
+use crate::sdk::ble_app::rf_drv_8266::{
+    ADV_PRI_DATA, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, GROUP_ADDRESS, MAC_ID,
+    MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_NEXT_POSITION, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
+    MESH_GROUP_ADDRESS_NEXT_POSITION,
+};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::packet_types::Packet;
 use crate::sdk::rf_drv::{set_advertisement_manufacturer_data, set_advertisement_mesh_name};
-use crate::state::*;
 
 /// Number of connection parameter sets to attempt during negotiation.
 ///
@@ -777,11 +788,11 @@ pub fn pair_update_key() {
 
     // MANUFACTURER DATA UPDATE: Set vendor-specific advertisement data
     let adv_data = *ADV_PRI_DATA.lock();
-    // SAFETY: AdvPrivate is repr(C, packed) with only primitive integer types
-    // (u16, u16, u32), making it safe to reinterpret as a byte slice. The
-    // struct has a fixed size and alignment, and all bit patterns are valid.
-    // This is necessary because AdvPrivate doesn't implement Pod trait due to
-    // packed representation requirements.
+    // SAFETY: (4) audited packed-wire view. `AdvPrivate` is `repr(C, packed)` with
+    // only primitive integer types (u16, u16, u32), so reinterpreting it as a byte
+    // slice is valid: the struct has a fixed size, and all bit patterns are valid.
+    // This is necessary because `AdvPrivate` cannot implement `Pod` due to its
+    // packed representation.
     let adv_data_bytes = unsafe {
         core::slice::from_raw_parts(
             &adv_data as *const AdvPrivate as *const u8,

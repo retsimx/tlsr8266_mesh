@@ -89,6 +89,9 @@ impl Executor {
             );
 
             WORK_PENDING.store(false, Ordering::Relaxed);
+            // SAFETY: (3) `raw::Executor::poll` contract. `self` is the `&'static mut
+            // Executor` handed to `run`, which never returns and never hands the reference
+            // out again, so exactly one context polls this executor.
             unsafe {
                 self.inner.poll();
             }

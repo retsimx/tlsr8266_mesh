@@ -8,13 +8,20 @@ use num_traits::FromPrimitive;
 use crate::sdk::app_att_light::{
     get_gAttributes, AttributeT, GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
 };
+use crate::sdk::ble_app::light_ll::connection_management::{
+    BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
+};
+use crate::sdk::ble_app::light_ll::ota_management::{
+    OTA_UPDATE_TERMINATION_REQUESTED, RF_SLAVE_OTA_FINISHED_FLAG,
+};
+use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::sdk::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
     PacketL2capHead, PacketVersionInd,
 };
-use crate::state::*;
 
 #[cfg(not(test))]
 extern "C" {
@@ -125,7 +132,10 @@ pub fn l2cap_att_search(
 
             // Check if the attribute has a 16-bit UUID (2 bytes)
             if current_attr.uuid_len == 2 {
-                // Get the UUID bytes and compare with the target UUID
+                // SAFETY: (4) audited GATT-table view. A 2-byte UUID length is
+                // exactly what `attrdef!`/`attrdefu!` pair with an `addr_of!` of
+                // a `static u16`, so the pointer is non-null and 2 bytes are in
+                // bounds for the whole program.
                 let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 2) };
                 if uuid == attr_uuid {
                     // Return this attribute and the next one, along with the handle position
@@ -135,7 +145,11 @@ pub fn l2cap_att_search(
                     ));
                 }
             } else {
-                // Handle 128-bit UUID (16 bytes)
+                // SAFETY: (4) audited GATT-table view. 128-bit-UUID entries store
+                // `uuid` as `addr_of!` of a 16-byte `[u8; 16]` static, so 0x10
+                // bytes are in bounds. Handle 0 (the count entry, `uuid == null`)
+                // is a pre-existing reachability gap in find-by-type/read-by-type;
+                // flagged in the batch report, not changed here.
                 let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 0x10) };
                 if uuid == attr_uuid {
                     // Return this attribute and the next one, along with the handle position
@@ -472,10 +486,16 @@ fn handle_find_info_request(packet: &Packet) -> Option<Packet> {
             // 16-bit UUID: Copy 2 bytes directly
             *bytemuck::from_bytes_mut(
                 &mut rf_packet_att_rsp.att_read_rsp_mut().value[offset + 3..offset + 5],
+                // SAFETY: (4) `uuid_len == 2` selects an entry whose `uuid` is
+                // `addr_of!` of a `static u16`, so the 2-byte read is aligned and
+                // in bounds.
             ) = unsafe { *(current_attr.uuid as *const u16) };
             offset += 4; // Handle (2) + UUID (2) = 4 bytes
         } else {
             // 128-bit UUID: Copy 16 bytes
+            // SAFETY: (4) 128-bit-UUID entries store `uuid` as `addr_of!` of a
+            // `[u8; 16]` static; find-info rejects a zero start handle above, so
+            // this arm only sees entries backed by those statics.
             let uuid_slice = unsafe { slice::from_raw_parts(current_attr.uuid, 0x10) };
             rf_packet_att_rsp.att_read_rsp_mut().value[offset + 3..offset + 3 + 0x10]
                 .copy_from_slice(uuid_slice);
@@ -581,6 +601,11 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
 
         // Check if attribute value matches the requested value
         let attr_value_matches =
+            // SAFETY: (4) `attr_len == 2` gates the read, and the table's 2-byte
+            // service values are `static u16`s (`GAP_SERVICE_UUID`, `DEV_INFO_UUID`),
+            // so 2 aligned bytes are in bounds. `STATUS_CCC` is also 2 bytes but a
+            // `[u8; 2]`; a 0x2902 lookup here would read it unaligned — pre-existing,
+            // reported, not changed.
             attr.attr_len == 2 && unsafe { *(attr.p_attr_value as *const u16) } == target_value;
 
         if attr_value_matches {
@@ -683,6 +708,9 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
     let mut bytes_read = 0;
 
     // ---- Handle selection based on UUID type (16-bit or 128-bit) ----
+    // SAFETY: (4) audited `Packet`-union view. `handle1` is at offset 6 of the
+    // 4-byte-aligned union, so the 2-byte read is aligned and lies inside the
+    // 48-byte packet buffer the RF/DMA layer filled.
     if unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) } == 0x15 {
         // ---- 128-bit UUID search ----
         let mut uuid = [0; 16];
@@ -706,6 +734,9 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 
                 // Copy attribute value to response
                 rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                    // SAFETY: (4) `found_attr` comes from `l2cap_att_search`, so
+                    // `p_attr_value` is the entry's static value and `attr_len`
+                    // bytes are in bounds (table max is 16, inside this buffer).
                     .copy_from_slice(unsafe {
                         slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
                     });
@@ -744,6 +775,9 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 
                         // 2. Characteristic properties (1 byte)
                         rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1] =
+                            // SAFETY: (4) a declaration entry's `p_attr_value` is
+                            // `addr_of!` of its `static` `CHAR_PROP_*` byte, so one
+                            // byte is in bounds.
                             unsafe { *(found_attrs[0].p_attr_value) };
                         bytes_read += 1;
 
@@ -757,6 +791,10 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                         // 4. Characteristic UUID (variable length)
                         rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1
                             ..(bytes_read as usize + 1 + found_attrs[1].uuid_len as usize)]
+                            // SAFETY: (4) `found_attrs[1]` is the value entry
+                            // paired with the declaration the search returned, so
+                            // its `uuid` is a static UUID valid for `uuid_len`
+                            // (2 or 16) bytes.
                             .copy_from_slice(unsafe {
                                 slice::from_raw_parts(
                                     found_attrs[1].uuid,
@@ -796,6 +834,9 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 
                     // Copy attribute value to response
                     rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                        // SAFETY: (4) as above: `found_attr` comes from
+                        // `l2cap_att_search`, so `p_attr_value` is the entry's
+                        // static value and `attr_len` bytes are in bounds.
                         .copy_from_slice(unsafe {
                             slice::from_raw_parts(
                                 found_attr.p_attr_value,
@@ -884,6 +925,12 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
     if get_gAttributes()[att_num].r.is_none() {
         // No read callback - directly return the attribute's value
         let mut rf_packet_att_rsp = create_att_response_template();
+        // SAFETY: (4) `att_num` was bounded by `get_gAttributes()[0].att_num`
+        // above, so both table reads are in bounds; `p_attr_value` is that
+        // entry's static value of `attr_len` bytes (table max 16) and the
+        // destination is this local packet's 22-byte `value` array. Handle 0
+        // (null pointer, `attr_len` 0) is a pre-existing zero-length-from-null
+        // edge, reported and not changed.
         unsafe {
             slice::from_raw_parts_mut(
                 addr_of_mut!(rf_packet_att_rsp.att_read_rsp_mut().value[0]),
@@ -896,11 +943,9 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
         }
 
         // Special case: handle SEND_TO_MASTER flag
-        if get_gAttributes()[att_num].p_attr_value == unsafe { SEND_TO_MASTER.as_mut_ptr() } {
+        if get_gAttributes()[att_num].p_attr_value == SEND_TO_MASTER.as_ptr() as *mut u8 {
             // Clear the SEND_TO_MASTER array after reading
-            unsafe {
-                SEND_TO_MASTER.fill(0);
-            }
+            SEND_TO_MASTER.lock().fill(0);
         }
         // Special case: handle OTA termination flag for handle 0x18
         else if att_num == 0x18 && *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
@@ -1041,6 +1086,9 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
                 response.att_read_rsp_mut().value[next_ptr * 2 + 2] = (group_end_handle >> 8) as u8;
 
                 // Get attribute value as a slice for easier handling
+                // SAFETY: (4) `found_attr` comes from `l2cap_att_search`, so
+                // `p_attr_value` is the entry's static service value and
+                // `attr_len` bytes are in bounds.
                 let value_slice = unsafe {
                     slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
                 };
@@ -1158,6 +1206,9 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
     // --- Get current attribute and check if it's a CCCD ---
     let current_attr = &get_gAttributes()[att_handle];
     let is_cccd = !current_attr.uuid.is_null()
+        // SAFETY: (4) the null check above excludes the count entry, and every
+        // other entry's `uuid` is a whole static UUID (>= 2 bytes), so two bytes
+        // are readable; `read_unaligned` removes the alignment requirement.
         && unsafe { read_unaligned(current_attr.uuid as *const u16) == GATT_UUID_CLIENT_CHAR_CFG };
 
     // --- Apply permission checks (skip for CCCDs) ---
@@ -1168,6 +1219,9 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         }
 
         // Check characteristic declaration for write permission (bits 2-3)
+        // SAFETY: (4) `att_handle >= 2` above, so `att_handle - 1` is a valid
+        // table entry (<= the count) and its `p_attr_value` is non-null: only
+        // entry 0 carries a null value pointer. One byte is in bounds.
         let declaration_properties = unsafe { *get_gAttributes()[att_handle - 1].p_attr_value };
         let write_permitted = declaration_properties & 0xc != 0;
 
@@ -1201,13 +1255,16 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         // Handle case when no write callback is defined
 
         // Early return if request data is insufficient (handle too small)
+        // SAFETY: (4) audited `Packet`-union view. `handle1` is at offset 6 of
+        // the 4-byte-aligned union, so the 2-byte read is aligned and lies
+        // inside the 48-byte packet buffer the RF/DMA layer filled.
         let handle_value = unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) };
         if handle_value < 3 {
             return response;
         }
 
         // Check if attribute value is stored in RAM (not ROM)
-        let ram_start_addr = unsafe { addr_of!(__RAM_START_ADDR) } as u32;
+        let ram_start_addr = addr_of!(__RAM_START_ADDR) as u32;
         let attr_addr = current_attr.p_attr_value as u32;
 
         if attr_addr <= ram_start_addr {
@@ -1215,10 +1272,19 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         }
 
         // Get mutable slice of attribute value and incoming data
+        // SAFETY: (4) the handle was range-checked against the table count and
+        // `attr_addr > ram_start_addr` gates out ROM-resident values, so
+        // `p_attr_value` is a RAM-backed static of `attr_len` bytes. Today every
+        // RAM-backed value entry carries a write callback, so this raw path only
+        // sees read-only entries and the gate rejects them; the bounds argument
+        // holds either way.
         let attr_value_slice = unsafe {
             slice::from_raw_parts_mut(current_attr.p_attr_value, current_attr.attr_len as usize)
         };
 
+        // SAFETY: (4) audited `Packet`-union view. The source is `value[6]` of
+        // the packet the RF/DMA layer filled; `attr_len` is at most 16 in the
+        // table, so `value[6..6 + attr_len]` stays inside the 30-byte field.
         let incoming_value_slice = unsafe {
             slice::from_raw_parts(
                 addr_of!(packet.l2cap_data().value[6]),
@@ -2428,14 +2494,14 @@ mod tests {
         // Temporarily modify the attribute to point to SEND_TO_MASTER
         unsafe {
             // Fill SEND_TO_MASTER with a test pattern
-            SEND_TO_MASTER.fill(0xAA);
+            SEND_TO_MASTER.lock().fill(0xAA);
 
             // Point attribute to SEND_TO_MASTER
-            let send_to_master_ptr = SEND_TO_MASTER.as_mut_ptr();
+            let send_to_master_ptr = SEND_TO_MASTER.as_ptr() as *mut u8;
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
                 send_to_master_ptr;
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
-                SEND_TO_MASTER.len() as u8;
+                SEND_TO_MASTER.lock().len() as u8;
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
         }
 
@@ -2457,10 +2523,8 @@ mod tests {
         assert_eq!(resp.att_read_rsp().opcode, GattOp::AttOpReadRsp as u8);
 
         // Verify that SEND_TO_MASTER was cleared (filled with zeros)
-        unsafe {
-            for &byte in SEND_TO_MASTER.iter() {
-                assert_eq!(byte, 0, "SEND_TO_MASTER should be cleared after read");
-            }
+        for &byte in SEND_TO_MASTER.lock().iter() {
+            assert_eq!(byte, 0, "SEND_TO_MASTER should be cleared after read");
         }
 
         // Restore the original attribute
@@ -2542,13 +2606,13 @@ mod tests {
         // Temporarily modify the attribute
         unsafe {
             // Fill SEND_TO_MASTER with a test pattern
-            SEND_TO_MASTER.fill(0xAA);
+            SEND_TO_MASTER.lock().fill(0xAA);
 
             // Point attribute to SEND_TO_MASTER
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
-                SEND_TO_MASTER.as_mut_ptr();
+                SEND_TO_MASTER.as_ptr() as *mut u8;
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
-                SEND_TO_MASTER.len() as u8;
+                SEND_TO_MASTER.lock().len() as u8;
             (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
         }
 
@@ -2569,10 +2633,8 @@ mod tests {
         let _ = l2cap_att_handler(&packet);
 
         // Verify SEND_TO_MASTER was cleared
-        unsafe {
-            for &byte in SEND_TO_MASTER.iter() {
-                assert_eq!(byte, 0, "SEND_TO_MASTER should be cleared after read");
-            }
+        for &byte in SEND_TO_MASTER.lock().iter() {
+            assert_eq!(byte, 0, "SEND_TO_MASTER should be cleared after read");
         }
 
         // Verify OTA terminate flag was NOT set despite the OTA state condition being true

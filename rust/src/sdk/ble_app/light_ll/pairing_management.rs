@@ -55,8 +55,10 @@
 //! - **Access Control**: Only authenticated devices can control mesh network functions
 //! - **Revocation**: Immediate credential deletion prevents further unauthorized access
 
-use crate::sdk::ble_app::ble_ll_pair::{pair_save_key, pair_set_key};
-use crate::state::{SimplifyLS, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK};
+use crate::sdk::ble_app::ble_ll_pair::{
+    pair_save_key, pair_set_key, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK,
+};
+use crate::sdk::common::sync::SimplifyLS;
 
 /// Securely deletes the current mesh network pairing configuration.
 ///

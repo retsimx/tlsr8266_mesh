@@ -6,6 +6,9 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::transmute;
 use core::ptr::{null, null_mut};
 
+#[cfg(test)]
+use self::fake_flash::FakeFlash;
+
 pub const PAGE_SIZE: u32 = 256;
 pub const PAGE_SIZE_OTP: u32 = 256;
 pub const FLASH_LOCK_EN: u32 = 0;
@@ -221,6 +224,20 @@ pub fn flash_send_addr(addr: u32) {
 #[cfg_attr(test, mry::mry)]
 #[link_section = ".ram_code"]
 pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
+    #[cfg(test)]
+    if FakeFlash::mode() == fake_flash::FakeFlashMode::InMemory {
+        // Pointer safety: never build a slice from a null pointer or a zero length.
+        if len == 0 || buf.is_null() {
+            return;
+        }
+        // SAFETY: (2) raw-pointer buffer ABI. `len != 0` and `buf` is non-null, so the
+        // caller contract gives a `len`-byte writable region; the slice never escapes.
+        FakeFlash::read_slice(addr, unsafe {
+            core::slice::from_raw_parts_mut(buf, len as usize)
+        });
+        return;
+    }
+
     // Use critical section for atomic SPI operation
     critical_section::with(|_| {
         // Start transaction by sending read command
@@ -421,6 +438,16 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
         return;
     }
 
+    #[cfg(test)]
+    if FakeFlash::mode() == fake_flash::FakeFlashMode::InMemory {
+        // SAFETY: (2) raw-pointer buffer ABI. The guard above proves `buf` is valid for
+        // reads of `len` bytes; the slice never escapes this function.
+        FakeFlash::write_slice(addr, unsafe {
+            core::slice::from_raw_parts(buf, len as usize)
+        });
+        return;
+    }
+
     // Create a safe slice from the raw input buffer
     // SAFETY: (2) raw-pointer buffer ABI. `len == 0` and a null `buf` return early
     // above, so `buf` is valid for reads of `len` bytes for the whole loop and the
@@ -501,9 +528,170 @@ pub fn flash_erase_sector(addr: u32) {
     // Clear watchdog timer to prevent resets during long erase operation
     wd_clear();
 
+    #[cfg(test)]
+    if FakeFlash::mode() == fake_flash::FakeFlashMode::InMemory {
+        FakeFlash::erase_sector(addr);
+        return;
+    }
+
     // Send sector erase command with the target address
     // No data is needed for erase operation (null pointer, 0 length)
     flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, null_mut(), 0);
+}
+
+/// In-process 512 KiB NOR flash model that the public `flash_*` entry points
+/// drive directly under `cfg(test)` when [`FakeFlashMode::InMemory`] is selected.
+///
+/// The default mode is [`FakeFlashMode::SpiRegisters`], so the existing
+/// SPI-mocking tests keep exercising the real `mspi_*` transactions untouched;
+/// `InMemory` is opt-in per test. All state lives behind one `Mutex`, and every
+/// lock recovers from poisoning, so a single panicking test cannot break the
+/// rest of a `--test-threads=1` run.
+#[cfg(test)]
+pub mod fake_flash {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard};
+    use std::vec::Vec;
+
+    /// Size of the modelled NOR array (512 KiB).
+    pub const FLASH_SIZE_BYTES: usize = 512 * 1024;
+    /// Size of one erasable sector (4 KiB).
+    pub const SECTOR_SIZE_BYTES: usize = 4096;
+
+    /// Where the flash entry points send their work.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FakeFlashMode {
+        /// Drives real `mspi_*` transactions (the default, so existing SPI-mocking tests run untouched).
+        SpiRegisters,
+        /// Executes reads/writes/erases directly against the 512 KiB in-memory NOR array.
+        InMemory,
+    }
+
+    /// Handle to the process-wide fake NOR device.
+    ///
+    /// The device is global (one 512 KiB array per test binary), so these are
+    /// associated functions grouped under a name for readable call sites.
+    pub struct FakeFlash;
+
+    struct FakeFlashState {
+        bytes: Vec<u8>,
+        mode: FakeFlashMode,
+        erase_counts: BTreeMap<u32, u32>,
+        fail_next_write: bool,
+    }
+
+    impl FakeFlashState {
+        const fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                mode: FakeFlashMode::SpiRegisters,
+                erase_counts: BTreeMap::new(),
+                fail_next_write: false,
+            }
+        }
+
+        /// Fill the array lazily, so a test that forgot `reset()` still works.
+        fn ensure(&mut self) {
+            if self.bytes.len() != FLASH_SIZE_BYTES {
+                self.bytes.clear();
+                self.bytes.resize(FLASH_SIZE_BYTES, 0xFF);
+            }
+        }
+    }
+
+    static STATE: Mutex<FakeFlashState> = Mutex::new(FakeFlashState::new());
+
+    /// Lock the device, recovering the inner state if an earlier test panicked
+    /// while holding the lock.
+    fn lock() -> MutexGuard<'static, FakeFlashState> {
+        STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sector base for any address inside the sector.
+    fn sector_base(addr: u32) -> u32 {
+        addr & !(SECTOR_SIZE_BYTES as u32 - 1)
+    }
+
+    impl FakeFlash {
+        /// Restore a blank device: all `0xFF`, no erase counts, no pending write
+        /// fault, and the default `SpiRegisters` mode.
+        pub fn reset() {
+            let mut state = lock();
+            state.bytes.clear();
+            state.bytes.resize(FLASH_SIZE_BYTES, 0xFF);
+            state.erase_counts.clear();
+            state.fail_next_write = false;
+            state.mode = FakeFlashMode::SpiRegisters;
+        }
+
+        /// Select where the `flash_*` entry points send their work. Tests that do
+        /// not opt in to `InMemory` keep driving the real `mspi_*` transactions.
+        pub fn set_mode(mode: FakeFlashMode) {
+            lock().mode = mode;
+        }
+
+        /// The mode currently selected by the last [`FakeFlash::set_mode`].
+        pub fn mode() -> FakeFlashMode {
+            lock().mode
+        }
+
+        /// Copy `out.len()` bytes starting at absolute flash offset `addr`.
+        /// Reads past the end of the array return `0xFF` instead of panicking.
+        pub fn read_slice(addr: u32, out: &mut [u8]) {
+            let mut state = lock();
+            state.ensure();
+            let start = (addr as usize).min(FLASH_SIZE_BYTES);
+            for (offset, byte) in out.iter_mut().enumerate() {
+                *byte = state.bytes.get(start + offset).copied().unwrap_or(0xFF);
+            }
+        }
+
+        /// Apply `data` at absolute flash offset `addr` with NOR `AND` semantics
+        /// (`dst &= src`): writing can only clear bits. The range is clamped to
+        /// the array instead of panicking.
+        pub fn write_slice(addr: u32, data: &[u8]) {
+            let mut state = lock();
+            state.ensure();
+            let start = addr as usize;
+            if start >= FLASH_SIZE_BYTES {
+                return;
+            }
+            let count = core::cmp::min(data.len(), FLASH_SIZE_BYTES - start);
+            let corrupt = state.fail_next_write;
+            // The injected fault is one-shot, like a single bad page program.
+            state.fail_next_write = false;
+            for (offset, &src) in data[..count].iter().enumerate() {
+                state.bytes[start + offset] &= src;
+            }
+            if corrupt && count > 0 {
+                state.bytes[start] ^= 0x01;
+            }
+        }
+
+        /// Fill the 4 KiB sector containing `addr` with `0xFF` and count the erase.
+        pub fn erase_sector(addr: u32) {
+            let mut state = lock();
+            state.ensure();
+            let base = sector_base(addr) as usize;
+            let end = core::cmp::min(base + SECTOR_SIZE_BYTES, FLASH_SIZE_BYTES);
+            if base >= end {
+                return;
+            }
+            state.bytes[base..end].fill(0xFF);
+            *state.erase_counts.entry(base as u32).or_insert(0) += 1;
+        }
+
+        /// Number of erases performed on the sector containing `addr`.
+        pub fn erase_count(addr: u32) -> u32 {
+            *lock().erase_counts.get(&sector_base(addr)).unwrap_or(&0)
+        }
+
+        /// Corrupt byte 0 of the next [`FakeFlash::write_slice`] so a read-back
+        /// verification fails; the corruption persists in the array.
+        pub fn fail_verify_next_write() {
+            lock().fail_next_write = true;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +699,18 @@ pub fn flash_erase_sector(addr: u32) {
 mod tests {
     use super::*;
     use std::vec::Vec;
+
+    use super::fake_flash::{FakeFlash, FakeFlashMode};
+
+    /// Restores the SPI-backed default mode even if the owning test panics, so a
+    /// failure cannot strand later tests in `InMemory` mode.
+    struct RestoreSpi;
+
+    impl Drop for RestoreSpi {
+        fn drop(&mut self) {
+            FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        }
+    }
 
     // Import mocked versions of the functions from their original modules
     use crate::sdk::drivers::spi::{
@@ -1093,5 +1293,112 @@ mod tests {
 
         // No delays should have been called either
         mock_sleep_us(mry::Any).assert_called(0);
+    }
+
+    /// Proves the real flash entry points work against the in-memory NOR model:
+    /// erase reads back `0xFF`, a written pattern reads back byte-exact, and
+    /// sequential writes obey NOR `AND` semantics without any SPI mocking.
+    #[test]
+    fn test_fake_flash_erase_write_read_round_trip() {
+        FakeFlash::reset();
+        FakeFlash::set_mode(FakeFlashMode::InMemory);
+        let _restore = RestoreSpi;
+
+        const ADDR: u32 = 0x1_0000;
+
+        // Erased silicon reads 0xFF.
+        flash_erase_sector(ADDR);
+        let mut erased = [0u8; 8];
+        flash_read_page(ADDR, 8, erased.as_mut_ptr());
+        assert_eq!(erased, [0xFF; 8]);
+
+        // A pattern written through the public API reads back byte-exact.
+        let pattern = [0xA5u8, 0x5A, 0x0F, 0xF0];
+        flash_write_page(ADDR, pattern.len() as u32, pattern.as_ptr());
+        let mut readback = [0u8; 4];
+        flash_read_page(ADDR, 4, readback.as_mut_ptr());
+        assert_eq!(readback, pattern);
+
+        // NOR writes can only clear bits: 0xFF & 0x0F & 0xF0 == 0x00.
+        flash_erase_sector(ADDR);
+        let ones_nibble = [0x0Fu8];
+        flash_write_page(ADDR, 1, ones_nibble.as_ptr());
+        let high_nibble = [0xF0u8];
+        flash_write_page(ADDR, 1, high_nibble.as_ptr());
+        let mut merged = [0xFFu8; 1];
+        flash_read_page(ADDR, 1, merged.as_mut_ptr());
+        assert_eq!(merged[0], 0x00);
+
+        // Two erases of the same sector were performed above.
+        assert_eq!(FakeFlash::erase_count(ADDR), 2);
+    }
+
+    /// Direct unit coverage of the model's NOR `AND` write semantics.
+    #[test]
+    fn test_fake_flash_nor_and_semantics() {
+        FakeFlash::reset();
+        FakeFlash::set_mode(FakeFlashMode::InMemory);
+        let _restore = RestoreSpi;
+
+        const ADDR: u32 = 0x4_0000;
+        let mut byte = [0u8; 1];
+
+        FakeFlash::write_slice(ADDR, &[0xFF]);
+        FakeFlash::write_slice(ADDR, &[0x0F]);
+        FakeFlash::write_slice(ADDR, &[0xF0]);
+        FakeFlash::read_slice(ADDR, &mut byte);
+        assert_eq!(byte[0], 0x00);
+
+        // An already-cleared bit cannot be set again by a later write.
+        const CLEARED: u32 = ADDR + 1;
+        FakeFlash::write_slice(CLEARED, &[0x00]);
+        FakeFlash::write_slice(CLEARED, &[0xFF]);
+        FakeFlash::read_slice(CLEARED, &mut byte);
+        assert_eq!(byte[0], 0x00);
+    }
+
+    /// The injected write fault corrupts exactly one write and persists in RAM.
+    #[test]
+    fn test_fake_flash_fail_verify_next_write() {
+        FakeFlash::reset();
+        FakeFlash::set_mode(FakeFlashMode::InMemory);
+        let _restore = RestoreSpi;
+
+        const ADDR: u32 = 0x2_0000;
+        let mut byte = [0u8; 1];
+
+        FakeFlash::fail_verify_next_write();
+        FakeFlash::write_slice(ADDR, &[0xFF]);
+        FakeFlash::read_slice(ADDR, &mut byte);
+        assert_eq!(byte[0], 0xFE);
+
+        // The fault is one-shot: a later write is not corrupted. A fresh byte is
+        // used because a NOR write cannot turn the corrupted 0xFE back into 0xFF.
+        FakeFlash::write_slice(ADDR + 1, &[0xFF]);
+        FakeFlash::read_slice(ADDR + 1, &mut byte);
+        assert_eq!(byte[0], 0xFF);
+    }
+
+    /// The raw-pointer guard in `flash_read_page` rejects a zero length and a
+    /// null buffer in `InMemory` mode without touching memory.
+    #[test]
+    fn test_fake_flash_zero_len_and_null_guards() {
+        FakeFlash::reset();
+        FakeFlash::set_mode(FakeFlashMode::InMemory);
+        let _restore = RestoreSpi;
+
+        const ADDR: u32 = 0x3_0000;
+        FakeFlash::write_slice(ADDR, &[0xA5]);
+
+        let mut buf = [0x11u8; 4];
+        flash_read_page(ADDR, 0, buf.as_mut_ptr());
+        assert_eq!(buf, [0x11; 4]);
+
+        flash_read_page(ADDR, 4, std::ptr::null_mut());
+
+        let mut byte = [0u8; 1];
+        FakeFlash::read_slice(ADDR, &mut byte);
+        assert_eq!(byte[0], 0xA5);
+        assert_eq!(FakeFlash::erase_count(ADDR), 0);
     }
 }

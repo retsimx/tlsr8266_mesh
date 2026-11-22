@@ -351,6 +351,17 @@ static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
 
+/// Resets the 64-bit clock accumulator and the overflow detector to zero.
+///
+/// Test-only: proof tests seed the hardware tick register through `FakeMmio` and need
+/// `clock_time64()` to restart from an exact, known base instead of inheriting state
+/// from an earlier test in the same `--test-threads=1` process.
+#[cfg(test)]
+pub fn reset_clock_time64_for_test() {
+    CLOCK_TIME_UPPER.store(0, Ordering::Relaxed);
+    LAST_CLOCK_TIME.store(0, Ordering::Relaxed);
+}
+
 /// Provides a 64-bit monotonic clock based on the 32-bit clock_time()
 ///
 /// This function extends the 32-bit hardware timer to a 64-bit logical timer by
@@ -1488,5 +1499,19 @@ mod tests {
         assert_eq!(result, (2_u64 << 32) | 300);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 2);
         mock_clock_time().assert_called(1);
+    }
+
+    #[test]
+    fn test_reset_clock_time64_for_test_clears_state() {
+        // Arrange: leave non-zero accumulator state behind, as a prior proof test would
+        CLOCK_TIME_UPPER.store(7, Ordering::Relaxed);
+        LAST_CLOCK_TIME.store(0x1234_5678, Ordering::Relaxed);
+
+        // Act
+        reset_clock_time64_for_test();
+
+        // Assert
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
+        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 0);
     }
 }

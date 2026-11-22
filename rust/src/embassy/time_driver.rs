@@ -104,10 +104,11 @@ pub fn on_timer0_interrupt() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::clock::mock_clock_time64;
+    use crate::sdk::mcu::clock::{mock_clock_time64, reset_clock_time64_for_test};
+    use crate::sdk::mcu::register::fake_mmio::{FakeMmio, RegWrite};
     use crate::sdk::mcu::register::{
         mock_read_reg_tmr_ctrl8, mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick,
-        mock_write_reg_tmr_ctrl8, mock_write_reg_tmr_sta,
+        mock_write_reg_tmr_ctrl8, mock_write_reg_tmr_sta, REG_BASE_ADDR,
     };
     use mry::{self, Any};
     use std::sync::Mutex;
@@ -263,6 +264,115 @@ mod tests {
                 Tmr0Write::Capt(CLOCK_SYS_CLOCK_1S),
                 Tmr0Write::Sta(FLD_TMR_STA::TMR0.bits()),
                 Tmr0Write::Ctrl8(0x01),
+            ]
+        );
+    }
+
+    // Proof slices (design 022 §6.2): the same `arm_tmr0` behaviour asserted above,
+    // but expressed against the bytes written to the hardware instead of against
+    // mocked accessor calls. Deliberately carry no mry lock attribute, so the real
+    // accessor bodies run and route through the in-process `FakeMmio` bank.
+
+    #[test]
+    fn test_arm_tmr0_near_future_via_fake_mmio() {
+        // Arrange
+        FakeMmio::reset();
+        reset_clock_time64_for_test();
+        FakeMmio::set_reg32(0x740, 1000); // reg_system_tick -> now == 1000
+        FakeMmio::set_reg8(0x620, 0x01); // TMR0 already enabled
+        FakeMmio::clear_writes();
+        let driver = MyDriver::new();
+
+        // Act
+        let armed = driver.arm_tmr0(1010);
+
+        // Assert
+        assert!(armed);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                // ctrl8 & !TMR0_EN
+                RegWrite {
+                    addr: 0x620 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00,
+                },
+                // tick = 0
+                RegWrite {
+                    addr: 0x630 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0,
+                },
+                // delta 10 clamped up to 32
+                RegWrite {
+                    addr: 0x624 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 32,
+                },
+                // status clear
+                RegWrite {
+                    addr: 0x623 | REG_BASE_ADDR,
+                    width: 1,
+                    value: FLD_TMR_STA::TMR0.bits() as u32,
+                },
+                // ctrl8 | TMR0_EN
+                RegWrite {
+                    addr: 0x620 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x01,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_arm_tmr0_far_future_via_fake_mmio() {
+        // Arrange
+        FakeMmio::reset();
+        reset_clock_time64_for_test();
+        FakeMmio::set_reg32(0x740, 0); // reg_system_tick -> now == 0
+        FakeMmio::set_reg8(0x620, 0x01); // TMR0 already enabled
+        FakeMmio::clear_writes();
+        let driver = MyDriver::new();
+
+        // Act
+        let armed = driver.arm_tmr0(CLOCK_SYS_CLOCK_1S as u64 * 10);
+
+        // Assert
+        assert!(armed);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                // ctrl8 & !TMR0_EN
+                RegWrite {
+                    addr: 0x620 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00,
+                },
+                // tick = 0
+                RegWrite {
+                    addr: 0x630 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0,
+                },
+                // delta clamped to one second
+                RegWrite {
+                    addr: 0x624 | REG_BASE_ADDR,
+                    width: 4,
+                    value: CLOCK_SYS_CLOCK_1S,
+                },
+                // status clear
+                RegWrite {
+                    addr: 0x623 | REG_BASE_ADDR,
+                    width: 1,
+                    value: FLD_TMR_STA::TMR0.bits() as u32,
+                },
+                // ctrl8 | TMR0_EN
+                RegWrite {
+                    addr: 0x620 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x01,
+                },
             ]
         );
     }

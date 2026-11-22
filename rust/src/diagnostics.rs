@@ -15,7 +15,6 @@ use core::cmp::min;
 use core::ptr::addr_of_mut;
 use core::slice;
 
-use crate::app;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page};
 use crate::sdk::light::LGT_PANIC_MSG;
@@ -240,9 +239,7 @@ pub async fn check_panic_info() {
         data[0] = LGT_PANIC_MSG;
         data[3..3 + len].copy_from_slice(&buffer[0..len]);
 
-        app()
-            .mesh_manager
-            .send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+        crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
 
         buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) }
     }
@@ -255,9 +252,7 @@ pub async fn check_panic_info() {
     let mut data = [0u8; 13];
     data[0] = LGT_PANIC_MSG;
 
-    app()
-        .mesh_manager
-        .send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+    crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
 
     // Finally clear the panic info
     flash_erase_sector(panic_addr);
@@ -500,13 +495,13 @@ pub mod rtt {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::mesh::{mock_send_mesh_message, send_mesh_message};
     use crate::sdk::drivers::flash::{
         flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
     use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
-    use crate::uart_manager::UartMsg;
-    use crate::{app_mocker, mock_app_mocker, App};
+    use crate::uart_manager::{mock_send_message, reset_for_test, send_message, UartMsg};
     use mry::{send_wrapper::SendWrapper, Any};
 
     /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in `logging.rs`).
@@ -528,28 +523,23 @@ mod tests {
     /// `UartStream::send` packets it.
     fn assert_uart_print(text: &[u8]) {
         for chunk in text.chunks(PAYLOAD_CHUNK) {
-            crate::app()
-                .uart_manager
-                .mock_send_message(expected_print(chunk))
-                .assert_called(1);
+            mock_send_message(expected_print(chunk)).assert_called(1);
         }
 
-        crate::app()
-            .uart_manager
-            .mock_send_message(Any)
-            .assert_called(text.len().div_ceil(PAYLOAD_CHUNK));
+        mock_send_message(Any).assert_called(text.len().div_ceil(PAYLOAD_CHUNK));
     }
 
-    fn mock_app_with_uart(app: &mut App) {
-        app.uart_manager.mock_send_message(Any).returns(Ok(()));
-        mock_app_mocker().returns(app);
+    /// Clears the module statics and mocks the UART sink, so a log line lands in
+    /// the mock instead of the real 12-slot channel.
+    fn mock_uart_print() {
+        reset_for_test();
+        mock_send_message(Any).returns(Ok(()));
     }
 
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write)]
+    #[mry::lock(send_message, analog_read, analog_write)]
     fn test_boot_sentinel_clean_reboot() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_CLEAN_REBOOT);
         mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
@@ -557,19 +547,15 @@ mod tests {
 
         report_reset_reason();
 
-        crate::app()
-            .uart_manager
-            .mock_send_message(Any)
-            .assert_called(0);
+        mock_send_message(Any).assert_called(0);
         mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
         mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write)]
+    #[mry::lock(send_message, analog_read, analog_write)]
     fn test_boot_sentinel_wd_reset() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
         mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
@@ -585,10 +571,9 @@ mod tests {
     /// `boot_init` is the hook `App::run` calls: it must run the reset report
     /// (and, when compiled in, initialise the ring) without touching flash.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write)]
+    #[mry::lock(send_message, analog_read, analog_write)]
     fn test_boot_init_reports_reset_reason() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
         mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_INIT_DONE);
@@ -603,15 +588,14 @@ mod tests {
 
     #[test]
     #[mry::lock(
-        app_mocker,
+        send_message,
         analog_read,
         analog_write,
         flash_read_page,
         flash_erase_sector
     )]
     fn test_boot_sentinel_panic_message() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         let body = b"panic body";
         let len = body.len() as u16;
@@ -648,10 +632,9 @@ mod tests {
     /// A panic body longer than the stream budget is clipped and marked, and the
     /// whole line still fits the 128-byte `UartStream` used by `uprintln!`.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_panic_message_truncated() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         let body = [b'x'; 200];
         let len = body.len() as u16;
@@ -698,10 +681,9 @@ mod tests {
     /// when the bytes that *were* read decode to exactly the 72-byte budget, so
     /// a cut can never look complete.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_panic_message_marks_short_body_cut_by_read() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         // 72 printable bytes followed by a byte that is invalid UTF-8, then more
         // data beyond the read window: the decoded prefix is exactly the budget.
@@ -744,10 +726,9 @@ mod tests {
     /// A message that fits the flash read window exactly but not the 72-byte
     /// stream budget is still marked, i.e. the clip alone can require `...`.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_panic_message_marks_body_clipped_within_read() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         let body = [b'w'; PANIC_READ_MAX];
         let len = body.len() as u16;
@@ -787,10 +768,9 @@ mod tests {
     /// AC4: an invalid panic flag means the sector is not trusted at all, so the
     /// boot report stays silent but still marks this boot as running.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_sentinel_panic_invalid_flag() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
         mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
@@ -805,10 +785,7 @@ mod tests {
         report_reset_reason();
 
         // No line at all, and the length/body were never read.
-        crate::app()
-            .uart_manager
-            .mock_send_message(Any)
-            .assert_called(0);
+        mock_send_message(Any).assert_called(0);
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, Any, Any).assert_called(0);
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
         mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
@@ -818,10 +795,9 @@ mod tests {
     /// AC4: a length beyond the 256-byte sector record is rejected before any
     /// body bytes are read, and nothing is logged.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_sentinel_panic_length_over_limit() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         let len: u16 = 257;
 
@@ -843,10 +819,7 @@ mod tests {
 
         report_reset_reason();
 
-        crate::app()
-            .uart_manager
-            .mock_send_message(Any)
-            .assert_called(0);
+        mock_send_message(Any).assert_called(0);
         // The over-limit length must short-circuit before the body read.
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
         mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
@@ -857,10 +830,9 @@ mod tests {
     /// code point is dropped (`from_utf8` error clamp), never replaced and never
     /// logged raw, and the clipped line is marked with `...`.
     #[test]
-    #[mry::lock(app_mocker, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
     fn test_boot_sentinel_panic_truncated_utf8() {
-        let mut app = App::default();
-        mock_app_with_uart(&mut app);
+        mock_uart_print();
 
         // 75 ASCII bytes, then `é` (0xC3 0xA9) starting at byte 75 so its second
         // byte is cut by the 76-byte read, then more data that is never read.
@@ -958,8 +930,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_erase_sector, app_mocker)]
+    #[mry::lock(flash_read_page, flash_erase_sector)]
     fn test_check_panic_info_no_valid_flag() {
+        reset_for_test();
+
         // Mock reading invalid flag
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| {
@@ -968,10 +942,6 @@ mod tests {
                 }
             },
         );
-
-        // Create mock app (needed for the app() call in the function, but shouldn't be reached)
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
 
         // Run check_panic_info (should return early)
         let future = check_panic_info();
@@ -983,8 +953,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_erase_sector, app_mocker)]
+    #[mry::lock(flash_read_page, flash_erase_sector, send_mesh_message)]
     fn test_check_panic_info_with_valid_data() {
+        reset_for_test();
+
         let test_message = b"Test panic message";
         let message_len = test_message.len() as u16;
 
@@ -1010,12 +982,8 @@ mod tests {
             },
         );
 
-        // Create mock app with mocked mesh_manager
-        let mut app = App::default();
-        app.mesh_manager
-            .mock_send_mesh_message(Any, Any, Any, Any)
-            .returns([1, 2, 3]);
-        mock_app_mocker().returns(&mut app);
+        // Mock the mesh send so the report never touches the radio
+        mock_send_mesh_message(Any, Any, Any, Any).returns([1, 2, 3]);
 
         // Mock final erase
         mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
@@ -1031,8 +999,6 @@ mod tests {
         mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).assert_called(1); // Final erase
 
         // Verify mesh messages were sent (3: two data chunks + one empty terminator)
-        app.mesh_manager
-            .mock_send_mesh_message(Any, Any, Any, Any)
-            .assert_called(3);
+        mock_send_mesh_message(Any, Any, Any, Any).assert_called(3);
     }
 }

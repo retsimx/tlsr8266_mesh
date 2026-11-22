@@ -3,7 +3,6 @@ use core::mem::size_of;
 use core::ptr::addr_of;
 
 use const_format::formatcp;
-use embassy_executor::Spawner;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
 use fixed::types::{I16F16, U16F16};
@@ -11,6 +10,7 @@ use fixed::types::{I16F16, U16F16};
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
+use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::drivers::pwm::pwm_set_cmp;
 use crate::sdk::light::{
@@ -32,9 +32,9 @@ const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
 type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 #[derive(Copy, Clone, Debug)]
-struct Message {
-    cmd: u8,
-    params: [u8; 16],
+pub struct Message {
+    pub cmd: u8,
+    pub params: [u8; 16],
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -54,15 +54,6 @@ pub(crate) struct LumSaveT {
 }
 
 impl LightState {
-    #[cfg(not(test))]
-    pub const fn default_const() -> Self {
-        Self {
-            cw: I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE)),
-            ww: I16F16::lit(formatcp!("{}", 0u16)),
-            brightness: I16F16::lit(formatcp!("{}", 0u16)),
-        }
-    }
-
     #[cfg(test)]
     pub fn default() -> Self {
         Self {
@@ -137,52 +128,36 @@ impl Transition {
     }
 }
 
-#[cfg_attr(test, mry::mry)]
-pub struct LightManager {
-    channel: Channel<CsRawMutex, Message, 10>,
-
+/// The lamp's transition state: the only owner of the five correlated fields
+/// shared by the TMR1 ISR, the light task and the main loop.
+///
+/// Every field is updated together (a transition step touches all three
+/// `Transition`s plus `brightness`), so they live behind one
+/// [`CriticalSectionMutex`] instead of per-field atomics that would tear the
+/// easing maths mid-step.
+pub struct LightTransitionCore {
+    brightness: u16,
     brightness_tr: Transition,
     cw_tr: Transition,
     ww_tr: Transition,
-
-    light_lum_addr: u32,
     last_transition_time: u32,
-
-    // Stores the brightness when the light is off, to restore when turned back on
-    brightness: u16,
 }
 
-#[cfg_attr(test, mry::mry(skip_fns(default_const, run, get_current_light_state)))]
-impl LightManager {
-    #[cfg(not(test))]
-    pub const fn default_const() -> Self {
+impl LightTransitionCore {
+    /// Default (lights off, cool-white) core state. `const` so it can seed the
+    /// [`LIGHT_HW`] static.
+    const fn new() -> Self {
         Self {
-            channel: Channel::new(),
+            brightness: MAX_LUM_BRIGHTNESS_VALUE,
             brightness_tr: Transition::new(I16F16::lit(formatcp!("{}", 0u16))),
             cw_tr: Transition::new(I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE))),
             ww_tr: Transition::new(I16F16::lit(formatcp!("{}", 0u16))),
-            light_lum_addr: 0,
             last_transition_time: 0,
-            brightness: MAX_LUM_BRIGHTNESS_VALUE,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn default() -> Self {
-        Self {
-            channel: Channel::new(),
-            brightness_tr: Transition::new(I16F16::from_num(0u16)),
-            cw_tr: Transition::new(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE)),
-            ww_tr: Transition::new(I16F16::from_num(0u16)),
-            light_lum_addr: 0,
-            last_transition_time: 0,
-            brightness: MAX_LUM_BRIGHTNESS_VALUE,
-            mry: Default::default(),
         }
     }
 
     fn handle_on_off(&mut self, on: u8) {
-        self.light_onoff(match on {
+        self.light_onoff_inner(match on {
             LIGHT_ON_PARAM => true,
             LIGHT_OFF_PARAM => false,
             _ => true,
@@ -221,60 +196,43 @@ impl LightManager {
         }
 
         if self.is_light_off() {
-            self.begin_transition(cw, ww, 0);
+            self.begin_transition_inner(cw, ww, 0);
         } else {
-            self.begin_transition(cw, ww, brightness);
+            self.begin_transition_inner(cw, ww, brightness);
         }
     }
 
-    pub fn send_message(&mut self, cmd: u8, params: [u8; 16]) {
-        let _ = self.channel.try_send(Message { cmd, params });
-    }
-
-    async fn process_message_impl(&mut self) {
-        let msg = self.channel.receive().await;
-        match msg.cmd {
-            LGT_CMD_LIGHT_ONOFF => self.handle_on_off(msg.params[0]),
-            LGT_CMD_SET_LIGHT => self.handle_transition(&msg.params),
-            _ => {}
+    /// Start a transition to `(cw, ww, brightness)`.
+    ///
+    /// Must be called with [`LIGHT_HW`] already held: it calls
+    /// `transition_step_inner` directly instead of the public
+    /// `transition_step()`, which would re-lock the mutex and panic under the
+    /// `cfg(test)` re-entrancy probe (issue #40).
+    fn begin_transition_inner(&mut self, cw: u16, ww: u16, brightness: u16) {
+        // Check if the cw or ww targets are changing and mark for save
+        if self.cw_tr.to != cw || self.ww_tr.to != ww {
+            self.last_transition_time = clock_time();
         }
+
+        let now = Instant::now();
+        self.brightness_tr
+            .begin_at(now, I16F16::from_num(brightness));
+        self.cw_tr.begin_at(now, I16F16::from_num(cw));
+        self.ww_tr.begin_at(now, I16F16::from_num(ww));
+
+        // Enable timer1
+        write_reg_tmr1_tick(0);
+        write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
+
+        // Run a single transition now to avoid anything bugging out.
+        self.transition_step_inner();
+
+        // `begin_at` above made `brightness` the transition target, so the
+        // on/off state is exactly `brightness == 0`.
+        crate::sdk::pm::set_reboot_light_off_state(brightness == 0);
     }
 
-    #[coverage(off)]
-    pub async fn run(&mut self, _spawner: Spawner) {
-        loop {
-            self.process_message_impl().await;
-        }
-    }
-
-    pub fn begin_transition(&mut self, cw: u16, ww: u16, brightness: u16) {
-        critical_section::with(|_| {
-            // Check if the cw or ww targets are changing and mark for save
-            if self.cw_tr.to != cw || self.ww_tr.to != ww {
-                self.last_transition_time = clock_time();
-            }
-
-            let now = Instant::now();
-            self.brightness_tr
-                .begin_at(now, I16F16::from_num(brightness));
-            self.cw_tr.begin_at(now, I16F16::from_num(cw));
-            self.ww_tr.begin_at(now, I16F16::from_num(ww));
-
-            // Enable timer1
-            write_reg_tmr1_tick(0);
-            write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
-
-            // Run a single transition now to avoid anything bugging out
-            self.transition_step();
-
-            // `begin_at` above made `brightness` the transition target, so the
-            // on/off state is exactly `brightness == 0`. Deriving it locally
-            // keeps this path off the mockable `is_light_off` accessor.
-            crate::sdk::pm::set_reboot_light_off_state(brightness == 0);
-        });
-    }
-
-    pub fn transition_step(&mut self) {
+    fn transition_step_inner(&mut self) {
         let now = Instant::now();
         let b = self.brightness_tr.step_at(now);
         let c = self.cw_tr.step_at(now);
@@ -284,18 +242,298 @@ impl LightManager {
             write_reg_tmr_ctrl(read_reg_tmr_ctrl() & !FLD_TMR::TMR1_EN.bits());
         }
 
-        self.light_adjust_rgb_hw(
+        light_adjust_rgb_hw_unlocked(
             self.cw_tr.current,
             self.ww_tr.current,
             self.brightness_tr.current,
         );
     }
 
-    pub fn is_light_off(&self) -> bool {
+    fn light_onoff_inner(&mut self, on: bool) {
+        let target = if on { self.brightness } else { 0 };
+        self.brightness_tr
+            .begin_at(Instant::now(), I16F16::from_num(target));
+        write_reg_tmr1_tick(0);
+        write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
+        self.transition_step_inner();
+        // `begin_at` above made `target` the transition target, so the
+        // on/off state is exactly `target == 0`.
+        crate::sdk::pm::set_reboot_light_off_state(target == 0);
+    }
+
+    fn is_light_off(&self) -> bool {
         if self.brightness_tr.is_active() {
             self.brightness_tr.to == 0
         } else {
             self.brightness_tr.current == 0
+        }
+    }
+}
+
+/// Single owner of the lamp transition state.
+pub static LIGHT_HW: CriticalSectionMutex<LightTransitionCore> =
+    CriticalSectionMutex::new(LightTransitionCore::new());
+
+/// Commands handed from the BLE stack / main loop to [`light_manager_task`].
+pub static LIGHT_CMD_CHANNEL: Channel<CsRawMutex, Message, 10> = Channel::new();
+
+fn calculate_lumen_map(val: I16F16) -> u32 {
+    static COEFF1: U16F16 = U16F16::lit("5.2221");
+    static COEFF2: U16F16 = U16F16::lit("130.5908");
+
+    let percentage = U16F16::from_num(val) / MAX_LUM_BRIGHTNESS_VALUE as u32 * 100;
+    ((COEFF1 * (percentage * percentage)) + COEFF2 * percentage).to_num()
+}
+
+fn pwm_set_lum(id: u32, y: u16, pol: bool) {
+    let lum = (y as u32 * PMW_MAX_TICK as u32) / (255 * 256) as u32;
+
+    pwm_set_cmp(id, if pol { PMW_MAX_TICK as u32 - lum } else { lum } as u16);
+}
+
+fn get_pwm_cmp(val: I16F16, lum: I16F16) -> u16 {
+    let val_lumen_map = calculate_lumen_map(lum);
+
+    ((val.to_num::<u32>() * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16
+}
+
+/// Set the cool-white PWM without taking [`LIGHT_HW`]; the caller holds it.
+fn light_adjust_cw_unlocked(val: I16F16, lum: I16F16) {
+    pwm_set_lum(PWMID_G, get_pwm_cmp(val, lum), false);
+}
+
+/// Set the warm-white PWM without taking [`LIGHT_HW`]; the caller holds it.
+fn light_adjust_ww_unlocked(val: I16F16, lum: I16F16) {
+    pwm_set_lum(PWMID_B, get_pwm_cmp(val, lum), true);
+}
+
+/// Drive both PWM channels without taking [`LIGHT_HW`]; the caller holds it.
+fn light_adjust_rgb_hw_unlocked(val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
+    light_adjust_cw_unlocked(val_cw, lum);
+    light_adjust_ww_unlocked(val_ww, lum);
+}
+
+/// Step every active transition and push the result to the PWM hardware.
+#[cfg_attr(test, mry::mry)]
+pub fn transition_step() {
+    LIGHT_HW.lock().transition_step_inner();
+}
+
+/// Start a transition to `(cw, ww, brightness)`.
+///
+/// Only host tests drive this directly today; it stays part of the lock-once
+/// API so a caller cannot reach `begin_transition_inner` without the lock.
+#[allow(dead_code)]
+pub fn begin_transition(cw: u16, ww: u16, brightness: u16) {
+    LIGHT_HW.lock().begin_transition_inner(cw, ww, brightness);
+}
+
+/// Set the cool-white PWM duty. Locks [`LIGHT_HW`] once so the paired CW/WW
+/// writes cannot interleave with a TMR1 transition step.
+#[cfg_attr(test, mry::mry)]
+pub fn light_adjust_cw(val: I16F16, lum: I16F16) {
+    let _guard = LIGHT_HW.lock();
+    light_adjust_cw_unlocked(val, lum);
+}
+
+/// Set the warm-white PWM duty. Locks [`LIGHT_HW`] once so the paired CW/WW
+/// writes cannot interleave with a TMR1 transition step.
+#[cfg_attr(test, mry::mry)]
+pub fn light_adjust_ww(val: I16F16, lum: I16F16) {
+    let _guard = LIGHT_HW.lock();
+    light_adjust_ww_unlocked(val, lum);
+}
+
+/// Drive both PWM channels. Locks [`LIGHT_HW`] once for the pair.
+///
+/// The animation helpers that used this (`lib.rs::blinken`) are gone, so only
+/// tests call it today; it stays part of the lock-once colour API.
+#[allow(dead_code)]
+pub fn light_adjust_rgb_hw(val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
+    let _guard = LIGHT_HW.lock();
+    light_adjust_rgb_hw_unlocked(val_cw, val_ww, lum);
+}
+
+/// Turn the lamp hardware on or off (no mesh status report).
+#[cfg_attr(test, mry::mry)]
+pub fn light_onoff_hw(on: bool) {
+    LIGHT_HW.lock().light_onoff_inner(on);
+}
+
+/// Turn the lamp on or off and report the new status to the mesh.
+pub fn light_onoff(on: bool) {
+    light_onoff_hw(on);
+    device_status_update();
+}
+
+/// Whether the lamp is off, taking the pending transition target into account.
+#[cfg_attr(test, mry::mry)]
+pub fn is_light_off() -> bool {
+    LIGHT_HW.lock().is_light_off()
+}
+
+/// Current (or target, while a transition is in flight) light state.
+pub fn get_current_light_state() -> LightState {
+    let core = LIGHT_HW.lock();
+    LightState {
+        cw: if core.cw_tr.is_active() {
+            core.cw_tr.to
+        } else {
+            core.cw_tr.current
+        },
+        ww: if core.ww_tr.is_active() {
+            core.ww_tr.to
+        } else {
+            core.ww_tr.current
+        },
+        brightness: if core.brightness_tr.is_active() {
+            core.brightness_tr.to
+        } else {
+            core.brightness_tr.current
+        },
+    }
+}
+
+/// Report the current on/off state to the mesh status buffer.
+#[cfg_attr(test, mry::mry)]
+pub fn device_status_update() {
+    // Snapshot the on/off state under the lock; the mesh notification below
+    // must not run inside the critical section.
+    let on = {
+        let core = LIGHT_HW.lock();
+        if core.is_light_off() {
+            0
+        } else {
+            1
+        }
+    };
+
+    // packet
+    let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN] = [0xff; MESH_NODE_ST_PAR_LEN];
+
+    st_val_par[0] = on;
+    st_val_par[1] = 0xff;
+
+    ll_device_status_update(&st_val_par);
+}
+
+/// Queue a command for [`light_manager_task`]. Dropped if the queue is full.
+pub fn send_light_message(cmd: u8, params: [u8; 16]) {
+    let _ = LIGHT_CMD_CHANNEL.try_send(Message { cmd, params });
+}
+
+/// Apply one queued command. Each arm takes [`LIGHT_HW`] once; the status
+/// report is a separate lock-once call, so no guard is ever held twice.
+fn dispatch_message(msg: Message) {
+    match msg.cmd {
+        LGT_CMD_LIGHT_ONOFF => {
+            LIGHT_HW.lock().handle_on_off(msg.params[0]);
+            device_status_update();
+        }
+        LGT_CMD_SET_LIGHT => LIGHT_HW.lock().handle_transition(&msg.params),
+        _ => {}
+    }
+}
+
+/// The one owner of the light command queue.
+#[coverage(off)]
+pub async fn light_manager_task() {
+    loop {
+        let msg = LIGHT_CMD_CHANNEL.receive().await;
+        dispatch_message(msg);
+    }
+}
+
+/// The lamp's persisted-brightness write pointer.
+///
+/// Owned by value by the main task and passed down as `&mut`; every flash call
+/// happens outside [`LIGHT_HW`].
+pub struct LightFlashStore {
+    light_lum_addr: u32,
+}
+
+impl LightFlashStore {
+    /// Scan the luminance sector for the last saved state, apply it and restore
+    /// the lamp on/off state.
+    ///
+    /// All `flash_read_page` calls happen before/without the [`LIGHT_HW`] lock;
+    /// the lock is taken exactly once, only to apply the loaded values.
+    pub fn retrieve_from_flash() -> Self {
+        // Read flash sector in chunks and scan for saved light state
+        const ENTRIES_PER_CHUNK: usize = 10;
+        let mut store = Self {
+            light_lum_addr: FLASH_ADR_LUM,
+        };
+        let mut buffer = [LumSaveT {
+            save_flag: 0xFF,
+            brightness: 0,
+            cw: 0,
+            ww: 0,
+        }; ENTRIES_PER_CHUNK];
+        let mut loaded: Option<(u16, u16, u16)> = None;
+
+        // Scan the entire sector in chunks
+        'scan: for offset in
+            (0..FLASH_SECTOR_SIZE).step_by(size_of::<LumSaveT>() * ENTRIES_PER_CHUNK)
+        {
+            let addr = FLASH_ADR_LUM + offset as u32;
+            flash_read_page(
+                addr,
+                size_of::<LumSaveT>() as u32 * ENTRIES_PER_CHUNK as u32,
+                buffer.as_mut_ptr() as *mut u8,
+            );
+
+            for (idx, entry) in buffer.iter().enumerate() {
+                match entry.save_flag {
+                    LIGHT_SAVE_VALID_FLAG => {
+                        // Found valid saved state - remember it and update the
+                        // address for the next write.
+                        loaded = Some((
+                            min(entry.brightness, MAX_LUM_BRIGHTNESS_VALUE),
+                            min(entry.cw, MAX_LUM_BRIGHTNESS_VALUE),
+                            min(entry.ww, MAX_LUM_BRIGHTNESS_VALUE),
+                        ));
+                        store.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
+                    }
+                    0xFF => {
+                        // Reached end of written data - set address for next write
+                        store.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
+                        break 'scan;
+                    }
+                    _ => {
+                        // Invalid entry, skip
+                    }
+                }
+            }
+        }
+
+        if let Some((brightness, cw, ww)) = loaded {
+            let mut core = LIGHT_HW.lock();
+            core.brightness = brightness;
+            let cw = I16F16::from_num(cw);
+            let ww = I16F16::from_num(ww);
+            // Set from/current/to all to saved value so colour starts
+            // immediately at the saved colour with no fade on boot.
+            core.cw_tr.from = cw;
+            core.cw_tr.current = cw;
+            core.cw_tr.to = cw;
+            core.ww_tr.from = ww;
+            core.ww_tr.current = ww;
+            core.ww_tr.to = ww;
+        }
+
+        Self::restore_onoff_state();
+        store
+    }
+
+    /// Restore the lamp on/off state recorded in analog memory.
+    fn restore_onoff_state() {
+        let val = analog_read(REGA_LIGHT_OFF);
+        if val & RecoverStatus::LightOff as u8 != 0 {
+            analog_write(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
+            light_onoff(false);
+        } else {
+            light_onoff(true);
         }
     }
 
@@ -313,11 +551,22 @@ impl LightManager {
             self.light_lum_erase();
         }
 
+        // Snapshot the values under a short lock; the flash write below must
+        // not run inside a critical section.
+        let (brightness, cw, ww): (u16, u16, u16) = {
+            let core = LIGHT_HW.lock();
+            (
+                core.brightness,
+                core.cw_tr.current.to_num(),
+                core.ww_tr.current.to_num(),
+            )
+        };
+
         let lum_save = LumSaveT {
             save_flag: LIGHT_SAVE_VALID_FLAG,
-            brightness: self.brightness,
-            cw: self.cw_tr.current.to_num(),
-            ww: self.ww_tr.current.to_num(),
+            brightness,
+            cw,
+            ww,
         };
 
         flash_write_page(
@@ -329,167 +578,41 @@ impl LightManager {
         self.light_lum_addr += size_of::<LumSaveT>() as u32;
     }
 
-    //retrieve LUM : brightness or RGB/CT value
-    pub fn light_lum_retrieve(&mut self) {
-        // Read flash sector in chunks and scan for saved light state
-        const ENTRIES_PER_CHUNK: usize = 10;
-        let mut buffer = [LumSaveT {
-            save_flag: 0xFF,
-            brightness: 0,
-            cw: 0,
-            ww: 0,
-        }; ENTRIES_PER_CHUNK];
-
-        // Scan the entire sector in chunks
-        for offset in (0..FLASH_SECTOR_SIZE).step_by(size_of::<LumSaveT>() * ENTRIES_PER_CHUNK) {
-            let addr = FLASH_ADR_LUM + offset as u32;
-            flash_read_page(
-                addr,
-                size_of::<LumSaveT>() as u32 * ENTRIES_PER_CHUNK as u32,
-                buffer.as_mut_ptr() as *mut u8,
-            );
-
-            for (idx, entry) in buffer.iter().enumerate() {
-                match entry.save_flag {
-                    LIGHT_SAVE_VALID_FLAG => {
-                        // Found valid saved state - update current values
-                        self.brightness = min(entry.brightness, MAX_LUM_BRIGHTNESS_VALUE);
-                        let cw = I16F16::from_num(min(entry.cw, MAX_LUM_BRIGHTNESS_VALUE));
-                        let ww = I16F16::from_num(min(entry.ww, MAX_LUM_BRIGHTNESS_VALUE));
-                        // Set from/current/to all to saved value so colour starts
-                        // immediately at the saved colour with no fade on boot.
-                        self.cw_tr.from = cw;
-                        self.cw_tr.current = cw;
-                        self.cw_tr.to = cw;
-                        self.ww_tr.from = ww;
-                        self.ww_tr.current = ww;
-                        self.ww_tr.to = ww;
-                        self.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
-                    }
-                    0xFF => {
-                        // Reached end of written data - set address for next write
-                        self.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
-
-                        // Restore light on/off state and exit
-                        let val = analog_read(REGA_LIGHT_OFF);
-                        if val & RecoverStatus::LightOff as u8 != 0 {
-                            analog_write(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
-                            self.light_onoff(false);
-                        } else {
-                            self.light_onoff(true);
-                        }
-                        return;
-                    }
-                    _ => {
-                        // Invalid entry, skip
-                    }
-                }
-            }
-        }
-
-        // If we scanned the whole sector, restore light state
-        let val = analog_read(REGA_LIGHT_OFF);
-        if val & RecoverStatus::LightOff as u8 != 0 {
-            analog_write(REGA_LIGHT_OFF, val & !(RecoverStatus::LightOff as u8));
-            self.light_onoff(false);
-        } else {
-            self.light_onoff(true);
-        }
-    }
-
     pub fn check_light_state_save(&mut self) {
-        // Save the light state if it's been more than 5 seconds since the last transition
-        if self.last_transition_time != 0
-            && clock_time_exceed(self.last_transition_time, 5000 * 1000)
-        {
-            self.last_transition_time = 0;
+        // Save the light state if it's been more than 5 seconds since the last
+        // transition. The timer is cleared under the lock; the guard is dropped
+        // before any flash erase/write happens.
+        let due = {
+            let mut core = LIGHT_HW.lock();
+            if core.last_transition_time != 0
+                && clock_time_exceed(core.last_transition_time, 5000 * 1000)
+            {
+                core.last_transition_time = 0;
+                true
+            } else {
+                false
+            }
+        };
+
+        if due {
             self.light_state_save();
         }
     }
+}
 
-    pub fn get_current_light_state(&self) -> LightState {
-        LightState {
-            cw: if self.cw_tr.is_active() {
-                self.cw_tr.to
-            } else {
-                self.cw_tr.current
-            },
-            ww: if self.ww_tr.is_active() {
-                self.ww_tr.to
-            } else {
-                self.ww_tr.current
-            },
-            brightness: if self.brightness_tr.is_active() {
-                self.brightness_tr.to
-            } else {
-                self.brightness_tr.current
-            },
-        }
+#[cfg(test)]
+impl Default for LightFlashStore {
+    fn default() -> Self {
+        Self { light_lum_addr: 0 }
     }
+}
 
-    pub fn calculate_lumen_map(&self, val: I16F16) -> u32 {
-        static COEFF1: U16F16 = U16F16::lit("5.2221");
-        static COEFF2: U16F16 = U16F16::lit("130.5908");
-
-        let percentage = U16F16::from_num(val) / MAX_LUM_BRIGHTNESS_VALUE as u32 * 100;
-        ((COEFF1 * (percentage * percentage)) + COEFF2 * percentage).to_num()
-    }
-
-    fn pwm_set_lum(&self, id: u32, y: u16, pol: bool) {
-        let lum = (y as u32 * PMW_MAX_TICK as u32) / (255 * 256) as u32;
-
-        pwm_set_cmp(id, if pol { PMW_MAX_TICK as u32 - lum } else { lum } as u16);
-    }
-
-    fn get_pwm_cmp(&self, val: I16F16, lum: I16F16) -> u16 {
-        let val_lumen_map = self.calculate_lumen_map(lum);
-
-        ((val.to_num::<u32>() * val_lumen_map) / MAX_LUM_BRIGHTNESS_VALUE as u32) as u16
-    }
-
-    pub fn light_adjust_cw(&self, val: I16F16, lum: I16F16) {
-        self.pwm_set_lum(PWMID_G, self.get_pwm_cmp(val, lum), false);
-    }
-
-    pub fn light_adjust_ww(&self, val: I16F16, lum: I16F16) {
-        self.pwm_set_lum(PWMID_B, self.get_pwm_cmp(val, lum), true);
-    }
-
-    pub fn light_adjust_rgb_hw(&self, val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
-        self.light_adjust_cw(val_cw, lum);
-        self.light_adjust_ww(val_ww, lum);
-    }
-
-    pub fn light_onoff_hw(&mut self, on: bool) {
-        let target = if on { self.brightness } else { 0 };
-        critical_section::with(|_| {
-            self.brightness_tr
-                .begin_at(Instant::now(), I16F16::from_num(target));
-            write_reg_tmr1_tick(0);
-            write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR1_EN.bits());
-            self.transition_step();
-            // `begin_at` above made `target` the transition target, so the
-            // on/off state is exactly `target == 0`.
-            crate::sdk::pm::set_reboot_light_off_state(target == 0);
-        });
-    }
-
-    pub fn light_onoff(&mut self, on: bool) {
-        self.light_onoff_hw(on);
-        self.device_status_update();
-    }
-
-    pub fn device_status_update(&self) {
-        // packet
-        let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN] = [0xff; MESH_NODE_ST_PAR_LEN];
-
-        let on = if self.is_light_off() { 0 } else { 1 };
-
-        st_val_par[0] = on;
-        st_val_par[1] = 0xff;
-
-        ll_device_status_update(&st_val_par);
-    }
+/// Restore the global light state to its power-on defaults and drain the
+/// command queue. Host tests are single-threaded, so this is enough isolation.
+#[cfg(test)]
+pub fn reset_for_test() {
+    *LIGHT_HW.lock() = LightTransitionCore::new();
+    while LIGHT_CMD_CHANNEL.try_receive().is_ok() {}
 }
 
 #[cfg(test)]
@@ -508,15 +631,18 @@ mod tests {
         mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
     };
     use embassy_time::Instant;
-    use futures::executor::block_on;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 
     // --- Helper Functions ---
 
-    /// Create a LightManager with known state for testing
-    fn create_test_light_manager() -> LightManager {
-        LightManager::default()
+    /// Run `f` with exclusive access to the global light transition core.
+    ///
+    /// The closure must only touch fields: calling a free function that locks
+    /// `LIGHT_HW` from inside would trip the re-entrancy probe.
+    fn with_core<R>(f: impl FnOnce(&mut LightTransitionCore) -> R) -> R {
+        let mut core = LIGHT_HW.lock();
+        f(&mut core)
     }
 
     /// Create test message for on/off command
@@ -611,20 +737,22 @@ mod tests {
 
     #[test]
     fn test_light_manager_default() {
-        // This test verifies that LightManager initializes with correct default values
+        // The global core comes up lights-off at cool white, the queue is empty
+        // and the flash write pointer starts at zero.
 
-        let manager = LightManager::default();
+        reset_for_test();
 
-        assert!(manager.channel.is_empty());
-        assert_eq!(manager.brightness, MAX_LUM_BRIGHTNESS_VALUE);
-        assert_eq!(manager.light_lum_addr, 0);
-        assert_eq!(manager.last_transition_time, 0);
-        assert_eq!(manager.brightness_tr.current.to_num::<u16>(), 0);
-        assert_eq!(
-            manager.cw_tr.current.to_num::<u16>(),
-            MAX_LUM_BRIGHTNESS_VALUE
-        );
-        assert_eq!(manager.ww_tr.current.to_num::<u16>(), 0);
+        assert!(LIGHT_CMD_CHANNEL.is_empty());
+        with_core(|core| {
+            assert_eq!(core.brightness, MAX_LUM_BRIGHTNESS_VALUE);
+            assert_eq!(core.last_transition_time, 0);
+            assert_eq!(core.brightness_tr.current.to_num::<u16>(), 0);
+            assert_eq!(core.cw_tr.current.to_num::<u16>(), MAX_LUM_BRIGHTNESS_VALUE);
+            assert_eq!(core.ww_tr.current.to_num::<u16>(), 0);
+        });
+
+        let store = LightFlashStore::default();
+        assert_eq!(store.light_lum_addr, 0);
     }
 
     #[test]
@@ -642,38 +770,38 @@ mod tests {
 
     #[test]
     fn test_send_message_adds_to_channel() {
-        // This test verifies that send_message correctly adds messages to the channel
+        // This test verifies that send_light_message correctly adds messages to the channel
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         let test_params = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-        manager.send_message(LGT_CMD_LIGHT_ONOFF, test_params);
+        send_light_message(LGT_CMD_LIGHT_ONOFF, test_params);
 
-        assert_eq!(manager.channel.len(), 1);
-        let msg = manager.channel.try_receive().unwrap();
+        assert_eq!(LIGHT_CMD_CHANNEL.len(), 1);
+        let msg = LIGHT_CMD_CHANNEL.try_receive().unwrap();
         assert_eq!(msg.cmd, LGT_CMD_LIGHT_ONOFF);
         assert_eq!(msg.params, test_params);
     }
 
     #[test]
     fn test_send_message_does_not_overflow_channel() {
-        // This test verifies that send_message doesn't add messages when channel is full
+        // This test verifies that send_light_message doesn't add messages when channel is full
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         // Fill the channel (capacity is 10)
         for i in 0..10 {
-            manager.send_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
+            send_light_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
         }
 
         // Try to add one more - should be ignored
-        manager.send_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
+        send_light_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
 
         // All 10 retained messages are received in order and the 11th was dropped
         for i in 0..10 {
-            assert_eq!(manager.channel.try_receive().unwrap().params[0], i);
+            assert_eq!(LIGHT_CMD_CHANNEL.try_receive().unwrap().params[0], i);
         }
-        assert!(manager.channel.try_receive().is_err());
+        assert!(LIGHT_CMD_CHANNEL.try_receive().is_err());
     }
 
     // --- On/Off Handling Tests ---
@@ -690,8 +818,8 @@ mod tests {
     fn test_handle_on_off_turns_light_on() {
         // This test verifies that handle_on_off correctly processes LIGHT_ON_PARAM
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 500;
+        reset_for_test();
+        with_core(|core| core.brightness = 500);
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -702,10 +830,10 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel (always 10455 for low brightness)
         mock_clock_time64().returns(1000);
 
-        manager.handle_on_off(LIGHT_ON_PARAM);
+        dispatch_message(create_onoff_message(LIGHT_ON_PARAM));
 
         // New state should target the saved brightness
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 500);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 500);
     }
 
     #[test]
@@ -720,9 +848,11 @@ mod tests {
     fn test_handle_on_off_turns_light_off() {
         // This test verifies that handle_on_off correctly processes LIGHT_OFF_PARAM
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(1000);
-        manager.brightness_tr.to = I16F16::from_num(1000);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(1000);
+            core.brightness_tr.to = I16F16::from_num(1000);
+        });
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -733,10 +863,10 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(1000);
 
-        manager.handle_on_off(LIGHT_OFF_PARAM);
+        dispatch_message(create_onoff_message(LIGHT_OFF_PARAM));
 
         // New state should target brightness 0
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 0);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 0);
     }
 
     #[test]
@@ -751,8 +881,8 @@ mod tests {
     fn test_handle_on_off_invalid_param_defaults_to_on() {
         // This test verifies that handle_on_off treats invalid params as ON
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 300;
+        reset_for_test();
+        with_core(|core| core.brightness = 300);
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -763,9 +893,9 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(1000);
 
-        manager.handle_on_off(0x99); // Invalid value
+        dispatch_message(create_onoff_message(0x99)); // Invalid value
 
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 300);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 300);
     }
 
     // --- Transition Handling Tests ---
@@ -782,10 +912,12 @@ mod tests {
     fn test_handle_transition_brightness_only() {
         // This test verifies that handle_transition correctly processes brightness changes
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 100;
-        manager.brightness_tr.current = I16F16::from_num(100);
-        manager.brightness_tr.to = I16F16::from_num(100);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness = 100;
+            core.brightness_tr.current = I16F16::from_num(100);
+            core.brightness_tr.to = I16F16::from_num(100);
+        });
         let params = [
             0x34, 0x12, // brightness = 0x1234
             0, 0, // temperature
@@ -804,11 +936,14 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(2000);
 
-        manager.handle_transition(&params);
+        LIGHT_HW.lock().handle_transition(&params);
 
-        assert_eq!(manager.brightness, 0x1234);
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 0x1234);
-        assert_eq!(manager.last_transition_time, 1000);
+        assert_eq!(with_core(|core| core.brightness), 0x1234);
+        assert_eq!(
+            with_core(|core| core.brightness_tr.to.to_num::<u16>()),
+            0x1234
+        );
+        assert_eq!(with_core(|core| core.last_transition_time), 1000);
     }
 
     #[test]
@@ -823,9 +958,11 @@ mod tests {
     fn test_handle_transition_temperature_only() {
         // This test verifies that handle_transition correctly processes temperature changes
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.to = I16F16::from_num(500);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.to = I16F16::from_num(500);
+        });
         let params = [
             0, 0, // brightness
             0x78, 0x56, // temperature = 0x5678
@@ -844,14 +981,14 @@ mod tests {
         mock_clock_time().returns(1000);
         mock_clock_time64().returns(2000);
 
-        manager.handle_transition(&params);
+        LIGHT_HW.lock().handle_transition(&params);
 
         // CW should be MAX - temperature, WW should be temperature
         assert_eq!(
-            manager.cw_tr.to.to_num::<u16>(),
+            with_core(|core| core.cw_tr.to.to_num::<u16>()),
             MAX_LUM_BRIGHTNESS_VALUE - 0x5678
         );
-        assert_eq!(manager.ww_tr.to.to_num::<u16>(), 0x5678);
+        assert_eq!(with_core(|core| core.ww_tr.to.to_num::<u16>()), 0x5678);
     }
 
     #[test]
@@ -866,9 +1003,11 @@ mod tests {
     fn test_handle_transition_independent_cw_ww() {
         // This test verifies that handle_transition correctly processes independent CW/WW
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.to = I16F16::from_num(500);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.to = I16F16::from_num(500);
+        });
         let params = [
             0, 0, // brightness
             0x34, 0x12, // cw = 0x1234
@@ -887,10 +1026,10 @@ mod tests {
         mock_clock_time().returns(1000);
         mock_clock_time64().returns(2000);
 
-        manager.handle_transition(&params);
+        LIGHT_HW.lock().handle_transition(&params);
 
-        assert_eq!(manager.cw_tr.to.to_num::<u16>(), 0x1234);
-        assert_eq!(manager.ww_tr.to.to_num::<u16>(), 0x5678);
+        assert_eq!(with_core(|core| core.cw_tr.to.to_num::<u16>()), 0x1234);
+        assert_eq!(with_core(|core| core.ww_tr.to.to_num::<u16>()), 0x5678);
     }
 
     #[test]
@@ -905,8 +1044,8 @@ mod tests {
     fn test_handle_transition_when_light_is_off_sets_brightness_zero() {
         // This test verifies that transitions when light is off keep brightness at 0
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 1000;
+        reset_for_test();
+        with_core(|core| core.brightness = 1000);
         // brightness_tr defaults to current=0, to=0 — light is off
         let params = [
             0x34, 0x12, // brightness
@@ -925,10 +1064,10 @@ mod tests {
         mock_clock_time().returns(1000);
         mock_clock_time64().returns(2000);
 
-        manager.handle_transition(&params);
+        LIGHT_HW.lock().handle_transition(&params);
 
         // Brightness should be set to 0 even though 0x1234 was requested
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 0);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 0);
     }
 
     // --- Easing Function Tests ---
@@ -994,28 +1133,30 @@ mod tests {
     fn test_transition_step_completes_when_time_reached() {
         // This test verifies transition_step finalizes state when target time is reached
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(500),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
-        manager.cw_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(300),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
-        manager.ww_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(200),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(500),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+            core.cw_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(300),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+            core.ww_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(200),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+        });
 
         mock_clock_time64().returns(100);
         mock_read_reg_tmr_ctrl().returns(0x10);
@@ -1023,12 +1164,15 @@ mod tests {
         mock_pwm_set_cmp(0, 0).returns(()); // CW channel
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
-        manager.transition_step();
+        transition_step();
 
         // Should match new state exactly
-        assert_eq!(manager.brightness_tr.current.to_num::<u16>(), 500);
-        assert_eq!(manager.cw_tr.current.to_num::<u16>(), 300);
-        assert_eq!(manager.ww_tr.current.to_num::<u16>(), 200);
+        assert_eq!(
+            with_core(|core| core.brightness_tr.current.to_num::<u16>()),
+            500
+        );
+        assert_eq!(with_core(|core| core.cw_tr.current.to_num::<u16>()), 300);
+        assert_eq!(with_core(|core| core.ww_tr.current.to_num::<u16>()), 200);
         // Timer should be disabled
         mock_write_reg_tmr_ctrl(0x10).assert_called(1);
     }
@@ -1038,38 +1182,40 @@ mod tests {
     fn test_transition_step_interpolates_during_transition() {
         // This test verifies transition_step correctly interpolates values mid-transition
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(1000),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
-        manager.cw_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(1000),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
-        manager.ww_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(1000),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(1000),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+            core.cw_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(1000),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+            core.ww_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(1000),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+        });
 
         // At 50% progress
         mock_pwm_set_cmp(0, 0).returns(()); // CW channel
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(50);
 
-        manager.transition_step();
+        transition_step();
 
         // Should be partway through transition, not at extremes
-        let brightness = manager.brightness_tr.current.to_num::<u16>();
+        let brightness = with_core(|core| core.brightness_tr.current.to_num::<u16>());
         assert!(brightness > 100 && brightness < 900);
     }
 
@@ -1082,46 +1228,52 @@ mod tests {
 
         mock_clock_time64().returns(1000);
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // Active transition from 0 toward 500: is_active() = true, to = 500
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(0),
-            to: I16F16::from_num(500),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(0),
+                to: I16F16::from_num(500),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+        });
 
-        assert!(!manager.is_light_off());
+        assert!(!is_light_off());
     }
 
     #[test]
     fn test_is_light_off_when_new_brightness_zero() {
         // This test verifies is_light_off returns true when new brightness is 0
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // Active transition from 500 toward 0: is_active() = true, to = 0
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(500),
-            current: I16F16::from_num(500),
-            to: I16F16::from_num(0),
-            start: Instant::from_ticks(0),
-            end: Instant::from_ticks(100),
-        };
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(500),
+                current: I16F16::from_num(500),
+                to: I16F16::from_num(0),
+                start: Instant::from_ticks(0),
+                end: Instant::from_ticks(100),
+            };
+        });
 
-        assert!(manager.is_light_off());
+        assert!(is_light_off());
     }
 
     #[test]
     fn test_is_light_off_when_brightness_nonzero() {
         // This test verifies is_light_off returns false when brightness is non-zero
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // No active transition (start == end == 0), current = 500
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.to = I16F16::from_num(500);
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.to = I16F16::from_num(500);
+        });
 
-        assert!(!manager.is_light_off());
+        assert!(!is_light_off());
     }
 
     // --- Get Current Light State Tests ---
@@ -1130,17 +1282,19 @@ mod tests {
     fn test_get_current_light_state_returns_new_when_newer() {
         // This test verifies get_current_light_state returns target when transition is active
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // Active transition (end > start): report to
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(500),
-            to: I16F16::from_num(1000),
-            start: Instant::from_ticks(100),
-            end: Instant::from_ticks(200),
-        };
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(500),
+                to: I16F16::from_num(1000),
+                start: Instant::from_ticks(100),
+                end: Instant::from_ticks(200),
+            };
+        });
 
-        let state = manager.get_current_light_state();
+        let state = get_current_light_state();
 
         assert_eq!(state.brightness.to_num::<u16>(), 1000);
     }
@@ -1149,17 +1303,19 @@ mod tests {
     fn test_get_current_light_state_returns_current_when_equal_timestamp() {
         // This test verifies get_current_light_state returns current when no transition is active
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // No active transition (start == end): report current
-        manager.brightness_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(500),
-            to: I16F16::from_num(1000),
-            start: Instant::from_ticks(100),
-            end: Instant::from_ticks(100), // end == start → not active
-        };
+        with_core(|core| {
+            core.brightness_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(500),
+                to: I16F16::from_num(1000),
+                start: Instant::from_ticks(100),
+                end: Instant::from_ticks(100), // end == start → not active
+            };
+        });
 
-        let state = manager.get_current_light_state();
+        let state = get_current_light_state();
 
         assert_eq!(state.brightness.to_num::<u16>(), 500);
     }
@@ -1168,12 +1324,14 @@ mod tests {
     fn test_get_current_light_state_returns_current_when_older() {
         // This test verifies get_current_light_state returns current when idle (no transition set up)
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
         // Default idle state (start == end == 0): report current
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.to = I16F16::from_num(1000);
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.to = I16F16::from_num(1000);
+        });
 
-        let state = manager.get_current_light_state();
+        let state = get_current_light_state();
 
         assert_eq!(state.brightness.to_num::<u16>(), 500);
     }
@@ -1185,14 +1343,15 @@ mod tests {
     fn test_light_lum_erase_resets_address() {
         // This test verifies light_lum_erase resets address and erases sector
 
-        let mut manager = create_test_light_manager();
-        manager.light_lum_addr = 0x1234;
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        store.light_lum_addr = 0x1234;
 
         mock_flash_erase_sector(FLASH_ADR_LUM).returns(());
 
-        manager.light_lum_erase();
+        store.light_lum_erase();
 
-        assert_eq!(manager.light_lum_addr, FLASH_ADR_LUM);
+        assert_eq!(store.light_lum_addr, FLASH_ADR_LUM);
         mock_flash_erase_sector(FLASH_ADR_LUM).assert_called(1);
     }
 
@@ -1201,18 +1360,21 @@ mod tests {
     fn test_light_state_save_writes_to_flash() {
         // This test verifies light_state_save writes current state to flash
 
-        let mut manager = create_test_light_manager();
-        manager.light_lum_addr = FLASH_ADR_LUM;
-        manager.brightness = 500;
-        manager.cw_tr.current = I16F16::from_num(300);
-        manager.ww_tr.current = I16F16::from_num(200);
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        store.light_lum_addr = FLASH_ADR_LUM;
+        with_core(|core| {
+            core.brightness = 500;
+            core.cw_tr.current = I16F16::from_num(300);
+            core.ww_tr.current = I16F16::from_num(200);
+        });
 
         mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).returns(());
 
-        manager.light_state_save();
+        store.light_state_save();
 
         assert_eq!(
-            manager.light_lum_addr,
+            store.light_lum_addr,
             FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
         );
         mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).assert_called(1);
@@ -1223,18 +1385,19 @@ mod tests {
     fn test_light_state_save_erases_when_sector_full() {
         // This test verifies light_state_save erases sector when address reaches end
 
-        let mut manager = create_test_light_manager();
-        manager.light_lum_addr =
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        store.light_lum_addr =
             FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32;
-        manager.brightness = 500;
+        with_core(|core| core.brightness = 500);
 
         mock_flash_erase_sector(FLASH_ADR_LUM).returns(());
         mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).returns(());
 
-        manager.light_state_save();
+        store.light_state_save();
 
         assert_eq!(
-            manager.light_lum_addr,
+            store.light_lum_addr,
             FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
         );
         mock_flash_erase_sector(FLASH_ADR_LUM).assert_called(1);
@@ -1253,9 +1416,9 @@ mod tests {
         clock_time64
     )]
     fn test_light_lum_retrieve_restores_state_and_turns_on() {
-        // This test verifies light_lum_retrieve correctly restores saved state
+        // This test verifies retrieve_from_flash correctly restores saved state
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         // Create a mock flash buffer with saved light state
         let saved_brightness = 800u16;
@@ -1301,12 +1464,23 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(1000);
 
-        manager.light_lum_retrieve();
+        let store = LightFlashStore::retrieve_from_flash();
 
         // Verify the state was restored
-        assert_eq!(manager.brightness, saved_brightness);
-        assert_eq!(manager.cw_tr.current.to_num::<u16>(), saved_cw);
-        assert_eq!(manager.ww_tr.current.to_num::<u16>(), saved_ww);
+        assert_eq!(with_core(|core| core.brightness), saved_brightness);
+        assert_eq!(
+            with_core(|core| core.cw_tr.current.to_num::<u16>()),
+            saved_cw
+        );
+        assert_eq!(
+            with_core(|core| core.ww_tr.current.to_num::<u16>()),
+            saved_ww
+        );
+        // The next save lands right after the 0xFF terminator.
+        assert_eq!(
+            store.light_lum_addr,
+            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+        );
 
         // The light_onoff should have been called
         mock_ll_device_status_update([1, 0xff]).assert_called(1);
@@ -1317,16 +1491,17 @@ mod tests {
     fn test_check_light_state_save_saves_after_timeout() {
         // This test verifies check_light_state_save saves after 5 seconds
 
-        let mut manager = create_test_light_manager();
-        manager.last_transition_time = 1000;
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        with_core(|core| core.last_transition_time = 1000);
 
         mock_clock_time_exceed(1000, 5000 * 1000).returns(true);
         // flash_write_page(addr, size, pointer) - size is size_of::<LumSaveT>() = 7
         mock_flash_write_page(Any, 7, Any).returns(());
 
-        manager.check_light_state_save();
+        store.check_light_state_save();
 
-        assert_eq!(manager.last_transition_time, 0);
+        assert_eq!(with_core(|core| core.last_transition_time), 0);
         mock_flash_write_page(Any, 7, Any).assert_called(1);
     }
 
@@ -1335,26 +1510,28 @@ mod tests {
     fn test_check_light_state_save_does_not_save_before_timeout() {
         // This test verifies check_light_state_save doesn't save before 5 seconds
 
-        let mut manager = create_test_light_manager();
-        manager.last_transition_time = 1000;
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        with_core(|core| core.last_transition_time = 1000);
 
         mock_clock_time_exceed(1000, 5000 * 1000).returns(false);
 
-        manager.check_light_state_save();
+        store.check_light_state_save();
 
-        assert_eq!(manager.last_transition_time, 1000);
+        assert_eq!(with_core(|core| core.last_transition_time), 1000);
     }
 
     #[test]
     fn test_check_light_state_save_does_nothing_when_no_transition() {
         // This test verifies check_light_state_save does nothing when last_transition_time is 0
 
-        let mut manager = create_test_light_manager();
-        manager.last_transition_time = 0;
+        reset_for_test();
+        let mut store = LightFlashStore::default();
+        with_core(|core| core.last_transition_time = 0);
 
-        manager.check_light_state_save();
+        store.check_light_state_save();
 
-        assert_eq!(manager.last_transition_time, 0);
+        assert_eq!(with_core(|core| core.last_transition_time), 0);
     }
 
     // --- PWM Calculation Tests ---
@@ -1363,8 +1540,7 @@ mod tests {
     fn test_calculate_lumen_map_at_zero() {
         // This test verifies calculate_lumen_map returns 0 at 0% brightness
 
-        let manager = create_test_light_manager();
-        let result = manager.calculate_lumen_map(I16F16::from_num(0));
+        let result = calculate_lumen_map(I16F16::from_num(0));
 
         assert_eq!(result, 0);
     }
@@ -1373,8 +1549,7 @@ mod tests {
     fn test_calculate_lumen_map_at_max() {
         // This test verifies calculate_lumen_map returns correct value at 100%
 
-        let manager = create_test_light_manager();
-        let result = manager.calculate_lumen_map(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
+        let result = calculate_lumen_map(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE));
 
         // At 100%: (5.2221 * 100^2) + 130.5908 * 100 = 52221 + 13059.08 = 65280.08
         assert!((65000..=66000).contains(&result));
@@ -1384,8 +1559,7 @@ mod tests {
     fn test_calculate_lumen_map_at_fifty_percent() {
         // This test verifies calculate_lumen_map returns correct value at 50%
 
-        let manager = create_test_light_manager();
-        let result = manager.calculate_lumen_map(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE / 2));
+        let result = calculate_lumen_map(I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE / 2));
 
         // At 50%: (5.2221 * 50^2) + 130.5908 * 50 = 13055.25 + 6529.54 = 19584.79
         assert!((19000..=20500).contains(&result));
@@ -1396,13 +1570,13 @@ mod tests {
     fn test_light_adjust_cw_sets_correct_pwm() {
         // This test verifies light_adjust_cw correctly sets PWM value
 
-        let manager = create_test_light_manager();
+        reset_for_test();
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
 
         mock_pwm_set_cmp(PWMID_G, 10455).returns(()); // Max value, pol=false
 
-        manager.light_adjust_cw(val, lum);
+        light_adjust_cw(val, lum);
 
         mock_pwm_set_cmp(PWMID_G, 10455).assert_called(1);
     }
@@ -1412,13 +1586,13 @@ mod tests {
     fn test_light_adjust_ww_sets_correct_pwm() {
         // This test verifies light_adjust_ww correctly sets PWM value
 
-        let manager = create_test_light_manager();
+        reset_for_test();
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
 
         mock_pwm_set_cmp(PWMID_B, 0).returns(()); // Max inverted (pol=true)
 
-        manager.light_adjust_ww(val, lum);
+        light_adjust_ww(val, lum);
 
         mock_pwm_set_cmp(PWMID_B, 0).assert_called(1);
     }
@@ -1428,7 +1602,7 @@ mod tests {
     fn test_light_adjust_rgb_hw_calls_both_adjusters() {
         // This test verifies light_adjust_rgb_hw calls both CW and WW adjusters
 
-        let manager = create_test_light_manager();
+        reset_for_test();
         let cw = I16F16::from_num(500);
         let ww = I16F16::from_num(300);
         let lum = I16F16::from_num(1000);
@@ -1436,7 +1610,7 @@ mod tests {
         mock_pwm_set_cmp(0, 0).returns(()); // CW channel (PWMID_G)
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel (PWMID_B)
 
-        manager.light_adjust_rgb_hw(cw, ww, lum);
+        light_adjust_rgb_hw(cw, ww, lum);
 
         // Should be called once for each channel
         mock_pwm_set_cmp(0, 0).assert_called(1);
@@ -1447,11 +1621,10 @@ mod tests {
     fn test_get_pwm_cmp_returns_scaled_value() {
         // This test verifies get_pwm_cmp correctly scales values
 
-        let manager = create_test_light_manager();
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
 
-        let result = manager.get_pwm_cmp(val, lum);
+        let result = get_pwm_cmp(val, lum);
 
         // At max brightness, lumen map returns ~65280, so result should be ~65280
         // (MAX * 65280) / MAX = 65280
@@ -1466,11 +1639,10 @@ mod tests {
     fn test_get_pwm_cmp_at_zero_brightness() {
         // This test verifies get_pwm_cmp returns 0 at 0 brightness
 
-        let manager = create_test_light_manager();
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(0);
 
-        let result = manager.get_pwm_cmp(val, lum);
+        let result = get_pwm_cmp(val, lum);
 
         assert_eq!(result, 0);
     }
@@ -1482,12 +1654,12 @@ mod tests {
     fn test_device_status_update_reports_on() {
         // This test verifies device_status_update reports correct status when light is on
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(500);
+        reset_for_test();
+        with_core(|core| core.brightness_tr.current = I16F16::from_num(500));
 
         mock_ll_device_status_update([1, 0xff]).returns(()); // Status 0 = light on
 
-        manager.device_status_update();
+        device_status_update();
 
         mock_ll_device_status_update([1, 0xff]).assert_called(1);
     }
@@ -1497,12 +1669,12 @@ mod tests {
     fn test_device_status_update_reports_off() {
         // This test verifies device_status_update reports correct status when light is off
 
-        let manager = create_test_light_manager();
+        reset_for_test();
         // brightness_tr defaults to current=0, to=0 — light is already off
 
         mock_ll_device_status_update([0, 0xff]).returns(()); // Status 0 = light off
 
-        manager.device_status_update();
+        device_status_update();
 
         mock_ll_device_status_update([0, 0xff]).assert_called(1);
     }
@@ -1521,13 +1693,15 @@ mod tests {
     fn test_begin_transition_updates_state() {
         // This test verifies begin_transition correctly sets up new transition
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(100);
-        manager.brightness_tr.to = I16F16::from_num(100);
-        manager.cw_tr.current = I16F16::from_num(100);
-        manager.cw_tr.to = I16F16::from_num(100);
-        manager.ww_tr.current = I16F16::from_num(100);
-        manager.ww_tr.to = I16F16::from_num(100);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(100);
+            core.brightness_tr.to = I16F16::from_num(100);
+            core.cw_tr.current = I16F16::from_num(100);
+            core.cw_tr.to = I16F16::from_num(100);
+            core.ww_tr.current = I16F16::from_num(100);
+            core.ww_tr.to = I16F16::from_num(100);
+        });
 
         mock_clock_time().returns(5000);
         mock_read_reg_tmr_ctrl().returns(0x00);
@@ -1537,13 +1711,16 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         mock_clock_time64().returns(3000);
 
-        manager.begin_transition(500, 300, 800);
+        begin_transition(500, 300, 800);
 
-        assert_eq!(manager.cw_tr.to.to_num::<u16>(), 500);
-        assert_eq!(manager.ww_tr.to.to_num::<u16>(), 300);
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 800);
-        assert_eq!(manager.brightness_tr.from.to_num::<u16>(), 100);
-        assert_eq!(manager.last_transition_time, 5000);
+        assert_eq!(with_core(|core| core.cw_tr.to.to_num::<u16>()), 500);
+        assert_eq!(with_core(|core| core.ww_tr.to.to_num::<u16>()), 300);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 800);
+        assert_eq!(
+            with_core(|core| core.brightness_tr.from.to_num::<u16>()),
+            100
+        );
+        assert_eq!(with_core(|core| core.last_transition_time), 5000);
     }
 
     #[test]
@@ -1558,12 +1735,14 @@ mod tests {
     fn test_begin_transition_does_not_update_time_if_no_color_change() {
         // This test verifies begin_transition doesn't update time if only brightness changes
 
-        let mut manager = create_test_light_manager();
-        manager.cw_tr.current = I16F16::from_num(500);
-        manager.cw_tr.to = I16F16::from_num(500);
-        manager.ww_tr.current = I16F16::from_num(300);
-        manager.ww_tr.to = I16F16::from_num(300);
-        manager.last_transition_time = 0;
+        reset_for_test();
+        with_core(|core| {
+            core.cw_tr.current = I16F16::from_num(500);
+            core.cw_tr.to = I16F16::from_num(500);
+            core.ww_tr.current = I16F16::from_num(300);
+            core.ww_tr.to = I16F16::from_num(300);
+            core.last_transition_time = 0;
+        });
 
         mock_clock_time().returns(5000);
         mock_read_reg_tmr_ctrl().returns(0x00);
@@ -1572,9 +1751,9 @@ mod tests {
         mock_pwm_set_cmp(Any, Any).returns(());
         mock_clock_time64().returns(3000);
 
-        manager.begin_transition(500, 300, 800); // Same CW/WW, different brightness
+        begin_transition(500, 300, 800); // Same CW/WW, different brightness
 
-        assert_eq!(manager.last_transition_time, 0);
+        assert_eq!(with_core(|core| core.last_transition_time), 0);
     }
 
     // --- Message Processing Tests ---
@@ -1591,8 +1770,8 @@ mod tests {
     fn test_process_message_handles_onoff() {
         // This test verifies process_message correctly handles on/off messages
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 500;
+        reset_for_test();
+        with_core(|core| core.brightness = 500);
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -1605,10 +1784,10 @@ mod tests {
 
         let msg = create_onoff_message(LIGHT_ON_PARAM);
 
-        manager.send_message(msg.cmd, msg.params);
-        block_on(manager.process_message_impl());
+        send_light_message(msg.cmd, msg.params);
+        dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 500);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 500);
     }
 
     #[test]
@@ -1626,10 +1805,8 @@ mod tests {
         use futures::task::noop_waker;
 
         // Setup
-        let mut manager = create_test_light_manager();
-        manager.brightness = 500;
-        // The future parks on `&mut self`, so drive it through a raw pointer.
-        let manager_ptr: *mut LightManager = &mut manager;
+        reset_for_test();
+        with_core(|core| core.brightness = 500);
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -1638,37 +1815,27 @@ mod tests {
         mock_pwm_set_cmp(Any, Any).returns(());
         mock_clock_time64().returns(1000);
 
-        let future = manager.process_message_impl();
+        let future = light_manager_task();
         futures::pin_mut!(future);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // The channel is empty on entry, so the iteration parks on receive().
+        // The channel is empty on entry, so the task parks on receive().
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-        // SAFETY: the pinned future is the only accessor of `manager`; this is
-        // a read-only reborrow.
-        assert!(unsafe { (&(*manager_ptr).channel).is_empty() });
+        assert!(LIGHT_CMD_CHANNEL.is_empty());
 
         // A message wakes the parked receive.
         let msg = create_onoff_message(LIGHT_ON_PARAM);
-        // SAFETY: the pinned future is the only accessor of `manager`, so the
-        // `&mut self` borrow is logically transferred to this call.
-        unsafe {
-            (*manager_ptr).send_message(msg.cmd, msg.params);
-        }
+        send_light_message(msg.cmd, msg.params);
 
-        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+        // The task consumes and dispatches it, then parks on the empty channel
+        // again, so the poll as a whole is still pending.
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
 
         // The command took effect and the channel is drained.
-        // SAFETY: the future has completed and is the only accessor of
-        // `manager`; this is a read-only reborrow.
-        assert_eq!(
-            unsafe { (*manager_ptr).brightness_tr.to.to_num::<u16>() },
-            500
-        );
-        // SAFETY: as above; read-only reborrow after completion.
-        assert!(unsafe { (&(*manager_ptr).channel).is_empty() });
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 500);
+        assert!(LIGHT_CMD_CHANNEL.is_empty());
     }
 
     #[test]
@@ -1683,9 +1850,11 @@ mod tests {
     fn test_process_message_handles_transition() {
         // This test verifies process_message correctly handles transition messages
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.to = I16F16::from_num(500);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.to = I16F16::from_num(500);
+        });
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -1698,30 +1867,33 @@ mod tests {
 
         let msg = create_brightness_message(1000);
 
-        manager.send_message(msg.cmd, msg.params);
-        block_on(manager.process_message_impl());
+        send_light_message(msg.cmd, msg.params);
+        dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
-        assert_eq!(manager.brightness, 1000);
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 1000);
+        assert_eq!(with_core(|core| core.brightness), 1000);
+        assert_eq!(
+            with_core(|core| core.brightness_tr.to.to_num::<u16>()),
+            1000
+        );
     }
 
     #[test]
     fn test_process_message_ignores_unknown_command() {
         // This test verifies process_message ignores unknown command types
 
-        let mut manager = create_test_light_manager();
-        let old_brightness = manager.brightness;
+        reset_for_test();
+        let old_brightness = with_core(|core| core.brightness);
 
         let msg = Message {
             cmd: 0xFF, // Unknown command
             params: [0; 16],
         };
 
-        manager.send_message(msg.cmd, msg.params);
-        block_on(manager.process_message_impl());
+        send_light_message(msg.cmd, msg.params);
+        dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
         // State should be unchanged
-        assert_eq!(manager.brightness, old_brightness);
+        assert_eq!(with_core(|core| core.brightness), old_brightness);
     }
 
     // --- Integration Tests ---
@@ -1739,8 +1911,8 @@ mod tests {
     fn test_full_transition_sequence() {
         // This test verifies transition state updates correctly
 
-        let mut manager = create_test_light_manager();
-        manager.brightness = 1000;
+        reset_for_test();
+        with_core(|core| core.brightness = 1000);
         // brightness_tr defaults to current=0 (light is off)
 
         mock_read_reg_tmr_ctrl().returns(0x00);
@@ -1754,12 +1926,20 @@ mod tests {
         mock_clock_time64().returns(1500);
 
         // Turn light on - should set up a transition
-        manager.light_onoff(true);
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 1000);
-        assert_eq!(manager.brightness_tr.current.to_num::<u16>(), 0);
+        light_onoff(true);
+        assert_eq!(
+            with_core(|core| core.brightness_tr.to.to_num::<u16>()),
+            1000
+        );
+        assert_eq!(
+            with_core(|core| core.brightness_tr.current.to_num::<u16>()),
+            0
+        );
 
         // Transition should be active (end > start)
-        assert!(manager.brightness_tr.end > manager.brightness_tr.start);
+        assert!(with_core(
+            |core| core.brightness_tr.end > core.brightness_tr.start
+        ));
     }
 
     #[test]
@@ -1774,13 +1954,15 @@ mod tests {
     fn test_color_temperature_adjustment() {
         // This test verifies adjusting color temperature while light is on
 
-        let mut manager = create_test_light_manager();
-        manager.brightness_tr.current = I16F16::from_num(1000);
-        manager.brightness_tr.to = I16F16::from_num(1000);
-        manager.cw_tr.current = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
-        manager.cw_tr.to = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
-        manager.ww_tr.current = I16F16::from_num(0);
-        manager.ww_tr.to = I16F16::from_num(0);
+        reset_for_test();
+        with_core(|core| {
+            core.brightness_tr.current = I16F16::from_num(1000);
+            core.brightness_tr.to = I16F16::from_num(1000);
+            core.cw_tr.current = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
+            core.cw_tr.to = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
+            core.ww_tr.current = I16F16::from_num(0);
+            core.ww_tr.to = I16F16::from_num(0);
+        });
 
         mock_read_reg_tmr_ctrl().returns(0x00);
         mock_write_reg_tmr1_tick(0).returns(());
@@ -1793,14 +1975,14 @@ mod tests {
 
         // Adjust to warm white (WW high, CW low)
         let params = create_temperature_message(MAX_LUM_BRIGHTNESS_VALUE - 100);
-        manager.handle_transition(&params.params);
+        LIGHT_HW.lock().handle_transition(&params.params);
 
-        assert_eq!(manager.cw_tr.to.to_num::<u16>(), 100);
+        assert_eq!(with_core(|core| core.cw_tr.to.to_num::<u16>()), 100);
         assert_eq!(
-            manager.ww_tr.to.to_num::<u16>(),
+            with_core(|core| core.ww_tr.to.to_num::<u16>()),
             MAX_LUM_BRIGHTNESS_VALUE - 100
         );
-        assert_eq!(manager.last_transition_time, 1000);
+        assert_eq!(with_core(|core| core.last_transition_time), 1000);
     }
 
     // --- Get Current Light State (Active CW/WW) Tests ---
@@ -1808,16 +1990,18 @@ mod tests {
     #[test]
     fn test_get_current_light_state_cw_active_returns_to() {
         // cw_tr.is_active() == true path: must return cw_tr.to, not cw_tr.current
-        let mut manager = create_test_light_manager();
-        manager.cw_tr = Transition {
-            from: I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
-            current: I16F16::from_num(30000),
-            to: I16F16::from_num(100),
-            start: Instant::from_ticks(1),
-            end: Instant::from_ticks(200),
-        };
+        reset_for_test();
+        with_core(|core| {
+            core.cw_tr = Transition {
+                from: I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
+                current: I16F16::from_num(30000),
+                to: I16F16::from_num(100),
+                start: Instant::from_ticks(1),
+                end: Instant::from_ticks(200),
+            };
+        });
 
-        let state = manager.get_current_light_state();
+        let state = get_current_light_state();
 
         assert_eq!(state.cw.to_num::<u16>(), 100);
     }
@@ -1826,21 +2010,23 @@ mod tests {
     fn test_get_current_light_state_ww_active_returns_to() {
         // ww_tr.is_active() == true path: must return ww_tr.to, not ww_tr.current
         // Use 30000 — within I16F16 signed integer range (max 32767)
-        let mut manager = create_test_light_manager();
-        manager.ww_tr = Transition {
-            from: I16F16::from_num(0),
-            current: I16F16::from_num(15000),
-            to: I16F16::from_num(30000),
-            start: Instant::from_ticks(1),
-            end: Instant::from_ticks(200),
-        };
+        reset_for_test();
+        with_core(|core| {
+            core.ww_tr = Transition {
+                from: I16F16::from_num(0),
+                current: I16F16::from_num(15000),
+                to: I16F16::from_num(30000),
+                start: Instant::from_ticks(1),
+                end: Instant::from_ticks(200),
+            };
+        });
 
-        let state = manager.get_current_light_state();
+        let state = get_current_light_state();
 
         assert_eq!(state.ww.to_num::<u16>(), 30000);
     }
 
-    // --- light_lum_retrieve: light-was-off + invalid-entry + full-sector-scan ---
+    // --- retrieve_from_flash: light-was-off + invalid-entry + full-sector-scan ---
 
     #[test]
     #[mry::lock(
@@ -1856,7 +2042,7 @@ mod tests {
     )]
     fn test_light_lum_retrieve_light_was_off_turns_light_off() {
         // When the LightOff bit is set in analog memory, light_onoff(false) is called.
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         let saved_brightness = 800u16;
         let saved_cw = 600u16;
@@ -1898,11 +2084,15 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(());
         mock_clock_time64().returns(1000);
 
-        manager.light_lum_retrieve();
+        let store = LightFlashStore::retrieve_from_flash();
 
-        assert_eq!(manager.brightness, saved_brightness);
+        assert_eq!(with_core(|core| core.brightness), saved_brightness);
         // brightness_tr targets 0 (light off)
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 0);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 0);
+        assert_eq!(
+            store.light_lum_addr,
+            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+        );
         mock_analog_write(REGA_LIGHT_OFF, 0x00).assert_called(1);
         mock_ll_device_status_update([0, 0xff]).assert_called(1);
     }
@@ -1922,7 +2112,7 @@ mod tests {
     fn test_light_lum_retrieve_skips_invalid_flash_entry() {
         // An entry with a save_flag that is neither 0xA5 nor 0xFF is silently skipped.
         // The scan continues until a 0xFF entry is found.
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         let saved_cw = 1234u16;
         let saved_ww = 5678u16;
@@ -1968,12 +2158,23 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(());
         mock_clock_time64().returns(1000);
 
-        manager.light_lum_retrieve();
+        let store = LightFlashStore::retrieve_from_flash();
 
         // The valid entry (index 1) was loaded correctly despite the invalid one before it
-        assert_eq!(manager.brightness, saved_brightness);
-        assert_eq!(manager.cw_tr.current.to_num::<u16>(), saved_cw);
-        assert_eq!(manager.ww_tr.current.to_num::<u16>(), saved_ww);
+        assert_eq!(with_core(|core| core.brightness), saved_brightness);
+        assert_eq!(
+            with_core(|core| core.cw_tr.current.to_num::<u16>()),
+            saved_cw
+        );
+        assert_eq!(
+            with_core(|core| core.ww_tr.current.to_num::<u16>()),
+            saved_ww
+        );
+        // 0xFF terminator at index 2.
+        assert_eq!(
+            store.light_lum_addr,
+            FLASH_ADR_LUM + 2 * size_of::<LumSaveT>() as u32
+        );
     }
 
     #[test]
@@ -1991,7 +2192,7 @@ mod tests {
     fn test_light_lum_retrieve_full_sector_uses_post_loop_restore() {
         // When the entire flash sector is full of valid entries (no 0xFF terminator),
         // the post-loop code restores the light state from analog memory.
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         let saved_brightness = 300u16;
         let saved_cw = 200u16;
@@ -2028,12 +2229,18 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(());
         mock_clock_time64().returns(1000);
 
-        manager.light_lum_retrieve();
+        let _store = LightFlashStore::retrieve_from_flash();
 
         // State from last valid entry in the full sector was restored
-        assert_eq!(manager.brightness, saved_brightness);
-        assert_eq!(manager.cw_tr.current.to_num::<u16>(), saved_cw);
-        assert_eq!(manager.ww_tr.current.to_num::<u16>(), saved_ww);
+        assert_eq!(with_core(|core| core.brightness), saved_brightness);
+        assert_eq!(
+            with_core(|core| core.cw_tr.current.to_num::<u16>()),
+            saved_cw
+        );
+        assert_eq!(
+            with_core(|core| core.ww_tr.current.to_num::<u16>()),
+            saved_ww
+        );
         mock_ll_device_status_update([1, 0xff]).assert_called(1);
     }
 
@@ -2052,7 +2259,7 @@ mod tests {
     fn test_light_lum_retrieve_full_sector_light_was_off() {
         // Full sector, no 0xFF terminator, AND the light was off at prior shutdown.
         // Exercises the post-loop RecoverStatus::LightOff == true branch.
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         let saved_brightness = 300u16;
         let saved_cw = 200u16;
@@ -2089,10 +2296,10 @@ mod tests {
         mock_pwm_set_cmp(1, 10455).returns(());
         mock_clock_time64().returns(1000);
 
-        manager.light_lum_retrieve();
+        let _store = LightFlashStore::retrieve_from_flash();
 
-        assert_eq!(manager.brightness, saved_brightness);
-        assert_eq!(manager.brightness_tr.to.to_num::<u16>(), 0);
+        assert_eq!(with_core(|core| core.brightness), saved_brightness);
+        assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 0);
         mock_analog_write(REGA_LIGHT_OFF, 0x00).assert_called(1);
         mock_ll_device_status_update([0, 0xff]).assert_called(1);
     }
@@ -2112,15 +2319,17 @@ mod tests {
         // Verifies that begin_transition with the same brightness target mid-transition
         // does not reset the transition end time (same-target guard fires).
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         // Set up an in-progress brightness transition to 500.
         // Use a far-future end so Instant::now() won't exceed it during the test.
-        manager.brightness_tr.to = I16F16::from_num(500);
-        manager.brightness_tr.from = I16F16::from_num(0);
-        manager.brightness_tr.current = I16F16::from_num(250);
-        manager.brightness_tr.start = Instant::from_ticks(0);
-        manager.brightness_tr.end = Instant::from_ticks(100_000_000);
+        with_core(|core| {
+            core.brightness_tr.to = I16F16::from_num(500);
+            core.brightness_tr.from = I16F16::from_num(0);
+            core.brightness_tr.current = I16F16::from_num(250);
+            core.brightness_tr.start = Instant::from_ticks(0);
+            core.brightness_tr.end = Instant::from_ticks(100_000_000);
+        });
 
         // cw/ww already at defaults (to = MAX and 0), pass the same so guard fires for them too
         mock_clock_time64().returns(50);
@@ -2131,9 +2340,12 @@ mod tests {
         mock_pwm_set_cmp(Any, Any).returns(());
 
         // begin_transition with same brightness target — guard should fire, end unchanged
-        manager.begin_transition(MAX_LUM_BRIGHTNESS_VALUE, 0, 500);
+        begin_transition(MAX_LUM_BRIGHTNESS_VALUE, 0, 500);
 
-        assert_eq!(manager.brightness_tr.end, Instant::from_ticks(100_000_000));
+        assert_eq!(
+            with_core(|core| core.brightness_tr.end),
+            Instant::from_ticks(100_000_000)
+        );
     }
 
     #[test]
@@ -2148,16 +2360,17 @@ mod tests {
         // Verifies that light_onoff_hw only starts a brightness transition and
         // does not disturb an in-progress colour transition.
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         // Set up an in-progress colour transition
-        manager.cw_tr.to = I16F16::from_num(100);
-        manager.cw_tr.from = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
-        manager.cw_tr.current = I16F16::from_num(30000);
-        manager.cw_tr.start = Instant::from_ticks(0);
-        manager.cw_tr.end = Instant::from_ticks(100_000_000);
-
-        manager.brightness = 500;
+        with_core(|core| {
+            core.cw_tr.to = I16F16::from_num(100);
+            core.cw_tr.from = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
+            core.cw_tr.current = I16F16::from_num(30000);
+            core.cw_tr.start = Instant::from_ticks(0);
+            core.cw_tr.end = Instant::from_ticks(100_000_000);
+            core.brightness = 500;
+        });
 
         mock_clock_time64().returns(50);
         mock_read_reg_tmr_ctrl().returns(0x00);
@@ -2166,12 +2379,18 @@ mod tests {
         mock_pwm_set_cmp(Any, Any).returns(());
 
         // Turn light on — only brightness_tr should change
-        manager.light_onoff_hw(true);
+        light_onoff_hw(true);
 
         // cw_tr.end must be unchanged
-        assert_eq!(manager.cw_tr.end, Instant::from_ticks(100_000_000));
+        assert_eq!(
+            with_core(|core| core.cw_tr.end),
+            Instant::from_ticks(100_000_000)
+        );
         // brightness_tr should now target 500
-        assert_eq!(manager.brightness_tr.to, I16F16::from_num(500));
+        assert_eq!(
+            with_core(|core| core.brightness_tr.to),
+            I16F16::from_num(500)
+        );
     }
 
     #[test]
@@ -2187,16 +2406,17 @@ mod tests {
         // Verifies that a colour-only change via begin_transition does not reset
         // an in-progress brightness transition (same-target guard fires for brightness).
 
-        let mut manager = create_test_light_manager();
+        reset_for_test();
 
         // In-progress brightness transition to 1000
-        manager.brightness_tr.to = I16F16::from_num(1000);
-        manager.brightness_tr.from = I16F16::from_num(0);
-        manager.brightness_tr.current = I16F16::from_num(500);
-        manager.brightness_tr.start = Instant::from_ticks(0);
-        manager.brightness_tr.end = Instant::from_ticks(100_000_000);
-
-        manager.brightness = 1000;
+        with_core(|core| {
+            core.brightness_tr.to = I16F16::from_num(1000);
+            core.brightness_tr.from = I16F16::from_num(0);
+            core.brightness_tr.current = I16F16::from_num(500);
+            core.brightness_tr.start = Instant::from_ticks(0);
+            core.brightness_tr.end = Instant::from_ticks(100_000_000);
+            core.brightness = 1000;
+        });
 
         mock_clock_time64().returns(50);
         mock_clock_time().returns(0);
@@ -2206,12 +2426,15 @@ mod tests {
         mock_pwm_set_cmp(Any, Any).returns(());
 
         // New colour, same brightness — guard fires for brightness
-        manager.begin_transition(100, 500, 1000);
+        begin_transition(100, 500, 1000);
 
         // brightness_tr.end unchanged (guard fired)
-        assert_eq!(manager.brightness_tr.end, Instant::from_ticks(100_000_000));
+        assert_eq!(
+            with_core(|core| core.brightness_tr.end),
+            Instant::from_ticks(100_000_000)
+        );
         // Colour was updated
-        assert_eq!(manager.cw_tr.to, I16F16::from_num(100));
-        assert_eq!(manager.ww_tr.to, I16F16::from_num(500));
+        assert_eq!(with_core(|core| core.cw_tr.to), I16F16::from_num(100));
+        assert_eq!(with_core(|core| core.ww_tr.to), I16F16::from_num(500));
     }
 }

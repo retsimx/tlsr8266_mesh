@@ -783,7 +783,6 @@ dependencies = [
  "mry",
  "num-derive",
  "num-traits",
- "once_cell",
  "paste",
  "portable-atomic",
  "static_cell",

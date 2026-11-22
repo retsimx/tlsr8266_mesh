@@ -41,6 +41,16 @@
 //!    so the interrupted thread would resume believing interrupts were already
 //!    disabled, and the eventual `release` would enable them at the wrong
 //!    point. In short: ISRs must not leak guards.
+//! 3. **The panic path must never be reachable while a guard on the same mutex
+//!    is held.** [`CriticalSectionMutex::lock`]'s re-entrancy assert exists only
+//!    under `cfg(test)`; in production a second `lock()` on the same mutex from
+//!    the same context succeeds and hands out a second `&mut T`. With
+//!    `panic = "abort"` there is no unwinding, so the outer guard is never
+//!    dropped either. A panic raised inside a critical section whose handler
+//!    then re-locks that mutex would therefore alias. The UART panic sink
+//!    (`uart_manager::send_sync_panic`) takes `UART_HW`, so no guard region on
+//!    `UART_HW` may contain a panic source: no indexing, no `unwrap`, no
+//!    formatting.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

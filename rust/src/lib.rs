@@ -1,16 +1,9 @@
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
 
-use crate::config::{MAX_LUM_BRIGHTNESS_VALUE, PWM_B, PWM_G};
 use crate::embassy::executor::Executor;
-use crate::sdk::mcu::gpio::*;
-use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::cpu_wakeup_init;
-use app::App;
 use core::sync::atomic::AtomicU32;
-use embassy_executor::Spawner;
-use fixed::types::I16F16;
-use ota::OtaManager;
 
 mod app;
 mod config;
@@ -33,18 +26,6 @@ pub mod version;
 #[cfg(test)]
 mod wire_contract_tests;
 
-#[cfg(test)]
-use once_cell::sync::Lazy;
-
-#[cfg(not(test))]
-static mut APP: App = App::default_const();
-
-#[cfg(test)]
-static mut APP: Lazy<App> = Lazy::new(|| {
-    println!("Initializing...");
-    App::default()
-});
-
 /// Storage for the single executor driven by `main_entrypoint`.
 static EXECUTOR: static_cell::StaticCell<Executor> = static_cell::StaticCell::new();
 
@@ -52,114 +33,12 @@ static EXECUTOR: static_cell::StaticCell<Executor> = static_cell::StaticCell::ne
 #[no_mangle]
 pub static HEARTBEAT: AtomicU32 = AtomicU32::new(0);
 
-#[cfg(not(test))]
-pub fn app() -> &'static mut App {
-    #[allow(static_mut_refs)]
-    unsafe {
-        &mut APP
-    }
-}
-
-#[cfg(test)]
-#[coverage(off)]
-#[cfg_attr(test, mry::mry)]
-pub fn app_mocker() -> *mut App {
-    unsafe { &mut *APP as *mut App }
-}
-
-#[cfg(test)]
-#[coverage(off)]
-pub fn app<'a>() -> &'a mut App {
-    unsafe { __make_static(&mut *app_mocker()) }
-}
-
-/// Resets the global APP's uart_manager without going through `app_mocker`, so it
-/// is safe to call from test helpers that run inside a `mry::lock(app_mocker)` scope.
-#[cfg(test)]
-#[coverage(off)]
-pub fn reset_app_uart_for_test() {
-    #[allow(static_mut_refs)]
-    unsafe {
-        APP.uart_manager = crate::uart_manager::UartManager::default();
-    }
-}
-
-#[cfg(test)]
-unsafe fn __make_static<T>(t: &mut T) -> &'static mut T {
-    core::mem::transmute(t)
-}
-
-#[coverage(off)]
-#[embassy_executor::task]
-pub async fn run(spawner: Spawner) {
-    app().run(spawner).await;
-}
-
-#[coverage(off)]
-fn set_pw1(on: bool) {
-    gpio_write(PWM_G as u32, if on { 1 } else { 0 });
-}
-
-#[coverage(off)]
-fn set_pw2(on: bool) {
-    gpio_write(PWM_B as u32, if on { 1 } else { 0 });
-}
-
-#[coverage(off)]
-pub fn blinken_testboard() {
-    for idx in 0..6 {
-        if idx % 2 == 0 {
-            set_pw1(true);
-            set_pw2(true);
-        } else {
-            set_pw1(false);
-            set_pw2(false);
-        }
-
-        for _ in 0..1000000 {
-            wd_clear();
-        }
-    }
-
-    set_pw1(false);
-    set_pw2(false);
-}
-
-#[coverage(off)]
-pub fn blinken() {
-    for idx in 0..6 {
-        if idx % 2 == 0 {
-            app().light_manager.light_adjust_rgb_hw(
-                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
-                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
-                I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
-            );
-        } else {
-            app().light_manager.light_adjust_rgb_hw(
-                I16F16::from_num(0),
-                I16F16::from_num(0),
-                I16F16::from_num(0),
-            );
-        }
-
-        for _ in 0..1000000 {
-            wd_clear();
-        }
-    }
-
-    app().light_manager.light_adjust_rgb_hw(
-        I16F16::from_num(0),
-        I16F16::from_num(0),
-        I16F16::from_num(0),
-    );
-}
-
 // no_mangle because this is referenced as an entrypoint from the assembler bootstrap
 #[no_mangle]
 #[coverage(off)]
 pub extern "C" fn main_entrypoint() {
     // Must happen first
-    OtaManager::handle_ota_update();
+    ota::handle_ota_update();
 
     // Get the CPU configured
     cpu_wakeup_init();
@@ -167,6 +46,6 @@ pub extern "C" fn main_entrypoint() {
     // Run the application
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(run(spawner).unwrap());
+        spawner.spawn(app::main_task(spawner).unwrap());
     });
 }

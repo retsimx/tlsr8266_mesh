@@ -687,7 +687,10 @@ mod tests {
             *chn_map = [0xff, 0xff, 0xff, 0xff, 0x1f]; // Default all channels enabled
         }
 
-        crate::reset_app_uart_for_test();
+        // Reset the UART statics, the echo-suppression deque and the shared
+        // queues (this also drains MESH_TX_QUEUE and MESH_RX_CHANNEL) so each
+        // test starts from a known-clean transport state.
+        crate::uart_manager::reset_for_test();
     }
 
     /// Tests that the connection event counter is incremented on every call.

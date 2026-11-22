@@ -5,8 +5,16 @@ use core::ptr::addr_of;
 use embassy_time::{Duration, Timer};
 use fixed::types::I16F16;
 
-use crate::app;
 use crate::config::*;
+use crate::light_manager::{
+    device_status_update, get_current_light_state, is_light_off, light_adjust_cw, light_adjust_ww,
+    light_onoff_hw, send_light_message, LightFlashStore,
+};
+use crate::mesh::{
+    mesh_device_address_validation_completed, mesh_pair_cb, mesh_pair_init, mesh_pair_proc_effect,
+    mesh_security_enable,
+};
+use crate::ota::{check_ota_area_startup, rf_mesh_data_ota};
 use crate::sdk::ble_app::flash_config::{
     dev_addr_with_mac_flag, dev_addr_with_mac_match, dev_addr_with_mac_rsp,
 };
@@ -101,12 +109,14 @@ fn light_init_default() {
 
     light_hw_timer_config();
 
-    app().mesh_manager.mesh_pair_init();
+    mesh_pair_init();
 }
 
-pub fn user_init() {
+/// Initialise the lamp and hand the caller the persisted-brightness store that
+/// the main loop owns from here on.
+pub fn user_init() -> LightFlashStore {
     // for app ota
-    app().ota_manager.check_ota_area_startup();
+    check_ota_area_startup();
 
     light_init_default();
 
@@ -120,7 +130,7 @@ pub fn user_init() {
     gpio_set_func(PWM_B as u32, !AS_GPIO);
 
     //retrieve lumen value
-    app().light_manager.light_lum_retrieve();
+    let flash_store = LightFlashStore::retrieve_from_flash();
 
     rf_link_slave_init(40000);
 
@@ -140,8 +150,10 @@ pub fn user_init() {
 
     vendor_set_adv_data();
 
-    app().light_manager.device_status_update();
-    app().mesh_manager.mesh_security_enable(true);
+    device_status_update();
+    mesh_security_enable(true);
+
+    flash_store
 }
 
 #[cfg_attr(test, mry::mry)]
@@ -194,22 +206,20 @@ fn proc_led() {
             LED_CONTROLLER.pattern_number.inc();
             if LED_CONTROLLER.pattern_number.get() == LED_CONTROLLER.blink_count.get() {
                 LED_CONTROLLER.blink_count.set(0);
-                app()
-                    .light_manager
-                    .light_onoff_hw(!app().light_manager.is_light_off()); // should not report online status again
+                light_onoff_hw(!is_light_off()); // should not report online status again
                 return;
             }
         }
 
         if led_off || led_on {
             if LED_CONTROLLER.led_selection_mask.get() & BIT!(0) != 0 {
-                app().light_manager.light_adjust_cw(
+                light_adjust_cw(
                     I16F16::from_num(LED_INDICATE_VAL * led_on as u16),
                     I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
                 );
             }
             if LED_CONTROLLER.led_selection_mask.get() & BIT!(1) != 0 {
-                app().light_manager.light_adjust_ww(
+                light_adjust_ww(
                     I16F16::from_num(LED_INDICATE_VAL * led_on as u16),
                     I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE),
                 );
@@ -233,20 +243,25 @@ fn light_auth_check() {
     }
 }
 
-#[cfg_attr(test, mry::mry)]
-fn light_user_func() {
-    app().light_manager.check_light_state_save();
+/// One main-loop tick's worth of light work.
+///
+/// Deliberately not `mry`-mockable: `mry` requires every argument type to be
+/// `Clone`, and handing the flash store over as `&mut` is the whole point of
+/// the ownership split. Tests drive the real function and assert its
+/// observable effects (`clock_time_exceed`, `flash_write_page`).
+fn light_user_func(flash_store: &mut LightFlashStore) {
+    flash_store.check_light_state_save();
 
     light_auth_check();
     factory_reset_cnt_check();
-    app().mesh_manager.mesh_pair_proc_effect();
+    mesh_pair_proc_effect();
 }
 
-pub async fn main_loop() {
+pub async fn main_loop(flash_store: &mut LightFlashStore) {
     #[cfg(not(test))]
     Timer::after(Duration::from_micros(LOOP_INTERVAL_US)).await;
 
-    light_user_func();
+    light_user_func(flash_store);
     rf_link_slave_proc();
 
     proc_led();
@@ -281,7 +296,7 @@ pub fn rf_link_response_callback(
         GET_STATUS => {
             ppp.val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
 
-            let state = app().light_manager.get_current_light_state();
+            let state = get_current_light_state();
             ppp.val[3] = (state.cw.to_num::<u16>() & 0xff) as u8;
             ppp.val[4] = ((state.cw.to_num::<u16>() >> 8) & 0xff) as u8;
             ppp.val[5] = (state.ww.to_num::<u16>() & 0xff) as u8;
@@ -366,7 +381,7 @@ pub fn rf_link_response_callback(
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(params, false);
+            let idx = rf_mesh_data_ota(params, false);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -374,7 +389,7 @@ pub fn rf_link_response_callback(
         CMD_END_OTA => {
             ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
 
-            let idx = app().ota_manager.rf_mesh_data_ota(params, true);
+            let idx = rf_mesh_data_ota(params, true);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -406,9 +421,7 @@ pub fn rf_link_data_callback(p: &Packet) {
     let op = op_cmd[0] & 0x3F;
 
     match op {
-        LGT_CMD_LIGHT_ONOFF => app()
-            .light_manager
-            .send_message(LGT_CMD_LIGHT_ONOFF, params),
+        LGT_CMD_LIGHT_ONOFF => send_light_message(LGT_CMD_LIGHT_ONOFF, params),
         LGT_CMD_LIGHT_CONFIG_GRP => {
             let val = params[1] as u16 | ((params[2] as u16) << 8);
             match params[0] {
@@ -426,12 +439,10 @@ pub fn rf_link_data_callback(p: &Packet) {
             if (!dev_addr_with_mac_flag(&params) || dev_addr_with_mac_match(&params))
                 && add_device_address(val).is_ok()
             {
-                app()
-                    .mesh_manager
-                    .mesh_device_address_validation_completed();
+                mesh_device_address_validation_completed();
             }
         }
-        LGT_CMD_SET_LIGHT => app().light_manager.send_message(LGT_CMD_SET_LIGHT, params),
+        LGT_CMD_SET_LIGHT => send_light_message(LGT_CMD_SET_LIGHT, params),
         LGT_CMD_SET_MAC_ADDR => {
             let mac = [
                 params[0], params[1], params[2], params[3], params[4], params[5],
@@ -450,9 +461,7 @@ pub fn rf_link_data_callback(p: &Packet) {
 
             light_sw_reboot();
         }
-        LGT_CMD_MESH_PAIR => app()
-            .mesh_manager
-            .mesh_pair_cb(&Vec::from_slice(&params[0..10]).unwrap()),
+        LGT_CMD_MESH_PAIR => mesh_pair_cb(&Vec::from_slice(&params[0..10]).unwrap()),
         _ => (),
     }
 }
@@ -484,12 +493,12 @@ pub fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
             mesh_node_table_init();
-            app().light_manager.device_status_update();
+            device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         }
         LGT_CMD_SET_DEV_ADDR => {
             mesh_node_table_init();
-            app().light_manager.device_status_update();
+            device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         }
         LGT_CMD_DEL_PAIR => cfg_led_event(LED_EVENT_FLASH_1HZ_4S),
@@ -502,7 +511,15 @@ pub fn rf_link_light_event_callback(status: u8) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::app::App;
+    use crate::light_manager::{
+        begin_transition, mock_device_status_update, mock_is_light_off, mock_light_adjust_cw,
+        mock_light_adjust_ww, mock_light_onoff_hw, LIGHT_CMD_CHANNEL,
+    };
+    use crate::mesh::{
+        mock_mesh_device_address_validation_completed, mock_mesh_pair_cb, mock_mesh_pair_init,
+        mock_mesh_pair_proc_effect, mock_mesh_security_enable,
+    };
+    use crate::ota::{mock_check_ota_area_startup, mock_rf_mesh_data_ota};
     use crate::sdk::ble_app::flash_config::{
         mock_dev_addr_with_mac_flag, mock_dev_addr_with_mac_match, mock_dev_addr_with_mac_rsp,
     };
@@ -513,10 +530,15 @@ mod tests {
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
-    use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_write_page};
-    use crate::sdk::drivers::pwm::{mock_pwm_set_duty, mock_pwm_start};
+    use crate::sdk::drivers::flash::{
+        flash_read_page, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
+    };
+    use crate::sdk::drivers::pwm::{
+        mock_pwm_set_cmp, mock_pwm_set_duty, mock_pwm_start, pwm_set_cmp,
+    };
     use crate::sdk::factory_reset::mock_factory_reset_cnt_check;
     use crate::sdk::factory_reset::mock_factory_reset_handle;
+    use crate::sdk::mcu::analog::{analog_read, mock_analog_read};
     use crate::sdk::mcu::clock::{
         clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
         CLOCK_SYS_CLOCK_1US,
@@ -525,13 +547,12 @@ mod tests {
     use crate::sdk::mcu::register::{
         mock_read_reg_irq_mask, mock_read_reg_tmr_ctrl, mock_write_reg_irq_mask,
         mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
-        mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
+        mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
     };
     use crate::sdk::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use crate::sdk::pm::mock_light_sw_reboot;
     use crate::sdk::pm::mock_usb_dp_pullup_en;
     use crate::vendor_light::mock_vendor_set_adv_data;
-    use crate::{app_mocker, mock_app_mocker};
     use futures::executor::block_on;
     use mry::Any;
 
@@ -699,18 +720,22 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_toggles_led_state_on_timing() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(false);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(false);
 
         // Set up LED controller with an active blink
         LED_CONTROLLER.blink_count.set(2);
@@ -734,24 +759,26 @@ mod tests {
 
         // Verify: LED should turn on
         assert_eq!(LED_CONTROLLER.is_on.get(), 1, "LED should be on");
-        app.light_manager
-            .mock_light_adjust_cw(Any, Any)
-            .assert_called(1);
+        mock_light_adjust_cw(Any, Any).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_continues_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(false);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(false);
 
         // Set up LED controller with a multi-blink sequence (blink_count = 3)
         // Pattern number starts at 0, so after increment it will be 1, which != 3
@@ -784,9 +811,7 @@ mod tests {
 
         // Verify: Since pattern_number (1) != blink_count (3), it should fall through to line 180
         // and perform LED adjustment
-        app.light_manager
-            .mock_light_adjust_cw(Any, Any)
-            .assert_called(1);
+        mock_light_adjust_cw(Any, Any).assert_called(1);
 
         // Verify: Blink sequence should continue (not complete)
         assert_eq!(
@@ -797,18 +822,22 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_completes_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(true);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(true);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
 
         // Set up for last blink transition
         LED_CONTROLLER.blink_count.set(1);
@@ -837,24 +866,26 @@ mod tests {
             0,
             "Blink should be complete"
         );
-        app.light_manager
-            .mock_light_onoff_hw(false)
-            .assert_called(1);
+        mock_light_onoff_hw(false).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_adjusts_ww_light() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(false);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(false);
 
         // Set up LED controller with BIT!(1) set (warm white)
         // Key: to reach the led_on branch, is_on must be 0, and on_duration_us must be non-zero
@@ -882,32 +913,32 @@ mod tests {
 
         // Verify: light_adjust_ww should be called (covers line 188 with BIT!(1) check)
         // This happens because led_on = true (is_on was 0 and on_duration_us != 0)
-        app.light_manager
-            .mock_light_adjust_ww(Any, Any)
-            .assert_called(1);
+        mock_light_adjust_ww(Any, Any).assert_called(1);
 
         // Verify: light_adjust_cw should NOT be called since BIT!(0) is not set
-        app.light_manager
-            .mock_light_adjust_cw(Any, Any)
-            .assert_called(0);
+        mock_light_adjust_cw(Any, Any).assert_called(0);
 
         // Cleanup
         reset_led_controller();
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_adjusts_led_bit5() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(false);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(false);
 
         // Set up LED controller with BIT!(5) set (covers line 196)
         // Note: on_duration_us = 0 means led_on will be false and led_off will be true
@@ -939,30 +970,30 @@ mod tests {
         // led_off will be true: (is_on != 0 || on_duration == 0) && off_duration != 0
         // = (1 || true) && true = true
         // So we enter the if led_off || led_on block, but only BIT!(5) is handled (empty)
-        app.light_manager
-            .mock_light_adjust_cw(Any, Any)
-            .assert_called(0);
-        app.light_manager
-            .mock_light_adjust_ww(Any, Any)
-            .assert_called(0);
+        mock_light_adjust_cw(Any, Any).assert_called(0);
+        mock_light_adjust_ww(Any, Any).assert_called(0);
 
         // Cleanup
         reset_led_controller();
     }
 
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(
+        clock_time,
+        light_adjust_cw,
+        light_adjust_ww,
+        light_onoff_hw,
+        is_light_off
+    )]
     fn test_proc_led_skips_adjustment_when_both_durations_zero() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_light_adjust_cw(Any, Any).returns(());
-        app.light_manager.mock_light_adjust_ww(Any, Any).returns(());
-        app.light_manager.mock_light_onoff_hw(Any).returns(());
-        app.light_manager.mock_is_light_off().returns(false);
+        mock_light_adjust_cw(Any, Any).returns(());
+        mock_light_adjust_ww(Any, Any).returns(());
+        mock_light_onoff_hw(Any).returns(());
+        mock_is_light_off().returns(false);
 
         // Set up LED controller where both on_duration and off_duration are 0
         // This makes both led_on and led_off false, so the if condition at line 182 is false
@@ -988,12 +1019,8 @@ mod tests {
         // led_on = (is_on == 0 && on_duration != 0) = (1 == 0 && 0 != 0) = false
         // led_off = ((is_on != 0 || on_duration == 0) && off_duration != 0) = ((1 || 1) && 0) = false
         // So the if (led_off || led_on) condition at line 182 is false, skipping all adjustments
-        app.light_manager
-            .mock_light_adjust_cw(Any, Any)
-            .assert_called(0);
-        app.light_manager
-            .mock_light_adjust_ww(Any, Any)
-            .assert_called(0);
+        mock_light_adjust_cw(Any, Any).assert_called(0);
+        mock_light_adjust_ww(Any, Any).assert_called(0);
     }
 
     // --- Tests for light_auth_check ---
@@ -1070,14 +1097,11 @@ mod tests {
     // --- Tests for rf_link_response_callback ---
 
     #[test]
-    #[mry::lock(app_mocker)]
     fn test_rf_link_response_callback_get_status() {
         // This test verifies GET_STATUS response returns current light state
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-
+        crate::light_manager::reset_for_test();
         DEVICE_ADDRESS.set(0x1234);
 
         let mut request = create_test_packet_att_value();
@@ -1265,14 +1289,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(app_mocker)]
     fn test_rf_link_response_callback_cmd_start_ota() {
         // This test verifies CMD_START_OTA response
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-
         DEVICE_ADDRESS.set(0x1234);
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
 
@@ -1302,16 +1322,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(rf_mesh_data_ota)]
     fn test_rf_link_response_callback_cmd_ota_data() {
         // This test verifies CMD_OTA_DATA response
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.ota_manager
-            .mock_rf_mesh_data_ota(Any, Any)
-            .returns(0x1234u16);
+        mock_rf_mesh_data_ota(Any, Any).returns(0x1234u16);
 
         DEVICE_ADDRESS.set(0x5678);
 
@@ -1332,22 +1348,16 @@ mod tests {
         assert_eq!(response.val[0], LGT_CMD_OTA_DATA_RSP | 0xc0);
         assert_eq!(response.val[1], 0x34); // idx low byte
         assert_eq!(response.val[2], 0x12); // idx high byte
-        app.ota_manager
-            .mock_rf_mesh_data_ota(Any, false)
-            .assert_called(1);
+        mock_rf_mesh_data_ota(Any, false).assert_called(1);
     }
 
     #[test]
-    #[mry::lock(app_mocker)]
+    #[mry::lock(rf_mesh_data_ota)]
     fn test_rf_link_response_callback_cmd_end_ota() {
         // This test verifies CMD_END_OTA response
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.ota_manager
-            .mock_rf_mesh_data_ota(Any, Any)
-            .returns(0xABCDu16);
+        mock_rf_mesh_data_ota(Any, Any).returns(0xABCDu16);
 
         DEVICE_ADDRESS.set(0x5678);
 
@@ -1368,9 +1378,7 @@ mod tests {
         assert_eq!(response.val[0], LGT_CMD_END_OTA_RSP | 0xc0);
         assert_eq!(response.val[1], 0xCD); // idx low byte
         assert_eq!(response.val[2], 0xAB); // idx high byte
-        app.ota_manager
-            .mock_rf_mesh_data_ota(Any, true)
-            .assert_called(1);
+        mock_rf_mesh_data_ota(Any, true).assert_called(1);
     }
 
     #[test]
@@ -1398,14 +1406,12 @@ mod tests {
     // --- Tests for rf_link_data_callback ---
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, app_mocker)]
+    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_light_onoff() {
         // This test verifies LGT_CMD_LIGHT_ONOFF is handled correctly
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_send_message(Any, Any).returns(());
+        crate::light_manager::reset_for_test();
 
         let packet = create_test_packet();
         let op_cmd = [
@@ -1426,10 +1432,17 @@ mod tests {
         // Execute
         rf_link_data_callback(&packet);
 
-        // Verify
-        app.light_manager
-            .mock_send_message(LGT_CMD_LIGHT_ONOFF, Any)
-            .assert_called(1);
+        // Verify: exactly one command was queued for the light task, with the
+        // parsed parameters passed through unchanged.
+        let msg = LIGHT_CMD_CHANNEL
+            .try_receive()
+            .expect("LGT_CMD_LIGHT_ONOFF must be queued");
+        assert_eq!(msg.cmd, LGT_CMD_LIGHT_ONOFF);
+        assert_eq!(msg.params, params);
+        assert!(
+            LIGHT_CMD_CHANNEL.try_receive().is_err(),
+            "exactly one command must be queued"
+        );
     }
 
     #[test]
@@ -1585,17 +1598,13 @@ mod tests {
         add_device_address,
         dev_addr_with_mac_flag,
         dev_addr_with_mac_match,
-        app_mocker
+        mesh_device_address_validation_completed
     )]
     fn test_rf_link_data_callback_config_dev_addr() {
         // This test verifies device address configuration
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.mesh_manager
-            .mock_mesh_device_address_validation_completed()
-            .returns(());
+        mock_mesh_device_address_validation_completed().returns(());
 
         let packet = create_test_packet();
         let op_cmd = [
@@ -1621,20 +1630,16 @@ mod tests {
 
         // Verify
         mock_add_device_address(0x5678).assert_called(1);
-        app.mesh_manager
-            .mock_mesh_device_address_validation_completed()
-            .assert_called(1);
+        mock_mesh_device_address_validation_completed().assert_called(1);
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, app_mocker)]
+    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_set_light() {
         // This test verifies LGT_CMD_SET_LIGHT is handled
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_send_message(Any, Any).returns(());
+        crate::light_manager::reset_for_test();
 
         let packet = create_test_packet();
         let op_cmd = [
@@ -1655,10 +1660,16 @@ mod tests {
         // Execute
         rf_link_data_callback(&packet);
 
-        // Verify
-        app.light_manager
-            .mock_send_message(LGT_CMD_SET_LIGHT, Any)
-            .assert_called(1);
+        // Verify: exactly one command was queued, with the parsed parameters.
+        let msg = LIGHT_CMD_CHANNEL
+            .try_receive()
+            .expect("LGT_CMD_SET_LIGHT must be queued");
+        assert_eq!(msg.cmd, LGT_CMD_SET_LIGHT);
+        assert_eq!(msg.params, params);
+        assert!(
+            LIGHT_CMD_CHANNEL.try_receive().is_err(),
+            "exactly one command must be queued"
+        );
     }
 
     #[test]
@@ -1701,14 +1712,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, app_mocker)]
+    #[mry::lock(parse_ble_packet_op_params, mesh_pair_cb)]
     fn test_rf_link_data_callback_mesh_pair() {
         // This test verifies mesh pair command handling
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.mesh_manager.mock_mesh_pair_cb(Any).returns(());
+        mock_mesh_pair_cb(Any).returns(());
 
         let packet = create_test_packet();
         let op_cmd = [
@@ -1730,7 +1739,7 @@ mod tests {
         rf_link_data_callback(&packet);
 
         // Verify
-        app.mesh_manager.mock_mesh_pair_cb(Any).assert_called(1);
+        mock_mesh_pair_cb(Any).assert_called(1);
     }
 
     #[test]
@@ -1801,11 +1810,12 @@ mod tests {
     /// `&pkt.op`, placing `vendor_id_lo` at offset 21 (padding slot) and `vendor_id_hi` at
     /// offset 22 — exactly where `val[1]` and `val[2]` read from.
     #[test]
-    #[mry::lock(clock_time, app_mocker)]
+    #[mry::lock(clock_time)]
     fn test_uart_light_ctrl_to_light_on_integration() {
         use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
         use heapless::Vec;
 
+        crate::light_manager::reset_for_test();
         DEVICE_ADDRESS.set(0x1234);
 
         // Mock clock_time, which light_slave_tx_command uses to seed the mesh sequence number.
@@ -1883,28 +1893,30 @@ mod tests {
         // Step 5: Run the REAL rf_link_data_callback (not mocked).
         //         With the bug: vendor_id check fails → early return → light never turns on.
         //         With the fix: vendor_id passes → LGT_CMD_LIGHT_ONOFF dispatched correctly.
-        let mut app = App::default();
-        app.light_manager.mock_send_message(Any, Any).returns(());
-        mock_app_mocker().returns(&mut app);
-
         rf_link_data_callback(&packet);
 
-        app.light_manager
-            .mock_send_message(LGT_CMD_LIGHT_ONOFF, Any)
-            .assert_called(1);
+        let msg = LIGHT_CMD_CHANNEL
+            .try_receive()
+            .expect("LGT_CMD_LIGHT_ONOFF must be queued for the light task");
+        assert_eq!(
+            msg.cmd, LGT_CMD_LIGHT_ONOFF,
+            "the parsed command must reach the light task"
+        );
+        assert_eq!(
+            msg.params[0], LIGHT_ON_PARAM,
+            "the UART payload must be passed through unchanged"
+        );
     }
 
     // --- Tests for rf_link_light_event_callback ---
 
     #[test]
-    #[mry::lock(mesh_node_table_init, app_mocker)]
+    #[mry::lock(mesh_node_table_init, device_status_update)]
     fn test_rf_link_light_event_callback_set_mesh_info() {
         // This test verifies LGT_CMD_SET_MESH_INFO event handling
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_device_status_update().returns(());
+        mock_device_status_update().returns(());
 
         mock_mesh_node_table_init().returns(());
 
@@ -1916,9 +1928,7 @@ mod tests {
 
         // Verify
         mock_mesh_node_table_init().assert_called(1);
-        app.light_manager
-            .mock_device_status_update()
-            .assert_called(1);
+        mock_device_status_update().assert_called(1);
         assert_eq!(LED_CONTROLLER.event_pending.get(), LED_EVENT_FLASH_1HZ_4S);
 
         // Cleanup
@@ -1926,14 +1936,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(mesh_node_table_init, app_mocker)]
+    #[mry::lock(mesh_node_table_init, device_status_update)]
     fn test_rf_link_light_event_callback_set_dev_addr() {
         // This test verifies LGT_CMD_SET_DEV_ADDR event handling
 
         // Setup
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-        app.light_manager.mock_device_status_update().returns(());
+        mock_device_status_update().returns(());
 
         mock_mesh_node_table_init().returns(());
 
@@ -1945,9 +1953,7 @@ mod tests {
 
         // Verify
         mock_mesh_node_table_init().assert_called(1);
-        app.light_manager
-            .mock_device_status_update()
-            .assert_called(1);
+        mock_device_status_update().assert_called(1);
         assert_eq!(LED_CONTROLLER.event_pending.get(), LED_EVENT_FLASH_1HZ_4S);
 
         // Cleanup
@@ -2011,7 +2017,7 @@ mod tests {
         rf_set_power_level_index,
         usb_dp_pullup_en,
         light_hw_timer_config,
-        app_mocker
+        mesh_pair_init
     )]
     fn test_light_init_default() {
         // This test verifies that light_init_default properly initializes mesh configuration
@@ -2023,9 +2029,7 @@ mod tests {
         mock_usb_dp_pullup_en(Any).returns(());
         mock_light_hw_timer_config().returns(());
 
-        let mut app = App::default();
-        app.mesh_manager.mock_mesh_pair_init().returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_mesh_pair_init().returns(());
 
         // Setup initial state - simulate ADV_DATA with some length
         let mut adv_data = ADV_DATA.lock();
@@ -2053,7 +2057,7 @@ mod tests {
         mock_light_hw_timer_config().assert_called(1);
 
         // Verify: mesh_pair_init was called
-        app.mesh_manager.mock_mesh_pair_init().assert_called(1);
+        mock_mesh_pair_init().assert_called(1);
 
         // Verify static state changes
         assert_eq!(MAX_MESH_NAME_LEN, MAX_MESH_NAME_LEN);
@@ -2079,7 +2083,6 @@ mod tests {
 
     #[mry::mry]
     #[mry::lock(
-        app_mocker,
         light_check_tick_per_us,
         rf_link_slave_pairing_enable,
         rf_set_power_level_index,
@@ -2090,20 +2093,29 @@ mod tests {
         gpio_set_func,
         rf_link_slave_init,
         factory_reset_handle,
-        vendor_set_adv_data
+        vendor_set_adv_data,
+        check_ota_area_startup,
+        flash_read_page,
+        analog_read,
+        light_onoff_hw,
+        device_status_update,
+        mesh_pair_init,
+        mesh_security_enable
     )]
     #[test]
     fn test_user_init() {
-        // Set up app mock
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
+        // Mock the OTA / mesh / light entry points user_init drives directly.
+        mock_check_ota_area_startup().returns(());
+        mock_mesh_pair_init().returns(());
+        mock_mesh_security_enable(Any).returns(());
+        mock_device_status_update().returns(());
 
-        // Mock app methods
-        app.ota_manager.mock_check_ota_area_startup().returns(());
-        app.light_manager.mock_light_lum_retrieve().returns(());
-        app.light_manager.mock_device_status_update().returns(());
-        app.mesh_manager.mock_mesh_pair_init().returns(());
-        app.mesh_manager.mock_mesh_security_enable(Any).returns(());
+        // `LightFlashStore::retrieve_from_flash` scans flash and then restores the
+        // persisted on/off state. Report "no saved entry" (buffer stays 0xFF) and
+        // "lamp was not off", then assert both halves of that path ran.
+        mock_flash_read_page(Any, Any, Any).returns(());
+        mock_analog_read(Any).returns(0);
+        mock_light_onoff_hw(Any).returns(());
 
         // Mock functions that light_init_default calls
         mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).returns(());
@@ -2124,93 +2136,128 @@ mod tests {
         mock_vendor_set_adv_data().returns(());
 
         // Call user_init
-        user_init();
+        let _flash_store = user_init();
 
         // Verify all mocks were called
-        app.ota_manager
-            .mock_check_ota_area_startup()
-            .assert_called(1);
+        mock_check_ota_area_startup().assert_called(1);
         mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).assert_called(1);
         mock_rf_link_slave_pairing_enable(true).assert_called(1);
         mock_rf_set_power_level_index(RfPower::Power8dBm as u32).assert_called(1);
         mock_usb_dp_pullup_en(true).assert_called(1);
         mock_light_hw_timer_config().assert_called(1);
-        app.mesh_manager.mock_mesh_pair_init().assert_called(1);
+        mock_mesh_pair_init().assert_called(1);
         mock_pwm_set_duty(0, 10455, 0).assert_called(1);
         mock_pwm_set_duty(1, 10455, 10455).assert_called(1);
         mock_pwm_start(0).assert_called(1);
         mock_pwm_start(1).assert_called(1);
         mock_gpio_set_func(513, 255).assert_called(1);
         mock_gpio_set_func(516, 255).assert_called(1);
-        app.light_manager.mock_light_lum_retrieve().assert_called(1);
+        // The luminance store was retrieved (one flash scan chunk) and the lamp
+        // on/off state restored from analog memory.
+        mock_flash_read_page(Any, Any, Any).assert_called(1);
+        mock_analog_read(Any).assert_called(1);
+        mock_light_onoff_hw(true).assert_called(1);
         mock_rf_link_slave_init(40000).assert_called(1);
         mock_factory_reset_handle().assert_called(1);
         mock_vendor_set_adv_data().assert_called(1);
-        app.light_manager
-            .mock_device_status_update()
-            .assert_called(1);
-        app.mesh_manager
-            .mock_mesh_security_enable(true)
-            .assert_called(1);
+        // Once from the on/off restore, once at the end of user_init.
+        mock_device_status_update().assert_called(2);
+        mock_mesh_security_enable(true).assert_called(1);
     }
 
     // --- Tests for light_user_func ---
 
     #[test]
-    #[mry::lock(app_mocker, clock_time_exceed, factory_reset_cnt_check)]
+    #[mry::lock(
+        clock_time,
+        clock_time64,
+        read_reg_tmr_ctrl,
+        write_reg_tmr1_tick,
+        write_reg_tmr_ctrl,
+        pwm_set_cmp,
+        clock_time_exceed,
+        flash_write_page,
+        factory_reset_cnt_check,
+        mesh_pair_proc_effect
+    )]
     fn test_light_user_func_structure() {
-        // This test verifies that light_user_func is properly decorated for testing
-        // and that it can be called with mocked app context
+        // `check_light_state_save` is an inherent method on the flash store and is
+        // deliberately not mockable, so this test drives the real function and
+        // asserts its observable effects: the 5 s save timer is polled, the save
+        // reaches flash, and the timer is cleared so a second tick does not save
+        // again.
+        reset_test_globals();
+        crate::light_manager::reset_for_test();
 
-        // Setup - mock the app with all necessary sub-mocks
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
+        // Seed a pending luminance save: a colour transition stamps
+        // `last_transition_time`.
+        mock_clock_time().returns(1000);
+        mock_clock_time64().returns(0);
+        mock_read_reg_tmr_ctrl().returns(0);
+        mock_write_reg_tmr1_tick(Any).returns(());
+        mock_write_reg_tmr_ctrl(Any).returns(());
+        mock_pwm_set_cmp(Any, Any).returns(());
+        begin_transition(500, 300, 800);
 
-        // Mock the light_manager methods called by light_user_func and light_auth_check
-        app.light_manager.mock_check_light_state_save().returns(());
-
-        // Mock mesh_manager methods
-        app.mesh_manager.mock_mesh_pair_proc_effect().returns(());
-
-        // Mock clock_time_exceed to return false (no timeout)
-        mock_clock_time_exceed(Any, Any).returns(false);
-
-        // Mock factory_reset_cnt_check
+        // 5 s have elapsed since that transition.
+        mock_clock_time_exceed(Any, Any).returns(true);
+        mock_flash_write_page(Any, Any, Any).returns(());
         mock_factory_reset_cnt_check().returns(());
+        mock_mesh_pair_proc_effect().returns(());
 
         // Execute - light_user_func calls:
-        // 1. app().light_manager.check_light_state_save();
+        // 1. flash_store.check_light_state_save();
         // 2. light_auth_check(); (which checks global state)
         // 3. factory_reset_cnt_check(); (external function)
-        // 4. app().mesh_manager.mesh_pair_proc_effect();
-        light_user_func();
+        // 4. mesh_pair_proc_effect();
+        let mut flash_store = LightFlashStore::default();
+        light_user_func(&mut flash_store);
 
-        // Verify the key app methods were called
-        app.light_manager
-            .mock_check_light_state_save()
-            .assert_called(1);
-        app.mesh_manager
-            .mock_mesh_pair_proc_effect()
-            .assert_called(1);
+        // Verify the save path ran, and the other three steps of the tick ran.
+        mock_clock_time_exceed(Any, Any).assert_called(1);
+        mock_flash_write_page(Any, Any, Any).assert_called(1);
+        mock_factory_reset_cnt_check().assert_called(1);
+        mock_mesh_pair_proc_effect().assert_called(1);
+
+        // A second tick must not save again: `check_light_state_save` cleared the
+        // timer, so it never even asks whether 5 s elapsed.
+        light_user_func(&mut flash_store);
+        mock_clock_time_exceed(Any, Any).assert_called(1);
+        mock_flash_write_page(Any, Any, Any).assert_called(1);
+        mock_factory_reset_cnt_check().assert_called(2);
+        mock_mesh_pair_proc_effect().assert_called(2);
     }
 
     // --- Tests for main_loop ---
 
     #[test]
-    #[mry::lock(light_user_func, rf_link_slave_proc, proc_led)]
+    #[mry::lock(
+        factory_reset_cnt_check,
+        mesh_pair_proc_effect,
+        rf_link_slave_proc,
+        proc_led
+    )]
     fn test_main_loop_structure() {
-        // This test verifies that main_loop calls the expected functions
+        // This test verifies that main_loop drives one tick of each stage.
+        //
+        // `light_user_func` itself is not mockable (it takes `&mut LightFlashStore`),
+        // so its body runs for real and is observed through two of its own callees.
+        reset_test_globals();
+        crate::light_manager::reset_for_test();
 
-        // Mock the direct callees of main_loop
-        mock_light_user_func().returns(());
+        // Mock the callees of the light tick and the other two stages
+        mock_factory_reset_cnt_check().returns(());
+        mock_mesh_pair_proc_effect().returns(());
         mock_rf_link_slave_proc().returns(());
         mock_proc_led().returns(());
 
         // Execute main_loop
-        block_on(main_loop());
+        let mut flash_store = LightFlashStore::default();
+        block_on(main_loop(&mut flash_store));
 
         // Verify the functions were called
-        mock_light_user_func().assert_called(1);
+        mock_factory_reset_cnt_check().assert_called(1);
+        mock_mesh_pair_proc_effect().assert_called(1);
         mock_rf_link_slave_proc().assert_called(1);
         mock_proc_led().assert_called(1);
     }
@@ -2220,24 +2267,23 @@ mod tests {
     /// produces exact unshifted VENDOR_ID at dat[8..10] and CW/WW/Brightness at dat[10..16].
     ///
     /// This lives in the application layer because the callback reads the light
-    /// state through `app()`; the SDK test tree may no longer inject an `App`.
+    /// state owned by `light_manager`; the SDK test tree may no longer inject an
+    /// application state object.
     #[test]
     #[mry::lock(
-        app_mocker,
         clock_time,
         clock_time64,
         read_reg_tmr_ctrl,
         write_reg_tmr1_tick,
-        write_reg_tmr_ctrl
+        write_reg_tmr_ctrl,
+        pwm_set_cmp
     )]
     fn test_rf_link_response_callback_to_slave_add_status_layout() {
         use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
-        use crate::sdk::mcu::register::{
-            mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
-        };
 
         // Reset only the globals this path reads: the request and response
         // packets are built locally below.
+        crate::light_manager::reset_for_test();
         DEVICE_ADDRESS.set(0x001F);
         DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
@@ -2249,14 +2295,9 @@ mod tests {
         mock_read_reg_tmr_ctrl().returns(0);
         mock_write_reg_tmr1_tick(Any).returns(());
         mock_write_reg_tmr_ctrl(Any).returns(());
+        mock_pwm_set_cmp(Any, Any).returns(());
 
-        let mut app = App::default();
-        app.light_manager
-            .mock_begin_transition(Any, Any, Any)
-            .calls_real_impl();
-        app.light_manager.mock_transition_step().returns(());
-        app.light_manager.begin_transition(8767, 24000, 16384);
-        mock_app_mocker().returns(&mut app);
+        begin_transition(8767, 24000, 16384);
 
         let req = PacketAttValue {
             sno: [0x01, 0x02, 0x03],

@@ -11,7 +11,7 @@ spellings (``tpush``, ``tpop``, ``tsub sp``, ``tadd sp``, ``tjl``, ``tj``,
 This exists to evidence the RAM budget: the main stack grows down from the top
 of RAM into the free region above ``_end_bss_`` (see ``sdk/boot.link`` and
 ``rust/src/startup.rs``), so the deepest reachable chain is the number the RAM
-gate must fit. The IRQ stack (``irq_stk``, 2048 B) is separate.
+gate must fit. The IRQ stack (``irq_stk``, 1792 B) is separate.
 
 Model and caveats (reported alongside the result):
   * Conservative frame model: a callee's whole frame is charged on top of the
@@ -74,10 +74,11 @@ INDIRECT_RE = re.compile(r"\btjex\b|\bbx\s+(?!lr\b)\w")
 # ``apply_indirect_edges``) instead of a silently missing edge.
 INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "emit_light_event": ("rf_link_light_event_callback",),
-    # Deliberately the hook, not ``MeshManager::mesh_pair_proc``: the dispatcher
-    # calls the hook, which reaches the manager method with a real `bl`. The
-    # substring ``mesh_pair_proc`` alone is ambiguous (it also matches
-    # ``mesh_pair_proc_effect``), so it would invent a false edge.
+    # Deliberately the hook, not ``mesh::mesh_pair_proc``: the dispatcher calls
+    # ``app::mesh_pair_proc_hook``, which reaches the free pairing function with
+    # a real `bl`. The substring ``mesh_pair_proc`` alone is ambiguous (it also
+    # matches ``mesh_pair_proc_effect`` and the hook itself), so it would invent
+    # a false edge.
     "on_mesh_pair_proc": ("mesh_pair_proc_hook",),
     "on_light_data": ("rf_link_data_callback",),
     "on_light_response": ("rf_link_response_callback",),

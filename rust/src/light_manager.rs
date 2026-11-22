@@ -8,7 +8,6 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
 use fixed::types::{I16F16, U16F16};
 
-use crate::common::REGA_LIGHT_OFF;
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
@@ -23,6 +22,7 @@ use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::sdk::mcu::register::{
     read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_TMR,
 };
+use crate::sdk::pm::REGA_LIGHT_OFF;
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -496,13 +496,13 @@ impl LightManager {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::embassy::time_driver::{clock_time64, mock_clock_time64};
     use crate::sdk::ble_app::light_ll::mesh_management::mock_ll_device_status_update;
     use crate::sdk::drivers::flash::{
         mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
     use crate::sdk::drivers::pwm::mock_pwm_set_cmp;
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
+    use crate::sdk::mcu::clock::{clock_time64, mock_clock_time64};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
     use crate::sdk::mcu::register::{
         mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,

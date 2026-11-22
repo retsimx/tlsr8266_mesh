@@ -20,9 +20,14 @@ Model and caveats (reported alongside the result):
     stack; the callee replaces the caller's frame.
   * Interrupt nesting on the IRQ stack is not modelled (assumes non-nested);
     the ``__irq`` register-save preamble is added as a fixed constant.
-  * The firmware contains no indirect calls (``bx rN`` / legacy ``tjex``), so
-    ``bl`` edges capture the whole call graph. If that changes this script must
-    be revisited.
+  * Indirect dispatch (``fn`` pointers, ``bx rN`` / legacy ``tjex``) has no
+    ``bl`` edge to walk, so the handful of known dispatchers are declared
+    explicitly in ``INDIRECT_EDGES`` (caller substring -> callee substrings,
+    resolved against the linked symbols). An indirect dispatch pushes a return
+    address, so it is modelled as a *normal* call, never a tail call. Every
+    entry must resolve to exactly one function; otherwise the gate fails rather
+    than silently scoring the missing callee as 0 B (which is what
+    ``longest_path`` does with an unknown name).
 
 Usage:
     python3 sdk/stack_analysis.py [--elf _build/lightblemesh] [--top 15]
@@ -59,6 +64,25 @@ SUB_RE = re.compile(rf"\b(?:tsub(?:cs)?|sub)\s+sp,\s*#{_IMM}")
 ADD_RE = re.compile(rf"\b(?:tadd(?:cs)?|add)\s+sp,\s*#{_IMM}")
 # `bx lr` is a return, not an indirect branch; `bx rN` and legacy `tjex` are.
 INDIRECT_RE = re.compile(r"\btjex\b|\bbx\s+(?!lr\b)\w")
+
+# Dispatchers that reach the application through a function pointer, so the
+# disassembly contains only a `bx rN` and no `bl` edge to the real callee.
+# Keyed by a *caller* substring, valued by *callee* substrings; both are matched
+# against the legacy-mangled symbol names objdump puts in `<...>` operands.
+# Substrings rather than full names because the mangling hash changes whenever
+# the crate is rebuilt, but a stale/ambiguous entry is a hard gate failure (see
+# ``apply_indirect_edges``) instead of a silently missing edge.
+INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
+    "emit_light_event": ("rf_link_light_event_callback",),
+    # Deliberately the hook, not ``MeshManager::mesh_pair_proc``: the dispatcher
+    # calls the hook, which reaches the manager method with a real `bl`. The
+    # substring ``mesh_pair_proc`` alone is ambiguous (it also matches
+    # ``mesh_pair_proc_effect``), so it would invent a false edge.
+    "on_mesh_pair_proc": ("mesh_pair_proc_hook",),
+    "on_light_data": ("rf_link_data_callback",),
+    "on_light_response": ("rf_link_response_callback",),
+    "on_uart_mesh_rx": ("light_mesh_rx_cb",),
+}
 
 
 @dataclass
@@ -147,6 +171,64 @@ def parse_functions(disasm: str) -> dict[str, Func]:
         funcs[name] = current
 
     return funcs
+
+
+class IndirectEdgeError(Exception):
+    """A configured ``INDIRECT_EDGES`` entry did not resolve to one function."""
+
+
+def _resolve_one(funcs: dict[str, Func], pattern: str, role: str, key: str) -> str:
+    """Resolve a substring to exactly one parsed function, or raise.
+
+    Zero matches means the table is stale (the dispatcher was inlined, renamed
+    or dropped) and more than one means the pattern is ambiguous. Both are hard
+    errors: ``longest_path`` scores an unknown callee as 0 B, so a silently
+    dropped edge would understate the stack depth this gate exists to bound.
+    """
+    matches = sorted(name for name in funcs if pattern in name)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise IndirectEdgeError(
+            f"INDIRECT_EDGES[{key!r}]: {role} {pattern!r} matches no parsed "
+            f"function (of {len(funcs)}); the table is stale - was the "
+            f"dispatcher inlined or renamed?"
+        )
+    raise IndirectEdgeError(
+        f"INDIRECT_EDGES[{key!r}]: {role} {pattern!r} is ambiguous, it matches "
+        f"{len(matches)} functions: {matches}"
+    )
+
+
+def apply_indirect_edges(
+    funcs: dict[str, Func], edges: dict[str, tuple[str, ...]] | None = None
+) -> list[tuple[str, str]]:
+    """Add ``INDIRECT_EDGES`` dispatch edges to ``Func.calls``.
+
+    Must run after :func:`parse_functions` and before :func:`all_roots` /
+    :func:`longest_path`, so roots, depth and cycle detection all see the same
+    graph. Edges are appended as normal calls ``(callee, False)`` because an
+    indirect dispatch pushes a return address; marking them tail would drop the
+    dispatcher frame.
+
+    Returns the resolved ``(caller, callee)`` pairs so the caller can report the
+    symbols the table actually bound to. Raises :class:`IndirectEdgeError` if any
+    entry does not resolve to exactly one function; nothing is mutated in that
+    case.
+    """
+    table = INDIRECT_EDGES if edges is None else edges
+    resolved: list[tuple[str, str]] = []
+    for caller_pattern, callee_patterns in table.items():
+        caller = _resolve_one(funcs, caller_pattern, "caller", caller_pattern)
+        for callee_pattern in callee_patterns:
+            callee = _resolve_one(funcs, callee_pattern, "callee", caller_pattern)
+            resolved.append((caller, callee))
+
+    # Mutate only once every entry resolved, so a rejected table leaves the call
+    # graph untouched and the failure is reported instead of half-applied.
+    for caller, callee in resolved:
+        funcs[caller].calls.append((callee, False))
+    return resolved
 
 
 def longest_path(
@@ -339,7 +421,7 @@ def read_symbols(elf: str) -> dict[str, int]:
     return syms
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--elf", default="_build/lightblemesh")
     ap.add_argument("--top", type=int, default=15)
@@ -354,7 +436,11 @@ def main() -> int:
         action="store_true",
         help="also report depth ignoring panic/unwind callees",
     )
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     funcs = parse_functions(objdump(args.elf))
     if not funcs:
@@ -363,6 +449,17 @@ def main() -> int:
     print(f"parsed {len(funcs)} functions from {args.elf}")
     indirect = sum(1 for f in funcs.values() if f.indirect)
     print(f"functions with indirect (bx/tjex) branches: {indirect}")
+
+    # Must precede every root/depth query: an unmapped dispatcher would score
+    # its callback as 0 B and silently understate the margin.
+    try:
+        edges = apply_indirect_edges(funcs)
+    except IndirectEdgeError as exc:
+        print(f"\nFAIL: {exc}")
+        return 1
+    print(f"indirect dispatch edges ({len(edges)}):")
+    for caller, callee in edges:
+        print(f"  {caller} -> {callee}")
 
     # Root the main stack at every in-degree-0 function, not __start: the
     # __start block contains the hardware vector table (tj __irq / tj __reset),

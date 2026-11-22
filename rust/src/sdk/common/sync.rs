@@ -29,7 +29,7 @@
 //!    guard is held at depth > 0. If some source could preempt a
 //!    depth-≥ 1 context, `enter_cs` would observe a non-zero depth and hand out
 //!    exclusion-free access while interrupts are nominally "masked". This is
-//!    why [`crate::embassy::executor`] deliberately keeps the permanently
+//!    why the embassy executor deliberately keeps the permanently
 //!    latched USB 250 µs interrupt out of the wake mask: a permanently pending,
 //!    unmaskable-by-`acquire` source would violate this assumption. Do not add
 //!    such a source without revisiting the depth counter.
@@ -170,6 +170,7 @@ impl<T: ?Sized> Drop for CriticalSectionMutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
     use core::cell::{Cell, RefCell};

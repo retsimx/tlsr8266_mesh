@@ -499,7 +499,7 @@ From cold boot to BLE operational. Entry point: `main_entrypoint()` in `lib.rs`.
     12. Set device address in packet templates.
     13. Enable advertising: `BLE_PERIPHERAL_ADVERTISING_ENABLED = true`.
     14. Load group addresses from flash via `retrieve_dev_grp_address()`.
-    15. Init mesh node table via `mesh_node_init()`.
+    15. Init mesh node table via `mesh_node_table_init()`.
     16. Write device info (MAC + build version + CRC16) to memory at 0x808004.
 12. **Spawn async tasks** — mesh sender, mesh receiver, light manager, panic checker.
 13. **Enable interrupts** — `irq_enable()`: write 1 to `reg_irq_en` (0x643).
@@ -1842,8 +1842,8 @@ All mesh nodes are peers. There is no designated coordinator, router, or gateway
 
 | Constant | Value | Location | Meaning |
 |----------|-------|----------|---------|
-| `SYS_CHN_LISTEN` | `[2, 12, 23, 34]` | `common.rs` | BLE data channels used for mesh RX/TX |
-| `SYS_CHN_ADV` | `[0x25, 0x26, 0x27]` | `common.rs` | BLE advertising channels (37, 38, 39) |
+| `SYS_CHN_LISTEN` | `[2, 12, 23, 34]` | `sdk/ble_app/flash_config.rs` | BLE data channels used for mesh RX/TX |
+| `SYS_CHN_ADV` | `[0x25, 0x26, 0x27]` | `sdk/ble_app/flash_config.rs` | BLE advertising channels (37, 38, 39) |
 | `ADV_INTERVAL2LISTEN_INTERVAL` | `4` | `sdk/light.rs` | Advertise every 4th listen cycle |
 | `ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL` | `8` | `sdk/light.rs` | Send online status every 8th cycle |
 | `MESH_LISTEN_INTERVAL_US` | `100_000` (100 ms) | `status_management.rs` | Duration of one listen cycle |
@@ -1927,7 +1927,7 @@ This adds up to 8 ms of random jitter between retransmissions, preventing synchr
 
 ### 20.4 Access Code Derivation
 
-`access_code(name, pass)` (`common.rs`):
+`access_code(name, pass)` (`flash_config.rs`):
 
 ```
 Stage 1 — AES encryption:
@@ -2039,7 +2039,7 @@ Smartphone ──(BLE GATT write)──► Connected node
                                     255
                                   )
                                          │
-                                  mesh_manager.add_send_mesh_msg()
+                                  queues::enqueue_mesh_tx()
                                          │
                               ┌──────────┴──────────┐
                               ▼                     ▼
@@ -2226,7 +2226,7 @@ For each set bit in MESH_NODE_MASK:
 ```
 1. Collect current status of all known nodes (mesh_node_adv_status())
 2. Build a mesh packet with opcode LGT_CMD_LIGHT_STATUS
-3. Inject into mesh TX queue via add_send_mesh_msg()
+3. Inject into mesh TX queue via queues::enqueue_mesh_tx()
 ```
 
 This keeps the entire mesh informed of every node's current lumen level and sequence number. Nodes receiving this broadcast update their local `MESH_NODE_ST` table via `mesh_node_update_status()`.
@@ -2314,7 +2314,7 @@ The state machine assembles the 16-byte name, password, and LTK from the two 8-b
 2. Regenerates `PAIR_AC` from new name+password
 3. Immediately reloads the new access code into the RF hardware
 4. Broadcasts `LGT_CMD_SET_MESH_INFO` to clear the network status table
-5. Re-initialises the node status table (`mesh_node_init()`)
+5. Re-initialises the node status table (`mesh_node_table_init()`)
 
 From this point the node is a member of the new mesh and is invisible to nodes on the old network.
 

@@ -18,13 +18,15 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 
-use crate::common::{
-    dev_addr_with_mac_flag, mesh_node_init, pair_load_key, retrieve_dev_grp_address,
-};
 use crate::config::{FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG};
-use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet;
-use crate::sdk::ble_app::light_ll::mesh_management::rf_link_match_group_mac;
+use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response};
+use crate::sdk::ble_app::flash_config::{
+    dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address,
+};
+use crate::sdk::ble_app::light_ll::mesh_management::{
+    mesh_node_table_init, rf_link_match_group_mac,
+};
 use crate::sdk::ble_app::light_ll::packet_processing::{
     parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_slave_add_status,
 };
@@ -478,7 +480,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     // Process the command data if this packet is intended for this device
     // (either directly targeted or matches one of our group addresses)
     if device_match || group_match {
-        rf_link_data_callback(&*pkt_light_data);
+        on_light_data(&*pkt_light_data);
     }
 
     // Update the stored sequence number with the one from this packet
@@ -595,7 +597,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
 
         // Call the response callback to fill in application-specific status data
         // If the callback returns true, add the status packet to the response queue
-        if rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt).is_ok() {
+        if on_light_response(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt).is_ok() {
             rf_link_slave_add_status(&*pkt_light_status);
         }
     }
@@ -731,7 +733,7 @@ pub fn rf_link_slave_init(interval: u32) {
         retrieve_dev_grp_address();
 
         // Initialize mesh network node functionality
-        mesh_node_init();
+        mesh_node_table_init();
 
         // Write device identification info to system memory
         // This includes MAC address, firmware version, and data integrity check
@@ -1086,11 +1088,11 @@ pub fn rf_set_ble_access_code_adv() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::common::mock_dev_addr_with_mac_flag;
-    use crate::common::mock_pair_load_key;
-    use crate::common::{mock_mesh_node_init, mock_retrieve_dev_grp_address};
-    use crate::main_light::{mock_rf_link_data_callback, mock_rf_link_response_callback};
     use crate::sdk::ble_app::ble_ll_pair::mock_pair_dec_packet;
+    use crate::sdk::ble_app::callbacks::{mock_on_light_data, mock_on_light_response};
+    use crate::sdk::ble_app::flash_config::mock_retrieve_dev_grp_address;
+    use crate::sdk::ble_app::flash_config::{mock_dev_addr_with_mac_flag, mock_pair_load_key};
+    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_rf_link_match_group_mac;
     use crate::sdk::ble_app::light_ll::packet_processing::{
         mock_parse_ble_packet_op_params, mock_rf_link_is_notify_req, mock_rf_link_slave_add_status,
@@ -2495,7 +2497,7 @@ mod tests {
     #[mry::lock(parse_ble_packet_op_params)]
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_non_notification_direct_match() {
         // Reset global state
@@ -2538,7 +2540,7 @@ mod tests {
         mock_rf_link_is_notify_req(Any).returns(false);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status stop if busy
         mock_rf_link_slave_read_status_stop().returns(());
@@ -2549,7 +2551,7 @@ mod tests {
         // Should return true for successful processing
 
         // Verify callback was called
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
 
         // Verify sequence number was updated
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
@@ -2565,7 +2567,7 @@ mod tests {
     #[mry::lock(parse_ble_packet_op_params)]
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_non_notification_bridge() {
         // Create a packet with valid length
@@ -2606,7 +2608,7 @@ mod tests {
         mock_rf_link_is_notify_req(Any).returns(false);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status stop if busy
         mock_rf_link_slave_read_status_stop().returns(());
@@ -2617,7 +2619,7 @@ mod tests {
         // Should return true for successful processing
 
         // Verify callback was NOT called (no match)
-        mock_rf_link_data_callback(Any).assert_called(0);
+        mock_on_light_data(Any).assert_called(0);
 
         // Verify sequence number was updated
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
@@ -2721,9 +2723,9 @@ mod tests {
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(dev_addr_with_mac_flag)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_device_addr_config_valid_broadcast() {
         // Create a packet with valid length
@@ -2770,13 +2772,13 @@ mod tests {
         mock_read_reg_system_tick().returns(0xAABBCCDD);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2800,7 +2802,7 @@ mod tests {
     #[mry::lock(parse_ble_packet_op_params)]
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_status_read_busy_stop() {
         // Create a packet with valid length
@@ -2837,7 +2839,7 @@ mod tests {
         mock_rf_link_is_notify_req(Any).returns(false);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Set SLAVE_READ_STATUS_BUSY to non-zero (covers line 468)
         SLAVE_READ_STATUS_BUSY.set(1);
@@ -2854,7 +2856,7 @@ mod tests {
         mock_rf_link_slave_read_status_stop().assert_called(1);
 
         // Verify callback was called
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
 
         // Verify sequence number was updated
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
@@ -2866,9 +2868,9 @@ mod tests {
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(dev_addr_with_mac_flag)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_grp_req() {
         // Mock system tick reading
@@ -2928,13 +2930,13 @@ mod tests {
         mock_dev_addr_with_mac_flag(Any).returns(false);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -2969,9 +2971,9 @@ mod tests {
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(dev_addr_with_mac_flag)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_config_dev_addr_with_mac_bridge() {
         // Create a packet with valid length
@@ -3018,13 +3020,13 @@ mod tests {
         mock_read_reg_system_tick().returns(0xAABBCCDD);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3058,9 +3060,9 @@ mod tests {
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_config_grp_bridge() {
         // Create a packet with valid length
@@ -3100,13 +3102,13 @@ mod tests {
         mock_read_reg_system_tick().returns(0xAABBCCDD);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3140,9 +3142,9 @@ mod tests {
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_config_grp() {
         // Create a packet with valid length
@@ -3182,13 +3184,13 @@ mod tests {
         mock_read_reg_system_tick().returns(0xAABBCCDD);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3222,9 +3224,9 @@ mod tests {
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_user_notify_req() {
         // Create a packet with valid length
@@ -3264,13 +3266,13 @@ mod tests {
         mock_read_reg_system_tick().returns(0xAABBCCDD);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3302,9 +3304,9 @@ mod tests {
     #[mry::lock(rf_link_is_notify_req)]
     #[mry::lock(dev_addr_with_mac_flag)]
     #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_config_dev_addr_device_match() {
         // Mock system tick reading
@@ -3351,13 +3353,13 @@ mod tests {
         mock_dev_addr_with_mac_flag(Any).returns(false);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3390,9 +3392,9 @@ mod tests {
     #[mry::lock(parse_ble_packet_op_params)]
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_slave_data_write_no_dec_notification_device_match_new() {
@@ -3432,13 +3434,13 @@ mod tests {
         mock_rf_link_is_notify_req(Any).returns(true);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3471,9 +3473,9 @@ mod tests {
     #[mry::lock(parse_ble_packet_op_params)]
     #[mry::lock(rf_link_match_group_mac)]
     #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(rf_link_data_callback)]
+    #[mry::lock(on_light_data)]
     #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(rf_link_response_callback)]
+    #[mry::lock(on_light_response)]
     #[mry::lock(rf_link_slave_add_status)]
     #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_slave_data_write_no_dec_notification_device_match() {
@@ -3515,13 +3517,13 @@ mod tests {
         mock_rf_link_is_notify_req(Any).returns(true);
 
         // Mock data callback
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
 
         // Mock read status parameter initialization
         mock_rf_link_slave_read_status_par_init().returns(());
 
         // Mock response callback that returns true to add status
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock add status function
         mock_rf_link_slave_add_status(Any).returns(());
@@ -3538,7 +3540,7 @@ mod tests {
         // Should return true for successful processing
 
         // Verify callback was called
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
 
         // Verify sequence number was updated
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
@@ -3547,7 +3549,7 @@ mod tests {
         assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
 
         // Verify response callback and add status were called
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
         mock_rf_link_slave_add_status(Any).assert_called(1);
 
         // Verify data validity flag is 0 for direct match
@@ -3641,7 +3643,7 @@ mod tests {
         rf_link_slave_set_adv,
         pair_load_key,
         retrieve_dev_grp_address,
-        mesh_node_init,
+        mesh_node_table_init,
         read_reg_system_tick,
         write_reg_system_tick_irq,
         write_reg8,
@@ -3706,8 +3708,8 @@ mod tests {
         // Mock device group address retrieval
         mock_retrieve_dev_grp_address().returns(());
 
-        // Mock mesh node initialization
-        mock_mesh_node_init().returns(());
+        // Mock mesh node table initialization
+        mock_mesh_node_table_init().returns(());
 
         // Act
         rf_link_slave_init(test_interval);
@@ -3733,7 +3735,7 @@ mod tests {
         mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write
         mock_rf_link_slave_set_adv(Any).assert_called(1);
         mock_retrieve_dev_grp_address().assert_called(1);
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
     }
 
     #[test]
@@ -3744,7 +3746,7 @@ mod tests {
         rf_set_ble_access_code,
         pair_load_key,
         retrieve_dev_grp_address,
-        mesh_node_init,
+        mesh_node_table_init,
         read_reg_system_tick,
         write_reg_system_tick_irq,
         write_reg8,
@@ -3812,8 +3814,8 @@ mod tests {
         // Mock device group address retrieval
         mock_retrieve_dev_grp_address().returns(());
 
-        // Mock mesh node initialization
-        mock_mesh_node_init().returns(());
+        // Mock mesh node table initialization
+        mock_mesh_node_table_init().returns(());
 
         // Act
         rf_link_slave_init(test_interval);
@@ -3826,7 +3828,7 @@ mod tests {
         mock_rf_set_ble_access_code(Any).assert_called(1); // Access code set
         mock_pair_load_key().assert_called(1);
         mock_retrieve_dev_grp_address().assert_called(1);
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
         mock_write_reg32(0x808004, expected_mac_u32).assert_called(1); // MAC ID write
         mock_write_reg32(0x808008, BUILD_VERSION).assert_called(1); // BUILD_VERSION write
         mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write

@@ -2,9 +2,9 @@
 //!
 //! This module contains the pure BLE/RF interrupt helpers for the
 //! TLSR8266-based mesh lighting system. The hardware interrupt entry point
-//! (`crate::irq::irq_handler`) calls these helpers; composing them with the
-//! Embassy time driver, light transitions and the UART manager is
-//! composition-root work that lives in `crate::irq`.
+//! (the crate root's `irq_handler`) calls these helpers; composing them with
+//! the Embassy time driver, light transitions and the UART manager is
+//! composition-root work that lives in the crate root.
 //!
 //! ## Key Responsibilities:
 //! - RF interrupt handling (TX/RX complete)
@@ -31,8 +31,9 @@ use super::timing::configure_ble_receive_state;
 /// 2. **RX complete**: BLE/mesh packet received and ready for processing
 ///
 /// `#[inline(always)]` is mandatory: the whole RF path must be inlined into
-/// `crate::irq::irq_handler` so it stays inside the `.ram_code` section (no XIP
-/// flash jump during radio operations) and adds no extra interrupt stack frame.
+/// the crate root's `irq_handler` so it stays inside the `.ram_code` section
+/// (no XIP flash jump during radio operations) and adds no extra interrupt
+/// stack frame.
 #[inline(always)]
 #[cfg_attr(test, mry::mry)]
 pub fn handle_rf_irq() {
@@ -62,7 +63,7 @@ pub fn handle_rf_irq() {
 /// - **Idle**: nothing to do
 ///
 /// `#[inline(always)]` is mandatory so this helper adds no extra interrupt stack
-/// frame. It inlines into `crate::irq::handle_system_interrupts`, which is
+/// frame. It inlines into the crate root's `handle_system_interrupts`, which is
 /// `#[inline(never)]` and therefore stays in `.text` (only `irq_handler` itself
 /// is `.ram_code`) — the same placement the dispatch had before the move.
 ///

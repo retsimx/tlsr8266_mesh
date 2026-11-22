@@ -43,10 +43,12 @@
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::app;
-use crate::common::{rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN};
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
 use crate::sdk::ble_app::ble_ll_pair::pair_init;
+use crate::sdk::ble_app::callbacks;
+use crate::sdk::ble_app::flash_config::{
+    rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN,
+};
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
@@ -556,7 +558,7 @@ fn update_connect_para() {
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_proc() {
     // Process mesh network pairing operations
-    app().mesh_manager.mesh_pair_proc();
+    callbacks::on_mesh_pair_proc();
 
     // Handle any pending connection parameter updates
     update_connect_para();
@@ -646,9 +648,9 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::common::mock_update_ble_parameter_cb;
     use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_build_available_channel_table;
     use crate::sdk::ble_app::ble_ll_pair::mock_pair_init;
+    use crate::sdk::ble_app::flash_config::mock_update_ble_parameter_cb;
     use crate::sdk::ble_app::rf_drv_8266::{
         mock_rf_reset_sn, mock_rf_set_ble_access_code, mock_rf_set_ble_channel,
         mock_rf_set_ble_crc_adv, mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_stop_trx,

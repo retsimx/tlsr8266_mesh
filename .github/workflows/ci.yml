@@ -145,7 +145,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run build driver tests
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check SDK layering (no sdk -> app dependencies)
+        run: python3 sdk/check_layering.py
+      - name: Run SDK tests
         run: python3 -m unittest discover -s sdk/tests -v
 
   llvm:

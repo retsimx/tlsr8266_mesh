@@ -11,6 +11,7 @@ use embassy_time::{Duration, Instant, WithTimeout};
 use heapless::Deque;
 
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
+use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::drivers::uart::{UartData, UartDriver, UartIrqMask, UART_DATA_LEN};
 use crate::sdk::packet_types::{AppCmdValue, Packet};
@@ -37,48 +38,7 @@ type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use crate::state::{SimplifyLS, DEVICE_ADDRESS};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum UartMsg {
-    //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
-    LightCtrl = 0x02,    // Sent by the client to control the mesh
-    LightStatus = 0x03, // Sent by us to notify when a bulk status message is sent. Sent by the client to force a full refresh of light statuses
-    MeshMessage = 0x04, // Sent by us to notify when a mesh message is sent
-    PanicMessage = 0x05, // Sent by us to provide details of a panic
-    PrintMessage = 0x06, // Sent by us to provide print output
-    NodeStatus = 0x07, // Sent by us for individual node online/offline and on/off change events. Payload: groups of [node_id, online, on_off] (3 bytes each, up to 13 per packet)
-    Ack = 0xff,
-}
-
-impl From<UartMsg> for u8 {
-    fn from(value: UartMsg) -> Self {
-        match value {
-            UartMsg::LightCtrl => 0x02,
-            UartMsg::LightStatus => 0x03,
-            UartMsg::MeshMessage => 0x04,
-            UartMsg::PanicMessage => 0x05,
-            UartMsg::PrintMessage => 0x06,
-            UartMsg::NodeStatus => 0x07,
-            UartMsg::Ack => 0xff,
-        }
-    }
-}
-
-impl TryFrom<u8> for UartMsg {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x02 => Ok(UartMsg::LightCtrl),
-            0x03 => Ok(UartMsg::LightStatus),
-            0x04 => Ok(UartMsg::MeshMessage),
-            0x05 => Ok(UartMsg::PanicMessage),
-            0x06 => Ok(UartMsg::PrintMessage),
-            0x07 => Ok(UartMsg::NodeStatus),
-            0xff => Ok(UartMsg::Ack),
-            _ => Err(()),
-        }
-    }
-}
+pub use crate::sdk::packet_types::UartMsg;
 
 // AppCmdValueT
 #[cfg_attr(test, mry::mry)]
@@ -129,15 +89,15 @@ pub async fn uart_receiver() {
 #[cfg_attr(test, mry::mry)]
 pub struct UartManager {
     pub driver: UartDriver,
-    send_channel: Channel<CsRawMutex, UartData, 12>,
     recv_channel: Channel<CsRawMutex, UartData, 12>,
     ack_counter: u8,
     last_ack: u8,
     sender_started: bool,
     started_signal: Signal<CsRawMutex, ()>,
     ack_signal: Signal<CsRawMutex, u8>,
-    uart_status_reporting: bool,
     sent: Deque<Fingerprint, 12>,
+    /// UART TX drops already reported by [`Self::report_queue_drops`].
+    dropped_uart_tx_seen: u32,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const)))]
@@ -146,32 +106,34 @@ impl UartManager {
     pub const fn default_const() -> Self {
         Self {
             driver: UartDriver::default_const(),
-            send_channel: Channel::new(),
             recv_channel: Channel::new(),
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
             started_signal: Signal::new(),
             ack_signal: Signal::new(),
-            uart_status_reporting: false,
             sent: Deque::new(),
+            dropped_uart_tx_seen: 0,
         }
     }
 
     #[cfg(test)]
     pub fn default() -> Self {
+        // The global queues outlive every manager, so clear them here: host
+        // tests share a single process and would otherwise inherit leftovers.
+        queues::reset_for_test();
+
         Self {
             driver: UartDriver::default(),
-            send_channel: Channel::new(),
             recv_channel: Channel::new(),
             ack_counter: 0,
             last_ack: 0,
             sender_started: false,
             started_signal: Signal::new(),
             ack_signal: Signal::new(),
-            uart_status_reporting: false,
             sent: Deque::new(),
             mry: Default::default(),
+            dropped_uart_tx_seen: 0,
         }
     }
 
@@ -180,15 +142,15 @@ impl UartManager {
     }
 
     pub fn enable_uart_status_reporting(&mut self) {
-        self.uart_status_reporting = true;
+        queues::set_uart_status_reporting_enabled(true);
     }
 
     pub fn disable_uart_status_reporting(&mut self) {
-        self.uart_status_reporting = false;
+        queues::set_uart_status_reporting_enabled(false);
     }
 
     pub fn uart_status_reporting_enabled(&self) -> bool {
-        self.uart_status_reporting
+        queues::uart_status_reporting_enabled()
     }
 
     pub fn init(&mut self) {
@@ -197,7 +159,7 @@ impl UartManager {
     }
 
     pub fn send_message(&mut self, msg: &UartData) -> Result<(), ()> {
-        if self.send_channel.try_send(*msg).is_ok() {
+        if queues::enqueue_uart_tx(msg) {
             Ok(())
         } else {
             Err(())
@@ -260,14 +222,44 @@ impl UartManager {
     }
     pub async fn sender(&mut self) {
         // Stay parked until a host actually speaks on UART, so boot banners
-        // queued into `send_channel` cost nothing on a headless light.
+        // queued into the UART TX channel cost nothing on a headless light.
         self.started_signal.wait().await;
 
         loop {
+            self.report_queue_drops();
+
             let mut msg = self.wait_for_outgoing_message().await;
             self.prepare_outgoing_message(&mut msg);
             self.send_with_retry(&msg).await;
         }
+    }
+
+    /// Surface UART TX queue overflow, one log line per change.
+    ///
+    /// The SDK cannot log — it must not reach the application's UART sink — so
+    /// it only counts drops. Turning a counter delta into a line here keeps a
+    /// sustained overload visible from the host without a write per iteration.
+    ///
+    /// Only reported once the backlog has drained past the halfway mark: a log
+    /// frame pushed into the very queue that overflowed can itself be dropped,
+    /// which would bump the counter and produce another line — a report storm
+    /// that keeps the queue saturated. Waiting for headroom means the line fits
+    /// and the diagnostic cannot amplify the condition it reports.
+    fn report_queue_drops(&mut self) {
+        let total = queues::dropped_uart_tx();
+        if total == self.dropped_uart_tx_seen {
+            return;
+        }
+        if UART_TX_CHANNEL.len() > UART_TX_QUEUE_CAPACITY / 2 {
+            return;
+        }
+
+        uprintln!(
+            "uart queue full: tx +{} (total {})",
+            total.wrapping_sub(self.dropped_uart_tx_seen),
+            total
+        );
+        self.dropped_uart_tx_seen = total;
     }
 
     async fn wait_for_received_message(&mut self) -> UartData {
@@ -275,7 +267,7 @@ impl UartManager {
     }
 
     async fn wait_for_outgoing_message(&mut self) -> UartData {
-        self.send_channel.receive().await
+        UART_TX_CHANNEL.receive().await
     }
 
     fn record_sent_fingerprint(&mut self, fingerprint: Fingerprint) {
@@ -540,7 +532,7 @@ mod tests {
         msg.data[1] = 0xCD;
         let expected_len = msg.len;
         let expected_data = msg.data;
-        manager.send_channel.try_send(msg).unwrap();
+        UART_TX_CHANNEL.try_send(msg).unwrap();
 
         let result = block_on(manager.wait_for_outgoing_message());
 
@@ -551,7 +543,6 @@ mod tests {
     #[test]
     fn test_wait_for_outgoing_message_waits_until_message_available() {
         let mut manager = UartManager::default();
-        let manager_ptr = SendWrapper::new(&mut manager as *mut UartManager);
         let future = manager.wait_for_outgoing_message();
         futures::pin_mut!(future);
 
@@ -565,9 +556,7 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
         msg.data[0] = 0xEF;
-        unsafe {
-            (*(*manager_ptr)).send_channel.try_send(msg).unwrap();
-        }
+        UART_TX_CHANNEL.try_send(msg).unwrap();
 
         let poll_result = future.as_mut().poll(&mut cx);
         assert!(
@@ -838,7 +827,7 @@ mod tests {
 
         // Verify channel has one message
         critical_section::with(|_| {
-            assert_eq!(manager.send_channel.len(), 1);
+            assert_eq!(UART_TX_CHANNEL.len(), 1);
         });
     }
 
@@ -879,7 +868,7 @@ mod tests {
 
         // Verify channel length is still at capacity
         critical_section::with(|_| {
-            assert_eq!(manager.send_channel.len(), capacity);
+            assert_eq!(UART_TX_CHANNEL.len(), capacity);
         });
     }
 
@@ -1124,7 +1113,7 @@ mod tests {
 
         // Verify channels are empty
         critical_section::with(|_| {
-            assert_eq!(manager.send_channel.len(), 0);
+            assert_eq!(UART_TX_CHANNEL.len(), 0);
             assert_eq!(manager.recv_channel.len(), 0);
             assert_eq!(manager.sent.len(), 0);
         });
@@ -1157,7 +1146,7 @@ mod tests {
 
         // Verify no message was sent to UART
         critical_section::with(|_| {
-            assert_eq!(app().uart_manager.send_channel.len(), 0);
+            assert_eq!(UART_TX_CHANNEL.len(), 0);
         });
     }
 
@@ -1195,7 +1184,7 @@ mod tests {
 
         // Verify no message was sent to UART
         critical_section::with(|_| {
-            assert_eq!(app().uart_manager.send_channel.len(), 0);
+            assert_eq!(UART_TX_CHANNEL.len(), 0);
         });
     }
 
@@ -1235,7 +1224,7 @@ mod tests {
 
         // Verify no message was sent to UART
         critical_section::with(|_| {
-            assert_eq!(app().uart_manager.send_channel.len(), 0);
+            assert_eq!(UART_TX_CHANNEL.len(), 0);
         });
     }
 
@@ -1273,10 +1262,10 @@ mod tests {
 
         // Verify a message was sent to UART
         critical_section::with(|_| {
-            assert_eq!(app().uart_manager.send_channel.len(), 1);
+            assert_eq!(UART_TX_CHANNEL.len(), 1);
 
             // Get the sent message
-            let sent_msg = app().uart_manager.send_channel.try_receive().unwrap();
+            let sent_msg = UART_TX_CHANNEL.try_receive().unwrap();
 
             // Verify message format
             assert_eq!(sent_msg.data[2], u8::from(UartMsg::MeshMessage));
@@ -1361,15 +1350,15 @@ mod tests {
 
         // Verify both messages were sent to UART
         critical_section::with(|_| {
-            assert_eq!(app().uart_manager.send_channel.len(), 2);
+            assert_eq!(UART_TX_CHANNEL.len(), 2);
 
             // Check first message by popping and checking
-            let msg1 = app().uart_manager.send_channel.try_receive().unwrap();
+            let msg1 = UART_TX_CHANNEL.try_receive().unwrap();
             assert_eq!(msg1.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg1.data[10], 0x02); // op code
 
             // Check second message
-            let msg2 = app().uart_manager.send_channel.try_receive().unwrap();
+            let msg2 = UART_TX_CHANNEL.try_receive().unwrap();
             assert_eq!(msg2.data[2], u8::from(UartMsg::MeshMessage));
             assert_eq!(msg2.data[10], 0x03); // op code
         });

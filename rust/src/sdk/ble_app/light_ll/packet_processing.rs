@@ -78,21 +78,18 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use bytemuck;
 
-use crate::common::rf_update_conn_para;
 use crate::config::VENDOR_ID;
-use crate::embassy::time_driver::clock_time64;
-use crate::main_light::{rf_link_data_callback, rf_link_response_callback};
-use crate::mesh::{MeshNodeStValT, MESH_NODE_ST_VAL_LEN, MESH_STATUS_VALUE_LEN};
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet;
+use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response, on_uart_mesh_rx};
+use crate::sdk::ble_app::flash_config::rf_update_conn_para;
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, CLOCK_SYS_CLOCK_1US};
+use crate::sdk::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::*;
 use crate::sdk::packet_types::*;
 use crate::state::*;
-use crate::uart_manager::light_mesh_rx_cb;
-use crate::{app, BIT};
+use crate::BIT;
 
 use super::mesh_management::{mesh_node_update_status, rf_link_match_group_mac};
 
@@ -756,7 +753,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     }
 
     // UART FORWARDING: Send packet to external interface for logging/debugging
-    light_mesh_rx_cb(packet);
+    on_uart_mesh_rx(packet);
 
     // DUPLICATE PREVENTION: Cache packet details to prevent future reprocessing
     rc_pkt_buf_push(op, packet);
@@ -785,7 +782,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     // LOCAL PACKET PROCESSING: Handle packets addressed to this device
     if group_match || device_match {
         // Trigger application-level packet processing callback
-        rf_link_data_callback(packet);
+        on_light_data(packet);
 
         // ACKNOWLEDGMENT GENERATION: Create ACK for non-notify requests that require it
         if !rf_link_is_notify_req(op) && packet.mesh().internal_par1[INTERNAL_PAR_SEND_ACK] != 0 {
@@ -849,8 +846,8 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
                 pkt_light_status.head_mut()._type |= BIT!(7);
 
                 // Queue ACK for mesh transmission with retransmit count from original packet
-                app().mesh_manager.add_send_mesh_msg(
-                    &*pkt_light_status,
+                super::super::queues::enqueue_mesh_tx(
+                    &pkt_light_status,
                     0, // No transmission delay for ACKs
                     packet.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
                 );
@@ -969,7 +966,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
                 .copy_from_slice(&src_bytes);
 
             // Generate application-specific response content
-            if rf_link_response_callback(
+            if on_light_response(
                 &mut pkt_light_status.att_cmd_mut().value,
                 &packet.att_cmd().value,
             )
@@ -979,8 +976,8 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
                 pkt_light_status.head_mut()._type |= BIT!(7);
 
                 // Queue response for mesh transmission
-                app().mesh_manager.add_send_mesh_msg(
-                    &*pkt_light_status,
+                super::super::queues::enqueue_mesh_tx(
+                    &pkt_light_status,
                     0, // No transmission delay for responses
                     packet.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
                 );
@@ -1004,7 +1001,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         }
 
         // Queue packet for mesh relay transmission with calculated delay
-        app().mesh_manager.add_send_mesh_msg(
+        super::super::queues::enqueue_mesh_tx(
             packet,
             clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64), // Convert delay to clock units
             packet.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
@@ -1338,7 +1335,7 @@ pub fn is_add_packet_buf_ready() -> bool {
 /// * Safe for concurrent access from multiple contexts
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
-    use crate::embassy::sync::mutex::CriticalSectionMutex;
+    use crate::sdk::common::sync::CriticalSectionMutex;
 
     // STATIC BUFFER ALLOCATION: Pre-allocated transmission buffer for zero-allocation operation
     static BLT_TX_FIFO: CriticalSectionMutex<[Packet; BLT_FIFO_TX_PACKET_COUNT]> =
@@ -1568,18 +1565,19 @@ mod tests {
     use mry::Any;
 
     // Import mock functions for dependencies
-    use crate::embassy::time_driver::mock_clock_time64;
-    use crate::main_light::{mock_rf_link_data_callback, mock_rf_link_response_callback};
+    use crate::reset_app_uart_for_test;
+    use crate::sdk::ble_app::callbacks::{
+        mock_on_light_data, mock_on_light_response, mock_on_uart_mesh_rx,
+    };
     use crate::sdk::ble_app::light_ll::mesh_management::{
         mock_mesh_node_update_status, mock_rf_link_match_group_mac,
     };
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
-    use crate::sdk::mcu::clock::{mock_clock_time, CLOCK_SYS_CLOCK_1US};
+    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time64, CLOCK_SYS_CLOCK_1US};
     use crate::sdk::mcu::register::{
         mock_read_reg_dma_tx_rptr, mock_read_reg_dma_tx_wptr, mock_read_reg_rnd_number,
         mock_read_reg_system_tick, mock_write_reg_dma_tx_fifo,
     };
-    use crate::{app_mocker, mock_app_mocker, reset_app_uart_for_test, App};
 
     /// Helper function to create a test packet with specified values.
     fn create_test_packet(opcode: u8, sno: [u8; 3], src_adr: u16, dst_adr: u16) -> Packet {
@@ -2201,88 +2199,6 @@ mod tests {
         );
     }
 
-    /// Regression test verifying the full response path:
-    /// rf_link_response_callback(GET_STATUS) -> rf_link_slave_add_status -> BUFF_RESPONSE
-    /// produces exact unshifted VENDOR_ID at dat[8..10] and CW/WW/Brightness at dat[10..16].
-    #[test]
-    #[mry::lock(
-        app_mocker,
-        clock_time,
-        clock_time64,
-        read_reg_tmr_ctrl,
-        write_reg_tmr1_tick,
-        write_reg_tmr_ctrl
-    )]
-    fn test_rf_link_response_callback_to_slave_add_status_layout() {
-        use crate::sdk::mcu::register::{
-            mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
-        };
-
-        reset_test_state();
-        DEVICE_ADDRESS.set(0x001F);
-        SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
-
-        mock_clock_time().returns(1);
-        mock_clock_time64().returns(100);
-        mock_read_reg_tmr_ctrl().returns(0);
-        mock_write_reg_tmr1_tick(Any).returns(());
-        mock_write_reg_tmr_ctrl(Any).returns(());
-
-        let mut app = App::default();
-        app.light_manager
-            .mock_begin_transition(Any, Any, Any)
-            .calls_real_impl();
-        app.light_manager.mock_transition_step().returns(());
-        app.light_manager.begin_transition(8767, 24000, 16384);
-        mock_app_mocker().returns(&mut app);
-
-        let req = PacketAttValue {
-            sno: [0x01, 0x02, 0x03],
-            src: [0x01, 0x00],
-            dst: [0x1F, 0x00],
-            val: [0; 23],
-        };
-
-        let mut pkt_light_status = Packet {
-            mesh: MeshPkt::default(),
-        };
-        pkt_light_status.att_cmd_mut().value.sno = [0xA2, 0x5F, 0xE3];
-        pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] = GET_STATUS;
-
-        rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &req)
-            .expect("GET_STATUS response callback should succeed");
-        rf_link_slave_add_status(&pkt_light_status);
-
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 1);
-        let buf = BUFF_RESPONSE.lock();
-        let dat = &buf[0].att_data().dat;
-
-        assert_eq!(&dat[0..3], &[0xA2, 0x5F, 0xE3], "sno mismatch");
-        assert_eq!(&dat[3..5], &[0x1F, 0x00], "dst/src addr mismatch");
-        assert_eq!(&dat[5..7], &[0x1F, 0x00], "src addr mismatch");
-        assert_eq!(dat[7], LGT_CMD_LIGHT_STATUS | 0xc0, "op mismatch");
-        assert_eq!(
-            &dat[8..10],
-            &VENDOR_ID.to_le_bytes(),
-            "VENDOR_ID must not be shifted"
-        );
-        assert_eq!(
-            &dat[10..12],
-            &8767u16.to_le_bytes(),
-            "CW bytes must align at dat[10..12]"
-        );
-        assert_eq!(
-            &dat[12..14],
-            &24000u16.to_le_bytes(),
-            "WW bytes must align at dat[12..14]"
-        );
-        assert_eq!(
-            &dat[14..16],
-            &16384u16.to_le_bytes(),
-            "Brightness bytes must align at dat[14..16]"
-        );
-        assert_eq!(&dat[16..18], &[0x00, 0x00], "trailing params zero");
-    }
     // ================================================================================
 
     /// Tests transmission buffer ready status with empty buffer.
@@ -2784,7 +2700,7 @@ mod tests {
     #[test]
     #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_rc_data_status_advertisement_end_to_end() {
-        use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+        use crate::sdk::packet_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
 
         mock_read_reg_system_tick().returns(0x12345678);
 
@@ -2970,11 +2886,7 @@ mod tests {
 
     /// Tests malformed packet early return without further processing.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        mesh_node_update_status
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, mesh_node_update_status)]
     fn test_rf_link_rc_data_malformed_packet_early_return() {
         reset_test_state();
 
@@ -2984,7 +2896,7 @@ mod tests {
 
         // Mock functions that should NOT be called due to early return
         mock_rf_link_match_group_mac(Any).returns((false, false));
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
         mock_mesh_node_update_status(Any).returns(1u32);
 
         rf_link_rc_data(&mut packet);
@@ -2992,7 +2904,7 @@ mod tests {
         // Verify that none of the subsequent processing functions were called
         // since the function should return early on line 714 due to malformed packet
         mock_rf_link_match_group_mac(Any).assert_called(0);
-        mock_rf_link_data_callback(Any).assert_called(0);
+        mock_on_light_data(Any).assert_called(0);
         mock_mesh_node_update_status(Any).assert_called(0);
 
         // Verify function completed with early return
@@ -3219,19 +3131,13 @@ mod tests {
 
     /// Tests local packet processing structure.
     #[test]
-    #[mry::lock(rf_link_match_group_mac, rf_link_data_callback, clock_time, app_mocker)]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_uart_mesh_rx, clock_time)]
     fn test_rf_link_rc_data_local_processing_with_ack() {
         reset_test_state();
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
+        mock_on_light_data(Any).returns(());
+        mock_on_uart_mesh_rx(Any).returns(());
         mock_clock_time().returns(12345); // Mock time for ACK sequence number generation
-
-        // Mock app and mesh manager for ACK transmission
-        let mut app = App::default();
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .returns(());
-        mock_app_mocker().returns(&mut app);
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3244,15 +3150,17 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify local processing callback was called
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+
+        // Verify the UART bridge saw the same packet before it was filtered for
+        // local processing (this used to be the un-mocked `light_mesh_rx_cb`).
+        mock_on_uart_mesh_rx(Any).assert_called(1);
 
         // Verify ACK generation used clock_time
         mock_clock_time().assert_called(1);
 
         // Verify ACK was queued for mesh transmission
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .assert_called(1);
+        assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 1);
 
         // Verify function completed processing
         assert!(true, "Local processing with ACK completed");
@@ -3264,20 +3172,10 @@ mod tests {
         rf_link_match_group_mac,
         read_reg_system_tick,
         read_reg_rnd_number,
-        clock_time64,
-        app_mocker
+        clock_time64
     )]
     fn test_rf_link_rc_data_mesh_relay() {
         reset_test_state();
-
-        // Set up App mock
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-
-        // Mock the mesh_manager.add_send_mesh_msg method
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .returns(());
 
         // Mock dependencies
         mock_rf_link_match_group_mac(Any).returns((false, false)); // No match - trigger relay
@@ -3299,24 +3197,18 @@ mod tests {
             "Packet should be marked for mesh transmission"
         );
 
-        // Verify mesh_manager.add_send_mesh_msg was called
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .assert_called(1);
+        // Verify the relay was queued for mesh transmission
+        assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 1);
     }
 
     /// Tests notification request response structure.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_rf_link_rc_data_notification_response() {
         reset_test_state();
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3336,8 +3228,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Verify response generation completed
         assert!(true, "Notification response completed");
@@ -3347,9 +3239,8 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback,
-        app_mocker,
+        on_light_data,
+        on_light_response,
         is_exist_in_rc_pkt_buf,
         rc_pkt_buf_push,
         req_cmd_set_notify_ok_flag
@@ -3357,18 +3248,9 @@ mod tests {
     fn test_rf_link_rc_data_complex_workflow() {
         reset_test_state();
 
-        // Set up App mock
-        let mut app = App::default();
-        mock_app_mocker().returns(&mut app);
-
-        // Mock the mesh_manager.add_send_mesh_msg method (might be called for group relay)
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .returns(());
-
         // Mock callback functions that are called during local processing
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock duplicate detection to allow processing
         mock_is_exist_in_rc_pkt_buf(Any, Any).returns(false); // Not a duplicate
@@ -3394,10 +3276,10 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify that local processing was triggered
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
 
         // Verify that response generation was triggered for notify request
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Verify complex workflow completed
         assert!(
@@ -3635,12 +3517,7 @@ mod tests {
 
     /// Tests duplicate notification request suppression (line 837: slave_read_status_response = false).
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_response_callback,
-        app_mocker,
-        is_exist_in_rc_pkt_buf
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_response, is_exist_in_rc_pkt_buf)]
     fn test_duplicate_notification_request_suppression() {
         reset_test_state();
 
@@ -3672,14 +3549,7 @@ mod tests {
         mock_rf_link_match_group_mac(Any).returns((false, true)); // device_match = true
 
         // Mock response callback (should NOT be called due to line 837 setting slave_read_status_response = false)
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
-
-        // Mock app to track mesh message sending (should NOT be called for duplicates)
-        let mut app = App::default();
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .returns(());
-        mock_app_mocker().returns(&mut app);
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Process the packet - should trigger line 837 (slave_read_status_response = false)
         // because req_cmd_is_notify_ok returns true due to the manually added packet
@@ -3687,10 +3557,8 @@ mod tests {
 
         // Verify response was NOT generated due to line 837 suppression
         // This proves that slave_read_status_response was set to false
-        mock_rf_link_response_callback(Any, Any).assert_called(0);
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .assert_called(0);
+        mock_on_light_response(Any, Any).assert_called(0);
+        assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 0);
 
         assert!(
             true,
@@ -3700,17 +3568,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_LIGHT_CONFIG_GRP.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_light_config_grp() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3726,8 +3590,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3740,17 +3604,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_CONFIG_DEV_ADDR.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_config_dev_addr() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3766,8 +3626,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3780,17 +3640,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_USER_NOTIFY_REQ.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_user_notify_req() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3806,8 +3662,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3820,17 +3676,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_START_OTA_REQ.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_start_ota_req() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3846,8 +3698,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3860,17 +3712,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_OTA_DATA_REQ.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_ota_data_req() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3886,8 +3734,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3900,17 +3748,13 @@ mod tests {
 
     /// Tests notification response generation for LGT_CMD_END_OTA_REQ.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_end_ota_req() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3926,8 +3770,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was set correctly
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -3942,16 +3786,16 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback,
+        on_light_data,
+        on_light_response,
         rf_link_is_notify_req
     )]
     fn test_notification_response_unknown_command() {
         reset_test_state();
 
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(()));
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(()));
 
         // Mock to make unknown command behave like a notify request to test the default case
         mock_rf_link_is_notify_req(Any).returns(true);
@@ -3970,8 +3814,8 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify callbacks were called
-        mock_rf_link_data_callback(Any).assert_called(1);
-        mock_rf_link_response_callback(Any, Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
+        mock_on_light_response(Any, Any).assert_called(1);
 
         // Check that the response value was not modified (default case does nothing)
         let pkt_status = PKT_LIGHT_STATUS.lock();
@@ -4034,25 +3878,13 @@ mod tests {
     /// This occurs when the condition on line 955 evaluates to false:
     /// !(not_slave_message || BLE_PERIPHERAL_LINK_COMMAND.get() != op || params[1] != 0)
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        rf_link_data_callback,
-        rf_link_response_callback,
-        app_mocker
-    )]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_light_response)]
     fn test_notification_response_transmission_skipped() {
         reset_test_state();
 
-        // Set up App mock to track mesh message sending (should NOT be called)
-        let mut app = App::default();
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .returns(());
-        mock_app_mocker().returns(&mut app);
-
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
-        mock_rf_link_data_callback(Any).returns(());
-        mock_rf_link_response_callback(Any, Any).returns(Ok(())); // Even if callback returns true...
+        mock_on_light_data(Any).returns(());
+        mock_on_light_response(Any, Any).returns(Ok(())); // Even if callback returns true...
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -4075,15 +3907,13 @@ mod tests {
         rf_link_rc_data(&mut packet);
 
         // Verify local processing callback was called
-        mock_rf_link_data_callback(Any).assert_called(1);
+        mock_on_light_data(Any).assert_called(1);
 
         // Verify response callback was NOT called (fell through to line 979)
-        mock_rf_link_response_callback(Any, Any).assert_called(0);
+        mock_on_light_response(Any, Any).assert_called(0);
 
         // Verify mesh message was NOT sent (fell through to line 979)
-        app.mesh_manager
-            .mock_add_send_mesh_msg(Any, Any, Any)
-            .assert_called(0);
+        assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 0);
 
         assert!(
             true,

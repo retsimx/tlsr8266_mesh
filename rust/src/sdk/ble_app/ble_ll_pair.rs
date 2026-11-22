@@ -1,7 +1,9 @@
 use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 
-use crate::common::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
+use crate::sdk::ble_app::flash_config::{
+    pair_flash_clean, pair_load_key, pair_update_key, save_pair_info,
+};
 use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair;
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{
@@ -1000,7 +1002,7 @@ pub fn pair_write(data: &Packet) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::common::{
+    use crate::sdk::ble_app::flash_config::{
         mock_pair_flash_clean, mock_pair_load_key, mock_pair_update_key, mock_save_pair_info,
     }; // Ensure mock_pair_load_key is imported
     use crate::sdk::ble_app::light_ll::pairing_management::mock_rf_link_delete_pair;

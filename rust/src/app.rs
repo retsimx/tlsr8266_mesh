@@ -11,6 +11,7 @@ use crate::light_manager::LightManager;
 use crate::main_light::{main_loop, user_init};
 use crate::mesh::MeshManager;
 use crate::ota::OtaManager;
+use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, BleAppHooks};
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::drivers::uart::UartDriver;
 use crate::sdk::light::*;
@@ -47,6 +48,9 @@ impl App {
 
     #[cfg(test)]
     pub fn default() -> App {
+        // Host tests share one process; start from empty global queues.
+        crate::sdk::ble_app::queues::reset_for_test();
+
         App {
             ota_manager: OtaManager::default(),
             mesh_manager: MeshManager::default(),
@@ -63,6 +67,12 @@ impl App {
         crate::sdk::rf_drv::set_light_event_handler(
             crate::main_light::rf_link_light_event_callback,
         );
+        set_ble_app_hooks(BleAppHooks {
+            on_mesh_pair_proc: mesh_pair_proc_hook,
+            on_light_data: crate::main_light::rf_link_data_callback,
+            on_light_response: crate::main_light::rf_link_response_callback,
+            on_uart_mesh_rx: crate::uart_manager::light_mesh_rx_cb,
+        });
 
         // Copy the password in to the pair config
         PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()]
@@ -165,16 +175,28 @@ impl App {
     }
 }
 
+/// Adapter that gives the mesh pairing seam its own symbol in the linked ELF.
+///
+/// `MeshManager::mesh_pair_proc` and this wrapper have indistinguishable
+/// prologues, so `sdk/stack_analysis.py`'s `INDIRECT_EDGES` matches the edge by
+/// symbol name. Both this function and the method are `#[inline(never)]` so the
+/// symbol the analyser looks for actually survives `OPT_INLINE_THRESHOLD`.
+#[inline(never)]
+fn mesh_pair_proc_hook() {
+    app().mesh_manager.mesh_pair_proc();
+}
+
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
-    /// `App::init()` is the composition root for the two SDK callback seams, but
-    /// it cannot be executed on the host: `rf_drv_init` and `user_init` are not
+    /// `App::init()` is the composition root for the SDK callback seams, but it
+    /// cannot be executed on the host: `rf_drv_init` and `user_init` are not
     /// `mry`-mockable and both touch hardware registers, and the slots they fill
-    /// are private statics owned by `sdk::app_att_light` and `sdk::rf_drv`.
+    /// are private statics owned by `sdk::app_att_light`, `sdk::rf_drv` and
+    /// `sdk::ble_app::callbacks`.
     ///
     /// What can be pinned here is the structural invariant that makes the wiring
-    /// safe: both registrations live in `App::init()`'s body and both precede
+    /// safe: every registration lives in `App::init()`'s body and precedes
     /// `rf_drv_init(true)`, so an accidental reorder or deletion fails this test.
     /// That the slots are populated afterwards is proven on target by the HIL
     /// acceptance run (boot, pairing LED flash, OTA).
@@ -198,13 +220,16 @@ mod tests {
         let light = init_body
             .find("set_light_event_handler(")
             .expect("App::init must register the light event handler");
+        let hooks = init_body
+            .find("set_ble_app_hooks(BleAppHooks {")
+            .expect("App::init must register the BLE app hooks");
         let rf_drv = init_body
             .find("rf_drv_init(true)")
             .expect("App::init must initialise the RF driver");
 
         assert!(
-            ota < rf_drv && light < rf_drv,
-            "both handler registrations must precede rf_drv_init(true)"
+            ota < rf_drv && light < rf_drv && hooks < rf_drv,
+            "every handler registration must precede rf_drv_init(true)"
         );
     }
 }

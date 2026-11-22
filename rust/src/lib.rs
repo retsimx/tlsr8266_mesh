@@ -13,7 +13,6 @@ use fixed::types::I16F16;
 use ota::OtaManager;
 
 mod app;
-mod common;
 mod config;
 mod diagnostics;
 mod embassy;

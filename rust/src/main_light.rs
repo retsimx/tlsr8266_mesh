@@ -6,12 +6,14 @@ use embassy_time::{Duration, Timer};
 use fixed::types::I16F16;
 
 use crate::app;
-use crate::common::*;
 use crate::config::*;
+use crate::sdk::ble_app::flash_config::{
+    dev_addr_with_mac_flag, dev_addr_with_mac_match, dev_addr_with_mac_rsp,
+};
 use crate::sdk::ble_app::light_ll::connection_management::{
     light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
 };
-use crate::sdk::ble_app::light_ll::mesh_management::mesh_construct_packet;
+use crate::sdk::ble_app::light_ll::mesh_management::{mesh_construct_packet, mesh_node_table_init};
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -481,12 +483,12 @@ pub fn light_slave_tx_command(
 pub fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
-            mesh_node_init();
+            mesh_node_table_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         }
         LGT_CMD_SET_DEV_ADDR => {
-            mesh_node_init();
+            mesh_node_table_init();
             app().light_manager.device_status_update();
             cfg_led_event(LED_EVENT_FLASH_1HZ_4S);
         }
@@ -501,10 +503,13 @@ pub fn rf_link_light_event_callback(status: u8) {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::common::{mock_dev_addr_with_mac_rsp, mock_mesh_node_init};
+    use crate::sdk::ble_app::flash_config::{
+        mock_dev_addr_with_mac_flag, mock_dev_addr_with_mac_match, mock_dev_addr_with_mac_rsp,
+    };
     use crate::sdk::ble_app::light_ll::connection_management::{
         mock_light_check_tick_per_us, mock_rf_link_slave_pairing_enable, mock_rf_link_slave_proc,
     };
+    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
@@ -512,12 +517,15 @@ mod tests {
     use crate::sdk::drivers::pwm::{mock_pwm_set_duty, mock_pwm_start};
     use crate::sdk::factory_reset::mock_factory_reset_cnt_check;
     use crate::sdk::factory_reset::mock_factory_reset_handle;
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed, CLOCK_SYS_CLOCK_1US};
+    use crate::sdk::mcu::clock::{
+        clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
+        CLOCK_SYS_CLOCK_1US,
+    };
     use crate::sdk::mcu::gpio::mock_gpio_set_func;
     use crate::sdk::mcu::register::{
         mock_read_reg_irq_mask, mock_read_reg_tmr_ctrl, mock_write_reg_irq_mask,
         mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
-        mock_write_reg_tmr_ctrl,
+        mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
     };
     use crate::sdk::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use crate::sdk::pm::mock_light_sw_reboot;
@@ -1889,7 +1897,7 @@ mod tests {
     // --- Tests for rf_link_light_event_callback ---
 
     #[test]
-    #[mry::lock(mesh_node_init, app_mocker)]
+    #[mry::lock(mesh_node_table_init, app_mocker)]
     fn test_rf_link_light_event_callback_set_mesh_info() {
         // This test verifies LGT_CMD_SET_MESH_INFO event handling
 
@@ -1898,7 +1906,7 @@ mod tests {
         mock_app_mocker().returns(&mut app);
         app.light_manager.mock_device_status_update().returns(());
 
-        mock_mesh_node_init().returns(());
+        mock_mesh_node_table_init().returns(());
 
         // Clear LED event before test
         LED_CONTROLLER.event_pending.set(0);
@@ -1907,7 +1915,7 @@ mod tests {
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO);
 
         // Verify
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
         app.light_manager
             .mock_device_status_update()
             .assert_called(1);
@@ -1918,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(mesh_node_init, app_mocker)]
+    #[mry::lock(mesh_node_table_init, app_mocker)]
     fn test_rf_link_light_event_callback_set_dev_addr() {
         // This test verifies LGT_CMD_SET_DEV_ADDR event handling
 
@@ -1927,7 +1935,7 @@ mod tests {
         mock_app_mocker().returns(&mut app);
         app.light_manager.mock_device_status_update().returns(());
 
-        mock_mesh_node_init().returns(());
+        mock_mesh_node_table_init().returns(());
 
         // Clear LED event before test
         LED_CONTROLLER.event_pending.set(0);
@@ -1936,7 +1944,7 @@ mod tests {
         rf_link_light_event_callback(LGT_CMD_SET_DEV_ADDR);
 
         // Verify
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
         app.light_manager
             .mock_device_status_update()
             .assert_called(1);
@@ -2205,5 +2213,103 @@ mod tests {
         mock_light_user_func().assert_called(1);
         mock_rf_link_slave_proc().assert_called(1);
         mock_proc_led().assert_called(1);
+    }
+
+    /// Regression test verifying the full response path:
+    /// rf_link_response_callback(GET_STATUS) -> rf_link_slave_add_status -> BUFF_RESPONSE
+    /// produces exact unshifted VENDOR_ID at dat[8..10] and CW/WW/Brightness at dat[10..16].
+    ///
+    /// This lives in the application layer because the callback reads the light
+    /// state through `app()`; the SDK test tree may no longer inject an `App`.
+    #[test]
+    #[mry::lock(
+        app_mocker,
+        clock_time,
+        clock_time64,
+        read_reg_tmr_ctrl,
+        write_reg_tmr1_tick,
+        write_reg_tmr_ctrl
+    )]
+    fn test_rf_link_response_callback_to_slave_add_status_layout() {
+        use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
+        use crate::sdk::mcu::register::{
+            mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
+        };
+
+        // Reset only the globals this path reads: the request and response
+        // packets are built locally below.
+        DEVICE_ADDRESS.set(0x001F);
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        DEVICE_STATUS_RECORD_INDEX.set(0);
+        SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
+
+        mock_clock_time().returns(1);
+        mock_clock_time64().returns(100);
+        mock_read_reg_tmr_ctrl().returns(0);
+        mock_write_reg_tmr1_tick(Any).returns(());
+        mock_write_reg_tmr_ctrl(Any).returns(());
+
+        let mut app = App::default();
+        app.light_manager
+            .mock_begin_transition(Any, Any, Any)
+            .calls_real_impl();
+        app.light_manager.mock_transition_step().returns(());
+        app.light_manager.begin_transition(8767, 24000, 16384);
+        mock_app_mocker().returns(&mut app);
+
+        let req = PacketAttValue {
+            sno: [0x01, 0x02, 0x03],
+            src: [0x01, 0x00],
+            dst: [0x1F, 0x00],
+            val: [0; 23],
+        };
+
+        let mut pkt_light_status = Packet {
+            mesh: crate::sdk::packet_types::MeshPkt::default(),
+        };
+        pkt_light_status.att_cmd_mut().value.sno = [0xA2, 0x5F, 0xE3];
+        pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] = GET_STATUS;
+
+        rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &req)
+            .expect("GET_STATUS response callback should succeed");
+        rf_link_slave_add_status(&pkt_light_status);
+
+        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 1);
+        let buf = BUFF_RESPONSE.lock();
+        let dat = &buf[0].att_data().dat;
+
+        assert_eq!(&dat[0..3], &[0xA2, 0x5F, 0xE3], "sno mismatch");
+        assert_eq!(&dat[3..5], &[0x1F, 0x00], "dst/src addr mismatch");
+        assert_eq!(&dat[5..7], &[0x1F, 0x00], "src addr mismatch");
+        assert_eq!(dat[7], LGT_CMD_LIGHT_STATUS | 0xc0, "op mismatch");
+        assert_eq!(
+            &dat[8..10],
+            &VENDOR_ID.to_le_bytes(),
+            "VENDOR_ID must not be shifted"
+        );
+        assert_eq!(
+            &dat[10..12],
+            &8767u16.to_le_bytes(),
+            "CW bytes must align at dat[10..12]"
+        );
+        assert_eq!(
+            &dat[12..14],
+            &24000u16.to_le_bytes(),
+            "WW bytes must align at dat[12..14]"
+        );
+        assert_eq!(
+            &dat[14..16],
+            &16384u16.to_le_bytes(),
+            "Brightness bytes must align at dat[14..16]"
+        );
+        assert_eq!(&dat[16..18], &[0x00, 0x00], "trailing params zero");
+        drop(buf);
+
+        // This test runs (alphabetically) before the SDK suites, which assume an
+        // empty shared status buffer. Leave the pointers where they were.
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        DEVICE_STATUS_RECORD_INDEX.set(0);
     }
 }

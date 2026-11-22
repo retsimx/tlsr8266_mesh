@@ -49,17 +49,17 @@ use crate::sdk::ble_app::queues;
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS};
 use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::common::sync::SimplifyLS;
-use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
-use crate::sdk::packet_types::*;
-use crate::sdk::packet_types::{
-    is_online, MeshNodeStT, MeshNodeStValT, UartMsg, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
-    MESH_STATUS_VALUE_LEN,
-};
 use crate::BIT;
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
+use mesh_protocol::mesh_types::{
+    is_online, MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
+    MESH_STATUS_VALUE_LEN,
+};
+use mesh_protocol::packet_types::*;
+use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
 
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
@@ -1394,13 +1394,13 @@ mod tests {
     // Import mock functions from their original modules
     use super::{mock_mesh_node_adv_status, mock_mesh_node_flush_status};
     use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
-    use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
     use crate::sdk::light::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
     use crate::sdk::mcu::clock::{
         clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
     };
     use crate::sdk::mcu::register::{mock_read_reg_system_tick, read_reg_system_tick};
-    use crate::sdk::packet_types::{MeshNodeStT, MeshNodeStValT, UartMsg, MESH_NODE_ST_PAR_LEN};
+    use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+    use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
 
     /// Mock wall-clock for sweep tests: ~31 s, far beyond one sweep, and
     /// deterministic so `Instant::now()` never depends on prior test state.
@@ -2741,7 +2741,9 @@ mod tests {
     #[mry::lock(read_reg_system_tick, mesh_node_update_status)]
     fn test_status_packet_parsing_integration() {
         use crate::sdk::ble_app::light_ll::packet_processing::rf_link_rc_data;
-        use crate::sdk::packet_types::{Packet, PacketAttValue, PacketAttWrite, PacketL2capHead};
+        use mesh_protocol::packet_types::{
+            Packet, PacketAttValue, PacketAttWrite, PacketL2capHead,
+        };
 
         // Setup mocks
         mock_read_reg_system_tick().returns(0x12345678);

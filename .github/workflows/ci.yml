@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
         working-directory: rust
 
   clippy:
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run clippy
-        run: cargo clippy --lib --target i686-unknown-linux-gnu -- -D warnings
+        run: cargo clippy --workspace --lib --target i686-unknown-linux-gnu -- -D warnings
         working-directory: rust
 
   test:
@@ -49,6 +49,10 @@ jobs:
         with:
           # >=0.8.6 required for Cargo 1.100+ build/<crate>/<hash>/out/ layout
           tool: cargo-llvm-cov@0.9.2
+
+      - name: Test mesh-protocol natively
+        working-directory: rust
+        run: cargo test -p mesh-protocol
 
       - name: Run tests with coverage
         id: coverage

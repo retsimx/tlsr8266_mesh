@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/mesh-protocol"]
+resolver = "2"
+
 [package]
 name = "tlsr8266_mesh"
 version = "0.1.0"
@@ -15,6 +19,7 @@ lto = false
 panic = "abort"
 
 [dependencies]
+mesh-protocol = { path = "crates/mesh-protocol" }
 paste = "1.0"
 embassy-time = { version = "0.5", features = ["tick-hz-32_000_000"] }
 embassy-time-driver = { version = "0.2", features = ["tick-hz-32_000_000"] }

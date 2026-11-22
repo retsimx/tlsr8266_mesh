@@ -37,8 +37,8 @@ use embassy_sync::signal::Signal;
 use heapless::Vec;
 
 use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::drivers::uart::UartData;
-use crate::sdk::packet_types::Packet;
+use mesh_protocol::packet_types::Packet;
+use mesh_protocol::uart::UartData;
 
 /// Raw mutex backing the channels and the wake signal: masks interrupts for the
 /// (short, allocation-free) critical sections inside `embassy-sync`.
@@ -205,10 +205,10 @@ pub fn reset_for_test() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::drivers::uart::UART_DATA_LEN;
+    use mesh_protocol::uart::UART_DATA_LEN;
 
     fn test_packet(src: u16, dst: u16, sno: u8) -> Packet {
-        use crate::sdk::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
+        use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
 
         Packet {
             att_cmd: PacketAttCmd {

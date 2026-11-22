@@ -406,8 +406,8 @@ fn handle_bridge_operations() {
 fn process_mesh_operations() {
     use crate::config::VENDOR_ID;
     use crate::sdk::ble_app::ble_ll_pair::pair_proc;
-    use crate::sdk::packet_types::MESH_NODE_ST_VAL_LEN;
-    use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
+    use mesh_protocol::mesh_types::MESH_NODE_ST_VAL_LEN;
+    use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 
     // Process any pending status read operations
     if SLAVE_READ_STATUS_BUSY.get() != 0 {
@@ -679,7 +679,7 @@ mod tests {
         mock_write_reg_dma_tx_rptr, mock_write_reg_rf_tx_wail_settle_time_lo,
         mock_write_reg_system_tick_irq,
     };
-    use crate::sdk::packet_types::{Packet, PacketAttData};
+    use mesh_protocol::packet_types::{Packet, PacketAttData};
 
     // Import mock for functions in the same module
     use super::mock_cleanup_ble_disconnection;

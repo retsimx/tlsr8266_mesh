@@ -18,7 +18,7 @@ use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::sdk::packet_types::{
+use mesh_protocol::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
     PacketL2capHead, PacketVersionInd,
 };
@@ -1313,8 +1313,8 @@ mod tests {
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
     };
     use crate::sdk::mcu::register::mock_read_reg_system_tick;
-    use crate::sdk::packet_types::{PacketAttData, PacketL2capData};
     use core::ptr::null_mut;
+    use mesh_protocol::packet_types::{PacketAttData, PacketL2capData};
 
     // Helper function to create UUID16 as a byte slice
     fn uuid16_to_bytes(uuid: u16) -> [u8; 2] {

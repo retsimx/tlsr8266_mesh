@@ -1,5 +1,9 @@
+//! CRC-16-MODBUS (polynomial `0xA001`, initial value `0xFFFF`).
+//!
+//! This is the checksum used by the UART frame format (`uart::compute_crc`) and
+//! by the host tooling, so the table and the loop shape are a wire contract.
+
 // Generate optimized CRC-16 lookup table for MODBUS with polynomial 0xA001
-#[coverage(off)]
 const fn generate_crc16_table() -> [u16; 256] {
     let mut table = [0u16; 256];
     let mut i = 0;
@@ -47,19 +51,17 @@ const CRC16_TABLE: [u16; 256] = generate_crc16_table();
 ///
 /// Approximately 40-50% faster than the previous dual-table implementation
 /// on ARM Thumb processors due to reduced memory accesses and loop unrolling.
-#[cfg_attr(test, mry::mry)]
 #[inline]
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xffff;
 
     // Process 8 bytes at a time for maximum performance
-    let chunks = data.chunks_exact(8);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = data.as_chunks::<8>();
 
     // Unrolled loop for 8-byte chunks - reduces loop overhead by 87.5%
     for chunk in chunks {
         // Manual unrolling of 8 iterations
-        // SAFETY: (5) check-free access on the UART-IRQ path. `chunks_exact(8)` yields
+        // SAFETY: (5) check-free access on the UART-IRQ path. `as_chunks::<8>()` yields
         // chunks of exactly 8 bytes, so `add(0..=7)` never leaves the chunk; a checked
         // `chunk[i]` can emit `panic_bounds_check`, which the stack gate counts on the
         // IRQ path (`handle_rx`), so it must stay unchecked.
@@ -68,7 +70,7 @@ pub fn crc16(data: &[u8]) -> u16 {
             let chunk_ptr = chunk.as_ptr();
 
             // Byte 0
-            let idx = ((crc ^ (*chunk_ptr.add(0) as u16)) & 0xff) as usize;
+            let idx = ((crc ^ (*chunk_ptr as u16)) & 0xff) as usize;
             crc = (crc >> 8) ^ CRC16_TABLE[idx];
 
             // Byte 1
@@ -111,9 +113,8 @@ pub fn crc16(data: &[u8]) -> u16 {
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
-    use crate::sdk::common::crc::crc16;
+    use super::*;
 
     #[test]
     fn test_basic_crc16() {

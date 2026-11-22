@@ -7,7 +7,5 @@ pub mod drivers;
 pub mod factory_reset;
 pub mod light;
 pub mod mcu;
-pub mod packet_types;
 pub mod pm;
 pub mod rf_drv;
-pub mod service;

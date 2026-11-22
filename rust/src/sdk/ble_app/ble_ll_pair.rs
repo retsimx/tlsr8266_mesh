@@ -16,7 +16,12 @@ use crate::sdk::mcu::crypto::{
     encode_password,
 };
 use crate::sdk::mcu::register::read_reg_system_tick;
-use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
+use mesh_protocol::mesh_types::{
+    PairState, PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK,
+    PAIR_OP_RESET_MESH, PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
+    PAIR_OP_VERIFY_CREDENTIALS,
+};
+use mesh_protocol::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
 
 //------------------------------------------------------------------------------
 // BLE Pairing and Security Module
@@ -149,44 +154,6 @@ static PAIR_READ_PENDING: AtomicBool = AtomicBool::new(false);
 /// When true, all mesh packets are encrypted before transmission.
 pub(crate) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
 
-/// Represents the current state of the BLE pairing process
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum PairState {
-    Idle = 0x00,                  // Initial/idle state
-    AwaitingRandom = 0x02,        // Waiting for random challenge
-    ReceivingMeshName = 0x05,     // Receiving mesh name
-    ReceivingMeshPassword = 0x06, // Receiving mesh password
-    ReceivingMeshLtk = 0x07,      // Receiving long-term key
-    RequestingLtk = 0x09,         // Requesting LTK
-    ResetMesh = 0x0A,             // Reset mesh configuration
-    DeletePairing = 0x0B,         // Deleting pairing
-    RandomConfirmation = 0x0C,    // Random value confirmation
-    SessionKeyExchange = 0x0D,    // Session key exchange
-    Init = 0x0E,                  // Initialization state
-    Completed = 0x0F,             // Pairing process completed
-}
-
-impl From<u8> for PairState {
-    fn from(value: u8) -> Self {
-        match value {
-            0x00 => Self::Idle,
-            0x02 => Self::AwaitingRandom,
-            0x05 => Self::ReceivingMeshName,
-            0x06 => Self::ReceivingMeshPassword,
-            0x07 => Self::ReceivingMeshLtk,
-            0x09 => Self::RequestingLtk,
-            0x0A => Self::ResetMesh,
-            0x0B => Self::DeletePairing,
-            0x0C => Self::RandomConfirmation,
-            0x0D => Self::SessionKeyExchange,
-            0x0E => Self::Init,
-            0x0F => Self::Completed,
-            _ => Self::Idle, // Default to Idle for unrecognized states
-        }
-    }
-}
-
 // Replace the raw atomic with an atomic PairState wrapper
 pub(crate) struct AtomicPairState(AtomicU8);
 
@@ -203,16 +170,6 @@ impl AtomicPairState {
         self.0.store(value as u8, Ordering::Relaxed)
     }
 }
-
-// Pairing Opcodes - Used in pair_write to identify the command type
-pub(crate) const PAIR_OP_EXCHANGE_RANDOM: u8 = 0x01; // Exchange random challenge
-pub(crate) const PAIR_OP_SET_MESH_NAME: u8 = 0x04; // Set mesh network name
-pub(crate) const PAIR_OP_SET_MESH_PASSWORD: u8 = 0x05; // Set mesh network password
-pub(crate) const PAIR_OP_SET_MESH_LTK: u8 = 0x06; // Set long-term key
-pub(crate) const PAIR_OP_GET_MESH_LTK: u8 = 0x08; // Request long-term key
-pub(crate) const PAIR_OP_RESET_MESH: u8 = 0x0A; // Reset mesh configuration
-pub(crate) const PAIR_OP_VERIFY_CREDENTIALS: u8 = 0x0C; // Verify credentials
-pub(crate) const PAIR_OP_DELETE_PAIRING: u8 = 0x0E; // Delete pairing information
 
 // Packet field constants
 const ATT_READ_RESPONSE_OPCODE: u8 = 0x0B; // ATT Read Response opcode
@@ -1249,11 +1206,11 @@ mod tests {
         mock_aes_att_encryption_packet, mock_encode_password,
     }; // Added mock_aes_att_decryption
     use crate::sdk::mcu::register::mock_read_reg_system_tick;
-    use crate::sdk::packet_types::{
-        MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
-    }; // Added PacketAttReadRsp
     use crate::sdk::rf_drv::{emit_light_event, mock_emit_light_event}; // Added mock for callback
     use core::mem::size_of;
+    use mesh_protocol::packet_types::{
+        MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
+    }; // Added PacketAttReadRsp
     use mry::send_wrapper::SendWrapper;
     use mry::{self, Any}; // Added mock for delete pair
 

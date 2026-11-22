@@ -176,8 +176,6 @@ pub const LIGHT_RX_BUFF_COUNT: usize = 8;
 pub const BUFF_RESPONSE_PACKET_COUNT: usize = 16;
 pub const BLT_FIFO_TX_PACKET_COUNT: usize = 12;
 
-pub const PKT_CMD_LEN: usize = 11;
-
 pub enum LightOpType {
     OpType1 = 1,
     OpType2 = 2,
@@ -207,29 +205,6 @@ pub enum OtaState {
 pub enum RecoverStatus {
     LightOff = BIT!(0),
     MeshOtaMaster100 = BIT!(1),
-}
-
-#[derive(Clone, Copy)]
-#[repr(C, packed)]
-pub struct AdvPrivate {
-    pub manufacture_id: u16,
-    // must vendor id to follow spec
-    pub mesh_product_uuid: u16,
-    pub mac_address: u32, // low 4 byte
-}
-
-#[derive(Clone, Copy, Default)]
-#[repr(C, packed)]
-pub struct AdvRspPrivate {
-    pub manufacture_id: u16, // 0
-    // must vendor id to follow spec
-    pub mesh_product_uuid: u16, // 2
-    pub mac_address: u32,       // 4
-    // low 4 byte
-    pub product_uuid: u16,   // 8
-    pub status: u8,          // 10
-    pub device_address: u16, // 11
-    pub rsv: [u8; 16],       // 13
 }
 
 #[derive(Clone, Copy)]
@@ -432,6 +407,7 @@ pub enum RfOperationState {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use mesh_protocol::packet_types::AdvRspPrivate;
 
     /// Tests BlePeripheralLinkState enum conversion methods.
     ///
@@ -781,7 +757,6 @@ mod tests {
         assert_eq!(LIGHT_RX_BUFF_COUNT, 8);
         assert_eq!(BUFF_RESPONSE_PACKET_COUNT, 16);
         assert_eq!(BLT_FIFO_TX_PACKET_COUNT, 12);
-        assert_eq!(PKT_CMD_LEN, 11);
 
         // Bridge constants
         assert_eq!(BRIDGE_MAX_CNT, 8);

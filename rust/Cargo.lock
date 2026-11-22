@@ -505,6 +505,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
+name = "mesh-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "mry"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -780,6 +787,7 @@ dependencies = [
  "fixed",
  "futures",
  "heapless",
+ "mesh-protocol",
  "mry",
  "num-derive",
  "num-traits",

@@ -14,13 +14,7 @@ use crate::sdk::mcu::register::{
 };
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::BIT;
-
-/// Maximum length of data that can be stored in a UART data buffer.
-///
-/// This value must be carefully chosen to balance memory usage against
-/// maximum message size requirements. The TLSR8266 has limited memory,
-/// so we keep this reasonably small.
-pub const UART_DATA_LEN: usize = 44; // data max 252
+use mesh_protocol::uart::{UartData, UART_DATA_LEN};
 
 /// UART interrupt mask flags for controlling the UART interrupt sources.
 ///
@@ -71,20 +65,6 @@ impl HardwareControl {
     pub const fn value(&self) -> u8 {
         *self as u8
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-///
-/// This struct must be a multiple of 16 bytes in size to ensure proper
-/// DMA alignment for efficient data transfer.
-pub struct UartData {
-    /// Length of valid data in the buffer (in bytes).
-    /// Although the field is 32 bits, the maximum length is limited by UART_DATA_LEN.
-    pub len: u32,
-    /// Buffer containing the actual UART data.
-    /// The maximum usable size is defined by UART_DATA_LEN.
-    pub data: [u8; UART_DATA_LEN],
 }
 
 /// Driver for UART communication on the TLSR8266.

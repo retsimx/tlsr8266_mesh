@@ -3,8 +3,8 @@ use core::ptr::addr_of;
 use core::slice;
 
 use crate::sdk::ble_app::rf_drv_8266::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
-use crate::sdk::light::AdvPrivate;
 use crate::sdk::rf_drv::set_advertisement_manufacturer_data;
+use mesh_protocol::packet_types::AdvPrivate;
 
 /// Configures and sets the advertisement data for the BLE mesh light device.
 ///
@@ -83,9 +83,9 @@ pub fn vendor_set_adv_data() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::light::AdvRspPrivate;
     use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;
     use core::cell::RefCell;
+    use mesh_protocol::packet_types::AdvRspPrivate;
     use mry::Any;
 
     // Thread-local storage for test data

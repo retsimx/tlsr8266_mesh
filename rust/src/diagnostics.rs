@@ -524,12 +524,13 @@ mod tests {
     use crate::sdk::drivers::flash::{
         flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
-    use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
-    use crate::uart_manager::{mock_send_message, reset_for_test, send_message, UartMsg};
+    use crate::uart_manager::{mock_send_message, reset_for_test, send_message};
+    use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use mry::{send_wrapper::SendWrapper, Any};
 
-    /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in `logging.rs`).
+    /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in
+    /// `mesh_protocol::uart`).
     const PAYLOAD_CHUNK: usize = 39;
 
     fn expected_print(bytes: &[u8]) -> UartData {

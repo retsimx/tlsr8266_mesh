@@ -84,7 +84,7 @@ struct AdvFieldLocation {
 }
 
 /// Helper function to check if advertisement data is empty
-fn is_adv_data_empty(pkt: &crate::sdk::packet_types::Packet) -> bool {
+fn is_adv_data_empty(pkt: &mesh_protocol::packet_types::Packet) -> bool {
     pkt.head().rf_len as i8 - (BLE_HEADER_LEN as i8) < 1
 }
 
@@ -110,7 +110,7 @@ fn adv_fields_iter(data: &[u8], max_len: usize) -> impl Iterator<Item = (usize, 
 
 /// Helper function to find or allocate space for an advertisement field type
 fn find_or_allocate_adv_field(
-    pkt: &mut crate::sdk::packet_types::Packet,
+    pkt: &mut mesh_protocol::packet_types::Packet,
     field_type: u8,
 ) -> AdvFieldLocation {
     if is_adv_data_empty(pkt) {
@@ -148,7 +148,7 @@ fn find_or_allocate_adv_field(
 }
 
 /// Helper function to update packet length fields
-fn update_packet_lengths(pkt: &mut crate::sdk::packet_types::Packet, total_data_len: usize) {
+fn update_packet_lengths(pkt: &mut mesh_protocol::packet_types::Packet, total_data_len: usize) {
     pkt.head_mut().rf_len = (total_data_len + BLE_HEADER_LEN as usize) as u8;
     pkt.head_mut().dma_len = (total_data_len + DMA_HEADER_EXTRA as usize) as u32;
 }
@@ -252,7 +252,7 @@ fn is_group_address(address: u16) -> bool {
 /// Helper function to compact advertisement data by removing invalid manufacturer data
 /// Returns the new end position for the compacted data
 fn compact_adv_data_removing_invalid_manufacturer(
-    pkt: &mut crate::sdk::packet_types::Packet,
+    pkt: &mut mesh_protocol::packet_types::Packet,
 ) -> usize {
     if is_adv_data_empty(pkt) {
         return 0;

@@ -735,6 +735,8 @@ def _cargo_build(manifest_path: Path, features: Sequence[str]) -> list[Path]:
     cmd = [
         "cargo",
         "build",
+        "--package",
+        "tlsr8266_mesh",
         "--lib",
         "--release",
         "-Z",

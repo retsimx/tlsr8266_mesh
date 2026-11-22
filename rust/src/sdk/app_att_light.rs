@@ -10,12 +10,12 @@ use crate::sdk::ble_app::light_ll::mesh_management::{
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
 use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
-use crate::sdk::packet_types::{Packet, PacketAttValue};
-use crate::sdk::service::{
+use crate::version::BUILD_VERSION;
+use mesh_protocol::packet_types::{Packet, PacketAttValue};
+use mesh_protocol::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
-use crate::version::BUILD_VERSION;
 
 /// OTA GATT write handler, registered once from `App::init()` so this module
 /// never imports the application's OTA manager.
@@ -530,7 +530,7 @@ mod tests {
     use crate::sdk::ble_app::light_ll::mesh_management::{
         mock_mesh_report_status_enable, mock_mesh_report_status_enable_mask,
     };
-    use crate::sdk::packet_types::PacketL2capHead;
+    use mesh_protocol::packet_types::PacketL2capHead;
 
     #[test]
     #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]

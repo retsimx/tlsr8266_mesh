@@ -23,14 +23,11 @@ use core::cmp::min;
 use core::fmt::{self, Write};
 use core::slice;
 
-use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
-use crate::uart_manager::{send_message, send_sync_panic, UartMsg};
+use mesh_protocol::uart::{
+    UartData, UartMsg, UART_DATA_LEN, UART_PAYLOAD_MAX_SIZE, UART_PAYLOAD_OFFSET,
+};
 
-// UART packet structure constants
-// Packet layout: [counter(1)][cmd_type(1)][cmd_code(1)][payload(39)][crc(2)] = 44 bytes total
-pub(crate) const UART_PAYLOAD_OFFSET: usize = 3; // Payload starts at index 3
-pub(crate) const UART_CRC_OFFSET: usize = 42; // CRC starts at index 42
-const UART_PAYLOAD_MAX_SIZE: usize = UART_CRC_OFFSET - UART_PAYLOAD_OFFSET; // 39 bytes
+use crate::uart_manager::{send_message, send_sync_panic};
 
 // Define a function to get a new UartStream rather than using a static mutable
 #[inline]

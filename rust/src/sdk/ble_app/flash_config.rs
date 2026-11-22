@@ -32,8 +32,8 @@ use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
-use crate::sdk::packet_types::Packet;
 use crate::sdk::rf_drv::{set_advertisement_manufacturer_data, set_advertisement_mesh_name};
+use mesh_protocol::packet_types::{AdvPrivate, Packet};
 
 /// Number of connection parameter sets to attempt during negotiation.
 ///
@@ -986,10 +986,10 @@ mod tests {
         decode_password, encode_password, mock_aes_att_encryption, mock_decode_password,
         mock_encode_password,
     };
-    use crate::sdk::packet_types::Packet;
     use crate::sdk::rf_drv::{
         mock_set_advertisement_manufacturer_data, mock_set_advertisement_mesh_name,
     };
+    use mesh_protocol::packet_types::Packet;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 

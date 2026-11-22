@@ -31,7 +31,7 @@ use crate::sdk::light::{
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
-use crate::sdk::packet_types::{is_online, MESH_NODE_ST_VAL_LEN};
+use mesh_protocol::mesh_types::{is_online, MESH_NODE_ST_VAL_LEN};
 
 #[cfg_attr(test, mry::mry)]
 /// Reports mesh node status information for transmission to the BLE master.
@@ -226,7 +226,7 @@ mod tests {
         ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
     };
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use crate::sdk::packet_types::{
+    use mesh_protocol::mesh_types::{
         MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
     };
     use mry::Any;

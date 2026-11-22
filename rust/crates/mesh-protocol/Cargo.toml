@@ -1,0 +1,7 @@
+[package]
+name = "mesh-protocol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = "1.22"

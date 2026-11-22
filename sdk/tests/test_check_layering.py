@@ -26,6 +26,7 @@ import check_layering  # noqa: E402  (sys.path set up above)
 
 SDK_ROOT = REPO_ROOT / "rust" / "src" / "sdk"
 SRC_ROOT = REPO_ROOT / "rust" / "src"
+CRATE_ROOT = REPO_ROOT / "rust" / "crates" / "mesh-protocol" / "src"
 
 
 def _write(path: Path, content: str) -> Path:
@@ -80,6 +81,11 @@ class TestRealSdkTree(unittest.TestCase):
             Path(check_layering.DEFAULT_SRC_ROOT).resolve(), SRC_ROOT.resolve()
         )
 
+    def test_default_crate_root_is_the_workspace_crate(self) -> None:
+        self.assertEqual(
+            Path(check_layering.DEFAULT_CRATE_ROOT).resolve(), CRATE_ROOT.resolve()
+        )
+
     def test_real_sdk_tree_is_clean(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -88,13 +94,25 @@ class TestRealSdkTree(unittest.TestCase):
         self.assertIn("0 violations", out.getvalue())
         self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 40)
 
-    def test_real_tree_reports_both_passes(self) -> None:
+    def test_real_tree_reports_every_pass(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main([])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIn("sdk layering OK", out.getvalue())
         self.assertIn("rust src audit OK", out.getvalue())
+        self.assertIn("mesh-protocol audit OK", out.getvalue())
+        # Both universal roots are named in the summary.
+        self.assertIn(str(Path("rust", "src")), out.getvalue())
+        self.assertIn(str(Path("rust", "crates", "mesh-protocol", "src")), out.getvalue())
+
+    def test_real_crate_tree_is_clean(self) -> None:
+        paths = check_layering.rust_files(str(CRATE_ROOT))
+        self.assertGreaterEqual(len(paths), 5)
+        violations, _total = check_layering.audit_universal(
+            paths, str(CRATE_ROOT), enforce_budget=False
+        )
+        self.assertEqual(violations, [])
 
     def test_production_unsafe_ceiling_equals_the_measured_count(self) -> None:
         # The ratchet may be lowered, never raised: raising it without removing
@@ -108,11 +126,12 @@ class TestRealSdkTree(unittest.TestCase):
 
 
 class _TempSrcTree(unittest.TestCase):
-    """A disposable ``rust/src`` plus a disposable SDK root for one test.
+    """A disposable ``rust/src``, SDK root and mesh-protocol root per test.
 
-    The gate runs both passes here: ``--root`` keeps the layering pass on the
-    fake SDK tree and ``--src-root`` points the universal pass at the fake
-    source tree, so the real ``rust/src`` is never read.
+    The gate runs every pass here: ``--root`` keeps the layering pass on the
+    fake SDK tree, ``--src-root`` points the firmware universal pass at the fake
+    source tree and ``--crate-root`` at a fake workspace-crate tree, so no real
+    tree is ever read.
     """
 
     def setUp(self) -> None:
@@ -121,11 +140,17 @@ class _TempSrcTree(unittest.TestCase):
         self.src_root = Path(tmp.name) / "src"
         self.root = self.src_root / "sdk"
         self.root.mkdir(parents=True)
+        self.crate_root = Path(tmp.name) / "mesh-protocol" / "src"
+        self.crate_root.mkdir(parents=True)
         _write(self.root / "clean.rs", _lines("pub fn f() {}"))
         _write(self.src_root / "clean.rs", _lines("pub fn f() {}"))
+        _write(self.crate_root / "lib.rs", _lines("pub fn f() {}"))
 
     def write_src(self, relative: str, content: str) -> Path:
         return _write(self.src_root / relative, content)
+
+    def write_crate(self, relative: str, content: str) -> Path:
+        return _write(self.crate_root / relative, content)
 
     def write(self, relative: str, content: str) -> Path:
         return _write(self.root / relative, content)
@@ -134,7 +159,14 @@ class _TempSrcTree(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main(
-                ["--root", str(self.root), "--src-root", str(self.src_root)]
+                [
+                    "--root",
+                    str(self.root),
+                    "--src-root",
+                    str(self.src_root),
+                    "--crate-root",
+                    str(self.crate_root),
+                ]
             )
         return code, out.getvalue(), err.getvalue()
 
@@ -142,6 +174,7 @@ class _TempSrcTree(unittest.TestCase):
         code, out, err = self.run_gate()
         self.assertEqual(code, 0, out + err)
         self.assertIn("rust src audit OK", out)
+        self.assertIn("mesh-protocol audit OK", out)
 
     def assert_violations(self, *expected: str) -> str:
         code, out, err = self.run_gate()
@@ -302,6 +335,42 @@ class TestLayerRules(_TempTree):
             ),
         )
         self.assert_violations("1: layer-common: crate::sdk::mcu::register::read_reg8")
+
+
+class TestMeshProtocolExternalCrate(_TempTree):
+    """`mesh_protocol` is a pure workspace crate, legal in every SDK layer."""
+
+    def test_mesh_protocol_imports_are_legal_in_every_layer(self) -> None:
+        self.write("common/crc_user.rs", _lines("use mesh_protocol::crc::crc16;"))
+        self.write(
+            "mcu/mesh_user.rs", _lines("use mesh_protocol::packet_types::Packet;")
+        )
+        self.write(
+            "drivers/uart_user.rs",
+            _lines("use mesh_protocol::uart::{UartData, UART_DATA_LEN};"),
+        )
+        self.assert_clean()
+
+    def test_mesh_protocol_multiline_grouped_import_is_legal(self) -> None:
+        self.write(
+            "drivers/uart_user.rs",
+            _lines(
+                "use mesh_protocol::{",
+                "    packet_types::{Packet, PacketL2capHead},",
+                "    uart::UartData,",
+                "};",
+            ),
+        )
+        self.assert_clean()
+
+    def test_another_external_crate_is_still_rejected_in_drivers(self) -> None:
+        # The allowance names one crate; it does not open the whole namespace.
+        self.write("drivers/x.rs", _lines("use serde::Serialize;"))
+        self.assert_violations("1: layer-drivers: external crate `serde`")
+
+    def test_mesh_protocol_does_not_unlock_app_layer_paths(self) -> None:
+        self.write("drivers/x.rs", _lines("use crate::app::App;"))
+        self.assert_violations("upward-dep: crate::app")
 
 
 class TestTestCodeStripping(_TempTree):
@@ -963,6 +1032,70 @@ class TestUnsafeBudgetRule(_TempSrcTree):
         self.assertNotIn("undocumented-unsafe", out)
 
 
+class TestMeshProtocolCrateUniversalRules(_TempSrcTree):
+    """The workspace crate is audited like the firmware for `unsafe` invariants."""
+
+    def test_static_mut_inside_the_crate_tree_fails(self) -> None:
+        path = self.write_crate(
+            "packet_types.rs", _lines("pub static mut SCRATCH: u8 = 0;")
+        )
+        out = self.assert_violations("1: static-mut: static mut SCRATCH")
+        self.assertEqual(out.splitlines()[0], f"{path}:1: static-mut: static mut SCRATCH")
+
+    def test_undocumented_unsafe_inside_the_crate_tree_fails(self) -> None:
+        # The shipped `Packet`-union view shape, with the SAFETY comment lost.
+        self.write_crate(
+            "packet_types.rs",
+            _lines(
+                "impl Packet {",
+                "    pub fn head(&self) -> &[u8; 10] {",
+                "        unsafe { &self.head }",
+                "    }",
+                "}",
+            ),
+        )
+        self.assert_violations("3: undocumented-unsafe")
+
+    def test_audited_unsafe_impl_inside_the_crate_tree_passes(self) -> None:
+        # The real crate ships documented `Pod`/`Zeroable` impls; they must pass.
+        self.write_crate(
+            "mesh_types.rs",
+            _lines(
+                "// SAFETY: (4) audited packed-wire view: all-zero bytes are valid.",
+                "unsafe impl Zeroable for MeshNodeStValT {}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_crate_unsafe_is_not_charged_to_the_firmware_budget(self) -> None:
+        # The ratchet is measured over rust/src only: a crate tree carrying more
+        # unsafe sites than the whole firmware ceiling must still pass.
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
+        self.write_crate(
+            "crc.rs",
+            _lines(
+                *(
+                    f"// SAFETY: generated probe {index}.\nunsafe fn probe_{index}() {{}}"
+                    for index in range(ceiling + 1)
+                )
+            ),
+        )
+        self.assert_clean()
+
+    def test_crate_failure_is_labelled_with_its_own_root(self) -> None:
+        self.write_crate("uart.rs", _lines("pub static mut SCRATCH: u8 = 0;"))
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("mesh-protocol audit FAILED: 1 violation(s)", err)
+        self.assertNotIn("rust src audit FAILED", err)
+
+    def test_clean_run_reports_both_universal_roots(self) -> None:
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"under {self.src_root}", out)
+        self.assertIn(f"under {self.crate_root}", out)
+
+
 class TestUniversalPassCli(_TempSrcTree):
     """Each pass reports independently; either failure exits 1."""
 
@@ -984,12 +1117,12 @@ class TestUniversalPassCli(_TempSrcTree):
         self.assertNotIn("static-mut", out)
         self.assertNotIn("undocumented-unsafe", out)
 
-    def test_both_passes_clean_prints_two_summaries(self) -> None:
+    def test_all_passes_clean_prints_three_summaries(self) -> None:
         code, out, err = self.run_gate()
         self.assertEqual(code, 0, out + err)
         self.assertEqual(
             [line.split(":")[0] for line in out.splitlines()],
-            ["sdk layering OK", "rust src audit OK"],
+            ["sdk layering OK", "rust src audit OK", "mesh-protocol audit OK"],
         )
 
 

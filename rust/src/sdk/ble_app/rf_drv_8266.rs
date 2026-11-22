@@ -23,7 +23,6 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsiz
 use crate::config::{
     FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG, VENDOR_ID,
 };
-use crate::const_assert;
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
 use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response};
 use crate::sdk::ble_app::flash_config::{
@@ -47,10 +46,18 @@ use crate::sdk::ble_app::light_ll::status_management::{
     SLAVE_STATUS_RECORD,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::common::crc::crc16;
 use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
-use crate::sdk::light::*;
+use crate::sdk::light::{
+    LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
+    GET_GROUP2, GET_GROUP3, GET_STATUS, GET_USER_NOTIFY, LGT_CMD_CONFIG_DEV_ADDR,
+    LGT_CMD_DEV_ADDR_RSP, LGT_CMD_END_OTA_REQ, LGT_CMD_END_OTA_RSP, LGT_CMD_LIGHT_CONFIG_GRP,
+    LGT_CMD_LIGHT_GRP_REQ, LGT_CMD_LIGHT_GRP_RSP1, LGT_CMD_LIGHT_GRP_RSP2, LGT_CMD_LIGHT_GRP_RSP3,
+    LGT_CMD_LIGHT_ONOFF, LGT_CMD_LIGHT_READ_STATUS, LGT_CMD_LIGHT_STATUS, LGT_CMD_OTA_DATA_REQ,
+    LGT_CMD_OTA_DATA_RSP, LGT_CMD_USER_NOTIFY_REQ, LGT_CMD_USER_NOTIFY_RSP, LIGHT_RX_BUFF_COUNT,
+    MAX_GROUP_COUNT, PKT_VAL_MAC_APP_HOP_COUNT, PKT_VAL_MAC_APP_LINK_INTERVAL,
+    PKT_VAL_MAC_APP_RESPONSE_TYPE, PKT_VAL_MAC_APP_TTC,
+};
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
@@ -71,13 +78,15 @@ use crate::sdk::mcu::register::{
 use crate::sdk::mcu::register::{
     rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode,
 };
-use crate::sdk::packet_types::{
-    Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp, PacketAttValue, PacketCtrlUnknown,
-    PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
-};
 use crate::sdk::pm::light_sw_reboot;
 use crate::version::BUILD_VERSION;
 use crate::BIT;
+use mesh_protocol::const_assert;
+use mesh_protocol::crc::crc16;
+use mesh_protocol::packet_types::{
+    AdvPrivate, AdvRspPrivate, Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp,
+    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+};
 
 const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
@@ -1343,9 +1352,9 @@ mod tests {
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::mcu::random::mock_rand;
     use crate::sdk::mcu::register::*;
-    use crate::sdk::packet_types::Packet;
-    use crate::sdk::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use crate::sdk::pm::mock_light_sw_reboot;
+    use mesh_protocol::packet_types::Packet;
+    use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 

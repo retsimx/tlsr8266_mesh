@@ -18,7 +18,7 @@ The firmware builds entirely with LLVM: a forked ARM backend lowers whole-progra
 
 `sdk/build_firmware.py` (invoked by `make`) orchestrates the whole-module LLVM IR pipeline:
 
-1. **Generate per-crate LLVM IR**: Cargo builds `rust/Cargo.toml` (`--lib --release -Z build-std=core --target thumbv6m-none-eabi --message-format=json`) with `RUSTFLAGS="--emit=llvm-ir"`, emitting `.ll` IR files for `core`, dependencies, and `tlsr8266_mesh`. `sdk/build_firmware.py` maps Cargo's JSON `compiler-artifact` records to their exact `.ll` modules.
+1. **Generate per-crate LLVM IR**: Cargo builds `rust/Cargo.toml` (a two-crate workspace, `cargo build --package tlsr8266_mesh --lib --release -Z build-std=core --target thumbv6m-none-eabi --message-format=json`) with `RUSTFLAGS="--emit=llvm-ir"`, emitting `.ll` IR files for `core`, dependencies, and the two workspace crates `tlsr8266_mesh` and `mesh_protocol`. `sdk/build_firmware.py` maps Cargo's JSON `compiler-artifact` records to their exact `.ll` modules and links both first-party modules.
 
 2. **Link and optimize whole-program IR**: `llvm-link` merges all selected `.ll` modules into a single bitcode module (`merged.bc`), and `opt` runs the project optimization pipeline (`OPT_PASSES`, inline threshold `50`) to produce `merged_opt.bc`.
 
@@ -77,6 +77,14 @@ To run the test suite, an x86 compatible machine is needed, and there is a helpe
 ```bash
 ./rust/run_tests.sh
 ```
+
+The `mesh-protocol` workspace crate is pure `no_std` protocol code, so it also runs natively on the host without the 32-bit target or register mocks:
+
+```bash
+cd rust && cargo test -p mesh-protocol
+```
+
+`./run_tests.sh` already covers it via `--workspace`, so both suites run in CI. The 32-bit cross-compiled suite exercises the firmware crate and its `mry`-mocked hardware paths; the native crate suite exercises the wire types, CRC, UART framing and GATT constants.
 
 > **Coverage tool version:** `nightly-2026-11-20` (Cargo 1.100+ target layout) requires `cargo-llvm-cov >= 0.8.6`. If an older version is already installed locally, upgrade it with `cargo install cargo-llvm-cov --force`.
 

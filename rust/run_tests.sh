@@ -10,12 +10,14 @@ fi
 if [ "${CI:-}" = "true" ]; then
     # CI mode: same as local but without --show-missing-lines
     RUST_BACKTRACE=1 cargo llvm-cov \
+        --workspace \
         --branch \
         --target i686-unknown-linux-gnu \
         -- --test-threads=1 "$@"
 else
     # Local mode: human-readable with missing lines
     RUST_BACKTRACE=1 cargo llvm-cov \
+        --workspace \
         --branch \
         --show-missing-lines \
         --target i686-unknown-linux-gnu \

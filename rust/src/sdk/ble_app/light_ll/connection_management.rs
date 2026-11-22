@@ -61,7 +61,7 @@ use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
-use crate::sdk::packet_types::*;
+use mesh_protocol::packet_types::*;
 
 /// Response buffer for storing packets that need to be sent back to the BLE host.
 /// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
@@ -828,7 +828,7 @@ mod tests {
         mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
         mock_write_reg_irq_src, mock_write_reg_rf_crc, mock_write_reg_system_tick_irq,
     };
-    use crate::sdk::packet_types::{Packet, PacketLlInit};
+    use mesh_protocol::packet_types::{Packet, PacketLlInit};
 
     /// Helper function to create a test packet with default valid parameters
     fn create_test_packet() -> Packet {

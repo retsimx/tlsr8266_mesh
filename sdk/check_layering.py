@@ -21,7 +21,17 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 * ``sdk/mcu/`` additionally may import ``crate::sdk::mcu``;
 * ``sdk/drivers/`` additionally may import ``crate::sdk::drivers``.
 
-**Pass 2 — universal rules** over ``--src-root`` (default ``rust/src``).
+``mesh_protocol`` (the pure workspace crate in ``rust/crates/mesh-protocol/``)
+is an *external* crate to every SDK layer: it is a sibling workspace member
+with no firmware dependencies, so importing it is never an inversion.  It is
+listed in ``LAYER_EXTERNAL_CRATES`` next to ``core`` and ``critical_section``.
+
+**Pass 2 — universal rules** over two roots: ``--src-root`` (default
+``rust/src``, the firmware) and ``--crate-root`` (default
+``rust/crates/mesh-protocol/src``).  Both are audited for zero production
+``static mut`` and full ``// SAFETY:`` coverage; the ``unsafe`` budget ratchet
+below is measured over the firmware root alone, so adding crate ``unsafe``
+sites can neither hide behind nor widen the firmware ceiling.
 
 Four permanent rules, one per line of defence won by R-9 (#45):
 
@@ -50,14 +60,17 @@ Four permanent rules, one per line of defence won by R-9 (#45):
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
 running this exact rule on the finished tree, not by hand-counting tokens.
+It is applied to ``--src-root`` only: the ``mesh-protocol`` crate is audited
+for rule violations but is not budgeted.
 
 Usage::
 
     python3 sdk/check_layering.py [--root rust/src/sdk] [--src-root rust/src]
+                                  [--crate-root rust/crates/mesh-protocol/src]
 
-Passing ``--root`` explicitly without ``--src-root`` runs only the layering
-pass; that is what keeps the temp-tree unit tests hermetic.  The no-argument
-form (CI) runs both passes.
+Passing ``--root`` explicitly without ``--src-root`` or ``--crate-root`` runs
+only the layering pass; that is what keeps the temp-tree unit tests hermetic.
+The no-argument form (CI) runs every pass.
 
 Exit codes: ``0`` clean, ``1`` one or more violations in either pass, ``2``
 usage/IO error.  Violations are printed one per line as
@@ -84,6 +97,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_ROOT = os.path.join(REPO_ROOT, "rust", "src", "sdk")
 DEFAULT_SRC_ROOT = os.path.join(REPO_ROOT, "rust", "src")
+DEFAULT_CRATE_ROOT = os.path.join(REPO_ROOT, "rust", "crates", "mesh-protocol", "src")
 
 # One-way ratchet: lower this when `unsafe` sites disappear, never raise it.
 # Measured by running the `unsafe-budget` rule on the finished R-9 tree, so the
@@ -96,7 +110,12 @@ DEFAULT_SRC_ROOT = os.path.join(REPO_ROOT, "rust", "src")
 # 132 is the count *with* `#[cfg(test)]` on a struct field stripped correctly;
 # the earlier 131 came from the stripper running past that field and masking the
 # production `unsafe impl Send` in `sdk/common/sync.rs`.
-MAX_PRODUCTION_UNSAFE = 132
+#
+# R-10 (#46) moved the pure wire crate out of the firmware tree: 45 of those
+# documented sites now live in `rust/crates/mesh-protocol/`, which the gate
+# audits for rule violations but does not budget, so the firmware ceiling drops
+# with them: 132 - 45 = 87.
+MAX_PRODUCTION_UNSAFE = 87
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
@@ -152,11 +171,20 @@ LAYER_SDK_IMPORTS = {
 
 # External crates each layer may import.  Adding a dependency here is a
 # deliberate act: it widens what the bottom of the SDK is allowed to assume.
+# `mesh_protocol` is the pure wire-format workspace crate: it has no firmware,
+# MMIO or app dependencies, so every layer may name it.
 LAYER_EXTERNAL_CRATES = {
-    "common": frozenset({"core", "critical_section"}),
-    "mcu": frozenset({"core", "critical_section", "bitflags"}),
+    "common": frozenset({"core", "critical_section", "mesh_protocol"}),
+    "mcu": frozenset({"core", "critical_section", "bitflags", "mesh_protocol"}),
     "drivers": frozenset(
-        {"core", "critical_section", "bitflags", "embassy_sync", "embassy_time"}
+        {
+            "core",
+            "critical_section",
+            "bitflags",
+            "embassy_sync",
+            "embassy_time",
+            "mesh_protocol",
+        }
     ),
 }
 
@@ -832,8 +860,15 @@ def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
     return collector.found, unsafe_total
 
 
-def audit_universal(paths: list[str], label: str) -> tuple[list[Violation], int]:
-    """Audit every path; return violations and the tree-wide ``unsafe`` total."""
+def audit_universal(
+    paths: list[str], label: str, enforce_budget: bool = True
+) -> tuple[list[Violation], int]:
+    """Audit every path; return violations and the tree-wide ``unsafe`` total.
+
+    ``enforce_budget`` is asserted for the firmware root only: the ratchet was
+    measured there, and the ``mesh-protocol`` crate is a separate tree whose
+    ``unsafe`` sites are bounded by the rule itself, not by a ceiling.
+    """
     violations: list[Violation] = []
     unsafe_total = 0
     for path in paths:
@@ -843,7 +878,7 @@ def audit_universal(paths: list[str], label: str) -> tuple[list[Violation], int]
         violations.extend(found)
         unsafe_total += count
 
-    if unsafe_total > MAX_PRODUCTION_UNSAFE:
+    if enforce_budget and unsafe_total > MAX_PRODUCTION_UNSAFE:
         violations.append(
             Violation(
                 label,
@@ -897,7 +932,10 @@ def check_file(path: str, root: str) -> list[Violation]:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Audit rust/src/ for layering and `unsafe` invariants."
+        description=(
+            "Audit rust/src/ for layering invariants and rust/src/ plus "
+            "rust/crates/mesh-protocol/src/ for `unsafe` invariants."
+        )
     )
     parser.add_argument(
         "--root",
@@ -911,9 +949,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--src-root",
         default=None,
         help=(
-            "source root for the universal pass "
+            "firmware source root for the universal pass "
             f"(default: {os.path.relpath(DEFAULT_SRC_ROOT, REPO_ROOT)}; "
-            "skipped when --root is given explicitly)"
+            "skipped when --root is given without --src-root/--crate-root)"
+        ),
+    )
+    parser.add_argument(
+        "--crate-root",
+        default=None,
+        help=(
+            "mesh-protocol source root for the universal pass "
+            f"(default: {os.path.relpath(DEFAULT_CRATE_ROOT, REPO_ROOT)}; "
+            "skipped when --root is given without --src-root/--crate-root)"
         ),
     )
     return parser
@@ -930,9 +977,11 @@ def _resolve(value: str | None, default: str, flag: str) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     root_given = args.root is not None
-    # An explicit `--root` without `--src-root` keeps the temp-tree unit tests
-    # hermetic: they exercise the layering pass only.
-    run_universal = args.src_root is not None or not root_given
+    # An explicit `--root` on its own keeps the temp-tree unit tests hermetic:
+    # they exercise the layering pass only.
+    run_universal = (
+        args.src_root is not None or args.crate_root is not None or not root_given
+    )
 
     root = _resolve(args.root, DEFAULT_ROOT, "--root")
     if root is None:
@@ -944,6 +993,8 @@ def main(argv: list[str] | None = None) -> int:
 
     src_root = ""
     src_paths: list[str] = []
+    crate_root = ""
+    crate_paths: list[str] = []
     if run_universal:
         resolved_src = _resolve(args.src_root, DEFAULT_SRC_ROOT, "--src-root")
         if resolved_src is None:
@@ -954,8 +1005,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: no .rs files under {src_root}", file=sys.stderr)
             return 2
 
+        resolved_crate = _resolve(args.crate_root, DEFAULT_CRATE_ROOT, "--crate-root")
+        if resolved_crate is None:
+            return 2
+        crate_root = resolved_crate
+        crate_paths = rust_files(crate_root)
+        if not crate_paths:
+            print(f"error: no .rs files under {crate_root}", file=sys.stderr)
+            return 2
+
     violations: list[Violation] = []
     universal: list[Violation] = []
+    crate_universal: list[Violation] = []
     try:
         for path in paths:
             violations.extend(check_file(path, root))
@@ -963,20 +1024,28 @@ def main(argv: list[str] | None = None) -> int:
             universal, _unsafe_total = audit_universal(
                 src_paths, _display_path(src_root)
             )
+            crate_universal, _crate_unsafe_total = audit_universal(
+                crate_paths, _display_path(crate_root), enforce_budget=False
+            )
     except (OSError, UnicodeDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if not violations and not universal:
+    if not violations and not universal and not crate_universal:
         print(f"sdk layering OK: {len(paths)} files scanned, 0 violations")
         if run_universal:
             print(
-                f"rust src audit OK: {len(src_paths)} files scanned, 0 violations"
+                f"rust src audit OK: {len(src_paths)} files scanned under "
+                f"{_display_path(src_root)}, 0 violations"
+            )
+            print(
+                f"mesh-protocol audit OK: {len(crate_paths)} files scanned under "
+                f"{_display_path(crate_root)}, 0 violations"
             )
         return 0
 
     for violation in sorted(
-        violations + universal,
+        violations + universal + crate_universal,
         key=lambda item: (item.path, item.line, item.rule, item.violation),
     ):
         print(violation.render())
@@ -989,6 +1058,12 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"rust src audit FAILED: {len(universal)} violation(s) "
             f"in {len(src_paths)} files",
+            file=sys.stderr,
+        )
+    if crate_universal:
+        print(
+            f"mesh-protocol audit FAILED: {len(crate_universal)} violation(s) "
+            f"in {len(crate_paths)} files",
             file=sys.stderr,
         )
     return 1

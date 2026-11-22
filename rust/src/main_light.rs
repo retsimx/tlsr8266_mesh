@@ -48,13 +48,13 @@ use crate::sdk::mcu::register::{
     read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt,
     write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
 };
-use crate::sdk::packet_types::{Packet, PacketAttValue};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
 use heapless::Vec;
+use mesh_protocol::packet_types::{Packet, PacketAttValue};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -602,12 +602,12 @@ mod tests {
         mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
         mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
     };
-    use crate::sdk::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use crate::sdk::pm::mock_light_sw_reboot;
     use crate::sdk::pm::mock_usb_dp_pullup_en;
     use crate::vendor_light::mock_vendor_set_adv_data;
     use core::sync::atomic::Ordering;
     use futures::executor::block_on;
+    use mesh_protocol::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use mry::Any;
 
     // --- Helper Functions ---
@@ -2361,7 +2361,7 @@ mod tests {
         };
 
         let mut pkt_light_status = Packet {
-            mesh: crate::sdk::packet_types::MeshPkt::default(),
+            mesh: mesh_protocol::packet_types::MeshPkt::default(),
         };
         pkt_light_status.att_cmd_mut().value.sno = [0xA2, 0x5F, 0xE3];
         pkt_light_status.att_cmd_mut().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE] = GET_STATUS;

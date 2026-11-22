@@ -32,10 +32,10 @@ use crate::sdk::ble_app::rf_drv_8266::{
     LIGHT_RX_BUFFER_WRITE_POINTER, MAC_ID, PKT_EMPTY,
 };
 use crate::sdk::common::sync::SimplifyLS;
-use crate::sdk::light::{AdvRspPrivate, LightRxBuff, LIGHT_RX_BUFF_COUNT};
+use crate::sdk::light::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
-use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
+use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
 
 /// Handles RF transmission complete interrupt.
 ///
@@ -433,9 +433,7 @@ mod tests {
         mock_is_exist_in_rc_pkt_buf, mock_parse_ble_packet_op_params, mock_rf_link_slave_data,
     };
     use crate::sdk::ble_app::rf_drv_8266::{mock_rf_start_stx2rx, mock_rf_stop_trx};
-    use crate::sdk::light::{
-        AdvRspPrivate, BlePeripheralLinkState, LightRxBuff, LIGHT_RX_BUFF_COUNT,
-    };
+    use crate::sdk::light::{BlePeripheralLinkState, LightRxBuff, LIGHT_RX_BUFF_COUNT};
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use crate::sdk::mcu::register::{
         mock_read_reg_rf_rx_status, mock_read_reg_system_tick, mock_read_reg_system_tick_irq,
@@ -443,7 +441,7 @@ mod tests {
         mock_write_reg_dma3_mode, mock_write_reg_rf_irq_status, mock_write_reg_rf_mode_control,
         mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
     };
-    use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
+    use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
@@ -502,7 +500,7 @@ mod tests {
 
     /// Helper function to create a valid BLE packet structure.
     fn create_mock_packet() -> Packet {
-        use crate::sdk::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
+        use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
         Packet {
             att_cmd: PacketAttCmd {
                 head: PacketL2capHead {
@@ -527,7 +525,7 @@ mod tests {
 
     /// Helper function to create a valid mesh packet structure.
     fn create_mock_mesh_packet() -> Packet {
-        use crate::sdk::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
+        use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
         Packet {
             att_cmd: PacketAttCmd {
                 head: PacketL2capHead {

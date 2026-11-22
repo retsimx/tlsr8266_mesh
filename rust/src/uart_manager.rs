@@ -21,13 +21,15 @@ use portable_atomic::AtomicBool;
 use crate::mesh;
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
-use crate::sdk::common::crc::crc16;
 use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::common::sync::SimplifyLS;
-use crate::sdk::drivers::uart::{UartData, UartDriver, UartIrqMask, UART_DATA_LEN};
-use crate::sdk::packet_types::{AppCmdValue, Packet};
+use crate::sdk::drivers::uart::{UartDriver, UartIrqMask};
 use crate::uprintln;
 use heapless::Vec;
+use mesh_protocol::packet_types::{AppCmdValue, Packet};
+#[cfg(test)]
+use mesh_protocol::uart::UART_CRC_OFFSET;
+use mesh_protocol::uart::{compute_crc, verify_crc, UartData, UartMsg, UART_DATA_LEN};
 
 pub(crate) const MSG_TYPE_INDEX: usize = 2;
 const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;
@@ -36,7 +38,13 @@ const CTRL_FINGERPRINT_RANGE: Range<usize> = 3..18;
 const CTRL_RETRANSMIT_INDEX: usize = 18;
 const CTRL_ACK_FLAG_INDEX: usize = 19;
 const OUTGOING_FINGERPRINT_RANGE: Range<usize> = 7..22;
-pub(crate) const CRC_RANGE: Range<usize> = 0..42;
+/// Byte span the UART CRC-16 covers. Production delegates the check to
+/// `mesh_protocol::uart::verify_crc`/`compute_crc`; the frame-building tests
+/// below still need the span itself, and deriving it from the crate's trailer
+/// offset keeps the two from drifting apart.
+#[cfg(test)]
+pub(crate) const CRC_RANGE: Range<usize> = 0..UART_CRC_OFFSET;
+
 pub(crate) const SNO_RANGE: Range<usize> = 2..5;
 const CTRL_PAYLOAD_LEN: usize = CTRL_PAYLOAD_RANGE.end - CTRL_PAYLOAD_RANGE.start;
 const CTRL_FINGERPRINT_LEN: usize = CTRL_FINGERPRINT_RANGE.end - CTRL_FINGERPRINT_RANGE.start;
@@ -48,8 +56,6 @@ type Fingerprint = [u8; CTRL_FINGERPRINT_LEN];
 type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use crate::sdk::ble_app::rf_drv_8266::DEVICE_ADDRESS;
-
-pub use crate::sdk::packet_types::UartMsg;
 
 /// The UART peripheral, owned by this module.
 ///
@@ -331,12 +337,6 @@ async fn wait_tx_done(_deadline: Instant) -> Result<(), ()> {
     UART_TX_DONE.try_take().ok_or(())
 }
 
-fn compute_crc(msg: &mut UartData) {
-    let crc = crc16(&msg.data[CRC_RANGE]);
-    msg.data[42] = (crc & 0xff) as u8;
-    msg.data[43] = ((crc >> 8) & 0xff) as u8;
-}
-
 async fn ack_msg(msg: &UartData, sno: &Vec<u8, 3>) {
     // If data[1] is 0xff, it means this message is an ack from the client
     if msg.data[1] == u8::from(UartMsg::Ack) {
@@ -505,8 +505,7 @@ async fn send_with_retry(msg: &UartData, ack_counter: u8) {
 #[inline(never)]
 pub fn handle_rx(msg: UartData) {
     // Check the crc of the packet
-    let crc = crc16(&msg.data[CRC_RANGE]);
-    if (crc & 0xff) as u8 != msg.data[42] || ((crc >> 8) & 0xff) as u8 != msg.data[43] {
+    if !verify_crc(&msg) {
         // CRC is invalid, drop the packet
         return;
     }
@@ -559,10 +558,11 @@ mod tests {
         mock_write_reg_dma_tx_rdy0, read_reg_dma_rx_rdy0, write_reg_dma1_addr,
         write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0,
     };
-    use crate::sdk::packet_types::{PacketL2capHead, PacketLlApp};
     use core::future::Future;
     use futures::executor::block_on;
     use futures::task::noop_waker;
+    use mesh_protocol::crc::crc16;
+    use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
     use mry::Any;
     use std::task::{Context, Poll};
 

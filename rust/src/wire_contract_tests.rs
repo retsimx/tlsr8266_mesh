@@ -5,20 +5,20 @@
 //! tooling asserts the same fixture from `utilities/meshutils/tests/`; both
 //! suites reading one committed file is what pins the shared protocol.
 //!
+//! The protocol half of the fixture (packed struct sizes, CRC-16-MODBUS, UART
+//! frame layout/frames/opcodes, GATT UUIDs, pairing opcodes and states) is
+//! asserted by the `mesh-protocol` crate (`rust/crates/mesh-protocol/src/lib.rs`),
+//! which now owns those definitions. What remains here is firmware-owned: the
+//! light/Ota binding, the OTA sub-commands and flash layout, the pairing
+//! defaults, and the AES vectors driven through the firmware's `mry`-mocked
+//! crypto path.
+//!
 //! The fixture also contains keys that only the Python suite owns (OTA packet
 //! framing and the generated version mask/blob); those are listed in
 //! [`PYTHON_ONLY_KEYS`] and are deliberately not consumed here.
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, MESH_LTK, MESH_NAME, MESH_PWD, OUT_OF_MESH};
-use crate::logging::{UART_CRC_OFFSET, UART_PAYLOAD_OFFSET};
 use crate::ota::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
-use crate::sdk::ble_app::ble_ll_pair::{
-    PairState, PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK,
-    PAIR_OP_RESET_MESH, PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
-    PAIR_OP_VERIFY_CREDENTIALS,
-};
-use crate::sdk::common::crc::crc16;
-use crate::sdk::drivers::uart::UART_DATA_LEN;
 use crate::sdk::light::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_REQ,
     LGT_CMD_START_OTA_RSP,
@@ -27,16 +27,6 @@ use crate::sdk::mcu::crypto::{
     aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, aes_ll_encryption,
     mock_aes_att_encryption, mock_aes_ll_encryption, AesDirection,
 };
-use crate::sdk::packet_types::{
-    AppCmdValue, MeshPkt, Packet, PacketAttCmd, PacketAttData, PacketAttReadRsp, PacketAttValue,
-    PacketL2capData, PacketL2capHead, PacketLlApp, PacketLlData, PacketLlInit,
-    RfPacketAdvIndModuleT,
-};
-use crate::sdk::service::{
-    TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR,
-    TELINK_SPP_DATA_SERVER2CLIENT,
-};
-use crate::uart_manager::{UartMsg, CRC_RANGE, MSG_TYPE_INDEX, SNO_RANGE};
 use core::mem::size_of;
 use mry::Any;
 
@@ -70,6 +60,89 @@ const PYTHON_ONLY_KEYS: &[&str] = &[
     "pair.session_key.response",
     "pair.session_key.session_key",
     "pair.session_key.response_invalid",
+];
+
+/// Fixture keys asserted by the `mesh-protocol` crate, which owns the packed
+/// wire structs, the CRC-16-MODBUS table, the UART frame layout, the GATT UUIDs
+/// and the pairing opcodes/states. They stay in the committed fixture and are
+/// consumed there, so the orphan check below must not demand them here as well.
+const MESH_PROTOCOL_KEYS: &[&str] = &[
+    // `size.*` for every packed struct the crate now defines.
+    "size.RfPacketAdvIndModuleT",
+    "size.PacketAttValue",
+    "size.PacketL2capHead",
+    "size.PacketL2capData",
+    "size.PacketLlData",
+    "size.AppCmdValue",
+    "size.PacketLlApp",
+    "size.PacketAttReadRsp",
+    "size.PacketLlInit",
+    "size.PacketAttData",
+    "size.PacketAttCmd",
+    "size.MeshPkt",
+    "size.Packet",
+    "size.UartData",
+    // CRC-16-MODBUS vectors.
+    "crc.v1.input",
+    "crc.v1.expect",
+    "crc.v2.input",
+    "crc.v2.expect",
+    "crc.v3.input",
+    "crc.v3.expect",
+    "crc.v4.input",
+    "crc.v4.expect",
+    "crc.v5.input",
+    "crc.v5.expect",
+    // UART frame layout.
+    "uart.layout.packet_length",
+    "uart.layout.payload_offset",
+    "uart.layout.crc_offset",
+    "uart.layout.payload_len",
+    // UART command opcodes (the `uart.ota.*` sub-commands stay firmware-side).
+    "uart.op.light_ctrl",
+    "uart.op.light_status",
+    "uart.op.mesh_message",
+    "uart.op.panic_message",
+    "uart.op.print_message",
+    "uart.op.node_status",
+    "uart.op.ack",
+    // Full 44-byte frames and the host ACK.
+    "uart.frame.light_ctrl.counter",
+    "uart.frame.light_ctrl.byte1",
+    "uart.frame.light_ctrl.cmd",
+    "uart.frame.light_ctrl.payload",
+    "uart.frame.light_ctrl.bytes",
+    "uart.frame.light_status.counter",
+    "uart.frame.light_status.byte1",
+    "uart.frame.light_status.cmd",
+    "uart.frame.light_status.payload",
+    "uart.frame.light_status.bytes",
+    "uart.frame.node_status.counter",
+    "uart.frame.node_status.byte1",
+    "uart.frame.node_status.cmd",
+    "uart.frame.node_status.payload",
+    "uart.frame.node_status.bytes",
+    "uart.frame.ack.counter",
+    "uart.frame.ack.byte1",
+    "uart.frame.ack.sno",
+    "uart.frame.ack.bytes",
+    // GATT characteristic UUIDs.
+    "uuid.server2client",
+    "uuid.client2server",
+    "uuid.ota",
+    "uuid.pair",
+    // Pairing opcodes and state discriminants.
+    "pair.op.exchange_random",
+    "pair.op.set_mesh_name",
+    "pair.op.set_mesh_password",
+    "pair.op.set_mesh_ltk",
+    "pair.op.get_mesh_ltk",
+    "pair.op.verify_credentials",
+    "pair.op.reset_mesh",
+    "pair.op.delete_pairing",
+    "pair.state.mesh_effect",
+    "pair.state.requesting_ltk",
+    "pair.state.pairing_complete",
 ];
 
 // --- fixture parsing ------------------------------------------------------
@@ -139,27 +212,6 @@ fn exact<const N: usize>(key: &str, bytes: Vec<u8>) -> [u8; N] {
         Ok(array) => array,
         Err(_) => panic!("fixture key `{key}` must hold exactly {N} bytes"),
     }
-}
-
-fn hex_uuid(p: &mut Parser, key: &str) -> [u8; 16] {
-    let text = p.str(key);
-    if text.len() != 32 {
-        panic!("fixture key `{key}` must be 32 hex characters, got {text:?}");
-    }
-
-    let mut bytes = [0u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let pair = &text[index * 2..index * 2 + 2];
-        *byte = match u8::from_str_radix(pair, 16) {
-            Ok(byte) => byte,
-            Err(_) => panic!("fixture key `{key}` has malformed hex {pair:?}"),
-        };
-    }
-
-    // The fixture stores canonical display order; the firmware constants are
-    // LSB-first.
-    bytes.reverse();
-    bytes
 }
 
 /// Fixture accessor that records which keys were consumed, so
@@ -234,31 +286,12 @@ impl Parser {
 // accounting test calls only the readers, so a value mismatch can fail only the
 // test that owns it, while both halves draw on one key list and cannot drift.
 
-/// `(fixture key, expected size)` for every packed struct the firmware owns.
+/// `(fixture key, expected size)` for the packed structs the firmware owns.
+///
+/// Every protocol struct now lives in `mesh-protocol` and is size-asserted
+/// there; the light manager's persisted luminance record is firmware-owned.
 fn struct_size_expectations() -> Vec<(&'static str, usize)> {
-    vec![
-        (
-            "size.RfPacketAdvIndModuleT",
-            size_of::<RfPacketAdvIndModuleT>(),
-        ),
-        ("size.PacketAttValue", size_of::<PacketAttValue>()),
-        ("size.PacketL2capHead", size_of::<PacketL2capHead>()),
-        ("size.PacketL2capData", size_of::<PacketL2capData>()),
-        ("size.PacketLlData", size_of::<PacketLlData>()),
-        ("size.AppCmdValue", size_of::<AppCmdValue>()),
-        ("size.PacketLlApp", size_of::<PacketLlApp>()),
-        ("size.PacketAttReadRsp", size_of::<PacketAttReadRsp>()),
-        ("size.PacketLlInit", size_of::<PacketLlInit>()),
-        ("size.PacketAttData", size_of::<PacketAttData>()),
-        ("size.PacketAttCmd", size_of::<PacketAttCmd>()),
-        ("size.MeshPkt", size_of::<MeshPkt>()),
-        ("size.Packet", size_of::<Packet>()),
-        ("size.LumSaveT", size_of::<crate::light_manager::LumSaveT>()),
-        (
-            "size.UartData",
-            size_of::<crate::sdk::drivers::uart::UartData>(),
-        ),
-    ]
+    vec![("size.LumSaveT", size_of::<crate::light_manager::LumSaveT>())]
 }
 
 fn read_struct_sizes(p: &mut Parser) {
@@ -277,46 +310,11 @@ fn check_struct_sizes(p: &mut Parser) {
     }
 }
 
-/// `(input, expected)` for every `crc.vN` vector.
-fn read_crc16(p: &mut Parser) -> Vec<(Vec<u8>, u32)> {
-    (1..=5)
-        .map(|version| {
-            (
-                p.bytes(&format!("crc.v{version}.input")),
-                p.u32(&format!("crc.v{version}.expect")),
-            )
-        })
-        .collect()
-}
-
-fn check_crc16(p: &mut Parser) {
-    for (index, (input, expected)) in read_crc16(p).into_iter().enumerate() {
-        let version = index + 1;
-        let expected = match u16::try_from(expected) {
-            Ok(expected) => expected,
-            Err(_) => {
-                panic!("fixture key `crc.v{version}.expect` does not fit in a u16: {expected:#x}")
-            }
-        };
-
-        assert_eq!(
-            crc16(&input),
-            expected,
-            "crc16 mismatch for `crc.v{version}.expect`"
-        );
-    }
-}
-
-/// `(fixture key, expected opcode)` for the UART commands and OTA requests.
+/// `(fixture key, expected opcode)` for the OTA sub-commands the firmware's
+/// light-command layer dispatches. The `uart.op.*` command bytes belong to the
+/// `UartMsg` enum in `mesh-protocol`.
 fn uart_opcode_expectations() -> Vec<(&'static str, u8)> {
     vec![
-        ("uart.op.light_ctrl", u8::from(UartMsg::LightCtrl)),
-        ("uart.op.light_status", u8::from(UartMsg::LightStatus)),
-        ("uart.op.mesh_message", u8::from(UartMsg::MeshMessage)),
-        ("uart.op.panic_message", u8::from(UartMsg::PanicMessage)),
-        ("uart.op.print_message", u8::from(UartMsg::PrintMessage)),
-        ("uart.op.node_status", u8::from(UartMsg::NodeStatus)),
-        ("uart.op.ack", u8::from(UartMsg::Ack)),
         ("uart.ota.start", LGT_CMD_START_OTA_REQ),
         ("uart.ota.start_resp", LGT_CMD_START_OTA_RSP),
         ("uart.ota.data", LGT_CMD_OTA_DATA_REQ),
@@ -337,258 +335,6 @@ fn check_uart_opcodes(p: &mut Parser) {
     }
 }
 
-struct UartLayout {
-    packet_length: usize,
-    payload_offset: usize,
-    crc_offset: usize,
-    payload_len: usize,
-}
-
-fn read_uart_layout(p: &mut Parser) -> UartLayout {
-    UartLayout {
-        packet_length: p.u32("uart.layout.packet_length") as usize,
-        payload_offset: p.u32("uart.layout.payload_offset") as usize,
-        crc_offset: p.u32("uart.layout.crc_offset") as usize,
-        payload_len: p.u32("uart.layout.payload_len") as usize,
-    }
-}
-
-/// Writes the CRC-16-MODBUS over the covered span, little-endian, at the
-/// fixture's CRC offset.
-fn seal_frame(layout: &UartLayout, mut frame: [u8; UART_DATA_LEN]) -> [u8; UART_DATA_LEN] {
-    let crc = crc16(&frame[0..layout.crc_offset]);
-    frame[layout.crc_offset] = (crc & 0xff) as u8;
-    frame[layout.crc_offset + 1] = ((crc >> 8) & 0xff) as u8;
-    frame
-}
-
-/// `counter | byte1 | cmd | payload(39) | crc16 LE`.
-fn data_frame(
-    layout: &UartLayout,
-    counter: u8,
-    byte1: u8,
-    cmd: u8,
-    payload: &[u8],
-) -> [u8; UART_DATA_LEN] {
-    let mut frame = [0u8; UART_DATA_LEN];
-    frame[0] = counter;
-    frame[1] = byte1;
-    frame[2] = cmd;
-    frame[layout.payload_offset..layout.payload_offset + payload.len()].copy_from_slice(payload);
-    seal_frame(layout, frame)
-}
-
-/// Host ACK: `counter | 0xff | sno(3) | zeros | crc16 LE`; no command byte.
-fn ack_frame(layout: &UartLayout, counter: u8, byte1: u8, sno: &[u8]) -> [u8; UART_DATA_LEN] {
-    let mut frame = [0u8; UART_DATA_LEN];
-    frame[0] = counter;
-    frame[1] = byte1;
-    frame[2..2 + sno.len()].copy_from_slice(sno);
-    seal_frame(layout, frame)
-}
-
-const FRAME_NAMESPACES: [&str; 3] = ["light_ctrl", "light_status", "node_status"];
-
-/// One `uart.frame.<namespace>` vector: the fields plus the expected bytes.
-struct UartFrameVector {
-    namespace: &'static str,
-    counter: u8,
-    byte1: u8,
-    cmd: u8,
-    payload: Vec<u8>,
-    expected: Vec<u8>,
-}
-
-/// The `uart.layout.*` and `uart.frame.*` values, read without asserting.
-struct UartFrameVectors {
-    layout: UartLayout,
-    data: Vec<UartFrameVector>,
-    ack_counter: u8,
-    ack_byte1: u8,
-    ack_sno: Vec<u8>,
-    ack_expected: Vec<u8>,
-}
-
-fn read_uart_frames(p: &mut Parser) -> UartFrameVectors {
-    let layout = read_uart_layout(p);
-
-    let data = FRAME_NAMESPACES
-        .iter()
-        .map(|&namespace| UartFrameVector {
-            namespace,
-            counter: p.u8(&format!("uart.frame.{namespace}.counter")),
-            byte1: p.u8(&format!("uart.frame.{namespace}.byte1")),
-            cmd: p.u8(&format!("uart.frame.{namespace}.cmd")),
-            payload: p.bytes(&format!("uart.frame.{namespace}.payload")),
-            expected: p.bytes(&format!("uart.frame.{namespace}.bytes")),
-        })
-        .collect();
-
-    UartFrameVectors {
-        layout,
-        data,
-        ack_counter: p.u8("uart.frame.ack.counter"),
-        ack_byte1: p.u8("uart.frame.ack.byte1"),
-        ack_sno: p.bytes("uart.frame.ack.sno"),
-        ack_expected: p.bytes("uart.frame.ack.bytes"),
-    }
-}
-
-/// Binds the fixture's `uart.layout.*` keys and the ACK `sno` placement to the
-/// production constants the firmware actually parses with.
-///
-/// Without this the frame builders above would be self-consistent but blind:
-/// they take every offset from the fixture, so changing `UART_PAYLOAD_OFFSET`,
-/// `UART_CRC_OFFSET`, `CRC_RANGE`, `MSG_TYPE_INDEX` or `SNO_RANGE` in the
-/// firmware would keep `fixture_uart_frames` green while the two sides drifted.
-fn check_uart_layout_bindings(layout: &UartLayout, ack_sno: &[u8]) {
-    assert_eq!(
-        UART_PAYLOAD_OFFSET as u32, layout.payload_offset as u32,
-        "`uart.layout.payload_offset` must equal UART_PAYLOAD_OFFSET"
-    );
-    assert_eq!(
-        UART_CRC_OFFSET as u32, layout.crc_offset as u32,
-        "`uart.layout.crc_offset` must equal UART_CRC_OFFSET"
-    );
-    assert_eq!(
-        (UART_CRC_OFFSET - UART_PAYLOAD_OFFSET) as u32,
-        layout.payload_len as u32,
-        "`uart.layout.payload_len` must equal UART_CRC_OFFSET - UART_PAYLOAD_OFFSET"
-    );
-
-    // The command byte sits immediately before the payload, and the CRC covers
-    // everything before it.
-    assert_eq!(MSG_TYPE_INDEX, 2, "MSG_TYPE_INDEX must stay the third byte");
-    assert_eq!(
-        MSG_TYPE_INDEX as u32,
-        layout.payload_offset as u32 - 1,
-        "the command byte must sit immediately before the payload"
-    );
-    assert_eq!(
-        CRC_RANGE,
-        0..layout.crc_offset,
-        "CRC_RANGE must cover exactly the pre-CRC span"
-    );
-
-    // The fixture's ACK `sno` is all zeros, so this pins the field's width and
-    // placement rather than its content.
-    assert_eq!(
-        SNO_RANGE,
-        2..5,
-        "SNO_RANGE must stay the three bytes at 2..5"
-    );
-    assert_eq!(
-        ack_sno.len(),
-        SNO_RANGE.end - SNO_RANGE.start,
-        "`uart.frame.ack.sno` must fill SNO_RANGE exactly"
-    );
-}
-
-fn check_uart_frames(p: &mut Parser) {
-    let vectors = read_uart_frames(p);
-    let layout = &vectors.layout;
-
-    assert_eq!(
-        layout.packet_length, UART_DATA_LEN,
-        "`uart.layout.packet_length` must equal UART_DATA_LEN"
-    );
-    assert_eq!(
-        layout.payload_offset + layout.payload_len,
-        layout.crc_offset,
-        "payload must end where the CRC begins"
-    );
-    assert_eq!(
-        layout.crc_offset + 2,
-        layout.packet_length,
-        "the two CRC bytes must end the packet"
-    );
-    check_uart_layout_bindings(layout, &vectors.ack_sno);
-
-    for vector in &vectors.data {
-        let namespace = vector.namespace;
-        assert_eq!(
-            vector.payload.len(),
-            layout.payload_len,
-            "`uart.frame.{namespace}.payload` must be {} bytes",
-            layout.payload_len
-        );
-        let frame = data_frame(
-            layout,
-            vector.counter,
-            vector.byte1,
-            vector.cmd,
-            &vector.payload,
-        );
-        assert_eq!(
-            frame.as_slice(),
-            vector.expected.as_slice(),
-            "`uart.frame.{namespace}.bytes` mismatch"
-        );
-    }
-
-    assert_eq!(
-        vectors.ack_byte1,
-        u8::from(UartMsg::Ack),
-        "an ACK frame must set byte 1 to the ACK opcode"
-    );
-    let frame = ack_frame(
-        layout,
-        vectors.ack_counter,
-        vectors.ack_byte1,
-        &vectors.ack_sno,
-    );
-    assert_eq!(
-        frame.as_slice(),
-        vectors.ack_expected.as_slice(),
-        "`uart.frame.ack.bytes` mismatch"
-    );
-}
-
-/// `(fixture key, expected firmware UUID)` in canonical display order.
-fn gatt_uuid_expectations() -> Vec<(&'static str, [u8; 16])> {
-    vec![
-        ("uuid.server2client", TELINK_SPP_DATA_SERVER2CLIENT),
-        ("uuid.client2server", TELINK_SPP_DATA_CLIENT2SERVER),
-        ("uuid.ota", TELINK_SPP_DATA_OTA),
-        ("uuid.pair", TELINK_SPP_DATA_PAIR),
-    ]
-}
-
-fn read_gatt_uuids(p: &mut Parser) {
-    for (key, _) in gatt_uuid_expectations() {
-        let _ = hex_uuid(p, key);
-    }
-}
-
-fn check_gatt_uuids(p: &mut Parser) {
-    for (key, expected) in gatt_uuid_expectations() {
-        assert_eq!(hex_uuid(p, key), expected, "`{key}` mismatch");
-    }
-}
-
-/// `(fixture key, expected opcode)` for the pairing commands.
-fn pairing_opcode_expectations() -> Vec<(&'static str, u8)> {
-    vec![
-        ("pair.op.exchange_random", PAIR_OP_EXCHANGE_RANDOM),
-        ("pair.op.set_mesh_name", PAIR_OP_SET_MESH_NAME),
-        ("pair.op.set_mesh_password", PAIR_OP_SET_MESH_PASSWORD),
-        ("pair.op.set_mesh_ltk", PAIR_OP_SET_MESH_LTK),
-        ("pair.op.get_mesh_ltk", PAIR_OP_GET_MESH_LTK),
-        ("pair.op.verify_credentials", PAIR_OP_VERIFY_CREDENTIALS),
-        ("pair.op.reset_mesh", PAIR_OP_RESET_MESH),
-        ("pair.op.delete_pairing", PAIR_OP_DELETE_PAIRING),
-    ]
-}
-
-/// `(fixture key, expected discriminant)` for the pairing states.
-fn pairing_state_expectations() -> Vec<(&'static str, u8)> {
-    vec![
-        ("pair.state.mesh_effect", PairState::ReceivingMeshLtk as u8),
-        ("pair.state.requesting_ltk", PairState::RequestingLtk as u8),
-        ("pair.state.pairing_complete", PairState::Completed as u8),
-    ]
-}
-
 /// The public pairing defaults, read without asserting.
 struct PairingDefaults {
     mesh_name: String,
@@ -605,23 +351,10 @@ fn read_pairing_defaults(p: &mut Parser) -> PairingDefaults {
 }
 
 fn read_pairing_constants(p: &mut Parser) {
-    for (key, _) in pairing_opcode_expectations() {
-        let _ = p.u8(key);
-    }
-    for (key, _) in pairing_state_expectations() {
-        let _ = p.u8(key);
-    }
     let _ = read_pairing_defaults(p);
 }
 
 fn check_pairing_constants(p: &mut Parser) {
-    for (key, expected) in pairing_opcode_expectations() {
-        assert_eq!(p.u8(key), expected, "`{key}` mismatch");
-    }
-    for (key, expected) in pairing_state_expectations() {
-        assert_eq!(p.u8(key), expected, "`{key}` mismatch");
-    }
-
     let defaults = read_pairing_defaults(p);
     assert_eq!(
         MESH_NAME, defaults.mesh_name,
@@ -824,10 +557,7 @@ fn check_firmware_header(p: &mut Parser) {
 /// [`fixture_has_no_orphan_vectors`] fails only for accounting problems.
 fn read_all(p: &mut Parser) {
     read_struct_sizes(p);
-    let _ = read_crc16(p);
     read_uart_opcodes(p);
-    let _ = read_uart_frames(p);
-    read_gatt_uuids(p);
     read_pairing_constants(p);
     let _ = read_aes_blocks(p);
     let _ = read_aes_packets(p);
@@ -842,23 +572,8 @@ fn fixture_struct_sizes() {
 }
 
 #[test]
-fn fixture_crc16() {
-    check_crc16(&mut Parser::new());
-}
-
-#[test]
 fn fixture_uart_opcodes() {
     check_uart_opcodes(&mut Parser::new());
-}
-
-#[test]
-fn fixture_uart_frames() {
-    check_uart_frames(&mut Parser::new());
-}
-
-#[test]
-fn fixture_gatt_uuids() {
-    check_gatt_uuids(&mut Parser::new());
 }
 
 #[test]
@@ -970,7 +685,7 @@ fn fixture_has_no_orphan_vectors() {
     let consumed = p.consumed_keys();
 
     for (key, _) in &all_keys {
-        if PYTHON_ONLY_KEYS.contains(&key.as_str()) {
+        if PYTHON_ONLY_KEYS.contains(&key.as_str()) || MESH_PROTOCOL_KEYS.contains(&key.as_str()) {
             continue;
         }
 
@@ -985,11 +700,15 @@ fn fixture_has_no_orphan_vectors() {
             !PYTHON_ONLY_KEYS.contains(&key.as_str()),
             "the Rust suite consumed Python-only key `{key}`"
         );
+        assert!(
+            !MESH_PROTOCOL_KEYS.contains(&key.as_str()),
+            "the firmware suite consumed `mesh-protocol`-owned key `{key}`"
+        );
     }
 
     assert_eq!(
         consumed.len(),
-        all_keys.len() - PYTHON_ONLY_KEYS.len(),
-        "consumed-key count does not match the fixture minus the Python-only allowlist"
+        all_keys.len() - PYTHON_ONLY_KEYS.len() - MESH_PROTOCOL_KEYS.len(),
+        "consumed-key count does not match the fixture minus the Python-only and mesh-protocol allowlists"
     );
 }

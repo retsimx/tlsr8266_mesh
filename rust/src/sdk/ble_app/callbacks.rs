@@ -32,7 +32,7 @@ use core::cell::Cell;
 
 use critical_section::Mutex;
 
-use crate::sdk::packet_types::{Packet, PacketAttValue};
+use mesh_protocol::packet_types::{Packet, PacketAttValue};
 
 /// Application entry points the SDK may invoke.
 ///
@@ -179,7 +179,7 @@ mod tests {
     }
 
     fn test_packet() -> Packet {
-        use crate::sdk::packet_types::{PacketAttCmd, PacketL2capHead};
+        use mesh_protocol::packet_types::{PacketAttCmd, PacketL2capHead};
 
         Packet {
             att_cmd: PacketAttCmd {

@@ -1,3 +1,11 @@
+//! GATT service identifiers used by the mesh transport: the assigned-number
+//! `u16` service UUIDs and the Telink SPP 16-byte characteristic UUIDs.
+//!
+//! Each 16-byte constant is the LSB-first (byte-reversed) form the stack writes
+//! into the attribute table; the Python tooling stores the canonical display
+//! order and reverses it.
+
+// BLE GATT assigned numbers (Bluetooth SIG service UUIDs).
 pub const SERVICE_UUID_ALERT_NOTIFICATION: u16 = 0x1811;
 pub const SERVICE_UUID_BATTERY: u16 = 0x180F;
 pub const SERVICE_UUID_BLOOD_PRESSURE: u16 = 0x1810;

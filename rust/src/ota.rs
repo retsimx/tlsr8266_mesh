@@ -18,7 +18,6 @@ use crate::sdk::ble_app::light_ll::status_management::{
 };
 use crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE;
 use crate::sdk::common::bit::ONES_32;
-use crate::sdk::common::crc::crc16;
 use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{
@@ -32,8 +31,9 @@ use crate::sdk::mcu::register::{
     write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
 };
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::sdk::packet_types::{Packet, PacketAttData};
 use crate::sdk::pm::light_sw_reboot;
+use mesh_protocol::crc::crc16;
+use mesh_protocol::packet_types::{Packet, PacketAttData};
 
 /// The mutable OTA runtime scalars shared by the GATT write handler, the mesh
 /// OTA command path and the system-timer interrupt.

@@ -37,18 +37,14 @@ use crate::sdk::mcu::clock::{
 use crate::sdk::mcu::register::{
     read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
 };
-use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
+use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
 //unit: s
 pub const MESH_PAIR_TIMEOUT: u32 = 10;
-
-// Compatibility re-export: the app layer still names this through
-// `crate::mesh`, even though the definition now lives in the SDK wire module.
-pub use crate::sdk::packet_types::MESH_NODE_ST_PAR_LEN;
 
 /// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
 ///

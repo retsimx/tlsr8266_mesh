@@ -367,6 +367,52 @@ class TestArtifactResolution(_RepoCase):
         self.assertIn(str(rlib), str(caught.exception))
         self.assertIn("gamma-44444444.ll", str(caught.exception))
 
+    def test_resolves_both_workspace_crate_ir_modules_without_globbing(self) -> None:
+        deps = self.repo / DEPS_REL
+        protocol_out = self.repo / BUILD_REL / "mesh-protocol" / "5b2bc05443b1ef31" / "out"
+        firmware_out = self.repo / BUILD_REL / "tlsr8266_mesh" / "d8471bd76b3061ca" / "out"
+
+        protocol_rlib = _write(
+            protocol_out / "libmesh_protocol-5b2bc05443b1ef31.rlib", "protocol rlib"
+        )
+        protocol_ll = _write(
+            protocol_out / "mesh_protocol-5b2bc05443b1ef31.ll", "protocol ir"
+        )
+        firmware_rlib = _write(
+            firmware_out / "libtlsr8266_mesh-d8471bd76b3061ca.rlib", "firmware rlib"
+        )
+        firmware_ll = _write(
+            firmware_out / "tlsr8266_mesh-d8471bd76b3061ca.ll", "firmware ir"
+        )
+
+        # Stale IR beside the live modules must never be selected.
+        stale = [
+            _write(deps / "mesh_protocol-deadbeef.ll", "stale protocol ir"),
+            _write(deps / "tlsr8266_mesh-deadbeef.ll", "stale firmware ir"),
+        ]
+
+        stdout = "\n".join([_artifact(protocol_rlib), _artifact(firmware_rlib)])
+        resolved = build_firmware.resolve_ll_paths(
+            build_firmware.parse_cargo_artifacts(stdout)
+        )
+
+        self.assertEqual(resolved, sorted({protocol_ll, firmware_ll}))
+        for module in stale:
+            self.assertNotIn(module, resolved)
+
+        link_argv = next(
+            argv
+            for label, argv in build_firmware._pipeline_commands(
+                self.out / "default",
+                resolved,
+                {name: Path(f"/tools/{name}") for name in build_firmware.TOOL_ORDER},
+                3543,
+            )
+            if label == "llvm-link"
+        )
+        self.assertIn(str(protocol_ll), link_argv)
+        self.assertIn(str(firmware_ll), link_argv)
+
     def test_root_rlib_hardlink_inode_match(self) -> None:
         deps = self.repo / DEPS_REL
         release = self.repo / "rust/target/thumbv6m-none-eabi/release"

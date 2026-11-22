@@ -8,7 +8,6 @@ use embassy_time::{Duration, Instant};
 use fixed::types::{I16F16, U16F16};
 
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
-use crate::mesh::MESH_NODE_ST_PAR_LEN;
 use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
 use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
@@ -23,6 +22,7 @@ use crate::sdk::mcu::register::{
     read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_TMR,
 };
 use crate::sdk::pm::REGA_LIGHT_OFF;
+use mesh_protocol::mesh_types::MESH_NODE_ST_PAR_LEN;
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;

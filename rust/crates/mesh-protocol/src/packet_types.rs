@@ -1,12 +1,42 @@
-use crate::sdk::light::{AdvRspPrivate, PKT_CMD_LEN};
-use bytemuck::{Pod, Zeroable};
+//! Packed wire structures for the TLSR8266 BLE/Mesh radio path.
+//!
+//! Every type here is a cross-boundary contract: the firmware sends and
+//! receives these bytes and the Python host tooling parses them. Sizes and
+//! field offsets are pinned by the `const_assert!`s below and by the golden
+//! vectors in `tests/wire_vectors.txt`.
+
 use core::mem;
 
-#[macro_export]
-macro_rules! const_assert {
-    ($($tt:tt)*) => {
-        const _: () = assert!($($tt)*);
-    }
+/// Length of the `cmd` field inside a mesh app command packet.
+///
+/// Lives here rather than in the light-command layer because the packet layout
+/// (`PacketLlData`) is a wire contract, so the field width has to travel with
+/// the struct that embeds it.
+pub const PKT_CMD_LEN: usize = 11;
+
+/// Private advertisement payload of a mesh node.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct AdvPrivate {
+    pub manufacture_id: u16,
+    // must vendor id to follow spec
+    pub mesh_product_uuid: u16,
+    pub mac_address: u32, // low 4 byte
+}
+
+/// Private scan-response payload of a mesh node.
+#[derive(Clone, Copy, Default)]
+#[repr(C, packed)]
+pub struct AdvRspPrivate {
+    pub manufacture_id: u16, // 0
+    // must vendor id to follow spec
+    pub mesh_product_uuid: u16, // 2
+    pub mac_address: u32,       // 4
+    // low 4 byte
+    pub product_uuid: u16,   // 8
+    pub status: u8,          // 10
+    pub device_address: u16, // 11
+    pub rsv: [u8; 16],       // 13
 }
 
 #[repr(C, packed)]
@@ -629,98 +659,7 @@ impl Packet {
 
 const_assert!(mem::size_of::<Packet>() == 48);
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum UartMsg {
-    //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
-    LightCtrl = 0x02,    // Sent by the client to control the mesh
-    LightStatus = 0x03, // Sent by us to notify when a bulk status message is sent. Sent by the client to force a full refresh of light statuses
-    MeshMessage = 0x04, // Sent by us to notify when a mesh message is sent
-    PanicMessage = 0x05, // Sent by us to provide details of a panic
-    PrintMessage = 0x06, // Sent by us to provide print output
-    NodeStatus = 0x07, // Sent by us for individual node online/offline and on/off change events. Payload: groups of [node_id, online, on_off] (3 bytes each, up to 13 per packet)
-    Ack = 0xff,
-}
-
-impl From<UartMsg> for u8 {
-    fn from(value: UartMsg) -> Self {
-        match value {
-            UartMsg::LightCtrl => 0x02,
-            UartMsg::LightStatus => 0x03,
-            UartMsg::MeshMessage => 0x04,
-            UartMsg::PanicMessage => 0x05,
-            UartMsg::PrintMessage => 0x06,
-            UartMsg::NodeStatus => 0x07,
-            UartMsg::Ack => 0xff,
-        }
-    }
-}
-
-impl TryFrom<u8> for UartMsg {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x02 => Ok(UartMsg::LightCtrl),
-            0x03 => Ok(UartMsg::LightStatus),
-            0x04 => Ok(UartMsg::MeshMessage),
-            0x05 => Ok(UartMsg::PanicMessage),
-            0x06 => Ok(UartMsg::PrintMessage),
-            0x07 => Ok(UartMsg::NodeStatus),
-            0xff => Ok(UartMsg::Ack),
-            _ => Err(()),
-        }
-    }
-}
-
-pub const MESH_NODE_ST_VAL_LEN: usize = 4;
-// MIN: 4,   MAX: 10
-pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
-
-/// Size of the status value region in one status advertisement packet.
-///
-/// `mesh_node_adv_status` fills `MESH_STATUS_VALUE_LEN` bytes and
-/// `rf_link_rc_data` decodes exactly the same span, so this is the single
-/// source of truth for the per-packet record capacity.
-pub const MESH_STATUS_VALUE_LEN: usize = 24;
-
-#[derive(Clone, Copy, Debug)]
-#[repr(C, packed)]
-pub struct MeshNodeStValT {
-    pub dev_adr: u8,
-    // don't change include type
-    pub sn: u8,
-    // don't change include type
-    pub par: [u8; MESH_NODE_ST_PAR_LEN], //lumen-rsv,
-}
-
-// SAFETY: This struct is safe to use with bytemuck because:
-// 1. It's #[repr(C, packed)] so it has a stable memory layout
-// 2. All fields are u8 which are safe to transmute
-// 3. The struct size is fixed and known at compile time
-unsafe impl Pod for MeshNodeStValT {}
-// SAFETY: (4) audited packed-wire view: all-zero bytes are a valid `MeshNodeStValT`
-// (`dev_adr` and `sn` are `u8`, `par` is `[u8; MESH_NODE_ST_PAR_LEN]`), which is all
-// `Zeroable` requires.
-unsafe impl Zeroable for MeshNodeStValT {}
-
-#[derive(Clone, Copy)]
-#[repr(C, packed)]
-pub struct MeshNodeStT {
-    /// Sweep-age counter: `0` = offline/never seen, `>= 1` = online with age
-    /// `miss - 1` status sweeps since the last observation. All-zero init in
-    /// `.bss` therefore means offline without an explicit runtime fill.
-    pub miss: u8,
-    // don't change include type
-    pub val: MeshNodeStValT,
-}
-
-/// A node is online iff it has a non-zero sweep-age counter (`miss`).
-pub fn is_online(node: &MeshNodeStT) -> bool {
-    node.miss != 0
-}
-
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
     use super::*;
     use core::mem;
@@ -976,9 +915,6 @@ mod tests {
     /// Tests packet structure field alignments and offsets
     #[test]
     fn test_packet_field_offsets() {
-        // Test that fields are at expected positions in packed structs
-        let mesh = MeshPkt::default();
-
         // Since these are packed structs, we need to be careful about alignment
         // but we can test that the structs can be created and accessed
 
@@ -1012,7 +948,7 @@ mod tests {
         let base = core::ptr::addr_of!(pkt) as usize;
 
         // IV source: rf_len in head (offset 5 within PacketL2capHead)
-        let rf_len_offset = unsafe { core::ptr::addr_of!(pkt.head.rf_len) as usize - base };
+        let rf_len_offset = core::ptr::addr_of!(pkt.head.rf_len) as usize - base;
         assert_eq!(
             rf_len_offset, 5,
             "rf_len must be at offset 5 for broadcast IV"

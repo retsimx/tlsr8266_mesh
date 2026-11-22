@@ -96,8 +96,9 @@ use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::*;
-use crate::sdk::packet_types::*;
 use crate::BIT;
+use mesh_protocol::mesh_types::*;
+use mesh_protocol::packet_types::*;
 
 use super::mesh_management::{
     mesh_node_update_status, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
@@ -2723,7 +2724,7 @@ mod tests {
     #[test]
     #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_rc_data_status_advertisement_end_to_end() {
-        use crate::sdk::packet_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+        use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
 
         mock_read_reg_system_tick().returns(0x12345678);
 

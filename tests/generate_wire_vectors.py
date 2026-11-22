@@ -561,7 +561,7 @@ w("pair.op.reset_mesh = 0x0a")
 w("pair.op.delete_pairing = 0x0e")
 w("")
 
-w("# --- Pairing state discriminants (PairState in state.rs) -----------------")
+w("# --- Pairing state discriminants (mesh_protocol::mesh_types::PairState) ---")
 w("pair.state.mesh_effect = %s" % hexval(mesh_common.PAIR_STATE_MESH_EFFECT))
 w("pair.state.requesting_ltk = %s" % hexval(mesh_common.PAIR_STATE_REQUESTING_LTK))
 w("pair.state.pairing_complete = %s" % hexval(mesh_common.PAIR_STATE_PAIRING_COMPLETE))

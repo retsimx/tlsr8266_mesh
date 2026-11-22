@@ -106,18 +106,50 @@
 
 use core::cmp::min;
 use core::convert::TryFrom;
+use core::sync::atomic::{AtomicU32, AtomicU8};
 
 use crate::config::{
     FLASH_ADR_PAIRING, FLASH_ADR_RESET_CNT, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG,
 };
+use crate::sdk::ble_app::ble_ll_pair::{
+    MESH_PAIR_ENABLE, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_PWD_ENCODE_SK,
+};
+use crate::sdk::ble_app::rf_drv_8266::MESH_DEVICE_ADDRESS_VALIDATION_PENDING;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::mcu::clock::clock_time_exceed;
 use crate::sdk::mcu::crypto::encode_password;
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::pm::{blink_ota_led_ok, light_sw_reboot};
-use crate::state::*;
 use crate::BIT;
 use critical_section;
+
+/// Factory reset detection state manager.
+/// Tracks reset counts and timing for factory reset sequence detection.
+struct FactoryResetState {
+    /// Flash address index for reset counter storage
+    flash_address_index: AtomicU32,
+    /// Number of consecutive resets for factory reset detection
+    consecutive_reset_count: AtomicU8,
+    /// Clear state counter for reset sequence tracking
+    clear_state: AtomicU8,
+    /// Timestamp for reset counter timeout checking
+    timing_check_timestamp: AtomicU32,
+}
+
+impl FactoryResetState {
+    const fn new() -> Self {
+        Self {
+            flash_address_index: AtomicU32::new(0),
+            consecutive_reset_count: AtomicU8::new(0),
+            clear_state: AtomicU8::new(3),
+            timing_check_timestamp: AtomicU32::new(0),
+        }
+    }
+}
+
+/// Global factory reset detection state.
+static FACTORY_RESET_STATE: FactoryResetState = FactoryResetState::new();
 
 /// Timing sequence for factory reset detection (in seconds)
 /// Format: [min_time, max_time] pairs for each power cycle step
@@ -527,6 +559,9 @@ fn write_timing_validation() {
 /// * Returns FACTORY_RESET_FLAG (0x80) if factory reset should be performed
 #[cfg_attr(test, mry::mry)]
 fn read_flash_byte(addr: u32) -> u8 {
+    // SAFETY: (1) volatile memory read. `addr` is `FLASH_ADR_RESET_CNT` plus a
+    // small step index inside that flash sector; `read_volatile` reads one byte at
+    // the exact width and creates no reference.
     unsafe {
         // Cast the address to a raw pointer and perform a volatile read
         let flash_ptr = addr as *const u8;
@@ -1011,6 +1046,7 @@ mod tests {
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::pm::{mock_blink_ota_led_ok, mock_light_sw_reboot};
     use core::slice;
+    use core::sync::atomic::Ordering;
     use mry::send_wrapper::SendWrapper;
     // factory_reset is defined in this module, so we can reference mock_factory_reset directly
 
@@ -1990,5 +2026,15 @@ mod tests {
         // Restore mesh pairing flags for other tests
         MESH_PAIR_ENABLE.set(false);
         MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+    }
+
+    #[test]
+    fn test_factory_reset_state_new_defaults() {
+        let state = FactoryResetState::new();
+
+        assert_eq!(state.flash_address_index.load(Ordering::Relaxed), 0);
+        assert_eq!(state.consecutive_reset_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.clear_state.load(Ordering::Relaxed), 3);
+        assert_eq!(state.timing_check_timestamp.load(Ordering::Relaxed), 0);
     }
 }

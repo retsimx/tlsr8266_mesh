@@ -239,6 +239,9 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 
         // Read requested data bytes into the provided buffer using a safer pattern
         // Still unsafe due to raw pointer usage, but more contained and idiomatic
+        // SAFETY: (2) raw-pointer buffer ABI. The caller contract requires `buf` to be
+        // valid for writes of `len` bytes; the slice is used only by the loop below and
+        // never escapes this critical section.
         unsafe {
             // Create a slice to the uninitialized buffer for safer indexing
             let buffer = core::slice::from_raw_parts_mut(buf, len as usize);
@@ -304,6 +307,9 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
         // Send all data bytes from buffer - use a safer pattern if data is present
         if !data.is_null() && data_len > 0 {
             // Create a temporary slice from the raw pointer for safer access
+            // SAFETY: (2) raw-pointer buffer ABI. The `!data.is_null() && data_len > 0`
+            // guard makes `data` valid for reads of `data_len` bytes, per the documented
+            // caller contract of `flash_write_page`.
             let data_slice = unsafe { core::slice::from_raw_parts(data, data_len as usize) };
 
             // Use iterator for more idiomatic access
@@ -416,6 +422,9 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
     }
 
     // Create a safe slice from the raw input buffer
+    // SAFETY: (2) raw-pointer buffer ABI. `len == 0` and a null `buf` return early
+    // above, so `buf` is valid for reads of `len` bytes for the whole loop and the
+    // slice never escapes this function.
     let data = unsafe { core::slice::from_raw_parts(buf, len as usize) };
 
     // Track current position in data and address
@@ -433,6 +442,9 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
         let write_size = core::cmp::min(bytes_remaining, current_page_remaining);
 
         // Get pointer to current position in the buffer
+        // SAFETY: (2) raw-pointer buffer ABI. `bytes_written` grows only by
+        // `write_size`, and the loop stops once it reaches the `len` bytes proven valid
+        // at entry, so the offset stays inside the allocation.
         let current_data_ptr = unsafe { buf.add(bytes_written) };
 
         // Write current chunk to flash

@@ -43,10 +43,12 @@
 use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use crate::sdk::ble_app::queues;
+use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS};
 use crate::sdk::common::sync::CriticalSectionMutex;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::uart::{UartData, UART_DATA_LEN};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
@@ -55,9 +57,118 @@ use crate::sdk::packet_types::{
     is_online, MeshNodeStT, MeshNodeStValT, UartMsg, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
     MESH_STATUS_VALUE_LEN,
 };
-use crate::state::*;
 use crate::BIT;
 use embassy_time::{Duration, Instant};
+use heapless::Deque;
+
+/// Mesh node status table storing information about all known nodes in the mesh network.
+/// Contains up to 64 entries with each node's device address, sequence number, and parameters.
+/// Used to track online status, last communication timestamp, and node-specific data.
+pub(crate) static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> =
+    CriticalSectionMutex::new(
+        [MeshNodeStT {
+            miss: 0,
+            val: MeshNodeStValT {
+                dev_adr: 0,
+                sn: 0,
+                par: [0; MESH_NODE_ST_PAR_LEN],
+            },
+        }; MESH_NODE_MAX_NUM],
+    );
+
+/// Remote control packet buffer storing received commands for processing.
+/// Queue of up to 20 packet buffers containing operation codes and sequence numbers.
+pub(crate) static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> =
+    CriticalSectionMutex::new(Deque::new());
+
+/// Sequence number for device status messages.
+/// 3-byte counter used to ensure message ordering and detect duplicates in status reports.
+pub(crate) static STATUS_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> =
+    CriticalSectionMutex::new([0; 3]);
+
+/// General sequence number for all device transmissions.
+/// 3-byte counter used to track and order outgoing mesh messages from this device.
+pub(crate) static GENERAL_MESSAGE_SEQUENCE_NUMBER: CriticalSectionMutex<[u8; 3]> =
+    CriticalSectionMutex::new([0; 3]);
+
+/// Mesh packet template for light control commands.
+/// Pre-structured packet used for sending lighting commands through the mesh network.
+/// Contains source/destination addressing and command payload area.
+pub(crate) static PKT_LIGHT_DATA: CriticalSectionMutex<Packet> =
+    CriticalSectionMutex::new(Packet {
+        att_cmd: PacketAttCmd {
+            head: PacketL2capHead {
+                dma_len: 0x27,
+                _type: 2,
+                rf_len: 0x25,
+                l2cap_len: 0xCCDD,
+                chan_id: 0,
+            },
+            opcode: 0,
+            handle: 0,
+            handle1: 0,
+            value: PacketAttValue {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0; 23],
+            },
+        },
+    });
+
+/// Mesh packet template for light status responses.
+/// Pre-structured packet used for reporting device status back through the mesh.
+/// Contains device state information and addressing for status updates.
+pub(crate) static PKT_LIGHT_STATUS: CriticalSectionMutex<Packet> =
+    CriticalSectionMutex::new(Packet {
+        att_cmd: PacketAttCmd {
+            head: PacketL2capHead {
+                dma_len: 0x27,
+                _type: 2,
+                rf_len: 0x25,
+                l2cap_len: 0x21,
+                chan_id: 0,
+            },
+            opcode: 0,
+            handle: 0,
+            handle1: 0,
+            value: PacketAttValue {
+                sno: [0; 3],
+                src: [0; 2],
+                dst: [0; 2],
+                val: [0; 23],
+            },
+        },
+    });
+
+/// Bitmask indicating which mesh nodes are active/online.
+/// Each bit represents one node in the mesh network (up to 64 nodes).
+pub(crate) static MESH_NODE_MASK: CriticalSectionMutex<[u32; MESH_NODE_MASK_LEN]> =
+    CriticalSectionMutex::new([0; MESH_NODE_MASK_LEN]);
+
+/// Counter for the number of mesh listen cycles performed.
+/// Used for timing and synchronization of mesh listening periods.
+pub(crate) static MESH_LISTEN_CYCLE_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Current maximum number of active nodes in the mesh network.
+/// Dynamically tracks the highest node count for optimization.
+pub(crate) static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
+
+/// Flag enabling automatic mesh node status reporting.
+/// When true, device periodically reports status to mesh network.
+pub(crate) static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
+
+/// Device node sequence number for mesh communication.
+/// Incremental counter used for message sequencing and duplicate detection.
+static DEVICE_NODE_SN: AtomicU8 = AtomicU8::new(1);
+
+/// Flag indicating device online status in mesh network.
+/// When true, device is considered active and reachable by other nodes.
+pub(crate) static MESH_DEVICE_ONLINE_STATUS: AtomicBool = AtomicBool::new(true);
+
+/// Listen interval for mesh operations in microseconds.
+/// Defines how often the device listens for mesh network traffic.
+pub(crate) static MESH_LISTEN_INTERVAL_US: AtomicU32 = AtomicU32::new(0);
 
 /// Advertisement round-robin cursor: index (1..MESH_NODE_MAX) of the next remote
 /// node to advertise. Persists across packets so every remote is eventually
@@ -709,6 +820,11 @@ pub fn mesh_send_online_status() {
     };
 
     // Get direct access to packet payload for efficient manipulation
+    // SAFETY: (4) audited packed-wire view. `value` is the payload field of the
+    // local `pkt_light_adv_status`, and the slice spans exactly
+    // `size_of::<PacketAttValue>()` bytes, so it stays inside that local for the
+    // rest of the function; only the first `MESH_STATUS_VALUE_LEN + 4` bytes are
+    // touched.
     let pktdata = unsafe {
         &mut *slice_from_raw_parts_mut(
             addr_of_mut!(pkt_light_adv_status.att_write_mut().value) as *mut u8,
@@ -722,6 +838,10 @@ pub fn mesh_send_online_status() {
 
     // Generate and embed advertisement sequence number
     ADV_ST_SN.store(ADV_ST_SN.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    // SAFETY: (4) audited packed-wire view. `opcode` is the first of the three
+    // consecutive one-byte header fields (`opcode`, `handle`, `handle1`) of the
+    // local packet, and `val` is a live 4-byte `u32`, so both 3-byte views are in
+    // bounds and the copy touches only this local.
     unsafe {
         let val = ADV_ST_SN.load(Ordering::Relaxed);
         // Copy sequence number to opcode field (3 bytes, little-endian)

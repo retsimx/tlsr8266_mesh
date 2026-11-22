@@ -12,11 +12,17 @@
 use core::ptr::addr_of;
 
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_select_next_data_channel;
+use crate::sdk::ble_app::light_ll::connection_management::{
+    BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED,
+    BRIDGE_RECEIVE_TIMING_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
+};
+use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::*;
-use crate::state::*;
 
 /// Handles the BLE receive state interrupt.
 ///

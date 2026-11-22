@@ -23,6 +23,7 @@ use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
 use crate::sdk::common::crc::crc16;
 use crate::sdk::common::sync::CriticalSectionMutex;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::uart::{UartData, UartDriver, UartIrqMask, UART_DATA_LEN};
 use crate::sdk::packet_types::{AppCmdValue, Packet};
 use crate::uprintln;
@@ -46,7 +47,7 @@ type Fingerprint = [u8; CTRL_FINGERPRINT_LEN];
 /// (short, allocation-free) critical sections inside `embassy-sync`.
 type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
-use crate::state::{SimplifyLS, DEVICE_ADDRESS};
+use crate::sdk::ble_app::rf_drv_8266::DEVICE_ADDRESS;
 
 pub use crate::sdk::packet_types::UartMsg;
 
@@ -102,6 +103,10 @@ pub fn light_mesh_rx_cb(data: &Packet) {
 
     let data = addr_of!(data.ll_app().value) as *const u8;
     // Compute the CRC of important bits. This is from start of AppCmdValueT.dst (5) to end of AppCmdValueT.par (20)
+    // SAFETY: (4) audited packed-wire view. `data` points at the live packet's
+    // `AppCmdValue` field (21 bytes), and the 15-byte view is the `dst`..`par`
+    // span of that wire layout (offsets 5..20), so it stays inside the
+    // caller-owned packet.
     let msg = unsafe { slice::from_raw_parts((data as u32 + 5) as *const u8, 20 - 5) };
 
     // Check if this message is one we sent
@@ -117,6 +122,9 @@ pub fn light_mesh_rx_cb(data: &Packet) {
 
     msg.data[2] = u8::from(UartMsg::MeshMessage);
     for i in 0..size_of::<AppCmdValue>() {
+        // SAFETY: (4) audited packed-wire copy. `i < size_of::<AppCmdValue>()` (21) and
+        // the destination offset `3 + i` stays below `UART_DATA_LEN` (44), so both the
+        // `msg.data` store and the `data` load stay in bounds of their buffers.
         unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.add(i) };
     }
 

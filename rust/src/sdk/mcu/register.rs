@@ -75,6 +75,9 @@ pub const REG_BASE_ADDR: u32 = 0x800000;
 #[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn write_reg8(addr: u32, v: u8) {
+    // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `write_volatile` preserves the 8-bit
+    // access, and no Rust reference aliases the register.
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u8, v) }
 }
 
@@ -86,6 +89,9 @@ pub fn write_reg8(addr: u32, v: u8) {
 #[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn write_reg16(addr: u32, v: u16) {
+    // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `write_volatile` preserves the 16-bit
+    // access, and no Rust reference aliases the register.
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u16, v) }
 }
 
@@ -97,6 +103,9 @@ pub fn write_reg16(addr: u32, v: u16) {
 #[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn write_reg32(addr: u32, v: u32) {
+    // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `write_volatile` preserves the 32-bit
+    // access, and no Rust reference aliases the register.
     unsafe { core::ptr::write_volatile((addr | REG_BASE_ADDR) as *mut u32, v) }
 }
 
@@ -116,6 +125,9 @@ pub fn write_reg32(addr: u32, v: u32) {
 #[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn read_reg8(addr: u32) -> u8 {
+    // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `read_volatile` preserves the 8-bit
+    // access and the value is returned by copy, so no reference is created.
     return unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u8) };
 }
 
@@ -129,6 +141,9 @@ pub fn read_reg8(addr: u32) -> u8 {
 #[coverage(off)]
 #[cfg_attr(test, mry::mry)]
 pub fn read_reg16(addr: u32) -> u16 {
+    // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `read_volatile` preserves the 16-bit
+    // access and the value is returned by copy, so no reference is created.
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u16) }
 }
 
@@ -142,6 +157,9 @@ pub fn read_reg16(addr: u32) -> u16 {
 #[cfg_attr(test, mry::mry)]
 #[coverage(off)]
 pub fn read_reg32(addr: u32) -> u32 {
+    // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
+    // register offset in the 0x800000 map; `read_volatile` preserves the 32-bit
+    // access and the value is returned by copy, so no reference is created.
     unsafe { core::ptr::read_volatile((addr | REG_BASE_ADDR) as *mut u32) }
 }
 

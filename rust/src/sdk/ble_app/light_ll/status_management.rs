@@ -70,16 +70,66 @@
 //! - **Load Balancing**: Distribution of traffic across multiple channels
 
 use core::cmp::min;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
+use crate::sdk::ble_app::ble_ll_pair::PAIR_AC;
+use crate::sdk::ble_app::light_ll::connection_management::{
+    BRIDGE_COMMAND_TIMESTAMP, SLAVE_DATA_VALID,
+};
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::{read_reg_rnd_number, read_reg_system_tick};
-use crate::state::*;
 
-use super::mesh_management::mesh_send_online_status;
+use super::mesh_management::{
+    mesh_send_online_status, MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA,
+    STATUS_MESSAGE_SEQUENCE_NUMBER,
+};
 use super::packet_processing::rf_link_is_notify_req;
+
+/// Status record table for tracking mesh node communications.
+/// Records device addresses and alarm IDs for up to 64 nodes in the mesh network.
+/// Used to track which devices need status updates or have pending alarms.
+pub(crate) static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> =
+    CriticalSectionMutex::new(
+        [StatusRecord {
+            adr: [0],
+            alarm_id: 0,
+        }; MESH_NODE_MAX_NUM],
+    );
+
+/// Status indicating slave is busy reading mesh node states.
+/// Prevents concurrent status reading operations.
+pub(crate) static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
+
+/// Write pointer for the device status buffer circular queue.
+/// Points to the next position for storing incoming status data.
+pub(crate) static DEVICE_STATUS_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Read pointer for the device status buffer circular queue.
+/// Points to the next status entry to be processed.
+pub(crate) static DEVICE_STATUS_BUFFER_READ_POINTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Flag indicating unicast status reading is active.
+/// When true, status reads are directed to specific devices rather than broadcast.
+pub(crate) static DEVICE_STATUS_READ_UNICAST_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Status tick counter for device state machine.
+/// Used for timing device status operations and state transitions.
+pub(crate) static DEVICE_STATUS_TICK_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+/// Current index into the device status record table.
+/// Points to the active entry in the status tracking array.
+pub(crate) static DEVICE_STATUS_RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+/// Notification request mask index for tracking pending requests.
+/// Used to track which devices have pending notification requests.
+pub(crate) static NOTIFICATION_REQUEST_MASK_INDEX: AtomicU8 = AtomicU8::new(0);
+
+/// Timestamp when device became busy reading status information.
+/// Used to detect and timeout stuck status reading operations.
+pub(crate) static DEVICE_STATUS_READ_BUSY_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
 /// Initializes BLE slave status reporting parameters to default state.
 ///

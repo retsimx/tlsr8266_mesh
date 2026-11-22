@@ -42,19 +42,187 @@
 
 use core::ptr::addr_of;
 use core::slice;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize};
 
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
-use crate::sdk::ble_app::ble_ll_pair::pair_init;
+use crate::sdk::ble_app::ble_ll_pair::{pair_init, PAIR_AC, SECURITY_ENABLE};
 use crate::sdk::ble_app::callbacks;
 use crate::sdk::ble_app::flash_config::{
     rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN,
 };
+use crate::sdk::ble_app::light_ll::mesh_management::{MESH_NODE_MASK, MESH_NODE_REPORT_ENABLE};
+use crate::sdk::ble_app::light_ll::status_management::DEVICE_STATUS_TICK_COUNTER;
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{
+    BLE_PERIPHERAL_ADVERTISING_ENABLED, BLE_SCAN_RESPONSE_INTERVAL_US, CURRENT_RF_STATE, MAC_ID,
+    PKT_INIT,
+};
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
 use crate::sdk::packet_types::*;
-use crate::state::*;
+
+/// Response buffer for storing packets that need to be sent back to the BLE host.
+/// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
+/// Protected by critical section mutex for thread-safe access in interrupt contexts.
+pub(crate) static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> =
+    CriticalSectionMutex::new(
+        [Packet {
+            att_data: PacketAttData {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                att: 0,
+                hl: 0,
+                hh: 0,
+                dat: [0; 23],
+            },
+        }; BUFF_RESPONSE_PACKET_COUNT],
+    );
+
+/// Current state of the BLE connection as a peripheral device.
+/// Tracks connection status, advertising state, and link layer operations.
+pub(crate) static BLE_PERIPHERAL_LINK_STATE: crate::sdk::light::AtomicBlePeripheralLinkState =
+    crate::sdk::light::AtomicBlePeripheralLinkState::new(
+        crate::sdk::light::BlePeripheralLinkState::Disconnected,
+    );
+
+/// Timestamp of the last received packet for timeout detection.
+/// Used to detect communication timeouts and trigger reconnection procedures.
+pub(crate) static LAST_PACKET_RECEIVED_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+
+/// Sequence number for light connection messages from master.
+/// Tracks message ordering in master-slave light control communications.
+pub(crate) static LIGHT_CONN_SN_MASTER: AtomicU16 = AtomicU16::new(0);
+
+/// Timestamp when the slave connection was established.
+/// Used for calculating connection duration and timeout detection.
+pub(crate) static SLAVE_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
+
+/// Flag indicating whether a BLE slave connection is currently active.
+/// Set to true when connected to a central device, false when disconnected.
+pub(crate) static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// BLE connection interval in microseconds for slave connections.
+/// Determines how frequently connection events occur between central and peripheral.
+pub(crate) static SLAVE_LINK_INTERVAL: AtomicU32 = AtomicU32::new(0x9c400);
+
+/// Current connection window size for slave timing.
+/// Defines the time window during which connection events can occur.
+pub(crate) static SLAVE_WINDOW_SIZE: AtomicU32 = AtomicU32::new(0);
+
+/// Updated connection window size pending application.
+/// New window size that will be applied after connection parameter update.
+pub(crate) static SLAVE_WINDOW_SIZE_UPDATE: AtomicU32 = AtomicU32::new(0);
+
+/// Scheduled timestamp for the next connection event.
+/// Used for precise timing of BLE connection intervals.
+pub(crate) static SLAVE_NEXT_CONNECT_TICK: AtomicU32 = AtomicU32::new(0);
+
+/// Flag indicating successful completion of connection parameter update.
+/// Set when BLE connection parameters have been successfully negotiated.
+pub(crate) static CONN_UPDATE_SUCCESSED: AtomicBool = AtomicBool::new(false);
+
+/// Counter tracking connection parameter update attempts.
+/// Used to limit retry attempts and detect update failures.
+pub(crate) static CONN_UPDATE_CNT: AtomicUsize = AtomicUsize::new(0);
+
+/// GATT service discovery timeout tracking timestamp.
+/// Used to detect when GATT service discovery has taken too long.
+pub(crate) static GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+
+/// BLE peripheral connection timeout value in microseconds.
+/// Maximum time to wait before considering the connection lost.
+pub(crate) static BLE_PERIPHERAL_CONNECTION_TIMEOUT_US: AtomicU32 = AtomicU32::new(0);
+
+/// Timestamp for BLE peripheral timing update procedures.
+/// Tracks when connection parameter updates were initiated.
+pub(crate) static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+
+/// Flag indicating timing update timestamp 2 is active.
+/// Used for secondary timing update coordination.
+pub(crate) static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Timestamp for secondary timing update procedure OK time.
+/// Tracks when secondary timing updates were confirmed.
+pub(crate) static BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME: AtomicU32 = AtomicU32::new(0);
+
+/// Next instant value for BLE connection parameter updates.
+/// BLE connection event number when new parameters take effect.
+pub(crate) static BLE_PERIPHERAL_NEXT_UPDATE_INSTANT: AtomicU16 = AtomicU16::new(0);
+
+/// Previous connection interval before parameter update.
+/// Stored for rollback in case of parameter update failure.
+pub(crate) static BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL: AtomicU32 = AtomicU32::new(0);
+
+/// BLE connection supervision timeout in 10ms units.
+/// Maximum time between successful communication before connection is dropped.
+pub(crate) static BLE_CONN_TIMEOUT: AtomicU32 = AtomicU32::new(0);
+
+/// BLE connection interval in 1.25ms units.
+/// Time between consecutive connection events.
+pub(crate) static BLE_CONN_INTERVAL: AtomicU32 = AtomicU32::new(0);
+
+/// BLE connection offset timing adjustment.
+/// Fine-tuning for connection event timing synchronization.
+pub(crate) static BLE_CONN_OFFSET: AtomicU32 = AtomicU32::new(0);
+
+/// Timestamp of the first successful slave connection.
+/// Used for connection establishment timing and statistics.
+pub(crate) static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+
+/// Flag indicating connection parameters need to be updated.
+/// Set when BLE connection parameters require modification.
+pub(crate) static NEED_UPDATE_CONNECT_PARA: AtomicBool = AtomicBool::new(false);
+
+/// User-requested maximum connection interval limit.
+/// Upper bound for BLE connection interval negotiations.
+static UPDATE_INTERVAL_USER_MAX: AtomicU16 = AtomicU16::new(0);
+
+/// User-requested minimum connection interval limit.
+/// Lower bound for BLE connection interval negotiations.
+static UPDATE_INTERVAL_USER_MIN: AtomicU16 = AtomicU16::new(0);
+
+/// Validation flag for slave data integrity.
+/// Ensures slave data structures are in a consistent state.
+pub(crate) static SLAVE_DATA_VALID: AtomicU32 = AtomicU32::new(0);
+
+/// Timestamp for bridge command operations.
+/// Used for timing bridge/relay operations in mesh network.
+pub(crate) static BRIDGE_COMMAND_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+
+/// Bridge sequence number for mesh relay operations.
+/// Tracks the current bridge/relay state and operation count.
+pub(crate) static BRIDGE_SEQUENCE_NUMBER: AtomicU32 = AtomicU32::new(0);
+
+/// Flag enabling automatic peripheral timing adjustment.
+/// When true, peripheral device adjusts its timing to maintain synchronization.
+pub(crate) static BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Device timing tick for bridge receive operations.
+/// Timestamp used for mesh bridge receive timing coordination.
+pub(crate) static BRIDGE_RECEIVE_TIMING_TICK: AtomicU32 = AtomicU32::new(0);
+
+/// Window offset for BLE peripheral connection timing.
+/// Adjustment applied to connection window for timing synchronization.
+static BLE_PERIPHERAL_WINDOW_OFFSET: AtomicU32 = AtomicU32::new(0);
+
+/// Current instant value for BLE peripheral connection events.
+/// BLE connection event counter for timing coordination.
+pub(crate) static BLE_PERIPHERAL_CONNECTION_INSTANT: AtomicU16 = AtomicU16::new(0);
+
+/// Current command state for BLE peripheral link operations.
+/// Tracks which command is being processed by the peripheral device.
+pub(crate) static BLE_PERIPHERAL_LINK_COMMAND: AtomicU8 = AtomicU8::new(0);
+
+/// Flag enabling BLE peripheral connection acceptance.
+/// When true, peripheral device accepts incoming BLE connection requests.
+static BLE_PERIPHERAL_CONNECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Validates BLE connection parameters according to specification constraints.
 ///

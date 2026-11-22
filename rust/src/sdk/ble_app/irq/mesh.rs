@@ -12,20 +12,26 @@
 use core::ptr::addr_of;
 use core::slice;
 
+use crate::sdk::ble_app::ble_ll_pair::PAIR_AC;
 use crate::sdk::ble_app::flash_config::SYS_CHN_LISTEN;
-use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
+use crate::sdk::ble_app::light_ll::connection_management::{
+    back_to_rxmode_bridge, BLE_PERIPHERAL_LINK_STATE,
+};
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable_mask, mesh_send_online_status,
+    MESH_DEVICE_ONLINE_STATUS, MESH_LISTEN_CYCLE_COUNT, MESH_LISTEN_INTERVAL_US, MESH_NODE_MASK,
+    MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
 };
 use crate::sdk::ble_app::light_ll::status_management::{app_bridge_cmd_handle, tx_packet_bridge};
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{
     RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
 use crate::sdk::packet_types::{is_online, MESH_NODE_ST_VAL_LEN};
-use crate::state::*;
 
 #[cfg_attr(test, mry::mry)]
 /// Reports mesh node status information for transmission to the BLE master.

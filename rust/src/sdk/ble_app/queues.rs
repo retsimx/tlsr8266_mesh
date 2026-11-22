@@ -14,8 +14,8 @@
 //!
 //! # Layer contract
 //!
-//! This module may only depend on the SDK itself, `crate::state`, `core`,
-//! `critical_section` and `embassy_sync`. It must never reach up into the
+//! This module may only depend on the SDK itself, `core`, `critical_section`
+//! and `embassy_sync`. It must never reach up into the
 //! application layer — that is the whole point of the module.
 //!
 //! # Full-queue policy

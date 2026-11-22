@@ -2,9 +2,9 @@ use core::mem::size_of;
 use core::ptr::addr_of;
 use core::slice;
 
+use crate::sdk::ble_app::rf_drv_8266::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 use crate::sdk::light::AdvPrivate;
 use crate::sdk::rf_drv::set_advertisement_manufacturer_data;
-use crate::state::{ADV_PRI_DATA, ADV_RSP_PRI_DATA, MAC_ID};
 
 /// Configures and sets the advertisement data for the BLE mesh light device.
 ///
@@ -46,6 +46,10 @@ pub fn vendor_set_adv_data() {
     // Serialize the AdvPrivate struct to bytes and send to the RF driver
     // This makes the device visible/discoverable in the mesh network
     let serialized_data =
+        // SAFETY: (4) audited packed-wire view. `tmp` is a live local `AdvPrivate`
+        // (`repr(C, packed)`, integer fields only) and the slice spans exactly
+        // `size_of::<AdvPrivate>()` bytes, so every bit pattern is valid and the range
+        // is in bounds.
         unsafe { slice::from_raw_parts(addr_of!(tmp) as *const u8, size_of::<AdvPrivate>()) };
     set_advertisement_manufacturer_data(serialized_data);
 

@@ -227,6 +227,9 @@ pub async fn check_panic_info() {
     let mut message: [u8; 256] = [0; 256];
     flash_read_page(panic_addr + 3, length as u32, message.as_mut_ptr());
 
+    // SAFETY: (4) audited panic-report wire view. `message` is a live 256-byte
+    // array and `length` is the sector's length word, written by `write_panic_info`
+    // from a `UartStream<256>`, so `length <= 256 == message.len()`.
     let mut buffer = unsafe { slice::from_raw_parts(message.as_ptr(), length as usize) };
     while !buffer.is_empty() {
         // Wait a moment to send the next message
@@ -241,6 +244,9 @@ pub async fn check_panic_info() {
 
         crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
 
+        // SAFETY: (4) audited panic-report wire view. `len <= buffer.len()`, so the
+        // advanced pointer stays inside the same `message` allocation and the new
+        // length remains in bounds; these are the same persisted wire bytes.
         buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) }
     }
 
@@ -364,10 +370,11 @@ pub mod rtt {
                     break;
                 }
 
-                // SAFETY: `wr` is always a valid index (it is reduced modulo
-                // RTT_CAP above, and a corrupt value is reset to 0). A checked
-                // store would put `panic_bounds_check` on the panic handler's
-                // call graph => rejected by the static stack gate.
+                // SAFETY: (5) panic/RTT call graph. `wr` is a valid index: it is
+                // reduced modulo `RTT_CAP` above and a corrupt value is reset to
+                // 0, so `wr < RTT_CAP`. A checked store would put
+                // `panic_bounds_check` on the panic handler's call graph and the
+                // static stack gate rejects it.
                 unsafe { *self.buf.get_unchecked_mut(wr) = byte };
                 wr = next;
                 self.wr.store(wr as u16, Ordering::Relaxed);
@@ -379,20 +386,38 @@ pub mod rtt {
     /// `probe-tlsr rtt`, so it may not be renamed.
     #[no_mangle]
     #[allow(non_upper_case_globals)]
-    pub static mut _TLSR_RTT: RttControlBlock = RttControlBlock::zeroed();
+    pub static _TLSR_RTT: critical_section::Mutex<core::cell::UnsafeCell<RttControlBlock>> =
+        critical_section::Mutex::new(core::cell::UnsafeCell::new(RttControlBlock::zeroed()));
+
+    // The host tool reads the control block straight from the symbol address, so
+    // the mutex wrapper must not add a tag byte or any padding in front of it.
+    const _: () = assert!(
+        core::mem::size_of::<critical_section::Mutex<core::cell::UnsafeCell<RttControlBlock>>>()
+            == core::mem::size_of::<RttControlBlock>()
+    );
+    // `probe-tlsr rtt` hard-codes the sampled size of the ring.
+    const _: () = assert!(core::mem::size_of::<RttControlBlock>() == 272);
 
     #[cfg(feature = "rtt")]
     pub fn rtt_init() {
-        critical_section::with(|_| unsafe {
-            let control_block = &mut *core::ptr::addr_of_mut!(_TLSR_RTT);
+        critical_section::with(|cs| {
+            // SAFETY: (4) audited `Sync`-wrapped static. `borrow` yields the
+            // control-block cell for exactly this critical section: the cell is a
+            // `static` (never null, aligned for `RttControlBlock`) and interrupts
+            // are masked for the whole closure, so no other context can hold a
+            // reference to it. The dereference cannot be made safe because the
+            // mutex deliberately exposes no `&mut T`.
+            let control_block = unsafe { &mut *_TLSR_RTT.borrow(cs).get() };
             control_block.init();
         });
     }
 
     #[cfg(feature = "rtt")]
     pub fn rtt_write_bytes(bytes: &[u8]) {
-        critical_section::with(|_| unsafe {
-            let control_block = &mut *core::ptr::addr_of_mut!(_TLSR_RTT);
+        critical_section::with(|cs| {
+            // SAFETY: (4) as in `rtt_init`: the critical section makes this the
+            // only accessor of the `static` cell for the duration of the call.
+            let control_block = unsafe { &mut *_TLSR_RTT.borrow(cs).get() };
             control_block.write(bytes);
         });
     }

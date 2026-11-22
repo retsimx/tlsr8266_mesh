@@ -80,18 +80,36 @@ use bytemuck;
 
 use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
+use crate::sdk::ble_app::ble_ll_channel_selection::SLAVE_CHN_MAP;
 use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet;
 use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response, on_uart_mesh_rx};
 use crate::sdk::ble_app::flash_config::rf_update_conn_para;
+use crate::sdk::ble_app::light_ll::connection_management::{
+    BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT, BLE_PERIPHERAL_CONNECTION_ACTIVE,
+    BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_NEXT_UPDATE_INSTANT,
+    BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
+    BUFF_RESPONSE, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_WINDOW_SIZE_UPDATE,
+};
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::register::*;
 use crate::sdk::packet_types::*;
-use crate::state::*;
 use crate::BIT;
 
-use super::mesh_management::{mesh_node_update_status, rf_link_match_group_mac};
+use super::mesh_management::{
+    mesh_node_update_status, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
+    MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST, PKT_LIGHT_DATA,
+    PKT_LIGHT_STATUS, RC_PKT_BUF, STATUS_MESSAGE_SEQUENCE_NUMBER,
+};
+use super::ota_management::OTA_UPDATE_IN_PROGRESS;
+use super::status_management::{
+    DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
+    DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX, NOTIFICATION_REQUEST_MASK_INDEX,
+    SLAVE_READ_STATUS_BUSY, SLAVE_STATUS_RECORD,
+};
 
 /// Implements duplicate packet detection using cached packet buffer.
 ///
@@ -705,6 +723,10 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
             // We need to extract from the value field, not from MeshPkt metadata fields
 
             // Get raw bytes of PacketAttValue starting from the beginning
+            // SAFETY: (4) audited packed-wire view. `packet` is the caller's live
+            // `&mut Packet`; the slice starts at its `value` field and spans
+            // `MESH_STATUS_VALUE_LEN` (24) of the 30 `PacketAttValue` bytes, which the
+            // signature check above proves were written by `mesh_node_adv_status`.
             let value_bytes = unsafe {
                 core::slice::from_raw_parts(
                     addr_of!(packet.att_write().value) as *const u8,

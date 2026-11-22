@@ -10,9 +10,9 @@
 //! - RF interrupt handling (TX/RX complete)
 //! - BLE system timer state dispatch
 
+use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::register::*;
-use crate::state::*;
 
 use super::advertisement::handle_ble_advertisement_state;
 use super::connection::{handle_ble_connected_state, BleConnectionEvent};

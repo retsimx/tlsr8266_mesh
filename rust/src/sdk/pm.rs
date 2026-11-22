@@ -1,5 +1,9 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::sdk::ble_app::light_ll::ota_management::{
+    OTA_UPDATE_IN_PROGRESS, OTA_UPDATE_MESH_OPERATIONS_BLOCKED,
+};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
@@ -8,7 +12,6 @@ use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GP
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
 use crate::sdk::mcu::watchdog::wd_clear;
-use crate::state::*;
 use crate::BIT;
 use critical_section;
 
@@ -489,8 +492,8 @@ mod tests {
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_no_ota() {
         // Setup: No OTA flags set
-        crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
-        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        OTA_UPDATE_IN_PROGRESS.set(false);
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
         // Light state must not leak in from another test
         set_reboot_light_off_state(false);
 
@@ -511,8 +514,8 @@ mod tests {
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_off() {
         // Setup: OTA flags set, light is off
-        crate::state::OTA_UPDATE_IN_PROGRESS.set(true);
-        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        OTA_UPDATE_IN_PROGRESS.set(true);
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
         set_reboot_light_off_state(true);
 
         mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
@@ -532,8 +535,8 @@ mod tests {
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_on() {
         // Setup: OTA flags set, light is on
-        crate::state::OTA_UPDATE_IN_PROGRESS.set(false);
-        crate::state::OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        OTA_UPDATE_IN_PROGRESS.set(false);
+        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
         set_reboot_light_off_state(false);
 
         mock_analog_write(REGA_LIGHT_OFF, 0).returns(());

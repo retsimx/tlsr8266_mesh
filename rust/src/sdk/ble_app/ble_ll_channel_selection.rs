@@ -1,4 +1,23 @@
-use crate::state::*;
+use core::sync::atomic::AtomicUsize;
+
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
+
+/// BLE Link Layer channel table for frequency hopping sequence.
+/// Contains the channel map used for data channel selection in BLE connections.
+/// Updated during connection parameter negotiations and channel map updates.
+static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> = CriticalSectionMutex::new([0; 40]);
+
+/// Channel map for slave device indicating which of the 37 BLE data channels are usable.
+/// Each bit represents one channel; used for adaptive frequency hopping.
+pub(super) static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::new([0; 5]);
+
+/// Current BLE Link Layer channel number for communication.
+/// Tracks which of the 37 BLE channels is currently in use.
+static BLE_LL_CHANNEL_NUM: AtomicUsize = AtomicUsize::new(0);
+
+/// Last unmapped channel in the BLE channel hopping sequence.
+/// Used for channel selection algorithm and interference avoidance.
+static BLE_LL_LAST_UNMAPPED_CH: AtomicUsize = AtomicUsize::new(0);
 
 /// Calculates and populates the BLE channel table based on the provided channel map.
 ///

@@ -18,11 +18,14 @@
 //! - OTA timeout countdown driven by `TMR0` elapsed time
 
 use crate::sdk::ble_app::irq::BleConnectionEvent;
+use crate::sdk::ble_app::light_ll::ota_management::{
+    OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS, RF_SLAVE_OTA_FINISHED_FLAG,
+};
 use crate::sdk::common::sync::CriticalSectionMutex;
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
 use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::register::*;
-use crate::state::*;
 
 /// Timestamp of the last `TMR0` interrupt at which the OTA timeout was decremented.
 ///
@@ -165,13 +168,13 @@ mod tests {
         handle_rf_packet_reception, handle_rf_transmission_complete,
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
+    use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
     use crate::sdk::light::{RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
     use crate::sdk::mcu::clock::mock_clock_time64;
     use crate::sdk::mcu::register::{
         mock_read_reg_irq_src, mock_read_reg_rf_irq_status, mock_write_reg_irq_src,
         mock_write_reg_tmr_sta,
     };
-    use crate::state::{OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS};
     use crate::uart_manager::{check_irq, mock_check_irq};
 
     /// Timeout used by the OTA countdown tests; any non-zero value that cannot be

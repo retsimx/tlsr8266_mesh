@@ -9,27 +9,47 @@
 //! - Channel map updates and frequency hopping management
 //! - Connection event timing synchronization
 
-use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
+use crate::sdk::ble_app::ble_ll_channel_selection::{
+    ble_ll_build_available_channel_table, SLAVE_CHN_MAP,
+};
+use crate::sdk::ble_app::ble_ll_pair::{PAIR_LOGIN_OK, PAIR_SETTING_FLAG, SECURITY_ENABLE};
 use crate::sdk::ble_app::flash_config::pair_load_key;
-use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
+use crate::sdk::ble_app::light_ll::connection_management::{
+    back_to_rxmode_bridge, BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT,
+    BLE_PERIPHERAL_CONNECTION_ACTIVE, BLE_PERIPHERAL_CONNECTION_INSTANT,
+    BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
+    BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_NEXT_UPDATE_INSTANT,
+    BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
+    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME,
+    BRIDGE_COMMAND_TIMESTAMP, BRIDGE_SEQUENCE_NUMBER, BUFF_RESPONSE,
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP, NEED_UPDATE_CONNECT_PARA, SLAVE_CONNECTED_TICK,
+    SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
+    SLAVE_WINDOW_SIZE_UPDATE,
+};
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable,
 };
 use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
+use crate::sdk::ble_app::light_ll::ota_management::{
+    OTA_UPDATE_IN_PROGRESS, OTA_UPDATE_TIMEOUT_SECONDS,
+};
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_data,
 };
 use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, tx_packet_bridge,
+    DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
+    DEVICE_STATUS_READ_BUSY_TIMESTAMP, SLAVE_READ_STATUS_BUSY,
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_INIT};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{
     ePairState, BlePeripheralLinkState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
     SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
-use crate::state::*;
 
 /// Outcome of one BLE connected-state dispatch, reported up to the interrupt
 /// composition root (the crate root) which owns the `ota_manager` calls.

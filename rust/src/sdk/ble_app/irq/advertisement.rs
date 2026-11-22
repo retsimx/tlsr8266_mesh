@@ -13,12 +13,16 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sdk::ble_app::flash_config::SYS_CHN_ADV;
-use crate::sdk::ble_app::light_ll::mesh_management::mesh_send_online_status;
+use crate::sdk::ble_app::light_ll::connection_management::BLE_PERIPHERAL_LINK_STATE;
+use crate::sdk::ble_app::light_ll::mesh_management::{
+    mesh_send_online_status, MESH_DEVICE_ONLINE_STATUS,
+};
 use crate::sdk::ble_app::rf_drv_8266::*;
+use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE, PKT_ADV};
+use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
-use crate::state::*;
 
 /// Returns the number of GATT advertisement cycles to perform.
 ///

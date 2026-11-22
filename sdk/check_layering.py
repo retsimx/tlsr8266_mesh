@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Layering gate for ``rust/src/sdk/``.
+"""Layering and ``unsafe`` gates for ``rust/src/``.
+
+The script runs two independent passes.
+
+**Pass 1 — SDK layering** over ``--root`` (default ``rust/src/sdk``).
 
 The SDK is a from-scratch vendor layer: it must not reach up into the
 application modules (``app``, ``mesh``, ``light_manager``, ...).  This gate
@@ -17,18 +21,55 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 * ``sdk/mcu/`` additionally may import ``crate::sdk::mcu``;
 * ``sdk/drivers/`` additionally may import ``crate::sdk::drivers``.
 
+**Pass 2 — universal rules** over ``--src-root`` (default ``rust/src``).
+
+Four permanent rules, one per line of defence won by R-9 (#45):
+
+* ``state-removed`` — any ``crate::state`` reference is a violation.  This one
+  rule scans the *whole raw file*, deliberately without the ``#[cfg(test)]``
+  mask: test modules import the deleted module too, and the acceptance
+  criterion is literally ``rg 'crate::state' rust/src/`` returning nothing.
+  Whitespace around ``::`` is irrelevant to the Rust lexer and is matched;
+  a crate alias cannot dodge it because ``c::state`` does not compile once the
+  module is deleted.
+* ``static-mut`` — a production ``static mut`` *item*.  The pattern is matched
+  anywhere in production code, so an inline attribute or a one-line
+  ``macro_rules!`` body does not hide it, while references such as
+  ``fn run(&'static mut self, ...)`` and ``-> &'static mut [T; N]`` are
+  rejected by the lookbehind (the preceding ``'`` is a lifetime).
+* ``undocumented-unsafe`` — every production ``unsafe`` token must have
+  ``SAFETY:`` in the contiguous ``//`` comment run directly above it.  The
+  token is selected in ``production_code()`` (so test modules are excluded),
+  but ``production_code()`` *blanks comments* — the raw ``text`` is therefore
+  what the comment run is read from, while the ``#[cfg(test)]``-stripped mask
+  proves each comment line is production code and not a test-only comment
+  laundering a production site.
+* ``unsafe-budget`` — the total production ``unsafe`` token count over the
+  whole source root may not exceed ``MAX_PRODUCTION_UNSAFE``.
+
+``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
+``unsafe`` sites are removed, never raised.  The value below was produced by
+running this exact rule on the finished tree, not by hand-counting tokens.
+
 Usage::
 
-    python3 sdk/check_layering.py [--root rust/src/sdk]
+    python3 sdk/check_layering.py [--root rust/src/sdk] [--src-root rust/src]
 
-Exit codes: ``0`` clean, ``1`` one or more violations, ``2`` usage/IO error.
-Violations are printed one per line as ``file:line: rule: violation``.
+Passing ``--root`` explicitly without ``--src-root`` runs only the layering
+pass; that is what keeps the temp-tree unit tests hermetic.  The no-argument
+form (CI) runs both passes.
+
+Exit codes: ``0`` clean, ``1`` one or more violations in either pass, ``2``
+usage/IO error.  Violations are printed one per line as
+``file:line: rule: violation``.
 
 The test stripper removes only ``#[cfg(test)]`` items and ``#[cfg(test)] mod
 tests { ... }`` blocks, using brace balancing, so production code sitting
-*below* an inline ``#[cfg(test)]`` item is still audited.  Only strict
-``#[cfg(test)]`` gates are stripped; ``#[cfg(not(test))]`` and
-``#[cfg_attr(test, ...)]`` are production code.
+*below* an inline ``#[cfg(test)]`` item is still audited.  An attribute that is
+not on an item (a struct field, a match arm, a statement) removes only its own
+``;``/``,``-terminated unit, so the production item that follows it stays
+visible.  Only strict ``#[cfg(test)]`` gates are stripped;
+``#[cfg(not(test))]`` and ``#[cfg_attr(test, ...)]`` are production code.
 """
 
 from __future__ import annotations
@@ -42,10 +83,25 @@ from typing import Iterator, NamedTuple
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_ROOT = os.path.join(REPO_ROOT, "rust", "src", "sdk")
+DEFAULT_SRC_ROOT = os.path.join(REPO_ROOT, "rust", "src")
 
-# Application-layer modules `rust/src/sdk/` must never name.  `crate::state`
-# and `crate::config` are deliberately absent: they are deferred to #45 and
-# stay legal for now.
+# One-way ratchet: lower this when `unsafe` sites disappear, never raise it.
+# Measured by running the `unsafe-budget` rule on the finished R-9 tree, so the
+# number is reproducible from the gate itself rather than hand-counted:
+#
+#     python3 -c 'import sys; sys.path.insert(0, "sdk"); \
+#       import check_layering as c; \
+#       print(c.audit_universal(c.rust_files("rust/src"), "rust/src")[1])'
+#
+# 132 is the count *with* `#[cfg(test)]` on a struct field stripped correctly;
+# the earlier 131 came from the stripper running past that field and masking the
+# production `unsafe impl Send` in `sdk/common/sync.rs`.
+MAX_PRODUCTION_UNSAFE = 132
+
+# Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
+# is deliberately absent: it is the legitimate root-level constant module.
+# `crate::state` is absent here too, but it is *not* legal: the universal
+# `state-removed` rule bans it outright, tests included.
 UPWARD_MODULES = frozenset(
     {
         "app",
@@ -123,6 +179,23 @@ _EXTERN_CRATE_SELF_RE = re.compile(
 # chain that wraps across lines is still counted once.
 _SUPER_CHAIN_RE = re.compile(r"(?:\bsuper\s*::\s*)+")
 _SUPER_KEYWORD_RE = re.compile(r"\bsuper\b")
+
+# --- universal pass (R-9) -------------------------------------------------
+# `state-removed` runs on the raw file text: the test mask would hide the
+# `#[cfg(test)]` import sites, and those are exactly what must also be gone.
+# The Rust lexer ignores whitespace around `::`, so `use crate :: state::X;` is
+# the same reference and `\s*` is required.  Crate-alias evasion
+# (`use crate as c; c::state::X`) needs no rule of its own and none is built:
+# the module no longer exists, so `c::state` is a hard compile error and can
+# never reach the tree.
+_STATE_REF_RE = re.compile(r"crate\s*::\s*state")
+# Matched anywhere in production code, so an attribute sharing the line
+# (`#[link_section = ".data"] pub static mut X`) and a single-line
+# `macro_rules!` body are both caught.  It must never match a *reference*:
+# in `&'static mut self` and `-> &'static mut [T; N]` the character before
+# `static` is the `'` of the lifetime, which the lookbehind rejects.
+_STATIC_MUT_RE = re.compile(r"(?<![&'\w])static[ \t]+mut[ \t]+[A-Za-z_]\w*")
+_UNSAFE_RE = re.compile(r"\bunsafe\b")
 
 
 class Violation(NamedTuple):
@@ -305,9 +378,130 @@ def _skip_space(code: str, index: int) -> int:
     return index
 
 
+def _ident_at(code: str, index: int) -> tuple[str, int]:
+    """The identifier at ``index`` (``""`` if none) and the index after it."""
+    if index >= len(code) or not _is_ident_start(code[index]):
+        return "", index
+    cursor = index
+    while cursor < len(code) and _is_ident_continue(code[cursor]):
+        cursor += 1
+    return code[index:cursor], cursor
+
+
+def _skip_attributes(code: str, index: int) -> int | None:
+    """Skip whitespace and a run of attributes; ``None`` if one is unbalanced."""
+    length = len(code)
+    while True:
+        index = _skip_space(code, index)
+        if index >= length or code[index] != "#":
+            return index
+        cursor = _skip_space(code, index + 1)
+        if cursor < length and code[cursor] == "!":
+            cursor = _skip_space(code, cursor + 1)
+        if cursor >= length or code[cursor] != "[":
+            return index
+        close = _matching(code, cursor, "[", "]")
+        if close < 0:
+            return None
+        index = close + 1
+
+
 # ---------------------------------------------------------------------------
 # Test stripping: remove only `#[cfg(test)]` items, never truncate the file.
 # ---------------------------------------------------------------------------
+
+
+# Tokens that may precede an item keyword without changing what is annotated.
+# `pub` is handled separately because of `pub(crate)` / `pub(in path)`.
+_ITEM_PREFIXES = frozenset({"unsafe", "async", "default"})
+# The keywords that start an *item*.  Only these can be annotated by
+# `#[cfg(test)]` and removed wholesale.
+_ITEM_KEYWORDS = frozenset(
+    {
+        "fn",
+        "mod",
+        "struct",
+        "enum",
+        "union",
+        "trait",
+        "impl",
+        "static",
+        "const",
+        "use",
+        "type",
+        "extern",
+        "macro_rules",
+    }
+)
+
+
+def _starts_item(code: str, index: int) -> bool:
+    """Whether the token after the attributes at ``index`` starts an item.
+
+    ``#[cfg(test)]`` on an item removes the whole item.  On a struct field, a
+    match arm or an expression statement it annotates something *inside* an
+    item, and its extent must stop at that unit instead — never at whatever
+    brace block happens to come next.
+    """
+    length = len(code)
+    cursor = _skip_attributes(code, index)
+    if cursor is None:
+        return False
+    while cursor < length:
+        cursor = _skip_space(code, cursor)
+        name, cursor = _ident_at(code, cursor)
+        if name == "pub":
+            after = _skip_space(code, cursor)
+            if after < length and code[after] == "(":
+                close = _matching(code, after, "(", ")")
+                if close < 0:
+                    return False
+                cursor = close + 1
+            continue
+        if name in _ITEM_PREFIXES:
+            continue
+        return name in _ITEM_KEYWORDS
+    return False
+
+
+def _annotation_extent(code: str, index: int) -> int | None:
+    """End index (exclusive) of the unit a non-item ``#[cfg(test)]`` annotates.
+
+    A struct field ends at its ``,`` and a statement at its ``;``.  Brackets
+    and parentheses nest, so the ``;`` of ``[u8; 4]`` does not terminate, and a
+    block-bodied statement is consumed as one unit.  The scan never runs past
+    the enclosing block's ``}``: over-stripping is the failure mode this exists
+    to prevent.
+    """
+    length = len(code)
+    depth = 0
+    cursor = index
+    while cursor < length:
+        char = code[cursor]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            if depth == 0:
+                return cursor
+            depth -= 1
+        elif char == "{":
+            if depth == 0:
+                close = _matching(code, cursor, "{", "}")
+                if close < 0:
+                    return None
+                after = _skip_space(code, close + 1)
+                if after < length and code[after] in ";,":
+                    return after + 1
+                return close + 1
+            depth += 1
+        elif char == "}":
+            if depth == 0:
+                return cursor
+            depth -= 1
+        elif depth == 0 and char in ";,":
+            return cursor + 1
+        cursor += 1
+    return None
 
 
 def _item_extent(code: str, index: int) -> int | None:
@@ -317,19 +511,9 @@ def _item_extent(code: str, index: int) -> int | None:
     balanced to its ``}``; an item without a body ends at its top-level ``;``.
     """
     length = len(code)
-    while True:
-        index = _skip_space(code, index)
-        if index < length and code[index] == "#":
-            cursor = _skip_space(code, index + 1)
-            if cursor < length and code[cursor] == "!":
-                cursor = _skip_space(code, cursor + 1)
-            if cursor < length and code[cursor] == "[":
-                close = _matching(code, cursor, "[", "]")
-                if close < 0:
-                    return None
-                index = close + 1
-                continue
-        break
+    index = _skip_attributes(code, index)
+    if index is None:
+        return None
     if index >= length:
         return None
 
@@ -352,11 +536,19 @@ def _item_extent(code: str, index: int) -> int | None:
 
 
 def strip_test_code(text: str, mask: bytearray) -> bytearray:
-    """Zero the mask over every ``#[cfg(test)]`` item / module."""
+    """Zero the mask over every ``#[cfg(test)]`` item / module.
+
+    The extent depends on what the attribute annotates: an item is removed
+    whole, while a field or statement (``#[cfg(test)]`` *inside* an item) is
+    removed only up to its own ``,``/``;``.
+    """
     code = blank_copy(text, mask)
     stripped = bytearray(mask)
     for match in _CFG_TEST_RE.finditer(code):
-        end = _item_extent(code, match.end())
+        if _starts_item(code, match.end()):
+            end = _item_extent(code, match.end())
+        else:
+            end = _annotation_extent(code, match.end())
         if end is not None:
             stripped[match.start() : end] = b"\x00" * (end - match.start())
     return stripped
@@ -553,6 +745,119 @@ def _statement_of(text: str, index: int) -> str:
     return text[index:stop].strip().rstrip(";")
 
 
+# ---------------------------------------------------------------------------
+# Universal rules (R-9): they apply to every file under `--src-root`.
+# ---------------------------------------------------------------------------
+
+
+def _line_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` offsets of each line; ``end`` excludes the newline."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index, char in enumerate(text):
+        if char == "\n":
+            spans.append((start, index))
+            start = index + 1
+    spans.append((start, len(text)))
+    return spans
+
+
+def _newline_is_live(stripped: bytearray, text: str, end: int) -> bool:
+    """Whether the line ending at ``end`` survives test-code stripping.
+
+    ``strip_test_code`` zeroes every byte of a ``#[cfg(test)]`` span, newline
+    included, while a production comment keeps a live newline (its ``//`` text
+    is masked by ``mask_source``, but the newline itself is code).  The final
+    line of a file has no newline; fall back to its last character.
+    """
+    if end < len(text):
+        return bool(stripped[end])
+    return end > 0 and bool(stripped[end - 1])
+
+
+def _documented_above(text: str, stripped: bytearray, line: int) -> bool:
+    """Whether the contiguous ``//`` run directly above ``line`` says SAFETY:.
+
+    ``line`` is the 1-based line of an ``unsafe`` token.  Every line of the run
+    must be live production text: a ``// SAFETY:`` inside a ``#[cfg(test)]``
+    module must not launder a production site that follows it.
+    """
+    # `split("\n")` and `_line_spans` agree with `_line_of`, which counts "\n".
+    lines = text.split("\n")
+    spans = _line_spans(text)
+    documented = False
+    cursor = line - 1
+    while cursor >= 1:
+        raw_line = lines[cursor - 1]
+        if not raw_line.lstrip().startswith("//"):
+            break
+        _start, end = spans[cursor - 1]
+        if not _newline_is_live(stripped, text, end):
+            return False
+        if "SAFETY:" in raw_line:
+            documented = True
+        cursor -= 1
+    return documented
+
+
+def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
+    """Apply the universal rules to one file.
+
+    Returns the violations and the number of production ``unsafe`` tokens, so
+    the caller can total the budget across the tree.
+    """
+    collector = _Collector(path, text)
+
+    # state-removed: raw text on purpose (see the module docstring).
+    for match in _STATE_REF_RE.finditer(text):
+        collector.add(match.start(), "state-removed", "crate::state")
+
+    stripped = strip_test_code(text, mask_source(text))
+    code = blank_copy(text, stripped)
+
+    for match in _STATIC_MUT_RE.finditer(code):
+        collector.add(match.start(), "static-mut", match.group(0).strip())
+
+    unsafe_total = 0
+    for match in _UNSAFE_RE.finditer(code):
+        unsafe_total += 1
+        line = _line_of(text, match.start())
+        if not _documented_above(text, stripped, line):
+            collector.add(
+                match.start(),
+                "undocumented-unsafe",
+                "no `// SAFETY:` comment directly above",
+            )
+
+    return collector.found, unsafe_total
+
+
+def audit_universal(paths: list[str], label: str) -> tuple[list[Violation], int]:
+    """Audit every path; return violations and the tree-wide ``unsafe`` total."""
+    violations: list[Violation] = []
+    unsafe_total = 0
+    for path in paths:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        found, count = audit_universal_source(text, _display_path(path))
+        violations.extend(found)
+        unsafe_total += count
+
+    if unsafe_total > MAX_PRODUCTION_UNSAFE:
+        violations.append(
+            Violation(
+                label,
+                0,
+                "unsafe-budget",
+                f"{unsafe_total} production unsafe tokens exceeds ceiling "
+                f"{MAX_PRODUCTION_UNSAFE} (lower the ceiling, never raise it)",
+            )
+        )
+
+    violations.sort(key=lambda item: (item.line, item.rule, item.violation))
+    return violations, unsafe_total
+
+
 def _layer_of(path: str, root: str) -> str | None:
     parts = os.path.relpath(path, root).split(os.sep)
     if len(parts) > 1 and parts[0] in LAYER_SDK_IMPORTS:
@@ -592,46 +897,100 @@ def check_file(path: str, root: str) -> list[Violation]:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Audit rust/src/sdk/ for upward (SDK -> app) dependencies."
+        description="Audit rust/src/ for layering and `unsafe` invariants."
     )
     parser.add_argument(
         "--root",
-        default=DEFAULT_ROOT,
-        help=f"SDK source root to audit (default: {DEFAULT_ROOT})",
+        default=None,
+        help=(
+            "SDK source root for the layering pass "
+            f"(default: {os.path.relpath(DEFAULT_ROOT, REPO_ROOT)})"
+        ),
+    )
+    parser.add_argument(
+        "--src-root",
+        default=None,
+        help=(
+            "source root for the universal pass "
+            f"(default: {os.path.relpath(DEFAULT_SRC_ROOT, REPO_ROOT)}; "
+            "skipped when --root is given explicitly)"
+        ),
     )
     return parser
 
 
+def _resolve(value: str | None, default: str, flag: str) -> str | None:
+    root = os.path.abspath(os.path.expanduser(value if value is not None else default))
+    if not os.path.isdir(root):
+        print(f"error: {flag} {root} is not a directory", file=sys.stderr)
+        return None
+    return root
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    root = os.path.abspath(os.path.expanduser(args.root))
-    if not os.path.isdir(root):
-        print(f"error: --root {root} is not a directory", file=sys.stderr)
+    root_given = args.root is not None
+    # An explicit `--root` without `--src-root` keeps the temp-tree unit tests
+    # hermetic: they exercise the layering pass only.
+    run_universal = args.src_root is not None or not root_given
+
+    root = _resolve(args.root, DEFAULT_ROOT, "--root")
+    if root is None:
         return 2
     paths = rust_files(root)
     if not paths:
         print(f"error: no .rs files under {root}", file=sys.stderr)
         return 2
 
+    src_root = ""
+    src_paths: list[str] = []
+    if run_universal:
+        resolved_src = _resolve(args.src_root, DEFAULT_SRC_ROOT, "--src-root")
+        if resolved_src is None:
+            return 2
+        src_root = resolved_src
+        src_paths = rust_files(src_root)
+        if not src_paths:
+            print(f"error: no .rs files under {src_root}", file=sys.stderr)
+            return 2
+
     violations: list[Violation] = []
+    universal: list[Violation] = []
     try:
         for path in paths:
             violations.extend(check_file(path, root))
+        if run_universal:
+            universal, _unsafe_total = audit_universal(
+                src_paths, _display_path(src_root)
+            )
     except (OSError, UnicodeDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    violations.sort(key=lambda item: (item.path, item.line, item.rule, item.violation))
 
-    if not violations:
+    if not violations and not universal:
         print(f"sdk layering OK: {len(paths)} files scanned, 0 violations")
+        if run_universal:
+            print(
+                f"rust src audit OK: {len(src_paths)} files scanned, 0 violations"
+            )
         return 0
 
-    for violation in violations:
+    for violation in sorted(
+        violations + universal,
+        key=lambda item: (item.path, item.line, item.rule, item.violation),
+    ):
         print(violation.render())
-    print(
-        f"sdk layering FAILED: {len(violations)} violation(s) in {len(paths)} files",
-        file=sys.stderr,
-    )
+    if violations:
+        print(
+            f"sdk layering FAILED: {len(violations)} violation(s) in {len(paths)} files",
+            file=sys.stderr,
+        )
+    if universal:
+        print(
+            f"rust src audit FAILED: {len(universal)} violation(s) "
+            f"in {len(src_paths)} files",
+            file=sys.stderr,
+        )
     return 1
 
 

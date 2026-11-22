@@ -54,14 +54,14 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-#[cfg(test)]
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{compiler_fence, AtomicU8, Ordering};
+use core::sync::atomic::{
+    compiler_fence, AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
+};
 
 struct SavedState(UnsafeCell<critical_section::RestoreState>);
 
-// SAFETY: only touched while global interrupts are disabled by the acquire path
-// of the outermost critical section, so no ISR can observe it concurrently.
+// SAFETY: (4) `Sync` wrapper. Only touched while global interrupts are disabled
+// by the outermost acquire path, so no ISR can observe it concurrently.
 unsafe impl Sync for SavedState {}
 
 /// Number of currently held mutex guards.
@@ -78,8 +78,8 @@ fn enter_cs(acquire: impl FnOnce() -> critical_section::RestoreState) {
     let depth = CS_DEPTH.load(Ordering::Relaxed);
     if depth == 0 {
         let state = acquire();
-        // SAFETY: interrupts are disabled from here until the matching release
-        // in `exit_cs`, so this cell is only reachable from the current context.
+        // SAFETY: (4) `Sync`-wrapper interior. Interrupts are disabled from here
+        // until the matching `exit_cs` release, so only this context sees it.
         unsafe { *CS_SAVED.0.get() = state };
     }
     CS_DEPTH.store(depth + 1, Ordering::Relaxed);
@@ -94,7 +94,8 @@ fn exit_cs(release: impl FnOnce(critical_section::RestoreState)) {
     let remaining = CS_DEPTH.load(Ordering::Relaxed) - 1;
     CS_DEPTH.store(remaining, Ordering::Relaxed);
     if remaining == 0 {
-        // SAFETY: written by the outermost `enter_cs` before this level existed.
+        // SAFETY: (4) `Sync`-wrapper interior. Written by the outermost
+        // `enter_cs` before this level existed.
         let saved = unsafe { *CS_SAVED.0.get() };
         release(saved);
     }
@@ -110,9 +111,13 @@ pub struct CriticalSectionMutex<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: exclusive access to `data` is guaranteed by the interrupt-disabled
-// critical section (and, under `cfg(test)`, by the re-entrancy probe).
+// SAFETY: (4) `Send` wrapper. `T: Send` bounds moving the protected value between
+// execution contexts, and every access to `data` is serialized by the
+// interrupt-disabled critical section.
 unsafe impl<T: ?Sized + Send> Send for CriticalSectionMutex<T> {}
+// SAFETY: (4) `Sync` wrapper. Sharing is sound because every access to `data`
+// goes through a guard that holds the interrupt-disabled critical section (or,
+// under `cfg(test)`, the re-entrancy probe), so no two contexts can alias it.
 unsafe impl<T: ?Sized + Send> Sync for CriticalSectionMutex<T> {}
 
 impl<T> CriticalSectionMutex<T> {
@@ -123,6 +128,16 @@ impl<T> CriticalSectionMutex<T> {
             locked: AtomicBool::new(false),
             data: UnsafeCell::new(t),
         }
+    }
+
+    /// Raw pointer to the protected value, for handing a stable address to code
+    /// that cannot take a guard (e.g. the GATT attribute table's value slots).
+    ///
+    /// The returned pointer carries exactly the same aliasing obligations as
+    /// [`UnsafeCell::get`]: dereferencing it is `unsafe`, and any access through
+    /// it must not overlap a live [`CriticalSectionMutexGuard`] on this mutex.
+    pub const fn as_ptr(&self) -> *mut T {
+        self.data.get()
     }
 }
 
@@ -141,6 +156,9 @@ impl<T: ?Sized> CriticalSectionMutex<T> {
             "re-entrant lock on same CriticalSectionMutex"
         );
         #[cfg(not(test))]
+        // SAFETY: (2) `critical_section::acquire` contract. `enter_cs` calls this only
+        // at depth 0 and stores the returned state in `CS_SAVED` for the matching
+        // `release`, so acquire/release stay 1:1 and properly nested.
         enter_cs(|| unsafe { critical_section::acquire() });
         CriticalSectionMutexGuard { lock: self }
     }
@@ -156,7 +174,8 @@ impl<T: ?Sized> Deref for CriticalSectionMutexGuard<'_, T> {
 
     #[inline(always)]
     fn deref(&self) -> &T {
-        // SAFETY: the guard holds the lock, so no other context can access `data`.
+        // SAFETY: (4) `Sync`-wrapper interior. The guard holds the lock, so no
+        // other context can access `data`.
         unsafe { &*self.lock.data.get() }
     }
 }
@@ -164,7 +183,8 @@ impl<T: ?Sized> Deref for CriticalSectionMutexGuard<'_, T> {
 impl<T: ?Sized> DerefMut for CriticalSectionMutexGuard<'_, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: `&mut self` proves this guard is the only accessor.
+        // SAFETY: (4) `Sync`-wrapper interior. `&mut self` proves this guard is
+        // the only accessor.
         unsafe { &mut *self.lock.data.get() }
     }
 }
@@ -175,7 +195,107 @@ impl<T: ?Sized> Drop for CriticalSectionMutexGuard<'_, T> {
         #[cfg(test)]
         self.lock.locked.store(false, Ordering::Relaxed);
         #[cfg(not(test))]
+        // SAFETY: (2) `critical_section::release` contract. `exit_cs` decrements the
+        // depth first and reaches this only at the outermost level, restoring exactly
+        // the state captured by the matching `acquire`.
         exit_cs(|state| unsafe { critical_section::release(state) });
+    }
+}
+
+pub trait SimplifyLS<T> {
+    fn get(&self) -> T;
+    fn set(&self, val: T);
+    fn inc(&self);
+    fn dec(&self);
+}
+
+impl SimplifyLS<bool> for AtomicBool {
+    fn get(&self) -> bool {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: bool) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        panic!("Not valid for bool");
+    }
+    fn dec(&self) {
+        panic!("Not valid for bool")
+    }
+}
+
+impl SimplifyLS<u8> for AtomicU8 {
+    fn get(&self) -> u8 {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: u8) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
+}
+
+impl SimplifyLS<u16> for AtomicU16 {
+    fn get(&self) -> u16 {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: u16) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
+}
+
+impl SimplifyLS<u32> for AtomicU32 {
+    fn get(&self) -> u32 {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: u32) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
+}
+
+impl SimplifyLS<usize> for AtomicUsize {
+    fn get(&self) -> usize {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: usize) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
+    }
+}
+
+impl SimplifyLS<i32> for AtomicI32 {
+    fn get(&self) -> i32 {
+        self.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: i32) {
+        self.store(val, Ordering::Relaxed);
+    }
+    fn inc(&self) {
+        self.set(self.get().wrapping_add(1));
+    }
+    fn dec(&self) {
+        self.set(self.get().wrapping_sub(1));
     }
 }
 
@@ -278,5 +398,108 @@ mod tests {
 
         // The guard's Drop must have released the mutex for this second lock.
         assert_eq!(*mutex.lock(), 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not valid for bool")]
+    fn test_simplifyls_bool_inc_panics() {
+        use super::SimplifyLS;
+
+        let flag = AtomicBool::new(false);
+        flag.inc();
+    }
+
+    #[test]
+    #[should_panic(expected = "Not valid for bool")]
+    fn test_simplifyls_bool_dec_panics() {
+        use super::SimplifyLS;
+
+        let flag = AtomicBool::new(false);
+        flag.dec();
+    }
+
+    #[test]
+    fn test_simplifyls_u8_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU8::new(0);
+        value.set(10);
+        assert_eq!(value.get(), 10);
+
+        value.set(u8::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u8::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_u16_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU16::new(0);
+        value.set(42);
+        assert_eq!(value.get(), 42);
+
+        value.set(u16::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u16::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_u32_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicU32::new(0);
+        value.set(100);
+        assert_eq!(value.get(), 100);
+
+        value.set(u32::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), u32::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_usize_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicUsize::new(0);
+        value.set(7);
+        assert_eq!(value.get(), 7);
+
+        value.set(usize::MAX);
+        value.inc();
+        assert_eq!(value.get(), 0);
+
+        value.set(0);
+        value.dec();
+        assert_eq!(value.get(), usize::MAX);
+    }
+
+    #[test]
+    fn test_simplifyls_i32_get_set_and_wraps() {
+        use super::SimplifyLS;
+
+        let value = AtomicI32::new(0);
+        value.set(-12);
+        assert_eq!(value.get(), -12);
+
+        value.set(i32::MAX);
+        value.inc();
+        assert_eq!(value.get(), i32::MIN);
+
+        value.set(i32::MIN);
+        value.dec();
+        assert_eq!(value.get(), i32::MAX);
     }
 }

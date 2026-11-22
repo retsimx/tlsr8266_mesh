@@ -99,9 +99,9 @@ fn build_uart_frame(buffer: &[u8], is_panic: bool) -> UartData {
         UartMsg::PrintMessage
     } as u8;
 
-    // SAFETY: `len <= UART_PAYLOAD_MAX_SIZE` so `3..3 + len` is inside the
-    // 44-byte `data` array, and `len <= buffer.len()` so the source range is
-    // in bounds. `copy_nonoverlapping` cannot panic.
+    // SAFETY: (5) panic/RTT call graph. `len <= UART_PAYLOAD_MAX_SIZE` so
+    // `3..3 + len` is inside the 44-byte `data` array, and `len <= buffer.len()`
+    // so the source range is in bounds. `copy_nonoverlapping` cannot panic.
     unsafe {
         core::ptr::copy_nonoverlapping(
             buffer.as_ptr(),
@@ -132,8 +132,9 @@ impl<const N: usize> UartStream<N> {
         if buffer.len() > remaining {
             return Err(());
         }
-        // SAFETY: `self.length <= out_buffer.len()` (invariant maintained by this
-        // function) and `buffer.len() <= remaining`, so both ranges are in bounds.
+        // SAFETY: (5) panic/RTT call graph. `self.length <= out_buffer.len()`
+        // (invariant maintained by this function) and `buffer.len() <= remaining`,
+        // so both ranges are in bounds.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
@@ -151,6 +152,10 @@ impl<const N: usize> UartStream<N> {
     /// bounds check would put `slice_end_index_len_fail` on the panic handler's
     /// call graph, which the static stack gate rejects.
     pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: (5) panic/RTT call graph. `self.length` only advances in `write_all`
+        // after the fit check, so `length <= N`; a checked `&out_buffer[..length]`
+        // would put `slice_end_index_len_fail` on the panic handler's call graph, which
+        // the static stack gate rejects.
         unsafe { slice::from_raw_parts(self.out_buffer.as_ptr(), self.length) }
     }
 
@@ -171,6 +176,9 @@ impl<const N: usize> UartStream<N> {
 
             let _ = send_message(&build_uart_frame(buffer, is_panic));
 
+            // SAFETY: (5) panic/RTT call graph. `len == min(UART_PAYLOAD_MAX_SIZE,
+            // buffer.len())`, so `add(len)` stays inside `buffer` and the remaining length
+            // is in bounds; checked slicing would add a panic edge the stack gate rejects.
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) };
         }
     }
@@ -194,6 +202,9 @@ impl<const N: usize> UartStream<N> {
 
             send_sync_panic(&build_uart_frame(buffer, is_panic));
 
+            // SAFETY: (5) panic/RTT call graph. As in `send_async`: `len` is
+            // `min(UART_PAYLOAD_MAX_SIZE, buffer.len())`, so the advanced pointer and the
+            // remaining length both stay inside the same slice.
             buffer = unsafe { slice::from_raw_parts(buffer.as_ptr().add(len), buffer.len() - len) };
         }
     }

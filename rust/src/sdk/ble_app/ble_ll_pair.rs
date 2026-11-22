@@ -1,10 +1,15 @@
 use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::sdk::ble_app::flash_config::{
     pair_flash_clean, pair_load_key, pair_update_key, save_pair_info,
 };
 use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair;
+use crate::sdk::ble_app::rf_drv_8266::{
+    FLASH_CONFIGURATION_INDEX, MAC_ID, MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
+};
+use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::mcu::crypto::{
     aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet,
@@ -12,7 +17,6 @@ use crate::sdk::mcu::crypto::{
 };
 use crate::sdk::mcu::register::read_reg_system_tick;
 use crate::sdk::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
-use crate::state::{PairState, *};
 
 //------------------------------------------------------------------------------
 // BLE Pairing and Security Module
@@ -46,6 +50,159 @@ use crate::state::{PairState, *};
 // 5. Maintenance
 //    - Client can delete pairing with PAIR_OP_DELETE_PAIRING
 //------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// Pairing state and configuration storage
+//
+// These statics and types are owned by the pairing module (design 019 §1, batch
+// 5). Readers outside this file import them by name from
+// `crate::sdk::ble_app::ble_ll_pair`.
+//------------------------------------------------------------------------------
+
+/// Mesh network name used for pairing and access control.
+/// 16-byte string identifier that devices must match to join the mesh network.
+pub(crate) static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
+
+/// Mesh network password used for authentication during pairing.
+/// 16-byte password that must be provided to join the mesh network.
+pub(crate) static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
+
+/// Long-Term Key (LTK) for mesh network encryption.
+/// 16-byte cryptographic key used to encrypt/decrypt mesh communications.
+pub(crate) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
+
+/// Current state of the mesh pairing process.
+/// Tracks progress through pairing sequence: idle, setting, transmitting, receiving, etc.
+pub(crate) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
+    CriticalSectionMutex::new(ePairState::PairSetted);
+
+/// Initialization Vector for Master (IVM) used in mesh encryption.
+/// 8-byte nonce used with AES encryption for securing mesh communications from master.
+static PAIR_IVM: CriticalSectionMutex<[u8; 8]> =
+    CriticalSectionMutex::new([0, 0, 0, 0, 1, 0, 0, 0]);
+
+/// Session key derived from mesh password for secure pairing.
+/// 16-byte key used during the pairing process to encrypt configuration data.
+pub(crate) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
+    CriticalSectionMutex::new([0; 16]);
+
+/// Initialization Vector for Slave (IVS) used in mesh encryption.
+/// 8-byte nonce used with AES encryption for securing mesh communications from slave.
+static PAIR_IVS: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0; 8]);
+
+pub(crate) struct PairStateData {
+    pub pair_ltk: [u8; 16],
+    pub pair_sk: [u8; 16],
+    pub pair_work: [u8; 16],
+    pub pair_nn: [u8; 16],
+    pub pair_pass: [u8; 16],
+    pub pair_ltk_mesh: [u8; 16],
+    pub pair_sk_copy: [u8; 16],
+    pub pair_rands: [u8; 8],
+    pub pair_randm: [u8; 8],
+}
+
+/// Comprehensive pairing state data containing all cryptographic material.
+/// Stores LTK, session keys, work buffers, network names, passwords, and random values
+/// used during the mesh pairing and authentication process.
+pub(crate) static PAIR_STATE: CriticalSectionMutex<PairStateData> =
+    CriticalSectionMutex::new(PairStateData {
+        pair_ltk: [0; 16],
+        pair_sk: [0; 16],
+        pair_work: [0; 16],
+        pair_nn: [0; 16],
+        pair_pass: [0; 16],
+        pair_ltk_mesh: [0; 16],
+        pair_sk_copy: [0; 16],
+        pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
+        pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
+    });
+
+/// Global flag indicating whether mesh pairing mode is currently active.
+/// When true, the device accepts pairing commands and can join new mesh networks.
+pub(crate) static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
+
+/// Current state of the BLE pairing finite state machine.
+/// Tracks progress through pairing steps: idle, random exchange, key exchange, etc.
+static BLE_PAIR_ST: AtomicPairState = AtomicPairState::new(PairState::Idle);
+
+/// Flag indicating successful completion of pairing login process.
+/// Set to true when device has been authenticated and can access mesh functions.
+pub(crate) static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
+
+/// Flag indicating whether mesh encryption is currently enabled.
+/// When true, all mesh communications are encrypted using the configured LTK.
+static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
+
+/// Access code derived from mesh name and password for RF communication.
+/// 32-bit value used to identify and filter mesh network traffic.
+pub(crate) static PAIR_AC: AtomicU32 = AtomicU32::new(0);
+
+/// Flag indicating a pairing read operation is waiting for response.
+/// Used to track pending configuration read requests during pairing.
+static PAIR_READ_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Global security enable flag for mesh communications.
+/// When true, all mesh packets are encrypted before transmission.
+pub(crate) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
+
+/// Represents the current state of the BLE pairing process
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum PairState {
+    Idle = 0x00,                  // Initial/idle state
+    AwaitingRandom = 0x02,        // Waiting for random challenge
+    ReceivingMeshName = 0x05,     // Receiving mesh name
+    ReceivingMeshPassword = 0x06, // Receiving mesh password
+    ReceivingMeshLtk = 0x07,      // Receiving long-term key
+    RequestingLtk = 0x09,         // Requesting LTK
+    ResetMesh = 0x0A,             // Reset mesh configuration
+    DeletePairing = 0x0B,         // Deleting pairing
+    RandomConfirmation = 0x0C,    // Random value confirmation
+    SessionKeyExchange = 0x0D,    // Session key exchange
+    Init = 0x0E,                  // Initialization state
+    Completed = 0x0F,             // Pairing process completed
+}
+
+impl From<u8> for PairState {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => Self::Idle,
+            0x02 => Self::AwaitingRandom,
+            0x05 => Self::ReceivingMeshName,
+            0x06 => Self::ReceivingMeshPassword,
+            0x07 => Self::ReceivingMeshLtk,
+            0x09 => Self::RequestingLtk,
+            0x0A => Self::ResetMesh,
+            0x0B => Self::DeletePairing,
+            0x0C => Self::RandomConfirmation,
+            0x0D => Self::SessionKeyExchange,
+            0x0E => Self::Init,
+            0x0F => Self::Completed,
+            _ => Self::Idle, // Default to Idle for unrecognized states
+        }
+    }
+}
+
+// Replace the raw atomic with an atomic PairState wrapper
+pub(crate) struct AtomicPairState(AtomicU8);
+
+impl AtomicPairState {
+    pub const fn new(state: PairState) -> Self {
+        Self(AtomicU8::new(state as u8))
+    }
+
+    pub fn get(&self) -> PairState {
+        PairState::from(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, value: PairState) {
+        self.0.store(value as u8, Ordering::Relaxed)
+    }
+}
 
 // Pairing Opcodes - Used in pair_write to identify the command type
 pub(crate) const PAIR_OP_EXCHANGE_RANDOM: u8 = 0x01; // Exchange random challenge
@@ -111,7 +268,18 @@ pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
     // Get current session key for decryption
     let pair_sk = &PAIR_STATE.lock().pair_sk;
 
-    // Perform decryption using AES-CCM
+    // Perform decryption using AES-CCM.
+    //
+    // SAFETY: `data_ptr` is `PacketAttValue::dst` in the caller's `&mut Packet`
+    // (packet offset 18) and `data_len = l2cap_len - 8` is the encrypted payload
+    // length. The producers of encrypted ATT writes set `l2cap_len` to 0x17 or
+    // 0x21, so `data_len <= 25` and `[18, 18 + data_len)` stays inside the
+    // 48-byte `Packet` union (25 bytes remain from `dst` to the end of
+    // `PacketAttValue`). The range is disjoint from the `pair_ivm` and `src`
+    // buffers and from the session key, and the slice is consumed only by the
+    // in-place AES-CCM call, so no other view of those bytes is live across it.
+    // `l2cap_len` is not re-clamped locally: this relies on the producer
+    // invariant noted above.
     let result = unsafe {
         // Create data slice and decrypt in-place
         let data = slice_from_raw_parts_mut(data_ptr, data_len);
@@ -179,11 +347,24 @@ pub fn pair_enc_packet(ps: &mut Packet) {
     // Calculate data length from L2CAP header length
     let data_len = ((ps.head().l2cap_len & 0xff) - L2CAP_HEADER_LEN) as usize;
 
-    // Create destination and payload slices for encryption
+    // Create destination and payload slices for encryption.
+    //
     let dst_slice =
+        // SAFETY: `ps.ll_app().value.dst` is the 2-byte `AppCmdValue::dst` field at
+        // packet offset 18, so `[18, 20)` lies inside the 48-byte `Packet` union and
+        // is exactly `size_of::<u16>()`. The slice is the MIC output of the AES-CCM
+        // call and never overlaps `data_slice`, which starts at `value.op` (packet
+        // offset 20).
         unsafe { slice::from_raw_parts_mut(addr_of!(ps.ll_app().value.dst) as *mut u8, 2) };
 
     let data_slice =
+        // SAFETY: `addr_of_mut!(ps.ll_app_mut().value.op)` is `AppCmdValue::op` at
+        // packet offset 20 and `data_len = (l2cap_len & 0xff) - 10` is the ciphertext
+        // length. Producers set `l2cap_len` to 0x16/0x17/0x21, so `data_len <= 23`
+        // and `[20, 20 + data_len)` ends at most at 43, inside the 48-byte `Packet`
+        // union (`AppCmdValue` ends at 33 and `PacketLlApp::rsv` follows). The range
+        // is disjoint from `dst_slice` at [18, 20) and is written in place by AES-CCM
+        // with no other live view of those bytes.
         unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.ll_app_mut().value.op), data_len) };
 
     // Perform encryption using AES-CCM
@@ -234,9 +415,23 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
         // - Expected MIC: 2 bytes from internal_par2[1]
         // - Data: 0x1c bytes starting from sno field
         aes_att_decryption_packet(
-            ltk,                                                                       // Long-term key
-            unsafe { &*(addr_of!(ps.head().rf_len) as *const [u8; 8]) },               // IV
+            ltk, // Long-term key
+            // SAFETY: the broadcast IV is the 8 raw wire bytes starting at
+            // `rf_len` (packet offset 5), i.e. `[5, 13)`: `rf_len`, `l2cap_len`,
+            // `chan_id`, `src_tx` and `handle1` are read as one byte block because
+            // that is how the wire format defines the nonce. `[u8; 8]` needs only
+            // alignment 1, the range is inside the 48-byte `Packet`, and it is
+            // read-only for the duration of the call.
+            unsafe { &*(addr_of!(ps.head().rf_len) as *const [u8; 8]) }, // IV
+            // SAFETY: the expected MIC is `internal_par2[1]` at packet offset 41;
+            // the 2-byte `[41, 43)` range is inside the 48-byte `Packet`, is only
+            // read here, and does not overlap the IV `[5, 13)` or the data block
+            // `[13, 41)`.
             unsafe { slice::from_raw_parts(addr_of!(ps.mesh().internal_par2[1]), 2) }, // Expected MIC
+            // SAFETY: the data block is the fixed 0x1c-byte mesh body starting at
+            // `sno` (packet offset 13), i.e. `[13, 41)`. That is inside the
+            // 48-byte `Packet` and ends exactly where the MIC starts, so the
+            // in-place AES-CCM write cannot touch the IV or the MIC buffer.
             unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c) }, // Data
         )
     } else {
@@ -245,14 +440,31 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
         // - Expected MIC: 4 bytes at position sno + (rf_len - 0xb)
         // - Data: payload from op field with length (rf_len - 0x12)
         aes_att_decryption_packet(
-            ltk,                                                          // Long-term key
+            ltk, // Long-term key
+            // SAFETY: the direct-mesh IV is the 8 raw wire bytes starting at
+            // `handle1` (packet offset 12), i.e. `[12, 20)`, covering `handle1`,
+            // `sno`, `src_adr` and `dst_adr` as the wire nonce. `[u8; 8]` needs
+            // only alignment 1, the range is inside the 48-byte `Packet`, and it
+            // is read-only for the call.
             unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) }, // IV
+            // SAFETY: the expected MIC is 4 bytes at `sno + (rf_len - 0xb)`,
+            // i.e. packet offset `rf_len + 2`. Above, `payload_len = rf_len - 0x12`
+            // is rejected when it exceeds 0x13, so `rf_len <= 0x25` and
+            // `[rf_len + 2, rf_len + 6)` ends at most at 43, inside the 48-byte
+            // `Packet`. TC32 and the i686 test host both have 32-bit pointers, so
+            // the `as u32` round-trip is lossless. The range is only read and does
+            // not overlap the IV or the data block.
             unsafe {
                 slice::from_raw_parts(
                     (addr_of!(ps.mesh().sno) as u32 + (rf_len as u32 - 0xb)) as *const u8,
                     4,
                 )
             }, // Expected MIC
+            // SAFETY: the payload is `payload_len = rf_len - 0x12 <= 0x13` bytes
+            // starting at `op` (packet offset 20), i.e. `[20, rf_len + 2)`. With
+            // `rf_len <= 0x25` that ends at most at 39, inside the 48-byte
+            // `Packet`, and it ends exactly where the MIC range starts, so the
+            // in-place AES-CCM write does not disturb the IV or the MIC.
             unsafe {
                 slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len as usize)
             }, // Data
@@ -282,14 +494,23 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
         if is_broadcast {
             // Broadcast packet encryption
             // - Use IV from packet header's rf_len field (8 bytes)
+            // SAFETY: same 8-byte wire nonce as the decrypt path: the raw block
+            // starting at `rf_len` (packet offset 5), `[5, 13)`, read-only, inside
+            // the 48-byte `Packet`; `[u8; 8]` needs only alignment 1.
             let iv = unsafe { &*(addr_of!(ps.head().rf_len) as *const [u8; 8]) };
 
             // - Use destination address from internal_par2[1] as the MIC output buffer (2 bytes)
+            // SAFETY: `internal_par2[1]` is packet offset 41; the 2-byte MIC
+            // output `[41, 43)` is inside `Packet`, is written only by AES-CCM,
+            // and does not overlap the IV `[5, 13)` or the payload `[13, 41)`.
             let dst = unsafe {
                 slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().internal_par2[1]), 2)
             };
 
             // - Encrypt payload starting from sno field (fixed size 0x1c bytes)
+            // SAFETY: `sno` is packet offset 13 and the encrypted body is a fixed
+            // 0x1c bytes, `[13, 41)`, inside `Packet`; it ends where the MIC
+            // starts, so the in-place write leaves the IV and MIC intact.
             let payload = unsafe {
                 slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().sno) as *mut u8, 0x1c)
             };
@@ -301,17 +522,34 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
         } else {
             // Direct mesh packet encryption
             // - Use IV from packet's handle1 field (8 bytes)
+            // SAFETY: the 8-byte wire nonce starts at `handle1` (packet offset
+            // 12), `[12, 20)`, read-only and inside the 48-byte `Packet`;
+            // alignment 1 suffices for `[u8; 8]`.
             let iv = unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) };
 
             // - Use destination address from position calculated based on rf_len as the MIC output buffer (4 bytes)
+            // SAFETY: pointer arithmetic only, no dereference: `sno` is packet
+            // offset 13 and `rf_len - 0xb` is at most 0x1a, so the result is at
+            // most offset 39 inside the 48-byte `Packet` (never past
+            // one-past-the-end). The `as u32` round-trip is lossless on TC32 and on
+            // the i686 test host, both of which have 32-bit pointers.
             let dst_ptr = unsafe {
                 (addr_of!(ps.mesh().sno) as u32 + (ps.head().rf_len as u32 - 0xb)) as *mut u8
             };
+            // SAFETY: the 4-byte MIC output starts at `rf_len + 2` and the
+            // payload below ends there, so `[rf_len + 2, rf_len + 6)` is inside the
+            // 48-byte `Packet` for every `rf_len <= 0x25` and never overlaps the IV
+            // `[12, 20)` or the payload `[20, rf_len + 2)`.
             let dst = unsafe { slice::from_raw_parts_mut(dst_ptr, 4) };
 
             // - Encrypt payload starting from op field with length based on rf_len
             let payload_len = ps.head().rf_len as usize - 0x12;
             let payload =
+                // SAFETY: `op` is packet offset 20 and `payload_len = rf_len - 0x12`,
+                // so the payload is `[20, rf_len + 2)`. The mesh send path builds
+                // encrypted packets with `rf_len = 0x25` (payload_len 0x13), which
+                // keeps the range inside the 48-byte `Packet` and flush against the
+                // MIC buffer.
                 unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len) };
 
             // Perform encryption using AES-CCM
@@ -1018,6 +1256,21 @@ mod tests {
     use core::mem::size_of;
     use mry::send_wrapper::SendWrapper;
     use mry::{self, Any}; // Added mock for delete pair
+
+    #[test]
+    fn test_pair_state_from_known_values() {
+        assert_eq!(PairState::from(0x0A), PairState::ResetMesh);
+        assert_eq!(PairState::from(0xFF), PairState::Idle);
+    }
+
+    #[test]
+    fn test_atomic_pair_state_get_set() {
+        let state = AtomicPairState::new(PairState::Init);
+        assert_eq!(state.get(), PairState::Init);
+
+        state.set(PairState::Completed);
+        assert_eq!(state.get(), PairState::Completed);
+    }
 
     // Helper function to create a test packet with ATT write structure
     fn create_test_packet() -> Packet {

@@ -72,7 +72,6 @@
 use core::cmp::min;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::app;
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
@@ -235,7 +234,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
             }
 
             // Queue the command for mesh transmission (no delay, no retransmit)
-            app().mesh_manager.add_send_mesh_msg(&*pkt_light_data, 0, 0);
+            super::super::queues::enqueue_mesh_tx(&pkt_light_data, 0, 0);
         }
     }
 }

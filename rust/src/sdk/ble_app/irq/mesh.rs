@@ -12,9 +12,7 @@
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::app;
-use crate::common::SYS_CHN_LISTEN;
-use crate::mesh::{is_online, MESH_NODE_ST_VAL_LEN};
+use crate::sdk::ble_app::flash_config::SYS_CHN_LISTEN;
 use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable_mask, mesh_send_online_status,
@@ -26,6 +24,7 @@ use crate::sdk::light::{
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use crate::sdk::mcu::register::*;
+use crate::sdk::packet_types::{is_online, MESH_NODE_ST_VAL_LEN};
 use crate::state::*;
 
 #[cfg_attr(test, mry::mry)]
@@ -215,13 +214,15 @@ pub fn handle_mesh_listening_state() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::common::SYS_CHN_LISTEN;
-    use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN};
+    use crate::sdk::ble_app::flash_config::SYS_CHN_LISTEN;
     use crate::sdk::light::{
         BlePeripheralLinkState, RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL,
         ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
     };
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+    use crate::sdk::packet_types::{
+        MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
+    };
     use mry::Any;
 
     // Import mock functions for RF operations

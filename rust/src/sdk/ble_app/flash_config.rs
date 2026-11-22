@@ -1,4 +1,20 @@
-use crate::app;
+//! BLE connection-parameter negotiation, device-address helpers and
+//! pairing/flash configuration.
+//!
+//! Everything here is a free function over the `crate::state` statics plus the
+//! SDK flash, crypto and RF primitives. This module deliberately has **no**
+//! application-layer dependencies: it must not import the application's `app`,
+//! `mesh`, `light_manager`, `uart_manager` or `ota` modules, nor any other
+//! module above the SDK layer.
+//!
+//! # Flash Pairing Layout
+//!
+//! Pairing credentials live in a dedicated 4 KB flash sector split into
+//! 64-byte slots (name at +0x10, password at +0x20, LTK at +0x30, flags at
+//! +0x01/+0x0F). Writes walk the slots sequentially for wear levelling and wrap
+//! back to slot 0 after a sector erase; see [`pair_flash_clean`] and
+//! [`pair_flash_config_init`].
+
 use crate::config::*;
 use crate::sdk::ble_app::light_ll::connection_management::setup_ble_parameter_start;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
@@ -48,12 +64,6 @@ pub const SYS_CHN_LISTEN: [u8; 4] = [2, 12, 23, 34];
 /// - 0x26 (38): 2426 MHz  
 /// - 0x27 (39): 2480 MHz
 pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
-
-/// Register address for light off state control.
-///
-/// Defined in `sdk::pm`, which owns the software-reboot retention writes, and
-/// re-exported here so existing callers keep working.
-pub use crate::sdk::pm::REGA_LIGHT_OFF;
 
 /// Checks if device address parameters include MAC address flag.
 ///
@@ -389,44 +399,6 @@ pub fn retrieve_dev_grp_address() {
         let default_addr = u16::from_le_bytes([mac_id[0], mac_id[1]]);
         DEVICE_ADDRESS.set(if default_addr == 0 { 1 } else { default_addr });
     }
-}
-
-/// Initializes mesh node tracking structures.
-///
-/// This function sets up the local mesh node state after device address
-/// resolution. It prepares the node tracking buffers and initializes the
-/// first entry with this device's information.
-///
-/// # Initialization Sequence
-///
-/// 1. **Buffer Setup**: Clears and initializes mesh node tracking buffers
-/// 2. **Self-Registration**: Adds this device as the first tracked node
-/// 3. **State Initialization**: Sets device address and sequence number
-///
-/// # Node Tracking Purpose
-///
-/// The mesh_node_st array maintains state for recently seen mesh devices:
-/// - Enables duplicate packet detection via sequence number tracking
-/// - Supports mesh message relay decisions
-/// - Maintains network topology awareness
-///
-/// # Side Effects
-/// * Clears all mesh node tracking buffers
-/// * Sets MESH_NODE_MAX to 1 (only self is known)
-/// * Initializes first node entry with local device info
-#[cfg_attr(test, mry::mry)]
-pub fn mesh_node_init() {
-    // Initialize mesh node tracking buffers
-    app().mesh_manager.mesh_node_buf_init();
-
-    let mut mesh_node_st = MESH_NODE_ST.lock();
-
-    // Register self as first tracked node
-    mesh_node_st[0].val.dev_adr = DEVICE_ADDRESS.get() as u8; // Lower byte of device address
-    mesh_node_st[0].val.sn = DEVICE_NODE_SN.get(); // Current sequence number
-                                                   // Self starts online (miss >= 1) and is never swept (sweep starts at index 1).
-    mesh_node_st[0].miss = 1;
-    MESH_NODE_MAX.set(1); // Only this device is known
 }
 
 /// Implements flash wear-leveling by wrapping configuration storage.
@@ -1007,7 +979,6 @@ mod tests {
     use crate::sdk::rf_drv::{
         mock_set_advertisement_manufacturer_data, mock_set_advertisement_mesh_name,
     };
-    use crate::{app_mocker, mock_app_mocker, App};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
 
@@ -1593,36 +1564,6 @@ mod tests {
     // raw memory addresses (FLASH_ADR_DEV_GRP_ADR) which don't exist in test environments.
     // To properly test this function, we would need to refactor it to use dependency injection
     // or create a testable wrapper that can be mocked.
-
-    // --- Tests for mesh_node_init ---
-
-    #[test]
-    #[mry::lock(app_mocker)]
-    fn test_mesh_node_init_initializes_node() {
-        // Setup test device address
-        DEVICE_ADDRESS.set(0x1234);
-        DEVICE_NODE_SN.set(0x56);
-
-        // Mock app
-        let mut app = App::default();
-        app.mesh_manager.mock_mesh_node_buf_init().returns(());
-
-        mock_app_mocker().returns(&mut app as *mut App);
-
-        // Call function
-        mesh_node_init();
-
-        // Verify mesh node was initialized
-        let mesh_node_st = MESH_NODE_ST.lock();
-        assert_eq!(mesh_node_st[0].val.dev_adr, 0x34); // Lower byte
-        assert_eq!(mesh_node_st[0].val.sn, 0x56);
-        // Self is left explicitly online (miss = 1).
-        assert_eq!(mesh_node_st[0].miss, 1);
-        assert_eq!(MESH_NODE_MAX.get(), 1);
-
-        // Verify mock was called
-        app.mesh_manager.mock_mesh_node_buf_init().assert_called(1);
-    }
 
     // --- Tests for pair_flash_clean ---
 

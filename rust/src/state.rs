@@ -6,8 +6,7 @@ use heapless::Deque;
 
 use crate::config::VENDOR_ID;
 use crate::const_assert;
-use crate::embassy::sync::mutex::CriticalSectionMutex;
-use crate::mesh::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
+use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::light::*;
 use crate::sdk::packet_types::*;
 

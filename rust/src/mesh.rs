@@ -1,29 +1,29 @@
 use core::ptr::addr_of;
 
-use bytemuck::{Pod, Zeroable};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_sync::signal::Signal;
 #[cfg(not(test))]
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use heapless::Vec;
 
-use crate::common::{access_code, mesh_node_init, pair_load_key, SYS_CHN_LISTEN};
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
-use crate::embassy::time_driver::clock_time64;
 use crate::main_light::{light_slave_tx_command, rf_link_light_event_callback};
 use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
-use crate::sdk::ble_app::light_ll::mesh_management::rf_link_match_group_mac;
+use crate::sdk::ble_app::flash_config::{access_code, pair_load_key, SYS_CHN_LISTEN};
+use crate::sdk::ble_app::light_ll::mesh_management::{
+    mesh_node_table_init, rf_link_match_group_mac,
+};
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_rc_data,
 };
+use crate::sdk::ble_app::queues::{self, SendPkt, MESH_RX_CHANNEL, MESH_TX_QUEUE, MESH_TX_WAKE};
 use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US};
+use crate::sdk::mcu::clock::{
+    clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
+};
 use crate::sdk::mcu::register::{
     read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
 };
@@ -32,25 +32,14 @@ use crate::state::*;
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{app, uprintln, BIT};
 
-/// Raw mutex backing the mesh channel/signal: masks interrupts for the
-/// (short, allocation-free) critical sections inside `embassy-sync`.
-type CsRawMutex = CriticalSectionRawMutex;
-
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
 //unit: s
 pub const MESH_PAIR_TIMEOUT: u32 = 10;
 
-pub const MESH_NODE_ST_VAL_LEN: usize = 4;
-// MIN: 4,   MAX: 10
-pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
-
-/// Size of the status value region in one status advertisement packet.
-///
-/// `mesh_node_adv_status` fills `MESH_STATUS_VALUE_LEN` bytes and
-/// `rf_link_rc_data` decodes exactly the same span, so this is the single
-/// source of truth for the per-packet record capacity.
-pub const MESH_STATUS_VALUE_LEN: usize = 24;
+// Compatibility re-export: the app layer still names this through
+// `crate::mesh`, even though the definition now lives in the SDK wire module.
+pub use crate::sdk::packet_types::MESH_NODE_ST_PAR_LEN;
 
 /// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
 ///
@@ -95,48 +84,9 @@ impl TryFrom<u8> for MeshPairState {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-#[repr(C, packed)]
-pub struct MeshNodeStValT {
-    pub dev_adr: u8,
-    // don't change include type
-    pub sn: u8,
-    // don't change include type
-    pub par: [u8; MESH_NODE_ST_PAR_LEN], //lumen-rsv,
-}
-
-// SAFETY: This struct is safe to use with bytemuck because:
-// 1. It's #[repr(C, packed)] so it has a stable memory layout
-// 2. All fields are u8 which are safe to transmute
-// 3. The struct size is fixed and known at compile time
-unsafe impl Pod for MeshNodeStValT {}
-unsafe impl Zeroable for MeshNodeStValT {}
-
-#[derive(Clone, Copy)]
-#[repr(C, packed)]
-pub struct MeshNodeStT {
-    /// Sweep-age counter: `0` = offline/never seen, `>= 1` = online with age
-    /// `miss - 1` status sweeps since the last observation. All-zero init in
-    /// `.bss` therefore means offline without an explicit runtime fill.
-    pub miss: u8,
-    // don't change include type
-    pub val: MeshNodeStValT,
-}
-
-/// A node is online iff it has a non-zero sweep-age counter (`miss`).
-pub fn is_online(node: &MeshNodeStT) -> bool {
-    node.miss != 0
-}
-
-struct SendPkt {
-    pub delay: u64,
-    pub pkt: Packet,
-    pub send_count: u8,
-}
-
 /// Outcome of the send-buffer scan, computed inside the send critical section.
 enum SendScan {
-    /// Nothing is queued: park on `send_wake` until `add_send_mesh_msg` pushes.
+    /// Nothing is queued: park on the wake signal until a producer pushes.
     Empty,
     /// Packets are queued but none is due: park until the earliest due tick.
     Wait(u64),
@@ -159,9 +109,10 @@ pub struct MeshManager {
     mesh_pair_timeout: u32,
     mesh_pair_time: u32,
     mesh_pair_state: MeshPairState,
-    pkt_send_buf: Vec<SendPkt, 8>,
-    pkt_rcv_buf: Channel<CsRawMutex, Packet, 8>,
-    send_wake: Signal<CsRawMutex, ()>,
+    /// Mesh TX drops already reported by [`Self::report_queue_drops`].
+    dropped_mesh_tx_seen: u32,
+    /// Mesh RX drops already reported by [`Self::report_queue_drops`].
+    dropped_mesh_rx_seen: u32,
 }
 
 #[cfg_attr(test, mry::mry(skip_fns(default_const)))]
@@ -182,14 +133,17 @@ impl MeshManager {
             mesh_pair_timeout: 0,
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
-            pkt_send_buf: Vec::new(),
-            pkt_rcv_buf: Channel::new(),
-            send_wake: Signal::new(),
+            dropped_mesh_tx_seen: 0,
+            dropped_mesh_rx_seen: 0,
         }
     }
 
     #[cfg(test)]
     pub fn default() -> Self {
+        // The global queues outlive every manager, so clear them here: host
+        // tests share a single process and would otherwise inherit leftovers.
+        queues::reset_for_test();
+
         Self {
             mesh_pair_start_time: 0,
             default_mesh_time: 0,
@@ -204,10 +158,9 @@ impl MeshManager {
             mesh_pair_timeout: 0,
             mesh_pair_time: 0,
             mesh_pair_state: MeshPairState::MeshPairName1,
-            pkt_send_buf: Vec::new(),
-            pkt_rcv_buf: Channel::new(),
-            send_wake: Signal::new(),
             mry: Default::default(),
+            dropped_mesh_tx_seen: 0,
+            dropped_mesh_rx_seen: 0,
         }
     }
 
@@ -226,16 +179,16 @@ impl MeshManager {
         let pkt = light_slave_tx_command(data, destination, retransmit_count, send_ack);
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
-            app().mesh_manager.add_rcv_mesh_msg(&pkt);
+            queues::enqueue_mesh_rx(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(
+                queues::enqueue_mesh_tx(
                     &pkt,
                     0,
                     pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
                 );
             }
         } else {
-            self.add_send_mesh_msg(
+            queues::enqueue_mesh_tx(
                 &pkt,
                 0,
                 pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
@@ -390,7 +343,7 @@ impl MeshManager {
             pair_load_key();
             self.default_mesh_time_ref = 0;
 
-            mesh_node_init();
+            mesh_node_table_init();
             app().light_manager.device_status_update();
             self.safe_effect_new_mesh_finish();
             return;
@@ -415,7 +368,7 @@ impl MeshManager {
         critical_section::with(|_| {
             pair_save_key();
             rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
-            rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_init()
+            rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
             sleep_us(1000);
             write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits()); // clear current rx in buffer
         });
@@ -438,6 +391,11 @@ impl MeshManager {
             .copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock());
     }
 
+    /// `#[inline(never)]` is load-bearing: `app::mesh_pair_proc_hook` wraps this
+    /// method, and `sdk/stack_analysis.py`'s `INDIRECT_EDGES` matches the
+    /// `on_mesh_pair_proc` edge by this symbol name. Inlining the method into the
+    /// wrapper would erase it from the linked ELF.
+    #[inline(never)]
     pub fn mesh_pair_proc(&mut self) {
         let dst_addr = 0xFFFF;
         let mut op_para: [u8; 16] = [0; 16];
@@ -555,16 +513,16 @@ impl MeshManager {
         );
         let (group_match, device_match) = rf_link_match_group_mac(&pkt);
         if group_match || device_match {
-            app().mesh_manager.add_rcv_mesh_msg(&pkt);
+            queues::enqueue_mesh_rx(&pkt);
             if !device_match {
-                self.add_send_mesh_msg(
+                queues::enqueue_mesh_tx(
                     &pkt,
                     0,
                     pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
                 );
             }
         } else {
-            self.add_send_mesh_msg(
+            queues::enqueue_mesh_tx(
                 &pkt,
                 0,
                 pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
@@ -572,47 +530,35 @@ impl MeshManager {
         }
     }
 
-    pub fn mesh_node_buf_init(&self) {
-        MESH_NODE_ST.lock().fill(MeshNodeStT {
-            miss: 0,
-            val: MeshNodeStValT {
-                dev_adr: 0,
-                sn: 0,
-                par: [0; MESH_NODE_ST_PAR_LEN],
-            },
-        });
-
-        app().light_manager.device_status_update();
-    }
-
     pub fn mesh_security_enable(&self, enable: bool) {
         SECURITY_ENABLE.set(enable);
     }
 
-    pub fn add_send_mesh_msg(&mut self, packet: &Packet, delay: u64, send_count: u8) {
-        // If we sent the message, and we are sending the message back to ourselves - just report the packet over uart
-        if packet.ll_app().value.src == DEVICE_ADDRESS.get()
-            && packet.ll_app().value.dst == DEVICE_ADDRESS.get()
-        {
-            light_mesh_rx_cb(packet);
-        } else {
-            // Only the buffer mutation runs with interrupts masked; the signal
-            // and the log are emitted outside so no MMIO happens inside the CS.
-            let pushed = critical_section::with(|_| {
-                self.pkt_send_buf
-                    .push(SendPkt {
-                        delay,
-                        pkt: *packet,
-                        send_count,
-                    })
-                    .is_ok()
-            });
+    /// Surface mesh queue overflow, one log line per change.
+    ///
+    /// The SDK cannot log — it must not reach the application's UART sink — so
+    /// it only counts drops. Turning a counter delta into a line here keeps a
+    /// sustained overload visible from RTT and the UART host without a write
+    /// per iteration.
+    fn report_queue_drops(&mut self) {
+        let tx = queues::dropped_mesh_tx();
+        if tx != self.dropped_mesh_tx_seen {
+            uprintln!(
+                "mesh queue full: tx +{} (total {})",
+                tx.wrapping_sub(self.dropped_mesh_tx_seen),
+                tx
+            );
+            self.dropped_mesh_tx_seen = tx;
+        }
 
-            if pushed {
-                self.send_wake.signal(());
-            } else {
-                uprintln!("pkt send buf is full, dropping packet...");
-            }
+        let rx = queues::dropped_mesh_rx();
+        if rx != self.dropped_mesh_rx_seen {
+            uprintln!(
+                "mesh queue full: rx +{} (total {})",
+                rx.wrapping_sub(self.dropped_mesh_rx_seen),
+                rx
+            );
+            self.dropped_mesh_rx_seen = rx;
         }
     }
 
@@ -621,53 +567,62 @@ impl MeshManager {
     /// The scheduling scan is a three-state machine driven by one critical
     /// section:
     /// - [`SendScan::Empty`]: nothing queued; the buffer check happens before
-    ///   `clock_time64()`, so host tests never touch MMIO. Park on `send_wake`
-    ///   until `add_send_mesh_msg` pushes a packet.
+    ///   `clock_time64()`, so host tests never touch MMIO. Park on
+    ///   [`MESH_TX_WAKE`] until [`queues::enqueue_mesh_tx`] pushes a packet.
     /// - [`SendScan::Wait`]: packets are queued but none is due yet; park on
-    ///   `send_wake` with a deadline of the earliest due tick.
+    ///   [`MESH_TX_WAKE`] with a deadline of the earliest due tick.
     /// - [`SendScan::Ready`]: the first due packet was removed and is
     ///   transmitted inline below.
+    ///
+    /// A packet addressed to this device by this device is *report-only*: it is
+    /// handed straight to the UART bridge and neither transmitted nor
+    /// re-queued. Because that check runs here — in task context, after the pop
+    /// — the retransmit re-queue below can never loop a self-addressed packet.
     ///
     /// The parked arms `return`, so the outer `loop` in
     /// [`Self::send_mesh_msg_task`] re-enters and rescans instead of looping
     /// internally.
     async fn send_mesh_msg_iteration(&mut self) {
-        let result = match critical_section::with(|_| {
-            // Reset before the scan: a push that lands after this critical
-            // section leaves the signal set, so the wake cannot be lost.
-            self.send_wake.reset();
+        self.report_queue_drops();
 
-            if self.pkt_send_buf.is_empty() {
-                return SendScan::Empty;
-            }
+        let result = {
+            // Reset before the scan: a push that lands after the scan leaves
+            // the signal set, so the wake cannot be lost.
+            MESH_TX_WAKE.reset();
 
-            // Sample the clock exactly once for the whole scan.
-            let now = clock_time64();
+            // Only the buffer scan runs with interrupts masked. `clock_time64`
+            // nests one more critical section, exactly as before this queue
+            // moved to module scope.
+            let mut send_queue = MESH_TX_QUEUE.lock();
 
-            let found = self
-                .pkt_send_buf
-                .iter()
-                .enumerate()
-                .find(|(_, elem)| now >= elem.delay);
+            if send_queue.is_empty() {
+                SendScan::Empty
+            } else {
+                // Sample the clock exactly once for the whole scan.
+                let now = clock_time64();
 
-            let (index, _) = match found {
-                Some(found) => found,
-                None => {
-                    let earliest = self.pkt_send_buf.iter().map(|e| e.delay).min().unwrap();
-                    return SendScan::Wait(earliest);
+                match send_queue
+                    .iter()
+                    .enumerate()
+                    .find(|(_, elem)| now >= elem.delay)
+                {
+                    Some((index, _)) => SendScan::Ready(send_queue.swap_remove(index)),
+                    None => {
+                        let earliest = send_queue.iter().map(|e| e.delay).min().unwrap();
+                        SendScan::Wait(earliest)
+                    }
                 }
-            };
+            }
+        };
 
-            SendScan::Ready(self.pkt_send_buf.swap_remove(index))
-        }) {
+        let result = match result {
             SendScan::Empty => {
-                self.send_wake.wait().await;
+                MESH_TX_WAKE.wait().await;
                 return;
             }
             SendScan::Wait(earliest) => {
                 #[cfg(not(test))]
-                let _ = self
-                    .send_wake
+                let _ = MESH_TX_WAKE
                     .wait()
                     .with_deadline(Instant::from_ticks(earliest))
                     .await;
@@ -675,15 +630,24 @@ impl MeshManager {
                 #[cfg(test)]
                 {
                     // Host tests have no time driver deadline; the wake signal
-                    // from `add_send_mesh_msg` is the only exit.
+                    // from `enqueue_mesh_tx` is the only exit.
                     let _ = earliest;
-                    self.send_wake.wait().await;
+                    MESH_TX_WAKE.wait().await;
                 }
 
                 return;
             }
             SendScan::Ready(pkt) => pkt,
         };
+
+        // Self-addressed packets are report-only: they exist so the host sees
+        // locally generated commands, not so the radio repeats them.
+        if result.pkt.ll_app().value.src == DEVICE_ADDRESS.get()
+            && result.pkt.ll_app().value.dst == DEVICE_ADDRESS.get()
+        {
+            light_mesh_rx_cb(&result.pkt);
+            return;
+        }
 
         let mut pkt = result.pkt;
 
@@ -728,7 +692,7 @@ impl MeshManager {
             let delay =
                 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 16) * 500);
 
-            self.add_send_mesh_msg(
+            queues::enqueue_mesh_tx(
                 &result.pkt,
                 clock_time64() + (delay as u64 * CLOCK_SYS_CLOCK_1US as u64),
                 result.send_count - 1,
@@ -749,15 +713,9 @@ impl MeshManager {
         }
     }
 
-    pub fn add_rcv_mesh_msg(&mut self, packet: &Packet) {
-        if self.pkt_rcv_buf.try_send(*packet).is_err() {
-            uprintln!("pkt rcv buf is full, dropping packet...");
-        }
-    }
-
     /// Process a single iteration of the mesh message receiving task
     async fn rcv_mesh_msg_iteration(&mut self) {
-        let mut result = self.pkt_rcv_buf.receive().await;
+        let mut result = MESH_RX_CHANNEL.receive().await;
 
         rf_link_rc_data(&mut result);
     }
@@ -780,7 +738,6 @@ impl MeshManager {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::embassy::time_driver::mock_clock_time64;
     use crate::sdk::ble_app::ble_ll_pair::mock_pair_save_key;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_rf_link_match_group_mac;
     use crate::sdk::ble_app::light_ll::packet_processing::{
@@ -792,7 +749,9 @@ mod tests {
     };
     use crate::sdk::drivers::flash::mock_flash_write_page;
     use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed, mock_sleep_us};
+    use crate::sdk::mcu::clock::{
+        mock_clock_time, mock_clock_time64, mock_clock_time_exceed, mock_sleep_us,
+    };
     use crate::sdk::mcu::register::{
         mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_rf_irq_status,
     };
@@ -800,8 +759,9 @@ mod tests {
     use heapless::Vec;
     use mry::Any;
 
-    use crate::common::{mock_access_code, mock_mesh_node_init, mock_pair_load_key};
     use crate::main_light::{mock_light_slave_tx_command, mock_rf_link_light_event_callback};
+    use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};
+    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
     use crate::uart_manager::mock_light_mesh_rx_cb;
 
     /// Helper function to create a test packet with mesh data
@@ -1477,7 +1437,7 @@ mod tests {
         rf_link_add_tx_packet,
         sleep_us,
         pair_load_key,
-        mesh_node_init,
+        mesh_node_table_init,
         app_mocker
     )]
     fn test_save_effect_new_mesh_default_mesh_active() {
@@ -1498,7 +1458,7 @@ mod tests {
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
-        mock_mesh_node_init().returns(());
+        mock_mesh_node_table_init().returns(());
 
         // Execute
         app.mesh_manager.save_effect_new_mesh();
@@ -1507,7 +1467,7 @@ mod tests {
         assert_eq!(app.mesh_manager.default_mesh_time_ref, 0);
         assert_eq!(app.mesh_manager.mesh_pair_start_time, 0);
         mock_pair_load_key().assert_called(1);
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
     }
 
     /// Tests save_effect_new_mesh with validation pending
@@ -1517,7 +1477,7 @@ mod tests {
         rf_link_add_tx_packet,
         sleep_us,
         pair_load_key,
-        mesh_node_init,
+        mesh_node_table_init,
         app_mocker
     )]
     fn test_save_effect_new_mesh_validation_pending() {
@@ -1538,14 +1498,14 @@ mod tests {
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
-        mock_mesh_node_init().returns(());
+        mock_mesh_node_table_init().returns(());
 
         // Execute
         app.mesh_manager.save_effect_new_mesh();
 
         // Verify
         mock_pair_load_key().assert_called(1);
-        mock_mesh_node_init().assert_called(1);
+        mock_mesh_node_table_init().assert_called(1);
     }
 
     /// Tests save_effect_new_mesh normal save path
@@ -1940,43 +1900,6 @@ mod tests {
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
     }
 
-    // --- mesh_node_buf_init Tests ---
-
-    /// Tests mesh_node_buf_init
-    #[test]
-    #[mry::lock(app_mocker)]
-    fn test_mesh_node_buf_init() {
-        // Setup
-        MESH_NODE_MAX.set(3);
-        let mut mesh_node_st = MESH_NODE_ST.lock();
-        mesh_node_st[0].miss = 100;
-        mesh_node_st[1].miss = 150;
-        mesh_node_st[2].miss = 200;
-        drop(mesh_node_st);
-
-        let mut app = App::default();
-        app.light_manager.mock_device_status_update().returns(());
-        mock_app_mocker().returns(&mut app);
-
-        let mesh_manager = MeshManager::default();
-
-        // Execute
-        mesh_manager.mesh_node_buf_init();
-
-        // Verify
-        let mesh_node_st = MESH_NODE_ST.lock();
-        for i in 0..3 {
-            // Use local variable to avoid unaligned reference to packed field
-            let miss = mesh_node_st[i].miss;
-            assert_eq!(miss, 0);
-        }
-        drop(mesh_node_st);
-
-        app.light_manager
-            .mock_device_status_update()
-            .assert_called(1);
-    }
-
     // --- mesh_security_enable Tests ---
 
     /// Tests mesh_security_enable with true
@@ -2007,102 +1930,129 @@ mod tests {
         assert!(!SECURITY_ENABLE.get());
     }
 
-    // --- add_send_mesh_msg Tests ---
+    // --- queues::enqueue_mesh_tx Tests ---
 
-    /// Tests add_send_mesh_msg loopback
+    /// A self-addressed packet is report-only: the TX task pops it, hands it to
+    /// the UART bridge and never transmits or re-queues it.
     #[test]
-    #[mry::lock(light_mesh_rx_cb)]
-    fn test_add_send_mesh_msg_loopback() {
+    #[mry::lock(
+        light_mesh_rx_cb,
+        clock_time64,
+        read_reg_system_tick,
+        read_reg_rnd_number,
+        rf_set_tx_rx_off,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        rf_set_ble_channel,
+        rf_start_srx2tx,
+        rf_set_rxmode
+    )]
+    fn test_send_mesh_msg_iteration_self_addressed_is_report_only() {
+        use futures::executor::block_on;
+
         // Setup
         DEVICE_ADDRESS.set(0x1234);
+        SECURITY_ENABLE.set(false);
         let mut mesh_manager = MeshManager::default();
         let test_pkt = create_test_packet(0x1234, 0x1234, [1, 2, 3]);
 
         mock_light_mesh_rx_cb(Any).returns(());
+        mock_clock_time64().returns(0);
+        mock_read_reg_system_tick().returns(1000);
+        mock_read_reg_rnd_number().returns(0x5555);
+        mock_rf_set_tx_rx_off().returns(());
+        mock_rf_set_ble_access_code(Any).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_rf_set_ble_channel(Any).returns(());
+        mock_rf_start_srx2tx(Any, Any).returns(());
+        mock_rf_set_rxmode().returns(());
 
         // Execute
-        mesh_manager.add_send_mesh_msg(&test_pkt, 0, 0);
+        assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 0));
+        block_on(mesh_manager.send_mesh_msg_iteration());
 
-        // Verify - packet should be processed immediately via UART callback
+        // Verify - reported over UART, popped, not transmitted
         mock_light_mesh_rx_cb(Any).assert_called(1);
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 0);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
+        mock_rf_set_tx_rx_off().assert_called(0);
     }
 
-    /// Tests add_send_mesh_msg normal add
+    /// Tests queues::enqueue_mesh_tx normal add
     #[test]
-    fn test_add_send_mesh_msg_normal() {
+    fn test_enqueue_mesh_tx_normal() {
         // Setup
         DEVICE_ADDRESS.set(0x1234);
-        let mut mesh_manager = MeshManager::default();
+        let _mesh_manager = MeshManager::default();
         let test_pkt = create_test_packet(0x5678, 0xABCD, [1, 2, 3]);
 
         // Execute
-        mesh_manager.add_send_mesh_msg(&test_pkt, 1000, 3);
+        assert!(queues::enqueue_mesh_tx(&test_pkt, 1000, 3));
 
         // Verify
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 1);
-        assert_eq!(mesh_manager.pkt_send_buf[0].delay, 1000);
-        assert_eq!(mesh_manager.pkt_send_buf[0].send_count, 3);
+        let send_queue = MESH_TX_QUEUE.lock();
+        assert_eq!(send_queue.len(), 1);
+        assert_eq!(send_queue[0].delay, 1000);
+        assert_eq!(send_queue[0].send_count, 3);
     }
 
-    /// Tests add_send_mesh_msg buffer full
+    /// Tests queues::enqueue_mesh_tx buffer full
     #[test]
-    fn test_add_send_mesh_msg_buffer_full() {
+    fn test_enqueue_mesh_tx_buffer_full() {
         // Setup
         DEVICE_ADDRESS.set(0x1234);
-        let mut mesh_manager = MeshManager::default();
+        let _mesh_manager = MeshManager::default();
         let test_pkt = create_test_packet(0x5678, 0xABCD, [1, 2, 3]);
 
         // Fill the buffer (capacity is 8)
         for i in 0..8 {
             let pkt = create_test_packet(i as u16, 0xFFFF, [i as u8, 0, 0]);
-            mesh_manager.add_send_mesh_msg(&pkt, i as u64, 0);
+            assert!(queues::enqueue_mesh_tx(&pkt, i as u64, 0));
         }
 
         // Execute - try to add one more
-        mesh_manager.add_send_mesh_msg(&test_pkt, 1000, 3);
+        assert!(!queues::enqueue_mesh_tx(&test_pkt, 1000, 3));
 
         // Verify - buffer should still be at max capacity
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 8);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 8);
     }
 
-    // --- add_rcv_mesh_msg Tests ---
+    // --- queues::enqueue_mesh_rx Tests ---
 
-    /// Tests add_rcv_mesh_msg normal add
+    /// Tests queues::enqueue_mesh_rx normal add
     #[test]
-    fn test_add_rcv_mesh_msg_normal() {
+    fn test_enqueue_mesh_rx_normal() {
         // Setup
-        let mut mesh_manager = MeshManager::default();
+        let _mesh_manager = MeshManager::default();
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
 
         // Execute
-        mesh_manager.add_rcv_mesh_msg(&test_pkt);
+        assert!(queues::enqueue_mesh_rx(&test_pkt));
 
         // Verify
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 1);
+        assert_eq!(MESH_RX_CHANNEL.len(), 1);
     }
 
-    /// Tests add_rcv_mesh_msg buffer full
+    /// Tests queues::enqueue_mesh_rx buffer full
     #[test]
-    fn test_add_rcv_mesh_msg_buffer_full() {
+    fn test_enqueue_mesh_rx_buffer_full() {
         // Setup
-        let mut mesh_manager = MeshManager::default();
+        let _mesh_manager = MeshManager::default();
 
         // Fill the buffer (capacity is 8)
         for i in 0..8 {
             let pkt = create_test_packet(i as u16, 0xFFFF, [i as u8, 0, 0]);
-            mesh_manager.add_rcv_mesh_msg(&pkt);
+            assert!(queues::enqueue_mesh_rx(&pkt));
         }
 
         // Execute - try to add one more
         let test_pkt = create_test_packet(0x9999, 0x8888, [9, 9, 9]);
-        mesh_manager.add_rcv_mesh_msg(&test_pkt);
+        assert!(!queues::enqueue_mesh_rx(&test_pkt));
 
         // Verify - buffer should still be at max capacity
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 8);
+        assert_eq!(MESH_RX_CHANNEL.len(), 8);
     }
 
-    /// Tests send_mesh_msg_iteration parks on send_wake and wakes on a push
+    /// Tests send_mesh_msg_iteration parks on the wake and wakes on a push
     #[test]
     fn test_send_mesh_msg_iteration_no_packets() {
         use core::future::Future;
@@ -2114,7 +2064,7 @@ mod tests {
         // The future parks on `&mut self`, so drive it through a raw pointer.
         let mesh_manager_ptr: *mut MeshManager = &mut mesh_manager;
 
-        // pkt_send_buf is empty by default, so the iteration parks on send_wake
+        // The TX queue is empty by default, so the iteration parks on the wake
         let future = mesh_manager.send_mesh_msg_iteration();
         futures::pin_mut!(future);
 
@@ -2123,14 +2073,15 @@ mod tests {
 
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
 
-        // Enqueue a ready packet; add_send_mesh_msg signals send_wake
+        // Enqueue a ready packet; `enqueue_mesh_tx` signals the wake
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
         // SAFETY: the pinned `send_mesh_msg_iteration` future is the only
-        // accessor of `mesh_manager`, so the `&mut self` borrow is logically
-        // transferred to `add_send_mesh_msg` for the duration of this block.
+        // accessor of `mesh_manager`; the queue itself is a module-level
+        // static, so no borrow of `mesh_manager` is needed here.
         unsafe {
-            (*mesh_manager_ptr).add_send_mesh_msg(&test_pkt, 0, 0);
-            assert_eq!((&(*mesh_manager_ptr).pkt_send_buf).len(), 1);
+            let _ = &(*mesh_manager_ptr);
+            assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 0));
+            assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
         }
 
         // The wake signal releases the parked iteration without sending; the
@@ -2138,9 +2089,7 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
 
         // Verify - the packet is still queued for the next iteration
-        // SAFETY: the future is parked (not completed), and it is the only
-        // accessor of `mesh_manager`; this is a read-only reborrow.
-        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 1);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
     }
 
     /// Tests send_mesh_msg_iteration with ready packet
@@ -2167,9 +2116,9 @@ mod tests {
         SECURITY_ENABLE.set(false);
 
         // Add a packet that's ready to send (delay is in the past)
-        mesh_manager.add_send_mesh_msg(&test_pkt, 0, 0); // delay=0 means ready to send immediately
+        assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 0)); // delay=0 means ready to send immediately
 
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 1);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
         // Mock the required functions
         mock_read_reg_system_tick().returns(1000);
@@ -2186,7 +2135,7 @@ mod tests {
         block_on(mesh_manager.send_mesh_msg_iteration());
 
         // Verify - packet should be processed and removed from buffer
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 0);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
         mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
     }
 
@@ -2194,7 +2143,7 @@ mod tests {
     /// wakes when a new packet is pushed.
     ///
     /// This is the `SendScan::Wait(earliest)` arm: the buffer is non-empty but
-    /// nothing is due yet, so the only exit is `send_wake`. Every mesh
+    /// nothing is due yet, so the only exit is the wake signal. Every mesh
     /// retransmission takes this path.
     #[test]
     #[mry::lock(clock_time64)]
@@ -2214,8 +2163,8 @@ mod tests {
         // Deadline far in the future: the buffer is not empty, but no packet is
         // due, so the scan must take `SendScan::Wait(earliest)`, not `Empty`.
         let far_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
-        mesh_manager.add_send_mesh_msg(&far_pkt, u64::MAX / 2, 0);
-        assert_eq!(mesh_manager.pkt_send_buf.len(), 1);
+        assert!(queues::enqueue_mesh_tx(&far_pkt, u64::MAX / 2, 0));
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
         let future = mesh_manager.send_mesh_msg_iteration();
         futures::pin_mut!(future);
@@ -2227,17 +2176,15 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
 
         // The not-yet-due packet must NOT have been consumed by the scan.
-        // SAFETY: the pinned `send_mesh_msg_iteration` future is the only
-        // accessor of `mesh_manager`; this is a read-only reborrow.
-        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 1);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
-        // A due packet signals `send_wake`, which releases the parked wait.
+        // A due packet signals the wake, which releases the parked wait.
         let ready_pkt = create_test_packet(0x9abc, 0xdef0, [4, 5, 6]);
-        // SAFETY: the pinned future is the only accessor of `mesh_manager`, so
-        // the `&mut self` borrow is logically transferred to this call.
+        // SAFETY: the pinned future is the only accessor of `mesh_manager`.
         unsafe {
-            (*mesh_manager_ptr).add_send_mesh_msg(&ready_pkt, 0, 0);
-            assert_eq!((&(*mesh_manager_ptr).pkt_send_buf).len(), 2);
+            let _ = &(*mesh_manager_ptr);
+            assert!(queues::enqueue_mesh_tx(&ready_pkt, 0, 0));
+            assert_eq!(MESH_TX_QUEUE.lock().len(), 2);
         }
 
         // Second poll: the wake completes the iteration without sending; the
@@ -2245,9 +2192,7 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
 
         // Nothing was consumed by this iteration.
-        // SAFETY: the future has completed and is the only accessor of
-        // `mesh_manager`; this is a read-only reborrow.
-        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_send_buf).len() }, 2);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 2);
 
         // The clock was sampled exactly once for the scan.
         mock_clock_time64().assert_called(1);
@@ -2269,7 +2214,7 @@ mod tests {
         let mesh_manager_ptr: *mut MeshManager = &mut mesh_manager;
         mock_rf_link_rc_data(Any).returns(());
 
-        // pkt_rcv_buf is empty by default, so the iteration parks on receive()
+        // The RX channel is empty by default, so the iteration parks on receive()
         let future = mesh_manager.rcv_mesh_msg_iteration();
         futures::pin_mut!(future);
 
@@ -2281,19 +2226,17 @@ mod tests {
         // Enqueue a packet; Channel::try_send wakes the parked receiver
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
         // SAFETY: the pinned `rcv_mesh_msg_iteration` future is the only
-        // accessor of `mesh_manager`, so the `&mut self` borrow is logically
-        // transferred to `add_rcv_mesh_msg` for the duration of this block.
+        // accessor of `mesh_manager`; the channel is a module-level static.
         unsafe {
-            (*mesh_manager_ptr).add_rcv_mesh_msg(&test_pkt);
-            assert_eq!((&(*mesh_manager_ptr).pkt_rcv_buf).len(), 1);
+            let _ = &(*mesh_manager_ptr);
+            assert!(queues::enqueue_mesh_rx(&test_pkt));
+            assert_eq!(MESH_RX_CHANNEL.len(), 1);
         }
 
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
 
         // Verify - the packet was received and handed to the mesh decoder
-        // SAFETY: the future is pinned and is the only accessor of
-        // `mesh_manager`; this is a read-only reborrow.
-        assert_eq!(unsafe { (&(*mesh_manager_ptr).pkt_rcv_buf).len() }, 0);
+        assert_eq!(MESH_RX_CHANNEL.len(), 0);
         mock_rf_link_rc_data(Any).assert_called(1);
     }
 
@@ -2308,8 +2251,8 @@ mod tests {
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
 
         // Add a packet to receive
-        mesh_manager.add_rcv_mesh_msg(&test_pkt);
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 1);
+        assert!(queues::enqueue_mesh_rx(&test_pkt));
+        assert_eq!(MESH_RX_CHANNEL.len(), 1);
 
         // Mock the rf_link_rc_data function
         mock_rf_link_rc_data(Any).returns(());
@@ -2318,7 +2261,7 @@ mod tests {
         block_on(mesh_manager.rcv_mesh_msg_iteration());
 
         // Verify - packet should be processed and removed from buffer
-        assert_eq!(mesh_manager.pkt_rcv_buf.len(), 0);
+        assert_eq!(MESH_RX_CHANNEL.len(), 0);
         mock_rf_link_rc_data(Any).assert_called(1);
     }
 }

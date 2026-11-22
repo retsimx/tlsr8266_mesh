@@ -1,4 +1,5 @@
 use crate::sdk::light::{AdvRspPrivate, PKT_CMD_LEN};
+use bytemuck::{Pod, Zeroable};
 use core::mem;
 
 #[macro_export]
@@ -505,6 +506,93 @@ impl Packet {
 }
 
 const_assert!(mem::size_of::<Packet>() == 48);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UartMsg {
+    //EnableUart = 0x01,      // Sent by the client to enable uart comms - not handled, just a dummy message
+    LightCtrl = 0x02,    // Sent by the client to control the mesh
+    LightStatus = 0x03, // Sent by us to notify when a bulk status message is sent. Sent by the client to force a full refresh of light statuses
+    MeshMessage = 0x04, // Sent by us to notify when a mesh message is sent
+    PanicMessage = 0x05, // Sent by us to provide details of a panic
+    PrintMessage = 0x06, // Sent by us to provide print output
+    NodeStatus = 0x07, // Sent by us for individual node online/offline and on/off change events. Payload: groups of [node_id, online, on_off] (3 bytes each, up to 13 per packet)
+    Ack = 0xff,
+}
+
+impl From<UartMsg> for u8 {
+    fn from(value: UartMsg) -> Self {
+        match value {
+            UartMsg::LightCtrl => 0x02,
+            UartMsg::LightStatus => 0x03,
+            UartMsg::MeshMessage => 0x04,
+            UartMsg::PanicMessage => 0x05,
+            UartMsg::PrintMessage => 0x06,
+            UartMsg::NodeStatus => 0x07,
+            UartMsg::Ack => 0xff,
+        }
+    }
+}
+
+impl TryFrom<u8> for UartMsg {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x02 => Ok(UartMsg::LightCtrl),
+            0x03 => Ok(UartMsg::LightStatus),
+            0x04 => Ok(UartMsg::MeshMessage),
+            0x05 => Ok(UartMsg::PanicMessage),
+            0x06 => Ok(UartMsg::PrintMessage),
+            0x07 => Ok(UartMsg::NodeStatus),
+            0xff => Ok(UartMsg::Ack),
+            _ => Err(()),
+        }
+    }
+}
+
+pub const MESH_NODE_ST_VAL_LEN: usize = 4;
+// MIN: 4,   MAX: 10
+pub const MESH_NODE_ST_PAR_LEN: usize = MESH_NODE_ST_VAL_LEN - 2;
+
+/// Size of the status value region in one status advertisement packet.
+///
+/// `mesh_node_adv_status` fills `MESH_STATUS_VALUE_LEN` bytes and
+/// `rf_link_rc_data` decodes exactly the same span, so this is the single
+/// source of truth for the per-packet record capacity.
+pub const MESH_STATUS_VALUE_LEN: usize = 24;
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C, packed)]
+pub struct MeshNodeStValT {
+    pub dev_adr: u8,
+    // don't change include type
+    pub sn: u8,
+    // don't change include type
+    pub par: [u8; MESH_NODE_ST_PAR_LEN], //lumen-rsv,
+}
+
+// SAFETY: This struct is safe to use with bytemuck because:
+// 1. It's #[repr(C, packed)] so it has a stable memory layout
+// 2. All fields are u8 which are safe to transmute
+// 3. The struct size is fixed and known at compile time
+unsafe impl Pod for MeshNodeStValT {}
+unsafe impl Zeroable for MeshNodeStValT {}
+
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct MeshNodeStT {
+    /// Sweep-age counter: `0` = offline/never seen, `>= 1` = online with age
+    /// `miss - 1` status sweeps since the last observation. All-zero init in
+    /// `.bss` therefore means offline without an explicit runtime fill.
+    pub miss: u8,
+    // don't change include type
+    pub val: MeshNodeStValT,
+}
+
+/// A node is online iff it has a non-zero sweep-age counter (`miss`).
+pub fn is_online(node: &MeshNodeStT) -> bool {
+    node.miss != 0
+}
 
 #[cfg(test)]
 #[coverage(off)]

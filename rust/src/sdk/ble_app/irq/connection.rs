@@ -9,8 +9,8 @@
 //! - Channel map updates and frequency hopping management
 //! - Connection event timing synchronization
 
-use crate::common::pair_load_key;
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
+use crate::sdk::ble_app::flash_config::pair_load_key;
 use crate::sdk::ble_app::light_ll::connection_management::back_to_rxmode_bridge;
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable,
@@ -32,7 +32,7 @@ use crate::sdk::mcu::register::*;
 use crate::state::*;
 
 /// Outcome of one BLE connected-state dispatch, reported up to the interrupt
-/// composition root (`crate::irq`) which owns the `ota_manager` calls.
+/// composition root (the crate root) which owns the `ota_manager` calls.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BleConnectionEvent {
     /// Nothing for the composition root to do.
@@ -308,7 +308,7 @@ fn handle_status_read_timeout() {
 /// - Scheduling the next connection event during OTA
 ///
 /// The OTA manager itself is driven by the interrupt composition root
-/// (`crate::irq`), which reacts to the returned event.
+/// (the crate root), which reacts to the returned event.
 ///
 /// ## Returns
 /// - `Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)` if OTA is active and
@@ -385,8 +385,8 @@ fn handle_bridge_operations() {
 #[cfg_attr(test, mry::mry)]
 fn process_mesh_operations() {
     use crate::config::VENDOR_ID;
-    use crate::mesh::MESH_NODE_ST_VAL_LEN;
     use crate::sdk::ble_app::ble_ll_pair::pair_proc;
+    use crate::sdk::packet_types::MESH_NODE_ST_VAL_LEN;
     use crate::sdk::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 
     // Process any pending status read operations
@@ -638,8 +638,8 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::common::mock_pair_load_key;
     use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_build_available_channel_table;
+    use crate::sdk::ble_app::flash_config::mock_pair_load_key;
     use crate::sdk::ble_app::irq::mesh::mock_mesh_node_report_status;
     use crate::sdk::ble_app::irq::mesh_node_report_status; // needed for mry::lock
     use crate::sdk::ble_app::light_ll::connection_management::mock_back_to_rxmode_bridge;

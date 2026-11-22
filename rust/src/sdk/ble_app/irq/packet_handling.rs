@@ -13,7 +13,6 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::app;
 use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
 use crate::sdk::ble_app::light_ll::connection_management::{
@@ -336,9 +335,9 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
         true
     };
 
-    // If packet validation passes, forward it to the mesh manager for processing
+    // If packet validation passes, hand it to the mesh RX queue for processing
     if pkt_valid() {
-        app().mesh_manager.add_rcv_mesh_msg(&packet);
+        crate::sdk::ble_app::queues::enqueue_mesh_rx(&packet);
     }
 }
 
@@ -430,11 +429,13 @@ mod tests {
     };
     use crate::sdk::packet_types::{Packet, PacketScanRsp, ScanRspData};
     use crate::state::*;
-    use crate::{app_mocker, mock_app_mocker};
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
     fn reset_global_state() {
+        // Global queues outlive every test in this process: clear them.
+        crate::sdk::ble_app::queues::reset_for_test();
+
         LIGHT_RX_BUFFER_WRITE_POINTER.set(0);
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
@@ -1013,9 +1014,9 @@ mod tests {
         // Verify duplicate check was performed
         mock_is_exist_in_rc_pkt_buf(Any, Any).assert_called(1);
 
-        // Note: In a complete implementation, we'd also verify that
-        // app().mesh_manager.add_rcv_mesh_msg(&packet) was called,
-        // but this requires more complex app mocking setup
+        // Note: the valid-packet branch now pushes onto the module-level mesh
+        // RX queue; asserting that is covered by
+        // `test_handle_mesh_packet_node_status_advertisement_line_285`.
     }
 
     /// Tests mesh packet handling with timing validation failure.
@@ -1876,7 +1877,6 @@ mod tests {
         read_reg_system_tick_irq,
         read_reg_system_tick,
         pair_dec_packet_mesh,
-        app_mocker,
         write_reg8,
         write_reg16,
         write_reg32
@@ -1889,11 +1889,8 @@ mod tests {
         mock_read_reg_system_tick().returns(30000);
         mock_pair_dec_packet_mesh(Any).returns(Ok(()));
 
-        // Mock app_mocker for the app() call that happens after pkt_valid() returns true
-        let test_app = crate::app::App::default();
-        let test_app_ptr = &test_app as *const _ as *mut crate::app::App;
-        mock_app_mocker().returns(test_app_ptr);
-
+        // A valid packet is handed to the module-level mesh RX queue, so no
+        // application singleton is touched on this path.
         mock_write_reg8(Any, Any).returns(());
         mock_write_reg16(Any, Any).returns(());
         mock_write_reg32(Any, Any).returns(());
@@ -1916,8 +1913,8 @@ mod tests {
         mock_pair_dec_packet_mesh(Any).assert_called(1);
 
         // For node status packets (0xffff), pkt_valid() returns true at line 285
-        // and then app().mesh_manager.add_rcv_mesh_msg() is called at line 312
-        mock_app_mocker().assert_called(1);
+        // and the packet is queued for the mesh RX task
+        assert_eq!(crate::sdk::ble_app::queues::MESH_RX_CHANNEL.len(), 1);
     }
 
     /// Tests the parse failure case (line 291) in handle_mesh_packet.
@@ -1964,8 +1961,8 @@ mod tests {
         // Verify that parsing was attempted and failed (triggering line 291)
         mock_parse_ble_packet_op_params(Any, Any).assert_called(1);
 
-        // Since pkt_valid() returns false at line 291, app() is never called
-        // No need to mock or assert app() calls since we return early
+        // Since pkt_valid() returns false at line 291, no application callback
+        // is reached; there is nothing to assert beyond the early return.
     }
 
     /// Tests the fallthrough to handle_ble_connection_data (line 193) in process_received_packet_slow_path.

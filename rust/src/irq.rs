@@ -18,11 +18,10 @@
 //! - OTA timeout countdown driven by `TMR0` elapsed time
 
 use crate::app;
-use crate::embassy::sync::mutex::CriticalSectionMutex;
-use crate::embassy::time_driver::clock_time64;
 use crate::sdk::ble_app::irq::BleConnectionEvent;
+use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::light::OtaState;
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1S;
+use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
 use crate::sdk::mcu::register::*;
 use crate::state::*;
 
@@ -154,9 +153,7 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::embassy::time_driver::{
-        mock_clock_time64, mock_on_timer0_interrupt, on_timer0_interrupt,
-    };
+    use crate::embassy::time_driver::{mock_on_timer0_interrupt, on_timer0_interrupt};
     use crate::sdk::ble_app::irq::dispatcher::{
         handle_ble_system_timer_irq, handle_rf_irq, mock_handle_ble_system_timer_irq,
         mock_handle_rf_irq,
@@ -166,6 +163,7 @@ mod tests {
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
     use crate::sdk::light::{RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
+    use crate::sdk::mcu::clock::mock_clock_time64;
     use crate::sdk::mcu::register::{
         mock_read_reg_irq_src, mock_read_reg_rf_irq_status, mock_write_reg_irq_src,
         mock_write_reg_tmr_sta,

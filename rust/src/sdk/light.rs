@@ -1,5 +1,4 @@
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
-use crate::BIT;
 
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
 pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
@@ -199,12 +198,6 @@ pub enum OtaState {
     Ok = 1,
     Error = 2,
     MasterOtaRebootOnly = 3,
-}
-
-// recover status before software reboot
-pub enum RecoverStatus {
-    LightOff = BIT!(0),
-    MeshOtaMaster100 = BIT!(1),
 }
 
 #[derive(Clone, Copy)]
@@ -822,7 +815,6 @@ mod tests {
     ///
     /// 1. Test BlePeripheralLinkState discriminant values
     /// 2. Test OtaState discriminant values
-    /// 3. Test RecoverStatus bit flag values
     ///
     /// # Notes
     ///
@@ -841,10 +833,6 @@ mod tests {
         assert_eq!(OtaState::Ok as u8, 1);
         assert_eq!(OtaState::Error as u8, 2);
         assert_eq!(OtaState::MasterOtaRebootOnly as u8, 3);
-
-        // RecoverStatus bit flags
-        assert_eq!(RecoverStatus::LightOff as u8, 1 << 0); // BIT!(0) = 1
-        assert_eq!(RecoverStatus::MeshOtaMaster100 as u8, 1 << 1); // BIT!(1) = 2
 
         // ePairState values
         assert_eq!(ePairState::PairSetted as u8, 0);

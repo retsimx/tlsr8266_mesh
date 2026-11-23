@@ -51,10 +51,6 @@ use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
 use heapless::Vec;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
-use tlsr8266_pac::{
-    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt,
-    write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
-};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -124,15 +120,12 @@ fn cfg_led_event(e: u32) {
 #[cfg_attr(test, mry::mry)]
 pub fn light_hw_timer_config() {
     // Enable timer1 interrupts for controlling light transitions
-    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN.bits());
-    write_reg_tmr1_capt(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
+    crate::sdk::mcu::irq_i::irq_enable_tmr1();
+    crate::sdk::mcu::timer::tmr1_configure(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
 
     // enable timer0 interrupt for tracking clock_time overflow
-    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN.bits());
-    write_reg_tmr0_tick(0);
-    write_reg_tmr0_capt(CLOCK_SYS_CLOCK_1S);
-
-    write_reg_tmr_ctrl(read_reg_tmr_ctrl() | FLD_TMR::TMR0_EN.bits());
+    crate::sdk::mcu::irq_i::irq_enable_tmr0();
+    crate::sdk::mcu::timer::tmr0_configure_and_enable(CLOCK_SYS_CLOCK_1S);
 }
 
 #[cfg_attr(test, mry::mry)]
@@ -424,6 +417,7 @@ pub fn rf_link_response_callback(
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
             OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+            crate::sdk::pm::set_reboot_ota_active(true);
         }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
@@ -604,11 +598,8 @@ mod tests {
     use futures::executor::block_on;
     use mesh_protocol::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use mry::Any;
-    use tlsr8266_pac::{
-        mock_read_reg_irq_mask, mock_read_reg_tmr_ctrl, mock_write_reg_irq_mask,
-        mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
-        mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
-    };
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::{FLD_IRQ, FLD_TMR};
 
     // --- Helper Functions ---
 
@@ -672,44 +663,48 @@ mod tests {
     // --- Tests for light_hw_timer_config ---
 
     #[test]
-    #[mry::lock(
-        read_reg_irq_mask,
-        write_reg_irq_mask,
-        write_reg_tmr1_capt,
-        write_reg_tmr0_tick,
-        write_reg_tmr0_capt,
-        read_reg_tmr_ctrl,
-        write_reg_tmr_ctrl
-    )]
     fn test_light_hw_timer_config_enables_timers() {
-        // This test verifies that light_hw_timer_config properly enables TMR0 and TMR1 interrupts
+        // This test verifies that light_hw_timer_config enables the TMR0/TMR1
+        // interrupts, programs both capture values and leaves TMR0 running.
 
-        // Setup mocks
-        let initial_irq_mask = 0x0000u32;
-        let initial_tmr_ctrl = 0x0000u32;
-
-        mock_read_reg_irq_mask().returns(initial_irq_mask);
-        mock_read_reg_irq_mask().returns(initial_irq_mask); // Called twice
-        mock_write_reg_irq_mask(Any).returns(());
-        mock_write_reg_tmr1_capt(Any).returns(());
-        mock_write_reg_tmr0_tick(Any).returns(());
-        mock_write_reg_tmr0_capt(Any).returns(());
-        mock_read_reg_tmr_ctrl().returns(initial_tmr_ctrl);
-        mock_write_reg_tmr_ctrl(Any).returns(());
+        // Seed an unrelated irq-mask bit and TMR1 as already enabled, so the
+        // assertions below prove the read-modify-writes preserve other bits.
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x640, FLD_IRQ::SYSTEM_TIMER.bits());
+        FakeMmio::set_reg8(0x620, FLD_TMR::TMR1_EN.bits() as u8);
 
         // Execute
         light_hw_timer_config();
 
-        // Verify TMR1 interrupt is enabled
-        mock_write_reg_irq_mask(Any).assert_called(2);
-        mock_write_reg_tmr1_capt(Any).assert_called(1);
+        // Verify both timer interrupts are enabled and the seeded bit survives
+        let irq_mask = FakeMmio::reg32(0x640);
+        assert!(
+            irq_mask & FLD_IRQ::TMR1_EN.bits() != 0,
+            "TMR1 interrupt must be enabled"
+        );
+        assert!(
+            irq_mask & FLD_IRQ::TMR0_EN.bits() != 0,
+            "TMR0 interrupt must be enabled"
+        );
+        assert!(
+            irq_mask & FLD_IRQ::SYSTEM_TIMER.bits() != 0,
+            "pre-existing irq mask bits must be preserved"
+        );
 
-        // Verify TMR0 is configured
-        mock_write_reg_tmr0_tick(0).assert_called(1);
-        mock_write_reg_tmr0_capt(Any).assert_called(1);
+        // Verify TMR1 capture (~120 Hz) and TMR0 tick/capture
+        assert_eq!(FakeMmio::reg32(0x628), CLOCK_SYS_CLOCK_1S / 120);
+        assert_eq!(FakeMmio::reg32(0x630), 0);
+        assert_eq!(FakeMmio::reg32(0x624), CLOCK_SYS_CLOCK_1S);
 
-        // Verify TMR0 is enabled
-        mock_write_reg_tmr_ctrl(Any).assert_called(1);
+        // Verify TMR0 is enabled and TMR1's enable bit was left alone
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR0_EN.bits() as u8 != 0,
+            "TMR0 must be left running"
+        );
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR1_EN.bits() as u8 != 0,
+            "TMR1 enable must not be cleared"
+        );
     }
 
     // --- Tests for proc_led ---
@@ -2225,9 +2220,6 @@ mod tests {
     #[mry::lock(
         clock_time,
         clock_time64,
-        read_reg_tmr_ctrl,
-        write_reg_tmr1_tick,
-        write_reg_tmr_ctrl,
         pwm_set_cmp,
         clock_time_exceed,
         flash_write_page,
@@ -2242,16 +2234,25 @@ mod tests {
         // again.
         reset_test_globals();
         crate::light_manager::reset_for_test();
+        FakeMmio::reset();
 
         // Seed a pending luminance save: a colour transition stamps
         // `last_transition_time`.
         mock_clock_time().returns(1000);
         mock_clock_time64().returns(0);
-        mock_read_reg_tmr_ctrl().returns(0);
-        mock_write_reg_tmr1_tick(Any).returns(());
-        mock_write_reg_tmr_ctrl(Any).returns(());
         mock_pwm_set_cmp(Any, Any).returns(());
         begin_transition(500, 300, 800);
+
+        // The colour command started a transition, so TMR1 must be running.
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR1_EN.bits() as u8 != 0,
+            "begin_transition must start TMR1"
+        );
+        assert_eq!(
+            FakeMmio::reg32(0x634),
+            0,
+            "begin_transition resets the tick"
+        );
 
         // 5 s have elapsed since that transition.
         mock_clock_time_exceed(Any, Any).returns(true);
@@ -2324,14 +2325,7 @@ mod tests {
     /// state owned by `light_manager`; the SDK test tree may no longer inject an
     /// application state object.
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time64,
-        read_reg_tmr_ctrl,
-        write_reg_tmr1_tick,
-        write_reg_tmr_ctrl,
-        pwm_set_cmp
-    )]
+    #[mry::lock(clock_time, clock_time64, pwm_set_cmp)]
     fn test_rf_link_response_callback_to_slave_add_status_layout() {
         use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
 
@@ -2346,12 +2340,22 @@ mod tests {
 
         mock_clock_time().returns(1);
         mock_clock_time64().returns(100);
-        mock_read_reg_tmr_ctrl().returns(0);
-        mock_write_reg_tmr1_tick(Any).returns(());
-        mock_write_reg_tmr_ctrl(Any).returns(());
         mock_pwm_set_cmp(Any, Any).returns(());
 
+        FakeMmio::reset();
         begin_transition(8767, 24000, 16384);
+
+        // `begin_transition` runs the real TMR1 HAL helpers, so the fake bank
+        // must show a started timer with a cleared tick.
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR1_EN.bits() as u8 != 0,
+            "begin_transition must start TMR1"
+        );
+        assert_eq!(
+            FakeMmio::reg32(0x634),
+            0,
+            "begin_transition resets the tick"
+        );
 
         let req = PacketAttValue {
             sno: [0x01, 0x02, 0x03],

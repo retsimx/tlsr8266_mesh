@@ -37,9 +37,6 @@ use crate::sdk::mcu::clock::{
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
 use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
-use tlsr8266_pac::{
-    read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
-};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -403,7 +400,7 @@ fn save_effect_new_mesh() {
         rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
         rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
         sleep_us(1000);
-        write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits()); // clear current rx in buffer
+        crate::sdk::ble_app::rf_drv_8266::rf_clear_rx_irq(); // clear current rx in buffer
     });
 
     safe_effect_new_mesh_finish();
@@ -756,7 +753,7 @@ async fn mesh_packet_send_iteration(
     }
 
     // Pick a random start channel
-    let start_chan_idx = (read_reg_system_tick() as u16 ^ read_reg_rnd_number()) as usize;
+    let start_chan_idx = crate::sdk::mcu::random::rand() as usize;
 
     // Send the packet on each channel
     for channel_index in start_chan_idx..start_chan_idx + SYS_CHN_LISTEN.len() {
@@ -770,7 +767,7 @@ async fn mesh_packet_send_iteration(
             rf_set_ble_channel(SYS_CHN_LISTEN[channel_index % SYS_CHN_LISTEN.len()]);
             rf_start_srx2tx(
                 addr_of!(pkt) as u32,
-                read_reg_system_tick() + CLOCK_SYS_CLOCK_1US * 30,
+                clock_time() + CLOCK_SYS_CLOCK_1US * 30,
             );
         });
 
@@ -784,7 +781,7 @@ async fn mesh_packet_send_iteration(
 
     if result.send_count != 0 {
         // Random delay to avoid congestion between 0us and 8ms
-        let delay = 8000 - (((read_reg_system_tick() as u16 ^ read_reg_rnd_number()) % 16) * 500);
+        let delay = 8000 - ((crate::sdk::mcu::random::rand() % 16) * 500);
 
         queues::enqueue_mesh_tx(
             &result.pkt,
@@ -856,11 +853,11 @@ mod tests {
     use crate::sdk::mcu::clock::{
         mock_clock_time, mock_clock_time64, mock_clock_time_exceed, mock_sleep_us,
     };
+    use crate::sdk::mcu::random::{mock_rand, rand};
     use heapless::Vec;
     use mry::Any;
-    use tlsr8266_pac::{
-        mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_rf_irq_status,
-    };
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::FLD_RF_IRQ_MASK;
 
     use crate::main_light::{mock_light_slave_tx_command, mock_rf_link_light_event_callback};
     use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};
@@ -1043,7 +1040,6 @@ mod tests {
         pair_save_key,
         rf_set_ble_access_code,
         rf_link_light_event_callback,
-        write_reg_rf_irq_status,
         is_add_packet_buf_ready,
         rf_link_add_tx_packet
     )]
@@ -1062,7 +1058,7 @@ mod tests {
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
         mock_sleep_us(1000).returns(());
-        mock_write_reg_rf_irq_status(Any).returns(());
+        FakeMmio::set_reg16(0xf20, 0);
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
@@ -1073,6 +1069,11 @@ mod tests {
         assert_eq!(pair().effect_new_mesh, 0);
         assert_eq!(pair().effect_new_mesh_delay_time, 0);
         mock_pair_save_key().assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(0xf20),
+            FLD_RF_IRQ_MASK::IRQ_RX.bits(),
+            "the pending RX interrupt must be acknowledged during the mesh switch"
+        );
     }
 
     /// Tests mesh_pair_proc_effect with delay time exceeded
@@ -1085,8 +1086,7 @@ mod tests {
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
         rf_set_ble_access_code,
-        rf_link_light_event_callback,
-        write_reg_rf_irq_status
+        rf_link_light_event_callback
     )]
     fn test_mesh_pair_proc_effect_with_delay_exceeded() {
         // Setup
@@ -1110,7 +1110,7 @@ mod tests {
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_link_light_event_callback(Any).returns(());
-        mock_write_reg_rf_irq_status(Any).returns(());
+        FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
         mesh_pair_proc_effect();
@@ -1118,6 +1118,11 @@ mod tests {
         // Verify
         assert_eq!(pair().effect_new_mesh_delay_time, 0);
         mock_clock_time_exceed(Any, Any).assert_called(2);
+        assert_eq!(
+            FakeMmio::reg16(0xf20),
+            FLD_RF_IRQ_MASK::IRQ_RX.bits(),
+            "the pending RX interrupt must be acknowledged during the mesh switch"
+        );
     }
 
     /// Tests mesh_pair_proc_effect with no effect needed
@@ -1597,8 +1602,7 @@ mod tests {
         pair_save_key,
         rf_set_ble_access_code,
         rf_link_light_event_callback,
-        sleep_us,
-        write_reg_rf_irq_status
+        sleep_us
     )]
     fn test_save_effect_new_mesh_normal_save() {
         // Setup
@@ -1621,7 +1625,7 @@ mod tests {
         mock_rf_set_ble_access_code(0xABCDEF12).returns(());
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
         mock_sleep_us(1000).returns(());
-        mock_write_reg_rf_irq_status(Any).returns(());
+        FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
         save_effect_new_mesh();
@@ -1631,6 +1635,11 @@ mod tests {
         mock_pair_save_key().assert_called(1);
         mock_rf_set_ble_access_code(0xABCDEF12).assert_called(1);
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(0xf20),
+            FLD_RF_IRQ_MASK::IRQ_RX.bits(),
+            "the pending RX interrupt must be acknowledged during the mesh switch"
+        );
     }
 
     // --- switch_to_default_mesh Tests ---
@@ -1979,8 +1988,6 @@ mod tests {
     #[mry::lock(
         light_mesh_rx_cb,
         clock_time64,
-        read_reg_system_tick,
-        read_reg_rnd_number,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
@@ -2001,8 +2008,6 @@ mod tests {
 
         mock_light_mesh_rx_cb(Any).returns(());
         mock_clock_time64().returns(0);
-        mock_read_reg_system_tick().returns(1000);
-        mock_read_reg_rnd_number().returns(0x5555);
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_set_ble_crc_adv().returns(());
@@ -2135,8 +2140,8 @@ mod tests {
     /// Tests send_mesh_msg_iteration with ready packet
     #[test]
     #[mry::lock(
-        read_reg_system_tick,
-        read_reg_rnd_number,
+        rand,
+        clock_time,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
@@ -2162,9 +2167,11 @@ mod tests {
 
         assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
-        // Mock the required functions
-        mock_read_reg_system_tick().returns(1000);
-        mock_read_reg_rnd_number().returns(0x5555);
+        // Mock the required functions. `rand()` used to be spelled
+        // `system_tick ^ rnd_number`; the same 0x03E8 ^ 0x5555 value keeps the
+        // channel selection and congestion delay identical.
+        mock_rand().returns(1000 ^ 0x5555);
+        mock_clock_time().returns(1000);
         mock_clock_time64().returns(1); // Return time > 0 so packet is ready
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
@@ -2182,6 +2189,72 @@ mod tests {
         // Verify - packet should be processed and removed from buffer
         assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
         mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
+        // The random start channel is drawn once, and the SRX2TX deadline is
+        // sampled once per channel from `clock_time()`.
+        mock_rand().assert_called(1);
+        mock_clock_time().assert_called(SYS_CHN_LISTEN.len());
+    }
+
+    /// The congestion backoff re-queue must keep the pre-migration 0..8 ms
+    /// spread: `8000 - (rand() % 16) * 500` microseconds past `clock_time64()`.
+    ///
+    /// `rand()` used to be spelled `system_tick as u16 ^ rnd_number`; this pins
+    /// both the value and the single draw it takes per retransmission.
+    #[test]
+    #[mry::lock(
+        rand,
+        clock_time,
+        rf_set_tx_rx_off,
+        rf_set_ble_access_code,
+        rf_set_ble_crc_adv,
+        rf_set_ble_channel,
+        rf_start_srx2tx,
+        rf_set_rxmode,
+        clock_time64
+    )]
+    fn test_send_mesh_msg_iteration_requeues_with_congestion_delay() {
+        use futures::executor::block_on;
+
+        // Setup
+        reset_for_test();
+        let mut dropped_tx_seen = 0;
+        let mut dropped_rx_seen = 0;
+        let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+
+        SECURITY_ENABLE.set(false);
+
+        // One retransmission left, due immediately.
+        assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 1));
+
+        // 0x03E8 ^ 0x5555 = 0x56BD; 0x56BD % 16 == 13 -> 8000 - 13 * 500 = 1500 us.
+        mock_rand().returns(1000 ^ 0x5555);
+        mock_clock_time().returns(1000);
+        mock_clock_time64().returns(1);
+        mock_rf_set_tx_rx_off().returns(());
+        mock_rf_set_ble_access_code(Any).returns(());
+        mock_rf_set_ble_crc_adv().returns(());
+        mock_rf_set_ble_channel(Any).returns(());
+        mock_rf_start_srx2tx(Any, Any).returns(());
+        mock_rf_set_rxmode().returns(());
+
+        // Execute
+        block_on(mesh_packet_send_iteration(
+            &mut dropped_tx_seen,
+            &mut dropped_rx_seen,
+        ));
+
+        // Verify: transmitted once, then re-queued one step before the last send.
+        mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
+        let send_queue = MESH_TX_QUEUE.lock();
+        assert_eq!(send_queue.len(), 1, "the retransmission is re-queued");
+        assert_eq!(send_queue[0].send_count, 0);
+        assert_eq!(
+            send_queue[0].delay,
+            1 + 1500 * CLOCK_SYS_CLOCK_1US as u64,
+            "the congestion delay must stay 8000 - (rand % 16) * 500 us"
+        );
+        drop(send_queue);
+        mock_rand().assert_called(2);
     }
 
     /// Tests send_mesh_msg_iteration parks on the earliest queued deadline and

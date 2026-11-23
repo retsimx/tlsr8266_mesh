@@ -31,9 +31,6 @@ use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::light_sw_reboot;
 use mesh_protocol::crc::crc16;
 use mesh_protocol::packet_types::{Packet, PacketAttData};
-use tlsr8266_pac::{
-    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
-};
 
 /// The mutable OTA runtime scalars shared by the GATT write handler, the mesh
 /// OTA command path and the system-timer interrupt.
@@ -121,9 +118,7 @@ pub fn handle_ota_update() {
 
     // First configure the system clock. This lets delays work as expected for reading/writing
     // flash
-    write_reg_rst1(0);
-    write_reg_clk_en1(0xff);
-    write_reg_system_tick_ctrl(0x01);
+    crate::sdk::pm::ota_enable_clocks_for_copy();
     irq_disable();
 
     // Read the first page of the new firmware
@@ -162,7 +157,7 @@ pub fn handle_ota_update() {
     flash_write_page(FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
     // Force reboot
-    write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot.bits());
+    crate::sdk::pm::mcu_trigger_reboot();
 
     #[allow(clippy::empty_loop)]
     loop {}
@@ -221,6 +216,7 @@ pub fn rf_link_slave_data_ota(data: &Packet) {
         }
 
         OTA_UPDATE_IN_PROGRESS.set(true);
+        crate::sdk::pm::set_reboot_ota_active(true);
         if SLAVE_READ_STATUS_BUSY.get() != 0 {
             rf_link_slave_read_status_stop();
         }

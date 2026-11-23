@@ -19,7 +19,13 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 * ``sdk/common/`` may only import ``crate::sdk::common``, root macros, and a
   small set of external crates;
 * ``sdk/mcu/`` additionally may import ``crate::sdk::mcu``;
-* ``sdk/drivers/`` additionally may import ``crate::sdk::drivers``.
+* ``sdk/drivers/`` additionally may import ``crate::sdk::drivers``;
+* ``sdk/pm.rs`` is a leaf even though it sits at the SDK root, so it obeys the
+  ``mcu`` rule set: ``crate::sdk::common`` plus ``crate::sdk::mcu``, root macros
+  and the ``mcu`` external crates, and nothing else.  It is the module the HAL
+  extraction moves into ``tlsr8266-hal`` (C-4), so it must not reach upward into
+  ``sdk/ble_app`` or ``sdk/light``; the rule makes that mechanically enforced
+  instead of review-enforced.
 
 ``mesh_protocol`` (the pure workspace crate in ``rust/crates/mesh-protocol/``)
 is an *external* crate to every SDK layer: it is a sibling workspace member
@@ -917,6 +923,8 @@ def audit_universal(
 
 def _layer_of(path: str, root: str) -> str | None:
     parts = os.path.relpath(path, root).split(os.sep)
+    if parts == ["pm.rs"]:
+        return "mcu"          # sdk/pm.rs is a leaf: common + mcu only
     if len(parts) > 1 and parts[0] in LAYER_SDK_IMPORTS:
         return parts[0]
     return None

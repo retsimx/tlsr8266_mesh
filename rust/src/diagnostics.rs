@@ -18,7 +18,7 @@ use core::slice;
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page};
 use crate::sdk::light::LGT_PANIC_MSG;
-use crate::sdk::mcu::analog::{analog_read, analog_write};
+use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 
 // Panic-path imports: `write_panic_info`/`panic` exist only on the target build
 // and in unit tests (which drive the writer), so the plain host library build
@@ -28,24 +28,26 @@ use crate::logging::UartStream;
 #[cfg(any(target_os = "none", test))]
 use crate::sdk::drivers::flash::flash_write_page;
 #[cfg(target_os = "none")]
-use crate::sdk::pm::light_sw_reboot;
-#[cfg(target_os = "none")]
 use core::fmt::Write;
 #[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 #[cfg(any(target_os = "none", test))]
 use core::ptr::addr_of;
+#[cfg(target_os = "none")]
+use tlsr8266_hal::pm::light_sw_reboot;
 
 /// Analog register holding why the previous boot ended.
 ///
 /// The register addresses and sentinel values are hardware contracts owned by
 /// the software-reboot path, so they are defined in `sdk::pm` and re-exported
 /// here for existing callers.
-pub use crate::sdk::pm::{REGA_BREADCRUMB, REGA_RESET_SENTINEL, SENTINEL_PANIC, SENTINEL_RUNNING};
+pub use tlsr8266_hal::pm::{
+    REGA_BREADCRUMB, REGA_RESET_SENTINEL, SENTINEL_PANIC, SENTINEL_RUNNING,
+};
 // Only this module's tests read the clean-reboot sentinel, so the re-export is
 // test-only rather than a blanket lint allowance on a production item.
 #[cfg(test)]
-pub use crate::sdk::pm::SENTINEL_CLEAN_REBOOT;
+pub use tlsr8266_hal::pm::SENTINEL_CLEAN_REBOOT;
 
 pub const CRUMB_BOOT: u8 = 1;
 pub const CRUMB_INIT_DONE: u8 = 2;
@@ -524,10 +526,11 @@ mod tests {
     use crate::sdk::drivers::flash::{
         flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
-    use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
     use crate::uart_manager::{mock_send_message, reset_for_test, send_message};
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use mry::{send_wrapper::SendWrapper, Any};
+    use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
 
     /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in
     /// `mesh_protocol::uart`).
@@ -555,80 +558,98 @@ mod tests {
         mock_send_message(Any).assert_called(text.len().div_ceil(PAYLOAD_CHUNK));
     }
 
-    /// Clears the module statics and mocks the UART sink, so a log line lands in
-    /// the mock instead of the real 12-slot channel.
+    /// Clears the module statics and the HAL host seams, then mocks the UART
+    /// sink, so a log line lands in the mock instead of the real 12-slot
+    /// channel. `FakeAnalog` is a process-wide singleton, so every test in this
+    /// module starts from a zeroed analog bank.
     fn mock_uart_print() {
         reset_for_test();
+        FakeMmio::reset();
+        FakeAnalog::reset();
         mock_send_message(Any).returns(Ok(()));
     }
 
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_clean_reboot() {
         mock_uart_print();
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_CLEAN_REBOOT);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
 
         report_reset_reason();
 
         mock_send_message(Any).assert_called(0);
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
     }
 
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_wd_reset() {
         mock_uart_print();
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
 
         report_reset_reason();
 
         assert_uart_print(b"[WD_RESET] sentinel=0xa5 breadcrumb=3\n");
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
     }
 
     /// `boot_init` is the hook `App::run` calls: it must run the reset report
     /// (and, when compiled in, initialise the ring) without touching flash.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write)]
+    #[mry::lock(send_message)]
     fn test_boot_init_reports_reset_reason() {
         mock_uart_print();
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_INIT_DONE);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_INIT_DONE);
 
         boot_init();
 
         assert_uart_print(b"[WD_RESET] sentinel=0xa5 breadcrumb=2\n");
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
     }
 
     #[test]
-    #[mry::lock(
-        send_message,
-        analog_read,
-        analog_write,
-        flash_read_page,
-        flash_erase_sector
-    )]
+    #[mry::lock(send_message, flash_read_page, flash_erase_sector)]
     fn test_boot_sentinel_panic_message() {
         mock_uart_print();
 
         let body = b"panic body";
         let len = body.len() as u16;
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -649,8 +670,16 @@ mod tests {
         report_reset_reason();
 
         assert_uart_print(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=panic body\n");
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
         // `check_panic_info()` owns erasing the sector, not the boot report.
         mock_flash_erase_sector(Any).assert_called(0);
     }
@@ -658,16 +687,15 @@ mod tests {
     /// A panic body longer than the stream budget is clipped and marked, and the
     /// whole line still fits the 128-byte `UartStream` used by `uprintln!`.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_panic_message_truncated() {
         mock_uart_print();
 
         let body = [b'x'; 200];
         let len = body.len() as u16;
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -707,7 +735,7 @@ mod tests {
     /// when the bytes that *were* read decode to exactly the 72-byte budget, so
     /// a cut can never look complete.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_panic_message_marks_short_body_cut_by_read() {
         mock_uart_print();
 
@@ -717,9 +745,8 @@ mod tests {
         body[PANIC_LOG_BODY_MAX] = 0xFF;
         let len = body.len() as u16;
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -752,16 +779,15 @@ mod tests {
     /// A message that fits the flash read window exactly but not the 72-byte
     /// stream budget is still marked, i.e. the clip alone can require `...`.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_panic_message_marks_body_clipped_within_read() {
         mock_uart_print();
 
         let body = [b'w'; PANIC_READ_MAX];
         let len = body.len() as u16;
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -794,13 +820,12 @@ mod tests {
     /// AC4: an invalid panic flag means the sector is not trusted at all, so the
     /// boot report stays silent but still marks this boot as running.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_sentinel_panic_invalid_flag() {
         mock_uart_print();
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -814,22 +839,29 @@ mod tests {
         mock_send_message(Any).assert_called(0);
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, Any, Any).assert_called(0);
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
     }
 
     /// AC4: a length beyond the 256-byte sector record is rejected before any
     /// body bytes are read, and nothing is logged.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_sentinel_panic_length_over_limit() {
         mock_uart_print();
 
         let len: u16 = 257;
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_MAIN_LOOP);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {
@@ -848,15 +880,23 @@ mod tests {
         mock_send_message(Any).assert_called(0);
         // The over-limit length must short-circuit before the body read.
         mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_RUNNING).assert_called(1);
-        mock_analog_write(REGA_BREADCRUMB, CRUMB_BOOT).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the analog register must hold the written value"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_BREADCRUMB),
+            CRUMB_BOOT,
+            "the analog register must hold the written value"
+        );
     }
 
     /// AC4: the bounded read can end inside a multi-byte character. The partial
     /// code point is dropped (`from_utf8` error clamp), never replaced and never
     /// logged raw, and the clipped line is marked with `...`.
     #[test]
-    #[mry::lock(send_message, analog_read, analog_write, flash_read_page)]
+    #[mry::lock(send_message, flash_read_page)]
     fn test_boot_sentinel_panic_truncated_utf8() {
         mock_uart_print();
 
@@ -878,9 +918,8 @@ mod tests {
         assert_eq!(body[PANIC_READ_MAX - 1], 0xC3);
         assert_eq!(expected.len(), 117);
 
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_read(REGA_BREADCRUMB).returns(CRUMB_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
+        FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
 
         mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
             |_, _, buf: SendWrapper<*mut u8>| unsafe {

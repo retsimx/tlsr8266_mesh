@@ -1,6 +1,6 @@
 use core::sync::atomic::AtomicUsize;
 
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 
 /// BLE Link Layer channel table for frequency hopping sequence.
 /// Contains the channel map used for data channel selection in BLE connections.

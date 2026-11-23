@@ -21,12 +21,12 @@ use crate::sdk::ble_app::irq::BleConnectionEvent;
 use crate::sdk::ble_app::light_ll::ota_management::{
     OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS, RF_SLAVE_OTA_FINISHED_FLAG,
 };
-use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
-use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
-use crate::sdk::mcu::irq_i::read_irq_sources;
-use crate::sdk::mcu::timer::{tmr0_ack_irq, tmr1_ack_irq};
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
+use tlsr8266_hal::mcu::irq_i::read_irq_sources;
+use tlsr8266_hal::mcu::timer::{tmr0_ack_irq, tmr1_ack_irq};
 
 /// Timestamp of the last `TMR0` interrupt at which the OTA timeout was decremented.
 ///
@@ -104,7 +104,7 @@ fn handle_system_interrupts() {
         tmr0_ack_irq();
 
         // Deliver expired embassy timers and re-arm TMR0 for the next deadline.
-        crate::embassy::time_driver::on_timer0_interrupt();
+        tlsr8266_hal::runtime::time_driver::on_timer0_interrupt();
 
         // Update 64-bit clock to handle 32-bit overflow
         let now = clock_time64();
@@ -155,7 +155,6 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::embassy::time_driver::{mock_on_timer0_interrupt, on_timer0_interrupt};
     use crate::light_manager::{mock_transition_step, transition_step};
     use crate::ota::{
         mock_rf_link_slave_ota_finish_handle, mock_rf_link_slave_ota_finish_led_and_reboot,
@@ -171,8 +170,8 @@ mod tests {
     };
     use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
     use crate::sdk::light::{RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
-    use crate::sdk::mcu::clock::mock_clock_time64;
     use crate::uart_manager::{check_irq, mock_check_irq};
+    use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
         mock_read_reg_rf_irq_status, mock_write_reg_irq_src, read_reg_rf_irq_status,
@@ -191,6 +190,10 @@ mod tests {
         *LAST_OTA_TIMEOUT_TICK.lock() = 0;
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
         OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+        // The HAL host seams are process-wide singletons, so every TMR0 test
+        // starts from a zeroed bank, tick count and write log.
+        FakeMmio::reset();
+        fake_clock::reset();
     }
 
     // ================================================================================
@@ -333,20 +336,34 @@ mod tests {
     /// Acceptance: the dispatcher must hand `TMR0` interrupts to the dynamic embassy
     /// time driver, which delivers expired timers and re-arms the hardware alarm.
     #[test]
-    #[mry::lock(clock_time64, on_timer0_interrupt, check_irq)]
+    #[mry::lock(check_irq)]
     fn test_tmr0_irq_flushes_embassy_timers() {
         reset_ota_timeout_state();
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
-        mock_clock_time64().returns(1000);
-        mock_on_timer0_interrupt().returns(());
+        fake_clock::set_ticks(1000);
 
         mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        mock_on_timer0_interrupt().assert_called(1);
+        // The real embassy hook re-arms TMR0 for the next deadline: the tick is
+        // cleared and the capture is programmed with the one-second cap.
+        let writes = FakeMmio::writes();
+        assert!(
+            writes
+                .iter()
+                .any(|w| w.addr == 0x630 | tlsr8266_pac::REG_BASE_ADDR),
+            "on_timer0_interrupt must clear the TMR0 tick"
+        );
+        assert!(
+            writes
+                .iter()
+                .any(|w| w.addr == 0x624 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == CLOCK_SYS_CLOCK_1S),
+            "on_timer0_interrupt must re-arm TMR0 with the one-second cap"
+        );
         assert_eq!(
             FakeMmio::reg8(0x623),
             FLD_TMR_STA::TMR0.bits(),
@@ -360,15 +377,14 @@ mod tests {
     /// interrupt is what prevents an immediate off-by-one decrement on the first
     /// interrupt after OTA begins.
     #[test]
-    #[mry::lock(clock_time64, on_timer0_interrupt, check_irq)]
+    #[mry::lock(check_irq)]
     fn test_tmr0_irq_restamps_ota_tick_when_ota_inactive() {
         reset_ota_timeout_state();
         OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
-        mock_clock_time64().returns(50_000);
-        mock_on_timer0_interrupt().returns(());
+        fake_clock::set_ticks(50_000);
 
         mock_check_irq().returns(());
 
@@ -396,7 +412,7 @@ mod tests {
     /// Acceptance: `TMR0` now fires at embassy alarm deadlines, so the countdown
     /// must be gated on elapsed clock ticks rather than on interrupt frequency.
     #[test]
-    #[mry::lock(clock_time64, on_timer0_interrupt, check_irq)]
+    #[mry::lock(check_irq)]
     fn test_tmr0_irq_ota_elapsed_under_one_second_does_not_decrement() {
         reset_ota_timeout_state();
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
@@ -405,8 +421,7 @@ mod tests {
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
-        mock_clock_time64().returns(1_000 + CLOCK_SYS_CLOCK_1S as u64 - 1);
-        mock_on_timer0_interrupt().returns(());
+        fake_clock::set_ticks(1_000 + CLOCK_SYS_CLOCK_1S as u64 - 1);
 
         mock_check_irq().returns(());
 
@@ -434,7 +449,7 @@ mod tests {
     /// Acceptance: during OTA the timeout still counts real seconds, decrements by
     /// exactly one per second, and restamps the tick that gates the next decrement.
     #[test]
-    #[mry::lock(clock_time64, on_timer0_interrupt, check_irq)]
+    #[mry::lock(check_irq)]
     fn test_tmr0_irq_ota_elapsed_one_second_decrements_once() {
         reset_ota_timeout_state();
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
@@ -444,8 +459,7 @@ mod tests {
         FakeMmio::set_reg8(0x623, 0);
 
         let now = 1_000 + CLOCK_SYS_CLOCK_1S as u64;
-        mock_clock_time64().returns(now);
-        mock_on_timer0_interrupt().returns(());
+        fake_clock::set_ticks(now);
 
         mock_check_irq().returns(());
 
@@ -477,12 +491,7 @@ mod tests {
     /// for that whole window. The mock body re-locks the flag; the `cfg(test)`
     /// re-entrancy probe turns that into a panic if the guard is still alive.
     #[test]
-    #[mry::lock(
-        clock_time64,
-        on_timer0_interrupt,
-        rf_link_slave_ota_finish_led_and_reboot,
-        check_irq
-    )]
+    #[mry::lock(rf_link_slave_ota_finish_led_and_reboot, check_irq)]
     fn test_tmr0_irq_ota_timeout_copies_finish_flag_before_reboot() {
         reset_ota_timeout_state();
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
@@ -492,8 +501,7 @@ mod tests {
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
-        mock_clock_time64().returns(1_000 + CLOCK_SYS_CLOCK_1S as u64);
-        mock_on_timer0_interrupt().returns(());
+        fake_clock::set_ticks(1_000 + CLOCK_SYS_CLOCK_1S as u64);
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns_with(|st: OtaState| {
             // Panics if the caller still holds the flag's critical section.
             drop(RF_SLAVE_OTA_FINISHED_FLAG.lock());
@@ -519,25 +527,33 @@ mod tests {
     /// Tests that a `SYSTEM_TIMER` interrupt dispatches to the BLE state helper,
     /// which clears the source exactly once.
     ///
-    /// The helper is mocked with `calls_real_impl`, so the real helper runs while
-    /// the call itself is tracked: this pins the wiring `SYSTEM_TIMER` → helper →
-    /// register clear, which a dropped call at the dispatch site would break. The
-    /// RF operation state is pinned to `Idle` so no BLE state handler runs.
+    /// The helper runs for real (its `Idle` arm only clears the source), so this
+    /// pins the wiring `SYSTEM_TIMER` → helper → register clear through the
+    /// write log; a dropped call at the dispatch site would leave the source
+    /// uncleared.
     #[test]
-    #[mry::lock(write_reg_irq_src, handle_ble_system_timer_irq, check_irq)]
+    #[mry::lock(check_irq)]
     fn test_system_timer_irq_clears_source_and_dispatches_ble_helper() {
         *CURRENT_RF_STATE.lock() = RfOperationState::Idle;
 
+        FakeMmio::reset();
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
-        mock_write_reg_irq_src(Any).returns(());
-        mock_handle_ble_system_timer_irq().calls_real_impl();
 
         mock_check_irq().returns(());
 
         handle_system_interrupts();
 
-        mock_write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits()).assert_called(1);
-        mock_handle_ble_system_timer_irq().assert_called(1);
+        let clears = FakeMmio::writes()
+            .into_iter()
+            .filter(|write| {
+                write.addr == 0x648 | tlsr8266_pac::REG_BASE_ADDR
+                    && write.value == FLD_IRQ::SYSTEM_TIMER.bits()
+            })
+            .count();
+        assert_eq!(
+            clears, 1,
+            "the SYSTEM_TIMER source must be cleared exactly once"
+        );
     }
 
     /// `OtaFinishCheck` only polls the OTA finish handler; nothing reboots.

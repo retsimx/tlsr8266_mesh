@@ -10,8 +10,8 @@
 //! asserted by the `mesh-protocol` crate (`rust/crates/mesh-protocol/src/lib.rs`),
 //! which now owns those definitions. What remains here is firmware-owned: the
 //! light/Ota binding, the OTA sub-commands and flash layout, the pairing
-//! defaults, and the AES vectors driven through the firmware's `mry`-mocked
-//! crypto path.
+//! defaults, and the AES vectors driven through the real crypto path (the HAL's
+//! `SoftwareAes` on host, hardware AES on device).
 //!
 //! The fixture also contains keys that only the Python suite owns (OTA packet
 //! framing and the generated version mask/blob); those are listed in
@@ -23,12 +23,12 @@ use crate::sdk::light::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_REQ,
     LGT_CMD_START_OTA_RSP,
 };
-use crate::sdk::mcu::crypto::{
-    aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet, aes_ll_encryption,
-    mock_aes_att_encryption, mock_aes_ll_encryption, AesDirection,
-};
 use core::mem::size_of;
-use mry::Any;
+use tlsr8266_hal::mcu::crypto::fake_crypto;
+use tlsr8266_hal::mcu::crypto::{
+    aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet,
+    MicMismatch,
+};
 
 const FIXTURE: &str = include_str!("../../tests/wire_vectors.txt");
 
@@ -581,33 +581,23 @@ fn fixture_pairing_constants() {
     check_pairing_constants(&mut Parser::new());
 }
 
-/// Pins `aes_att_encryption`'s outer byte-reversal convention and its
-/// `(key, plain)` -> `aes_ll_encryption` wiring.
+/// Proves the AES block table both ways through the **real** crypto path.
 ///
-/// This is a convention test, not a value test: the mock returns the very
-/// fixture cipher byte-reversed, so it cannot prove that the block table's
-/// `cipher` values are right. Value parity for that table comes from
-/// [`fixture_aes_packets`] (the committed table drives the real CTR+CBC-MAC
-/// path) and from Python's `AesBlockTests.test_round_trip`.
+/// `aes_att_encryption` / `aes_att_decryption` are called unstubbed, so this is
+/// a value test of the whole primitive: on host the HAL's `SoftwareAes` runs a
+/// real FIPS-197 AES-128 with the TLSR8266 byte-reversal parity, and on device
+/// the hardware AES engine runs. Any byte-order or parity mistake anywhere in
+/// that chain (the outer `result.reverse()`, the reversed key/data the chip
+/// expects, the S-box, the round schedule) makes one of the 8 committed
+/// `(key, plain) -> cipher` triples fail in one of the two directions.
 #[test]
-#[mry::lock(aes_att_encryption, aes_ll_encryption)]
 fn fixture_aes_blocks() {
+    fake_crypto::reset();
     let blocks = read_aes_blocks(&mut Parser::new());
     assert!(
         !blocks.is_empty(),
         "the fixture has no `aes.block.*` vectors"
     );
-
-    // Partial mock: `aes_att_encryption` runs for real, and its inner
-    // `aes_ll_encryption` is stubbed with the byte-reversed fixture output,
-    // so only the outer reversal convention is exercised.
-    mock_aes_att_encryption(Any, Any).calls_real_impl();
-
-    for block in &blocks {
-        let mut stubbed = block.cipher;
-        stubbed.reverse();
-        mock_aes_ll_encryption(block.key, block.plain, AesDirection::Encrypt).returns(stubbed);
-    }
 
     for block in &blocks {
         assert_eq!(
@@ -616,34 +606,28 @@ fn fixture_aes_blocks() {
             "aes_att_encryption mismatch for fixture block {:02x?}",
             block.plain
         );
+        assert_eq!(
+            aes_att_decryption(&block.key, &block.cipher),
+            block.plain,
+            "aes_att_decryption mismatch for fixture block {:02x?}",
+            block.cipher
+        );
     }
 }
 
-/// Value parity for the AES block table and the authenticated-packet path: the
-/// committed `(key, plain) -> cipher` set drives the real CTR+CBC-MAC code.
+/// Value parity for the authenticated-packet path: the committed
+/// `aes.packet.*` vectors drive the real CTR + CBC-MAC code end to end, and the
+/// decryption direction must both recover the plaintext and reject a corrupted
+/// MIC.
 #[test]
-#[mry::lock(aes_att_encryption)]
 fn fixture_aes_packets() {
+    fake_crypto::reset();
     let mut p = Parser::new();
-    let blocks = read_aes_blocks(&mut p);
     let packets = read_aes_packets(&mut p);
-    assert!(
-        !blocks.is_empty(),
-        "the fixture has no `aes.block.*` vectors"
-    );
     assert!(
         !packets.is_empty(),
         "the fixture has no `aes.packet.*` vectors"
     );
-
-    // The committed block table is the complete (key, plain) -> cipher set that
-    // the packet CTR+CBC-MAC path feeds to the AES primitive.
-    for block in &blocks {
-        mock_aes_att_encryption(block.key, block.plain).returns(block.cipher);
-    }
-    // A missing pair falls through to a zero block, which fails the assertions
-    // below loudly instead of silently weakening the test.
-    mock_aes_att_encryption(Any, Any).returns([0u8; 16]);
 
     for packet in &packets {
         let mut ciphertext = packet.plain.clone();
@@ -665,7 +649,7 @@ fn fixture_aes_packets() {
         let mut ignored = packet.cipher.clone();
         assert_eq!(
             aes_att_decryption_packet(&packet.key, &packet.ivm, &corrupted_mic, &mut ignored),
-            Err(()),
+            Err(MicMismatch),
             "decryption accepted a corrupted MIC"
         );
     }

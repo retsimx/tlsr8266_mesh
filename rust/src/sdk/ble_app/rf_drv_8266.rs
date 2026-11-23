@@ -46,7 +46,6 @@ use crate::sdk::ble_app::light_ll::status_management::{
     SLAVE_STATUS_RECORD,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{
     LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
@@ -58,12 +57,6 @@ use crate::sdk::light::{
     MAX_GROUP_COUNT, PKT_VAL_MAC_APP_HOP_COUNT, PKT_VAL_MAC_APP_LINK_INTERVAL,
     PKT_VAL_MAC_APP_RESPONSE_TYPE, PKT_VAL_MAC_APP_TTC,
 };
-use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::sdk::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
-use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
-use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::random::rand;
-use crate::sdk::pm::light_sw_reboot;
 use crate::version::BUILD_VERSION;
 use crate::BIT;
 use mesh_protocol::const_assert;
@@ -72,6 +65,13 @@ use mesh_protocol::packet_types::{
     AdvPrivate, AdvRspPrivate, Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp,
     PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
 };
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
+use tlsr8266_hal::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
+use tlsr8266_hal::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
+use tlsr8266_hal::mcu::irq_i::irq_disable;
+use tlsr8266_hal::mcu::random::rand;
+use tlsr8266_hal::pm::light_sw_reboot;
 use tlsr8266_pac::{
     read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode,
     write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl,
@@ -1353,21 +1353,50 @@ mod tests {
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_par_init;
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
     use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI};
-    use crate::sdk::common::sync::SimplifyLS;
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
-    use crate::sdk::mcu::analog::*;
-    use crate::sdk::mcu::clock::mock_is_16mhz_xtal;
-    use crate::sdk::mcu::cmd_table::*;
-    use crate::sdk::mcu::crypto::mock_aes_att_decryption_packet;
-    use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::mcu::random::mock_rand;
-    use crate::sdk::pm::mock_light_sw_reboot;
     use mesh_protocol::packet_types::Packet;
     use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_hal::common::sync::SimplifyLS;
+    use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::*;
+
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+    }
+
+    /// A value the analog bank never legitimately holds in these tests, seeded
+    /// before a write so the assertion proves the write happened.
+    const ANA_UNWRITTEN: u8 = 0xff;
+
+    /// `TBL_RF_INI[0]` is a `TCMD_WRITE` of 0x02 to 0x5b4, and `TBL_RF_INI[2]`
+    /// is a `TCMD_WAREG` of 0x31 to analog 0x99 (16MHz-only). Both are the
+    /// observable proof that `rf_drv_init` ran the command table.
+    const RF_INI_FIRST_REG: u32 = 0x5b4;
+    const RF_INI_FIRST_VALUE: u8 = 0x02;
+    const RF_INI_16MHZ_ANA: u8 = 0x99;
+    const RF_INI_16MHZ_ANA_VALUE: u8 = 0x31;
+
+    /// `reg_rnd_number`, the hardware RNG word `rand()` mixes with the clock.
+    const REG_RND_NUMBER: u32 = 0x448;
+
+    /// Asserts the leading command of `TBL_RF_INI` was executed.
+    fn assert_rf_init_table_applied() {
+        assert_eq!(
+            FakeMmio::reg8(RF_INI_FIRST_REG),
+            RF_INI_FIRST_VALUE,
+            "rf_drv_init must load the RF init command table"
+        );
+    }
 
     #[test]
     fn test_rf_link_get_rsp_type() {
@@ -1583,73 +1612,81 @@ mod tests {
         mock_write_reg_dma3_addr(0x5678).assert_called(1);
     }
 
+    /// Seeds the four analog registers `rf_set_power_level_index` writes with a
+    /// value the table never holds, so a missing write cannot pass by luck.
+    fn seed_power_registers() {
+        for addr in [0xa2u8, 4, 0xa7, 0x8d] {
+            FakeAnalog::set(addr, ANA_UNWRITTEN);
+        }
+    }
+
+    /// Asserts the four analog registers hold `TBL_RF_POWER[index]`.
+    fn assert_power_registers(index: usize) {
+        assert_eq!(
+            FakeAnalog::get(0xa2),
+            TBL_RF_POWER[index].a,
+            "0xa2 must carry the table's `a` byte"
+        );
+        assert_eq!(
+            FakeAnalog::get(4),
+            TBL_RF_POWER[index].b,
+            "0x04 must carry the table's `b` byte"
+        );
+        assert_eq!(
+            FakeAnalog::get(0xa7),
+            TBL_RF_POWER[index].c,
+            "0xa7 must carry the table's `c` byte"
+        );
+        assert_eq!(
+            FakeAnalog::get(0x8d),
+            TBL_RF_POWER[index].d,
+            "0x8d must carry the table's `d` byte"
+        );
+    }
+
     // Split the power level tests into separate test functions
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_power_level_index_highest() {
         // Test highest power level (index 0)
-        mock_analog_write(0xa2, TBL_RF_POWER[0].a).returns(());
-        mock_analog_write(4, TBL_RF_POWER[0].b).returns(());
-        mock_analog_write(0xa7, TBL_RF_POWER[0].c).returns(());
-        mock_analog_write(0x8d, TBL_RF_POWER[0].d).returns(());
+        reset_host_fakes();
+        seed_power_registers();
 
         rf_set_power_level_index(0);
 
-        mock_analog_write(0xa2, TBL_RF_POWER[0].a).assert_called(1);
-        mock_analog_write(4, TBL_RF_POWER[0].b).assert_called(1);
-        mock_analog_write(0xa7, TBL_RF_POWER[0].c).assert_called(1);
-        mock_analog_write(0x8d, TBL_RF_POWER[0].d).assert_called(1);
+        assert_power_registers(0);
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_power_level_index_middle() {
         // Test middle power level (index 6)
-        mock_analog_write(0xa2, TBL_RF_POWER[6].a).returns(());
-        mock_analog_write(4, TBL_RF_POWER[6].b).returns(());
-        mock_analog_write(0xa7, TBL_RF_POWER[6].c).returns(());
-        mock_analog_write(0x8d, TBL_RF_POWER[6].d).returns(());
+        reset_host_fakes();
+        seed_power_registers();
 
         rf_set_power_level_index(6);
 
-        mock_analog_write(0xa2, TBL_RF_POWER[6].a).assert_called(1);
-        mock_analog_write(4, TBL_RF_POWER[6].b).assert_called(1);
-        mock_analog_write(0xa7, TBL_RF_POWER[6].c).assert_called(1);
-        mock_analog_write(0x8d, TBL_RF_POWER[6].d).assert_called(1);
+        assert_power_registers(6);
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_power_level_index_lowest() {
         // Test lowest power level (index 11)
-        mock_analog_write(0xa2, TBL_RF_POWER[11].a).returns(());
-        mock_analog_write(4, TBL_RF_POWER[11].b).returns(());
-        mock_analog_write(0xa7, TBL_RF_POWER[11].c).returns(());
-        mock_analog_write(0x8d, TBL_RF_POWER[11].d).returns(());
+        reset_host_fakes();
+        seed_power_registers();
 
         rf_set_power_level_index(11);
 
-        mock_analog_write(0xa2, TBL_RF_POWER[11].a).assert_called(1);
-        mock_analog_write(4, TBL_RF_POWER[11].b).assert_called(1);
-        mock_analog_write(0xa7, TBL_RF_POWER[11].c).assert_called(1);
-        mock_analog_write(0x8d, TBL_RF_POWER[11].d).assert_called(1);
+        assert_power_registers(11);
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_power_level_index_out_of_range() {
         // Test out of range index (should use the last entry in the table)
-        mock_analog_write(0xa2, TBL_RF_POWER[11].a).returns(());
-        mock_analog_write(4, TBL_RF_POWER[11].b).returns(());
-        mock_analog_write(0xa7, TBL_RF_POWER[11].c).returns(());
-        mock_analog_write(0x8d, TBL_RF_POWER[11].d).returns(());
+        reset_host_fakes();
+        seed_power_registers();
 
         rf_set_power_level_index(20); // Out of range
 
-        mock_analog_write(0xa2, TBL_RF_POWER[11].a).assert_called(1);
-        mock_analog_write(4, TBL_RF_POWER[11].b).assert_called(1);
-        mock_analog_write(0xa7, TBL_RF_POWER[11].c).assert_called(1);
-        mock_analog_write(0x8d, TBL_RF_POWER[11].d).assert_called(1);
+        assert_power_registers(11);
     }
 
     #[test]
@@ -1659,7 +1696,6 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_mode)]
     #[mry::lock(write_reg_rf_txrx_state)]
     #[mry::lock(write_reg16)]
-    #[mry::lock(analog_write)]
     #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_data_channels() {
         // Mock all register writes
@@ -1669,8 +1705,6 @@ mod tests {
         mock_write_reg_rf_rx_mode(Any).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg16(0x4d6, Any).returns(());
-        mock_analog_write(6, Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
 
         // Test data channel (0-10)
@@ -1678,8 +1712,12 @@ mod tests {
         mock_write_reg_rf_channel(5).assert_called(1);
         // Channel 5 should result in gain = (5+2)*2 = 14, intgn = 14+2400 = 2414
         mock_write_reg_pll_rx_fine_div_tune(2414).assert_called(1);
-        // SAR ADC should be powered off
-        mock_analog_write(6, 0).assert_called(1);
+        // SAR ADC should be powered off: seeded to a value the write must clear
+        assert_eq!(
+            FakeAnalog::get(6),
+            0,
+            "reg 0x06 (SAR ADC power) must be written to 0"
+        );
         // RF mode should be set to 0x29
         mock_write_reg_rf_mode(0x29).assert_called(1);
         // RX should be disabled
@@ -1700,7 +1738,6 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_mode)]
     #[mry::lock(write_reg_rf_txrx_state)]
     #[mry::lock(write_reg_pll_rx_fine_div_tune)]
-    #[mry::lock(analog_write)]
     fn test_rf_set_ble_channel_adv_channels() {
         // Mock all register writes
         mock_write_reg_rf_channel(Any).returns(());
@@ -1708,8 +1745,6 @@ mod tests {
         mock_write_reg_rf_rx_mode(Any).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
-        mock_analog_write(6, Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
 
         // Test advertising channels
         // Channel 37 (2402 MHz)
@@ -1737,7 +1772,6 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_mode)]
     #[mry::lock(write_reg_rf_txrx_state)]
     #[mry::lock(write_reg16)]
-    #[mry::lock(analog_write)]
     #[mry::lock(write_reg_rf_channel)]
     #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_extended_40_50() {
@@ -1748,8 +1782,6 @@ mod tests {
         mock_write_reg_rf_rx_mode(Any).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg16(0x4d6, Any).returns(());
-        mock_analog_write(6, Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
 
         // Test extended channel (40-50)
@@ -1768,7 +1800,6 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_mode)]
     #[mry::lock(write_reg_rf_txrx_state)]
     #[mry::lock(write_reg_pll_rx_fine_div_tune)]
-    #[mry::lock(analog_write)]
     fn test_rf_set_ble_channel_extended_51_61() {
         // Mock all register writes
         mock_write_reg_rf_channel(Any).returns(());
@@ -1776,8 +1807,6 @@ mod tests {
         mock_write_reg_rf_rx_mode(Any).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
-        mock_analog_write(6, Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
 
         // Test extended channel (51-61) with our new calculation
         // For channel 55:
@@ -1797,7 +1826,6 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_mode)]
     #[mry::lock(write_reg_rf_txrx_state)]
     #[mry::lock(write_reg_pll_rx_fine_div_tune)]
-    #[mry::lock(analog_write)]
     fn test_rf_set_ble_channel_out_of_range() {
         // Mock all register writes
         mock_write_reg_rf_channel(Any).returns(());
@@ -1805,8 +1833,6 @@ mod tests {
         mock_write_reg_rf_rx_mode(Any).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
-        mock_analog_write(6, Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
 
         // Test out of range channel (> 61)
         rf_set_ble_channel(62);
@@ -1894,21 +1920,24 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_tp_gain_zero() {
+        reset_host_fakes();
+        FakeAnalog::set(0x93, ANA_UNWRITTEN);
+
         // Set up the global state variables
         RF_TP_BASE.set(0x30);
         RF_TP_GAIN.set(0x40);
 
         // Test gain = 0, should result in BASE value unchanged
-        mock_analog_write(0x93, 0x30).returns(());
         rf_set_tp_gain(0);
-        mock_analog_write(0x93, 0x30).assert_called(1);
+        assert_eq!(FakeAnalog::get(0x93), 0x30, "gain 0 keeps the base value");
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_tp_gain_medium() {
+        reset_host_fakes();
+        FakeAnalog::set(0x93, ANA_UNWRITTEN);
+
         // Set up the global state variables
         RF_TP_BASE.set(0x30);
         RF_TP_GAIN.set(0x40);
@@ -1916,14 +1945,15 @@ mod tests {
         // Test gain = 10
         // Calculation: BASE - ((gain * GAIN + 0x80) >> 8)
         // 0x30 - ((10 * 0x40 + 0x80) >> 8) = 0x30 - 3 = 0x2D
-        mock_analog_write(0x93, 0x2D).returns(());
         rf_set_tp_gain(10);
-        mock_analog_write(0x93, 0x2D).assert_called(1);
+        assert_eq!(FakeAnalog::get(0x93), 0x2D, "gain 10 scales to 0x2D");
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_rf_set_tp_gain_max() {
+        reset_host_fakes();
+        FakeAnalog::set(0x93, ANA_UNWRITTEN);
+
         // Set up the global state variables
         RF_TP_BASE.set(0x10);
         RF_TP_GAIN.set(0x40);
@@ -1931,9 +1961,12 @@ mod tests {
         // Test gain = 0xFF (maximum gain)
         // Without overflow protection: 0x10 - ((0xFF * 0x40 + 0x80) >> 8) would cause overflow
         // With overflow protection: Since power_adjustment > base_value, we should get 0
-        mock_analog_write(0x93, 0).returns(());
         rf_set_tp_gain(0xFF);
-        mock_analog_write(0x93, 0).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(0x93),
+            0,
+            "an adjustment larger than the base must clamp to 0"
+        );
     }
 
     /// Tests that rf_init_table selects the full 61-entry table or the 12MHz prefix.
@@ -2013,16 +2046,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(load_tbl_cmd_set)]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
-    #[mry::lock(flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
     fn test_rf_drv_init_enable() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock functions for enabling the RF driver
-        mock_load_tbl_cmd_set().returns((TBL_RF_INI.len() - 4) as u32);
+        reset_host_fakes();
+        // Seed the deepsleep flag the driver reports back
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
         // Expect calls to configure the Automatic Gain Control (AGC) settings
         for i in 0..6 {
@@ -2057,11 +2085,8 @@ mod tests {
         // Call with enable=true - should initialize the driver
         let result = rf_drv_init(true);
 
-        // Verify that analog_read was called to check deepsleep flag
-        mock_analog_read(rega_deepsleep_flag).assert_called(1);
-
-        // Verify table initialization was loaded
-        mock_load_tbl_cmd_set().assert_called(1);
+        // Verify table initialization was loaded (observable as its writes)
+        assert_rf_init_table_applied();
 
         // Verify AGC settings were configured
         for i in 0..6 {
@@ -2087,15 +2112,12 @@ mod tests {
     /// `rf_drv_init` actually reads the detected flag, exactly once, and still
     /// loads a table.
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(load_tbl_cmd_set)]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
-    #[mry::lock(flash_read_page)]
-    #[mry::lock(is_16mhz_xtal)]
+    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
     fn test_rf_drv_init_reads_detected_xtal_flag() {
-        mock_analog_read(rega_deepsleep_flag).returns(0);
-        mock_load_tbl_cmd_set().returns(TBL_RF_INI.len() as u32);
-        mock_is_16mhz_xtal().returns(true);
+        reset_host_fakes();
+        // Deepsleep flag clear, and a 16MHz crystal detected at boot
+        FakeAnalog::set(rega_deepsleep_flag, 0);
+        fake_clock::set_xtal_16mhz(true);
 
         for i in 0..6 {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
@@ -2114,34 +2136,33 @@ mod tests {
 
         let result = rf_drv_init(true);
 
-        // The detected crystal is read exactly once, and the table load that
-        // consumes it is still issued
-        mock_is_16mhz_xtal().assert_called(1);
-        mock_load_tbl_cmd_set().assert_called(1);
+        // The detected crystal reaches the table selection: the 16MHz-only
+        // analog command at 0x99 (TCMD_WAREG, dat 0x31) must have run.
+        assert_rf_init_table_applied();
+        assert_eq!(
+            FakeAnalog::get(RF_INI_16MHZ_ANA),
+            RF_INI_16MHZ_ANA_VALUE,
+            "a detected 16MHz crystal must select the 16MHz-only table entries"
+        );
 
         assert_eq!(result, 0);
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(analog_write)]
     fn test_rf_drv_init_disable() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock the analog_write function for powering off SAR ADC
-        mock_analog_write(6, 0).returns(());
+        reset_host_fakes();
+        // Seed the deepsleep flag and the SAR ADC power register
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
+        FakeAnalog::set(6, ANA_UNWRITTEN);
 
         // Call with enable=false - should power off the RF driver
         let result = rf_drv_init(false);
 
-        // Verify that analog_read was called to check deepsleep flag
-        mock_analog_read(rega_deepsleep_flag).assert_called(1);
-
         // Verify that the SAR ADC was powered off
-        mock_analog_write(6, 0).assert_called(1);
+        assert_eq!(FakeAnalog::get(6), 0, "SAR ADC power must be cleared");
 
-        // Verify the function returns the deepsleep flag value
+        // Verify the function returns the deepsleep flag value (0x40 is not the
+        // bank default, so this proves the flag was read)
         assert_eq!(result, 0x40);
     }
 
@@ -2187,16 +2208,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(load_tbl_cmd_set)]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
-    #[mry::lock(flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
     fn test_rf_drv_init_with_power_settings() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock functions for enabling the RF driver
-        mock_load_tbl_cmd_set().returns((TBL_RF_INI.len() - 4) as u32);
+        reset_host_fakes();
+        // Seed the deepsleep flag the driver reports back
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
         // Expect calls to configure the Automatic Gain Control (AGC) settings
         for i in 0..6 {
@@ -2245,16 +2261,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(load_tbl_cmd_set)]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
-    #[mry::lock(flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
     fn test_rf_drv_init_with_default_power_settings() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock functions for enabling the RF driver
-        mock_load_tbl_cmd_set().returns((TBL_RF_INI.len() - 4) as u32);
+        reset_host_fakes();
+        // Seed the deepsleep flag the driver reports back
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
         // Expect calls to configure the Automatic Gain Control (AGC) settings
         for i in 0..6 {
@@ -2299,15 +2310,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(analog_write)]
     #[mry::lock(flash_read_page)]
     fn test_rf_drv_init_disabled() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock the analog_write function for powering off SAR ADC
-        mock_analog_write(6, 0).returns(());
+        reset_host_fakes();
+        // Seed the deepsleep flag and the SAR ADC power register
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
+        FakeAnalog::set(6, ANA_UNWRITTEN);
 
         // Ensure flash_read_page is NOT called when disabled
         mock_flash_read_page(Any, Any, Any).returns(());
@@ -2315,11 +2323,8 @@ mod tests {
         // Call with enable=false - should power off the RF driver
         let result = rf_drv_init(false);
 
-        // Verify that analog_read was called to check deepsleep flag
-        mock_analog_read(rega_deepsleep_flag).assert_called(1);
-
         // Verify that the SAR ADC was powered off
-        mock_analog_write(6, 0).assert_called(1);
+        assert_eq!(FakeAnalog::get(6), 0, "SAR ADC power must be cleared");
 
         // Verify flash_read_page was NOT called
         mock_flash_read_page(Any, Any, Any).assert_called(0);
@@ -2329,16 +2334,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(analog_read)]
-    #[mry::lock(load_tbl_cmd_set)]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
-    #[mry::lock(flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
     fn test_rf_drv_init_with_partial_power_settings() {
-        // Mock the analog_read to return a specific deepsleep flag value
-        mock_analog_read(rega_deepsleep_flag).returns(0x40);
-
-        // Mock functions for enabling the RF driver
-        mock_load_tbl_cmd_set().returns((TBL_RF_INI.len() - 4) as u32);
+        reset_host_fakes();
+        // Seed the deepsleep flag the driver reports back
+        FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
         // Expect calls to configure the Automatic Gain Control (AGC) settings
         for i in 0..6 {
@@ -2383,135 +2383,97 @@ mod tests {
         assert_eq!(result, 0x40);
     }
 
+    /// Datasheet offsets of the registers `blc_ll_init_basic_mcu` configures.
+    const REG_RF_SYS_TIMER_CONFIG: u32 = 0xf0a;
+    const REG_DMA2_ADDR: u32 = 0x508;
+    const REG_DMA2_CTRL: u32 = 0x50a;
+    const REG_DMA_CHN_IRQ_MSK: u32 = 0x521;
+    const REG_IRQ_MASK: u32 = 0x640;
+    const REG_SYSTEM_TICK_MODE: u32 = 0x74c;
+    const REG_RF_IRQ_MASK: u32 = 0xf1c;
+    const REG_RF_IRQ_STATUS: u32 = 0xf20;
+    const REG_SYSTEM_TICK: u32 = 0x740;
+    const REG_SYSTEM_TICK_IRQ: u32 = 0x744;
+    const REG_IRQ_SRC: u32 = 0x648;
+    const REG_RF_TIMING_CONFIG: u32 = 0xf2c;
+
+    /// Values written to `addr`, oldest first, as recorded by FakeMmio.
+    fn register_writes(addr: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (addr | tlsr8266_pac::REG_BASE_ADDR))
+            .map(|w| w.value)
+            .collect()
+    }
+
     #[test]
-    #[mry::lock(write_reg_rf_sys_timer_config)]
-    #[mry::lock(write_reg_dma2_addr)]
-    #[mry::lock(write_reg_dma2_ctrl)]
-    #[mry::lock(write_reg_dma_chn_irq_msk)]
-    #[mry::lock(read_reg_irq_mask)]
-    #[mry::lock(write_reg_irq_mask)]
-    #[mry::lock(read_reg_system_tick_mode)]
-    #[mry::lock(write_reg_system_tick_mode)]
-    #[mry::lock(write_reg_rf_irq_mask)]
-    #[mry::lock(write_reg_rf_irq_status)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(write_reg_irq_src)]
-    #[mry::lock(write_reg_rf_timing_config)]
     fn test_blc_ll_init_basic_mcu() {
-        // Setup mocks for register operations
-        mock_write_reg_rf_sys_timer_config(700).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
-        mock_write_reg_dma2_ctrl(0x104).returns(());
-        mock_write_reg_dma_chn_irq_msk(0).returns(());
+        reset_host_fakes();
 
-        // First call to write_reg_irq_mask with initial value | 0x2000
-        mock_read_reg_irq_mask().returns(0x1000); // Initial value
-        mock_write_reg_irq_mask(0x1000 | 0x2000).returns(());
-
-        mock_read_reg_system_tick_mode().returns(0x01); // Simulate some initial value
-        mock_write_reg_system_tick_mode(0x01 | 2).returns(());
-
-        mock_write_reg_rf_irq_mask(0).returns(());
-        mock_write_reg_rf_irq_status(0xfffe).returns(());
-
-        // The expected value should be IRQ_RX | IRQ_TX
-        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX;
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).returns(());
-
-        mock_read_reg_system_tick().returns(0x1234); // Simulate some system tick value
-        mock_write_reg_system_tick_irq(0x1234 | (0x80 << 0x18)).returns(());
-
-        mock_write_reg_irq_src(0x80 << 0xd).returns(());
-
-        // Second call to write_reg_irq_mask with 0x1000 | (0x80 << 0xd)
-        mock_write_reg_irq_mask(0x1000 | (0x80 << 0xd)).returns(());
-
-        mock_write_reg_rf_timing_config(0xc00).returns(());
+        // Pre-existing hardware state the function must preserve while OR-ing
+        // its own interrupt enables in.
+        FakeMmio::set_reg32(REG_IRQ_MASK, 0x1000);
+        FakeMmio::set_reg8(REG_SYSTEM_TICK_MODE, 0x01);
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 0x1234);
 
         // Call the function under test
         blc_ll_init_basic_mcu();
 
         // Verify all register operations were performed correctly
-        mock_write_reg_rf_sys_timer_config(700).assert_called(1); // System tick interval
-        mock_write_reg_dma2_addr(Any).assert_called(1); // DMA buffer address
-        mock_write_reg_dma2_ctrl(0x104).assert_called(1); // DMA2 control register
-        mock_write_reg_dma_chn_irq_msk(0).assert_called(1); // DMA channel interrupt mask
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_SYS_TIMER_CONFIG),
+            700,
+            "system tick interval"
+        );
+        assert_eq!(FakeMmio::reg16(REG_DMA2_CTRL), 0x104, "DMA2 control");
+        assert_eq!(
+            FakeMmio::reg8(REG_DMA_CHN_IRQ_MSK),
+            0,
+            "DMA channel IRQ mask"
+        );
 
-        // RF interrupt configuration - verify both calls to read and write
-        mock_read_reg_irq_mask().assert_called(2);
-        mock_write_reg_irq_mask(0x1000 | 0x2000).assert_called(1);
-        mock_write_reg_irq_mask(0x1000 | (0x80 << 0xd)).assert_called(1);
+        // RF interrupt configuration: the mask is cleared, then the RX|TX bits
+        // are set, and the second `reg_irq_mask` write carries the first one's
+        // bits, which proves the read-modify-write ran twice.
+        let expected_rf_irq_mask = (FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX).bits();
+        assert_eq!(
+            register_writes(REG_RF_IRQ_MASK),
+            vec![0, expected_rf_irq_mask as u32],
+            "the RF IRQ mask must be cleared and then enabled"
+        );
+        assert_eq!(FakeMmio::reg16(REG_RF_IRQ_STATUS), 0xfffe, "RF IRQ status");
 
-        mock_read_reg_system_tick_mode().assert_called(1);
-        mock_write_reg_system_tick_mode(0x01 | 2).assert_called(1);
-
-        // Clear and reset RF interrupt status
-        mock_write_reg_rf_irq_mask(0).assert_called(1);
-        mock_write_reg_rf_irq_status(0xfffe).assert_called(1);
-
-        // Configure RF interrupts for RX and TX
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).assert_called(1);
-
-        // System tick interrupt configuration
-        mock_read_reg_system_tick().assert_called(1);
-        mock_write_reg_system_tick_irq(0x1234 | (0x80 << 0x18)).assert_called(1);
-
-        mock_write_reg_irq_src(0x80 << 0xd).assert_called(1);
-
-        // Additional timing configuration
-        mock_write_reg_rf_timing_config(0xc00).assert_called(1);
+        assert_eq!(
+            register_writes(REG_IRQ_MASK),
+            vec![0x1000 | 0x2000, 0x1000 | 0x2000 | (0x80 << 0xd)],
+            "both read-modify-write passes must accumulate"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_SYSTEM_TICK_MODE),
+            0x01 | 2,
+            "system tick mode keeps its existing bits"
+        );
+        assert_eq!(
+            FakeMmio::reg32(REG_SYSTEM_TICK_IRQ),
+            0x1234 | (0x80 << 0x18),
+            "system tick IRQ keeps the current tick"
+        );
+        assert_eq!(
+            FakeMmio::reg32(REG_IRQ_SRC),
+            0x80 << 0xd,
+            "IRQ source select"
+        );
+        assert_eq!(FakeMmio::reg16(REG_RF_TIMING_CONFIG), 0xc00, "RF timing");
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_sys_timer_config)]
-    #[mry::lock(write_reg_dma2_addr)]
-    #[mry::lock(write_reg_dma2_ctrl)]
-    #[mry::lock(write_reg_dma_chn_irq_msk)]
-    #[mry::lock(read_reg_irq_mask)]
-    #[mry::lock(write_reg_irq_mask)]
-    #[mry::lock(read_reg_system_tick_mode)]
-    #[mry::lock(write_reg_system_tick_mode)]
-    #[mry::lock(write_reg_rf_irq_mask)]
-    #[mry::lock(write_reg_rf_irq_status)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(write_reg_irq_src)]
-    #[mry::lock(write_reg_rf_timing_config)]
     fn test_blc_ll_init_basic_mcu_dma_buffer_address() {
         // This test specifically checks that the DMA buffer address is correctly set
-        // We need to mock all required functions but we're specifically interested in
-        // the DMA buffer address calculation
+        reset_host_fakes();
+        FakeMmio::set_reg32(REG_IRQ_MASK, 0x1000);
+        FakeMmio::set_reg8(REG_SYSTEM_TICK_MODE, 0x01);
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 0x1234);
 
-        // Mock all register operations
-        mock_write_reg_rf_sys_timer_config(700).returns(());
-        mock_write_reg_dma2_ctrl(0x104).returns(());
-        mock_write_reg_dma_chn_irq_msk(0).returns(());
-
-        mock_read_reg_irq_mask().returns(0x1000);
-        mock_write_reg_irq_mask(0x1000 | 0x2000).returns(());
-        mock_write_reg_irq_mask(0x1000 | (0x80 << 0xd)).returns(());
-
-        mock_read_reg_system_tick_mode().returns(0x01);
-        mock_write_reg_system_tick_mode(0x01 | 2).returns(());
-
-        mock_write_reg_rf_irq_mask(0).returns(());
-        mock_write_reg_rf_irq_status(0xfffe).returns(());
-
-        let expected_rf_irq_mask = FLD_RF_IRQ_MASK::IRQ_RX | FLD_RF_IRQ_MASK::IRQ_TX;
-        mock_write_reg_rf_irq_mask(expected_rf_irq_mask.bits()).returns(());
-
-        mock_read_reg_system_tick().returns(0x1234);
-        mock_write_reg_system_tick_irq(0x1234 | (0x80 << 0x18)).returns(());
-
-        mock_write_reg_irq_src(0x80 << 0xd).returns(());
-
-        mock_write_reg_rf_timing_config(0xc00).returns(());
-
-        // Mock the specific DMA address write we're testing
-        mock_write_reg_dma2_addr(Any).returns(());
-
-        // Setup test state - we need to know the expected DMA address
         critical_section::with(|_| {
             // Set the receive buffer write pointer to a specific value for testing
             LIGHT_RX_BUFFER_WRITE_POINTER.set(2);
@@ -2519,11 +2481,14 @@ mod tests {
             // Call the function under test
             blc_ll_init_basic_mcu();
 
-            // Calculate expected DMA address (the address of buffer element at index 5)
-            // For this test, we're more interested in verifying the call was made
-            // with the correct pointer calculation than the exact numeric address
+            // The DMA2 address must be the address of the buffer element the
+            // write pointer selects.
             let expected_addr = core::ptr::addr_of!(LIGHT_RX_BUFF.lock()[2]) as u16;
-            mock_write_reg_dma2_addr(expected_addr).assert_called(1);
+            assert_eq!(
+                FakeMmio::reg16(REG_DMA2_ADDR),
+                expected_addr,
+                "DMA2 must point at the selected RX buffer element"
+            );
         });
     }
 
@@ -3890,7 +3855,6 @@ mod tests {
     #[test]
     #[mry::lock(
         blc_ll_init_basic_mcu,
-        rand,
         flash_write_page,
         flash_read_page,
         rf_link_slave_set_adv,
@@ -3923,9 +3887,11 @@ mod tests {
         mock_write_reg32(Any, Any).returns(());
         mock_write_reg16(Any, Any).returns(());
 
-        // Mock random MAC generation
-        mock_rand().returns(0xABCD);
-        mock_rand().returns(0xEF12);
+        // The generated MAC is `[rand(), rand()]`, and `rand()` is
+        // `clock_time() as u16 ^ read_reg_rnd_number()`; clock_time() is the
+        // mocked system tick, the RNG register is seeded here.
+        FakeMmio::set_reg16(REG_RND_NUMBER, 0x1234);
+        let expected_rand = 0x1234u16 ^ (0x1234_5678u32 as u16);
 
         // Mock flash read for MAC check (returns u32::MAX to trigger MAC generation)
         mock_flash_read_page(FLASH_ADR_MAC, 4, Any).returns_with(
@@ -3937,8 +3903,18 @@ mod tests {
         // Mock flash read for MAC (6 bytes for rf_link_slave_set_adv)
         mock_flash_read_page(FLASH_ADR_MAC, 6, Any).returns(());
 
-        // Mock flash write for MAC address
-        mock_flash_write_page(FLASH_ADR_MAC, 4, Any).returns(());
+        // Capture the MAC the driver writes so the generated value is checked
+        let written_mac = std::sync::Arc::new(std::sync::Mutex::new([0u8; 4]));
+        let written_mac_clone = std::sync::Arc::clone(&written_mac);
+        mock_flash_write_page(FLASH_ADR_MAC, 4, Any).returns_with(
+            move |_addr, len, buf: SendWrapper<*const u8>| {
+                // SAFETY: `buf`/`len` are the arguments `flash_write_page` was
+                // called with, so `[buf, buf+len)` is the caller's live buffer
+                // for the duration of this call.
+                let data = unsafe { core::slice::from_raw_parts(*buf, len as usize) };
+                written_mac_clone.lock().unwrap()[..data.len()].copy_from_slice(data);
+            },
+        );
 
         // Mock flash read for pairing check (returns non-zero, so pairing is configured)
         mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).returns_with(
@@ -3968,9 +3944,19 @@ mod tests {
         rf_link_slave_init(test_interval);
 
         // Assert - verify MAC was generated and written to flash
-        mock_rand().assert_called(2); // Two calls for MAC generation
         mock_flash_write_page(FLASH_ADR_MAC, 4, Any).assert_called(1); // MAC written to flash
-                                                                       // Calculate expected CRC for assertion
+        assert_eq!(
+            *written_mac.lock().unwrap(),
+            [
+                (expected_rand & 0xff) as u8,
+                (expected_rand >> 8) as u8,
+                (expected_rand & 0xff) as u8,
+                (expected_rand >> 8) as u8,
+            ],
+            "both rand() calls must feed the generated MAC"
+        );
+
+        // Calculate expected CRC for assertion
         let expected_mac_u32 = 0x44332211u32; // From MAC_ID [0x11, 0x22, 0x33, 0x44]
         let crc_data = [
             (expected_mac_u32 & 0xFF) as u8,

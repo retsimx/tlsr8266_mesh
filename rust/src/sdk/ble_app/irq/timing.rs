@@ -19,9 +19,9 @@ use crate::sdk::ble_app::light_ll::connection_management::{
 use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
-use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_pac::*;
 
 /// Handles the BLE receive state interrupt.
@@ -130,8 +130,8 @@ mod tests {
         mock_rf_set_ble_channel, mock_rf_start_brx, mock_rf_stop_trx,
     };
     use crate::sdk::light::{BlePeripheralLinkState, RfOperationState};
-    use crate::sdk::mcu::clock::{mock_sleep_us, CLOCK_SYS_CLOCK_1US};
     use mry::Any;
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 
     use tlsr8266_pac::{
         mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
@@ -139,8 +139,19 @@ mod tests {
         mock_write_reg_rf_tx_wail_settle_time_lo, mock_write_reg_system_tick_irq,
     };
 
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        tlsr8266_pac::fake_mmio::FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+    }
+
     /// Helper function to reset global state to known values for test isolation.
     fn reset_global_state() {
+        reset_host_fakes();
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         SLAVE_LINK_INTERVAL.set(100000); // 100ms default
         SLAVE_WINDOW_SIZE.set(50000); // 50ms default
@@ -174,9 +185,6 @@ mod tests {
         mock_write_reg_system_tick_irq(Any).returns(());
         mock_read_reg_system_tick_irq().returns(100000);
 
-        // Clock function mocks
-        mock_sleep_us(Any).returns(());
-
         // BLE LL function mocks
         mock_ble_ll_select_next_data_channel(Any, Any).returns(12);
 
@@ -207,7 +215,6 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     #[mry::lock(write_reg_system_tick_irq)]
     #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(sleep_us)]
     #[mry::lock(ble_ll_select_next_data_channel)]
     #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_basic() {
@@ -278,7 +285,6 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     #[mry::lock(write_reg_system_tick_irq)]
     #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(sleep_us)]
     #[mry::lock(ble_ll_select_next_data_channel)]
     #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_normal_timing() {
@@ -325,7 +331,6 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     #[mry::lock(write_reg_system_tick_irq)]
     #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(sleep_us)]
     #[mry::lock(ble_ll_select_next_data_channel)]
     #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_minimum_timing() {
@@ -365,7 +370,6 @@ mod tests {
     #[mry::lock(read_reg_system_tick)]
     #[mry::lock(write_reg_system_tick_irq)]
     #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(sleep_us)]
     #[mry::lock(ble_ll_select_next_data_channel)]
     #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_ota_timing() {

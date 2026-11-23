@@ -77,9 +77,9 @@ use crate::sdk::ble_app::light_ll::connection_management::{
     BRIDGE_COMMAND_TIMESTAMP, SLAVE_DATA_VALID,
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_pac::{read_reg_rnd_number, read_reg_system_tick};
 
 use super::mesh_management::{
@@ -384,12 +384,22 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::{
         mock_rf_set_ble_access_code, mock_rf_set_ble_crc_adv, mock_rf_set_tx_rx_off,
     };
-    use crate::sdk::mcu::clock::mock_sleep_us;
     use mry::Any;
     use std::sync::atomic::Ordering;
     use tlsr8266_pac::mock_read_reg_system_tick;
 
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        tlsr8266_pac::fake_mmio::FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+    }
+
     fn setup_test_state() {
+        reset_host_fakes();
         // Reset all status management state
         DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
@@ -594,7 +604,6 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_set_tx_rx_off,
-        sleep_us,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         read_reg_system_tick,
@@ -606,7 +615,6 @@ mod tests {
 
         // Mock RF setup functions
         mock_rf_set_tx_rx_off().returns(());
-        mock_sleep_us(100).returns(());
         mock_rf_set_ble_access_code(0x12345678).returns(());
         mock_rf_set_ble_crc_adv().returns(());
         mock_read_reg_system_tick().returns(50000);
@@ -618,7 +626,8 @@ mod tests {
 
         // Verify RF setup sequence
         mock_rf_set_tx_rx_off().assert_called(1);
-        mock_sleep_us(100).assert_called(1);
+        // The 100us RF settling delay is observable through the fake clock
+        assert_eq!(tlsr8266_hal::mcu::clock::fake_clock::sleeps(), vec![100]);
         mock_rf_set_ble_access_code(0x12345678).assert_called(1);
         mock_rf_set_ble_crc_adv().assert_called(1);
         mock_read_reg_system_tick().assert_called(1);
@@ -628,7 +637,6 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_set_tx_rx_off,
-        sleep_us,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         read_reg_system_tick,
@@ -648,7 +656,6 @@ mod tests {
             .saturating_sub(ONLINE_STATUS_COMP * CLOCK_SYS_CLOCK_1US * 1000);
 
         mock_rf_set_tx_rx_off().returns(());
-        mock_sleep_us(100).returns(());
         mock_rf_set_ble_access_code(0x12345678).returns(());
         mock_rf_set_ble_crc_adv().returns(());
         mock_read_reg_system_tick().returns(current_tick);
@@ -666,7 +673,6 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_set_tx_rx_off,
-        sleep_us,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         read_reg_system_tick,
@@ -679,7 +685,6 @@ mod tests {
         let current_tick = 1000; // Recent time, broadcast not due
 
         mock_rf_set_tx_rx_off().returns(());
-        mock_sleep_us(100).returns(());
         mock_rf_set_ble_access_code(0x12345678).returns(());
         mock_rf_set_ble_crc_adv().returns(());
         mock_read_reg_system_tick().returns(current_tick);
@@ -696,7 +701,6 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_set_tx_rx_off,
-        sleep_us,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         read_reg_system_tick,
@@ -708,7 +712,6 @@ mod tests {
 
         // Mock all functions with simple returns
         mock_rf_set_tx_rx_off().returns(());
-        mock_sleep_us(100).returns(());
         mock_rf_set_ble_access_code(0x12345678).returns(());
         mock_rf_set_ble_crc_adv().returns(());
         mock_read_reg_system_tick().returns(800000); // Use tick > broadcast_interval to trigger status send
@@ -720,7 +723,8 @@ mod tests {
 
         // Verify all functions were called
         mock_rf_set_tx_rx_off().assert_called(1);
-        mock_sleep_us(100).assert_called(1);
+        // The 100us RF settling delay is observable through the fake clock
+        assert_eq!(tlsr8266_hal::mcu::clock::fake_clock::sleeps(), vec![100]);
         mock_rf_set_ble_access_code(0x12345678).assert_called(1);
         mock_rf_set_ble_crc_adv().assert_called(1);
         mock_read_reg_system_tick().assert_called(1);

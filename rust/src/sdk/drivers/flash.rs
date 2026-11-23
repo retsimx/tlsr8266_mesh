@@ -1,10 +1,10 @@
 use crate::sdk::drivers::spi::{
     mspi_ctrl_write, mspi_get, mspi_high, mspi_low, mspi_read, mspi_wait, mspi_write,
 };
-use crate::sdk::mcu::clock::sleep_us;
-use crate::sdk::mcu::watchdog::wd_clear;
 use core::mem::transmute;
 use core::ptr::{null, null_mut};
+use tlsr8266_hal::mcu::clock::sleep_us;
+use tlsr8266_hal::mcu::watchdog::wd_clear;
 
 #[cfg(test)]
 use self::fake_flash::FakeFlash;
@@ -717,8 +717,26 @@ mod tests {
         mock_mspi_ctrl_write, mock_mspi_get, mock_mspi_high, mock_mspi_low, mock_mspi_read,
         mock_mspi_wait, mock_mspi_write,
     };
-    use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// `reg_tmr_ctrl`: the watchdog clear bit lives here.
+    const REG_TMR_CTRL: u32 = 0x620;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank, tick count and sleep log.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
+
+    /// Number of `reg_tmr_ctrl` writes, i.e. `wd_clear()` calls.
+    fn watchdog_clears() -> usize {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == REG_TMR_CTRL | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
+    }
 
     // This is required because we're working with raw pointers in our testing
     // It helps to ensure safe operations when mocking hardware interactions
@@ -761,10 +779,10 @@ mod tests {
         mspi_ctrl_write,
         mspi_high,
         mspi_low,
-        mspi_wait,
-        sleep_us
+        mspi_wait
     )]
     fn test_flash_read_page() {
+        reset_fakes();
         // Setup mock responses for SPI functions
 
         // Simulate the busy bit being clear (not busy)
@@ -772,8 +790,6 @@ mod tests {
         mock_mspi_write(0x03).returns(()); // READ_CMD
         mock_mspi_write(0x10).returns(()); // addr[23:16]
         mock_mspi_write(0x00).returns(()); // addr[15:8] addr[7:0] dummy write for reading
-
-        mock_sleep_us(1).returns(());
 
         // Configure chip select behavior
         mock_mspi_high().returns(());
@@ -842,8 +858,9 @@ mod tests {
     /// * This test focuses on the simple case where data fits within page boundaries
     /// * Page size is 256 bytes for this device
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait)]
     fn test_flash_write_page_small() {
+        reset_fakes();
         // Setup mock responses
 
         // Simulate the busy bit being clear after a write
@@ -853,8 +870,6 @@ mod tests {
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
-        mock_sleep_us(1).returns(());
-        mock_sleep_us(100).returns(());
 
         // Create test data to write
         let data = vec![0x11, 0x22, 0x33, 0x44];
@@ -922,8 +937,9 @@ mod tests {
     /// * The test uses a special pattern in the data to help verify correct buffer position
     /// * This test focuses specifically on the page-spanning behavior
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait)]
     fn test_flash_write_page_cross_boundary() {
+        reset_fakes();
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
 
@@ -931,8 +947,6 @@ mod tests {
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
-        mock_sleep_us(1).returns(());
-        mock_sleep_us(100).returns(());
 
         // Create test data to write (spans two pages)
         // Use a special pattern to verify correct buffer position is used
@@ -1002,10 +1016,9 @@ mod tests {
     /// * The function should ensure the watchdog is cleared before long erase operations
     /// * SPI protocol requires specific chip select sequence
     #[test]
-    #[mry::lock(
-        mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us, wd_clear
-    )]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait)]
     fn test_flash_erase_sector() {
+        reset_fakes();
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
 
@@ -1013,9 +1026,6 @@ mod tests {
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
-        mock_sleep_us(1).returns(());
-        mock_sleep_us(100).returns(());
-        mock_wd_clear().returns(());
 
         // Setup command expectations
         mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
@@ -1029,7 +1039,11 @@ mod tests {
         flash_erase_sector(0x2000);
 
         // Verify watchdog was cleared
-        mock_wd_clear().assert_called(1);
+        assert_eq!(
+            watchdog_clears(),
+            1,
+            "the erase path must kick the watchdog once"
+        );
 
         // Verify proper command sequence with exact call counts
         mock_mspi_high().assert_called(5); // Initial + after WRITE_ENABLE + after ERASE + final + flash wait done
@@ -1110,11 +1124,10 @@ mod tests {
         mspi_ctrl_write,
         mspi_high,
         mspi_low,
-        mspi_wait,
-        sleep_us,
-        wd_clear
+        mspi_wait
     )]
     fn test_flash_read_write_cycle() {
+        reset_fakes();
         // Setup mock responses
         mock_mspi_read().returns(0); // Not busy
 
@@ -1123,8 +1136,6 @@ mod tests {
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
         mock_mspi_ctrl_write(0x0a).returns(());
-        mock_sleep_us(mry::Any).returns(());
-        mock_wd_clear().returns(());
 
         // Setup command byte expectations
         mock_mspi_write(mry::Any).returns(());
@@ -1159,7 +1170,11 @@ mod tests {
 
         // Step 2: Erase sector to prepare for write
         flash_erase_sector(0x3000);
-        mock_wd_clear().assert_called(1);
+        assert_eq!(
+            watchdog_clears(),
+            1,
+            "the erase path must kick the watchdog once"
+        );
 
         // Step 3: Write data to flash
         flash_write_page(0x3000, 4, vec_to_raw(&write_data));
@@ -1198,8 +1213,9 @@ mod tests {
     /// 4. Verify the function completes without hanging
     /// 5. Verify mspi_read was called exactly FLASH_WAIT_ITERATIONS times
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait)]
     fn test_flash_busy_flag_timeout() {
+        reset_fakes();
         // Setup mock responses
 
         // Critical: Always return 1 to simulate flash never clearing the busy flag
@@ -1210,8 +1226,6 @@ mod tests {
         mock_mspi_high().returns(());
         mock_mspi_low().returns(());
         mock_mspi_wait().returns(());
-        mock_sleep_us(1).returns(());
-        mock_sleep_us(100).returns(());
 
         // Setup expectations for command bytes
         mock_mspi_write(0x06).returns(()); // WRITE_ENABLE_CMD
@@ -1265,8 +1279,9 @@ mod tests {
     /// * Ensuring the function does nothing when given empty/invalid parameters
     /// * Prevents potential undefined behavior from null pointer operations
     #[test]
-    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait, sleep_us)]
+    #[mry::lock(mspi_read, mspi_write, mspi_high, mspi_low, mspi_wait)]
     fn test_flash_write_page_early_return() {
+        reset_fakes();
         // Create a valid test data buffer (won't be used with length 0)
         let data = vec![0x11, 0x22, 0x33, 0x44];
         let data_ptr = vec_to_raw(&data);
@@ -1292,7 +1307,10 @@ mod tests {
         mock_mspi_read().assert_called(0);
 
         // No delays should have been called either
-        mock_sleep_us(mry::Any).assert_called(0);
+        assert!(
+            fake_clock::sleeps().is_empty(),
+            "the early return must not delay"
+        );
     }
 
     /// Proves the real flash entry points work against the in-memory NOR model:

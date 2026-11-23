@@ -772,6 +772,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlsr8266-hal"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-executor",
+ "embassy-time-driver",
+ "embassy-time-queue-utils",
+ "tlsr8266-pac",
+]
+
+[[package]]
 name = "tlsr8266-pac"
 version = "0.1.0"
 dependencies = [
@@ -790,8 +801,6 @@ dependencies = [
  "embassy-executor",
  "embassy-sync",
  "embassy-time",
- "embassy-time-driver",
- "embassy-time-queue-utils",
  "fixed",
  "futures",
  "heapless",
@@ -801,6 +810,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "static_cell",
+ "tlsr8266-hal",
  "tlsr8266-pac",
 ]
 

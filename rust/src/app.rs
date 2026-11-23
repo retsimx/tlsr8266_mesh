@@ -12,15 +12,15 @@ use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_PWD_ENCODE_SK;
 use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, BleAppHooks};
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_init, is_16mhz_xtal};
-use crate::sdk::mcu::dma::dma_init;
-use crate::sdk::mcu::gpio::gpio_init;
-use crate::sdk::mcu::irq_i::{irq_enable, irq_init};
-use crate::sdk::mcu::watchdog::wd_clear;
 use crate::uart_manager::{uart_receiver, uart_sender};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
 use heapless::Vec;
+use tlsr8266_hal::mcu::clock::{clock_init, is_16mhz_xtal};
+use tlsr8266_hal::mcu::dma::dma_init;
+use tlsr8266_hal::mcu::gpio::gpio_init;
+use tlsr8266_hal::mcu::irq_i::{irq_enable, irq_init};
+use tlsr8266_hal::mcu::watchdog::wd_clear;
 
 /// The application's single root task.
 ///

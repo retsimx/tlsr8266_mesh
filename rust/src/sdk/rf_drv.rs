@@ -13,9 +13,9 @@ use crate::sdk::ble_app::rf_drv_8266::{
     DEVICE_ADDRESS, GROUP_ADDRESS, MESH_DEVICE_ADDRESS_NEXT_POSITION,
     MESH_GROUP_ADDRESS_NEXT_POSITION, PKT_ADV, SET_UUID_FLAG,
 };
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
+use tlsr8266_hal::common::sync::SimplifyLS;
 
 /// Mesh light-event handler, registered once from `App::init()` so this module
 /// never imports the application layer.

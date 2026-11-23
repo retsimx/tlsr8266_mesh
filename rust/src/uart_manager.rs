@@ -21,8 +21,6 @@ use portable_atomic::AtomicBool;
 use crate::mesh;
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
-use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::uart::{UartDriver, UartIrqMask};
 use crate::uprintln;
 use heapless::Vec;
@@ -30,6 +28,8 @@ use mesh_protocol::packet_types::{AppCmdValue, Packet};
 #[cfg(test)]
 use mesh_protocol::uart::UART_CRC_OFFSET;
 use mesh_protocol::uart::{compute_crc, verify_crc, UartData, UartMsg, UART_DATA_LEN};
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::common::sync::SimplifyLS;
 
 pub(crate) const MSG_TYPE_INDEX: usize = 2;
 const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;
@@ -552,7 +552,6 @@ mod tests {
     use super::*;
     use crate::mesh::{mock_send_mesh_message, send_mesh_message};
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
-    use crate::sdk::mcu::clock::{clock_time, mock_clock_time};
     use core::future::Future;
     use futures::executor::block_on;
     use futures::task::noop_waker;
@@ -560,11 +559,27 @@ mod tests {
     use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
     use mry::Any;
     use std::task::{Context, Poll};
-    use tlsr8266_pac::{
-        mock_read_reg_dma_rx_rdy0, mock_write_reg_dma1_addr, mock_write_reg_dma_rx_rdy0,
-        mock_write_reg_dma_tx_rdy0, read_reg_dma_rx_rdy0, write_reg_dma1_addr,
-        write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0,
-    };
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::{mock_write_reg_dma1_addr, write_reg_dma1_addr};
+
+    /// `reg_dma_rx_rdy0`: DMA/UART interrupt flags, write-1-to-clear.
+    const REG_DMA_RX_RDY0: u32 = 0x526;
+
+    /// `reg_dma_tx_rdy0`: write to trigger the DMA1 transfer.
+    const REG_DMA_TX_RDY0: u32 = 0x524;
+    /// Number of DMA1 transmit triggers, i.e. `start_tx_unchecked` arms.
+    fn dma1_arms() -> usize {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == REG_DMA_TX_RDY0 | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
+    }
+
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
 
     /// Create a test packet with the given parameters
     fn create_test_packet(
@@ -802,29 +817,29 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_send_with_retry_exits_when_ack_already_received() {
         reset_for_test();
+        reset_fakes();
         UART_LAST_ACK.store(5, Ordering::Relaxed);
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns(());
 
         let msg = empty_frame();
 
         block_on(send_with_retry(&msg, 5));
 
-        mock_write_reg_dma_tx_rdy0(Any).assert_called(1);
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
     }
 
     #[test]
-    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
+    #[mry::lock(write_reg_dma1_addr)]
     fn test_send_with_retry_retransmits_until_ack_is_received() {
         reset_for_test();
+        reset_fakes();
         UART_LAST_ACK.store(0, Ordering::Relaxed);
 
+        // The DMA1 address write is the per-transmission seam: inject the ack
+        // when the second transmission is armed, so the retry loop exits.
         let sends = AtomicU8::new(0);
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns_with(move |_| {
+        mock_write_reg_dma1_addr(Any).returns_with(move |_addr: u16| {
             if sends.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
                 UART_LAST_ACK.store(1, Ordering::Relaxed);
             }
@@ -836,7 +851,11 @@ mod tests {
         // retransmits; the second send marks the ack, so the loop exits.
         block_on(send_with_retry(&msg, 1));
 
-        mock_write_reg_dma_tx_rdy0(Any).assert_called(2);
+        assert_eq!(
+            dma1_arms(),
+            2,
+            "DMA1 must be triggered once per retransmission"
+        );
     }
 
     /// Tests that an incoming ack frame wakes a waiter parked on
@@ -1312,17 +1331,15 @@ mod tests {
 
     /// The idle `uart_send_async` path arms DMA1 exactly once and returns.
     #[test]
-    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_uart_send_async_starts_when_idle() {
         reset_for_test();
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns(());
+        reset_fakes();
 
         let msg = empty_frame();
 
         block_on(uart_send_async(&msg));
 
-        mock_write_reg_dma_tx_rdy0(Any).assert_called(1);
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
         assert!(UART_HW.lock().is_tx_busy());
     }
 
@@ -1332,11 +1349,9 @@ mod tests {
     /// The host `wait_tx_done` takes the timeout branch immediately (there is
     /// no time driver), so this test would hang forever if the loop could spin.
     #[test]
-    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_uart_send_async_timeout_force_starts_dma1() {
         reset_for_test();
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns(());
+        reset_fakes();
 
         // Pretend the previous transfer is still in flight and its TX-complete
         // interrupt never arrives.
@@ -1348,24 +1363,22 @@ mod tests {
         block_on(uart_send_async(&msg));
 
         // One arm for the stuck transfer, one forced arm by the timeout branch.
-        mock_write_reg_dma_tx_rdy0(Any).assert_called(2);
+        assert_eq!(
+            dma1_arms(),
+            2,
+            "DMA1 must be triggered once per retransmission"
+        );
         assert!(UART_HW.lock().is_tx_busy());
     }
 
     /// A TX-complete interrupt clears the busy flag and wakes an async sender.
     #[test]
-    #[mry::lock(
-        read_reg_dma_rx_rdy0,
-        write_reg_dma_rx_rdy0,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
     fn test_check_irq_tx_complete_clears_busy_and_signals_tx_done() {
         reset_for_test();
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns(());
-        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Tx as u8);
-        mock_write_reg_dma_rx_rdy0(Any).returns(());
+        reset_fakes();
+        // `check_irq` reads the DMA/UART flag register through the real
+        // `get_and_clear_irq_source`, which writes the value back to clear it.
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Tx as u8);
 
         UART_HW.lock().start_tx_unchecked(&empty_frame());
         assert!(UART_HW.lock().is_tx_busy());
@@ -1374,20 +1387,30 @@ mod tests {
 
         assert!(!UART_HW.lock().is_tx_busy());
         assert!(UART_TX_DONE.try_take().is_some());
-        mock_write_reg_dma_rx_rdy0(Any).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(UartIrqMask::Tx as u8))
+                .count(),
+            1,
+            "the TX flag must be cleared exactly once"
+        );
     }
 
     /// An RX-complete interrupt copies the frame into the RX channel and runs
     /// the normal `handle_rx` bookkeeping.
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0, mesh_report_status_enable)]
+    #[mry::lock(mesh_report_status_enable)]
     fn test_check_irq_rx_copies_frame_into_rx_channel() {
         reset_for_test();
+        reset_fakes();
         let frame = frame_with_valid_crc();
         UART_HW.lock().rx_data_buf = frame;
 
-        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Rx as u8);
-        mock_write_reg_dma_rx_rdy0(Any).returns(());
+        // `check_irq` reads the DMA/UART flag register through the real
+        // `get_and_clear_irq_source`, which writes the value back to clear it.
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Rx as u8);
         mock_mesh_report_status_enable(true).returns(());
 
         check_irq();
@@ -1395,23 +1418,29 @@ mod tests {
         let received = UART_RX_CHANNEL.try_receive().unwrap();
         assert_eq!(received.data, frame.data);
         assert!(started());
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(UartIrqMask::Rx as u8))
+                .count(),
+            1,
+            "the RX flag must be cleared exactly once"
+        );
         mock_mesh_report_status_enable(true).assert_called(1);
     }
 
     /// The panic sink arms DMA1 synchronously and does not touch the queue.
     #[test]
-    #[mry::lock(clock_time, write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_send_sync_panic_starts_dma1() {
         reset_for_test();
-        mock_clock_time().returns(0);
-        mock_write_reg_dma1_addr(Any).returns(());
-        mock_write_reg_dma_tx_rdy0(Any).returns(());
+        reset_fakes();
 
         let msg = empty_frame();
 
         send_sync_panic(&msg);
 
-        mock_write_reg_dma_tx_rdy0(Any).assert_called(1);
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
         assert!(UART_HW.lock().is_tx_busy());
         assert_eq!(UART_TX_CHANNEL.len(), 0);
     }

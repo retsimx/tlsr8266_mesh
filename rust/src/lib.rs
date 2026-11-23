@@ -1,14 +1,13 @@
 #![feature(coverage_attribute)]
 #![cfg_attr(not(test), no_std)]
 
-use crate::embassy::executor::Executor;
-use crate::sdk::pm::cpu_wakeup_init;
 use core::sync::atomic::AtomicU32;
+use tlsr8266_hal::pm::cpu_wakeup_init;
+use tlsr8266_hal::runtime::executor::Executor;
 
 mod app;
 mod config;
 mod diagnostics;
-mod embassy;
 mod irq;
 mod light_manager;
 mod logging;
@@ -25,6 +24,10 @@ pub mod version;
 /// Bit-manipulation macros live in the PAC crate; re-exported here so existing
 /// `use crate::{BIT, ...}` paths keep resolving.
 pub use tlsr8266_pac::{BIT, BIT_MASK_LEN, BIT_RNG};
+
+/// Helper macros moved to the HAL crate; re-exported here because
+/// `sdk/drivers/pwm.rs` invokes `MASK_VAL!` through a `crate::` path.
+pub use tlsr8266_hal::MASK_VAL;
 
 #[cfg(test)]
 mod wire_contract_tests;

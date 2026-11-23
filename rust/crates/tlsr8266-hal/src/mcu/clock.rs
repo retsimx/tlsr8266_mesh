@@ -9,8 +9,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::sdk::mcu::analog::analog_read;
-use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
+use crate::mcu::analog::analog_read;
+use crate::MASK_VAL;
 use tlsr8266_pac::{
     read_reg_clk_sel, read_reg_system_tick, write_reg_clk_sel, write_reg_rst_clk0,
     write_reg_tmr_ctrl, FLD_CLK_EN, FLD_CLK_SEL, FLD_TMR, WATCHDOG_TIMEOUT_COEFF,
@@ -34,15 +34,15 @@ pub const CLOCK_PLL_CLOCK: u32 = 192000000;
 /// Number of system clock ticks in 1 second
 pub const CLOCK_SYS_CLOCK_1S: u32 = CLOCK_SYS_CLOCK_HZ;
 /// Number of system clock ticks in 1 millisecond
-pub const CLOCK_SYS_CLOCK_1MS: u32 = (CLOCK_SYS_CLOCK_1S / 1000);
+pub const CLOCK_SYS_CLOCK_1MS: u32 = CLOCK_SYS_CLOCK_1S / 1000;
 /// Number of system clock ticks in 1 microsecond
-pub const CLOCK_SYS_CLOCK_1US: u32 = (CLOCK_SYS_CLOCK_1S / 1000000);
+pub const CLOCK_SYS_CLOCK_1US: u32 = CLOCK_SYS_CLOCK_1S / 1000000;
 /// Number of system clock ticks in 4 seconds
 pub const CLOCK_SYS_CLOCK_4S: u32 = CLOCK_SYS_CLOCK_1S << 2;
 /// Maximum number of milliseconds that can be represented by the clock counter
-pub const CLOCK_MAX_MS: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1MS);
+pub const CLOCK_MAX_MS: u32 = u32::MAX / CLOCK_SYS_CLOCK_1MS;
 /// Maximum number of microseconds that can be represented by the clock counter
-pub const CLOCK_MAX_US: u32 = (u32::MAX / CLOCK_SYS_CLOCK_1US);
+pub const CLOCK_MAX_US: u32 = u32::MAX / CLOCK_SYS_CLOCK_1US;
 
 /// Analog register address of the low byte of the free-running 32K_RC counter
 const ANA_32K_COUNTER_LO: u8 = 0x40;
@@ -86,21 +86,16 @@ const XTAL_DETECT_MAX_SAMPLE_STEP: u16 = 0x7fff;
 static IS_16MHZ_XTAL: AtomicBool = AtomicBool::new(false);
 
 /// Clock source selection for the TLSR8266 SoC
+///
+/// Variant names are the datasheet `reg_clk_sel.SRC` field values, so the
+/// datasheet spelling is kept; only the two sources this firmware selects are
+/// defined here.
+#[allow(non_camel_case_types)]
 enum CLOCK_SEL {
-    /// 32MHz RC oscillator (internal)
-    SEL_32M_RC = 0,
     /// High-speed clock with divider (used for PLL-derived clock)
     SEL_HS_DIV = 1,
     /// 16MHz external oscillator from pad
     SEL_16M_PAD = 2,
-    /// 32MHz external oscillator from pad
-    SEL_32M_PAD = 3,
-    /// Clock from SPI interface
-    SEL_SPI = 4,
-    /// 40MHz internal oscillator
-    SEL_40M_INTERNAL = 5,
-    /// 32KHz RC oscillator (low power)
-    SEL_32K_RC = 6,
 }
 
 /// Initializes the system clock and watchdog timer.
@@ -158,10 +153,10 @@ pub fn clock_init() {
     //    - Use high-speed divider (SEL_HS_DIV) as clock source
     //    - Divide PLL clock (192MHz) by 6 to get 32MHz system clock
     write_reg_clk_sel(MASK_VAL!(
-        FLD_CLK_SEL::DIV.bits() as u32, // Set the clock divider field
-        (CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S) as u32, // Divider value (192MHz/32MHz = 6)
-        FLD_CLK_SEL::SRC.bits() as u32, // Set the clock source field
-        CLOCK_SEL::SEL_HS_DIV as u32    // Use HS divider as clock source
+        FLD_CLK_SEL::DIV.bits() as u32,       // Set the clock divider field
+        CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S, // Divider value (192MHz/32MHz = 6)
+        FLD_CLK_SEL::SRC.bits() as u32,       // Set the clock source field
+        CLOCK_SEL::SEL_HS_DIV as u32          // Use HS divider as clock source
     ) as u8);
 
     // 4. Configure system timer and watchdog
@@ -173,7 +168,7 @@ pub fn clock_init() {
         FLD_TMR::TMR0_EN.bits(), // Enable Timer0
         1,
         FLD_TMR::TMR_WD_CAPT.bits(), // Configure watchdog capture value
-        WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF, // Convert ms to watchdog units
+        (WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS) >> WATCHDOG_TIMEOUT_COEFF, // Convert ms to watchdog units
         FLD_TMR::TMR_WD_EN.bits(), // Enable watchdog timer
         1
     ))
@@ -190,7 +185,6 @@ pub fn clock_init() {
 ///
 /// * Written once by [`clock_init`] and only read afterwards
 /// * Uses a `Relaxed` load because no ordering with other memory is required
-#[cfg_attr(test, mry::mry)]
 pub fn is_16mhz_xtal() -> bool {
     IS_16MHZ_XTAL.load(Ordering::Relaxed)
 }
@@ -274,7 +268,6 @@ fn read_ana_32k() -> u16 {
 ///   boots and can be reflashed over SWire, whereas a hang here cannot be
 ///   recovered without SWire
 /// * Runs from normal `.text` (not `.ram_code`) so it costs no SRAM
-#[cfg_attr(test, mry::mry)]
 pub fn detect_xtal_is_16mhz() -> bool {
     // 1. Remember the clock selection so it can be restored afterwards
     let previous = read_reg_clk_sel();
@@ -339,28 +332,13 @@ pub fn detect_xtal_is_16mhz() -> bool {
 /// * The counter will overflow after approximately 134 seconds
 /// * This function is marked as inline(always) for performance in time-critical operations
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn clock_time() -> u32 {
     // Read the system tick register directly
     read_reg_system_tick()
 }
 
-#[cfg(test)]
 static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
-
-#[cfg(test)]
 static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
-
-/// Resets the 64-bit clock accumulator and the overflow detector to zero.
-///
-/// Test-only: proof tests seed the hardware tick register through `FakeMmio` and need
-/// `clock_time64()` to restart from an exact, known base instead of inheriting state
-/// from an earlier test in the same `--test-threads=1` process.
-#[cfg(test)]
-pub fn reset_clock_time64_for_test() {
-    CLOCK_TIME_UPPER.store(0, Ordering::Relaxed);
-    LAST_CLOCK_TIME.store(0, Ordering::Relaxed);
-}
 
 /// Provides a 64-bit monotonic clock based on the 32-bit clock_time()
 ///
@@ -388,15 +366,7 @@ pub fn reset_clock_time64_for_test() {
 /// blew past any in-progress transition timestamp and caused the light to snap to its final
 /// state. By reading clock_time() inside the critical section, interrupts are physically
 /// incapable of wedging themselves between the hardware read and the comparison.
-#[cfg_attr(test, mry::mry)]
 pub fn clock_time64() -> u64 {
-    // When not testing, these static variables are defined here
-    // When testing, they're defined at module level for test access
-    #[cfg(not(test))]
-    static CLOCK_TIME_UPPER: AtomicU32 = AtomicU32::new(0);
-    #[cfg(not(test))]
-    static LAST_CLOCK_TIME: AtomicU32 = AtomicU32::new(0);
-
     critical_section::with(|_| {
         // Read the hardware time inside the critical section so that no interrupt can update
         // LAST_CLOCK_TIME between this read and the comparison below.
@@ -446,11 +416,10 @@ pub fn clock_time64() -> u64 {
 /// * Marked as inline(always) for performance in time-critical operations
 /// * Maximum span is limited by CLOCK_MAX_US (approximately 134 seconds)
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
     // Calculate elapsed time (handles overflow correctly due to u32 wraparound properties)
     // Convert span_us to system clock ticks and compare
-    return (clock_time() - reference) as u32 > span_us * CLOCK_SYS_CLOCK_1US;
+    clock_time().wrapping_sub(reference) > span_us.wrapping_mul(CLOCK_SYS_CLOCK_1US)
 }
 
 /// Busy-waits for the specified number of microseconds.
@@ -466,38 +435,168 @@ pub fn clock_time_exceed(reference: u32, span_us: u32) -> bool {
 ///
 /// # Notes
 ///
-/// * This function is placed in RAM (.ram_code section) for reliable execution
-///   regardless of flash access timing
+/// * On the device this function is placed in RAM (.ram_code section) for
+///   reliable execution regardless of flash access timing
 /// * Uses busy-waiting which keeps the CPU active (consuming power)
 /// * For longer delays or power-efficient waiting, consider using a sleep mode instead
 /// * Maximum delay is limited by CLOCK_MAX_US (approximately 134 seconds)
 /// * Never inlined to save code size at expense of function call overhead
+/// * Off-target there is no register to spin on: the clock advances by `us` and
+///   the duration is recorded in `fake_clock::sleeps` instead of blocking
 #[inline(never)]
-#[cfg_attr(test, mry::mry)]
-#[link_section = ".ram_code"]
+#[cfg_attr(target_os = "none", link_section = ".ram_code")]
 pub fn sleep_us(us: u32) {
-    // Record starting time
-    let t = clock_time();
+    #[cfg(target_os = "none")]
+    {
+        // Record starting time
+        let t = clock_time();
 
-    // Busy-wait until the specified time has elapsed
-    while !clock_time_exceed(t, us) {}
+        // Busy-wait until the specified time has elapsed
+        while !clock_time_exceed(t, us) {}
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        // Never spin on host: advance the fake tick and log the requested delay
+        fake_clock::advance_ticks(us as u64 * CLOCK_SYS_CLOCK_1US as u64);
+        fake_clock::record_sleep(us);
+    }
+}
+
+/// Host-side clock seam: the tick register, the 64-bit accumulator and the
+/// recorded `sleep_us` durations.
+///
+/// Production code reads the free-running system tick register (`0x740`) and
+/// masks interrupts to detect its 32-bit overflow. Off-target both are emulated:
+/// the register lives in `tlsr8266_pac::FakeMmio` and the accumulator words are
+/// the same module-scope statics [`clock_time64`] uses.
+///
+/// [`advance_ticks`] deliberately leaves `LAST_CLOCK_TIME` alone so
+/// [`clock_time64`] observes a single 32-bit wraparound and bumps
+/// `CLOCK_TIME_UPPER` exactly once, like silicon.
+#[cfg(not(target_os = "none"))]
+pub mod fake_clock {
+    use super::{CLOCK_TIME_UPPER, IS_16MHZ_XTAL, LAST_CLOCK_TIME};
+    use core::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard};
+    use std::vec::Vec;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// `reg_system_tick`: the free-running 32-bit system tick counter.
+    const REG_SYSTEM_TICK: u32 = 0x740;
+
+    /// Durations passed to `sleep_us`, in call order.
+    static SLEEPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+    fn sleeps_lock() -> MutexGuard<'static, Vec<u32>> {
+        SLEEPS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Zero the tick register, both accumulator words and the sleep log.
+    pub fn reset() {
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 0);
+        LAST_CLOCK_TIME.store(0, Ordering::Relaxed);
+        CLOCK_TIME_UPPER.store(0, Ordering::Relaxed);
+        sleeps_lock().clear();
+    }
+
+    /// Set the tick register and both accumulator words to `ticks`, leaving no
+    /// pending overflow for `clock_time64()` to observe.
+    pub fn set_ticks(ticks: u64) {
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, ticks as u32);
+        LAST_CLOCK_TIME.store(ticks as u32, Ordering::Relaxed);
+        CLOCK_TIME_UPPER.store((ticks >> 32) as u32, Ordering::Relaxed);
+    }
+
+    /// Advance the tick register by `delta`, adding whole 32-bit wraps to the
+    /// upper word.
+    ///
+    /// `LAST_CLOCK_TIME` is intentionally untouched: the next `clock_time64()`
+    /// call sees the low word go backwards and bumps the upper word once, which
+    /// is exactly what the hardware path does.
+    pub fn advance_ticks(delta: u64) {
+        let ticks = FakeMmio::reg32(REG_SYSTEM_TICK).wrapping_add(delta as u32);
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, ticks);
+        let upper = (CLOCK_TIME_UPPER.load(Ordering::Relaxed)).wrapping_add((delta >> 32) as u32);
+        CLOCK_TIME_UPPER.store(upper, Ordering::Relaxed);
+    }
+
+    /// Seed the cached crystal result, as `clock_init()` would publish it.
+    pub fn set_xtal_16mhz(is_16mhz: bool) {
+        IS_16MHZ_XTAL.store(is_16mhz, Ordering::Relaxed);
+    }
+
+    /// The durations requested from `sleep_us`, oldest first.
+    pub fn sleeps() -> Vec<u32> {
+        sleeps_lock().clone()
+    }
+
+    /// Record one `sleep_us(us)` request. Called by `sleep_us`; not part of the
+    /// test-facing API.
+    pub(crate) fn record_sleep(us: u32) {
+        sleeps_lock().push(us);
+    }
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::REG_BASE_ADDR;
 
-    // Import mock functions from register module for testing
-    use crate::sdk::mcu::analog::mock_analog_read;
-    use mry::Any;
-    use std::sync::atomic::AtomicU32;
-    use std::sync::{Arc, Mutex};
-    use tlsr8266_pac::mock_read_reg_clk_sel;
-    use tlsr8266_pac::mock_read_reg_system_tick;
-    use tlsr8266_pac::mock_write_reg_clk_sel;
-    use tlsr8266_pac::mock_write_reg_rst_clk0;
-    use tlsr8266_pac::mock_write_reg_tmr_ctrl;
+    /// `reg_system_tick`, the free-running 32-bit counter `clock_time` reads.
+    const SYSTEM_TICK: u32 = 0x740;
+    /// `reg_clk_sel`, the clock source/divider byte.
+    const CLK_SEL: u32 = 0x66;
+    /// `reg_rst_clk0` (32-bit view) and `reg_tmr_ctrl` (32-bit view).
+    const RST_CLK0: u32 = 0x60;
+    const TMR_CTRL: u32 = 0x620;
+
+    /// `FakeMmio`, `FakeAnalog` and `fake_clock` are process-wide singletons and
+    /// the suite runs with `--test-threads=1`, so every test starts from zero.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
+    }
+
+    /// Move the hardware tick register without telling the 64-bit accumulator.
+    ///
+    /// This is the host equivalent of silicon advancing the counter between two
+    /// `clock_time64()` calls: `LAST_CLOCK_TIME` keeps the previous observation,
+    /// so a value that went backwards is read as a 32-bit overflow.
+    fn move_tick_register(ticks: u32) {
+        FakeMmio::set_reg32(SYSTEM_TICK, ticks);
+    }
+
+    /// Base value the scripted system tick starts from.
+    const SCRIPTED_TICK_BASE: u32 = 0x1000_0000;
+    /// System ticks the scripted measurement window is reported to span.
+    ///
+    /// A `static` rather than a closure capture: `FakeMmio::on_read32` takes a
+    /// plain `fn` pointer, so the hook cannot capture anything.
+    static SCRIPTED_ELAPSED_TICKS: AtomicU32 = AtomicU32::new(0);
+
+    /// Script the 32K_RC counter so crystal detection completes a full window
+    /// with the supplied system-tick count, as a real board would.
+    fn script_xtal_measurement(system_ticks: u32) {
+        // Edge alignment: the edge (100), the first sample past it (101), then
+        // the sample that closes the 32 tick window (133).
+        FakeAnalog::push_reads(ANA_32K_COUNTER_LO, &[100, 101, 133]);
+        FakeAnalog::set(ANA_32K_COUNTER_HI, 0);
+        FakeMmio::set_reg8(CLK_SEL, 0x63);
+        SCRIPTED_ELAPSED_TICKS.store(system_ticks, Ordering::Relaxed);
+        FakeMmio::on_read32(SYSTEM_TICK, |call_idx| {
+            if call_idx == 0 {
+                SCRIPTED_TICK_BASE
+            } else {
+                SCRIPTED_TICK_BASE + SCRIPTED_ELAPSED_TICKS.load(Ordering::Relaxed)
+            }
+        });
+        FakeMmio::clear_writes();
+    }
 
     /// Tests clock_init function for proper register configuration.
     ///
@@ -509,9 +608,9 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock responses for register write functions and crystal detection
+    /// 1. Script the 32K_RC counter and the system tick so detection reports 16MHz
     /// 2. Call clock_init to trigger the configuration
-    /// 3. Verify that each register was written with expected values
+    /// 3. Verify the ordered register writes and the published crystal result
     ///
     /// # Notes
     ///
@@ -521,19 +620,16 @@ mod tests {
     /// * Confirms PLL divider calculation is correct
     /// * Verifies watchdog timeout is properly converted to register value
     #[test]
-    #[mry::lock(
-        write_reg_rst_clk0,
-        write_reg_clk_sel,
-        write_reg_tmr_ctrl,
-        detect_xtal_is_16mhz
-    )]
     fn test_clock_init() {
+        reset_fakes();
+        script_xtal_measurement(16_400);
+
         // Setup expected values
         let expected_rst_clk0 = 0xff000000 | FLD_CLK_EN::USB_EN.bits();
 
         let expected_clk_sel = MASK_VAL!(
             FLD_CLK_SEL::DIV.bits() as u32,
-            (CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S) as u32,
+            CLOCK_PLL_CLOCK / CLOCK_SYS_CLOCK_1S,
             FLD_CLK_SEL::SRC.bits() as u32,
             CLOCK_SEL::SEL_HS_DIV as u32
         ) as u8;
@@ -542,35 +638,62 @@ mod tests {
             FLD_TMR::TMR0_EN.bits(),
             1,
             FLD_TMR::TMR_WD_CAPT.bits(),
-            WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS >> WATCHDOG_TIMEOUT_COEFF,
+            (WATCHDOG_INIT_TIMEOUT * CLOCK_SYS_CLOCK_1MS) >> WATCHDOG_TIMEOUT_COEFF,
             FLD_TMR::TMR_WD_EN.bits(),
             1
         );
 
-        // Setup mock behaviors
-        mock_write_reg_rst_clk0(expected_rst_clk0).returns(());
-        mock_write_reg_clk_sel(expected_clk_sel).returns(());
-        mock_write_reg_tmr_ctrl(expected_tmr_ctrl).returns(());
-        mock_detect_xtal_is_16mhz().returns(true);
+        // The clock source detection switches to the crystal pad and restores
+        // the value it read first.
+        let measurement_src = MASK_VAL!(
+            FLD_CLK_SEL::SRC.bits() as u32,
+            CLOCK_SEL::SEL_16M_PAD as u32
+        ) as u8;
 
         // Call the function being tested
         clock_init();
 
-        // Verify each register was written exactly once with correct values
-        mock_write_reg_rst_clk0(expected_rst_clk0).assert_called(1);
-        mock_write_reg_clk_sel(expected_clk_sel).assert_called(1);
-        mock_write_reg_tmr_ctrl(expected_tmr_ctrl).assert_called(1);
-
-        // Verify the crystal was detected exactly once and its result published
-        mock_detect_xtal_is_16mhz().assert_called(1);
+        // Verify the ordered write sequence: reset, measure, restore, configure,
+        // arm the watchdog.
         assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: RST_CLK0 | REG_BASE_ADDR,
+                    width: 4,
+                    value: expected_rst_clk0,
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: measurement_src as u32,
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x63,
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: expected_clk_sel as u32,
+                },
+                RegWrite {
+                    addr: TMR_CTRL | REG_BASE_ADDR,
+                    width: 4,
+                    value: expected_tmr_ctrl,
+                },
+            ]
+        );
+
+        // Verify the crystal was detected once and its result published
+        assert!(
             is_16mhz_xtal(),
-            true,
             "clock_init should publish the detected crystal"
         );
 
         // Leave the shared state at its power-on default for other tests
-        IS_16MHZ_XTAL.store(false, Ordering::Relaxed);
+        fake_clock::set_xtal_16mhz(false);
     }
 
     /// Tests clock_time function for proper system tick reading.
@@ -581,28 +704,24 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock response for system tick register
+    /// 1. Seed the system tick register
     /// 2. Call clock_time function
-    /// 3. Verify returned value matches expected tick value
+    /// 3. Verify returned value matches the seeded tick value
     ///
     /// # Notes
     ///
     /// * Tests the basic operation of reading system time
     /// * Verifies function is a simple pass-through to register read
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_clock_time() {
+        reset_fakes();
+
         // Setup expected tick value
         let expected_tick = 0x12345678;
-
-        // Setup mock behavior for register read
-        mock_read_reg_system_tick().returns(expected_tick);
+        move_tick_register(expected_tick);
 
         // Call the function being tested
         let result = clock_time();
-
-        // Verify register was read exactly once
-        mock_read_reg_system_tick().assert_called(1);
 
         // Verify returned value matches expected tick
         assert_eq!(result, expected_tick);
@@ -616,7 +735,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup current time slightly ahead but not enough to exceed the span
+    /// 1. Seed the tick register slightly ahead but not enough to exceed the span
     /// 2. Verify function returns false
     ///
     /// # Notes
@@ -624,26 +743,20 @@ mod tests {
     /// * Tests the negative condition (time not elapsed)
     /// * Verifies microsecond-to-tick conversion is applied correctly
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_not_elapsed() {
+        reset_fakes();
+
         // Reference time
         let reference_time = 0x10000000;
 
-        // Setup current time slightly ahead but not enough to exceed the span
         // Current is 1000 ticks ahead, requesting 50us = 32*50 = 1600 ticks
-        mock_clock_time().returns(reference_time + 1000);
+        fake_clock::set_ticks(reference_time as u64 + 1000);
 
         // Time span of 50us (should be 1600 ticks at 32MHz)
         let result = clock_time_exceed(reference_time, 50);
 
         // Should return false because not enough time has elapsed
-        assert_eq!(
-            result, false,
-            "Should return false when time has not elapsed"
-        );
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(!result, "Should return false when time has not elapsed");
     }
 
     /// Tests clock_time_exceed function when the time span has elapsed.
@@ -654,7 +767,7 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup current time significantly ahead of reference time
+    /// 1. Seed the tick register significantly ahead of the reference time
     /// 2. Verify function returns true
     ///
     /// # Notes
@@ -662,23 +775,20 @@ mod tests {
     /// * Tests the positive condition (time has elapsed)
     /// * Verifies microsecond-to-tick conversion is applied correctly
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_elapsed() {
+        reset_fakes();
+
         // Reference time
         let reference_time = 0x10000000;
 
-        // Setup current time significantly ahead
         // Current is 2000 ticks ahead, requesting 50us = 32*50 = 1600 ticks
-        mock_clock_time().returns(reference_time + 2000);
+        fake_clock::set_ticks(reference_time as u64 + 2000);
 
         // Time span of 50us (should be 1600 ticks at 32MHz)
         let result = clock_time_exceed(reference_time, 50);
 
         // Should return true because enough time has elapsed
-        assert_eq!(result, true, "Should return true when time has elapsed");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(result, "Should return true when time has elapsed");
     }
 
     /// Tests clock_time_exceed function with timer overflow.
@@ -689,7 +799,8 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup current time with a value that would appear "less" than reference
+    /// 1. Seed the tick register with a value that would appear "less" than the
+    ///    reference time
     /// 2. Verify function correctly detects elapsed time despite wraparound
     ///
     /// # Notes
@@ -697,69 +808,58 @@ mod tests {
     /// * Tests the wraparound condition using u32 arithmetic properties
     /// * This is a critical test case as overflow handling is essential for correct timing
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_overflow() {
+        reset_fakes();
+
         // Reference time
         let reference_time = 0x10000000;
 
-        // Setup case where timer has wrapped around (appears less but actually more)
-        // 0xFFFFFFFE - 0x10000000 + 2 = 0xEFFFFFFE (large positive difference due to wraparound)
-        mock_clock_time().returns(0xFFFFFFFE);
+        // 0xFFFFFFFE - 0x10000000 + 2 = 0xEFFFFFFE (large positive difference)
+        fake_clock::set_ticks(0xFFFFFFFE);
 
         // Check for 10ms elapsed time (should be true when wrapped around)
         let result = clock_time_exceed(reference_time, 10000);
 
         // Should return true because of wraparound arithmetic
-        assert_eq!(result, true, "Should correctly handle timer overflow");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(result, "Should correctly handle timer overflow");
     }
 
-    /// Tests sleep_us function for proper busy-wait behavior.
+    /// Tests sleep_us function for the host timing contract.
     ///
     /// This test verifies that the sleep_us function correctly:
-    /// - Records the starting time
-    /// - Calls clock_time_exceed in a loop until the time span has elapsed
-    /// - Exits after the time span is complete
+    /// - Advances the emulated system tick by the requested duration
+    /// - Records the requested duration for assertion
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock responses for clock_time and clock_time_exceed
-    /// 2. Configure clock_time_exceed to return false initially then true
-    /// 3. Call sleep_us with a specified duration
-    /// 4. Verify correct sequence and number of function calls
+    /// 1. Seed a known tick value
+    /// 2. Call sleep_us with a specified duration
+    /// 3. Verify the tick advanced by `us * 32` and the duration was recorded
     ///
     /// # Notes
     ///
-    /// * Tests the busy-wait loop behavior
-    /// * Verifies proper termination when time elapses
-    /// * Counts exact number of iterations to check loop behavior
+    /// * The busy-wait loop itself is `cfg(target_os = "none")` only; off-target
+    ///   the seam advances instantly and logs the request, so the host contract
+    ///   is exactly "tick advanced once, duration recorded once"
     #[test]
-    #[mry::lock(clock_time, clock_time_exceed)]
     fn test_sleep_us() {
-        // Setup a fixed starting time
-        let start_time = 0x12345678;
-        mock_clock_time().returns(start_time);
+        reset_fakes();
 
-        // Setup clock_time_exceed to initially return false (time not elapsed)
-        // then return true after 3 calls (time has elapsed)
-        let mut exceed_call_count = 0;
-        mock_clock_time_exceed(start_time, 100).returns_with(move |_, _| {
-            exceed_call_count += 1;
-            exceed_call_count > 3 // Return true after 3 calls to exit the loop
-        });
+        // Setup a fixed starting time
+        let start_time: u32 = 0x12345678;
+        fake_clock::set_ticks(start_time as u64);
 
         // Call the function being tested - sleep for 100us
         sleep_us(100);
 
-        // Verify clock_time was called exactly once to record start time
-        mock_clock_time().assert_called(1);
+        // Verify the tick advanced by the full duration (100us * 32 ticks/us)
+        assert_eq!(
+            clock_time(),
+            start_time.wrapping_add(100 * CLOCK_SYS_CLOCK_1US)
+        );
 
-        // Verify clock_time_exceed was called 4 times:
-        // 3 times returning false (continuing the loop)
-        // 1 time returning true (exiting the loop)
-        mock_clock_time_exceed(start_time, 100).assert_called(4);
+        // Verify the duration was recorded exactly once
+        assert_eq!(fake_clock::sleeps(), vec![100]);
     }
 
     /// Tests clock_time_exceed with zero duration.
@@ -776,18 +876,16 @@ mod tests {
     ///
     /// * Tests the edge case of zero time span
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_zero_duration() {
+        reset_fakes();
+
         let reference_time = 1000;
 
         // Any elapsed time should exceed a zero duration
-        mock_clock_time().returns(reference_time + 1);
+        fake_clock::set_ticks(reference_time as u64 + 1);
 
         let result = clock_time_exceed(reference_time, 0);
-        assert_eq!(result, true, "Zero duration should always be exceeded");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(result, "Zero duration should always be exceeded");
     }
 
     /// Tests clock_time_exceed with minimum duration (1us) - not yet exceeded.
@@ -806,22 +904,16 @@ mod tests {
     /// * Tests the minimum meaningful duration
     /// * Verifies tick conversion for short durations
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_not_exceeded() {
+        reset_fakes();
+
         let reference_time = 1000;
 
-        // 1 us at 32MHz = 32 ticks
-        // Current time is 31 ticks ahead (not enough)
-        mock_clock_time().returns(reference_time + 31);
+        // 1 us at 32MHz = 32 ticks; current time is 31 ticks ahead (not enough)
+        fake_clock::set_ticks(reference_time as u64 + 31);
 
         let result = clock_time_exceed(reference_time, 1);
-        assert_eq!(
-            result, false,
-            "1 microsecond should require 32 ticks at 32MHz"
-        );
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(!result, "1 microsecond should require 32 ticks at 32MHz");
     }
 
     /// Tests clock_time_exceed with minimum duration (1us) - exactly met.
@@ -840,21 +932,16 @@ mod tests {
     /// * Test case for the boundary condition
     /// * Verifies that we need to exceed, not just meet, the time
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_exact() {
+        reset_fakes();
+
         let reference_time = 1000;
 
-        // Now advance one more tick (exactly enough)
-        mock_clock_time().returns(reference_time + 32);
+        // Now advance to exactly enough ticks
+        fake_clock::set_ticks(reference_time as u64 + 32);
 
         let result = clock_time_exceed(reference_time, 1);
-        assert_eq!(
-            result, false,
-            "32 ticks should match exactly 1us (not exceed)"
-        );
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(!result, "32 ticks should match exactly 1us (not exceed)");
     }
 
     /// Tests clock_time_exceed with minimum duration (1us) - exceeded.
@@ -873,18 +960,16 @@ mod tests {
     /// * Tests the "just over" condition
     /// * Ensures accuracy at small timescales
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_min_duration_exceeded() {
+        reset_fakes();
+
         let reference_time = 1000;
 
         // Now advance one more tick (just enough to exceed)
-        mock_clock_time().returns(reference_time + 33);
+        fake_clock::set_ticks(reference_time as u64 + 33);
 
         let result = clock_time_exceed(reference_time, 1);
-        assert_eq!(result, true, "33 ticks should exceed 1us requirement");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(result, "33 ticks should exceed 1us requirement");
     }
 
     /// Tests clock_time_exceed with very large duration - not exceeded.
@@ -903,22 +988,20 @@ mod tests {
     /// * Tests the upper limit of time span handling
     /// * Verifies accuracy at large timescales
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_max_duration_not_exceeded() {
-        let reference_time = 1000;
+        reset_fakes();
+
+        let reference_time: u32 = 1000;
 
         // Test with a large but valid duration (close to max representable)
         let large_us = CLOCK_MAX_US - 1000;
         let large_ticks = large_us * CLOCK_SYS_CLOCK_1US;
 
         // Set current time to be less than required
-        mock_clock_time().returns(reference_time + large_ticks - 1);
+        fake_clock::set_ticks(reference_time.wrapping_add(large_ticks - 1) as u64);
 
         let result = clock_time_exceed(reference_time, large_us);
-        assert_eq!(result, false, "Large duration should not be exceeded yet");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(!result, "Large duration should not be exceeded yet");
     }
 
     /// Tests clock_time_exceed with very large duration - exceeded.
@@ -937,22 +1020,20 @@ mod tests {
     /// * Tests the upper boundary of usable time spans
     /// * Verifies proper handling of large tick values
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time_exceed_max_duration_exceeded() {
-        let reference_time = 1000;
+        reset_fakes();
+
+        let reference_time: u32 = 1000;
 
         // Test with a large but valid duration (close to max representable)
         let large_us = CLOCK_MAX_US - 1000;
         let large_ticks = large_us * CLOCK_SYS_CLOCK_1US;
 
         // Set current time to be more than required
-        mock_clock_time().returns(reference_time + large_ticks + 1);
+        fake_clock::set_ticks(reference_time.wrapping_add(large_ticks + 1) as u64);
 
         let result = clock_time_exceed(reference_time, large_us);
-        assert_eq!(result, true, "Large duration should now be exceeded");
-
-        // Verify clock_time was called the expected number of times
-        mock_clock_time().assert_called(1);
+        assert!(result, "Large duration should now be exceeded");
     }
 
     /// Tests that read_ana_32k retries when the high byte changes mid-read.
@@ -964,26 +1045,24 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Return `0x12` for the first high-byte read and `0x13` for both reads of
-    ///    the second attempt
+    /// 1. Queue `0x12` for the first high-byte read and `0x13` for the next three
     /// 2. Return a constant low byte
     /// 3. Call read_ana_32k and verify the second attempt's value is returned
     ///
     /// # Notes
     ///
-    /// * The two low-byte reads prove the retry loop actually ran
-    /// * The final value `0x1334` is only reachable if the stable high byte is
-    ///   combined with the low byte
+    /// * The queued high bytes are consumed in read order, so the returned value
+    ///   `0x1334` is only reachable if the retry loop actually ran: accepting the
+    ///   first attempt would return `0x1234`, and reading a fifth sample would
+    ///   fall through to the zeroed bank and change the result again
     #[test]
-    #[mry::lock(analog_read)]
     fn test_read_ana_32k_retries_on_torn_high_byte() {
+        reset_fakes();
+
         // Attempt 1 reads high (0x12), low, high (0x13) and is rejected; attempt
         // 2 reads high (0x13), low, high (0x13) and is accepted.
-        let mut hi_samples = [0x12u8, 0x13, 0x13, 0x13].into_iter();
-        mock_analog_read(ANA_32K_COUNTER_HI).returns_with(move |_: u8| -> u8 {
-            hi_samples.next().expect("too many high-byte reads")
-        });
-        mock_analog_read(ANA_32K_COUNTER_LO).returns(0x34);
+        FakeAnalog::push_reads(ANA_32K_COUNTER_HI, &[0x12, 0x13, 0x13, 0x13]);
+        FakeAnalog::set(ANA_32K_COUNTER_LO, 0x34);
 
         let value = read_ana_32k();
 
@@ -991,11 +1070,6 @@ mod tests {
             value, 0x1334,
             "should accept only the high byte that stayed stable"
         );
-
-        // Two high-byte reads per attempt, one attempt rejected and one accepted
-        mock_analog_read(ANA_32K_COUNTER_HI).assert_called(4);
-        // One low-byte read per attempt proves the retry loop was exercised
-        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(2);
     }
 
     /// Tests that read_ana_32k stops retrying when the high byte never settles.
@@ -1007,25 +1081,24 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Alternate the high byte on every read so `hi1 != hi2` always
+    /// 1. Queue an alternating high-byte sequence so `hi1 != hi2` always
     /// 2. Call read_ana_32k and verify a best-effort value comes back
     ///
     /// # Notes
     ///
-    /// * 4097 low-byte reads pin the cap; without it this test would never return
+    /// * The queue holds exactly the samples the bounded loop is allowed to
+    ///   consume; without the cap this test would never return
     #[test]
-    #[mry::lock(analog_read)]
     fn test_read_ana_32k_bounded_when_high_byte_never_settles() {
-        let mut hi_reads: u32 = 0;
-        mock_analog_read(ANA_32K_COUNTER_HI).returns_with(move |_: u8| -> u8 {
-            hi_reads += 1;
-            if hi_reads % 2 == 1 {
-                0x12
-            } else {
-                0x13
-            }
-        });
-        mock_analog_read(ANA_32K_COUNTER_LO).returns(0x34);
+        reset_fakes();
+
+        // Two high-byte reads per attempt, and one attempt past the cap.
+        let attempts = XTAL_DETECT_MAX_POLLS as usize + 1;
+        let alternating: Vec<u8> = (0..attempts * 2)
+            .map(|i| if i % 2 == 0 { 0x12 } else { 0x13 })
+            .collect();
+        FakeAnalog::push_reads(ANA_32K_COUNTER_HI, &alternating);
+        FakeAnalog::set(ANA_32K_COUNTER_LO, 0x34);
 
         let value = read_ana_32k();
 
@@ -1033,8 +1106,6 @@ mod tests {
             value, 0x1334,
             "should return the last sample instead of retrying forever"
         );
-        // One attempt past the cap, and every attempt reads the low byte once
-        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(XTAL_DETECT_MAX_POLLS as usize + 1);
     }
 
     /// Tests that is_16mhz_xtal reflects the value stored at boot.
@@ -1049,15 +1120,13 @@ mod tests {
     /// * Restores the power-on default so later tests start from a known state
     #[test]
     fn test_is_16mhz_xtal_reflects_stored_value() {
-        IS_16MHZ_XTAL.store(true, Ordering::Relaxed);
-        assert_eq!(is_16mhz_xtal(), true, "Should report a stored 16MHz result");
+        reset_fakes();
 
-        IS_16MHZ_XTAL.store(false, Ordering::Relaxed);
-        assert_eq!(
-            is_16mhz_xtal(),
-            false,
-            "Should report a stored 12MHz result"
-        );
+        fake_clock::set_xtal_16mhz(true);
+        assert!(is_16mhz_xtal(), "Should report a stored 16MHz result");
+
+        fake_clock::set_xtal_16mhz(false);
+        assert!(!is_16mhz_xtal(), "Should report a stored 12MHz result");
     }
 
     /// Tests that detect_xtal_is_16mhz reports false for a 12MHz measurement.
@@ -1069,47 +1138,40 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock the 32K_RC counter to advance 1 tick to the edge, then 32 ticks
-    /// 2. Mock the system tick to advance 12,500 ticks over the window
-    /// 3. Call the function and verify it reports false
+    /// 1. Script the 32K_RC counter to advance 1 tick to the edge, then 32 ticks
+    /// 2. Script the system tick to advance 12,500 ticks over the window
+    /// 3. Call the function and verify it reports false and restores the register
     ///
     /// # Notes
     ///
     /// * 12,500 is the measured centre of the 12MHz board range
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_below_threshold() {
-        let start_tick = 0x1000_0000u32;
-        let elapsed = 12_500u32;
-
-        mock_read_reg_clk_sel().returns(0x63);
-
-        // 32K_RC samples: the edge (100), the first sample past the edge (101),
-        // then the sample that closes the 32 tick window (133)
-        let mut lo_samples = [100u8, 101, 133].into_iter();
-        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
-            lo_samples.next().expect("unexpected 32K_RC low-byte read")
-        });
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-
-        let mut tick_calls = 0;
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            tick_calls += 1;
-            if tick_calls == 1 {
-                start_tick
-            } else {
-                start_tick + elapsed
-            }
-        });
-        mock_write_reg_clk_sel(Any).returns(());
+        reset_fakes();
+        script_xtal_measurement(12_500);
 
         let result = detect_xtal_is_16mhz();
 
-        assert_eq!(result, false, "12,500 ticks should be reported as 12MHz");
-        mock_read_reg_clk_sel().assert_called(1);
-        mock_read_reg_system_tick().assert_called(2);
+        assert!(!result, "12,500 ticks should be reported as 12MHz");
         // One write to switch sources, one to restore
-        mock_write_reg_clk_sel(Any).assert_called(2);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: MASK_VAL!(
+                        FLD_CLK_SEL::SRC.bits() as u32,
+                        CLOCK_SEL::SEL_16M_PAD as u32
+                    ),
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x63,
+                },
+            ]
+        );
     }
 
     /// Tests that detect_xtal_is_16mhz reports true for a 16MHz measurement.
@@ -1121,34 +1183,13 @@ mod tests {
     ///
     /// * 16,400 is the measured centre of the 16MHz board range
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_above_threshold() {
-        let start_tick = 0x2000_0000u32;
-        let elapsed = 16_400u32;
-
-        mock_read_reg_clk_sel().returns(0x63);
-
-        let mut lo_samples = [100u8, 101, 133].into_iter();
-        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
-            lo_samples.next().expect("unexpected 32K_RC low-byte read")
-        });
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-
-        let mut tick_calls = 0;
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            tick_calls += 1;
-            if tick_calls == 1 {
-                start_tick
-            } else {
-                start_tick + elapsed
-            }
-        });
-        mock_write_reg_clk_sel(Any).returns(());
+        reset_fakes();
+        script_xtal_measurement(16_400);
 
         let result = detect_xtal_is_16mhz();
 
-        assert_eq!(result, true, "16,400 ticks should be reported as 16MHz");
-        mock_read_reg_system_tick().assert_called(2);
+        assert!(result, "16,400 ticks should be reported as 16MHz");
     }
 
     /// Tests the exact threshold boundary of detect_xtal_is_16mhz.
@@ -1160,39 +1201,19 @@ mod tests {
     ///
     /// * The threshold is inclusive, so a count of exactly 14,500 is 16MHz
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_at_threshold() {
         assert_eq!(
             XTAL_DETECT_16MHZ_THRESHOLD, 14_500,
             "the documented threshold must not drift"
         );
 
-        let start_tick = 0x3000_0000u32;
-        let elapsed = XTAL_DETECT_16MHZ_THRESHOLD;
-
-        mock_read_reg_clk_sel().returns(0x63);
-
-        let mut lo_samples = [100u8, 101, 133].into_iter();
-        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
-            lo_samples.next().expect("unexpected 32K_RC low-byte read")
-        });
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-
-        let mut tick_calls = 0;
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            tick_calls += 1;
-            if tick_calls == 1 {
-                start_tick
-            } else {
-                start_tick + elapsed
-            }
-        });
-        mock_write_reg_clk_sel(Any).returns(());
+        reset_fakes();
+        script_xtal_measurement(XTAL_DETECT_16MHZ_THRESHOLD);
 
         let result = detect_xtal_is_16mhz();
 
-        assert_eq!(
-            result, true,
+        assert!(
+            result,
             "A count exactly at the threshold should be reported as 16MHz"
         );
     }
@@ -1206,8 +1227,8 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Return `0x63` (divider 3, 32MHz pad) from read_reg_clk_sel
-    /// 2. Record every write_reg_clk_sel value in call order
+    /// 1. Seed `reg_clk_sel` with `0x63` (divider 3, 32MHz pad)
+    /// 2. Record every `reg_clk_sel` write in call order
     /// 3. Verify the writes are [SEL_16M_PAD source byte, previous value]
     ///
     /// # Notes
@@ -1215,7 +1236,6 @@ mod tests {
     /// * The recorded order proves the restore is the second and final write
     /// * A 16,400 tick count is used so the measurement completes normally
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_restores_previous_clk_sel() {
         let previous = 0x63u8;
         let measurement_src = MASK_VAL!(
@@ -1223,39 +1243,29 @@ mod tests {
             CLOCK_SEL::SEL_16M_PAD as u32
         ) as u8;
 
-        mock_read_reg_clk_sel().returns(previous);
-
-        let writes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let recorded_writes = Arc::clone(&writes);
-        mock_write_reg_clk_sel(Any).returns_with(move |value: u8| {
-            recorded_writes.lock().unwrap().push(value);
-        });
-
-        let mut lo_samples = [100u8, 101, 133].into_iter();
-        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
-            lo_samples.next().expect("unexpected 32K_RC low-byte read")
-        });
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-
-        let start_tick = 0x4000_0000u32;
-        let mut tick_calls = 0;
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            tick_calls += 1;
-            if tick_calls == 1 {
-                start_tick
-            } else {
-                start_tick + 16_400
-            }
-        });
+        reset_fakes();
+        script_xtal_measurement(16_400);
 
         let result = detect_xtal_is_16mhz();
 
-        assert_eq!(result, true, "16,400 ticks should be reported as 16MHz");
+        assert!(result, "16,400 ticks should be reported as 16MHz");
         assert_eq!(
-            *writes.lock().unwrap(),
-            vec![measurement_src, previous],
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: measurement_src as u32,
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: previous as u32,
+                },
+            ],
             "detection must restore the previously read reg_clk_sel value"
         );
+        assert_eq!(FakeMmio::reg8(CLK_SEL), previous);
     }
 
     /// Tests that detect_xtal_is_16mhz fails safe when the 32K_RC counter stalls.
@@ -1277,34 +1287,46 @@ mod tests {
     /// * Without the fail-safe the 16,400 tick reading would be reported as
     ///   16MHz; without the bounds the test would never return
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_reports_12mhz_when_32k_stalls() {
-        mock_read_reg_clk_sel().returns(0x63);
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-        mock_analog_read(ANA_32K_COUNTER_LO).returns(100);
-
-        let start_tick = 0x5000_0000u32;
-        let mut tick_calls = 0;
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            tick_calls += 1;
-            if tick_calls == 1 {
-                start_tick
+        reset_fakes();
+        FakeAnalog::set(ANA_32K_COUNTER_HI, 0);
+        FakeAnalog::set(ANA_32K_COUNTER_LO, 100);
+        FakeMmio::set_reg8(CLK_SEL, 0x63);
+        FakeMmio::on_read32(SYSTEM_TICK, |call_idx| {
+            if call_idx == 0 {
+                0x5000_0000
             } else {
-                start_tick + 16_400
+                0x5000_0000 + 16_400
             }
         });
-        mock_write_reg_clk_sel(Any).returns(());
+        FakeMmio::clear_writes();
 
         let result = detect_xtal_is_16mhz();
 
-        assert_eq!(
-            result, false,
+        assert!(
+            !result,
             "an incomplete 32K_RC window must report the 12MHz default"
         );
         // One write to switch sources, one to restore
-        mock_write_reg_clk_sel(Any).assert_called(2);
-        // Two polls for the edge plus the cap on each loop
-        mock_analog_read(ANA_32K_COUNTER_LO).assert_called(2 * XTAL_DETECT_MAX_POLLS as usize + 2);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: MASK_VAL!(
+                        FLD_CLK_SEL::SRC.bits() as u32,
+                        CLOCK_SEL::SEL_16M_PAD as u32
+                    ),
+                },
+                RegWrite {
+                    addr: CLK_SEL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x63,
+                },
+            ],
+            "the timeout path must still restore reg_clk_sel"
+        );
     }
 
     /// Tests that detect_xtal_is_16mhz ignores a backward 32K_RC glitch.
@@ -1316,202 +1338,186 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Emit the edge (100), a sample past it (101), a backward glitch (99),
+    /// 1. Queue the edge (100), a sample past it (101), a backward glitch (99),
     ///    then one incrementing sample per poll
-    /// 2. Model the system tick counter as proportional to the number of 32K_RC
-    ///    samples the measurement actually consumed (~512 system ticks per 32K
-    ///    tick, i.e. a 16MHz part)
-    /// 3. Verify the result is true
+    /// 2. Model the system tick counter as a 16MHz measurement
+    /// 3. Verify the result is true and the queue was fully consumed
     ///
     /// # Notes
     ///
     /// * Without the guard the glitch wraps to a delta of 65,534, closes the
-    ///   window after three samples and reads ~512 ticks, i.e. 12MHz
+    ///   window after three samples and leaves most of the queue behind; the
+    ///   trailing read observes the leftover sample instead of the zeroed bank
     #[test]
-    #[mry::lock(analog_read, read_reg_clk_sel, write_reg_clk_sel, read_reg_system_tick)]
     fn test_detect_xtal_is_16mhz_ignores_backward_glitch() {
-        // ~16MHz of system clock per 32K_RC tick
-        const SYS_TICKS_PER_32K_TICK: u32 = 512;
+        reset_fakes();
 
-        let start_tick = 0x6000_0000u32;
-        let samples_read = Arc::new(AtomicU32::new(0));
-
-        mock_read_reg_clk_sel().returns(0x63);
-        mock_analog_read(ANA_32K_COUNTER_HI).returns(0);
-
-        let mut call: u32 = 0;
-        let counted = Arc::clone(&samples_read);
-        mock_analog_read(ANA_32K_COUNTER_LO).returns_with(move |_: u8| -> u8 {
-            call += 1;
-            counted.fetch_add(1, Ordering::Relaxed);
-            match call {
-                1 => 100, // edge
-                2 => 101, // first sample past the edge
-                3 => 99,  // backward glitch: 99 - 101 wraps to 65,534
-                n => (100 + n) as u8,
+        // 32K_RC samples in read order: edge, first sample past it, glitch, then
+        // one incrementing sample per poll (104, 105, ... 133).
+        let mut samples = vec![100u8, 101, 99];
+        samples.extend(104u8..=133);
+        FakeAnalog::push_reads(ANA_32K_COUNTER_LO, &samples);
+        FakeAnalog::set(ANA_32K_COUNTER_HI, 0);
+        FakeMmio::set_reg8(CLK_SEL, 0x63);
+        FakeMmio::on_read32(SYSTEM_TICK, |call_idx| {
+            if call_idx == 0 {
+                0x6000_0000
+            } else {
+                0x6000_0000 + 16_400
             }
         });
-
-        let counted = Arc::clone(&samples_read);
-        mock_read_reg_system_tick().returns_with(move || -> u32 {
-            start_tick + counted.load(Ordering::Relaxed) * SYS_TICKS_PER_32K_TICK
-        });
-        mock_write_reg_clk_sel(Any).returns(());
+        FakeMmio::clear_writes();
 
         let result = detect_xtal_is_16mhz();
 
+        assert!(result, "a backward glitch must not truncate the 32K window");
+        // The bank byte is 0, so an empty queue is the only way this read can
+        // return 0: every queued sample must have been consumed.
         assert_eq!(
-            result, true,
-            "a backward glitch must not truncate the 32K window"
-        );
-        // The window completed, so the samples span the full 32 ticks; a
-        // truncated window would stop after the glitch (three samples)
-        assert!(
-            samples_read.load(Ordering::Relaxed) >= XTAL_DETECT_WINDOW_32K_TICKS as u32,
+            FakeAnalog::get(ANA_32K_COUNTER_LO),
+            0,
             "the ignored glitch should cost one poll, not the window"
         );
     }
 
-    // Helper function to reset static variables for testing without using unsafe
-    fn reset_static_vars() {
-        CLOCK_TIME_UPPER.store(0, Ordering::Relaxed);
-        LAST_CLOCK_TIME.store(0, Ordering::Relaxed);
-    }
-
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time64_no_overflow() {
-        // Arrange
-        reset_static_vars();
+        reset_fakes();
 
-        // Set initial value
-        let initial_value = 1000;
-        LAST_CLOCK_TIME.store(initial_value, Ordering::Relaxed);
+        // The accumulator last saw 1000; the counter has moved 100 ticks on.
+        fake_clock::set_ticks(1000);
+        move_tick_register(1100);
 
-        // Simulate non-overflow case
-        let next_value = initial_value + 100;
-
-        // Mock clock_time with the correct format
-        mock_clock_time().returns(next_value);
-
-        // Act
         let result = clock_time64();
 
-        // Assert
-        assert_eq!(result, next_value as u64);
+        assert_eq!(result, 1100);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
-        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), next_value);
-        mock_clock_time().assert_called(1);
+        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 1100);
     }
 
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time64_with_overflow() {
-        // Arrange
-        reset_static_vars();
+        reset_fakes();
 
-        // Set up overflow scenario
-        let initial_value = 0xFFFFFF00_u32;
-        LAST_CLOCK_TIME.store(initial_value, Ordering::Relaxed);
+        // The counter was near the top of its range, then wrapped to 100.
+        fake_clock::set_ticks(0xFFFFFF00);
+        move_tick_register(100);
 
-        // Simulate overflow: next value will be less than previous
-        let next_value = 100_u32;
-
-        // Mock clock_time with the correct format
-        mock_clock_time().returns(next_value);
-
-        // Act
         let result = clock_time64();
 
-        // Assert
         // The upper 32 bits should be incremented to 1, and lower 32 bits should be our next value
-        assert_eq!(result, (1_u64 << 32) | next_value as u64);
-        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
-        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), next_value);
-        mock_clock_time().assert_called(1);
-    }
-
-    #[test]
-    #[mry::lock(clock_time)]
-    fn test_clock_time64_normal_increment() {
-        // Arrange
-        reset_static_vars();
-        LAST_CLOCK_TIME.store(1000, Ordering::Relaxed);
-        mock_clock_time().returns(1500);
-
-        // Act
-        let result = clock_time64();
-
-        // Assert
-        assert_eq!(result, 1500);
-        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
-        mock_clock_time().assert_called(1);
-    }
-
-    #[test]
-    #[mry::lock(clock_time)]
-    fn test_clock_time64_first_overflow() {
-        // Arrange
-        reset_static_vars();
-        LAST_CLOCK_TIME.store(0xFFFFFF00, Ordering::Relaxed);
-        mock_clock_time().returns(100);
-
-        // Act
-        let result = clock_time64();
-
-        // Assert
         assert_eq!(result, (1_u64 << 32) | 100);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
-        mock_clock_time().assert_called(1);
+        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 100);
     }
 
     #[test]
-    #[mry::lock(clock_time)]
-    fn test_clock_time64_after_overflow() {
-        // Arrange
-        reset_static_vars();
-        LAST_CLOCK_TIME.store(100, Ordering::Relaxed);
-        CLOCK_TIME_UPPER.store(1, Ordering::Relaxed);
-        mock_clock_time().returns(200);
+    fn test_clock_time64_normal_increment() {
+        reset_fakes();
 
-        // Act
+        fake_clock::set_ticks(1000);
+        move_tick_register(1500);
+
         let result = clock_time64();
 
-        // Assert
+        assert_eq!(result, 1500);
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_clock_time64_first_overflow() {
+        reset_fakes();
+
+        fake_clock::set_ticks(0xFFFFFF00);
+        move_tick_register(100);
+
+        let result = clock_time64();
+
+        assert_eq!(result, (1_u64 << 32) | 100);
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_clock_time64_after_overflow() {
+        reset_fakes();
+
+        // Already one wrap deep, and moving forward inside the same epoch.
+        fake_clock::set_ticks((1_u64 << 32) | 100);
+        move_tick_register(200);
+
+        let result = clock_time64();
+
         assert_eq!(result, (1_u64 << 32) | 200);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
-        mock_clock_time().assert_called(1);
     }
 
     #[test]
-    #[mry::lock(clock_time)]
     fn test_clock_time64_second_overflow() {
-        // Arrange
-        reset_static_vars();
-        LAST_CLOCK_TIME.store(0xFFFFFF00, Ordering::Relaxed);
-        CLOCK_TIME_UPPER.store(1, Ordering::Relaxed);
-        mock_clock_time().returns(300);
+        reset_fakes();
 
-        // Act
+        // One wrap deep and near the top of the range again.
+        fake_clock::set_ticks((1_u64 << 32) | 0xFFFFFF00);
+        move_tick_register(300);
+
         let result = clock_time64();
 
-        // Assert
         assert_eq!(result, (2_u64 << 32) | 300);
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 2);
-        mock_clock_time().assert_called(1);
     }
 
     #[test]
-    fn test_reset_clock_time64_for_test_clears_state() {
+    fn test_fake_clock_reset_clears_state() {
+        reset_fakes();
+
         // Arrange: leave non-zero accumulator state behind, as a prior proof test would
         CLOCK_TIME_UPPER.store(7, Ordering::Relaxed);
         LAST_CLOCK_TIME.store(0x1234_5678, Ordering::Relaxed);
+        move_tick_register(0xDEAD_BEEF);
+        sleep_us(5);
 
         // Act
-        reset_clock_time64_for_test();
+        fake_clock::reset();
 
         // Assert
         assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 0);
         assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 0);
+        assert_eq!(clock_time(), 0);
+        assert!(fake_clock::sleeps().is_empty());
+    }
+
+    #[test]
+    fn test_fake_clock_advance_ticks_wraps_low_word_once() {
+        reset_fakes();
+
+        // Last observation sits at the top of the low word; `advance_ticks`
+        // rolls the register over but deliberately leaves LAST_CLOCK_TIME
+        // alone, so `clock_time64` sees one wrap and bumps the upper word once.
+        fake_clock::set_ticks(0xFFFF_FFF0);
+        fake_clock::advance_ticks(0x20);
+
+        let result = clock_time64();
+
+        assert_eq!(result, (1_u64 << 32) | 0x10);
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
+        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 0x10);
+
+        // A second read observes no further wrap.
+        assert_eq!(clock_time64(), (1_u64 << 32) | 0x10);
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_fake_clock_advance_ticks_carries_multiple_wraps() {
+        reset_fakes();
+
+        // A delta spanning more than one low-word period must add every whole
+        // 32-bit wrap to the upper word in the same `advance_ticks` call.
+        fake_clock::advance_ticks(0x3_0000_0020);
+
+        let result = clock_time64();
+
+        assert_eq!(result, (3_u64 << 32) | 0x20);
+        assert_eq!(CLOCK_TIME_UPPER.load(Ordering::Relaxed), 3);
+        assert_eq!(LAST_CLOCK_TIME.load(Ordering::Relaxed), 0x20);
     }
 }

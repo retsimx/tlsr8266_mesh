@@ -32,25 +32,25 @@ use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_MESH_OPERATIONS_BL
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS, MAC_ID, MAX_MESH_NAME_LEN};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
 use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{
     factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason,
 };
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{
-    clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
-};
-use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
-use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
 use heapless::Vec;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{
+    clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
+};
+use tlsr8266_hal::mcu::gpio::{gpio_set_func, AS_GPIO};
+use tlsr8266_hal::mcu::irq_i::irq_disable;
+use tlsr8266_hal::pm::{light_sw_reboot, usb_dp_pullup_en};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -120,12 +120,12 @@ fn cfg_led_event(e: u32) {
 #[cfg_attr(test, mry::mry)]
 pub fn light_hw_timer_config() {
     // Enable timer1 interrupts for controlling light transitions
-    crate::sdk::mcu::irq_i::irq_enable_tmr1();
-    crate::sdk::mcu::timer::tmr1_configure(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
+    tlsr8266_hal::mcu::irq_i::irq_enable_tmr1();
+    tlsr8266_hal::mcu::timer::tmr1_configure(CLOCK_SYS_CLOCK_1S / 120); // ~ 120hz
 
     // enable timer0 interrupt for tracking clock_time overflow
-    crate::sdk::mcu::irq_i::irq_enable_tmr0();
-    crate::sdk::mcu::timer::tmr0_configure_and_enable(CLOCK_SYS_CLOCK_1S);
+    tlsr8266_hal::mcu::irq_i::irq_enable_tmr0();
+    tlsr8266_hal::mcu::timer::tmr0_configure_and_enable(CLOCK_SYS_CLOCK_1S);
 }
 
 #[cfg_attr(test, mry::mry)]
@@ -417,7 +417,7 @@ pub fn rf_link_response_callback(
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
             OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
-            crate::sdk::pm::set_reboot_ota_active(true);
+            tlsr8266_hal::pm::set_reboot_ota_active(true);
         }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
@@ -585,21 +585,28 @@ mod tests {
     };
     use crate::sdk::factory_reset::mock_factory_reset_cnt_check;
     use crate::sdk::factory_reset::mock_factory_reset_handle;
-    use crate::sdk::mcu::analog::{analog_read, mock_analog_read};
-    use crate::sdk::mcu::clock::{
-        clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
-        CLOCK_SYS_CLOCK_1US,
-    };
-    use crate::sdk::mcu::gpio::mock_gpio_set_func;
-    use crate::sdk::pm::mock_light_sw_reboot;
-    use crate::sdk::pm::mock_usb_dp_pullup_en;
     use crate::vendor_light::mock_vendor_set_adv_data;
     use core::sync::atomic::Ordering;
     use futures::executor::block_on;
     use mesh_protocol::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use mry::Any;
+    use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{FLD_IRQ, FLD_TMR};
+
+    /// `reg_pwdn_ctrl`: written by `mcu_trigger_reboot`.
+    const REG_PWDN_CTRL: u32 = 0x6f;
+    /// `reg_gpio_gpio_func` plus the port C register offset (`(pin >> 8) << 3`).
+    const REG_GPIO_PC_FUNC: u32 = 0x586 + 0x10;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank, analog plane and clock.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
+    }
 
     // --- Helper Functions ---
 
@@ -726,7 +733,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(clock_time)]
     fn test_proc_led_initializes_new_event() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -737,7 +743,7 @@ mod tests {
         LED_CONTROLLER.blink_count.set(0);
 
         let test_time = 1000000u32;
-        mock_clock_time().returns(test_time);
+        fake_clock::set_ticks(test_time as u64);
 
         // Execute
         proc_led();
@@ -769,13 +775,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_toggles_led_state_on_timing() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -800,8 +800,7 @@ mod tests {
 
         // Simulate time passing enough to trigger LED on
         let new_time = LED_CONTROLLER.timing_tick.get() + LED_CONTROLLER.off_duration_us.get() + 1;
-        mock_clock_time().returns(new_time);
-        mock_clock_time().returns(new_time); // Called for timing check and update
+        fake_clock::set_ticks(new_time as u64);
 
         // Execute
         proc_led();
@@ -812,13 +811,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_continues_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -843,7 +836,7 @@ mod tests {
         LED_CONTROLLER.pattern_number.set(0);
 
         // Simulate time passing enough to trigger LED on
-        mock_clock_time().returns(100000);
+        fake_clock::set_ticks(100_000);
 
         // Execute
         proc_led();
@@ -871,13 +864,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_completes_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -902,8 +889,7 @@ mod tests {
 
         // Simulate time passing
         let new_time = LED_CONTROLLER.timing_tick.get() + LED_CONTROLLER.off_duration_us.get() + 1;
-        mock_clock_time().returns(new_time);
-        mock_clock_time().returns(new_time);
+        fake_clock::set_ticks(new_time as u64);
 
         // Execute
         proc_led();
@@ -919,13 +905,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_adjusts_ww_light() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -954,8 +934,7 @@ mod tests {
         // Timing condition: clock_time() - timing_tick >= (is_on != 0 ? on_duration : off_duration)
         // Since is_on=0, we need: clock_time() - 1000 >= off_duration
         let new_time = LED_CONTROLLER.timing_tick.get() + LED_CONTROLLER.off_duration_us.get() + 1;
-        mock_clock_time().returns(new_time);
-        mock_clock_time().returns(new_time); // Called again for timing_tick update
+        fake_clock::set_ticks(new_time as u64);
 
         // Execute
         proc_led();
@@ -972,13 +951,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_adjusts_led_bit5() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -1008,8 +981,7 @@ mod tests {
         let new_time = LED_CONTROLLER.timing_tick.get()
             + LED_CONTROLLER.on_duration_us.get()
             + 100 * CLOCK_SYS_CLOCK_1US;
-        mock_clock_time().returns(new_time);
-        mock_clock_time().returns(new_time);
+        fake_clock::set_ticks(new_time as u64);
 
         // Execute
         proc_led();
@@ -1027,13 +999,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        clock_time,
-        light_adjust_cw,
-        light_adjust_ww,
-        light_onoff_hw,
-        is_light_off
-    )]
+    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_skips_adjustment_when_both_durations_zero() {
         // Reset LED_CONTROLLER to clean state
         reset_led_controller();
@@ -1058,8 +1024,7 @@ mod tests {
 
         // Simulate time passing - timing condition will be true since 0 - 0 >= 0
         let new_time = LED_CONTROLLER.timing_tick.get() + 1;
-        mock_clock_time().returns(new_time);
-        mock_clock_time().returns(new_time);
+        fake_clock::set_ticks(new_time as u64);
 
         // Execute
         proc_led();
@@ -1075,7 +1040,6 @@ mod tests {
     // --- Tests for light_auth_check ---
 
     #[test]
-    #[mry::lock(clock_time_exceed)]
     fn test_light_auth_check_clears_timestamp_on_timeout() {
         // This test verifies authentication timeout when security is enabled
 
@@ -1087,7 +1051,9 @@ mod tests {
         PAIR_LOGIN_OK.set(false);
         BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(1000000);
 
-        mock_clock_time_exceed(Any, Any).returns(true);
+        // The authentication window is 60 s: park the tick past it.
+        reset_fakes();
+        fake_clock::set_ticks(1_000_000 + AUTH_TIME as u64 * 1000 * 1000 * 32 + 1);
 
         // Execute
         light_auth_check();
@@ -1722,12 +1688,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        parse_ble_packet_op_params,
-        flash_erase_sector,
-        flash_write_page,
-        light_sw_reboot
-    )]
+    #[mry::lock(parse_ble_packet_op_params, flash_erase_sector, flash_write_page)]
     fn test_rf_link_data_callback_set_mac_addr() {
         // This test verifies MAC address setting and reboot
 
@@ -1749,7 +1710,8 @@ mod tests {
         ));
         mock_flash_erase_sector(Any).returns(());
         mock_flash_write_page(Any, Any, Any).returns(());
-        mock_light_sw_reboot().returns(());
+
+        reset_fakes();
 
         // Execute
         rf_link_data_callback(&packet);
@@ -1757,7 +1719,12 @@ mod tests {
         // Verify
         mock_flash_erase_sector(Any).assert_called(1);
         mock_flash_write_page(Any, Any, Any).assert_called(1);
-        mock_light_sw_reboot().assert_called(1);
+        assert!(
+            FakeMmio::writes()
+                .iter()
+                .any(|write| write.addr == REG_PWDN_CTRL | tlsr8266_pac::REG_BASE_ADDR),
+            "setting the MAC address must reboot the MCU"
+        );
     }
 
     #[test]
@@ -1859,7 +1826,6 @@ mod tests {
     /// `&pkt.op`, placing `vendor_id_lo` at offset 21 (padding slot) and `vendor_id_hi` at
     /// offset 22 — exactly where `val[1]` and `val[2]` read from.
     #[test]
-    #[mry::lock(clock_time)]
     fn test_uart_light_ctrl_to_light_on_integration() {
         use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
         use heapless::Vec;
@@ -1868,7 +1834,7 @@ mod tests {
         DEVICE_ADDRESS.set(0x1234);
 
         // Mock clock_time, which light_slave_tx_command uses to seed the mesh sequence number.
-        mock_clock_time().returns(0x5000);
+        fake_clock::set_ticks(0x5000_u64);
 
         // Step 1: Construct the 13-byte payload that handle_light_ctrl extracts from
         //         msg.data[CTRL_PAYLOAD_RANGE] (bytes 5..18 of a UART LightCtrl message).
@@ -2064,7 +2030,6 @@ mod tests {
         light_check_tick_per_us,
         rf_link_slave_pairing_enable,
         rf_set_power_level_index,
-        usb_dp_pullup_en,
         light_hw_timer_config,
         mesh_pair_init
     )]
@@ -2072,10 +2037,13 @@ mod tests {
         // This test verifies that light_init_default properly initializes mesh configuration
 
         // Setup mocks
+        reset_fakes();
+        // Seed the USB analog register with bit 4 set, so enabling the DP
+        // pull-up is observable as a clear.
+        FakeAnalog::set(0x00, 0xff);
         mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).returns(());
         mock_rf_link_slave_pairing_enable(Any).returns(());
         mock_rf_set_power_level_index(Any).returns(());
-        mock_usb_dp_pullup_en(Any).returns(());
         mock_light_hw_timer_config().returns(());
 
         mock_mesh_pair_init().returns(());
@@ -2100,7 +2068,11 @@ mod tests {
         mock_rf_set_power_level_index(RfPower::Power8dBm as u32).assert_called(1);
 
         // Verify: usb_dp_pullup_en was called with true
-        mock_usb_dp_pullup_en(true).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(0x00),
+            0xef,
+            "enabling the USB DP pull-up must clear bit 4 of the USB analog register"
+        );
 
         // Verify: light_hw_timer_config was called
         mock_light_hw_timer_config().assert_called(1);
@@ -2135,17 +2107,14 @@ mod tests {
         light_check_tick_per_us,
         rf_link_slave_pairing_enable,
         rf_set_power_level_index,
-        usb_dp_pullup_en,
         light_hw_timer_config,
         pwm_set_duty,
         pwm_start,
-        gpio_set_func,
         rf_link_slave_init,
         factory_reset_handle,
         vendor_set_adv_data,
         check_ota_area_startup,
         flash_read_page,
-        analog_read,
         light_onoff_hw,
         device_status_update,
         mesh_pair_init,
@@ -2154,6 +2123,13 @@ mod tests {
     #[test]
     fn test_user_init() {
         // Mock the OTA / mesh / light entry points user_init drives directly.
+        reset_fakes();
+        // Seed the USB analog register (bit 4 = pull-up disabled) and the port C
+        // GPIO-function register, so the real `usb_dp_pullup_en` and
+        // `gpio_set_func` calls below are observable.
+        FakeAnalog::set(0x00, 0xff);
+        FakeMmio::set_reg8(REG_GPIO_PC_FUNC, 0xff);
+
         mock_check_ota_area_startup().returns(());
         mock_mesh_pair_init().returns(());
         mock_mesh_security_enable(Any).returns(());
@@ -2163,14 +2139,12 @@ mod tests {
         // persisted on/off state. Report "no saved entry" (buffer stays 0xFF) and
         // "lamp was not off", then assert both halves of that path ran.
         mock_flash_read_page(Any, Any, Any).returns(());
-        mock_analog_read(Any).returns(0);
         mock_light_onoff_hw(Any).returns(());
 
         // Mock functions that light_init_default calls
         mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).returns(());
         mock_rf_link_slave_pairing_enable(true).returns(());
         mock_rf_set_power_level_index(RfPower::Power8dBm as u32).returns(());
-        mock_usb_dp_pullup_en(true).returns(());
         mock_light_hw_timer_config().returns(());
 
         // Mock functions that user_init calls directly
@@ -2178,8 +2152,6 @@ mod tests {
         mock_pwm_set_duty(1, 10455, 10455).returns(());
         mock_pwm_start(0).returns(());
         mock_pwm_start(1).returns(());
-        mock_gpio_set_func(513, 255).returns(());
-        mock_gpio_set_func(516, 255).returns(());
         mock_rf_link_slave_init(40000).returns(());
         mock_factory_reset_handle().returns(());
         mock_vendor_set_adv_data().returns(());
@@ -2192,19 +2164,27 @@ mod tests {
         mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).assert_called(1);
         mock_rf_link_slave_pairing_enable(true).assert_called(1);
         mock_rf_set_power_level_index(RfPower::Power8dBm as u32).assert_called(1);
-        mock_usb_dp_pullup_en(true).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(0x00),
+            0xef,
+            "user_init must enable the USB DP pull-up"
+        );
         mock_light_hw_timer_config().assert_called(1);
         mock_mesh_pair_init().assert_called(1);
         mock_pwm_set_duty(0, 10455, 0).assert_called(1);
         mock_pwm_set_duty(1, 10455, 10455).assert_called(1);
         mock_pwm_start(0).assert_called(1);
         mock_pwm_start(1).assert_called(1);
-        mock_gpio_set_func(513, 255).assert_called(1);
-        mock_gpio_set_func(516, 255).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg8(REG_GPIO_PC_FUNC),
+            0xfa,
+            "user_init must select the peripheral function for PB0 and PB2"
+        );
         // The luminance store was retrieved (one flash scan chunk) and the lamp
         // on/off state restored from analog memory.
         mock_flash_read_page(Any, Any, Any).assert_called(1);
-        mock_analog_read(Any).assert_called(1);
+        // The zeroed analog bank means the lamp was recorded as on, so the
+        // restore path drives `light_onoff_hw(true)`.
         mock_light_onoff_hw(true).assert_called(1);
         mock_rf_link_slave_init(40000).assert_called(1);
         mock_factory_reset_handle().assert_called(1);
@@ -2218,10 +2198,7 @@ mod tests {
 
     #[test]
     #[mry::lock(
-        clock_time,
-        clock_time64,
         pwm_set_cmp,
-        clock_time_exceed,
         flash_write_page,
         factory_reset_cnt_check,
         mesh_pair_proc_effect
@@ -2234,12 +2211,11 @@ mod tests {
         // again.
         reset_test_globals();
         crate::light_manager::reset_for_test();
-        FakeMmio::reset();
+        reset_fakes();
 
         // Seed a pending luminance save: a colour transition stamps
         // `last_transition_time`.
-        mock_clock_time().returns(1000);
-        mock_clock_time64().returns(0);
+        fake_clock::set_ticks(1000);
         mock_pwm_set_cmp(Any, Any).returns(());
         begin_transition(500, 300, 800);
 
@@ -2254,8 +2230,8 @@ mod tests {
             "begin_transition resets the tick"
         );
 
-        // 5 s have elapsed since that transition.
-        mock_clock_time_exceed(Any, Any).returns(true);
+        // 5 s (160_000_000 ticks) have elapsed since that transition.
+        fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
         mock_flash_write_page(Any, Any, Any).returns(());
         mock_factory_reset_cnt_check().returns(());
         mock_mesh_pair_proc_effect().returns(());
@@ -2269,15 +2245,15 @@ mod tests {
         light_user_func(&mut flash_store);
 
         // Verify the save path ran, and the other three steps of the tick ran.
-        mock_clock_time_exceed(Any, Any).assert_called(1);
         mock_flash_write_page(Any, Any, Any).assert_called(1);
         mock_factory_reset_cnt_check().assert_called(1);
         mock_mesh_pair_proc_effect().assert_called(1);
 
         // A second tick must not save again: `check_light_state_save` cleared the
-        // timer, so it never even asks whether 5 s elapsed.
+        // timer, so it never even asks whether 5 s elapsed. The clock still reads
+        // well past the window, so a second write could only come from a timer
+        // that was not cleared.
         light_user_func(&mut flash_store);
-        mock_clock_time_exceed(Any, Any).assert_called(1);
         mock_flash_write_page(Any, Any, Any).assert_called(1);
         mock_factory_reset_cnt_check().assert_called(2);
         mock_mesh_pair_proc_effect().assert_called(2);
@@ -2325,7 +2301,7 @@ mod tests {
     /// state owned by `light_manager`; the SDK test tree may no longer inject an
     /// application state object.
     #[test]
-    #[mry::lock(clock_time, clock_time64, pwm_set_cmp)]
+    #[mry::lock(pwm_set_cmp)]
     fn test_rf_link_response_callback_to_slave_add_status_layout() {
         use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
 
@@ -2338,11 +2314,10 @@ mod tests {
         DEVICE_STATUS_RECORD_INDEX.set(0);
         SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
 
-        mock_clock_time().returns(1);
-        mock_clock_time64().returns(100);
         mock_pwm_set_cmp(Any, Any).returns(());
 
-        FakeMmio::reset();
+        reset_fakes();
+        fake_clock::set_ticks(1);
         begin_transition(8767, 24000, 16384);
 
         // `begin_transition` runs the real TMR1 HAL helpers, so the fake bank

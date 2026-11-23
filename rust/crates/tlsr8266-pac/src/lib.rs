@@ -586,7 +586,7 @@ regrw!(reg_clk_en1, 0x64, 8);
 regrw!(reg_clk_en2, 0x65, 8);
 
 // CLKEN0: peripheral clock enable (1 = enabled). Written as 0xff by
-// `tbl_cpu_wakeup_init` in pm.rs.
+// `TBL_CPU_WAKEUP_INIT` in pm.rs.
 regrw!(reg_clk_en0, 0x63, 8);
 bitflags! {
     pub struct FLD_CLK0_EN: u8 {

@@ -58,7 +58,7 @@
 use crate::sdk::ble_app::ble_ll_pair::{
     pair_save_key, pair_set_key, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK,
 };
-use crate::sdk::common::sync::SimplifyLS;
+use tlsr8266_hal::common::sync::SimplifyLS;
 
 /// Securely deletes the current mesh network pairing configuration.
 ///

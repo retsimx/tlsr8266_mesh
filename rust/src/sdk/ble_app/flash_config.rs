@@ -28,12 +28,12 @@ use crate::sdk::ble_app::rf_drv_8266::{
     MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_NEXT_POSITION, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
     MESH_GROUP_ADDRESS_NEXT_POSITION,
 };
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::*;
-use crate::sdk::mcu::crypto::{aes_att_encryption, decode_password};
 use crate::sdk::rf_drv::{set_advertisement_manufacturer_data, set_advertisement_mesh_name};
 use mesh_protocol::packet_types::{AdvPrivate, Packet};
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::crypto::{aes_att_encryption, decode_password};
 
 /// Number of connection parameter sets to attempt during negotiation.
 ///
@@ -982,16 +982,74 @@ mod tests {
     use crate::sdk::drivers::flash::{
         mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
     };
-    use crate::sdk::mcu::crypto::{
-        decode_password, encode_password, mock_aes_att_encryption, mock_decode_password,
-        mock_encode_password,
-    };
     use crate::sdk::rf_drv::{
         mock_set_advertisement_manufacturer_data, mock_set_advertisement_mesh_name,
     };
     use mesh_protocol::packet_types::Packet;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_hal::mcu::crypto::fake_crypto::{self, FakeAesMode};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        fake_crypto::reset();
+    }
+
+    /// Datasheet offsets of the AES registers `aes_mmio_run` drives.
+    const REG_AES_CTRL: u32 = 0x540;
+    const REG_AES_DATA: u32 = 0x548;
+
+    /// Last hardware word served by the scripted AES data read hook.
+    static STUB_AES_WORD3: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+    /// `AES_CTRL` bit 2: the operation finished.
+    fn stub_aes_ctrl_done(_idx: usize) -> u8 {
+        4
+    }
+
+    /// Scripted `reg_aes_data` reads: three zero words, then the wanted one.
+    fn stub_aes_data(idx: usize) -> u32 {
+        if idx == 3 {
+            STUB_AES_WORD3.load(core::sync::atomic::Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    /// Restores the default AES transport on drop, so a test that switches to
+    /// `MmioRegisters` cannot leave the register loop installed for the next
+    /// test — not even when it panics (the fake is a process-wide singleton and
+    /// the suite runs `--test-threads=1`).
+    struct AesModeGuard;
+
+    impl Drop for AesModeGuard {
+        fn drop(&mut self) {
+            fake_crypto::reset();
+        }
+    }
+
+    /// Force the next `aes_att_encryption` call to return a block whose first
+    /// four bytes are `word` (little-endian).
+    ///
+    /// `aes_att_encryption` reverses the 16-byte hardware block, so the wanted
+    /// bytes must sit in the last hardware word, byte-swapped; the other three
+    /// words are zero. `FakeAesMode::MmioRegisters` makes the real register
+    /// write/poll/read sequence run against the scripted `FakeMmio` bank. The
+    /// returned guard restores the default transport.
+    fn stub_aes_first_word(word: u32) -> AesModeGuard {
+        reset_host_fakes();
+        fake_crypto::set_mode(FakeAesMode::MmioRegisters);
+        STUB_AES_WORD3.store(word.swap_bytes(), core::sync::atomic::Ordering::Relaxed);
+        FakeMmio::on_read32(REG_AES_DATA, stub_aes_data);
+        FakeMmio::on_read8(REG_AES_CTRL, stub_aes_ctrl_done);
+        AesModeGuard
+    }
 
     /// Creates an aligned [u8; 100] buffer suitable for casting to *const Packet.
     /// Packet requires align(4); a [u8] array on the stack has no alignment guarantee.
@@ -1653,74 +1711,84 @@ mod tests {
     // --- Tests for access_code ---
 
     #[test]
-    #[mry::lock(aes_att_encryption)]
     fn test_access_code_basic_operation() {
+        reset_host_fakes();
+
         // Setup test inputs
         let name = b"TestName";
         let pass = b"TestPassword";
 
-        // Setup mock to return predictable value
-        let mock_result = [
-            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
-            0x77, 0x88,
-        ];
-        mock_aes_att_encryption(Any, Any).returns(mock_result);
-
-        // Call function
+        // Call function (real FIPS-197 AES through the host fake)
         let result = access_code(name, pass);
-
-        // Verify aes_att_encryption was called
-        mock_aes_att_encryption(Any, Any).assert_called(1);
 
         // Verify result is a u32
         assert!(result != 0, "Should return non-zero access code");
+
+        // The code must be a deterministic function of name + password, so a
+        // different password has to produce a different access code.
+        assert_eq!(
+            result,
+            access_code(name, pass),
+            "access_code must be deterministic"
+        );
+        assert_ne!(
+            result,
+            access_code(name, b"OtherPassword"),
+            "a different password must derive a different access code"
+        );
     }
 
     #[test]
-    #[mry::lock(aes_att_encryption)]
     fn test_access_code_handles_short_inputs() {
-        // Test with very short inputs
-        let name = b"Hi";
-        let pass = b"Pw";
+        reset_host_fakes();
 
-        let mock_result = [0xAAu8; 16];
-        mock_aes_att_encryption(Any, Any).returns(mock_result);
+        // Test with very short inputs: both are zero-padded to one AES block,
+        // so the code must equal the one derived from the padded arrays.
+        let mut padded_name = [0u8; 16];
+        padded_name[..2].copy_from_slice(b"Hi");
+        let mut padded_pass = [0u8; 16];
+        padded_pass[..2].copy_from_slice(b"Pw");
 
         // Should not panic
-        let result = access_code(name, pass);
+        let result = access_code(b"Hi", b"Pw");
         assert!(result != 0);
+        assert_eq!(
+            result,
+            access_code(&padded_name, &padded_pass),
+            "short inputs must be zero-padded to a full AES block"
+        );
     }
 
     #[test]
-    #[mry::lock(aes_att_encryption)]
     fn test_access_code_handles_long_inputs() {
+        reset_host_fakes();
+
         // Test with inputs longer than 16 bytes
         let name = b"ThisIsAVeryLongNameThatExceeds16Bytes";
         let pass = b"ThisIsAVeryLongPasswordThatExceeds16Bytes";
 
-        let mock_result = [0xBBu8; 16];
-        mock_aes_att_encryption(Any, Any).returns(mock_result);
-
-        // Should not panic, should truncate to 16 bytes
+        // Should not panic, and must truncate to the first 16 bytes
         let result = access_code(name, pass);
         assert!(result != 0);
+        assert_eq!(
+            result,
+            access_code(&name[..16], &pass[..16]),
+            "inputs longer than one AES block must be truncated"
+        );
     }
 
     #[test]
-    #[mry::lock(aes_att_encryption)]
     fn test_access_code_bit_manipulation_logic() {
-        // Test that the bit manipulation logic is applied
-        // Use a specific pattern that would trigger the bit flipping logic
-
-        // Create a result where the first two bits are both 1 (triggering the logic)
-        let mut mock_result = [0u8; 16];
-        // Set up u32 value with specific bit pattern
-        // The code checks: bit = destbuf[0] >> 1 ^ destbuf[0]
-        // We want to create conditions where multiple consecutive bits are 1
-        let test_value: u32 = 0b11111100000000000000000000000000u32;
-        mock_result[0..4].copy_from_slice(&test_value.to_le_bytes());
-
-        mock_aes_att_encryption(Any, Any).returns(mock_result);
+        // The consecutive-bit-run limiter works on the first four bytes of the
+        // AES output: `bit_pattern = (w >> 1) ^ w` is all ones while the bits of
+        // `w` keep alternating, and the limiter breaks a run longer than five by
+        // flipping the bit at the current scan position.
+        //
+        // `w = 0b101010` makes `bit_pattern` all ones for six positions, so the
+        // limiter flips bit 6 and nothing else (the density pass in stage 3
+        // always sees 16 set bits and never corrects).
+        let raw_first_word: u32 = 0b0000_0000_0000_0000_0000_0000_0010_1010;
+        let _aes_mode = stub_aes_first_word(raw_first_word);
 
         let name = b"Test";
         let pass = b"Test";
@@ -1728,20 +1796,17 @@ mod tests {
         // Call function
         let result = access_code(name, pass);
 
-        // The function should apply bit manipulation logic
-        // We can't predict the exact output without implementing the full algorithm,
-        // but we can verify it returns a value
-        assert!(result != 0);
+        assert_eq!(
+            result,
+            raw_first_word ^ (1 << 6),
+            "the run limiter must flip bit 6 of an alternating six-bit run"
+        );
     }
 
     // --- Tests for pair_update_key ---
 
     #[test]
-    #[mry::lock(
-        aes_att_encryption,
-        set_advertisement_mesh_name,
-        set_advertisement_manufacturer_data
-    )]
+    #[mry::lock(set_advertisement_mesh_name, set_advertisement_manufacturer_data)]
     fn test_pair_update_key_updates_advertisement() {
         // Setup test pairing state
         let mut pair_state = PAIR_STATE.lock();
@@ -1752,8 +1817,6 @@ mod tests {
         drop(pair_state);
 
         // Setup mocks
-        let mock_result = [0x12u8; 16];
-        mock_aes_att_encryption(Any, Any).returns(mock_result);
         mock_set_advertisement_mesh_name(Any).returns(());
         mock_set_advertisement_manufacturer_data(Any).returns(());
 
@@ -1769,11 +1832,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(
-        aes_att_encryption,
-        set_advertisement_mesh_name,
-        set_advertisement_manufacturer_data
-    )]
+    #[mry::lock(set_advertisement_mesh_name, set_advertisement_manufacturer_data)]
     fn test_pair_update_key_handles_null_terminated_name() {
         // Setup pairing state with null-terminated name
         let mut pair_state = PAIR_STATE.lock();
@@ -1783,7 +1842,6 @@ mod tests {
         drop(pair_state);
 
         // Setup mocks
-        mock_aes_att_encryption(Any, Any).returns([0u8; 16]);
         mock_set_advertisement_mesh_name(Any).returns(());
         mock_set_advertisement_manufacturer_data(Any).returns(());
 
@@ -1928,14 +1986,7 @@ mod tests {
 
     /// Test that a single write/read cycle preserves pairing data correctly
     #[test]
-    #[mry::lock(
-        flash_read_page,
-        flash_write_page,
-        flash_erase_sector,
-        pair_update_key,
-        encode_password,
-        decode_password
-    )]
+    #[mry::lock(flash_read_page, flash_write_page, flash_erase_sector, pair_update_key)]
     fn test_pairing_persistence_single_write_read() {
         use std::sync::{Arc, Mutex};
 
@@ -1986,13 +2037,8 @@ mod tests {
 
         mock_pair_update_key().returns(());
 
-        // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
-        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
+        // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
+        // save/load cycle proves the encoded password really round-trips.
 
         // Set test pairing data
         {
@@ -2101,14 +2147,7 @@ mod tests {
 
     /// Test multiple writes use wear-leveling (different offsets)
     #[test]
-    #[mry::lock(
-        flash_read_page,
-        flash_write_page,
-        flash_erase_sector,
-        pair_update_key,
-        encode_password,
-        decode_password
-    )]
+    #[mry::lock(flash_read_page, flash_write_page, flash_erase_sector, pair_update_key)]
     fn test_pairing_persistence_wear_leveling() {
         use std::sync::{Arc, Mutex};
 
@@ -2151,13 +2190,8 @@ mod tests {
 
         mock_pair_update_key().returns(());
 
-        // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
-        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
+        // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
+        // save/load cycle proves the encoded password really round-trips.
 
         // First write
         {
@@ -2221,14 +2255,7 @@ mod tests {
 
     /// Test sector boundary wraparound
     #[test]
-    #[mry::lock(
-        flash_read_page,
-        flash_write_page,
-        flash_erase_sector,
-        pair_update_key,
-        encode_password,
-        decode_password
-    )]
+    #[mry::lock(flash_read_page, flash_write_page, flash_erase_sector, pair_update_key)]
     fn test_pairing_persistence_wraparound() {
         use std::sync::{Arc, Mutex};
 
@@ -2276,13 +2303,8 @@ mod tests {
 
         mock_pair_update_key().returns(());
 
-        // Mock encode/decode_password to return the input data (identity function for testing)
-        mock_encode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
-        mock_decode_password(Any, Any).returns_with(|_key: Vec<u8>, password: Vec<u8>| {
-            password.as_slice().try_into().unwrap()
-        });
+        // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
+        // save/load cycle proves the encoded password really round-trips.
 
         // Write data
         {

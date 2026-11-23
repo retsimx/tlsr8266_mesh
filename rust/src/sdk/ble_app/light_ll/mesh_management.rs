@@ -47,10 +47,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering}
 
 use crate::sdk::ble_app::queues;
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS};
-use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
 use crate::BIT;
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
@@ -60,6 +57,9 @@ use mesh_protocol::mesh_types::{
 };
 use mesh_protocol::packet_types::*;
 use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed};
 
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
@@ -1395,19 +1395,27 @@ mod tests {
     use super::{mock_mesh_node_adv_status, mock_mesh_node_flush_status};
     use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
     use crate::sdk::light::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
-    use crate::sdk::mcu::clock::{
-        clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
-    };
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{mock_read_reg_system_tick, read_reg_system_tick};
-
-    /// Mock wall-clock for sweep tests: ~31 s, far beyond one sweep, and
-    /// deterministic so `Instant::now()` never depends on prior test state.
-    const TEST_NOW_TICKS: u64 = 1_000_000_000;
 
     /// Helper function to reset global mesh state for tests
     fn reset_mesh_state() {
+        // The PAC/HAL host fakes are process-wide singletons: clear them so a
+        // test never inherits another test's register bank, analog bank, clock
+        // or AES transport.
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+
+        // `Instant::now()` on the host reads the fake tick register, and
+        // `LAST_SWEEP` is forced to zero just below, so the clock has to be past
+        // one sweep interval for `mesh_node_flush_status` to do any work.
+        fake_clock::set_ticks(10 * 32_000_000);
+
         // Global queues outlive every test in this process: clear them (and the
         // UART reporting flag) before seeding per-test state.
         queues::reset_for_test();
@@ -2155,12 +2163,7 @@ mod tests {
     ///
     /// Verifies that the function can be called without crashing.
     #[test]
-    #[mry::lock(read_reg_system_tick, clock_time_exceed)]
     fn test_mesh_node_flush_status() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x10000000);
-        mock_clock_time_exceed(Any, Any).returns(false); // Rate limited, no action
-
         reset_mesh_state();
 
         // Add a node to the mesh
@@ -2168,7 +2171,7 @@ mod tests {
         let packet = vec![test_node];
         mesh_node_update_status(&packet);
 
-        // Call flush status (should be rate limited and do nothing)
+        // A sweep with no timed-out node must not emit anything
         mesh_node_flush_status();
 
         // Test passes if no crash occurs
@@ -2182,18 +2185,25 @@ mod tests {
     ///
     /// Verifies that the function returns early when rate limited.
     #[test]
-    #[mry::lock(clock_time_exceed)]
     fn test_mesh_send_online_status_rate_limited() {
-        // Setup mock to simulate rate limiting
-        mock_clock_time_exceed(Any, Any).returns(false); // Rate limited
-
         reset_mesh_state();
 
-        // Call should be rate limited and return early
+        // `LAST_STATUS_TIME` is a function-local static, so it survives into the
+        // next test. Calling once at tick 0 either sends (and stores 0) or was
+        // already rate limited with 0 stored; either way it holds 0 afterwards.
+        fake_clock::set_ticks(0);
+        mesh_send_online_status();
+        let queued = crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len();
+
+        // Same tick again: clock_time_exceed(0, interval) is 0 > interval, i.e.
+        // false, so the call must return before queueing anything.
         mesh_send_online_status();
 
-        // Verify the function was called (should return early due to rate limiting)
-        mock_clock_time_exceed(Any, Any).assert_called(1);
+        assert_eq!(
+            crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(),
+            queued,
+            "a second status request inside the interval must not be queued"
+        );
     }
 
     /// Tests mesh_send_online_status when not rate limited.
@@ -2202,20 +2212,21 @@ mod tests {
     /// and queues the resulting status advertisement on the module-level mesh
     /// TX queue.
     #[test]
-    #[mry::lock(
-        clock_time_exceed,
-        clock_time,
-        mesh_node_flush_status,
-        mesh_node_adv_status
-    )]
+    #[mry::lock(mesh_node_flush_status, mesh_node_adv_status)]
     fn test_mesh_send_online_status_function_sequence() {
         // Setup mocks
-        mock_clock_time_exceed(Any, Any).returns(true); // Not rate limited
-        mock_clock_time().returns(12345); // Mock the timestamp update
         mock_mesh_node_flush_status().returns(()); // Mock flush status
         mock_mesh_node_adv_status(Any).returns(0); // Mock advertisement status
 
         reset_mesh_state();
+
+        // Drive the interval: tick 0 normalises LAST_STATUS_TIME to 0, then a
+        // tick near u32::MAX makes the elapsed span exceed the configured
+        // interval so the send path runs.
+        fake_clock::set_ticks(0);
+        mesh_send_online_status();
+        crate::sdk::ble_app::queues::reset_for_test();
+        fake_clock::set_ticks(u32::MAX as u64);
 
         // Call should proceed through all mocked steps
         mesh_send_online_status();
@@ -3084,10 +3095,8 @@ mod tests {
 
     /// Tests that a timed-out node triggers a UART status send from mesh_node_flush_status.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_timeout_sends_uart() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
 
         // One remote sitting exactly at the deadline for MESH_NODE_MAX=2 (6 sweeps).
         let deadline = mesh_status_offline_sweeps(2);
@@ -3113,10 +3122,8 @@ mod tests {
     /// Tests that mesh_node_flush_status sends nothing when no nodes have timed out,
     /// and that a fresh node only ages by one sweep.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_no_timeout_no_uart() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
 
         {
             let mut st = MESH_NODE_ST.lock();
@@ -3142,10 +3149,8 @@ mod tests {
 
     /// Tests that mesh_node_flush_status sends online=0 (offline) in the NodeStatus packet.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_timeout_sends_offline_format() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
 
         let deadline = mesh_status_offline_sweeps(2);
         {
@@ -3180,10 +3185,8 @@ mod tests {
     /// offline on the next sweep, and only that node. (The counter cannot wrap:
     /// an online `miss` is reset to 0 before it can exceed the deadline.)
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_deadline_boundary() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
 
         let deadline = mesh_status_offline_sweeps(3); // ~6
         {
@@ -3270,10 +3273,8 @@ mod tests {
     /// More than 9 nodes timing out in one sweep must all produce offline
     /// events (regression: the old fixed 9-entry buffer silently dropped them).
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_emits_all_timeouts_over_nine() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
         DEVICE_ADDRESS.set(0x01);
 
         let n = 15usize;
@@ -3322,10 +3323,8 @@ mod tests {
     /// ceil(63/13) = 5 batches, zero every age, and set one mask bit per node.
     /// Guards the single-pass resumable cursor introduced for M3.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_node_flush_status_full_table_all_timeout() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
         DEVICE_ADDRESS.set(0x01);
 
         let remotes = MESH_NODE_MAX_NUM - 1; // 63 remotes + self
@@ -3386,10 +3385,8 @@ mod tests {
     /// At M=64 the derived deadline is 26 sweeps (13 s): a node aged 10 sweeps
     /// (5 s) must remain online after a sweep.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_status_deadline_five_second_gap_stays_online() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
         DEVICE_ADDRESS.set(0x01);
 
         let deadline = mesh_status_offline_sweeps(64);
@@ -3430,10 +3427,8 @@ mod tests {
     /// later accepted update revives it (miss = 1) and it does not immediately
     /// re-timeout.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_mesh_status_deadline_offline_then_revive() {
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
         DEVICE_ADDRESS.set(0x01);
 
         let deadline = mesh_status_offline_sweeps(64);
@@ -3546,12 +3541,10 @@ mod tests {
     /// Offline integration: observe via update, time out via the derived
     /// deadline, then report; report must surface the node with sn forced to 0.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_status_pipeline_update_timeout_then_report_offline() {
         use crate::sdk::ble_app::irq::mesh_node_report_status;
 
         reset_mesh_state();
-        mock_clock_time64().returns(TEST_NOW_TICKS);
         DEVICE_ADDRESS.set(0x01);
         MESH_NODE_MAX.set(1);
         MESH_NODE_REPORT_ENABLE.set(true);

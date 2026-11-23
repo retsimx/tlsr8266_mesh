@@ -17,20 +17,20 @@ use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY,
 };
 use crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE;
-use crate::sdk::common::bit::ONES_32;
-use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{
     flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE,
 };
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
-use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
-use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::watchdog::wd_clear;
-use crate::sdk::pm::light_sw_reboot;
 use mesh_protocol::crc::crc16;
 use mesh_protocol::packet_types::{Packet, PacketAttData};
+use tlsr8266_hal::common::bit::ONES_32;
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
+use tlsr8266_hal::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
+use tlsr8266_hal::mcu::irq_i::irq_disable;
+use tlsr8266_hal::mcu::watchdog::wd_clear;
+use tlsr8266_hal::pm::light_sw_reboot;
 
 /// The mutable OTA runtime scalars shared by the GATT write handler, the mesh
 /// OTA command path and the system-timer interrupt.
@@ -118,7 +118,7 @@ pub fn handle_ota_update() {
 
     // First configure the system clock. This lets delays work as expected for reading/writing
     // flash
-    crate::sdk::pm::ota_enable_clocks_for_copy();
+    tlsr8266_hal::pm::ota_enable_clocks_for_copy();
     irq_disable();
 
     // Read the first page of the new firmware
@@ -157,7 +157,7 @@ pub fn handle_ota_update() {
     flash_write_page(FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
     // Force reboot
-    crate::sdk::pm::mcu_trigger_reboot();
+    tlsr8266_hal::pm::mcu_trigger_reboot();
 
     #[allow(clippy::empty_loop)]
     loop {}
@@ -216,7 +216,7 @@ pub fn rf_link_slave_data_ota(data: &Packet) {
         }
 
         OTA_UPDATE_IN_PROGRESS.set(true);
-        crate::sdk::pm::set_reboot_ota_active(true);
+        tlsr8266_hal::pm::set_reboot_ota_active(true);
         if SLAVE_READ_STATUS_BUSY.get() != 0 {
             rf_link_slave_read_status_stop();
         }
@@ -422,7 +422,7 @@ pub fn rf_ota_set_flag() {
 
 /// Signal a successful OTA with the LED pattern.
 pub fn rf_led_ota_ok() {
-    crate::sdk::pm::blink_ota_led_ok(OTA_LED as u32);
+    tlsr8266_hal::pm::blink_ota_led_ok(OTA_LED as u32);
 }
 
 /// Signal a failed OTA by blinking the LED: 60 toggles of 100 ms.
@@ -537,17 +537,28 @@ pub fn rf_link_slave_ota_finish_handle() {
 mod tests {
     use super::*;
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_sleep_us};
-    use crate::sdk::mcu::gpio::mock_gpio_set_func;
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
     use std::sync::{Arc, Mutex};
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
         mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
         mock_write_reg_gpio_out, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_oen,
         write_reg_gpio_out,
     };
+
+    /// `reg_gpio_gpio_func`: per-port GPIO-function select register.
+    const REG_GPIO_GPIO_FUNC: u32 = 0x586;
+    /// `reg_tmr_ctrl`: the watchdog clear bit lives here.
+    const REG_TMR_CTRL: u32 = 0x620;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank and tick count.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
 
     /// The GATT write handler stages packets without holding `OTA_STATE` while
     /// it copies into `BUFF_RESPONSE`, and advances the cursor once per packet.
@@ -580,16 +591,16 @@ mod tests {
     #[test]
     #[mry::lock(
         rf_link_slave_ota_finish_handle,
-        rf_link_slave_ota_finish_led_and_reboot,
-        clock_time
+        rf_link_slave_ota_finish_led_and_reboot
     )]
     fn test_finish_handle_counts_down_terminate_then_reboots() {
+        reset_fakes();
         reset_for_test();
         *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok;
         OTA_UPDATE_TERMINATION_REQUESTED.set(true);
         OTA_STATE.lock().terminate_cnt = 1;
 
-        mock_clock_time().returns(0);
+        fake_clock::set_ticks(0);
         mock_rf_link_slave_ota_finish_handle().calls_real_impl();
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
 
@@ -635,8 +646,9 @@ mod tests {
     /// would trip the `cfg(test)` re-entrancy probe if a critical section
     /// spanned the blocking flash calls.
     #[test]
-    #[mry::lock(flash_write_page, flash_read_page, clock_time)]
+    #[mry::lock(flash_write_page, flash_read_page)]
     fn test_ota_save_reaches_flash_without_ota_state_lock() {
+        reset_fakes();
         reset_for_test();
         *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
         // Mesh OTA mode: skips the CRC check and uses 8-byte packets.
@@ -670,7 +682,7 @@ mod tests {
                 *read.lock().unwrap() += 1;
             },
         );
-        mock_clock_time().returns(1234);
+        fake_clock::set_ticks(1234);
 
         rf_link_slave_data_ota_save();
 
@@ -700,22 +712,20 @@ mod tests {
     /// held the pin high for the whole 6 s and looked identical to success.
     #[test]
     #[mry::lock(
-        gpio_set_func,
         read_reg_gpio_oen,
         write_reg_gpio_oen,
         read_reg_gpio_out,
-        write_reg_gpio_out,
-        wd_clear,
-        sleep_us
+        write_reg_gpio_out
     )]
     fn test_rf_led_ota_error_alternates_pin_sixty_times() {
-        const PIN: u32 = OTA_LED as u32; // port C, pin id low byte is the bit mask itself
+        // `OTA_LED` is port C, pin 0: the pin id's low byte is the bit mask and
+        // the port number is the register offset, so (pin >> 8) << 3 == 0x10.
         const PIN_MASK: u8 = 0x01;
-        const REG_OFFSET: u32 = 0x10; // port C: (pin >> 8) << 3
+        const REG_OFFSET: u32 = 0x10;
 
+        reset_fakes();
         reset_for_test();
 
-        mock_gpio_set_func(Any, Any).returns(());
         mock_read_reg_gpio_oen(Any).returns(0);
         mock_write_reg_gpio_oen(Any, Any).returns(());
         mock_read_reg_gpio_out(Any).returns(0);
@@ -727,15 +737,21 @@ mod tests {
             recorded_writes.lock().unwrap().push(value);
         });
 
-        mock_wd_clear().returns(());
-        // The LED delay loop must also hold no OTA_STATE guard.
-        mock_sleep_us(Any).returns_with(|_us: u32| {
-            let _probe = OTA_STATE.lock();
-        });
-
         rf_led_ota_error();
 
-        mock_gpio_set_func(PIN, AS_GPIO).assert_called(1);
+        // `gpio_set_func` runs for real now: it selects the GPIO function for
+        // the LED pin by writing the pin mask into `reg_gpio_gpio_func`.
+        let func_writes: Vec<_> = FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == (REG_GPIO_GPIO_FUNC + REG_OFFSET) | tlsr8266_pac::REG_BASE_ADDR)
+            .collect();
+        assert_eq!(
+            func_writes.len(),
+            1,
+            "gpio_set_func must select the GPIO function exactly once"
+        );
+        assert_eq!(func_writes[0].value, u32::from(PIN_MASK));
+
         // Output enabled once, before the first write.
         mock_write_reg_gpio_oen(Any, Any).assert_called(1);
         // Sixty writes that alternate high, low, high, low, ...
@@ -748,8 +764,15 @@ mod tests {
             "the OTA error LED must be driven high and low alternately, sixty times"
         );
         mock_write_reg_gpio_out(Any, REG_OFFSET).assert_called(60);
-        mock_wd_clear().assert_called(60);
-        // Cadence unchanged: 60 iterations of 100 ms.
-        mock_sleep_us(100 * 1000).assert_called(60);
+        // The real `wd_clear` pokes the CLR_WD bit of `reg_tmr_ctrl` once per
+        // iteration; the write log is the observable that replaces the mock.
+        let wd_writes = FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == REG_TMR_CTRL | tlsr8266_pac::REG_BASE_ADDR)
+            .count();
+        assert_eq!(wd_writes, 60, "the watchdog must be cleared once per blink");
+        // Cadence unchanged: 60 iterations of 100 ms, recorded by `sleep_us`.
+        let expected_sleeps = vec![100 * 1000u32; 60];
+        assert_eq!(fake_clock::sleeps(), expected_sleeps);
     }
 }

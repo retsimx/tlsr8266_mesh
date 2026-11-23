@@ -5,9 +5,9 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::{raw, Spawner};
 
-#[cfg(not(test))]
-use crate::sdk::mcu::irq_i::{irq_disable, irq_restore};
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
+use crate::mcu::irq_i::{irq_disable, irq_restore};
+#[cfg(target_os = "none")]
 use tlsr8266_pac::{
     read_reg_irq_en, read_reg_irq_mask, write_reg_mcu_wakeup_mask, write_reg_pwdn_ctrl, FldPwdnCtrl,
 };
@@ -96,7 +96,7 @@ impl Executor {
                 self.inner.poll();
             }
 
-            #[cfg(not(test))]
+            #[cfg(target_os = "none")]
             {
                 let prev = irq_disable();
                 if !WORK_PENDING.load(Ordering::Relaxed) {
@@ -130,4 +130,10 @@ impl Executor {
     //         self.inner.poll();
     //     }
     // }
+}
+
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
 }

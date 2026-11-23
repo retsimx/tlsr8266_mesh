@@ -115,14 +115,14 @@ use crate::sdk::ble_app::ble_ll_pair::{
     MESH_PAIR_ENABLE, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_PWD_ENCODE_SK,
 };
 use crate::sdk::ble_app::rf_drv_8266::MESH_DEVICE_ADDRESS_VALIDATION_PENDING;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::mcu::clock::clock_time_exceed;
-use crate::sdk::mcu::crypto::encode_password;
-use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::pm::{blink_ota_led_ok, light_sw_reboot};
 use crate::BIT;
 use critical_section;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::clock_time_exceed;
+use tlsr8266_hal::mcu::crypto::encode_password;
+use tlsr8266_hal::mcu::irq_i::irq_disable;
+use tlsr8266_hal::pm::{blink_ota_led_ok, light_sw_reboot};
 
 /// Factory reset detection state manager.
 /// Tracks reset counts and timing for factory reset sequence detection.
@@ -1041,14 +1041,28 @@ pub fn kick_out(par: KickoutReason) {
 mod tests {
     use super::*;
     use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_write_page};
-    use crate::sdk::mcu::clock::mock_clock_time_exceed;
-    use crate::sdk::mcu::crypto::mock_encode_password;
-    use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::pm::{mock_blink_ota_led_ok, mock_light_sw_reboot};
     use core::slice;
     use core::sync::atomic::Ordering;
     use mry::send_wrapper::SendWrapper;
+    use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_hal::mcu::crypto::fake_crypto;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     // factory_reset is defined in this module, so we can reference mock_factory_reset directly
+
+    /// `reg_irq_en`: the global interrupt enable register.
+    const REG_IRQ_EN: u32 = 0x643;
+    /// `reg_pwdn_ctrl`: written by `mcu_trigger_reboot`.
+    const REG_PWDN_CTRL: u32 = 0x6f;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank, tick count and AES mode.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
+        fake_crypto::reset();
+    }
 
     /// Test the compile-time validation of power cycle timing configuration
     #[test]
@@ -1597,15 +1611,9 @@ mod tests {
 
     /// Test factory_reset_handle factory reset completion
     #[test]
-    #[mry::lock(
-        read_flash_byte,
-        flash_erase_sector,
-        irq_disable,
-        factory_reset,
-        light_sw_reboot,
-        blink_ota_led_ok
-    )]
+    #[mry::lock(read_flash_byte, flash_erase_sector, factory_reset)]
     fn test_factory_reset_handle_completed_sequence() {
+        reset_fakes();
         // Set up initial state
         FACTORY_RESET_STATE.flash_address_index.set(10);
         FACTORY_RESET_STATE.consecutive_reset_count.set(0);
@@ -1626,22 +1634,32 @@ mod tests {
             });
         }
 
-        // Set up the LED-success mock
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
-
-        // Mock all the functions called during factory reset
-        mock_irq_disable().returns(0);
+        // Set up the LED-success path: `blink_ota_led_ok` runs for real now, so
+        // its six 1 Hz sleeps land in `fake_clock::sleeps()`.
         mock_factory_reset().returns(());
-        mock_light_sw_reboot().returns(());
         mock_flash_erase_sector(mry::Any).returns(());
 
         factory_reset_handle();
 
         // Verify factory reset functions were called
-        mock_irq_disable().assert_called(1);
+        assert!(
+            FakeMmio::writes().iter().any(|write| write.addr
+                == REG_IRQ_EN | tlsr8266_pac::REG_BASE_ADDR
+                && write.value == 0),
+            "the reset path must disable global interrupts"
+        );
         mock_factory_reset().assert_called(1);
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
-        mock_light_sw_reboot().assert_called(1);
+        assert_eq!(
+            fake_clock::sleeps(),
+            vec![1000 * 1000u32; 6],
+            "the success indicator must blink six times at 1 Hz"
+        );
+        assert!(
+            FakeMmio::writes()
+                .iter()
+                .any(|write| write.addr == REG_PWDN_CTRL | tlsr8266_pac::REG_BASE_ADDR),
+            "the reset path must trigger the MCU reboot"
+        );
         // Don't check flash_erase_sector for now - it might be called from within factory_reset()
 
         // Verify state cleared
@@ -1710,7 +1728,7 @@ mod tests {
 
     /// Test timing check remains pending when minimum time has not elapsed
     #[test]
-    #[mry::lock(clock_time_exceed, write_timing_validation, flash_write_page)]
+    #[mry::lock(write_timing_validation, flash_write_page)]
     fn test_factory_reset_cnt_check_min_time_not_elapsed() {
         // Set up state 1 for step 4 (requires timing validation)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
@@ -1723,13 +1741,18 @@ mod tests {
 
         let min_time_us = (POWER_CYCLE_TIMING[3].0 as u32) * 1_000_000;
 
-        mock_clock_time_exceed(0, min_time_us).returns(false);
+        reset_fakes();
+        // The clock starts at tick 0, so the minimum window has not elapsed.
+        fake_clock::set_ticks(0);
+        assert!(
+            !clock_time_exceed(0, min_time_us),
+            "precondition: the minimum window must not have elapsed at tick 0"
+        );
         mock_write_timing_validation().returns(());
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
-        mock_clock_time_exceed(0, min_time_us).assert_called(1);
         mock_write_timing_validation().assert_called(0);
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(0);
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 1);
@@ -1741,7 +1764,7 @@ mod tests {
 
     /// Test factory_reset_cnt_check timing state machine
     #[test]
-    #[mry::lock(clock_time_exceed, read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte, flash_write_page)]
     fn test_factory_reset_cnt_check_timing_state_machine() {
         // Set up valid state 1 (checking minimum time)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4); // Step 4
@@ -1753,8 +1776,10 @@ mod tests {
 
         let current_addr = FLASH_ADR_RESET_CNT + 25;
 
-        // Mock minimum time elapsed
-        mock_clock_time_exceed(0, POWER_CYCLE_TIMING[3].0 as u32 * 1000 * 1000).returns(true);
+        // The minimum window has elapsed: park the fake tick at the top of the
+        // 32-bit range, far past any configured microsecond span.
+        reset_fakes();
+        fake_clock::set_ticks(u32::MAX as u64);
         mock_read_flash_byte(current_addr).returns(ResetStep::Step4.flash_value());
         mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
@@ -1766,14 +1791,13 @@ mod tests {
             FACTORY_RESET_STATE.timing_check_timestamp.get(),
             POWER_CYCLE_TIMING[3].1 as u32
         );
-        mock_clock_time_exceed(0, POWER_CYCLE_TIMING[3].0 as u32 * 1000 * 1000).assert_called(1);
         mock_read_flash_byte(current_addr).assert_called(1);
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
     }
 
     /// Test factory_reset_cnt_check maximum time exceeded
     #[test]
-    #[mry::lock(clock_time_exceed, read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte, flash_write_page)]
     fn test_factory_reset_cnt_check_max_time_exceeded() {
         // Set up state 2 (checking maximum time)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
@@ -1785,15 +1809,16 @@ mod tests {
 
         let current_addr = FLASH_ADR_RESET_CNT + 20;
 
-        // Mock maximum time exceeded
-        mock_clock_time_exceed(0, POWER_CYCLE_TIMING[3].1 as u32 * 1000 * 1000).returns(true);
+        // The maximum window has been exceeded: park the fake tick at the top of
+        // the 32-bit range, far past any configured microsecond span.
+        reset_fakes();
+        fake_clock::set_ticks(u32::MAX as u64);
         mock_read_flash_byte(current_addr).returns(ResetStep::Step4.flash_value());
         mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
         // Should clear sequence and reset state
-        mock_clock_time_exceed(0, POWER_CYCLE_TIMING[3].1 as u32 * 1000 * 1000).assert_called(1);
         mock_read_flash_byte(current_addr).assert_called(1);
         mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
@@ -1939,20 +1964,22 @@ mod tests {
 
     /// Test that kick_out with non-OutOfMesh reason only does factory reset
     #[test]
-    #[mry::lock(factory_reset, blink_ota_led_ok)]
+    #[mry::lock(factory_reset)]
     fn test_kick_out_non_out_of_mesh_only_factory_reset() {
-        // Mock the success LED blink
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
-
+        reset_fakes();
         // Mock factory reset
         mock_factory_reset().returns(());
 
         // Call kick_out with DefaultName reason (not OutOfMesh)
         kick_out(KickoutReason::DefaultName);
 
-        // Should have called factory reset and LED functions
+        // Should have called factory reset and the real LED-success blink
         mock_factory_reset().assert_called(1);
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
+        assert_eq!(
+            fake_clock::sleeps(),
+            vec![1000 * 1000u32; 6],
+            "the success indicator must blink six times at 1 Hz"
+        );
 
         // Should NOT have written any pairing data (since it's not OutOfMesh)
         // We can't easily verify this with mry, but the test ensures no crashes
@@ -1960,12 +1987,7 @@ mod tests {
 
     /// Test that kick_out writes default credentials and pairing flags to flash
     #[test]
-    #[mry::lock(
-        flash_erase_sector,
-        flash_write_page,
-        encode_password,
-        blink_ota_led_ok
-    )]
+    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_kick_out_out_of_mesh_writes_credentials_and_flags() {
         // Ensure a known LTK is stored before invoking kick_out
         let expected_ltk = [0xAAu8; 16];
@@ -1978,8 +2000,17 @@ mod tests {
         MESH_PAIR_ENABLE.set(true);
         MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
 
-        let encoded_password = [0x5Au8; 16];
-        mock_encode_password(mry::Any, mry::Any).returns(encoded_password);
+        let encoded_password = {
+            // Compute the expected ciphertext with the real AES path: the same
+            // key and password buffer `kick_out` feeds to `encode_password`.
+            let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+            let mut password = [0u8; 16];
+            let len = MESH_PWD.len().min(password.len());
+            password[..len].copy_from_slice(&MESH_PWD.as_bytes()[..len]);
+            encode_password(&key, &password)
+        };
+
+        reset_fakes();
 
         let mut expected_name = [0u8; 16];
         let name_bytes = OUT_OF_MESH.as_bytes();
@@ -2014,14 +2045,15 @@ mod tests {
             },
         );
 
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).returns(());
-
         kick_out(KickoutReason::OutOfMesh);
 
         mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(4);
-        mock_encode_password(mry::Any, mry::Any).assert_called(1);
         assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
-        mock_blink_ota_led_ok(crate::config::OTA_LED as u32).assert_called(1);
+        assert_eq!(
+            fake_clock::sleeps(),
+            vec![1000 * 1000u32; 6],
+            "the success indicator must blink six times at 1 Hz"
+        );
 
         // Restore mesh pairing flags for other tests
         MESH_PAIR_ENABLE.set(false);

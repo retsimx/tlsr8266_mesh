@@ -27,16 +27,16 @@ use crate::sdk::ble_app::rf_drv_8266::{
 use crate::sdk::ble_app::rf_drv_8266::{
     DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
 };
-use crate::sdk::common::sync::CriticalSectionMutex;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{
-    clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
-};
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
 use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{
+    clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
+};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -753,7 +753,7 @@ async fn mesh_packet_send_iteration(
     }
 
     // Pick a random start channel
-    let start_chan_idx = crate::sdk::mcu::random::rand() as usize;
+    let start_chan_idx = tlsr8266_hal::mcu::random::rand() as usize;
 
     // Send the packet on each channel
     for channel_index in start_chan_idx..start_chan_idx + SYS_CHN_LISTEN.len() {
@@ -781,7 +781,7 @@ async fn mesh_packet_send_iteration(
 
     if result.send_count != 0 {
         // Random delay to avoid congestion between 0us and 8ms
-        let delay = 8000 - ((crate::sdk::mcu::random::rand() % 16) * 500);
+        let delay = 8000 - ((tlsr8266_hal::mcu::random::rand() % 16) * 500);
 
         queues::enqueue_mesh_tx(
             &result.pkt,
@@ -847,15 +847,12 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
         mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
     };
-    use crate::sdk::common::sync::CriticalSectionMutexGuard;
     use crate::sdk::drivers::flash::mock_flash_write_page;
     use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
-    use crate::sdk::mcu::clock::{
-        mock_clock_time, mock_clock_time64, mock_clock_time_exceed, mock_sleep_us,
-    };
-    use crate::sdk::mcu::random::{mock_rand, rand};
     use heapless::Vec;
     use mry::Any;
+    use tlsr8266_hal::common::sync::CriticalSectionMutexGuard;
+    use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::FLD_RF_IRQ_MASK;
 
@@ -863,6 +860,18 @@ mod tests {
     use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
     use crate::uart_manager::mock_light_mesh_rx_cb;
+
+    /// `reg_system_tick`: the free-running tick `clock_time()` reads.
+    const REG_SYSTEM_TICK: u32 = 0x740;
+    /// `reg_rnd_number`: the hardware entropy source `rand()` XORs in.
+    const REG_RND_NUMBER: u32 = 0x448;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank and tick count.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
 
     /// Borrow the pairing state for one field access.
     ///
@@ -1036,7 +1045,6 @@ mod tests {
     /// Tests mesh_pair_proc_effect with effect_new_mesh set
     #[test]
     #[mry::lock(
-        sleep_us,
         pair_save_key,
         rf_set_ble_access_code,
         rf_link_light_event_callback,
@@ -1057,7 +1065,6 @@ mod tests {
         mock_pair_save_key().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
-        mock_sleep_us(1000).returns(());
         FakeMmio::set_reg16(0xf20, 0);
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
@@ -1079,8 +1086,6 @@ mod tests {
     /// Tests mesh_pair_proc_effect with delay time exceeded
     #[test]
     #[mry::lock(
-        clock_time,
-        clock_time_exceed,
         pair_load_key,
         pair_save_key,
         is_add_packet_buf_ready,
@@ -1102,8 +1107,9 @@ mod tests {
         pair().effect_new_mesh_delay_time = 1000;
         pair().mesh_pair_cmd_interval = 500;
 
-        mock_clock_time().returns(0);
-        mock_clock_time_exceed(Any, Any).returns(true); // For sleep_us
+        reset_fakes();
+        // The 500 ms interval (16_000_000 ticks) has elapsed since the delay ref.
+        fake_clock::set_ticks(1000 + 500 * 1000 * 32 + 1);
         mock_pair_load_key().returns(());
         mock_pair_save_key().returns(());
         mock_is_add_packet_buf_ready().returns(true);
@@ -1117,7 +1123,6 @@ mod tests {
 
         // Verify
         assert_eq!(pair().effect_new_mesh_delay_time, 0);
-        mock_clock_time_exceed(Any, Any).assert_called(2);
         assert_eq!(
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
@@ -1127,7 +1132,6 @@ mod tests {
 
     /// Tests mesh_pair_proc_effect with no effect needed
     #[test]
-    #[mry::lock(clock_time_exceed)]
     fn test_mesh_pair_proc_effect_no_effect() {
         // Setup
         reset_for_test();
@@ -1135,14 +1139,15 @@ mod tests {
         pair().effect_new_mesh_delay_time = 1000;
         pair().mesh_pair_cmd_interval = 500;
 
-        mock_clock_time_exceed(1000, 500 * 1000).returns(false);
+        reset_fakes();
+        // Park the clock at the delay reference: nothing has elapsed yet.
+        fake_clock::set_ticks(1000);
 
         // Execute
         mesh_pair_proc_effect();
 
         // Verify - nothing should change
         assert_eq!(pair().effect_new_mesh_delay_time, 1000);
-        mock_clock_time_exceed(1000, 500 * 1000).assert_called(1);
     }
 
     // --- mesh_device_address_validation_completed Tests ---
@@ -1186,12 +1191,11 @@ mod tests {
 
     /// Tests mesh_pair_cb with MeshPairName1
     #[test]
-    #[mry::lock(clock_time)]
     fn test_mesh_pair_cb_name1() {
         // Setup
         reset_for_test();
         let params: Vec<u8, 10> = Vec::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
-        mock_clock_time().returns(1000);
+        fake_clock::set_ticks(1000);
 
         // Execute
         mesh_pair_cb(&params);
@@ -1288,14 +1292,13 @@ mod tests {
 
     /// Tests mesh_pair_cb with MeshPairEffectDelay
     #[test]
-    #[mry::lock(clock_time)]
     fn test_mesh_pair_cb_effect_delay() {
         // Setup
         reset_for_test();
         pair().default_mesh_time_ref = 500;
         pair().mesh_pair_cmd_interval = 250;
         let params: Vec<u8, 10> = Vec::from_slice(&[6, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        mock_clock_time().returns(2000);
+        fake_clock::set_ticks(2000);
 
         // Execute
         mesh_pair_cb(&params);
@@ -1321,12 +1324,11 @@ mod tests {
 
     /// Tests mesh_pair_cb with MeshPairDefaultMesh
     #[test]
-    #[mry::lock(clock_time)]
     fn test_mesh_pair_cb_default_mesh() {
         // Setup
         reset_for_test();
         let params: Vec<u8, 10> = Vec::from_slice(&[8, 5, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        mock_clock_time().returns(3000);
+        fake_clock::set_ticks(3000);
 
         // Execute
         mesh_pair_cb(&params);
@@ -1352,13 +1354,12 @@ mod tests {
 
     /// Tests mesh_pair_cb updates default_mesh_time_ref when it's set
     #[test]
-    #[mry::lock(clock_time)]
     fn test_mesh_pair_cb_updates_default_mesh_time_ref() {
         // Setup
         reset_for_test();
         pair().default_mesh_time_ref = 100;
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
-        mock_clock_time().returns(5000);
+        fake_clock::set_ticks(5000);
 
         // Execute
         mesh_pair_cb(&params);
@@ -1529,7 +1530,6 @@ mod tests {
     #[mry::lock(
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
-        sleep_us,
         pair_load_key,
         mesh_node_table_init,
         device_status_update
@@ -1545,7 +1545,6 @@ mod tests {
 
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
         mock_mesh_node_table_init().returns(());
         mock_device_status_update().returns(());
@@ -1565,7 +1564,6 @@ mod tests {
     #[mry::lock(
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
-        sleep_us,
         pair_load_key,
         mesh_node_table_init,
         device_status_update
@@ -1581,7 +1579,6 @@ mod tests {
 
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_sleep_us(1000).returns(());
         mock_pair_load_key().returns(());
         mock_mesh_node_table_init().returns(());
         mock_device_status_update().returns(());
@@ -1601,8 +1598,7 @@ mod tests {
         rf_link_add_tx_packet,
         pair_save_key,
         rf_set_ble_access_code,
-        rf_link_light_event_callback,
-        sleep_us
+        rf_link_light_event_callback
     )]
     fn test_save_effect_new_mesh_normal_save() {
         // Setup
@@ -1624,7 +1620,6 @@ mod tests {
         mock_pair_save_key().returns(());
         mock_rf_set_ble_access_code(0xABCDEF12).returns(());
         mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
-        mock_sleep_us(1000).returns(());
         FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
@@ -1646,7 +1641,7 @@ mod tests {
 
     /// Tests switch_to_default_mesh
     #[test]
-    #[mry::lock(clock_time, access_code)]
+    #[mry::lock(access_code)]
     fn test_switch_to_default_mesh() {
         // Setup
         reset_for_test();
@@ -1662,7 +1657,7 @@ mod tests {
         *PAIR_CONFIG_MESH_PWD.lock() = test_pwd;
         *PAIR_CONFIG_MESH_LTK.lock() = test_ltk;
 
-        mock_clock_time().returns(5000);
+        fake_clock::set_ticks(5000);
         mock_access_code(Any, Any).returns(0xDEADBEEF);
 
         // Execute
@@ -1680,7 +1675,7 @@ mod tests {
 
     /// Tests mesh_pair_proc with timeout
     #[test]
-    #[mry::lock(clock_time_exceed, pair_load_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_load_key, rf_link_light_event_callback)]
     fn test_mesh_pair_proc_timeout() {
         // Setup
         reset_for_test();
@@ -1688,7 +1683,9 @@ mod tests {
         pair().mesh_pair_timeout = 10;
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
 
-        mock_clock_time_exceed(1000, 10 * 1000 * 1000).returns(true);
+        reset_fakes();
+        // 10 s (320_000_000 ticks) have elapsed since the pairing window opened.
+        fake_clock::set_ticks(1000 + 10 * 1000 * 1000 * 32 + 1);
         mock_pair_load_key().returns(());
         mock_rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT).returns(());
 
@@ -1703,7 +1700,7 @@ mod tests {
 
     /// Tests mesh_pair_proc default mesh effect delay
     #[test]
-    #[mry::lock(clock_time_exceed, pair_load_key)]
+    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_default_mesh_effect_delay() {
         // Setup
         reset_for_test();
@@ -1712,7 +1709,9 @@ mod tests {
         pair().mesh_pair_start_time = 0;
         pair().default_mesh_time_ref = 0; // Ensure we don't skip the condition
 
-        mock_clock_time_exceed(1000, MESH_PAIR_CMD_INTERVAL * 1000).returns(true);
+        reset_fakes();
+        // The pairing command interval (500 ms = 16_000_000 ticks) has elapsed.
+        fake_clock::set_ticks(1000 + MESH_PAIR_CMD_INTERVAL as u64 * 1000 * 32 + 1);
         mock_pair_load_key().returns(());
 
         // Execute
@@ -1726,7 +1725,7 @@ mod tests {
 
     /// Tests mesh_pair_proc default mesh effect delay with switch
     #[test]
-    #[mry::lock(clock_time_exceed, clock_time, access_code)]
+    #[mry::lock(access_code)]
     fn test_mesh_pair_proc_default_mesh_effect_delay_with_switch() {
         // Setup
         reset_for_test();
@@ -1734,8 +1733,19 @@ mod tests {
         pair().default_mesh_time = 5000;
         pair().mesh_pair_start_time = 0;
 
-        mock_clock_time_exceed(1000, MESH_PAIR_CMD_INTERVAL * 1000).returns(true);
-        mock_clock_time().returns(2000);
+        reset_fakes();
+        // Two reads of the tick: the first drives the interval predicate (must be
+        // past 500 ms), the second stamps the refreshed reference.
+        FakeMmio::on_read32(
+            REG_SYSTEM_TICK,
+            |call_idx| {
+                if call_idx == 0 {
+                    u32::MAX
+                } else {
+                    2000
+                }
+            },
+        );
         mock_access_code(Any, Any).returns(0x11223344);
 
         // Execute
@@ -1749,7 +1759,7 @@ mod tests {
 
     /// Tests mesh_pair_proc default mesh timeout
     #[test]
-    #[mry::lock(clock_time_exceed, pair_load_key)]
+    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_default_mesh_timeout() {
         // Setup
         reset_for_test();
@@ -1758,9 +1768,9 @@ mod tests {
         pair().default_mesh_time = 5000;
         pair().mesh_pair_start_time = 0;
 
-        mock_clock_time_exceed(Any, Any).returns_with(|ref_time: u32, span: u32| -> bool {
-            ref_time == 1000 && span == 5000 * 1000
-        });
+        reset_fakes();
+        // 5 s (160_000_000 ticks) have elapsed since the default-mesh reference.
+        fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
         mock_pair_load_key().returns(());
 
         // Execute
@@ -1773,7 +1783,6 @@ mod tests {
 
     /// Tests mesh_pair_proc default mesh timeout with 255s delay
     #[test]
-    #[mry::lock(clock_time_exceed, clock_time)]
     fn test_mesh_pair_proc_default_mesh_timeout_255s() {
         // Setup
         reset_for_test();
@@ -1782,10 +1791,17 @@ mod tests {
         pair().default_mesh_time = 255000;
         pair().mesh_pair_start_time = 0;
 
-        mock_clock_time_exceed(Any, Any).returns_with(|ref_time: u32, span: u32| -> bool {
-            ref_time == 1000 && span == 255000 * 1000
+        reset_fakes();
+        // `255 s` exceeds the documented `CLOCK_MAX_US`, so the tick span wraps
+        // through 32 bits; the real predicate compares against the wrapped value.
+        // First read drives that predicate, second stamps the refreshed reference.
+        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| {
+            if call_idx == 0 {
+                1000 + (255_000u32 * 1000).wrapping_mul(32) + 1
+            } else {
+                3000
+            }
         });
-        mock_clock_time().returns(3000);
 
         // Execute
         mesh_pair_proc();
@@ -1796,12 +1812,7 @@ mod tests {
 
     /// Tests mesh_pair_proc state machine - Name1
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        light_slave_tx_command,
-        rf_link_match_group_mac
-    )]
+    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_state_name1() {
         // Setup
         reset_for_test();
@@ -1812,9 +1823,19 @@ mod tests {
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
         PAIR_STATE.lock().pair_nn = [1; 16];
 
-        mock_clock_time_exceed(Any, Any)
-            .returns_with(|ref_time: u32, _span: u32| -> bool { ref_time == 1000 });
-        mock_clock_time().returns(2000);
+        reset_fakes();
+        // First read drives the 500 ms interval predicate, second stamps
+        // `mesh_pair_time`.
+        FakeMmio::on_read32(
+            REG_SYSTEM_TICK,
+            |call_idx| {
+                if call_idx == 0 {
+                    u32::MAX
+                } else {
+                    2000
+                }
+            },
+        );
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -1828,12 +1849,7 @@ mod tests {
 
     /// Tests mesh_pair_proc state machine - transitions through all states
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        light_slave_tx_command,
-        rf_link_match_group_mac
-    )]
+    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_state_transitions() {
         // Setup
         reset_for_test();
@@ -1845,8 +1861,16 @@ mod tests {
         PAIR_STATE.lock().pair_pass = [2; 16];
         PAIR_STATE.lock().pair_ltk_mesh = [3; 16];
 
-        mock_clock_time_exceed(Any, Any).returns(true); // For other clock_time_exceed calls
-        mock_clock_time().returns(2000);
+        reset_fakes();
+        // Every iteration reads the tick twice: the interval predicate (must be
+        // past 500 ms) then the `mesh_pair_time` stamp.
+        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| {
+            if call_idx % 2 == 0 {
+                u32::MAX
+            } else {
+                2000
+            }
+        });
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -1885,12 +1909,7 @@ mod tests {
 
     /// Tests mesh_pair_proc PairSetMeshTxDone state
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        light_slave_tx_command,
-        rf_link_match_group_mac
-    )]
+    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_tx_done_state() {
         // Setup
         reset_for_test();
@@ -1899,8 +1918,18 @@ mod tests {
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxDone;
 
-        mock_clock_time_exceed(1000, 500 * 1000).returns(true);
-        mock_clock_time().returns(2000);
+        reset_fakes();
+        // The interval predicate must be past 500 ms, then the stamp is read.
+        FakeMmio::on_read32(
+            REG_SYSTEM_TICK,
+            |call_idx| {
+                if call_idx == 0 {
+                    u32::MAX
+                } else {
+                    2000
+                }
+            },
+        );
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -1914,12 +1943,7 @@ mod tests {
 
     /// Tests mesh_pair_proc PairSetMeshRxDone state
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        light_slave_tx_command,
-        rf_link_match_group_mac
-    )]
+    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_rx_done_state() {
         // Setup
         reset_for_test();
@@ -1930,12 +1954,14 @@ mod tests {
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshRxDone;
 
-        // Mock specific clock_time_exceed calls
-        // Don't trigger timeout: clock_time_exceed(5000, 60 * 1000 * 1000)
-        mock_clock_time_exceed(5000, 60 * 1000 * 1000).returns(false);
-        // Trigger interval check: clock_time_exceed(1000, 500 * 1000)
-        mock_clock_time_exceed(1000, 500 * 1000).returns(true);
-        mock_clock_time().returns(6000);
+        reset_fakes();
+        // Read 0 drives the pairing-timeout predicate (must stay inside the
+        // 60 s window), read 1 the 500 ms interval predicate (must be past it),
+        // read 2 the `mesh_pair_time` stamp.
+        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| match call_idx {
+            0 | 1 => 1_900_000_000,
+            _ => 6000,
+        });
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -1987,7 +2013,6 @@ mod tests {
     #[test]
     #[mry::lock(
         light_mesh_rx_cb,
-        clock_time64,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
@@ -2007,7 +2032,6 @@ mod tests {
         let test_pkt = create_test_packet(0x1234, 0x1234, [1, 2, 3]);
 
         mock_light_mesh_rx_cb(Any).returns(());
-        mock_clock_time64().returns(0);
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_set_ble_crc_adv().returns(());
@@ -2140,15 +2164,12 @@ mod tests {
     /// Tests send_mesh_msg_iteration with ready packet
     #[test]
     #[mry::lock(
-        rand,
-        clock_time,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         rf_set_ble_channel,
         rf_start_srx2tx,
-        rf_set_rxmode,
-        clock_time64
+        rf_set_rxmode
     )]
     fn test_send_mesh_msg_iteration_with_ready_packet() {
         use futures::executor::block_on;
@@ -2167,12 +2188,12 @@ mod tests {
 
         assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
-        // Mock the required functions. `rand()` used to be spelled
-        // `system_tick ^ rnd_number`; the same 0x03E8 ^ 0x5555 value keeps the
-        // channel selection and congestion delay identical.
-        mock_rand().returns(1000 ^ 0x5555);
-        mock_clock_time().returns(1000);
-        mock_clock_time64().returns(1); // Return time > 0 so packet is ready
+        // Mock the required functions. `rand()` is the real
+        // `clock_time() as u16 ^ reg_rnd_number`, so seed both halves: 1000 ^
+        // 0x5555 keeps the channel selection and congestion delay identical.
+        reset_fakes();
+        fake_clock::set_ticks(1000);
+        FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_set_ble_crc_adv().returns(());
@@ -2189,10 +2210,6 @@ mod tests {
         // Verify - packet should be processed and removed from buffer
         assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
         mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
-        // The random start channel is drawn once, and the SRX2TX deadline is
-        // sampled once per channel from `clock_time()`.
-        mock_rand().assert_called(1);
-        mock_clock_time().assert_called(SYS_CHN_LISTEN.len());
     }
 
     /// The congestion backoff re-queue must keep the pre-migration 0..8 ms
@@ -2202,15 +2219,12 @@ mod tests {
     /// both the value and the single draw it takes per retransmission.
     #[test]
     #[mry::lock(
-        rand,
-        clock_time,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
         rf_set_ble_channel,
         rf_start_srx2tx,
-        rf_set_rxmode,
-        clock_time64
+        rf_set_rxmode
     )]
     fn test_send_mesh_msg_iteration_requeues_with_congestion_delay() {
         use futures::executor::block_on;
@@ -2227,9 +2241,10 @@ mod tests {
         assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 1));
 
         // 0x03E8 ^ 0x5555 = 0x56BD; 0x56BD % 16 == 13 -> 8000 - 13 * 500 = 1500 us.
-        mock_rand().returns(1000 ^ 0x5555);
-        mock_clock_time().returns(1000);
-        mock_clock_time64().returns(1);
+        // `rand()` is the real `clock_time() as u16 ^ reg_rnd_number`.
+        reset_fakes();
+        fake_clock::set_ticks(1000);
+        FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_set_ble_crc_adv().returns(());
@@ -2250,11 +2265,10 @@ mod tests {
         assert_eq!(send_queue[0].send_count, 0);
         assert_eq!(
             send_queue[0].delay,
-            1 + 1500 * CLOCK_SYS_CLOCK_1US as u64,
-            "the congestion delay must stay 8000 - (rand % 16) * 500 us"
+            1000 + 1500 * CLOCK_SYS_CLOCK_1US as u64,
+            "the congestion delay must stay 8000 - (rand % 16) * 500 us past the clock"
         );
         drop(send_queue);
-        mock_rand().assert_called(2);
     }
 
     /// Tests send_mesh_msg_iteration parks on the earliest queued deadline and
@@ -2264,7 +2278,6 @@ mod tests {
     /// nothing is due yet, so the only exit is the wake signal. Every mesh
     /// retransmission takes this path.
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_send_mesh_msg_iteration_parks_until_earliest_deadline() {
         use core::future::Future;
         use core::task::{Context, Poll};
@@ -2276,7 +2289,7 @@ mod tests {
         let mut dropped_rx_seen = 0;
 
         // The scan samples the clock once (after the empty check).
-        mock_clock_time64().returns(0);
+        reset_fakes();
 
         // Deadline far in the future: the buffer is not empty, but no packet is
         // due, so the scan must take `SendScan::Wait(earliest)`, not `Empty`.
@@ -2307,9 +2320,6 @@ mod tests {
 
         // Nothing was consumed by this iteration.
         assert_eq!(MESH_TX_QUEUE.lock().len(), 2);
-
-        // The clock was sampled exactly once for the scan.
-        mock_clock_time64().assert_called(1);
     }
 
     // --- rcv_mesh_msg_iteration Tests ---

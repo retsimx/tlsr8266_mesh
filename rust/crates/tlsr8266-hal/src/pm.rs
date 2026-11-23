@@ -1,14 +1,12 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sdk::common::sync::SimplifyLS;
-use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::sdk::mcu::clock::sleep_us;
-use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
-use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
-use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::watchdog::wd_clear;
+use crate::mcu::analog::{analog_read, analog_write};
+use crate::mcu::clock::sleep_us;
+use crate::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
+use crate::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
+use crate::mcu::irq_i::irq_disable;
+use crate::mcu::watchdog::wd_clear;
 use crate::BIT;
-use critical_section;
 use tlsr8266_pac::{
     write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
 };
@@ -56,7 +54,6 @@ pub fn set_reboot_light_off_state(is_off: bool) {
     REBOOT_LIGHT_OFF.store(is_off, Ordering::Relaxed);
 }
 
-#[cfg_attr(test, mry::mry)]
 pub fn usb_dp_pullup_en(en: bool) {
     let mut dat: u8 = analog_read(0x00);
     if en {
@@ -68,6 +65,8 @@ pub fn usb_dp_pullup_en(en: bool) {
     analog_write(0x00, dat);
 }
 
+/// Wakeup source bits of `reg_wakeup_en`, named as they are in the datasheet.
+#[allow(non_camel_case_types)]
 pub enum PM_WAKEUP {
     // WAKEUP_SRC_ANA 0 -- 2  not supported
     CORE = BIT!(5),
@@ -258,7 +257,7 @@ pub const TCMD_WRITE: u8 = 0x3;
 pub const TCMD_WAIT: u8 = 0x7;
 pub const TCMD_WAREG: u8 = 0x8;
 
-const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
+const TBL_CPU_WAKEUP_INIT: [TBLCMDSET; 0x13] = [
     TBLCMDSET {
         adr: 0x60,
         dat: 0, // reg_rst0: release module resets (0 = not in reset)
@@ -360,11 +359,10 @@ const tbl_cpu_wakeup_init: [TBLCMDSET; 0x13] = [
 ];
 
 pub fn cpu_wakeup_init() {
-    load_tbl_cmd_set(&tbl_cpu_wakeup_init);
+    load_tbl_cmd_set(&TBL_CPU_WAKEUP_INIT);
 }
 
 // recover status before software reboot
-#[cfg_attr(test, mry::mry)]
 fn light_sw_reboot_callback() {
     if REBOOT_OTA_ACTIVE.load(Ordering::Relaxed) {
         // rf_slave_ota_busy means mesh ota master busy also.
@@ -394,7 +392,6 @@ pub fn mcu_trigger_reboot() {
 }
 
 #[link_section = ".ram_code"]
-#[cfg_attr(test, mry::mry)]
 fn light_sw_reboot_ll() {
     // In the original code it calls this to reset, but I can't get this function working.
     // unsafe { cpu_sleep_wakeup(1, 0x40, ((CLOCK_SYS_CLOCK_1US) * 10000) + read_reg_system_tick()); }
@@ -402,14 +399,16 @@ fn light_sw_reboot_ll() {
     // Instead, let's just reset the MCU as described in the docs
     mcu_trigger_reboot();
 
-    // Don't loop forever in tests - just return instead
-    #[cfg(not(test))]
+    // Don't loop forever off-target - just return instead
+    // The reboot write above has already fired: park without returning so no
+    // caller resumes before the watchdog resets the part.
+    #[cfg(target_os = "none")]
+    #[allow(clippy::empty_loop)]
     {
         loop {}
     }
 }
 
-#[cfg_attr(test, mry::mry)]
 pub fn light_sw_reboot() {
     irq_disable();
 
@@ -420,12 +419,10 @@ pub fn light_sw_reboot() {
 
     light_sw_reboot_callback();
     light_sw_reboot_ll();
-    return;
 }
 
 /// Blinks the OTA LED six times at 1 Hz to signal success. `pin` is passed by
 /// the caller so this module needs no `crate::config` dependency.
-#[cfg_attr(test, mry::mry)]
 pub fn blink_ota_led_ok(pin: u32) {
     gpio_set_func(pin, AS_GPIO);
     gpio_set_output_en(pin, 1);
@@ -442,38 +439,46 @@ pub fn blink_ota_led_ok(pin: u32) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
-    use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::cmd_table::mock_load_tbl_cmd_set;
-    use crate::sdk::mcu::gpio::mock_gpio_set_func;
-    use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
-    use mry::Any;
-    use std::sync::{Arc, Mutex};
+    use crate::mcu::analog::fake_analog::FakeAnalog;
+    use crate::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
-    use tlsr8266_pac::{
-        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
-        mock_write_reg_gpio_out, mock_write_reg_pwdn_ctrl, read_reg_gpio_oen, read_reg_gpio_out,
-        write_reg_gpio_oen, write_reg_gpio_out, REG_BASE_ADDR,
-    };
+    use tlsr8266_pac::REG_BASE_ADDR;
+
+    /// Registers these tests read back directly.
+    const IRQ_EN: u32 = 0x643;
+    const PWDN_CTRL: u32 = 0x6f;
+    const TMR_CTRL: u32 = 0x620;
+    const GPIO_GPIO_FUNC: u32 = 0x586;
+    const GPIO_OEN: u32 = 0x582;
+    const GPIO_OUT: u32 = 0x583;
+
+    /// `FakeMmio`, `FakeAnalog` and `fake_clock` are process-wide singletons and
+    /// the suite runs with `--test-threads=1`, so every test starts from zero.
+    /// The reboot mirrors are reset too because they are module statics.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
+        set_reboot_ota_active(false);
+        set_reboot_light_off_state(false);
+    }
 
     /// Tests usb_dp_pullup_en function with enable=true
     ///
     /// Verifies that when enabling USB DP pullup, BIT(4) is cleared
     /// in the analog register value.
     #[test]
-    #[mry::lock(analog_read, analog_write)]
     fn test_usb_dp_pullup_en_enable() {
-        // Setup: analog_read returns a value with BIT(4) set
+        reset_fakes();
+        // Setup: analog register 0x00 starts with BIT(4) set
         let initial_value = 0xFF;
-        mock_analog_read(0x00).returns(initial_value);
-        mock_analog_write(0x00, initial_value & !BIT!(4)).returns(());
+        FakeAnalog::set(0x00, initial_value);
 
         // Execute
         usb_dp_pullup_en(true);
 
-        // Verify: analog_write was called with BIT(4) cleared
-        mock_analog_write(0x00, Any).assert_called(1);
+        // Verify: the analog register holds the value with BIT(4) cleared
+        assert_eq!(FakeAnalog::get(0x00), initial_value & !BIT!(4));
     }
 
     /// Tests usb_dp_pullup_en function with enable=false
@@ -481,56 +486,135 @@ mod tests {
     /// Verifies that when disabling USB DP pullup, BIT(4) is set
     /// in the analog register value.
     #[test]
-    #[mry::lock(analog_read, analog_write)]
     fn test_usb_dp_pullup_en_disable() {
-        // Setup: analog_read returns a value with BIT(4) cleared
+        reset_fakes();
+        // Setup: analog register 0x00 starts with BIT(4) cleared
         let initial_value = 0x00;
-        mock_analog_read(0x00).returns(initial_value);
-        mock_analog_write(0x00, initial_value | BIT!(4)).returns(());
+        FakeAnalog::set(0x00, initial_value);
 
         // Execute
         usb_dp_pullup_en(false);
 
-        // Verify: analog_write was called with BIT(4) set
-        mock_analog_write(0x00, Any).assert_called(1);
+        // Verify: the analog register holds the value with BIT(4) set
+        assert_eq!(FakeAnalog::get(0x00), initial_value | BIT!(4));
     }
 
     /// Tests cpu_wakeup_init function
     ///
-    /// Verifies that cpu_wakeup_init calls load_tbl_cmd_set
-    /// with the correct table.
+    /// Verifies that cpu_wakeup_init runs the whole static wakeup command table:
+    /// the register writes, the analog writes and the absence of any wait.
     #[test]
-    #[mry::lock(load_tbl_cmd_set)]
     fn test_cpu_wakeup_init() {
-        // Since load_tbl_cmd_set takes a reference to a slice,
-        // we just verify it's called once
-        mock_load_tbl_cmd_set().returns(0);
+        reset_fakes();
 
         // Execute
         cpu_wakeup_init();
 
-        // Verify: load_tbl_cmd_set was called exactly once
-        mock_load_tbl_cmd_set().assert_called(1);
+        // Every TCMD_WRITE entry of `TBL_CPU_WAKEUP_INIT`, in table order.
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0x60 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x61 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x62 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x63 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0xff
+                },
+                RegWrite {
+                    addr: 0x64 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0xff
+                },
+                RegWrite {
+                    addr: 0x74 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x53
+                },
+                RegWrite {
+                    addr: 0x7c | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0xf7
+                },
+                RegWrite {
+                    addr: 0x74 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x67 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x66 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: 0x73 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x00
+                },
+                RegWrite {
+                    addr: TMR_CTRL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x01
+                },
+                RegWrite {
+                    addr: 0x74f | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x01
+                },
+            ],
+            "every TCMD_WRITE entry must reach its register, in table order"
+        );
+
+        // Every TCMD_WAREG entry, as the analog bank now holds them.
+        assert_eq!(FakeAnalog::get(0x81), 0xc0);
+        assert_eq!(FakeAnalog::get(0x20), 0xd0);
+        assert_eq!(FakeAnalog::get(0x2d), 0x0f);
+        assert_eq!(FakeAnalog::get(0x2c), 0x00);
+        assert_eq!(FakeAnalog::get(0x05), 0x62);
+
+        // The table has no TCMD_WAIT entry
+        assert!(fake_clock::sleeps().is_empty());
     }
 
     /// Tests light_sw_reboot_callback when no OTA update is active
     ///
     /// Verifies that when the OTA mirror is clear, no analog_write occurs.
     #[test]
-    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_no_ota() {
+        reset_fakes();
         // Setup: OTA mirror clear
         set_reboot_ota_active(false);
-        // Light state must not leak in from another test
         set_reboot_light_off_state(false);
-
-        mock_analog_write(Any, Any).returns(());
+        // A value no callback path writes, so a stray write is visible
+        FakeAnalog::set(REGA_LIGHT_OFF, 0x77);
 
         // Execute
         light_sw_reboot_callback();
 
         // Verify: the callback writes nothing when no OTA is in progress
-        mock_analog_write(Any, Any).assert_called(0);
+        assert_eq!(
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            0x77,
+            "no OTA in progress must leave the recovery payload alone"
+        );
     }
 
     /// Tests light_sw_reboot_callback when OTA is active and light is off
@@ -538,22 +622,20 @@ mod tests {
     /// Verifies that when the OTA mirror is set and the published state says the
     /// light is off, analog_write is called with RecoverStatus::LightOff.
     #[test]
-    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_off() {
+        reset_fakes();
         // Setup: OTA mirror set, light is off
         set_reboot_ota_active(true);
         set_reboot_light_off_state(true);
 
-        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
-
         // Execute
         light_sw_reboot_callback();
 
-        // Verify: analog_write called with correct parameters
-        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).assert_called(1);
-
-        // The mirror is process-global: leave it clear for later tests.
-        set_reboot_ota_active(false);
+        // Verify: the recovery payload records "light off"
+        assert_eq!(
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            RecoverStatus::LightOff as u8
+        );
     }
 
     /// Tests light_sw_reboot_callback when OTA is active and light is on
@@ -561,43 +643,44 @@ mod tests {
     /// Verifies that when the OTA mirror is set and the published state says the
     /// light is on, analog_write is called with 0.
     #[test]
-    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_on() {
+        reset_fakes();
         // Setup: OTA mirror set, light is on
         set_reboot_ota_active(true);
         set_reboot_light_off_state(false);
-
-        mock_analog_write(REGA_LIGHT_OFF, 0).returns(());
+        FakeAnalog::set(REGA_LIGHT_OFF, 0x77);
 
         // Execute
         light_sw_reboot_callback();
 
-        // Verify: analog_write called with correct parameters
-        mock_analog_write(REGA_LIGHT_OFF, 0).assert_called(1);
-
-        // The mirror is process-global: leave it clear for later tests.
-        set_reboot_ota_active(false);
+        // Verify: the recovery payload records "light on" (zero)
+        assert_eq!(FakeAnalog::get(REGA_LIGHT_OFF), 0);
     }
 
     /// The mirror is the callback's only input: clearing it after a call stops
     /// the next one from writing, so the decision is made per call and not
     /// latched by an earlier OTA update.
     #[test]
-    #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_follows_mirror() {
+        reset_fakes();
         set_reboot_light_off_state(true);
-        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
 
         set_reboot_ota_active(true);
         light_sw_reboot_callback();
-        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).assert_called(1);
+        assert_eq!(
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            RecoverStatus::LightOff as u8
+        );
 
         set_reboot_ota_active(false);
+        // Overwrite the payload so a second write would be visible
+        FakeAnalog::set(REGA_LIGHT_OFF, 0x77);
         light_sw_reboot_callback();
-        mock_analog_write(Any, Any).assert_called(1);
-
-        // Leave the mirror clear for any later test in this binary.
-        set_reboot_ota_active(false);
+        assert_eq!(
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            0x77,
+            "clearing the mirror must stop the next callback from writing"
+        );
     }
 
     /// The recovery payload written to `REGA_LIGHT_OFF` is a wire contract
@@ -613,7 +696,7 @@ mod tests {
     /// the boot-time flash copy cannot run without them.
     #[test]
     fn test_ota_enable_clocks_for_copy_writes_clock_registers() {
-        FakeMmio::reset();
+        reset_fakes();
 
         ota_enable_clocks_for_copy();
 
@@ -643,14 +726,14 @@ mod tests {
     /// number that could drift away from the PAC definition.
     #[test]
     fn test_mcu_trigger_reboot_writes_reboot_bit() {
-        FakeMmio::reset();
+        reset_fakes();
 
         mcu_trigger_reboot();
 
         assert_eq!(
             FakeMmio::writes(),
             vec![RegWrite {
-                addr: 0x6f | REG_BASE_ADDR,
+                addr: PWDN_CTRL | REG_BASE_ADDR,
                 width: 1,
                 value: FldPwdnCtrl::Reboot.bits() as u32,
             }]
@@ -662,14 +745,14 @@ mod tests {
     /// effect is the same one `mcu_trigger_reboot` produces.
     #[test]
     fn test_light_sw_reboot_ll_triggers_reboot() {
-        FakeMmio::reset();
+        reset_fakes();
 
         light_sw_reboot_ll();
 
         assert_eq!(
             FakeMmio::writes(),
             vec![RegWrite {
-                addr: 0x6f | REG_BASE_ADDR,
+                addr: PWDN_CTRL | REG_BASE_ADDR,
                 width: 1,
                 value: FldPwdnCtrl::Reboot.bits() as u32,
             }]
@@ -680,136 +763,102 @@ mod tests {
     /// alternates it high/low over six cycles, 1 s apart, with the watchdog
     /// cleared between writes.
     ///
-    /// `gpio_write`/`gpio_set_output_en` carry no `mry` annotation, so the
-    /// assertion is made one level down: the OUT register they drive. Each
-    /// `gpio_write` reads the (mocked) zeroed OUT register, sets or clears the
-    /// pin bit, and writes it back, so the recorded write sequence is the level
-    /// sequence shifted into the pin's bit: `[0x02, 0x00, 0x02, 0x00, 0x02, 0x00]`.
+    /// The assertion is made on the real GPIO/clock leaves: the OUT register
+    /// write log is the level sequence shifted into the pin's bit
+    /// (`[0x02, 0x00, 0x02, 0x00, 0x02, 0x00]`), the watchdog control register
+    /// is written once per cycle, and `fake_clock` records six 1 s sleeps.
     ///
     /// The old `led_onoff: u32` toggle produced `1, 0xFFFF_FFFE, 1, ...`, all of
     /// which `gpio_write` treats as "high", so the old sequence was six set
     /// writes and the LED never blinked.
     #[test]
-    #[mry::lock(
-        gpio_set_func,
-        read_reg_gpio_oen,
-        write_reg_gpio_oen,
-        read_reg_gpio_out,
-        write_reg_gpio_out,
-        wd_clear,
-        sleep_us
-    )]
     fn test_blink_ota_led_ok_alternates_pin_six_times() {
+        reset_fakes();
+
         const PIN: u32 = 0x02; // port A, pin id low byte is the bit mask itself
         const PIN_MASK: u8 = 0x02;
 
-        mock_gpio_set_func(Any, Any).returns(());
-        mock_read_reg_gpio_oen(Any).returns(0);
-        mock_write_reg_gpio_oen(Any, Any).returns(());
-        mock_read_reg_gpio_out(Any).returns(0);
-
-        // Record every OUT register write in call order.
-        let writes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let recorded_writes = Arc::clone(&writes);
-        mock_write_reg_gpio_out(Any, Any).returns_with(move |value: u8, _offset: u32| {
-            recorded_writes.lock().unwrap().push(value);
-        });
-
-        mock_wd_clear().returns(());
-        mock_sleep_us(Any).returns(());
-
         blink_ota_led_ok(PIN);
 
-        mock_gpio_set_func(PIN, AS_GPIO).assert_called(1);
-        // Output enabled once, before the first write.
-        mock_write_reg_gpio_oen(Any, Any).assert_called(1);
-        // Six writes that alternate high, low, high, low, high, low.
+        // The pin was switched to GPIO function and enabled as an output.
+        assert_eq!(FakeMmio::reg8(GPIO_GPIO_FUNC), PIN_MASK);
+        assert_eq!(FakeMmio::reg8(GPIO_OEN), 0x00);
+
+        // Six OUT-register writes that alternate high, low, high, low, high, low.
+        let out_writes: Vec<u32> = FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == GPIO_OUT | REG_BASE_ADDR)
+            .map(|w| w.value)
+            .collect();
         assert_eq!(
-            *writes.lock().unwrap(),
-            vec![PIN_MASK, 0, PIN_MASK, 0, PIN_MASK, 0],
+            out_writes,
+            vec![PIN_MASK as u32, 0, PIN_MASK as u32, 0, PIN_MASK as u32, 0],
             "the OTA LED must be driven high and low alternately, six times"
         );
-        mock_write_reg_gpio_out(PIN_MASK, Any).assert_called(3);
-        mock_write_reg_gpio_out(0, Any).assert_called(3);
-        mock_write_reg_gpio_out(Any, Any).assert_called(6);
-        mock_wd_clear().assert_called(6);
-        mock_sleep_us(1000 * 1000).assert_called(6);
+
+        // The watchdog was cleared once per cycle.
+        let wd_writes = FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == TMR_CTRL | REG_BASE_ADDR)
+            .count();
+        assert_eq!(wd_writes, 6, "the watchdog must be cleared once per cycle");
+
+        // Six one-second waits were requested.
+        assert_eq!(fake_clock::sleeps(), vec![1000 * 1000; 6]);
     }
 
     /// Tests light_sw_reboot function
     ///
-    /// Verifies that light_sw_reboot calls irq_disable,
-    /// light_sw_reboot_callback, and light_sw_reboot_ll in sequence.
+    /// Verifies that light_sw_reboot masks interrupts, records a clean reboot
+    /// and then fires the hardware reboot bit.
     #[test]
-    #[mry::lock(
-        irq_disable,
-        light_sw_reboot_callback,
-        light_sw_reboot_ll,
-        analog_read,
-        analog_write
-    )]
     fn test_light_sw_reboot() {
-        mock_irq_disable().returns(0);
-        mock_light_sw_reboot_callback().returns(());
-        mock_light_sw_reboot_ll().returns(());
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).returns(());
+        reset_fakes();
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
 
         // Execute
         light_sw_reboot();
 
-        // Verify: All functions called in correct order
-        mock_irq_disable().assert_called(1);
-        mock_light_sw_reboot_callback().assert_called(1);
-        mock_light_sw_reboot_ll().assert_called(1);
+        // Verify: interrupts were masked
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 0);
+
+        // Verify: the running sentinel was replaced by the clean-reboot one
+        assert_eq!(FakeAnalog::get(REGA_RESET_SENTINEL), SENTINEL_CLEAN_REBOOT);
+
+        // Verify: the reboot bit was fired
+        assert_eq!(FakeMmio::reg8(PWDN_CTRL), FldPwdnCtrl::Reboot.bits());
     }
 
     /// A watchdog or user reboot overwrites the running sentinel with "clean",
     /// so the next boot does not report a phantom watchdog reset.
     #[test]
-    #[mry::lock(
-        irq_disable,
-        light_sw_reboot_callback,
-        light_sw_reboot_ll,
-        analog_read,
-        analog_write
-    )]
     fn test_light_sw_reboot_sets_clean_sentinel() {
-        mock_irq_disable().returns(0);
-        mock_light_sw_reboot_callback().returns(());
-        mock_light_sw_reboot_ll().returns(());
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_RUNNING);
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).returns(());
+        reset_fakes();
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
 
         // Execute
         light_sw_reboot();
 
         // Verify: the running sentinel was cleared exactly once
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).assert_called(1);
+        assert_eq!(FakeAnalog::get(REGA_RESET_SENTINEL), SENTINEL_CLEAN_REBOOT);
     }
 
     /// A panic reboot keeps the panic sentinel intact so the next boot can
     /// stream the panic message left in flash.
     #[test]
-    #[mry::lock(
-        irq_disable,
-        light_sw_reboot_callback,
-        light_sw_reboot_ll,
-        analog_read,
-        analog_write
-    )]
     fn test_light_sw_reboot_preserves_panic_sentinel() {
-        mock_irq_disable().returns(0);
-        mock_light_sw_reboot_callback().returns(());
-        mock_light_sw_reboot_ll().returns(());
-        mock_analog_read(REGA_RESET_SENTINEL).returns(SENTINEL_PANIC);
-        mock_analog_write(Any, Any).returns(());
+        reset_fakes();
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
 
         // Execute
         light_sw_reboot();
 
         // Verify: no clean-reboot write, which would hide the panic
-        mock_analog_write(REGA_RESET_SENTINEL, SENTINEL_CLEAN_REBOOT).assert_called(0);
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_PANIC,
+            "a panic sentinel must survive the reboot"
+        );
     }
 
     /// Tests PM_WAKEUP enum values

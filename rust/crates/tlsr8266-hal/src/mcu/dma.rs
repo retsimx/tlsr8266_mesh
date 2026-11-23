@@ -34,8 +34,16 @@ pub fn dma_init() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
-    use tlsr8266_pac::mock_write_reg_dma_chn_irq_msk;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::REG_BASE_ADDR;
+
+    /// `reg_dma_chn_irq_msk`, the register `dma_init` must clear.
+    const DMA_CHN_IRQ_MSK: u32 = 0x521;
+
+    /// The `FakeMmio` bank is process-wide, so every test starts from zero.
+    fn reset_fakes() {
+        FakeMmio::reset();
+    }
 
     /// Tests the DMA initialization function.
     ///
@@ -44,20 +52,25 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for the register write function
+    /// 1. Reset the fake register bank
     /// 2. Call the dma_init function
-    /// 3. Verify that the register write function was called exactly once with value 0
+    /// 3. Verify the write log holds exactly one 8-bit write of 0 to the mask register
     #[test]
-    #[mry::lock(write_reg_dma_chn_irq_msk)]
     fn test_dma_init() {
-        // Setup mock for the register write function
-        mock_write_reg_dma_chn_irq_msk(0).returns(());
+        reset_fakes();
 
         // Call the function being tested
         dma_init();
 
-        // Verify the register write function was called exactly once with value 0
-        mock_write_reg_dma_chn_irq_msk(0).assert_called(1);
+        // Verify the register write happened exactly once with value 0
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: DMA_CHN_IRQ_MSK | REG_BASE_ADDR,
+                width: 1,
+                value: 0,
+            }]
+        );
     }
 
     /// Tests that dma_init specifically disables interrupts with value 0.
@@ -68,22 +81,26 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock to accept any value but verify only 0 is passed
+    /// 1. Seed the mask register with a non-zero value so a skipped write is visible
     /// 2. Call the dma_init function
-    /// 3. Verify the correct value (0) was used and no other values were used
+    /// 3. Verify the register reads back as 0 and no other register was written
     #[test]
-    #[mry::lock(write_reg_dma_chn_irq_msk)]
     fn test_dma_init_uses_zero_value() {
-        // Setup mock with Any matcher to verify that only 0 is used
-        mock_write_reg_dma_chn_irq_msk(Any).returns(());
+        reset_fakes();
+        // Pre-set every mask bit: a "write 0" is the only way back to 0.
+        FakeMmio::set_reg8(DMA_CHN_IRQ_MSK, 0xff);
+        FakeMmio::clear_writes();
 
         // Call the function being tested
         dma_init();
 
-        // Verify the register write was called with 0 and not any other value
-        mock_write_reg_dma_chn_irq_msk(0).assert_called(1);
+        // Verify the register holds 0 and not any other value
+        assert_eq!(FakeMmio::reg8(DMA_CHN_IRQ_MSK), 0);
 
         // Total call count should be 1
-        mock_write_reg_dma_chn_irq_msk(Any).assert_called(1);
+        let writes = FakeMmio::writes();
+        assert_eq!(writes.len(), 1, "dma_init must write exactly one register");
+        assert_eq!(writes[0].addr, DMA_CHN_IRQ_MSK | REG_BASE_ADDR);
+        assert_eq!(writes[0].value, 0);
     }
 }

@@ -37,11 +37,12 @@ may name it: ``sdk/common`` sits below the MCU and has no register access.
 
 **Pass 2 — universal rules** over the firmware root and every workspace crate
 root: ``--src-root`` (default ``rust/src``, the firmware) and the repeatable
-``--crate-root`` (default ``rust/crates/mesh-protocol/src`` and
-``rust/crates/tlsr8266-pac/src``).  All of them are audited for zero
-production ``static mut`` and full ``// SAFETY:`` coverage; the ``unsafe``
-budget ratchet below is measured over the firmware root alone, so adding crate
-``unsafe`` sites can neither hide behind nor widen the firmware ceiling.
+``--crate-root`` (default ``rust/crates/mesh-protocol/src``,
+``rust/crates/tlsr8266-pac/src`` and ``rust/crates/tlsr8266-hal/src``).  All of
+them are audited for zero production ``static mut`` and full ``// SAFETY:``
+coverage; the ``unsafe`` budget ratchet below is measured over the firmware
+root alone, so adding crate ``unsafe`` sites can neither hide behind nor widen
+the firmware ceiling.
 
 Four permanent rules, one per line of defence won by R-9 (#45):
 
@@ -65,7 +66,12 @@ Four permanent rules, one per line of defence won by R-9 (#45):
   proves each comment line is production code and not a test-only comment
   laundering a production site.
 * ``unsafe-budget`` — the total production ``unsafe`` token count over the
-  whole source root may not exceed ``MAX_PRODUCTION_UNSAFE``.
+  whole source root may not exceed ``MAX_PRODUCTION_UNSAFE``.  Code gated by
+  ``#[cfg(not(target_os = "none"))]`` is host-only: it never reaches the
+  firmware image, so it is excluded from this count.  It is *not* exempt from
+  the two rules above — a host-only ``unsafe`` still needs ``// SAFETY:`` and a
+  host-only ``static mut`` is still an item.  Only the numeric budget ignores
+  it; see ``strip_host_only_code``.
 
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
@@ -116,6 +122,7 @@ DEFAULT_CRATE_ROOT = os.path.join(REPO_ROOT, "rust", "crates", "mesh-protocol", 
 DEFAULT_CRATE_ROOTS = (
     DEFAULT_CRATE_ROOT,
     os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-pac", "src"),
+    os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-hal", "src"),
 )
 
 # One-way ratchet: lower this when `unsafe` sites disappear, never raise it.
@@ -137,7 +144,11 @@ DEFAULT_CRATE_ROOTS = (
 #
 # C-2 (#64) moved the six volatile MMIO sites into `rust/crates/tlsr8266-pac/`,
 # audited the same way and likewise unbudgeted: 87 - 6 = 81.
-MAX_PRODUCTION_UNSAFE = 81
+#
+# C-4 (#66) moved the HAL layer into `rust/crates/tlsr8266-hal/`: `sync.rs` 9 +
+# `irq_i.rs` 3 + `executor.rs` 1 = 13 documented sites leave the firmware tree
+# (`pm.rs` contributed 0), so the ceiling follows them down: 81 - 13 = 68.
+MAX_PRODUCTION_UNSAFE = 68
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
@@ -161,9 +172,9 @@ UPWARD_MODULES = frozenset(
 
 LOGGING_MACROS = ("uprintln", "uprint")
 
-# Root macros exported from `crate` (see sdk/common/bit.rs, plus the bit macros
-# re-exported from `tlsr8266_pac` in rust/src/lib.rs).  Importing a macro is
-# never a layering violation.
+# Root macros exported from `crate` (see `tlsr8266-hal`'s common/bit.rs, plus
+# the bit macros re-exported from `tlsr8266_pac` in rust/src/lib.rs). Importing a
+# macro is never a layering violation.
 ROOT_MACROS = frozenset(
     {
         "BIT",
@@ -197,11 +208,20 @@ LAYER_SDK_IMPORTS = {
 # `mesh_protocol` is the pure wire-format workspace crate: it has no firmware,
 # MMIO or app dependencies, so every layer may name it.  `tlsr8266_pac` is the
 # register/bit-macro leaf crate: it is MMIO, so `common` — below the MCU — may
-# not name it.
+# not name it.  `tlsr8266_hal` (C-4) is the extracted HAL layer: the remaining
+# `mcu` and `drivers` modules consume it; `sdk/common` no longer exists in the
+# firmware tree, so `common` stays exactly as it was.
 LAYER_EXTERNAL_CRATES = {
     "common": frozenset({"core", "critical_section", "mesh_protocol"}),
     "mcu": frozenset(
-        {"core", "critical_section", "bitflags", "mesh_protocol", "tlsr8266_pac"}
+        {
+            "core",
+            "critical_section",
+            "bitflags",
+            "mesh_protocol",
+            "tlsr8266_pac",
+            "tlsr8266_hal",
+        }
     ),
     "drivers": frozenset(
         {
@@ -212,11 +232,19 @@ LAYER_EXTERNAL_CRATES = {
             "embassy_time",
             "mesh_protocol",
             "tlsr8266_pac",
+            "tlsr8266_hal",
         }
     ),
 }
 
 _CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+# `#[cfg(not(target_os = "none"))]` marks code that only builds for the host.
+# `mask_source` blanks the `"none"` literal, so this pattern can never match the
+# masked `code`; it is matched against the raw `text` instead (see
+# `strip_host_only_code`).
+_CFG_HOST_RE = re.compile(
+    r'#\s*\[\s*cfg\s*\(\s*not\s*\(\s*target_os\s*=\s*"none"\s*\)\s*\)\s*\]'
+)
 _LOGGING_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:" + "|".join(LOGGING_MACROS) + r")\s*!"
 )
@@ -615,6 +643,37 @@ def production_code(text: str) -> str:
     return blank_copy(text, strip_test_code(text, mask_source(text)))
 
 
+def strip_host_only_code(text: str, stripped: bytearray) -> bytearray:
+    """Zero the mask over every ``#[cfg(not(target_os = "none"))]`` span.
+
+    Host-only code never reaches the firmware image, so it is excluded from the
+    ``unsafe-budget`` count.  It is *not* exempt from ``static-mut`` or
+    ``undocumented-unsafe``: those rules keep running on ``stripped``, so the
+    returned mask is used for the numeric budget only.
+
+    The attribute is matched against the raw ``text``: ``mask_source`` blanks
+    the ``"none"`` string literal, so a regex over the masked ``code`` can never
+    match it.  The code/comment mask then rejects the same characters sitting in
+    a comment or a string literal.  Extents are computed on the test-stripped
+    ``code`` — offsets are identical, ``blank_copy`` keeps the length — so an
+    item is removed whole while a field, statement or bare block annotation
+    stops at its own unit.
+    """
+    code = blank_copy(text, stripped)
+    mask = mask_source(text)
+    target_stripped = bytearray(stripped)
+    for match in _CFG_HOST_RE.finditer(text):
+        if mask[match.start()] != 1:
+            continue  # the attribute text is inside a comment or a string
+        if _starts_item(code, match.end()):
+            end = _item_extent(code, match.end())
+        else:
+            end = _annotation_extent(code, match.end())
+        if end is not None:
+            target_stripped[match.start() : end] = b"\x00" * (end - match.start())
+    return target_stripped
+
+
 # ---------------------------------------------------------------------------
 # Path extraction.
 # ---------------------------------------------------------------------------
@@ -874,9 +933,9 @@ def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
     for match in _STATIC_MUT_RE.finditer(code):
         collector.add(match.start(), "static-mut", match.group(0).strip())
 
-    unsafe_total = 0
+    # `undocumented-unsafe` reads `code`: a host-only `unsafe` is still real
+    # Rust in this tree and still needs its `// SAFETY:` comment.
     for match in _UNSAFE_RE.finditer(code):
-        unsafe_total += 1
         line = _line_of(text, match.start())
         if not _documented_above(text, stripped, line):
             collector.add(
@@ -884,6 +943,10 @@ def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
                 "undocumented-unsafe",
                 "no `// SAFETY:` comment directly above",
             )
+
+    # The budget alone ignores host-only code: it cannot reach the firmware.
+    target_code = blank_copy(text, strip_host_only_code(text, stripped))
+    unsafe_total = len(_UNSAFE_RE.findall(target_code))
 
     return collector.found, unsafe_total
 

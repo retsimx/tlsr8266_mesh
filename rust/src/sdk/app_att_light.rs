@@ -8,7 +8,6 @@ use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_report_status_enable, mesh_report_status_enable_mask,
 };
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::version::BUILD_VERSION;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
@@ -16,6 +15,7 @@ use mesh_protocol::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
 };
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 
 /// OTA GATT write handler, registered once from `App::init()` so this module
 /// never imports the application's OTA manager.

@@ -1,4 +1,4 @@
-use crate::sdk::mcu::gpio::GPIO_PIN_TYPE;
+use tlsr8266_hal::mcu::gpio::GPIO_PIN_TYPE;
 // General stuff
 
 // 0~MAX_MESH_NAME_LEN bytes  (strlen(ADV_DATA) + strlen(MESH_NAME) + sizeof(LlAdvPrivateT))<=31

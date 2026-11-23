@@ -21,8 +21,9 @@ use tlsr8266_pac::{
 ///
 /// Interrupt masking is owned by this module, so the `critical_section` crate's
 /// single global impl lives here: `acquire` masks interrupts and returns the
-/// previous enable state, `release` restores that saved state. Under host tests
-/// (`cfg!(test)`) no hardware is touched and the state is always `0`.
+/// previous enable state, `release` restores that saved state. Off-target
+/// (`cfg!(target_os = "none")` is false) no hardware is touched and the state is
+/// always `0`.
 struct TlsrCriticalSection;
 critical_section::set_impl!(TlsrCriticalSection);
 
@@ -36,7 +37,7 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
     // previous enable state for `release`; it never allocates or panics, and the
     // `critical_section` depth counter is the only caller.
     unsafe fn acquire() -> RawRestoreState {
-        if !cfg!(test) {
+        if cfg!(target_os = "none") {
             return irq_disable();
         };
         0
@@ -45,7 +46,7 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
     // SAFETY: (2) critical-section release. Restores the state returned by the
     // matching `acquire`; pairing is enforced by the `critical_section` crate.
     unsafe fn release(state: RawRestoreState) {
-        if !cfg!(test) {
+        if cfg!(target_os = "none") {
             irq_restore(state)
         }
     }
@@ -76,14 +77,13 @@ pub const IRQ_INIT_VALUE: u32 = FLD_IRQ::TMR1_EN.bits() | FLD_IRQ::ZB_RT_EN.bits
 /// * Used to start a non-critical section after a critical section
 /// * Should be paired with irq_restore() when the non-critical section ends
 /// * The return value can be passed to irq_restore() to restore previous state
-#[cfg_attr(test, mry::mry)]
 pub fn irq_enable() -> u8 {
     // Step 1: Read current interrupt enable state before modification
     let r = read_reg_irq_en(); // don't worry, the compiler will optimize the return value if not used
                                // Step 2: Enable global interrupts by writing 1 to enable register
     write_reg_irq_en(1);
     // Step 3: Return previous state so it can be restored later
-    return r;
+    r
 }
 
 /// Disables global interrupts on the TLSR8266 MCU.
@@ -104,14 +104,13 @@ pub fn irq_enable() -> u8 {
 /// * When interrupts are disabled, time-sensitive operations can be
 ///   performed without being interrupted, but this should be kept as
 ///   short as possible to avoid missing important interrupts
-#[cfg_attr(test, mry::mry)]
 pub fn irq_disable() -> u8 {
     // Step 1: Read current interrupt enable state before modification
     let r = read_reg_irq_en(); // don't worry, the compiler will optimize the return value if not used
                                // Step 2: Disable global interrupts by writing 0 to enable register
     write_reg_irq_en(0);
     // Step 3: Return previous state so it can be restored later
-    return r;
+    r
 }
 
 /// Restores the global interrupt state to a previously saved value.
@@ -119,7 +118,7 @@ pub fn irq_disable() -> u8 {
 /// # Parameters
 ///
 /// * `en` - The interrupt enable value to restore (typically obtained from
-///          irq_enable() or irq_disable())
+///   irq_enable() or irq_disable())
 ///
 /// # Algorithm
 /// 1. Writes the provided value to the interrupt enable register
@@ -130,7 +129,6 @@ pub fn irq_disable() -> u8 {
 ///   that existed before the critical section began
 /// * Should be paired with irq_disable() or irq_enable() which provides
 ///   the previous state to restore
-#[cfg_attr(test, mry::mry)]
 pub fn irq_restore(en: u8) {
     // Write saved interrupt enable state back to the register
     write_reg_irq_en(en);
@@ -149,7 +147,6 @@ pub fn irq_restore(en: u8) {
 ///   - Timer1 interrupts for timing functions
 ///   - ZigBee/BLE real-time interrupts for wireless communication
 /// * Other interrupts can be enabled later as needed by the application
-#[cfg_attr(test, mry::mry)]
 pub fn irq_init() {
     // Configure which specific interrupt sources are enabled
     write_reg_irq_mask(IRQ_INIT_VALUE);
@@ -219,10 +216,18 @@ pub fn irq_enable_tmr1() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::REG_BASE_ADDR;
-    use tlsr8266_pac::{mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask};
+
+    /// `reg_irq_en` (global interrupt enable) and `reg_irq_mask`.
+    const IRQ_EN: u32 = 0x643;
+    const IRQ_MASK: u32 = 0x640;
+
+    /// `FakeMmio` is process-wide and the suite runs with `--test-threads=1`,
+    /// so every test starts from a zeroed bank.
+    fn reset_fakes() {
+        FakeMmio::reset();
+    }
 
     /// Tests enabling global interrupts.
     ///
@@ -233,34 +238,40 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock the read_reg_irq_en function to return a known value (0)
-    /// 2. Mock the write_reg_irq_en function (no return value needed)
-    /// 3. Call irq_enable()
-    /// 4. Verify the return value is the mocked value from read_reg_irq_en
-    /// 5. Verify that write_reg_irq_en was called with the parameter 1
+    /// 1. Seed `reg_irq_en` with 0 (interrupts disabled)
+    /// 2. Call irq_enable()
+    /// 3. Verify the return value is the previous state
+    /// 4. Verify the enable register was written with 1
     ///
     /// # Notes
     ///
     /// * Tests the case where interrupts were previously disabled
     #[test]
-    #[mry::lock(read_reg_irq_en, write_reg_irq_en)]
     fn test_irq_enable_when_disabled() {
-        // Step 1: Mock read_reg_irq_en to return 0 (interrupts disabled)
-        mock_read_reg_irq_en().returns(0);
-        // Step 2: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        // Step 1: interrupts disabled
+        FakeMmio::set_reg8(IRQ_EN, 0);
+        FakeMmio::clear_writes();
 
-        // Step 3: Call the function being tested
+        // Step 2: Call the function being tested
         let previous_state = irq_enable();
 
-        // Step 4: Verify the previous state is returned correctly
+        // Step 3: Verify the previous state is returned correctly
         assert_eq!(
             previous_state, 0,
             "irq_enable should return the previous state (0)"
         );
 
-        // Step 5: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(1).assert_called(1);
+        // Step 4: Verify the enable register was written with the correct value
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 1,
+            }]
+        );
     }
 
     /// Tests enabling global interrupts when already enabled.
@@ -272,35 +283,40 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock the read_reg_irq_en function to return 1 (enabled)
-    /// 2. Mock the write_reg_irq_en function
-    /// 3. Call irq_enable()
-    /// 4. Verify the return value is 1
-    /// 5. Verify write_reg_irq_en was still called with parameter 1
+    /// 1. Seed `reg_irq_en` with 1 (enabled)
+    /// 2. Call irq_enable()
+    /// 3. Verify the return value is 1 and the register still holds 1
     ///
     /// # Notes
     ///
     /// * Tests the case where interrupts were already enabled
     /// * Confirms the function is idempotent
     #[test]
-    #[mry::lock(read_reg_irq_en, write_reg_irq_en)]
     fn test_irq_enable_when_already_enabled() {
-        // Step 1: Mock read_reg_irq_en to return 1 (interrupts enabled)
-        mock_read_reg_irq_en().returns(1);
-        // Step 2: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        // Step 1: interrupts enabled
+        FakeMmio::set_reg8(IRQ_EN, 1);
+        FakeMmio::clear_writes();
 
-        // Step 3: Call the function being tested
+        // Step 2: Call the function being tested
         let previous_state = irq_enable();
 
-        // Step 4: Verify the previous state is returned correctly
+        // Step 3: Verify the previous state is returned correctly
         assert_eq!(
             previous_state, 1,
             "irq_enable should return the previous state (1)"
         );
 
-        // Step 5: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(1).assert_called(1);
+        // Step 4: Verify the write still happened with value 1
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 1,
+            }]
+        );
     }
 
     /// Tests disabling global interrupts.
@@ -312,34 +328,39 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock read_reg_irq_en to return 1 (enabled)
-    /// 2. Mock write_reg_irq_en
-    /// 3. Call irq_disable()
-    /// 4. Verify the return value is 1
-    /// 5. Verify write_reg_irq_en was called with parameter 0
+    /// 1. Seed `reg_irq_en` with 1 (enabled)
+    /// 2. Call irq_disable()
+    /// 3. Verify the return value is 1 and the register now holds 0
     ///
     /// # Notes
     ///
     /// * Tests the case where interrupts were previously enabled
     #[test]
-    #[mry::lock(read_reg_irq_en, write_reg_irq_en)]
     fn test_irq_disable_when_enabled() {
-        // Step 1: Mock read_reg_irq_en to return 1 (interrupts enabled)
-        mock_read_reg_irq_en().returns(1);
-        // Step 2: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        // Step 1: interrupts enabled
+        FakeMmio::set_reg8(IRQ_EN, 1);
+        FakeMmio::clear_writes();
 
-        // Step 3: Call the function being tested
+        // Step 2: Call the function being tested
         let previous_state = irq_disable();
 
-        // Step 4: Verify the previous state is returned correctly
+        // Step 3: Verify the previous state is returned correctly
         assert_eq!(
             previous_state, 1,
             "irq_disable should return the previous state (1)"
         );
 
-        // Step 5: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(0).assert_called(1);
+        // Step 4: Verify the enable register was written with 0
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 0);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 0,
+            }]
+        );
     }
 
     /// Tests disabling global interrupts when already disabled.
@@ -351,35 +372,40 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock read_reg_irq_en to return 0 (disabled)
-    /// 2. Mock write_reg_irq_en
-    /// 3. Call irq_disable()
-    /// 4. Verify the return value is 0
-    /// 5. Verify write_reg_irq_en was still called with parameter 0
+    /// 1. Seed `reg_irq_en` with 0 (disabled)
+    /// 2. Call irq_disable()
+    /// 3. Verify the return value is 0 and the register still holds 0
     ///
     /// # Notes
     ///
     /// * Tests the case where interrupts were already disabled
     /// * Confirms the function is idempotent
     #[test]
-    #[mry::lock(read_reg_irq_en, write_reg_irq_en)]
     fn test_irq_disable_when_already_disabled() {
-        // Step 1: Mock read_reg_irq_en to return 0 (interrupts disabled)
-        mock_read_reg_irq_en().returns(0);
-        // Step 2: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        // Step 1: interrupts disabled
+        FakeMmio::set_reg8(IRQ_EN, 0);
+        FakeMmio::clear_writes();
 
-        // Step 3: Call the function being tested
+        // Step 2: Call the function being tested
         let previous_state = irq_disable();
 
-        // Step 4: Verify the previous state is returned correctly
+        // Step 3: Verify the previous state is returned correctly
         assert_eq!(
             previous_state, 0,
             "irq_disable should return the previous state (0)"
         );
 
-        // Step 5: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(0).assert_called(1);
+        // Step 4: Verify the write still happened with value 0
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 0);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 0,
+            }]
+        );
     }
 
     /// Tests restoring global interrupts to enabled state.
@@ -389,24 +415,30 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock write_reg_irq_en
+    /// 1. Reset the bank
     /// 2. Call irq_restore(1) to restore enabled state
-    /// 3. Verify write_reg_irq_en was called with parameter 1
+    /// 3. Verify the enable register holds 1
     ///
     /// # Notes
     ///
     /// * Tests restoring to enabled state (1)
     #[test]
-    #[mry::lock(write_reg_irq_en)]
     fn test_irq_restore_to_enabled() {
-        // Step 1: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
 
-        // Step 2: Call the function being tested
+        // Call the function being tested
         irq_restore(1);
 
-        // Step 3: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(1).assert_called(1);
+        // Verify the enable register was written with 1
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 1,
+            }]
+        );
     }
 
     /// Tests restoring global interrupts to disabled state.
@@ -416,24 +448,32 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock write_reg_irq_en
+    /// 1. Seed the enable register with 1 so the write is visible
     /// 2. Call irq_restore(0) to restore disabled state
-    /// 3. Verify write_reg_irq_en was called with parameter 0
+    /// 3. Verify the enable register holds 0
     ///
     /// # Notes
     ///
     /// * Tests restoring to disabled state (0)
     #[test]
-    #[mry::lock(write_reg_irq_en)]
     fn test_irq_restore_to_disabled() {
-        // Step 1: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(IRQ_EN, 1);
+        FakeMmio::clear_writes();
 
-        // Step 2: Call the function being tested
+        // Call the function being tested
         irq_restore(0);
 
-        // Step 3: Verify write_reg_irq_en was called with the correct parameter
-        mock_write_reg_irq_en(0).assert_called(1);
+        // Verify the enable register was written with 0
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 0);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_EN | REG_BASE_ADDR,
+                width: 1,
+                value: 0,
+            }]
+        );
     }
 
     /// Tests initializing the interrupt system.
@@ -443,24 +483,30 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock write_reg_irq_mask
+    /// 1. Reset the bank
     /// 2. Call irq_init()
-    /// 3. Verify write_reg_irq_mask was called with IRQ_INIT_VALUE
+    /// 3. Verify the mask register holds IRQ_INIT_VALUE
     ///
     /// # Notes
     ///
     /// * Verifies the correct initialization value is used
     #[test]
-    #[mry::lock(write_reg_irq_mask)]
     fn test_irq_init() {
-        // Step 1: Mock write_reg_irq_mask (void function)
-        mock_write_reg_irq_mask(Any).returns(());
+        reset_fakes();
 
-        // Step 2: Call the function being tested
+        // Call the function being tested
         irq_init();
 
-        // Step 3: Verify write_reg_irq_mask was called with the correct parameter
-        mock_write_reg_irq_mask(IRQ_INIT_VALUE).assert_called(1);
+        // Verify the mask register was written with the correct value
+        assert_eq!(FakeMmio::reg32(IRQ_MASK), IRQ_INIT_VALUE);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: IRQ_MASK | REG_BASE_ADDR,
+                width: 4,
+                value: IRQ_INIT_VALUE,
+            }]
+        );
     }
 
     /// Tests a typical critical section pattern using the interrupt functions.
@@ -472,40 +518,53 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Mock read_reg_irq_en to return 1 (enabled)
-    /// 2. Mock write_reg_irq_en
-    /// 3. Call irq_disable() to start critical section
-    /// 4. Call irq_restore() with returned state
-    /// 5. Verify both functions were called with correct parameters
+    /// 1. Seed the enable register with 1 (enabled)
+    /// 2. Call irq_disable() to start the critical section
+    /// 3. Call irq_restore() with the returned state
+    /// 4. Verify the ordered writes are [0, 1] and the register ends enabled
     ///
     /// # Notes
     ///
     /// * Demonstrates and tests the common critical section pattern
     #[test]
-    #[mry::lock(read_reg_irq_en, write_reg_irq_en)]
     fn test_critical_section_pattern() {
-        // Step 1: Mock read_reg_irq_en to return 1 (interrupts were enabled)
-        mock_read_reg_irq_en().returns(1);
-        // Step 2: Mock write_reg_irq_en (void function)
-        mock_write_reg_irq_en(Any).returns(());
+        reset_fakes();
+        // Step 1: interrupts were enabled
+        FakeMmio::set_reg8(IRQ_EN, 1);
+        FakeMmio::clear_writes();
 
-        // Step 3: Call irq_disable() to start critical section
+        // Step 2: Call irq_disable() to start the critical section
         let previous_state = irq_disable();
 
         // Simulate some operations in the critical section...
 
-        // Step 4: Call irq_restore() to end critical section
+        // Step 3: Call irq_restore() to end the critical section
         irq_restore(previous_state);
 
-        // Step 5: Verify write_reg_irq_en was called correctly for both operations
-        mock_write_reg_irq_en(0).assert_called(1); // First call with 0 to disable interrupts
-        mock_write_reg_irq_en(1).assert_called(1); // Second call with 1 to restore enabled state
+        // Step 4: Verify the enable register was written correctly for both operations
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: IRQ_EN | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0,
+                },
+                RegWrite {
+                    addr: IRQ_EN | REG_BASE_ADDR,
+                    width: 1,
+                    value: 1,
+                },
+            ],
+            "disable then restore, in that order"
+        );
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 1, "interrupts end enabled");
     }
 
-    // Proof slices for the semantic IRQ helpers: these carry no mry lock
-    // attribute, so the real accessor bodies run and route through the
-    // in-process `FakeMmio` bank. Each test resets the bank first because it is
-    // process-wide (`--test-threads=1`).
+    // Proof slices for the semantic IRQ helpers: these exercise the real
+    // accessor bodies, which route through the in-process `FakeMmio` bank. Each
+    // test resets the bank first because it is process-wide
+    // (`--test-threads=1`).
 
     /// Tests that the system timer predicate follows bit 20 of `reg_irq_src`.
     #[test]

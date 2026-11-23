@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mesh-protocol", "crates/tlsr8266-pac"]
+members = [".", "crates/mesh-protocol", "crates/tlsr8266-pac", "crates/tlsr8266-hal"]
 resolver = "2"
 
 [package]
@@ -21,9 +21,8 @@ panic = "abort"
 [dependencies]
 mesh-protocol = { path = "crates/mesh-protocol" }
 tlsr8266-pac = { path = "crates/tlsr8266-pac" }
+tlsr8266-hal = { path = "crates/tlsr8266-hal" }
 embassy-time = { version = "0.5", features = ["tick-hz-32_000_000"] }
-embassy-time-driver = { version = "0.2", features = ["tick-hz-32_000_000"] }
-embassy-time-queue-utils = "0.3"
 embassy-executor = { version = "0.10", features = [] }
 embassy-sync = "0.8"
 static_cell = "2"
@@ -43,4 +42,4 @@ tlsr8266-pac = { path = "crates/tlsr8266-pac", features = ["mry-compat"] }
 
 [features]
 # If enabled, mirror log output into the `_TLSR_RTT` ring for a SWire-attached host.
-rtt = []
+rtt = ["tlsr8266-hal/rtt"]

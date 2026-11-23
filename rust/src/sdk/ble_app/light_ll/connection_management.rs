@@ -57,10 +57,10 @@ use crate::sdk::ble_app::rf_drv_8266::{
     BLE_PERIPHERAL_ADVERTISING_ENABLED, BLE_SCAN_RESPONSE_INTERVAL_US, CURRENT_RF_STATE, MAC_ID,
     PKT_INIT,
 };
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use mesh_protocol::packet_types::*;
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
 /// Response buffer for storing packets that need to be sent back to the BLE host.
@@ -823,8 +823,8 @@ mod tests {
         mock_rf_reset_sn, mock_rf_set_ble_access_code, mock_rf_set_ble_channel,
         mock_rf_set_ble_crc_adv, mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_stop_trx,
     };
-    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use mesh_protocol::packet_types::{Packet, PacketLlInit};
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use tlsr8266_pac::{
         mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
         mock_write_reg_irq_src, mock_write_reg_rf_crc, mock_write_reg_system_tick_irq,

@@ -49,9 +49,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32};
 
 use crate::config::FLASH_ADR_LIGHT_NEW_FW;
-use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{OtaState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 
 /// Over-The-Air (OTA) update completion status flag.
 /// Indicates whether an OTA firmware update has finished successfully or with errors.

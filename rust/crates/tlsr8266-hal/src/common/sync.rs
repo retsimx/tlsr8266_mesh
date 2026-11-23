@@ -43,8 +43,9 @@
 //!    point. In short: ISRs must not leak guards.
 //! 3. **The panic path must never be reachable while a guard on the same mutex
 //!    is held.** [`CriticalSectionMutex::lock`]'s re-entrancy assert exists only
-//!    under `cfg(test)`; in production a second `lock()` on the same mutex from
-//!    the same context succeeds and hands out a second `&mut T`. With
+//!    off-target (`not(target_os = "none")`); on the device a second `lock()` on
+//!    the same mutex from the same context succeeds and hands out a second
+//!    `&mut T`. With
 //!    `panic = "abort"` there is no unwinding, so the outer guard is never
 //!    dropped either. A panic raised inside a critical section whose handler
 //!    then re-locks that mutex would therefore alias. The UART panic sink
@@ -54,23 +55,30 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
+#[cfg(any(target_os = "none", test))]
+use core::sync::atomic::compiler_fence;
 use core::sync::atomic::{
-    compiler_fence, AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
+    AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
 };
 
+#[cfg(any(target_os = "none", test))]
 struct SavedState(UnsafeCell<critical_section::RestoreState>);
 
+#[cfg(any(target_os = "none", test))]
 // SAFETY: (4) `Sync` wrapper. Only touched while global interrupts are disabled
 // by the outermost acquire path, so no ISR can observe it concurrently.
 unsafe impl Sync for SavedState {}
 
 /// Number of currently held mutex guards.
+#[cfg(any(target_os = "none", test))]
 static CS_DEPTH: AtomicU8 = AtomicU8::new(0);
 /// Restore state captured by the outermost `critical_section::acquire`.
+#[cfg(any(target_os = "none", test))]
 static CS_SAVED: SavedState =
     SavedState(UnsafeCell::new(critical_section::RestoreState::invalid()));
 
 /// Enter one nesting level, disabling interrupts only at the outermost level.
+#[cfg(any(target_os = "none", test))]
 #[inline]
 fn enter_cs(acquire: impl FnOnce() -> critical_section::RestoreState) {
     // Read the depth *before* acquiring so a nested lock never touches the
@@ -87,6 +95,7 @@ fn enter_cs(acquire: impl FnOnce() -> critical_section::RestoreState) {
 }
 
 /// Leave one nesting level, restoring interrupts only at the outermost level.
+#[cfg(any(target_os = "none", test))]
 #[inline]
 fn exit_cs(release: impl FnOnce(critical_section::RestoreState)) {
     compiler_fence(Ordering::Release);
@@ -104,9 +113,9 @@ fn exit_cs(release: impl FnOnce(critical_section::RestoreState)) {
 /// A mutex that keeps interrupts disabled while its guard is alive.
 ///
 /// See the [module docs](self) for the safety model.
-#[cfg_attr(not(test), repr(transparent))]
+#[cfg_attr(target_os = "none", repr(transparent))]
 pub struct CriticalSectionMutex<T: ?Sized> {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     locked: AtomicBool,
     data: UnsafeCell<T>,
 }
@@ -117,14 +126,14 @@ pub struct CriticalSectionMutex<T: ?Sized> {
 unsafe impl<T: ?Sized + Send> Send for CriticalSectionMutex<T> {}
 // SAFETY: (4) `Sync` wrapper. Sharing is sound because every access to `data`
 // goes through a guard that holds the interrupt-disabled critical section (or,
-// under `cfg(test)`, the re-entrancy probe), so no two contexts can alias it.
+// off-target, the re-entrancy probe), so no two contexts can alias it.
 unsafe impl<T: ?Sized + Send> Sync for CriticalSectionMutex<T> {}
 
 impl<T> CriticalSectionMutex<T> {
     /// Create a new mutex in an unlocked state. Usable in `const` context.
     pub const fn new(t: T) -> Self {
         Self {
-            #[cfg(test)]
+            #[cfg(not(target_os = "none"))]
             locked: AtomicBool::new(false),
             data: UnsafeCell::new(t),
         }
@@ -146,16 +155,16 @@ impl<T: ?Sized> CriticalSectionMutex<T> {
     ///
     /// # Panics
     ///
-    /// Under `cfg(test)` only, panics if the same mutex is already locked in
-    /// this thread; the production path has no re-entrancy check.
+    /// Under off-target builds only, panics if the same mutex is already locked
+    /// in this thread; the device path has no re-entrancy check.
     #[inline(always)]
     pub fn lock(&self) -> CriticalSectionMutexGuard<'_, T> {
-        #[cfg(test)]
+        #[cfg(not(target_os = "none"))]
         assert!(
             !self.locked.swap(true, Ordering::Relaxed),
             "re-entrant lock on same CriticalSectionMutex"
         );
-        #[cfg(not(test))]
+        #[cfg(target_os = "none")]
         // SAFETY: (2) `critical_section::acquire` contract. `enter_cs` calls this only
         // at depth 0 and stores the returned state in `CS_SAVED` for the matching
         // `release`, so acquire/release stay 1:1 and properly nested.
@@ -192,9 +201,9 @@ impl<T: ?Sized> DerefMut for CriticalSectionMutexGuard<'_, T> {
 impl<T: ?Sized> Drop for CriticalSectionMutexGuard<'_, T> {
     #[inline(always)]
     fn drop(&mut self) {
-        #[cfg(test)]
+        #[cfg(not(target_os = "none"))]
         self.lock.locked.store(false, Ordering::Relaxed);
-        #[cfg(not(test))]
+        #[cfg(target_os = "none")]
         // SAFETY: (2) `critical_section::release` contract. `exit_cs` decrements the
         // depth first and reaches this only at the outermost level, restoring exactly
         // the state captured by the matching `acquire`.

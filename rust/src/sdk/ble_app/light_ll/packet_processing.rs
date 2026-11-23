@@ -92,12 +92,12 @@ use crate::sdk::ble_app::light_ll::connection_management::{
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::*;
-use crate::sdk::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
 use crate::BIT;
 use mesh_protocol::mesh_types::*;
 use mesh_protocol::packet_types::*;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_pac::*;
 
 use super::mesh_management::{
@@ -1358,7 +1358,7 @@ pub fn is_add_packet_buf_ready() -> bool {
 /// * Safe for concurrent access from multiple contexts
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
-    use crate::sdk::common::sync::CriticalSectionMutex;
+    use tlsr8266_hal::common::sync::CriticalSectionMutex;
 
     // STATIC BUFFER ALLOCATION: Pre-allocated transmission buffer for zero-allocation operation
     static BLT_TX_FIFO: CriticalSectionMutex<[Packet; BLT_FIFO_TX_PACKET_COUNT]> =
@@ -1595,11 +1595,9 @@ mod tests {
         mock_mesh_node_update_status, mock_rf_link_match_group_mac,
     };
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time64, CLOCK_SYS_CLOCK_1US};
-    use tlsr8266_pac::{
-        mock_read_reg_dma_tx_rptr, mock_read_reg_dma_tx_wptr, mock_read_reg_rnd_number,
-        mock_read_reg_system_tick, mock_write_reg_dma_tx_fifo,
-    };
+    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::mock_read_reg_rnd_number;
 
     /// Helper function to create a test packet with specified values.
     fn create_test_packet(opcode: u8, sno: [u8; 3], src_adr: u16, dst_adr: u16) -> Packet {
@@ -1656,7 +1654,32 @@ mod tests {
     }
 
     /// Reset global state to known values for test isolation.
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+    }
+
+    /// Datasheet offsets of the DMA TX queue registers, as `read_reg_dma_tx_*`
+    /// and `write_reg_dma_tx_fifo` reach them.
+    const REG_DMA_TX_RPTR: u32 = 0x52a;
+    const REG_DMA_TX_WPTR: u32 = 0x52b;
+    const REG_DMA_TX_FIFO: u32 = 0x52c;
+
+    /// Number of `write_reg_dma_tx_fifo` registrations the run performed.
+    fn dma_tx_fifo_writes() -> usize {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (REG_DMA_TX_FIFO | tlsr8266_pac::REG_BASE_ADDR))
+            .count()
+    }
+
     fn reset_test_state() {
+        reset_host_fakes();
         RC_PKT_BUF.lock().clear();
         DEVICE_ADDRESS.set(0x1234);
         DEVICE_STATUS_RECORD_INDEX.set(0);
@@ -2227,25 +2250,22 @@ mod tests {
 
     /// Tests transmission buffer ready status with empty buffer.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr)]
     fn test_is_add_packet_buf_ready_empty_buffer() {
-        mock_read_reg_dma_tx_wptr().returns(0);
-        mock_read_reg_dma_tx_rptr().returns(0);
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 0);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
 
         let result = is_add_packet_buf_ready();
 
         assert_eq!(result, true, "Empty buffer should be ready for packets");
-
-        mock_read_reg_dma_tx_wptr().assert_called(1);
-        mock_read_reg_dma_tx_rptr().assert_called(1);
     }
 
     /// Tests transmission buffer ready status with buffer near capacity.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr)]
     fn test_is_add_packet_buf_ready_near_full() {
-        mock_read_reg_dma_tx_wptr().returns(5);
-        mock_read_reg_dma_tx_rptr().returns(2);
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 5);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 2);
 
         let result = is_add_packet_buf_ready();
 
@@ -2255,10 +2275,10 @@ mod tests {
 
     /// Tests transmission buffer ready status with buffer having capacity.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr)]
     fn test_is_add_packet_buf_ready_has_capacity() {
-        mock_read_reg_dma_tx_wptr().returns(4);
-        mock_read_reg_dma_tx_rptr().returns(2);
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 4);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 2);
 
         let result = is_add_packet_buf_ready();
 
@@ -2272,11 +2292,10 @@ mod tests {
 
     /// Tests successful packet transmission queuing.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr, write_reg_dma_tx_fifo)]
     fn test_rf_link_add_tx_packet_success() {
-        mock_read_reg_dma_tx_wptr().returns(2);
-        mock_read_reg_dma_tx_rptr().returns(0);
-        mock_write_reg_dma_tx_fifo(Any).returns(());
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 2);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
 
         let packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
 
@@ -2284,16 +2303,17 @@ mod tests {
 
         assert!(result.is_ok(), "Should successfully queue packet");
 
-        // Verify DMA registration was called
-        mock_write_reg_dma_tx_fifo(Any).assert_called(1);
+        // Verify DMA registration was called exactly once (widx != 0, so no
+        // empty-buffer marker write)
+        assert_eq!(dma_tx_fifo_writes(), 1, "one FIFO registration expected");
     }
 
     /// Tests packet rejection when buffer is full.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr)]
     fn test_rf_link_add_tx_packet_buffer_full() {
-        mock_read_reg_dma_tx_wptr().returns(7);
-        mock_read_reg_dma_tx_rptr().returns(3);
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 7);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 3);
 
         let packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
 
@@ -2305,11 +2325,10 @@ mod tests {
 
     /// Tests empty buffer initialization.
     #[test]
-    #[mry::lock(read_reg_dma_tx_wptr, read_reg_dma_tx_rptr, write_reg_dma_tx_fifo)]
     fn test_rf_link_add_tx_packet_empty_buffer_init() {
-        mock_read_reg_dma_tx_wptr().returns(0);
-        mock_read_reg_dma_tx_rptr().returns(0);
-        mock_write_reg_dma_tx_fifo(Any).returns(());
+        reset_host_fakes();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 0);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
 
         let packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
 
@@ -2320,8 +2339,8 @@ mod tests {
             "Should successfully initialize empty buffer and add packet"
         );
 
-        // Verify DMA was called for the packet
-        mock_write_reg_dma_tx_fifo(Any).assert_called(2);
+        // Verify DMA was called twice: the empty-buffer marker, then the packet
+        assert_eq!(dma_tx_fifo_writes(), 2, "marker + packet registrations");
     }
 
     // ================================================================================
@@ -3155,13 +3174,14 @@ mod tests {
 
     /// Tests local packet processing structure.
     #[test]
-    #[mry::lock(rf_link_match_group_mac, on_light_data, on_uart_mesh_rx, clock_time)]
+    #[mry::lock(rf_link_match_group_mac, on_light_data, on_uart_mesh_rx)]
     fn test_rf_link_rc_data_local_processing_with_ack() {
         reset_test_state();
         mock_rf_link_match_group_mac(Any).returns((false, true)); // Device match
         mock_on_light_data(Any).returns(());
         mock_on_uart_mesh_rx(Any).returns(());
-        mock_clock_time().returns(12345); // Mock time for ACK sequence number generation
+        // Seed the fake tick: the ACK sequence number is clock_time() + device address
+        fake_clock::set_ticks(12345);
 
         // Use peripheral mode to avoid hardware register access
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
@@ -3180,8 +3200,14 @@ mod tests {
         // local processing (this used to be the un-mocked `light_mesh_rx_cb`).
         mock_on_uart_mesh_rx(Any).assert_called(1);
 
-        // Verify ACK generation used clock_time
-        mock_clock_time().assert_called(1);
+        // Verify ACK generation consumed clock_time(): the status packet's
+        // sequence number is clock_time() + DEVICE_ADDRESS, truncated to 3 bytes.
+        let expected_sno = (12345u32 + 0x1234u32).to_le_bytes();
+        assert_eq!(
+            PKT_LIGHT_STATUS.lock().att_cmd().value.sno,
+            [expected_sno[0], expected_sno[1], expected_sno[2]],
+            "ACK sequence number must be derived from the fake clock"
+        );
 
         // Verify ACK was queued for mesh transmission
         assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 1);
@@ -3192,20 +3218,16 @@ mod tests {
 
     /// Tests mesh relay packet marking.
     #[test]
-    #[mry::lock(
-        rf_link_match_group_mac,
-        read_reg_system_tick,
-        read_reg_rnd_number,
-        clock_time64
-    )]
+    #[mry::lock(rf_link_match_group_mac, read_reg_rnd_number)]
     fn test_rf_link_rc_data_mesh_relay() {
         reset_test_state();
 
         // Mock dependencies
         mock_rf_link_match_group_mac(Any).returns((false, false)); // No match - trigger relay
-        mock_read_reg_system_tick().returns(1000);
         mock_read_reg_rnd_number().returns(42);
-        mock_clock_time64().returns(1000000);
+        // clock_time64() is clock_time() plus its overflow accumulator, and
+        // clock_time() is the fake system tick register.
+        fake_clock::set_ticks(1_000_000);
 
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false); // Mesh-only mode for random delay
 

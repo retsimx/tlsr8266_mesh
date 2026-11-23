@@ -2,12 +2,9 @@
 //! according to a static `TBLCMDSET` table. It touches nothing but the register,
 //! analog and clock leaves of the HAL.
 
-use crate::sdk::mcu::analog::analog_write;
-use crate::sdk::mcu::clock::sleep_us;
+use crate::mcu::analog::analog_write;
+use crate::mcu::clock::sleep_us;
 use tlsr8266_pac::write_reg8;
-
-#[cfg(test)]
-use mry::mry;
 
 pub const TCMD_UNDER_RD: u8 = 0x80;
 pub const TCMD_UNDER_WR: u8 = 0x40;
@@ -26,7 +23,6 @@ pub struct TBLCMDSET {
     pub cmd: u8,
 }
 
-#[cfg_attr(test, mry(skip_args(TBLCMDSET)))]
 pub fn load_tbl_cmd_set(cmds: &[TBLCMDSET]) -> u32 {
     for cmd in cmds {
         let adr: u32 = cmd.adr as u32; // write_reg8 adds 0x800000 itself
@@ -52,20 +48,38 @@ pub fn load_tbl_cmd_set(cmds: &[TBLCMDSET]) -> u32 {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::analog::mock_analog_write;
-    use crate::sdk::mcu::clock::mock_sleep_us;
-    use mry::Any;
-    use tlsr8266_pac::mock_write_reg8;
+    use crate::mcu::analog::fake_analog::FakeAnalog;
+    use crate::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::REG_BASE_ADDR;
 
-    #[test]
-    fn test_load_tbl_cmd_set_empty() {
-        let result = load_tbl_cmd_set(&[]);
-        assert_eq!(result, 0);
+    /// A byte no command in this suite writes, used to prove "no analog write".
+    const ANALOG_SENTINEL_ADDR: u8 = 0x78;
+    const ANALOG_SENTINEL_VALUE: u8 = 0x5a;
+
+    /// `FakeMmio`, `FakeAnalog` and `fake_clock` are process-wide singletons and
+    /// the suite runs with `--test-threads=1`, so every test starts from zero.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        fake_clock::reset();
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
+    fn test_load_tbl_cmd_set_empty() {
+        reset_fakes();
+
+        let result = load_tbl_cmd_set(&[]);
+
+        assert_eq!(result, 0);
+        assert!(FakeMmio::writes().is_empty(), "nothing may be written");
+        assert!(fake_clock::sleeps().is_empty(), "nothing may be waited on");
+    }
+
+    #[test]
     fn test_load_tbl_cmd_set_write_cmd() {
+        reset_fakes();
+
         // Create a test command set with TCMD_WRITE
         let cmd_set = [TBLCMDSET {
             adr: 0x1234,
@@ -73,43 +87,51 @@ mod tests {
             cmd: TCMD_WRITE | TCMD_UNDER_WR,
         }];
 
-        // Mock write_reg8 function
-        mock_write_reg8(0x1234, 0x56).returns(());
-
         let result = load_tbl_cmd_set(&cmd_set);
 
         // Assert the function returns the size of the command set
         assert_eq!(result, 1);
 
-        // Verify that write_reg8 was called with the expected arguments
-        mock_write_reg8(0x1234, 0x56).assert_called(1);
+        // Verify the register was written with the expected value
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x1234 | REG_BASE_ADDR,
+                width: 1,
+                value: 0x56,
+            }]
+        );
+        assert_eq!(FakeMmio::reg8(0x1234), 0x56);
     }
 
     #[test]
-    #[mry::lock(analog_write)]
     fn test_load_tbl_cmd_set_wareg_cmd() {
+        reset_fakes();
+
         // Create a test command set with TCMD_WAREG
         let cmd_set = [TBLCMDSET {
-            adr: 0x78,
+            adr: ANALOG_SENTINEL_ADDR as u16,
             dat: 0x9A,
             cmd: TCMD_WAREG | TCMD_UNDER_WR,
         }];
 
-        // Mock analog_write function
-        mock_analog_write(0x78, 0x9A).returns(());
-
         let result = load_tbl_cmd_set(&cmd_set);
 
         // Assert the function returns the size of the command set
         assert_eq!(result, 1);
 
-        // Verify that analog_write was called with the expected arguments
-        mock_analog_write(0x78, 0x9A).assert_called(1);
+        // Verify the analog register received the expected value
+        assert_eq!(FakeAnalog::get(ANALOG_SENTINEL_ADDR), 0x9A);
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "an analog write must not touch the MMIO bank"
+        );
     }
 
     #[test]
-    #[mry::lock(sleep_us)]
     fn test_load_tbl_cmd_set_wait_cmd() {
+        reset_fakes();
+
         // Create a test command set with TCMD_WAIT
         let cmd_set = [TBLCMDSET {
             adr: 0x02, // 0x02 * 256 = 512
@@ -117,23 +139,20 @@ mod tests {
             cmd: TCMD_WAIT | TCMD_UNDER_WR,
         }];
 
-        // Mock sleep_us function
-        mock_sleep_us(564).returns(());
-
         let result = load_tbl_cmd_set(&cmd_set);
 
         // Assert the function returns the size of the command set
         assert_eq!(result, 1);
 
-        // Verify that sleep_us was called with the expected arguments
-        mock_sleep_us(564).assert_called(1);
+        // Verify the wait duration reached the clock leaf
+        assert_eq!(fake_clock::sleeps(), vec![564]);
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(analog_write)]
-    #[mry::lock(sleep_us)]
     fn test_load_tbl_cmd_set_unsupported_cmd() {
+        reset_fakes();
+        FakeAnalog::set(ANALOG_SENTINEL_ADDR, ANALOG_SENTINEL_VALUE);
+
         // Create a test command set with an unsupported command value
         let cmd_set = [TBLCMDSET {
             adr: 0x1234,
@@ -146,17 +165,21 @@ mod tests {
         // Assert the function returns the size of the command set
         assert_eq!(result, 1);
 
-        // No mocked functions should be called
-        mock_write_reg8(Any, Any).assert_called(0);
-        mock_analog_write(Any, Any).assert_called(0);
-        mock_sleep_us(Any).assert_called(0);
+        // No side effect may be observed
+        assert!(FakeMmio::writes().is_empty(), "no register write");
+        assert_eq!(
+            FakeAnalog::get(ANALOG_SENTINEL_ADDR),
+            ANALOG_SENTINEL_VALUE,
+            "no analog write"
+        );
+        assert!(fake_clock::sleeps().is_empty(), "no wait");
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(analog_write)]
-    #[mry::lock(sleep_us)]
     fn test_load_tbl_cmd_set_invalid_flag() {
+        reset_fakes();
+        FakeAnalog::set(ANALOG_SENTINEL_ADDR, ANALOG_SENTINEL_VALUE);
+
         // Create a test command set with invalid cmd flag (no TCMD_UNDER_WR)
         let cmd_set = [TBLCMDSET {
             adr: 0x1234,
@@ -169,17 +192,20 @@ mod tests {
         // Assert the function returns the size of the command set
         assert_eq!(result, 1);
 
-        // No mocked functions should be called
-        mock_write_reg8(Any, Any).assert_called(0);
-        mock_analog_write(Any, Any).assert_called(0);
-        mock_sleep_us(Any).assert_called(0);
+        // No side effect may be observed
+        assert!(FakeMmio::writes().is_empty(), "no register write");
+        assert_eq!(
+            FakeAnalog::get(ANALOG_SENTINEL_ADDR),
+            ANALOG_SENTINEL_VALUE,
+            "no analog write"
+        );
+        assert!(fake_clock::sleeps().is_empty(), "no wait");
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(analog_write)]
-    #[mry::lock(sleep_us)]
     fn test_load_tbl_cmd_set_multiple_commands() {
+        reset_fakes();
+
         // Create a test command set with multiple commands
         let cmd_set = [
             TBLCMDSET {
@@ -188,7 +214,7 @@ mod tests {
                 cmd: TCMD_WRITE | TCMD_UNDER_WR,
             },
             TBLCMDSET {
-                adr: 0x78,
+                adr: ANALOG_SENTINEL_ADDR as u16,
                 dat: 0x9A,
                 cmd: TCMD_WAREG | TCMD_UNDER_WR,
             },
@@ -204,19 +230,21 @@ mod tests {
             },
         ];
 
-        // Mock all required functions
-        mock_write_reg8(0x1234, 0x56).returns(());
-        mock_analog_write(0x78, 0x9A).returns(());
-        mock_sleep_us(564).returns(());
-
         let result = load_tbl_cmd_set(&cmd_set);
 
         // Assert the function returns the size of the command set
         assert_eq!(result, 4);
 
-        // Verify all functions were called with the expected arguments
-        mock_write_reg8(0x1234, 0x56).assert_called(1);
-        mock_analog_write(0x78, 0x9A).assert_called(1);
-        mock_sleep_us(564).assert_called(1);
+        // Verify all three command kinds took effect exactly once
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x1234 | REG_BASE_ADDR,
+                width: 1,
+                value: 0x56,
+            }]
+        );
+        assert_eq!(FakeAnalog::get(ANALOG_SENTINEL_ADDR), 0x9A);
+        assert_eq!(fake_clock::sleeps(), vec![564]);
     }
 }

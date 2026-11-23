@@ -3,7 +3,7 @@
 //! This module provides functions for generating pseudo-random numbers
 //! suitable for non-cryptographic applications on the TLSR8266 platform.
 
-use crate::sdk::mcu::clock::clock_time;
+use crate::mcu::clock::clock_time;
 use tlsr8266_pac::read_reg_rnd_number;
 
 /// Generates a 16-bit pseudo-random number.
@@ -29,48 +29,55 @@ use tlsr8266_pac::read_reg_rnd_number;
 ///   the hardware RNG implementation in the TLSR8266
 /// * The function is marked as inline(always) for performance in time-critical sections
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn rand() -> u16 {
-    return clock_time() as u16 ^ read_reg_rnd_number();
+    clock_time() as u16 ^ read_reg_rnd_number()
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
 
-    // Import mocked versions of the functions from their original modules
-    use crate::sdk::mcu::clock::mock_clock_time;
-    use tlsr8266_pac::mock_read_reg_rnd_number;
+    /// `reg_rnd_number`, the hardware entropy source.
+    const RND_NUMBER: u32 = 0x448;
+
+    /// `fake_clock`, `FakeMmio` and `FakeAnalog` are process-wide singletons and
+    /// the suite runs with `--test-threads=1`, so each test starts from zero.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
 
     /// Tests that the rand function correctly combines clock_time and hardware RNG values.
     ///
     /// This test verifies that the rand function properly:
-    /// - Calls clock_time() function
-    /// - Calls read_reg_rnd_number() function
+    /// - Reads clock_time() from the system tick register
+    /// - Reads read_reg_rnd_number() from the hardware RNG register
     /// - Combines the values using XOR operation
     /// - Returns a 16-bit unsigned integer
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock responses for clock_time and hardware RNG
+    /// 1. Seed the system tick register and the hardware RNG register
     /// 2. Call rand() function to generate random number
     /// 3. Verify the returned value matches the expected XOR combination
-    /// 4. Confirm both source functions were called exactly once
     ///
     /// # Notes
     ///
     /// * This test confirms the core algorithm of the rand function
     /// * The test uses fixed values to enable deterministic verification
     #[test]
-    #[mry::lock(clock_time, read_reg_rnd_number)]
     fn test_rand_basic() {
-        // Setup mock responses with fixed values for deterministic testing
-        mock_clock_time().returns(0x1234); // Mock system time
-        mock_read_reg_rnd_number().returns(0xABCD); // Mock hardware RNG
+        reset_fakes();
+
+        // Seed the system time and the hardware RNG with fixed values
+        fake_clock::set_ticks(0x1234);
+        FakeMmio::set_reg16(RND_NUMBER, 0xABCD);
 
         // Calculate expected result: time (truncated to 16 bits) XOR hardware RNG
-        let expected = (0x1234 as u16) ^ 0xABCD;
+        let expected = 0x1234_u16 ^ 0xABCD;
 
         // Call the function we're testing
         let result = rand();
@@ -80,33 +87,27 @@ mod tests {
             result, expected,
             "The random value should be the XOR of clock time and hardware RNG"
         );
-
-        // Verify each dependency was called exactly once
-        mock_clock_time().assert_called(1);
-        mock_read_reg_rnd_number().assert_called(1);
     }
 
-    /// Tests the rand function with different mock values.
+    /// Tests the rand function with different input values.
     ///
     /// This test verifies the behavior of rand() with different input values
     /// and confirms the XOR operation works correctly in all cases.
     ///
     /// # Algorithm
     ///
-    /// 1. Setup test cases with different combinations of time and RNG values
-    /// 2. Create closures for mocks to return different values on each call
-    /// 3. Call rand() multiple times to test various input combinations
-    /// 4. Verify the results match expected XOR combinations
+    /// 1. For each test case, seed the tick register and the RNG register
+    /// 2. Call rand() and verify the result matches the expected XOR combination
     ///
     /// # Notes
     ///
     /// * This test checks boundary cases (0, max u16 value)
     /// * Tests cases where clock_time and RNG have the same/different values
     /// * Verifies the XOR operation works correctly for all input combinations
-    /// * Uses closures to provide different return values for each call
     #[test]
-    #[mry::lock(clock_time, read_reg_rnd_number)]
     fn test_rand_with_different_values() {
+        reset_fakes();
+
         // Define test cases: (clock_time value, rng value, expected result)
         let test_cases = [
             // Zero values
@@ -123,46 +124,22 @@ mod tests {
             (0x12345678, 0xABCD, (0x5678 ^ 0xABCD)),
         ];
 
-        // Create vectors to hold the test values
-        let time_values: Vec<u32> = test_cases.iter().map(|&(t, _, _)| t).collect();
-        let rng_values: Vec<u16> = test_cases.iter().map(|&(_, r, _)| r).collect();
-        let expected_results: Vec<u16> = test_cases.iter().map(|&(_, _, e)| e).collect();
-
-        let time_values_copy = time_values.clone();
-        let rng_values_copy = rng_values.clone();
-
-        // Use closures to provide different return values on each call
-        let mut time_index = 0;
-        mock_clock_time().returns_with(move || {
-            let value = time_values_copy[time_index];
-            time_index += 1;
-            value
-        });
-
-        let mut rng_index = 0;
-        mock_read_reg_rnd_number().returns_with(move || {
-            let value = rng_values_copy[rng_index];
-            rng_index += 1;
-            value
-        });
-
         // Run through all test cases
-        for (i, expected_result) in expected_results.iter().enumerate() {
+        for (i, &(time, rng, expected_result)) in test_cases.iter().enumerate() {
+            fake_clock::set_ticks(time as u64);
+            FakeMmio::set_reg16(RND_NUMBER, rng);
+
             // Call function under test
             let result = rand();
 
             // Verify correct XOR operation
             assert_eq!(
                 result,
-                *expected_result,
+                expected_result,
                 "Test case {}: For clock_time()=0x{:X} and RNG=0x{:X}, expected 0x{:X} but got 0x{:X}",
-                i, time_values[i], rng_values[i], expected_result, result
+                i, time, rng, expected_result, result
             );
         }
-
-        // Verify each source function was called the correct number of times
-        mock_clock_time().assert_called(test_cases.len());
-        mock_read_reg_rnd_number().assert_called(test_cases.len());
     }
 
     /// Tests the randomness distribution of rand() with simulated values.
@@ -172,10 +149,9 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup simulation of changing time values and hardware RNG values
+    /// 1. Simulate a progressing system time and a cycling hardware RNG pattern
     /// 2. Generate multiple random numbers by calling rand()
     /// 3. Verify that the set of generated values has expected distribution properties
-    /// 4. Confirm the source functions are called the expected number of times
     ///
     /// # Notes
     ///
@@ -184,48 +160,31 @@ mod tests {
     /// * We verify the distribution across high and low bits
     /// * This is a simple distribution test, not a full statistical analysis
     #[test]
-    #[mry::lock(clock_time, read_reg_rnd_number)]
     fn test_rand_distribution() {
-        // Setup simulated time progression
-        let mut simulated_time = 0u32;
-
-        // Simulate changing clock time with a closure
-        mock_clock_time().returns_with(move || {
-            let current_time = simulated_time;
-            simulated_time += 1; // Increment for next call
-            current_time
-        });
+        reset_fakes();
 
         // Simulate varying hardware RNG patterns
         let rng_patterns = [0x1234, 0xAAAA, 0x5555, 0xFFFF, 0x0000, 0x9876];
-        let mut rng_index = 0;
-
-        mock_read_reg_rnd_number().returns_with(move || {
-            let value = rng_patterns[rng_index % rng_patterns.len()];
-            rng_index += 1;
-            value
-        });
 
         // Generate a set of random numbers
         const SAMPLE_SIZE: usize = 100;
         let mut random_values = Vec::with_capacity(SAMPLE_SIZE);
 
-        for _ in 0..SAMPLE_SIZE {
+        for i in 0..SAMPLE_SIZE {
+            // Simulate a monotonically advancing system clock
+            fake_clock::set_ticks(i as u64);
+            FakeMmio::set_reg16(RND_NUMBER, rng_patterns[i % rng_patterns.len()]);
             random_values.push(rand());
         }
-
-        // Verify expected call counts
-        mock_clock_time().assert_called(SAMPLE_SIZE);
-        mock_read_reg_rnd_number().assert_called(SAMPLE_SIZE);
 
         // Basic distribution test - check for variance in the output
         // Count occurrences of set bits in specific positions
         let mut bit_counts = [0; 16];
 
         for value in &random_values {
-            for bit in 0..16 {
+            for (bit, count) in bit_counts.iter_mut().enumerate() {
                 if (value & (1 << bit)) != 0 {
-                    bit_counts[bit] += 1;
+                    *count += 1;
                 }
             }
         }
@@ -261,10 +220,9 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup a sequence of changing values for both time and RNG sources
-    /// 2. Create expected result patterns based on XOR of these values
-    /// 3. Call rand() multiple times and verify each result
-    /// 4. Verify the overall pattern of random numbers generated
+    /// 1. Seed a sequence of changing values for both time and RNG sources
+    /// 2. Call rand() multiple times and verify each result
+    /// 3. Verify the overall pattern of random numbers generated
     ///
     /// # Notes
     ///
@@ -273,8 +231,9 @@ mod tests {
     /// * Verifies changing inputs produce expected changing outputs
     /// * More comprehensive than individual unit tests
     #[test]
-    #[mry::lock(clock_time, read_reg_rnd_number)]
     fn test_rand_integration() {
+        reset_fakes();
+
         // Create sequences of time and RNG values to simulate a calling pattern
         let time_sequence = [0x0001, 0x0002, 0x0003, 0x0004, 0x0005];
         let rng_sequence = [0xA000, 0xB000, 0xC000, 0xD000, 0xE000];
@@ -286,32 +245,16 @@ mod tests {
             .map(|(&t, &r)| (t as u16) ^ r)
             .collect();
 
-        // Setup mock with sequences
-        let mut time_index = 0;
-        mock_clock_time().returns_with(move || {
-            let value = time_sequence[time_index];
-            time_index = (time_index + 1) % time_sequence.len();
-            value as u32
-        });
-
-        let mut rng_index = 0;
-        mock_read_reg_rnd_number().returns_with(move || {
-            let value = rng_sequence[rng_index];
-            rng_index = (rng_index + 1) % rng_sequence.len();
-            value
-        });
-
         // Generate sequence of random numbers and verify against expected results
-        for expected in &expected_results {
+        for (i, expected) in expected_results.iter().enumerate() {
+            fake_clock::set_ticks(time_sequence[i] as u64);
+            FakeMmio::set_reg16(RND_NUMBER, rng_sequence[i]);
+
             let result = rand();
             assert_eq!(
                 result, *expected,
                 "Random value does not match expected pattern"
             );
         }
-
-        // Verify correct number of calls to source functions
-        mock_clock_time().assert_called(expected_results.len());
-        mock_read_reg_rnd_number().assert_called(expected_results.len());
     }
 }

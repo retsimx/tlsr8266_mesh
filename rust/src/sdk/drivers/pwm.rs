@@ -1,4 +1,4 @@
-use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
+use crate::{BIT, MASK_VAL};
 use tlsr8266_pac::{
     read_reg_pwm_enable, write_reg_pwm_cmp, write_reg_pwm_cycle, write_reg_pwm_enable, FLD_PWM,
 };

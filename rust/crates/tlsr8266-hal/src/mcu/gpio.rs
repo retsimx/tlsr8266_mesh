@@ -1,5 +1,4 @@
-use crate::sdk::mcu::analog::{analog_read, analog_write};
-use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
+use crate::mcu::gpio::GPIO_PIN_TYPE::*;
 use crate::BIT;
 use crate::{BM_CLR, BM_SET};
 use tlsr8266_pac::{
@@ -34,7 +33,7 @@ pub const GPIO_PULL_DN_100K: u8 = 3;
 /// Defines the possible directions for a GPIO pin:
 /// * `IN`: Configures the pin as an input (value 0)
 /// * `OUT`: Configures the pin as an output (value 1)
-pub enum GPIO_DIR {
+pub enum GpioDir {
     IN = 0,
     OUT = 1,
 }
@@ -357,15 +356,20 @@ pub const PM_PIN_UP_DOWN_FLOAT: u8 = 0xff;
 ///
 /// The encoding format allows for efficient pin manipulation by separating
 /// the port number and bit position, which can be extracted using bit operations.
+///
+/// The type and variant names are the datasheet pin names, so the datasheet
+/// spelling is kept as-is; only the irreducible `#[allow]` for that spelling is
+/// applied.
+#[allow(non_camel_case_types)]
 pub enum GPIO_PIN_TYPE {
-    GPIO_PA0 = 0x000 | BIT!(0), // Port A, pin 0
-    GPIO_PA1 = 0x000 | BIT!(1), // Port A, pin 1
-    GPIO_PA2 = 0x000 | BIT!(2), // Port A, pin 2
-    GPIO_PA3 = 0x000 | BIT!(3), // Port A, pin 3
-    GPIO_PA4 = 0x000 | BIT!(4), // Port A, pin 4
-    GPIO_PA5 = 0x000 | BIT!(5), // Port A, pin 5
-    GPIO_PA6 = 0x000 | BIT!(6), // Port A, pin 6
-    GPIO_PA7 = 0x000 | BIT!(7), // Port A, pin 7
+    GPIO_PA0 = BIT!(0), // Port A, pin 0
+    GPIO_PA1 = BIT!(1), // Port A, pin 1
+    GPIO_PA2 = BIT!(2), // Port A, pin 2
+    GPIO_PA3 = BIT!(3), // Port A, pin 3
+    GPIO_PA4 = BIT!(4), // Port A, pin 4
+    GPIO_PA5 = BIT!(5), // Port A, pin 5
+    GPIO_PA6 = BIT!(6), // Port A, pin 6
+    GPIO_PA7 = BIT!(7), // Port A, pin 7
 
     GPIO_PB0 = 0x100 | BIT!(0), // Port B, pin 0
     GPIO_PB1 = 0x100 | BIT!(1), // Port B, pin 1
@@ -499,7 +503,8 @@ impl GPIO_PIN_TYPE {
 /// Initializes all GPIO pins based on the predefined constants.
 ///
 /// This function configures the entire GPIO system according to the predefined constants
-/// for each pin port (PA through PF). The initialization process is performed in two steps:
+/// for each pin port (PA through PF). Only the digital properties are programmed; the
+/// vendor SDK's analog pull-up/pull-down step never ran and is not compiled.
 ///
 /// # Step 1: Configure digital GPIO properties
 /// For each port (PA-PF), configures:
@@ -509,13 +514,11 @@ impl GPIO_PIN_TYPE {
 /// - Drive strength (typically 1=strong drive)
 /// - Function selection (GPIO vs peripheral functions)
 ///
-/// # Step 2: Configure analog properties
-/// Sets pull-up/pull-down resistors for each pin through analog registers.
-/// Each analog register controls 4 pins, with 2 bits per pin to select:
-/// - No pull-up/down (0/float)
-/// - 1MΩ pull-up (1)
-/// - 10kΩ pull-up (2)
-/// - 100kΩ pull-down (3)
+/// # Step 2: Configure analog properties (not performed)
+/// The vendor SDK also programs each pin's pull-up/pull-down resistor through
+/// analog registers `0x0a..0x14`. That tail sits behind an early `return` in the
+/// ported SDK code and has never run on device, so it is not part of the
+/// compiled path; see the note at the end of the function body.
 ///
 /// # Notes
 ///
@@ -524,7 +527,7 @@ impl GPIO_PIN_TYPE {
 /// - Register bits 24-31: Initial output values
 /// - Setting2 registers bits 8-15: Drive strength configuration
 /// - Setting2 registers bits 16-23: Function selection (GPIO vs peripherals)
-/// - The commented-out portion would configure special function combinations
+/// - The special-function combination configuration is not ported from the vendor SDK
 #[coverage(off)]
 pub fn gpio_init() {
     // --- Configure Port A (PA0-PA7) GPIO settings ---
@@ -779,117 +782,13 @@ pub fn gpio_init() {
             | (if PF0_FUNC == AS_GPIO { BIT!(16) } else { 0 })  // PF0 function: 1=GPIO, 0=peripheral
             | (if PF1_FUNC == AS_GPIO { BIT!(17) } else { 0 }), // PF1 function: 1=GPIO, 0=peripheral
     );
-    return;
 
-    /*  do later
-    reg_gpio_config_func = ((if PA0_FUNC==AS_DMIC||PA4_FUNC==AS_DMIC) { BITS(0,7)} else {0}) | ((PA1_FUNC==AS_PWM { BIT!(2)} else {0}) |
-        ((if PA2_FUNC==AS_UART||PA3_FUNC==AS_UART) { BITS(3,5)} else {0}) |
-        ((PA2_FUNC==AS_PWM { BIT!(4)} else {0}) | ((PA3_FUNC==AS_PWM { BIT!(6)} else {0}) |
-        (((PB0_FUNC==AS_SDM||PB1_FUNC==AS_SDM||PB6_FUNC==AS_SDM||PB7_FUNC==AS_SDM) { BIT_RNG(12,15)} else {0}) |
-        ((if PA0_FUNC==AS_I2S||PA1_FUNC==AS_I2S||PA2_FUNC==AS_I2S||PA3_FUNC==AS_I2S||PA4_FUNC==AS_I2S) { (BIT_RNG(21,23)|BIT_RNG(29,30))} else {0});
-    */
-
-    // --- Configure analog pull-up/pull-down settings ---
-    // Each analog register controls 4 pins, with 2 bits per pin
-
-    // Save the lower 4 bits of analog register 0x0a which are used for other purposes
-    let areg = analog_read(0x0a) & 0x0f;
-
-    // Configure pull-up/down for PA0-PA1
-    analog_write(
-        0x0a,
-        areg | (PULL_WAKEUP_SRC_PA0 << 4) | (PULL_WAKEUP_SRC_PA1 << 6),
-    );
-
-    // Configure pull-up/down for PA2-PA5
-    analog_write(
-        0x0b,
-        PULL_WAKEUP_SRC_PA2
-            | (PULL_WAKEUP_SRC_PA3 << 2)
-            | (PULL_WAKEUP_SRC_PA4 << 4)
-            | (PULL_WAKEUP_SRC_PA5 << 6),
-    );
-
-    // Configure pull-up/down for PA6-PB1
-    analog_write(
-        0x0c,
-        PULL_WAKEUP_SRC_PA6
-            | (PULL_WAKEUP_SRC_PA7 << 2)
-            | (PULL_WAKEUP_SRC_PB0 << 4)
-            | (PULL_WAKEUP_SRC_PB1 << 6),
-    );
-
-    // Configure pull-up/down for PB2-PB5
-    analog_write(
-        0x0d,
-        PULL_WAKEUP_SRC_PB2
-            | (PULL_WAKEUP_SRC_PB3 << 2)
-            | (PULL_WAKEUP_SRC_PB4 << 4)
-            | (PULL_WAKEUP_SRC_PB5 << 6),
-    );
-
-    // Configure pull-up/down for PB6-PC1
-    analog_write(
-        0x0e,
-        PULL_WAKEUP_SRC_PB6
-            | (PULL_WAKEUP_SRC_PB7 << 2)
-            | (PULL_WAKEUP_SRC_PC0 << 4)
-            | (PULL_WAKEUP_SRC_PC1 << 6),
-    );
-
-    // Configure pull-up/down for PC2-PC5
-    analog_write(
-        0x0f,
-        PULL_WAKEUP_SRC_PC2
-            | (PULL_WAKEUP_SRC_PC3 << 2)
-            | (PULL_WAKEUP_SRC_PC4 << 4)
-            | (PULL_WAKEUP_SRC_PC5 << 6),
-    );
-
-    // Configure pull-up/down for PC6-PD1
-    analog_write(
-        0x10,
-        PULL_WAKEUP_SRC_PC6
-            | (PULL_WAKEUP_SRC_PC7 << 2)
-            | (PULL_WAKEUP_SRC_PD0 << 4)
-            | (PULL_WAKEUP_SRC_PD1 << 6),
-    );
-
-    // Configure pull-up/down for PD2-PD5
-    analog_write(
-        0x11,
-        PULL_WAKEUP_SRC_PD2
-            | (PULL_WAKEUP_SRC_PD3 << 2)
-            | (PULL_WAKEUP_SRC_PD4 << 4)
-            | (PULL_WAKEUP_SRC_PD5 << 6),
-    );
-
-    // Configure pull-up/down for PD6-PE1
-    analog_write(
-        0x12,
-        PULL_WAKEUP_SRC_PD6
-            | (PULL_WAKEUP_SRC_PD7 << 2)
-            | (PULL_WAKEUP_SRC_PE0 << 4)
-            | (PULL_WAKEUP_SRC_PE1 << 6),
-    );
-
-    // Configure pull-up/down for PE2-PE5
-    analog_write(
-        0x13,
-        PULL_WAKEUP_SRC_PE2
-            | (PULL_WAKEUP_SRC_PE3 << 2)
-            | (PULL_WAKEUP_SRC_PE4 << 4)
-            | (PULL_WAKEUP_SRC_PE5 << 6),
-    );
-
-    // Configure pull-up/down for PE6-PF1
-    analog_write(
-        0x14,
-        PULL_WAKEUP_SRC_PE6
-            | (PULL_WAKEUP_SRC_PE7 << 2)
-            | (PULL_WAKEUP_SRC_PF0 << 4)
-            | (PULL_WAKEUP_SRC_PF1 << 6),
-    );
+    // The vendor SDK also programs the analog pin pull-up/pull-down registers
+    // (`0x0a..0x14`) at the end of `gpio_init`. That tail has been unreachable
+    // since an early `return` was added (af45079, 2023-01-27), so it has never
+    // run on device, and re-enabling it would change pad behaviour. It is
+    // therefore removed instead of compiled, which leaves the emitted firmware
+    // unchanged; the original sequence is in git history at af45079^.
 }
 
 /// Sets the function type for a GPIO pin.
@@ -913,7 +812,6 @@ pub fn gpio_init() {
 ///
 /// * Pin format: 0xPBB where P is port (0-5 for A-F) and BB is bit mask
 /// * The implementation shifts the port ID to get the register offset
-#[cfg_attr(test, mry::mry)]
 pub fn gpio_set_func(pin: u32, func: u8) {
     // Extract the bit position from the pin identifier (lower 8 bits)
     let bit: u8 = (pin & 0xff) as u8;
@@ -1009,7 +907,6 @@ pub fn gpio_set_output_en(pin: u32, value: u32) {
 /// * This function exhibits different behavior from gpio_set_output_en
 ///   despite manipulating the same register, which may indicate a hardware-specific
 ///   design or a potential issue in the implementation
-#[cfg_attr(test, mry::mry)]
 pub fn gpio_set_input_en(pin: u32, value: u32) {
     // Extract the bit position from the pin identifier
     let bit = (pin & 0xff) as u8;
@@ -1081,10 +978,19 @@ pub fn gpio_write(pin: u32, value: u32) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use tlsr8266_pac::{
-        mock_read_reg_gpio_gpio_func, mock_read_reg_gpio_oen, mock_read_reg_gpio_out,
-        mock_write_reg_gpio_gpio_func, mock_write_reg_gpio_oen, mock_write_reg_gpio_out,
-    };
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::REG_BASE_ADDR;
+
+    /// Base addresses of the three per-port GPIO registers these tests touch.
+    const GPIO_OEN: u32 = 0x582;
+    const GPIO_OUT: u32 = 0x583;
+    const GPIO_GPIO_FUNC: u32 = 0x586;
+
+    /// `FakeMmio` is process-wide and the suite runs with `--test-threads=1`,
+    /// so every test starts from a zeroed bank.
+    fn reset_fakes() {
+        FakeMmio::reset();
+    }
 
     /// Tests setting a GPIO pin to GPIO function mode.
     ///
@@ -1095,22 +1001,27 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_func with GPIO_PA0 and AS_GPIO
-    /// 4. Verify the register was written with the bit set
+    /// 1. Seed the port A function register with 0
+    /// 2. Call gpio_set_func with GPIO_PA0 and AS_GPIO
+    /// 3. Verify the register was written with the bit set
     #[test]
-    #[mry::lock(read_reg_gpio_gpio_func, write_reg_gpio_gpio_func)]
     fn test_gpio_set_func_as_gpio() {
-        // Setup initial register value - PA0 is port A (offset 0)
-        mock_read_reg_gpio_gpio_func(0).returns(0x00);
-        mock_write_reg_gpio_gpio_func(0x01, 0).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(GPIO_GPIO_FUNC, 0x00);
 
         // Call the function (set PA0 as GPIO)
         gpio_set_func(GPIO_PA0 as u32, AS_GPIO);
 
-        // Verify function register was written with bit 1 set (PA0's bit mask is 0x01)
-        mock_write_reg_gpio_gpio_func(0x01, 0).assert_called(1);
+        // Verify function register was written with bit 0 set (PA0's bit mask is 0x01)
+        assert_eq!(FakeMmio::reg8(GPIO_GPIO_FUNC), 0x01);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: GPIO_GPIO_FUNC | REG_BASE_ADDR,
+                width: 1,
+                value: 0x01,
+            }]
+        );
     }
 
     /// Tests setting a GPIO pin to peripheral function mode.
@@ -1122,22 +1033,29 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current register value (with bit already set)
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_func with GPIO_PA0 and a peripheral function (AS_UART)
-    /// 4. Verify the register was written with the bit cleared
+    /// 1. Seed the function register with PA0's bit already set
+    /// 2. Call gpio_set_func with GPIO_PA0 and a peripheral function (AS_UART)
+    /// 3. Verify the register was written with the bit cleared
     #[test]
-    #[mry::lock(read_reg_gpio_gpio_func, write_reg_gpio_gpio_func)]
     fn test_gpio_set_func_as_peripheral() {
-        // Setup initial register value with PA0's bit set (bit mask 0x01)
-        mock_read_reg_gpio_gpio_func(0).returns(0x01);
-        mock_write_reg_gpio_gpio_func(0x00, 0).returns(());
+        reset_fakes();
+        // PA0's bit set (bit mask 0x01)
+        FakeMmio::set_reg8(GPIO_GPIO_FUNC, 0x01);
+        FakeMmio::clear_writes();
 
         // Call the function (set PA0 as UART)
         gpio_set_func(GPIO_PA0 as u32, AS_UART);
 
         // Verify function register was written with PA0's bit cleared
-        mock_write_reg_gpio_gpio_func(0x00, 0).assert_called(1);
+        assert_eq!(FakeMmio::reg8(GPIO_GPIO_FUNC), 0x00);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: GPIO_GPIO_FUNC | REG_BASE_ADDR,
+                width: 1,
+                value: 0x00,
+            }]
+        );
     }
 
     /// Tests setting a GPIO pin to peripheral function mode for a different port.
@@ -1148,24 +1066,31 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_func with GPIO_PB2 and AS_MSPI
-    /// 4. Verify the register was written with correct offset and value
+    /// 1. Seed the port B function register with PB2's bit set
+    /// 2. Call gpio_set_func with GPIO_PB2 and AS_MSPI
+    /// 3. Verify the register was written with the bit cleared at the port B offset
     #[test]
-    #[mry::lock(read_reg_gpio_gpio_func, write_reg_gpio_gpio_func)]
     fn test_gpio_set_func_port_b() {
-        // Setup initial register value for port B
+        reset_fakes();
         // Port B offset = 8 (calculated from (0x100 >> 8) << 3 = 0x08)
         // PB2's bit mask is 0x04
-        mock_read_reg_gpio_gpio_func(8).returns(0x04);
-        mock_write_reg_gpio_gpio_func(0x00, 8).returns(());
+        const PORT_B_OFFSET: u32 = 8;
+        FakeMmio::set_reg8(GPIO_GPIO_FUNC + PORT_B_OFFSET, 0x04);
+        FakeMmio::clear_writes();
 
         // Call the function (set PB2 as MSPI)
         gpio_set_func(GPIO_PB2 as u32, AS_MSPI);
 
         // Verify function register was written with bit 2 cleared at port B offset
-        mock_write_reg_gpio_gpio_func(0x00, 8).assert_called(1);
+        assert_eq!(FakeMmio::reg8(GPIO_GPIO_FUNC + PORT_B_OFFSET), 0x00);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: (GPIO_GPIO_FUNC + PORT_B_OFFSET) | REG_BASE_ADDR,
+                width: 1,
+                value: 0x00,
+            }]
+        );
     }
 
     /// Tests enabling output for a GPIO pin.
@@ -1177,24 +1102,29 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current OEN register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_output_en with GPIO_PA3 and value=1 (enable)
-    /// 4. Verify the register was written with the correct bit cleared
+    /// 1. Seed the OEN register with all outputs disabled (all 1s)
+    /// 2. Call gpio_set_output_en with GPIO_PA3 and value=1 (enable)
+    /// 3. Verify the register was written with the correct bit cleared
     #[test]
-    #[mry::lock(read_reg_gpio_oen, write_reg_gpio_oen)]
     fn test_gpio_set_output_en_enable() {
-        // Setup initial register value with all outputs disabled (all 1s)
-        // PA3 is port A (offset 0)
-        mock_read_reg_gpio_oen(0).returns(0xFF);
-        mock_write_reg_gpio_oen(0xF7, 0).returns(());
+        reset_fakes();
+        // PA3 is port A (offset 0); all outputs disabled (all 1s)
+        FakeMmio::set_reg8(GPIO_OEN, 0xFF);
+        FakeMmio::clear_writes();
 
         // Call the function (enable output for PA3)
         gpio_set_output_en(GPIO_PA3 as u32, 1);
 
-        // Verify OEN register was written with PA3's bit cleared (bit mask 0x08)
-        // Expected: 0xFF with bit 3 cleared = 0xF7
-        mock_write_reg_gpio_oen(0xF7, 0).assert_called(1);
+        // PA3's bit mask is 0x08: 0xFF with bit 3 cleared = 0xF7
+        assert_eq!(FakeMmio::reg8(GPIO_OEN), 0xF7);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: GPIO_OEN | REG_BASE_ADDR,
+                width: 1,
+                value: 0xF7,
+            }]
+        );
     }
 
     /// Tests disabling output for a GPIO pin.
@@ -1206,24 +1136,30 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current OEN register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_output_en with GPIO_PB5 and value=0 (disable)
-    /// 4. Verify the register was written with the correct bit set
+    /// 1. Seed the port B OEN register with PB5 already enabled
+    /// 2. Call gpio_set_output_en with GPIO_PB5 and value=0 (disable)
+    /// 3. Verify the register was written with the correct bit set
     #[test]
-    #[mry::lock(read_reg_gpio_oen, write_reg_gpio_oen)]
     fn test_gpio_set_output_en_disable() {
-        // Setup initial register value with some outputs enabled
+        reset_fakes();
         // Port B offset = 8, bit 5 already cleared (enabled)
-        mock_read_reg_gpio_oen(8).returns(0xDF);
-        mock_write_reg_gpio_oen(0xFF, 8).returns(());
+        const PORT_B_OFFSET: u32 = 8;
+        FakeMmio::set_reg8(GPIO_OEN + PORT_B_OFFSET, 0xDF);
+        FakeMmio::clear_writes();
 
         // Call the function (disable output for PB5)
         gpio_set_output_en(GPIO_PB5 as u32, 0);
 
-        // Verify OEN register was written with bit 5 set (disable output)
-        // Expected: 0xDF with bit 5 set = 0xFF
-        mock_write_reg_gpio_oen(0xFF, 8).assert_called(1);
+        // 0xDF with bit 5 set = 0xFF
+        assert_eq!(FakeMmio::reg8(GPIO_OEN + PORT_B_OFFSET), 0xFF);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: (GPIO_OEN + PORT_B_OFFSET) | REG_BASE_ADDR,
+                width: 1,
+                value: 0xFF,
+            }]
+        );
     }
 
     /// Tests enabling input for a GPIO pin.
@@ -1235,24 +1171,30 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_input_en with GPIO_PC6 and value=1 (enable)
-    /// 4. Verify the register was written with the bit set
+    /// 1. Seed the port C register with bit 6 initially cleared
+    /// 2. Call gpio_set_input_en with GPIO_PC6 and value=1 (enable)
+    /// 3. Verify the register was written with the bit set
     #[test]
-    #[mry::lock(read_reg_gpio_oen, write_reg_gpio_oen)]
     fn test_gpio_set_input_en_enable() {
-        // Setup initial register value for port C (offset 16)
-        // Bit 6 initially cleared
-        mock_read_reg_gpio_oen(16).returns(0xBF);
-        mock_write_reg_gpio_oen(0xFF, 16).returns(());
+        reset_fakes();
+        // Port C offset = 16, bit 6 initially cleared
+        const PORT_C_OFFSET: u32 = 16;
+        FakeMmio::set_reg8(GPIO_OEN + PORT_C_OFFSET, 0xBF);
+        FakeMmio::clear_writes();
 
         // Call the function (enable input for PC6)
         gpio_set_input_en(GPIO_PC6 as u32, 1);
 
-        // Verify register was written with bit 6 set
-        // Expected: 0xBF with bit 6 set = 0xFF
-        mock_write_reg_gpio_oen(0xFF, 16).assert_called(1);
+        // 0xBF with bit 6 set = 0xFF
+        assert_eq!(FakeMmio::reg8(GPIO_OEN + PORT_C_OFFSET), 0xFF);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: (GPIO_OEN + PORT_C_OFFSET) | REG_BASE_ADDR,
+                width: 1,
+                value: 0xFF,
+            }]
+        );
     }
 
     /// Tests disabling input for a GPIO pin.
@@ -1264,24 +1206,30 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_set_input_en with GPIO_PD2 and value=0 (disable)
-    /// 4. Verify the register was written with the bit cleared
+    /// 1. Seed the port D register with bit 2 initially set
+    /// 2. Call gpio_set_input_en with GPIO_PD2 and value=0 (disable)
+    /// 3. Verify the register was written with the bit cleared
     #[test]
-    #[mry::lock(read_reg_gpio_oen, write_reg_gpio_oen)]
     fn test_gpio_set_input_en_disable() {
-        // Setup initial register value for port D (offset 24)
-        // Bit 2 initially set
-        mock_read_reg_gpio_oen(24).returns(0x04);
-        mock_write_reg_gpio_oen(0x00, 24).returns(());
+        reset_fakes();
+        // Port D offset = 24, bit 2 initially set
+        const PORT_D_OFFSET: u32 = 24;
+        FakeMmio::set_reg8(GPIO_OEN + PORT_D_OFFSET, 0x04);
+        FakeMmio::clear_writes();
 
         // Call the function (disable input for PD2)
         gpio_set_input_en(GPIO_PD2 as u32, 0);
 
-        // Verify register was written with bit 2 cleared
-        // Expected: 0x04 with bit 2 cleared = 0x00
-        mock_write_reg_gpio_oen(0x00, 24).assert_called(1);
+        // 0x04 with bit 2 cleared = 0x00
+        assert_eq!(FakeMmio::reg8(GPIO_OEN + PORT_D_OFFSET), 0x00);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: (GPIO_OEN + PORT_D_OFFSET) | REG_BASE_ADDR,
+                width: 1,
+                value: 0x00,
+            }]
+        );
     }
 
     /// Tests writing a 1 (high) to a GPIO pin.
@@ -1293,23 +1241,29 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current OUT register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_write with GPIO_PA5 and value=1 (high)
-    /// 4. Verify the register was written with the bit set
+    /// 1. Seed the OUT register with bit 5 cleared
+    /// 2. Call gpio_write with GPIO_PA5 and value=1 (high)
+    /// 3. Verify the register was written with the bit set
     #[test]
-    #[mry::lock(read_reg_gpio_out, write_reg_gpio_out)]
     fn test_gpio_write_high() {
-        // Setup initial register value with bit 5 cleared
-        mock_read_reg_gpio_out(0).returns(0xDF);
-        mock_write_reg_gpio_out(0xFF, 0).returns(());
+        reset_fakes();
+        // PA5's bit initially cleared
+        FakeMmio::set_reg8(GPIO_OUT, 0xDF);
+        FakeMmio::clear_writes();
 
         // Call the function (write high to PA5)
         gpio_write(GPIO_PA5 as u32, 1);
 
-        // Verify OUT register was written with bit 5 set
-        // Expected: 0xDF with bit 5 set = 0xFF
-        mock_write_reg_gpio_out(0xFF, 0).assert_called(1);
+        // 0xDF with bit 5 set = 0xFF
+        assert_eq!(FakeMmio::reg8(GPIO_OUT), 0xFF);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: GPIO_OUT | REG_BASE_ADDR,
+                width: 1,
+                value: 0xFF,
+            }]
+        );
     }
 
     /// Tests writing a 0 (low) to a GPIO pin.
@@ -1321,23 +1275,29 @@ mod tests {
     ///
     /// # Algorithm
     ///
-    /// 1. Setup mock for reading the current OUT register value
-    /// 2. Setup mock for writing the updated register value
-    /// 3. Call gpio_write with GPIO_PB1 and value=0 (low)
-    /// 4. Verify the register was written with the bit cleared
+    /// 1. Seed the port B OUT register with bit 1 set
+    /// 2. Call gpio_write with GPIO_PB1 and value=0 (low)
+    /// 3. Verify the register was written with the bit cleared
     #[test]
-    #[mry::lock(read_reg_gpio_out, write_reg_gpio_out)]
     fn test_gpio_write_low() {
-        // Setup initial register value for port B (offset 8)
-        // Bit 1 initially set
-        mock_read_reg_gpio_out(8).returns(0x02);
-        mock_write_reg_gpio_out(0x00, 8).returns(());
+        reset_fakes();
+        // Port B offset = 8, bit 1 initially set
+        const PORT_B_OFFSET: u32 = 8;
+        FakeMmio::set_reg8(GPIO_OUT + PORT_B_OFFSET, 0x02);
+        FakeMmio::clear_writes();
 
         // Call the function (write low to PB1)
         gpio_write(GPIO_PB1 as u32, 0);
 
-        // Verify OUT register was written with bit 1 cleared
-        // Expected: 0x02 with bit 1 cleared = 0x00
-        mock_write_reg_gpio_out(0x00, 8).assert_called(1);
+        // 0x02 with bit 1 cleared = 0x00
+        assert_eq!(FakeMmio::reg8(GPIO_OUT + PORT_B_OFFSET), 0x00);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: (GPIO_OUT + PORT_B_OFFSET) | REG_BASE_ADDR,
+                width: 1,
+                value: 0x00,
+            }]
+        );
     }
 }

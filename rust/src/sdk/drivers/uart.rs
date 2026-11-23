@@ -1,11 +1,11 @@
 use core::mem::size_of;
 use core::ptr::addr_of;
 
-use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
-use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
-use crate::sdk::mcu::watchdog::wd_clear;
 use crate::BIT;
 use mesh_protocol::uart::{UartData, UART_DATA_LEN};
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
+use tlsr8266_hal::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
+use tlsr8266_hal::mcu::watchdog::wd_clear;
 use tlsr8266_pac::{
     read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0,
     read_reg_irq_mask, read_reg_uart_status, write_reg16, write_reg8, write_reg_dma0_addr,
@@ -418,19 +418,52 @@ mod tests {
     use super::*;
 
     // Import mock versions of the functions from their original modules
-    use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
-    use crate::sdk::mcu::gpio::{mock_gpio_set_func, mock_gpio_set_input_en};
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
+    use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
         mock_read_reg_dma_chn_en, mock_read_reg_dma_chn_irq_msk, mock_read_reg_dma_rx_rdy0,
         mock_read_reg_irq_mask, mock_read_reg_uart_status, mock_write_reg_dma0_addr,
-        mock_write_reg_dma0_ctrl, mock_write_reg_dma0_mode, mock_write_reg_dma1_addr,
-        mock_write_reg_dma1_mode, mock_write_reg_dma_chn_en, mock_write_reg_dma_chn_irq_msk,
-        mock_write_reg_dma_rx_rdy0, mock_write_reg_dma_tx_rdy0, mock_write_reg_irq_mask,
-        mock_write_reg_uart_clk_div, mock_write_reg_uart_ctrl0, mock_write_reg_uart_ctrl1,
-        mock_write_reg_uart_rx_timeout, mock_write_reg_uart_rx_timeout_cnt,
-        mock_write_reg_uart_status,
+        mock_write_reg_dma0_ctrl, mock_write_reg_dma0_mode, mock_write_reg_dma1_mode,
+        mock_write_reg_dma_chn_en, mock_write_reg_dma_chn_irq_msk, mock_write_reg_dma_rx_rdy0,
+        mock_write_reg_irq_mask, mock_write_reg_uart_clk_div, mock_write_reg_uart_ctrl0,
+        mock_write_reg_uart_ctrl1, mock_write_reg_uart_rx_timeout,
+        mock_write_reg_uart_rx_timeout_cnt, mock_write_reg_uart_status,
     };
+
+    /// `reg_system_tick`: the free-running tick `clock_time()` reads.
+    const REG_SYSTEM_TICK: u32 = 0x740;
+    /// `reg_tmr_ctrl`: the watchdog clear bit lives here.
+    const REG_TMR_CTRL: u32 = 0x620;
+    /// `reg_gpio_gpio_func` plus the port C register offset (`(pin >> 8) << 3`).
+    const REG_GPIO_PC_FUNC: u32 = 0x586 + 0x10;
+    /// `reg_gpio_oen` plus the port C register offset.
+    const REG_GPIO_PC_OEN: u32 = 0x582 + 0x10;
+    /// `reg_dma_rx_rdy0`: DMA/UART interrupt flags, write-1-to-clear.
+    const REG_DMA_RX_RDY0: u32 = 0x526;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a known-empty bank and tick count.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+    }
+
+    /// `reg_dma_tx_rdy0`: write to trigger the DMA1 transfer.
+    const REG_DMA_TX_RDY0: u32 = 0x524;
+    /// Number of DMA1 transmit triggers, i.e. `start_tx_unchecked` arms.
+    fn dma1_arms() -> usize {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == REG_DMA_TX_RDY0 | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
+    }
+
+    fn watchdog_clears() -> usize {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == REG_TMR_CTRL | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
+    }
 
     /// Tests the default constructor for the UART driver.
     ///
@@ -503,8 +536,6 @@ mod tests {
     /// * Confirms DMA is set up correctly
     #[test]
     #[mry::lock(
-        gpio_set_func,
-        gpio_set_input_en,
         write_reg_dma0_addr,
         write_reg_dma0_ctrl,
         read_reg_dma_rx_rdy0,
@@ -524,10 +555,11 @@ mod tests {
         write_reg_dma1_mode
     )]
     fn test_uart_init() {
-        // Setup mock responses for GPIO functions
-        mock_gpio_set_func(GPIO_PIN_TYPE::GPIO_UTX as u32, AS_UART).returns(());
-        mock_gpio_set_func(GPIO_PIN_TYPE::GPIO_URX as u32, AS_UART).returns(());
-        mock_gpio_set_input_en(GPIO_PIN_TYPE::GPIO_URX as u32, 1).returns(());
+        reset_fakes();
+        // Seed both UART pins as peripheral-selected (bits set) so the
+        // `AS_UART` clears below are observable, and the OEN bank at 0.
+        FakeMmio::set_reg8(REG_GPIO_PC_FUNC, 0xff);
+        FakeMmio::set_reg8(REG_GPIO_PC_OEN, 0x00);
 
         // Setup mock responses for DMA buffer initialization
         mock_write_reg_dma0_addr(mry::Any).returns(());
@@ -561,10 +593,19 @@ mod tests {
         let mut driver = UartDriver::default_const();
         driver.init();
 
-        // Verify GPIO configuration
-        mock_gpio_set_func(GPIO_PIN_TYPE::GPIO_UTX as u32, AS_UART).assert_called(1);
-        mock_gpio_set_func(GPIO_PIN_TYPE::GPIO_URX as u32, AS_UART).assert_called(1);
-        mock_gpio_set_input_en(GPIO_PIN_TYPE::GPIO_URX as u32, 1).assert_called(1);
+        // Verify GPIO configuration: both UART pins leave the GPIO-function
+        // register (their bits cleared for `AS_UART`), and the RX pin's input
+        // enable sets its OEN bit.
+        assert_eq!(
+            FakeMmio::reg8(REG_GPIO_PC_FUNC),
+            0x3f,
+            "UTX (bit 6) and URX (bit 7) must both select the UART function"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_GPIO_PC_OEN),
+            0x80,
+            "the RX pin must have its input enable bit set"
+        );
 
         // Verify UART register initialization
         mock_write_reg_uart_clk_div(69 | FLD_UART_CLK_DIV::CLK_EN.bits()).assert_called(1); // Clock divider
@@ -634,17 +675,22 @@ mod tests {
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value is zero
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
     fn test_get_and_clear_irq_source_no_flags() {
         // No interrupt flags set
-        mock_read_reg_dma_rx_rdy0().returns(0);
-        mock_write_reg_dma_rx_rdy0(0).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, 0);
 
         let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, 0);
 
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(0).assert_called(1);
+        // The raw value is written back to clear the flags.
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR && w.value == 0)
+                .count(),
+            1
+        );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with RX flag set.
@@ -662,17 +708,23 @@ mod tests {
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the RX flag
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
     fn test_get_and_clear_irq_source_rx_flag() {
         // RX interrupt flag set
-        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Rx.bits());
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::Rx.bits()).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Rx.bits());
 
         let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, UartIrqMask::Rx.bits());
 
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::Rx.bits()).assert_called(1);
+        // The raw value is written back to clear the flags.
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(UartIrqMask::Rx.bits()))
+                .count(),
+            1
+        );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with TX flag set.
@@ -690,17 +742,23 @@ mod tests {
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the TX flag
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
     fn test_get_and_clear_irq_source_tx_flag() {
         // TX interrupt flag set
-        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::Tx.bits());
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::Tx.bits()).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Tx.bits());
 
         let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, UartIrqMask::Tx.bits());
 
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::Tx.bits()).assert_called(1);
+        // The raw value is written back to clear the flags.
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(UartIrqMask::Tx.bits()))
+                .count(),
+            1
+        );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with both RX and TX flags set.
@@ -718,17 +776,23 @@ mod tests {
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value matches the combined flags
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
     fn test_get_and_clear_irq_source_all_flags() {
         // Both RX and TX interrupt flags set
-        mock_read_reg_dma_rx_rdy0().returns(UartIrqMask::all());
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::all()).returns(());
+        reset_fakes();
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::all());
 
         let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, UartIrqMask::all());
 
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(UartIrqMask::all()).assert_called(1);
+        // The raw value is written back to clear the flags.
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(UartIrqMask::all()))
+                .count(),
+            1
+        );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with masking of irrelevant bits.
@@ -746,18 +810,24 @@ mod tests {
     /// 4. Verify the same value is written back to clear flags
     /// 5. Verify the returned value has irrelevant bits masked out
     #[test]
-    #[mry::lock(read_reg_dma_rx_rdy0, write_reg_dma_rx_rdy0)]
     fn test_get_and_clear_irq_source_with_masking() {
         // Additional irrelevant bits set (should be masked out)
+        reset_fakes();
         let raw_value = 0xF0 | UartIrqMask::Rx.bits();
-        mock_read_reg_dma_rx_rdy0().returns(raw_value);
-        mock_write_reg_dma_rx_rdy0(raw_value).returns(());
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, raw_value);
 
         let result = UartDriver::get_and_clear_irq_source();
         assert_eq!(result, UartIrqMask::Rx.bits()); // Should only have RX bit, others masked
 
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(raw_value).assert_called(1);
+        // The raw value is written back to clear the flags.
+        assert_eq!(
+            FakeMmio::writes()
+                .into_iter()
+                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
+                    && w.value == u32::from(raw_value))
+                .count(),
+            1
+        );
     }
 
     /// Tests the TX busy flag manipulation methods.
@@ -771,10 +841,8 @@ mod tests {
     ///
     /// * Simple state manipulation test
     #[test]
-    #[mry::lock(write_reg_dma1_addr, write_reg_dma_tx_rdy0)]
     fn test_tx_busy_flag_manipulation() {
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
+        reset_fakes();
 
         let mut driver = UartDriver::default_const();
 
@@ -788,8 +856,7 @@ mod tests {
         };
         driver.start_tx_unchecked(&msg);
         assert_eq!(driver.is_tx_busy(), true);
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
 
         // Clear busy flag
         driver.clear_tx_busy_flag();
@@ -817,22 +884,8 @@ mod tests {
     /// * Tests the case where the driver is not busy
     /// * No waiting or watchdog kicks should occur
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        wd_clear,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
     fn test_send_not_busy() {
-        // Setup mock responses for timing functions
-        mock_clock_time().returns(1000);
-        mock_clock_time_exceed(1000, 10 * 1000).returns(false);
-        mock_wd_clear().returns(());
-
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
+        reset_fakes();
 
         // Create a test message
         let mut msg = UartData {
@@ -851,14 +904,14 @@ mod tests {
         // Verify result and busy flag
         assert_eq!(driver.is_tx_busy, true);
 
-        // Verify DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
+        // Verify DMA configuration: `start_tx_unchecked` armed DMA1 once.
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
 
-        // No waiting should have happened
-        mock_clock_time().assert_called(1);
-        mock_clock_time_exceed(mry::Any, mry::Any).assert_called(0);
-        mock_wd_clear().assert_called(0);
+        // No waiting should have happened: the loop body would kick the
+        // watchdog, and with a frozen fake tick the loop could never satisfy its
+        // timeout, so a zero kick count proves the `is_tx_busy()` guard
+        // short-circuited `clock_time_exceed` entirely.
+        assert_eq!(watchdog_clears(), 0, "no wait means no watchdog kick");
     }
 
     /// Tests the synchronous UART data transmission function when the driver is busy.
@@ -885,30 +938,14 @@ mod tests {
     /// * Tests the case where the driver is initially busy but becomes available
     /// * Verifies watchdog is kicked during the busy-wait
     #[test]
-    #[mry::lock(
-        clock_time,
-        clock_time_exceed,
-        wd_clear,
-        write_reg_dma1_addr,
-        write_reg_dma_tx_rdy0
-    )]
     fn test_send_busy() {
-        // Setup mock responses for timing functions
-        mock_clock_time().returns(2000);
+        reset_fakes();
 
-        // Configure mock to return false on first call and true on subsequent calls
-        // This simulates the busy flag becoming clear after waiting
-        let mut call_count = 0;
-        mock_clock_time_exceed(2000, 10 * 1000).returns_with(move |_, _| {
-            call_count += 1;
-            call_count > 1
-        });
-
-        mock_wd_clear().returns(());
-
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma1_addr(mry::Any).returns(());
-        mock_write_reg_dma_tx_rdy0(mry::Any).returns(());
+        // The busy-wait reads the system tick through `clock_time()`. Each read
+        // advances the fake tick by 200_000 ticks, so the 10 ms timeout
+        // (10_000 * CLOCK_SYS_CLOCK_1US = 320_000 ticks) trips on the second
+        // `clock_time_exceed` probe and the loop body runs exactly once.
+        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| call_idx as u32 * 200_000);
 
         // Create a test message
         let mut msg = UartData {
@@ -930,13 +967,17 @@ mod tests {
         assert_eq!(driver.is_tx_busy, true);
 
         // Verify DMA was configured
-        mock_write_reg_dma1_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma_tx_rdy0(mry::Any).assert_called(1);
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
 
-        // Verify waiting occurred
-        mock_clock_time().assert_called(1);
-        mock_clock_time_exceed(mry::Any, mry::Any).assert_called(2);
-        mock_wd_clear().assert_called(1);
+        // Verify waiting occurred: one kick per loop iteration. With the tick
+        // advancing 200_000 per read, the 320_000-tick timeout is reached on the
+        // second probe, so exactly one iteration (one kick) may run — a third
+        // probe would mean the loop body ran twice.
+        assert_eq!(
+            watchdog_clears(),
+            1,
+            "the busy-wait must kick the watchdog once before timing out"
+        );
     }
 
     /// Tests the DMA buffer initialization for UART reception.

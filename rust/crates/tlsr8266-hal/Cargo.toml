@@ -1,0 +1,15 @@
+[package]
+name = "tlsr8266-hal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tlsr8266-pac = { path = "../tlsr8266-pac" }
+critical-section = { version = "1.2", features = ["restore-state-u8"] }
+embassy-executor = { version = "0.10", features = [] }
+embassy-time-driver = { version = "0.2", features = ["tick-hz-32_000_000"] }
+embassy-time-queue-utils = "0.3"
+
+[features]
+default = []
+rtt = []

@@ -31,10 +31,10 @@ use crate::sdk::ble_app::rf_drv_8266::{
     ADV_RSP_PRI_DATA, BLE_SCAN_RESPONSE_INTERVAL_US, DEVICE_ADDRESS, LIGHT_RX_BUFF,
     LIGHT_RX_BUFFER_WRITE_POINTER, MAC_ID, PKT_EMPTY,
 };
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
 /// Handles RF transmission complete interrupt.
@@ -434,18 +434,39 @@ mod tests {
     };
     use crate::sdk::ble_app::rf_drv_8266::{mock_rf_start_stx2rx, mock_rf_stop_trx};
     use crate::sdk::light::{BlePeripheralLinkState, LightRxBuff, LIGHT_RX_BUFF_COUNT};
-    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
-        mock_read_reg_rf_rx_status, mock_read_reg_system_tick, mock_read_reg_system_tick_irq,
-        mock_write_reg8, mock_write_reg_dma2_addr, mock_write_reg_dma3_addr,
-        mock_write_reg_dma3_mode, mock_write_reg_rf_irq_status, mock_write_reg_rf_mode_control,
+        mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
+        mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_rf_mode_control,
         mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
     };
+
+    /// Datasheet offsets of the RF receive / DMA registers this module touches.
+    const REG_RF_RX_STATUS: u32 = 0x443;
+    const REG_RF_IRQ_STATUS: u32 = 0xf20;
+    const REG_DMA2_ADDR: u32 = 0x508;
+
+    /// Number of `write_reg_dma2_addr` (0x508) writes the run performed.
+    fn dma2_addr_writes() -> usize {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (REG_DMA2_ADDR | tlsr8266_pac::REG_BASE_ADDR))
+            .count()
+    }
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
     fn reset_global_state() {
+        // The PAC/HAL host fakes are process-wide singletons: clear them so a
+        // test never inherits another test's register bank, analog bank, clock
+        // or AES transport.
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+
         // Global queues outlive every test in this process: clear them.
         crate::sdk::ble_app::queues::reset_for_test();
 
@@ -557,16 +578,18 @@ mod tests {
     /// This function should clear bit 2 of the RF interrupt status register
     /// to acknowledge the transmission completion.
     #[test]
-    #[mry::lock(write_reg_rf_irq_status)]
     fn test_handle_rf_transmission_complete() {
-        // Setup mock
-        mock_write_reg_rf_irq_status(Any).returns(());
+        reset_global_state();
 
         // Execute function
         handle_rf_transmission_complete();
 
-        // Verify RF interrupt status bit 2 is cleared
-        mock_write_reg_rf_irq_status(2).assert_called(1);
+        // Verify RF interrupt status bit 2 is cleared (write-1-to-clear)
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            2,
+            "bit 2 of reg_rf_irq_status must be acknowledged"
+        );
     }
 
     // ================================================================================
@@ -580,14 +603,11 @@ mod tests {
     /// - Return early without processing packet
     /// - Not advance write pointer or set up DMA
     #[test]
-    #[mry::lock(read_reg_rf_rx_status, write_reg_rf_irq_status, write_reg_dma2_addr)]
     fn test_handle_rf_packet_reception_rf_error() {
         reset_global_state();
 
-        // Setup mocks for error case
-        mock_read_reg_rf_rx_status().returns(0x0b); // RF error
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // RF error status in the receive status register
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x0b);
 
         // Setup initial state
         let initial_write_ptr = 1;
@@ -597,7 +617,11 @@ mod tests {
         handle_rf_packet_reception();
 
         // Verify error handling
-        mock_write_reg_rf_irq_status(1).assert_called(1); // Clear interrupt bit 1
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "bit 1 of reg_rf_irq_status must be acknowledged"
+        );
 
         // Verify write pointer was advanced (this happens before error check)
         assert_eq!(
@@ -615,21 +639,12 @@ mod tests {
     /// - Check for duplicate packets using timestamp
     /// - Return early without further processing
     #[test]
-    #[mry::lock(
-        read_reg_rf_rx_status,
-        write_reg_rf_irq_status,
-        write_reg_dma2_addr,
-        rf_stop_trx,
-        rf_start_stx2rx,
-        read_reg_system_tick
-    )]
+    #[mry::lock(rf_stop_trx, rf_start_stx2rx, read_reg_system_tick)]
     fn test_handle_rf_packet_reception_invalid_packet_duplicate() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00); // Valid RF status
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
         mock_rf_stop_trx().returns(());
         mock_rf_start_stx2rx(Any, Any).returns(());
         mock_read_reg_system_tick().returns(10000);
@@ -654,10 +669,14 @@ mod tests {
         handle_rf_packet_reception();
 
         // Verify DMA setup for next reception
-        mock_write_reg_dma2_addr(Any).assert_called(1);
+        assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
 
         // Verify RF interrupt is cleared
-        mock_write_reg_rf_irq_status(1).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "bit 1 of reg_rf_irq_status must be acknowledged"
+        );
 
         // Note: Duplicate detection would require the T_RX_LAST static to match
         // the packet timestamp, which is complex to test with the static variable
@@ -668,14 +687,11 @@ mod tests {
     /// When a packet has dma_len == 1 but timestamp doesn't match last received,
     /// the function should simply return without restarting RF operations.
     #[test]
-    #[mry::lock(read_reg_rf_rx_status, write_reg_rf_irq_status, write_reg_dma2_addr)]
     fn test_handle_rf_packet_reception_invalid_packet_no_duplicate() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00); // Valid RF status
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
 
         // Create buffer with invalid packet (dma_len == 1) with unique timestamp
         let mut light_rx_buff =
@@ -693,8 +709,12 @@ mod tests {
         handle_rf_packet_reception();
 
         // Verify basic operations
-        mock_write_reg_rf_irq_status(1).assert_called(1);
-        mock_write_reg_dma2_addr(Any).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "bit 1 of reg_rf_irq_status must be acknowledged"
+        );
+        assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
     }
 
     // ================================================================================
@@ -709,22 +729,12 @@ mod tests {
     /// - Update last received timestamp
     /// - Call slow path processing function
     #[test]
-    #[mry::lock(
-        read_reg_rf_rx_status,
-        write_reg_rf_irq_status,
-        write_reg_dma2_addr,
-        rf_stop_trx,
-        write_reg8,
-        read_reg_system_tick,
-        rf_start_stx2rx
-    )]
+    #[mry::lock(rf_stop_trx, write_reg8, read_reg_system_tick, rf_start_stx2rx)]
     fn test_handle_rf_packet_reception_valid_packet() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00); // Valid RF status
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
         mock_rf_stop_trx().returns(());
         mock_write_reg8(Any, Any).returns(());
         mock_read_reg_system_tick().returns(50000);
@@ -767,8 +777,12 @@ mod tests {
         }
 
         // Verify DMA setup and interrupt clearing
-        mock_write_reg_rf_irq_status(1).assert_called(1);
-        mock_write_reg_dma2_addr(Any).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "bit 1 of reg_rf_irq_status must be acknowledged"
+        );
+        assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
 
         // Note: Testing the slow path function would require extensive mocking
         // as it calls many external functions with complex logic
@@ -779,22 +793,12 @@ mod tests {
     /// Verifies that the circular buffer write pointer wraps around correctly
     /// when it reaches the buffer size limit.
     #[test]
-    #[mry::lock(
-        read_reg_rf_rx_status,
-        write_reg_rf_irq_status,
-        write_reg_dma2_addr,
-        rf_stop_trx,
-        write_reg8,
-        read_reg_system_tick,
-        rf_start_stx2rx
-    )]
+    #[mry::lock(rf_stop_trx, write_reg8, read_reg_system_tick, rf_start_stx2rx)]
     fn test_handle_rf_packet_reception_buffer_wraparound() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00);
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
         mock_rf_stop_trx().returns(());
         mock_write_reg8(Any, Any).returns(());
         mock_read_reg_system_tick().returns(50000);
@@ -1400,14 +1404,11 @@ mod tests {
     /// Verifies that the packet reception handles buffer boundaries correctly
     /// and doesn't cause out-of-bounds access.
     #[test]
-    #[mry::lock(read_reg_rf_rx_status, write_reg_rf_irq_status, write_reg_dma2_addr)]
     fn test_buffer_boundary_conditions() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00);
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
 
         // Test all buffer positions
         for i in 0..LIGHT_RX_BUFF_COUNT {
@@ -1468,14 +1469,11 @@ mod tests {
     /// Verifies that timestamp comparisons and calculations handle
     /// overflow conditions correctly.
     #[test]
-    #[mry::lock(read_reg_rf_rx_status, write_reg_rf_irq_status, write_reg_dma2_addr)]
     fn test_timestamp_overflow_handling() {
         reset_global_state();
 
-        // Setup mocks
-        mock_read_reg_rf_rx_status().returns(0x00);
-        mock_write_reg_rf_irq_status(Any).returns(());
-        mock_write_reg_dma2_addr(Any).returns(());
+        // Valid RF status
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
 
         // Test with timestamp near overflow boundary
         let near_overflow_time = 0xFFFFFFF0u32;
@@ -1499,7 +1497,11 @@ mod tests {
         handle_rf_packet_reception();
 
         // Verify function completes without issues
-        mock_write_reg_rf_irq_status(1).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "bit 1 of reg_rf_irq_status must be acknowledged"
+        );
 
         // Test with zero timestamp
         light_rx_buff[1] =
@@ -1513,8 +1515,13 @@ mod tests {
 
         handle_rf_packet_reception();
 
-        // Verify function handles zero timestamp correctly
-        mock_write_reg_rf_irq_status(1).assert_called(2);
+        // Verify function handles zero timestamp correctly: the ack is
+        // write-1-to-clear, so both receptions leave the same value behind
+        assert_eq!(
+            FakeMmio::reg16(REG_RF_IRQ_STATUS),
+            1,
+            "each reception acknowledges bit 1"
+        );
     }
 
     /// Tests MAC address edge cases.

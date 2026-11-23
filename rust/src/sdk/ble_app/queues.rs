@@ -36,9 +36,9 @@ use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use heapless::Vec;
 
-use crate::sdk::common::sync::CriticalSectionMutex;
 use mesh_protocol::packet_types::Packet;
 use mesh_protocol::uart::UartData;
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
 
 /// Raw mutex backing the channels and the wake signal: masks interrupts for the
 /// (short, allocation-free) critical sections inside `embassy-sync`.
@@ -93,7 +93,7 @@ static DROPPED_UART_TX: AtomicU32 = AtomicU32::new(0);
 /// Bump one drop counter by one.
 ///
 /// `fetch_add` requires 32-bit atomic read-modify-write, which `thumbv6m`
-/// (Cortex-M0) does not provide; `sdk/mcu/clock.rs` uses the same
+/// (Cortex-M0) does not provide; `tlsr8266-hal`'s `mcu/clock.rs` uses the same
 /// load-modify-store form for that reason. Producers run in both task and
 /// interrupt context, so the update is masked. `critical_section` nesting is
 /// counted, so a producer that is already masked pays two register writes.

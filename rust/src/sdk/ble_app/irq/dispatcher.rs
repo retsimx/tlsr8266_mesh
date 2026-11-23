@@ -100,7 +100,6 @@ pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
 
     // Import mock functions from their original modules
     use crate::sdk::ble_app::irq::advertisement::mock_handle_ble_advertisement_state;
@@ -110,10 +109,20 @@ mod tests {
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
     use crate::sdk::ble_app::irq::timing::mock_configure_ble_receive_state;
-    use tlsr8266_pac::{mock_read_reg_rf_irq_status, mock_write_reg_irq_src};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
 
-    /// Restores the process-wide RF operation state between tests.
+    /// Datasheet offsets of the interrupt registers this module touches.
+    const REG_RF_IRQ_STATUS: u32 = 0xf20;
+    const REG_IRQ_SRC: u32 = 0x648;
+
+    /// Restores the process-wide RF operation state between tests, and clears
+    /// the PAC/HAL host fakes so a test never inherits another test's register
+    /// bank (the suite runs `--test-threads=1`, so these are singletons).
     fn reset_rf_state() {
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
         *CURRENT_RF_STATE.lock() = RfOperationState::Idle;
     }
 
@@ -124,9 +133,10 @@ mod tests {
     /// Tests that an RF transmission complete interrupt dispatches to the
     /// transmission complete handler.
     #[test]
-    #[mry::lock(read_reg_rf_irq_status, handle_rf_transmission_complete)]
+    #[mry::lock(handle_rf_transmission_complete)]
     fn test_handle_rf_irq_transmission_complete() {
-        mock_read_reg_rf_irq_status().returns(FLD_RF_IRQ_MASK::IRQ_TX.bits());
+        reset_rf_state();
+        FakeMmio::set_reg16(REG_RF_IRQ_STATUS, FLD_RF_IRQ_MASK::IRQ_TX.bits());
         mock_handle_rf_transmission_complete().returns(());
 
         handle_rf_irq();
@@ -137,9 +147,10 @@ mod tests {
     /// Tests that an RF reception complete interrupt dispatches to the packet
     /// reception handler.
     #[test]
-    #[mry::lock(read_reg_rf_irq_status, handle_rf_packet_reception)]
+    #[mry::lock(handle_rf_packet_reception)]
     fn test_handle_rf_irq_reception_complete() {
-        mock_read_reg_rf_irq_status().returns(FLD_RF_IRQ_MASK::IRQ_RX.bits());
+        reset_rf_state();
+        FakeMmio::set_reg16(REG_RF_IRQ_STATUS, FLD_RF_IRQ_MASK::IRQ_RX.bits());
         mock_handle_rf_packet_reception().returns(());
 
         handle_rf_irq();
@@ -149,14 +160,11 @@ mod tests {
 
     /// Tests that simultaneous TX and RX interrupts dispatch to both handlers.
     #[test]
-    #[mry::lock(
-        read_reg_rf_irq_status,
-        handle_rf_transmission_complete,
-        handle_rf_packet_reception
-    )]
+    #[mry::lock(handle_rf_transmission_complete, handle_rf_packet_reception)]
     fn test_handle_rf_irq_both_interrupts() {
+        reset_rf_state();
         let both_interrupts = FLD_RF_IRQ_MASK::IRQ_TX.bits() | FLD_RF_IRQ_MASK::IRQ_RX.bits();
-        mock_read_reg_rf_irq_status().returns(both_interrupts);
+        FakeMmio::set_reg16(REG_RF_IRQ_STATUS, both_interrupts);
         mock_handle_rf_transmission_complete().returns(());
         mock_handle_rf_packet_reception().returns(());
 
@@ -168,13 +176,10 @@ mod tests {
 
     /// Tests that no RF interrupt bits means no dispatch.
     #[test]
-    #[mry::lock(
-        read_reg_rf_irq_status,
-        handle_rf_transmission_complete,
-        handle_rf_packet_reception
-    )]
+    #[mry::lock(handle_rf_transmission_complete, handle_rf_packet_reception)]
     fn test_handle_rf_irq_no_interrupts() {
-        mock_read_reg_rf_irq_status().returns(0);
+        reset_rf_state();
+        FakeMmio::set_reg16(REG_RF_IRQ_STATUS, 0);
         mock_handle_rf_transmission_complete().returns(());
         mock_handle_rf_packet_reception().returns(());
 
@@ -191,30 +196,32 @@ mod tests {
     /// Tests that the system timer source is cleared before dispatching, and that
     /// the advertising state handler runs and reports nothing to the composition root.
     #[test]
-    #[mry::lock(write_reg_irq_src, handle_ble_advertisement_state)]
+    #[mry::lock(handle_ble_advertisement_state)]
     fn test_handle_ble_system_timer_irq_clears_source_and_dispatches_advertising() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
 
-        mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_advertisement_state().returns(());
 
         let event = handle_ble_system_timer_irq();
 
         assert_eq!(event, BleConnectionEvent::None);
-        mock_write_reg_irq_src(Any).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg32(REG_IRQ_SRC),
+            FLD_IRQ::SYSTEM_TIMER.bits(),
+            "the SYSTEM_TIMER source must be cleared before dispatch"
+        );
         mock_handle_ble_advertisement_state().assert_called(1);
     }
 
     /// Tests dispatch to the connected state handler and that its event is
     /// propagated unchanged to the caller.
     #[test]
-    #[mry::lock(write_reg_irq_src, handle_ble_connected_state)]
+    #[mry::lock(handle_ble_connected_state)]
     fn test_handle_ble_system_timer_irq_dispatches_connected() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Connected;
 
-        mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaFinishCheckAndErrorReboot);
 
         let event = handle_ble_system_timer_irq();
@@ -230,14 +237,9 @@ mod tests {
     /// Tests dispatch to the receiving and mesh-listening state handlers.
     /// Neither of them reports anything to the composition root.
     #[test]
-    #[mry::lock(
-        write_reg_irq_src,
-        configure_ble_receive_state,
-        handle_mesh_listening_state
-    )]
+    #[mry::lock(configure_ble_receive_state, handle_mesh_listening_state)]
     fn test_handle_ble_system_timer_irq_dispatches_receiving_and_mesh_listening() {
         reset_rf_state();
-        mock_write_reg_irq_src(Any).returns(());
         mock_configure_ble_receive_state().returns(());
         mock_handle_mesh_listening_state().returns(());
 
@@ -256,7 +258,6 @@ mod tests {
     /// reports nothing to the composition root.
     #[test]
     #[mry::lock(
-        write_reg_irq_src,
         handle_ble_advertisement_state,
         handle_ble_connected_state,
         configure_ble_receive_state,
@@ -265,7 +266,6 @@ mod tests {
     fn test_handle_ble_system_timer_irq_idle_runs_no_state_handler() {
         reset_rf_state();
 
-        mock_write_reg_irq_src(Any).returns(());
         mock_handle_ble_advertisement_state().returns(());
         mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaErrorReboot);
         mock_configure_ble_receive_state().returns(());
@@ -274,7 +274,11 @@ mod tests {
         let event = handle_ble_system_timer_irq();
 
         assert_eq!(event, BleConnectionEvent::None);
-        mock_write_reg_irq_src(Any).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg32(REG_IRQ_SRC),
+            FLD_IRQ::SYSTEM_TIMER.bits(),
+            "the SYSTEM_TIMER source must be cleared before dispatch"
+        );
         mock_handle_ble_advertisement_state().assert_called(0);
         mock_handle_ble_connected_state().assert_called(0);
         mock_configure_ble_receive_state().assert_called(0);

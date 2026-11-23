@@ -19,9 +19,9 @@ use crate::sdk::ble_app::light_ll::mesh_management::{
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE, PKT_ADV};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
 /// Returns the number of GATT advertisement cycles to perform.
@@ -156,8 +156,7 @@ mod tests {
 
     // Import mock functions from their original modules
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
-    use crate::sdk::mcu::analog::{analog_write, mock_analog_write};
-    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use tlsr8266_pac::{
         mock_read_reg_rf_mode, mock_read_reg_system_tick, mock_write_reg8,
         mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_pll_rx_fine_div_tune,
@@ -167,10 +166,21 @@ mod tests {
         mock_write_reg_system_tick_irq,
     };
 
+    /// Reset the PAC/HAL host fakes so a test never inherits another test's
+    /// register bank, analog bank, clock or AES transport (the suite runs
+    /// `--test-threads=1`, so all of these are process-wide singletons).
+    fn reset_host_fakes() {
+        tlsr8266_pac::fake_mmio::FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+    }
+
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
     /// Note: Call reset_advertisement_internal_state() separately after setting up mocks.
     fn reset_global_state() {
+        reset_host_fakes();
         BLE_ADVERTISING_ENABLED.set(false);
         BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
         MESH_DEVICE_ONLINE_STATUS.set(false);
@@ -210,12 +220,10 @@ mod tests {
 
         // Mock rf_set_ble_channel internals (will be called with different channels)
         mock_write_reg_rf_channel(Any).returns(());
-        mock_analog_write(6, 0).returns(());
         mock_write_reg_rf_mode(0x29).returns(());
         mock_write_reg_rf_rx_mode(0).returns(());
         mock_write_reg_rf_txrx_state(Any).returns(());
         mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
-        mock_analog_write(0x93, Any).returns(());
 
         // Mock rf_start_stx2rx internals
         mock_read_reg_rf_mode().returns(0);
@@ -419,7 +427,6 @@ mod tests {
         write_reg_rf_rx_mode,
         write_reg_rf_txrx_state,
         write_reg_pll_rx_fine_div_tune,
-        analog_write,
         read_reg_rf_mode,
         write_reg_rf_sched_tick,
         write_reg_rf_mode_control,
@@ -507,7 +514,6 @@ mod tests {
         write_reg_rf_rx_mode,
         write_reg_rf_txrx_state,
         write_reg_pll_rx_fine_div_tune,
-        analog_write,
         read_reg_rf_mode,
         write_reg_rf_sched_tick,
         write_reg_rf_mode_control,
@@ -618,7 +624,6 @@ mod tests {
         write_reg_rf_rx_mode,
         write_reg_rf_txrx_state,
         write_reg_pll_rx_fine_div_tune,
-        analog_write,
         read_reg_rf_mode,
         write_reg_rf_sched_tick,
         write_reg_rf_mode_control,

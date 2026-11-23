@@ -15,12 +15,12 @@ use crate::sdk::ble_app::light_ll::ota_management::{
     OTA_UPDATE_TERMINATION_REQUESTED, RF_SLAVE_OTA_FINISHED_FLAG,
 };
 use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
 use mesh_protocol::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
     PacketL2capHead, PacketVersionInd,
 };
+use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_pac::read_reg_system_tick;
 
 #[cfg(not(test))]

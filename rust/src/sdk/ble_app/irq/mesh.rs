@@ -25,12 +25,12 @@ use crate::sdk::ble_app::light_ll::mesh_management::{
 use crate::sdk::ble_app::light_ll::status_management::{app_bridge_cmd_handle, tx_packet_bridge};
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{
     RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
 };
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use mesh_protocol::mesh_types::{is_online, MESH_NODE_ST_VAL_LEN};
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
 #[cfg_attr(test, mry::mry)]
@@ -225,11 +225,11 @@ mod tests {
         BlePeripheralLinkState, RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL,
         ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
     };
-    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use mesh_protocol::mesh_types::{
         MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
     };
     use mry::Any;
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 
     // Import mock functions for RF operations
     use crate::sdk::ble_app::rf_drv_8266::{

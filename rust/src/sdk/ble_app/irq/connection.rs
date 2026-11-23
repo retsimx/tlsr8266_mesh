@@ -43,12 +43,12 @@ use crate::sdk::ble_app::light_ll::status_management::{
 };
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_INIT};
-use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{
     ePairState, BlePeripheralLinkState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
     SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
-use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
+use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
 /// Outcome of one BLE connected-state dispatch, reported up to the interrupt
@@ -673,8 +673,8 @@ mod tests {
         mock_rf_link_slave_read_status_stop, mock_tx_packet_bridge,
     };
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
-    use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use mesh_protocol::packet_types::{Packet, PacketAttData};
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use tlsr8266_pac::{
         mock_read_reg_system_tick, mock_write_reg8, mock_write_reg_dma3_mode,
         mock_write_reg_dma_tx_rptr, mock_write_reg_rf_tx_wail_settle_time_lo,

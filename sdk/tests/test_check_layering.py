@@ -28,6 +28,7 @@ SDK_ROOT = REPO_ROOT / "rust" / "src" / "sdk"
 SRC_ROOT = REPO_ROOT / "rust" / "src"
 CRATE_ROOT = REPO_ROOT / "rust" / "crates" / "mesh-protocol" / "src"
 PAC_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-pac" / "src"
+HAL_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-hal" / "src"
 
 
 def _write(path: Path, content: str) -> Path:
@@ -87,13 +88,21 @@ class TestRealSdkTree(unittest.TestCase):
             Path(check_layering.DEFAULT_CRATE_ROOT).resolve(), CRATE_ROOT.resolve()
         )
 
+    def test_default_crate_roots_include_the_hal_crate(self) -> None:
+        # C-4: the extracted HAL crate is audited by the no-argument (CI) run.
+        roots = [Path(item).resolve() for item in check_layering.DEFAULT_CRATE_ROOTS]
+        self.assertIn(HAL_ROOT.resolve(), roots)
+
     def test_real_sdk_tree_is_clean(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main([])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIn("0 violations", out.getvalue())
-        self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 40)
+        # C-4 moved `common/`, `mcu/` and `pm.rs` into `tlsr8266-hal`, so the
+        # shipped SDK tree is smaller; the floor only guards against the gate
+        # silently scanning an empty/wrong directory.
+        self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 30)
 
     def test_real_tree_reports_every_pass(self) -> None:
         out, err = io.StringIO(), io.StringIO()
@@ -104,10 +113,12 @@ class TestRealSdkTree(unittest.TestCase):
         self.assertIn("rust src audit OK", out.getvalue())
         self.assertIn("mesh-protocol audit OK", out.getvalue())
         self.assertIn("tlsr8266-pac audit OK", out.getvalue())
+        self.assertIn("tlsr8266-hal audit OK", out.getvalue())
         # Every universal root is named in the summary, relative to the repo.
         self.assertIn(str(SRC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
         self.assertIn(str(CRATE_ROOT.relative_to(REPO_ROOT)), out.getvalue())
         self.assertIn(str(PAC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
+        self.assertIn(str(HAL_ROOT.relative_to(REPO_ROOT)), out.getvalue())
 
     def test_real_crate_tree_is_clean(self) -> None:
         paths = check_layering.rust_files(str(CRATE_ROOT))
@@ -338,6 +349,25 @@ class TestLayerRules(_TempTree):
             ),
         )
         self.assert_violations("1: layer-common: crate::sdk::mcu::register::read_reg8")
+
+    def test_tlsr8266_hal_is_legal_in_mcu_and_drivers(self) -> None:
+        # C-4: the extracted HAL crate is what the remaining `mcu`/`drivers`
+        # modules consume, so naming it is not an inversion there.
+        self.write("mcu/hal_user.rs", _lines("use tlsr8266_hal::mcu::clock::clock_time;"))
+        self.write(
+            "drivers/hal_user.rs",
+            _lines("use tlsr8266_hal::common::sync::SimplifyLS;"),
+        )
+        self.assert_clean()
+
+    def test_tlsr8266_hal_is_rejected_in_common(self) -> None:
+        # `sdk/common` no longer exists in the firmware tree, and the allowance
+        # was not widened: only `mcu` and `drivers` may name the HAL.
+        self.write(
+            "common/hal_user.rs",
+            _lines("use tlsr8266_hal::common::sync::SimplifyLS;"),
+        )
+        self.assert_violations("1: layer-common: external crate `tlsr8266_hal`")
 
 
 class TestPmLeafRule(_TempTree):
@@ -1098,6 +1128,144 @@ class TestUnsafeBudgetRule(_TempSrcTree):
         self.assertNotIn("undocumented-unsafe", out)
 
 
+class TestHostOnlyUnsafeBudget(_TempSrcTree):
+    """`#[cfg(not(target_os = "none"))]` code never reaches the firmware image.
+
+    It is excluded from the numeric `unsafe-budget` only.  The SAFETY and
+    `static mut` rules keep applying: host-only code is still real Rust in the
+    audited tree and still compiled for host tests.
+    """
+
+    def _audit_source(self, *lines: str) -> tuple[list, int]:
+        path = self.write_src("x.rs", _lines(*lines))
+        return check_layering.audit_universal_source(
+            path.read_text(encoding="utf-8"), str(path)
+        )
+
+    def test_host_only_item_is_excluded_from_the_budget(self) -> None:
+        violations, total = self._audit_source(
+            '#[cfg(not(target_os = "none"))]',
+            "// SAFETY: (1) host-only probe.",
+            "unsafe fn host_probe() {}",
+            "// SAFETY: (1) production probe.",
+            "unsafe fn production_probe() {}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 1)  # only the production site is charged
+
+    def test_host_only_unsafe_without_safety_still_fails(self) -> None:
+        violations, total = self._audit_source(
+            '#[cfg(not(target_os = "none"))]',
+            "unsafe fn host_probe() {}",
+        )
+        self.assertEqual(
+            [(item.rule, item.line) for item in violations],
+            [("undocumented-unsafe", 2)],
+        )
+        self.assertEqual(total, 0)  # excluded from the budget, not from SAFETY
+
+    def test_host_only_unsafe_with_safety_raises_nothing(self) -> None:
+        violations, total = self._audit_source(
+            '#[cfg(not(target_os = "none"))]',
+            "// SAFETY: (1) host-only probe.",
+            "unsafe fn host_probe() {}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 0)
+
+    def test_host_only_static_mut_is_still_reported(self) -> None:
+        violations, total = self._audit_source(
+            '#[cfg(not(target_os = "none"))]',
+            "static mut HOST_SCRATCH: u8 = 0;",
+        )
+        self.assertEqual(
+            [(item.rule, item.line, item.violation) for item in violations],
+            [("static-mut", 2, "static mut HOST_SCRATCH")],
+        )
+        self.assertEqual(total, 0)
+
+    def test_production_unsafe_is_still_counted(self) -> None:
+        # Positive control for the exclusion above: nothing but ordinary
+        # production code here, and it must move the budget.
+        violations, total = self._audit_source(
+            "// SAFETY: (1) production probe.",
+            "unsafe fn production_probe() {}",
+            "",
+            "// SAFETY: (1) second production probe.",
+            "unsafe fn production_probe_two() {}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 2)
+
+    def test_unsafe_impl_and_nested_unsafe_inside_a_host_only_item(self) -> None:
+        violations, total = self._audit_source(
+            '#[cfg(not(target_os = "none"))]',
+            "mod host {",
+            "    // SAFETY: (4) audited wrapper.",
+            "    unsafe impl Send for Probe {}",
+            "    // SAFETY: (1) raw pointer probe.",
+            "    pub unsafe fn probe(p: *const u8) -> u8 {",
+            "        // SAFETY: (2) same contract as the caller.",
+            "        unsafe { *p }",
+            "    }",
+            "}",
+            "// SAFETY: (1) production probe.",
+            "unsafe fn production_probe() {}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 1)
+
+    def test_annotation_shaped_host_only_block_stops_at_its_own_braces(self) -> None:
+        # The host-only attribute here annotates a bare block, not an item, so
+        # the extent is `_annotation_extent`'s job: stopping one block early
+        # would hide the target branch below it from the budget.
+        violations, total = self._audit_source(
+            "pub fn probe(v: u8) -> u8 {",
+            '    #[cfg(not(target_os = "none"))]',
+            "    {",
+            "        // SAFETY: (1) host-only branch.",
+            "        unsafe { host_read(v) }",
+            "    }",
+            '    #[cfg(target_os = "none")]',
+            "    {",
+            "        // SAFETY: (1) target branch.",
+            "        unsafe { read(v) }",
+            "    }",
+            "}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 1)  # the target branch is still firmware code
+
+    def test_host_only_attribute_text_in_a_comment_does_not_strip_code(self) -> None:
+        # The attribute is matched on the raw text because `mask_source` blanks
+        # the `"none"` literal; the mask guard is what keeps a copy of it in a
+        # comment from swallowing the production `unsafe` below.
+        violations, total = self._audit_source(
+            '// historically: #[cfg(not(target_os = "none"))]',
+            "",
+            "// SAFETY: (1) production probe.",
+            "unsafe fn production_probe() {}",
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 1)
+
+    def test_host_only_sites_are_not_charged_to_the_firmware_ceiling(self) -> None:
+        # Gate-level proof: more documented host-only `unsafe` sites than the
+        # whole firmware ceiling must still pass, because none of them ship.
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
+        self.write_src(
+            "host.rs",
+            "\n".join(
+                '#[cfg(not(target_os = "none"))]\n'
+                f"// SAFETY: (1) generated host-only probe {index}.\n"
+                f"unsafe fn host_probe_{index}() {{}}"
+                for index in range(ceiling + 1)
+            )
+            + "\n",
+        )
+        self.assert_clean()
+
+
 class TestMeshProtocolCrateUniversalRules(_TempSrcTree):
     """The workspace crate is audited like the firmware for `unsafe` invariants."""
 
@@ -1229,6 +1397,7 @@ class TestRepeatableCrateRoot(_TempSrcTree):
         self.assertIn(f"under {self.crate_root}", out.getvalue())
         self.assertNotIn("rust src audit", out.getvalue())
         self.assertNotIn("tlsr8266-pac audit", out.getvalue())
+        self.assertNotIn("tlsr8266-hal audit", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
+use crate::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
 use core::cell::RefCell;
 use core::task::Waker;
 use embassy_time_driver::Driver;
@@ -95,7 +95,6 @@ impl Driver for MyDriver {
 }
 
 /// Called from the `TMR0` interrupt to flush expired embassy timers and re-arm `TMR0`.
-#[cfg_attr(test, mry::mry)]
 pub fn on_timer0_interrupt() {
     DRIVER.on_interrupt();
 }
@@ -104,182 +103,124 @@ pub fn on_timer0_interrupt() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::clock::{mock_clock_time64, reset_clock_time64_for_test};
-    use mry::{self, Any};
-    use std::sync::Mutex;
+    use crate::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
-    use tlsr8266_pac::{
-        mock_read_reg_tmr_ctrl8, mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick,
-        mock_write_reg_tmr_ctrl8, mock_write_reg_tmr_sta, REG_BASE_ADDR,
-    };
+    use tlsr8266_pac::REG_BASE_ADDR;
 
-    /// Tag used to identify a mocked register write, in call order.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    enum Tmr0Write {
-        Ctrl8(u8),
-        Tick(u32),
-        Capt(u32),
-        Sta(u8),
-    }
+    /// `reg_system_tick`, `reg_tmr_ctrl` (8-bit view), `reg_tmr0_tick`,
+    /// `reg_tmr0_capt` and `reg_tmr_sta`.
+    const SYSTEM_TICK: u32 = 0x740;
+    const TMR_CTRL8: u32 = 0x620;
+    const TMR0_TICK: u32 = 0x630;
+    const TMR0_CAPT: u32 = 0x624;
+    const TMR_STA: u32 = 0x623;
 
-    /// Shared log of `TMR0` register writes, filled by the mock closures.
-    static WRITE_LOG: Mutex<Vec<Tmr0Write>> = Mutex::new(Vec::new());
-
-    fn reset_write_log() {
-        WRITE_LOG.lock().unwrap().clear();
-    }
-
-    fn write_log() -> Vec<Tmr0Write> {
-        WRITE_LOG.lock().unwrap().clone()
+    /// `FakeMmio` and `fake_clock` are process-wide and the suite runs with
+    /// `--test-threads=1`, so every test starts from zero.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
     }
 
     #[test]
-    #[mry::lock(clock_time64)]
     fn test_driver_now_returns_clock_time64() {
         // Arrange
+        reset_fakes();
         let driver = MyDriver::new();
         let expected_time = 0x1234567890ABCDEF;
-
-        // Mock clock_time64 with the correct format
-        mock_clock_time64().returns(expected_time);
+        fake_clock::set_ticks(expected_time);
 
         // Act
         let result = driver.now();
 
         // Assert
         assert_eq!(result, expected_time);
-        mock_clock_time64().assert_called(1);
     }
 
     #[test]
-    #[mry::lock(
-        clock_time64,
-        read_reg_tmr_ctrl8,
-        write_reg_tmr_ctrl8,
-        write_reg_tmr0_tick,
-        write_reg_tmr0_capt,
-        write_reg_tmr_sta
-    )]
     fn test_arm_tmr0_past_timestamp_returns_false_without_writes() {
         // Arrange
+        reset_fakes();
         let driver = MyDriver::new();
-        mock_clock_time64().returns(5000);
+        // `now` is 5000 ticks, the deadline is already behind it
+        fake_clock::set_ticks(5000);
 
         // Act
         let armed = driver.arm_tmr0(4000);
 
         // Assert
         assert!(!armed);
-        mock_clock_time64().assert_called(1);
-        mock_read_reg_tmr_ctrl8().assert_called(0);
-        mock_write_reg_tmr_ctrl8(Any).assert_called(0);
-        mock_write_reg_tmr0_tick(Any).assert_called(0);
-        mock_write_reg_tmr0_capt(Any).assert_called(0);
-        mock_write_reg_tmr_sta(Any).assert_called(0);
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a past deadline must not touch TMR0"
+        );
     }
 
     #[test]
-    #[mry::lock(
-        clock_time64,
-        read_reg_tmr_ctrl8,
-        write_reg_tmr_ctrl8,
-        write_reg_tmr0_tick,
-        write_reg_tmr0_capt,
-        write_reg_tmr_sta
-    )]
     fn test_arm_tmr0_near_future_clamps_delta_to_32_ticks() {
         // Arrange
+        reset_fakes();
         let driver = MyDriver::new();
-        reset_write_log();
-        mock_clock_time64().returns(1000);
-        mock_read_reg_tmr_ctrl8().returns(0x01);
-        mock_write_reg_tmr_ctrl8(Any).returns_with(|value: u8| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Ctrl8(value));
-        });
-        mock_write_reg_tmr0_tick(Any).returns_with(|value: u32| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Tick(value));
-        });
-        mock_write_reg_tmr0_capt(Any).returns_with(|value: u32| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Capt(value));
-        });
-        mock_write_reg_tmr_sta(Any).returns_with(|value: u8| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Sta(value));
-        });
+        fake_clock::set_ticks(1000);
+        FakeMmio::set_reg8(TMR_CTRL8, 0x01); // TMR0 already enabled
 
-        // Act
+        // Act: a 10 tick delta is below the 1 us floor
         let armed = driver.arm_tmr0(1010);
 
-        // Assert
+        // Assert: end state, not just the write order
         assert!(armed);
         assert_eq!(
-            write_log(),
-            vec![
-                Tmr0Write::Ctrl8(0x00),
-                Tmr0Write::Tick(0),
-                Tmr0Write::Capt(32),
-                Tmr0Write::Sta(FLD_TMR_STA::TMR0.bits()),
-                Tmr0Write::Ctrl8(0x01),
-            ]
+            FakeMmio::reg32(TMR0_CAPT),
+            32,
+            "delta clamps up to 32 ticks"
+        );
+        assert_eq!(FakeMmio::reg32(TMR0_TICK), 0, "the tick counter restarts");
+        assert_eq!(
+            FakeMmio::reg8(TMR_STA),
+            FLD_TMR_STA::TMR0.bits(),
+            "the pending status bit is acknowledged"
+        );
+        assert_eq!(
+            FakeMmio::reg8(TMR_CTRL8),
+            0x01,
+            "TMR0 is left enabled and every other control bit preserved"
         );
     }
 
     #[test]
-    #[mry::lock(
-        clock_time64,
-        read_reg_tmr_ctrl8,
-        write_reg_tmr_ctrl8,
-        write_reg_tmr0_tick,
-        write_reg_tmr0_capt,
-        write_reg_tmr_sta
-    )]
     fn test_arm_tmr0_far_future_clamps_delta_to_one_second() {
         // Arrange
+        reset_fakes();
         let driver = MyDriver::new();
-        reset_write_log();
-        mock_clock_time64().returns(0);
-        mock_read_reg_tmr_ctrl8().returns(0x01);
-        mock_write_reg_tmr_ctrl8(Any).returns_with(|value: u8| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Ctrl8(value));
-        });
-        mock_write_reg_tmr0_tick(Any).returns_with(|value: u32| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Tick(value));
-        });
-        mock_write_reg_tmr0_capt(Any).returns_with(|value: u32| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Capt(value));
-        });
-        mock_write_reg_tmr_sta(Any).returns_with(|value: u8| {
-            WRITE_LOG.lock().unwrap().push(Tmr0Write::Sta(value));
-        });
+        fake_clock::set_ticks(0);
+        FakeMmio::set_reg8(TMR_CTRL8, 0x01); // TMR0 already enabled
 
-        // Act
+        // Act: ten seconds out
         let armed = driver.arm_tmr0(CLOCK_SYS_CLOCK_1S as u64 * 10);
 
-        // Assert
+        // Assert: end state, not just the write order
         assert!(armed);
         assert_eq!(
-            write_log(),
-            vec![
-                Tmr0Write::Ctrl8(0x00),
-                Tmr0Write::Tick(0),
-                Tmr0Write::Capt(CLOCK_SYS_CLOCK_1S),
-                Tmr0Write::Sta(FLD_TMR_STA::TMR0.bits()),
-                Tmr0Write::Ctrl8(0x01),
-            ]
+            FakeMmio::reg32(TMR0_CAPT),
+            CLOCK_SYS_CLOCK_1S,
+            "delta clamps down to one second"
         );
+        assert_eq!(FakeMmio::reg32(TMR0_TICK), 0, "the tick counter restarts");
+        assert_eq!(FakeMmio::reg8(TMR_STA), FLD_TMR_STA::TMR0.bits());
+        assert_eq!(FakeMmio::reg8(TMR_CTRL8), 0x01);
     }
 
-    // Proof slices (design 022 §6.2): the same `arm_tmr0` behaviour asserted above,
-    // but expressed against the bytes written to the hardware instead of against
-    // mocked accessor calls. Deliberately carry no mry lock attribute, so the real
-    // accessor bodies run and route through the in-process `FakeMmio` bank.
+    // Proof slices (design 022 §6.2): the same `arm_tmr0` behaviour asserted
+    // above, but expressed against the ordered bytes written to the hardware.
+    // The real accessor bodies run and route through the in-process `FakeMmio`
+    // bank.
 
     #[test]
     fn test_arm_tmr0_near_future_via_fake_mmio() {
         // Arrange
-        FakeMmio::reset();
-        reset_clock_time64_for_test();
-        FakeMmio::set_reg32(0x740, 1000); // reg_system_tick -> now == 1000
-        FakeMmio::set_reg8(0x620, 0x01); // TMR0 already enabled
+        reset_fakes();
+        FakeMmio::set_reg32(SYSTEM_TICK, 1000); // now == 1000
+        FakeMmio::set_reg8(TMR_CTRL8, 0x01); // TMR0 already enabled
         FakeMmio::clear_writes();
         let driver = MyDriver::new();
 
@@ -293,31 +234,31 @@ mod tests {
             vec![
                 // ctrl8 & !TMR0_EN
                 RegWrite {
-                    addr: 0x620 | REG_BASE_ADDR,
+                    addr: TMR_CTRL8 | REG_BASE_ADDR,
                     width: 1,
                     value: 0x00,
                 },
                 // tick = 0
                 RegWrite {
-                    addr: 0x630 | REG_BASE_ADDR,
+                    addr: TMR0_TICK | REG_BASE_ADDR,
                     width: 4,
                     value: 0,
                 },
                 // delta 10 clamped up to 32
                 RegWrite {
-                    addr: 0x624 | REG_BASE_ADDR,
+                    addr: TMR0_CAPT | REG_BASE_ADDR,
                     width: 4,
                     value: 32,
                 },
                 // status clear
                 RegWrite {
-                    addr: 0x623 | REG_BASE_ADDR,
+                    addr: TMR_STA | REG_BASE_ADDR,
                     width: 1,
                     value: FLD_TMR_STA::TMR0.bits() as u32,
                 },
                 // ctrl8 | TMR0_EN
                 RegWrite {
-                    addr: 0x620 | REG_BASE_ADDR,
+                    addr: TMR_CTRL8 | REG_BASE_ADDR,
                     width: 1,
                     value: 0x01,
                 },
@@ -328,10 +269,9 @@ mod tests {
     #[test]
     fn test_arm_tmr0_far_future_via_fake_mmio() {
         // Arrange
-        FakeMmio::reset();
-        reset_clock_time64_for_test();
-        FakeMmio::set_reg32(0x740, 0); // reg_system_tick -> now == 0
-        FakeMmio::set_reg8(0x620, 0x01); // TMR0 already enabled
+        reset_fakes();
+        FakeMmio::set_reg32(SYSTEM_TICK, 0); // now == 0
+        FakeMmio::set_reg8(TMR_CTRL8, 0x01); // TMR0 already enabled
         FakeMmio::clear_writes();
         let driver = MyDriver::new();
 
@@ -345,31 +285,31 @@ mod tests {
             vec![
                 // ctrl8 & !TMR0_EN
                 RegWrite {
-                    addr: 0x620 | REG_BASE_ADDR,
+                    addr: TMR_CTRL8 | REG_BASE_ADDR,
                     width: 1,
                     value: 0x00,
                 },
                 // tick = 0
                 RegWrite {
-                    addr: 0x630 | REG_BASE_ADDR,
+                    addr: TMR0_TICK | REG_BASE_ADDR,
                     width: 4,
                     value: 0,
                 },
                 // delta clamped to one second
                 RegWrite {
-                    addr: 0x624 | REG_BASE_ADDR,
+                    addr: TMR0_CAPT | REG_BASE_ADDR,
                     width: 4,
                     value: CLOCK_SYS_CLOCK_1S,
                 },
                 // status clear
                 RegWrite {
-                    addr: 0x623 | REG_BASE_ADDR,
+                    addr: TMR_STA | REG_BASE_ADDR,
                     width: 1,
                     value: FLD_TMR_STA::TMR0.bits() as u32,
                 },
                 // ctrl8 | TMR0_EN
                 RegWrite {
-                    addr: 0x620 | REG_BASE_ADDR,
+                    addr: TMR_CTRL8 | REG_BASE_ADDR,
                     width: 1,
                     value: 0x01,
                 },

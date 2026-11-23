@@ -1,4 +1,4 @@
-use crate::sdk::mcu::cmd_table::TBLCMDSET;
+use tlsr8266_hal::mcu::cmd_table::TBLCMDSET;
 
 pub const TBL_AGC: [u32; 7] = [
     0x30333231, 0x182C3C38, 0xC0C1C, 0x0, 0x1B150F0A, 0x322E2721, 0x3E38,

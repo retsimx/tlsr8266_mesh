@@ -92,7 +92,7 @@ fn handle_system_interrupts() {
     }
 
     // Handle UART interrupts for external communication
-    crate::uart_manager::check_irq();
+    crate::uart_manager::take_rx_and_ack_tx_irq();
 }
 
 /// Handles one `SYSTEM_TIMER` interrupt: the BLE state machine plus the OTA
@@ -101,7 +101,7 @@ fn handle_system_interrupts() {
 /// # Why this is out of line
 ///
 /// `handle_system_interrupts` keeps **one** frame shared by every interrupt
-/// branch, but the deepest chain (UART) never runs the BLE state machine. Once
+/// branch, but only the timer branch runs the BLE state machine. Once
 /// `handle_ble_system_timer_irq` (and, through it, the whole connection state
 /// machine) is inlined into that frame, its locals are charged to the IRQ stack
 /// gate on a branch the gate's maximum never walks: measured, they were 248 B of
@@ -154,7 +154,7 @@ mod tests {
     };
     use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
     use crate::sdk::light::RfOperationState;
-    use crate::uart_manager::{check_irq, mock_check_irq};
+    use crate::uart_manager::{mock_take_rx_and_ack_tx_irq, take_rx_and_ack_tx_irq};
     use mesh_protocol::mesh_types::RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS;
     use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1S};
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -319,7 +319,7 @@ mod tests {
     /// Acceptance: the dispatcher must hand `TMR0` interrupts to the dynamic embassy
     /// time driver, which delivers expired timers and re-arms the hardware alarm.
     #[test]
-    #[mry::lock(check_irq)]
+    #[mry::lock(take_rx_and_ack_tx_irq)]
     fn test_tmr0_irq_flushes_embassy_timers() {
         reset_ota_timeout_state();
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
@@ -327,7 +327,7 @@ mod tests {
 
         fake_clock::set_ticks(1000);
 
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -360,7 +360,7 @@ mod tests {
     /// interrupt is what prevents an immediate off-by-one decrement on the first
     /// interrupt after OTA begins.
     #[test]
-    #[mry::lock(check_irq)]
+    #[mry::lock(take_rx_and_ack_tx_irq)]
     fn test_tmr0_irq_restamps_ota_tick_when_ota_inactive() {
         reset_ota_timeout_state();
         crate::ota::set_timeout_for_test(TEST_OTA_TIMEOUT_SECONDS);
@@ -369,7 +369,7 @@ mod tests {
 
         fake_clock::set_ticks(50_000);
 
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -395,7 +395,7 @@ mod tests {
     /// Acceptance: `TMR0` now fires at embassy alarm deadlines, so the countdown
     /// must be gated on elapsed clock ticks rather than on interrupt frequency.
     #[test]
-    #[mry::lock(check_irq)]
+    #[mry::lock(take_rx_and_ack_tx_irq)]
     fn test_tmr0_irq_ota_elapsed_under_one_second_does_not_decrement() {
         reset_ota_timeout_state();
         crate::ota::set_mesh_ota_blocked_for_test(true);
@@ -406,7 +406,7 @@ mod tests {
 
         fake_clock::set_ticks(1_000 + CLOCK_SYS_CLOCK_1S as u64 - 1);
 
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -432,7 +432,7 @@ mod tests {
     /// Acceptance: during OTA the timeout still counts real seconds, decrements by
     /// exactly one per second, and restamps the tick that gates the next decrement.
     #[test]
-    #[mry::lock(check_irq)]
+    #[mry::lock(take_rx_and_ack_tx_irq)]
     fn test_tmr0_irq_ota_elapsed_one_second_decrements_once() {
         reset_ota_timeout_state();
         crate::ota::set_mesh_ota_blocked_for_test(true);
@@ -444,7 +444,7 @@ mod tests {
         let now = 1_000 + CLOCK_SYS_CLOCK_1S as u64;
         fake_clock::set_ticks(now);
 
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -475,7 +475,7 @@ mod tests {
     /// `cfg(test)` re-entrancy probe turns that into a panic if the guard is
     /// still alive.
     #[test]
-    #[mry::lock(rf_link_slave_ota_finish_led_and_reboot, check_irq)]
+    #[mry::lock(rf_link_slave_ota_finish_led_and_reboot, take_rx_and_ack_tx_irq)]
     fn test_tmr0_irq_ota_timeout_copies_finish_flag_before_reboot() {
         reset_ota_timeout_state();
         crate::ota::set_mesh_ota_blocked_for_test(true);
@@ -491,7 +491,7 @@ mod tests {
             let _probe = crate::ota::ota_status_snapshot_impl();
             assert_eq!(st, OtaState::Ok, "the reboot must see the copied flag");
         });
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -516,14 +516,14 @@ mod tests {
     /// write log; a dropped call at the dispatch site would leave the source
     /// uncleared.
     #[test]
-    #[mry::lock(check_irq)]
+    #[mry::lock(take_rx_and_ack_tx_irq)]
     fn test_system_timer_irq_clears_source_and_dispatches_ble_helper() {
         *CURRENT_RF_STATE.lock() = RfOperationState::Idle;
 
         FakeMmio::reset();
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
 
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -547,7 +547,7 @@ mod tests {
         handle_ble_system_timer_irq,
         rf_link_slave_ota_finish_handle,
         rf_link_slave_ota_finish_led_and_reboot,
-        check_irq
+        take_rx_and_ack_tx_irq
     )]
     fn test_system_timer_irq_ota_finish_check_only_polls() {
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
@@ -556,7 +556,7 @@ mod tests {
 
         mock_rf_link_slave_ota_finish_handle().returns(());
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -572,7 +572,7 @@ mod tests {
         handle_ble_system_timer_irq,
         rf_link_slave_ota_finish_handle,
         rf_link_slave_ota_finish_led_and_reboot,
-        check_irq
+        take_rx_and_ack_tx_irq
     )]
     fn test_system_timer_irq_ota_error_reboots_with_error_state() {
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
@@ -581,7 +581,7 @@ mod tests {
 
         mock_rf_link_slave_ota_finish_handle().returns(());
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -597,7 +597,7 @@ mod tests {
         handle_ble_system_timer_irq,
         rf_link_slave_ota_finish_handle,
         rf_link_slave_ota_finish_led_and_reboot,
-        check_irq
+        take_rx_and_ack_tx_irq
     )]
     fn test_system_timer_irq_finish_check_and_zero_counter_reboots() {
         reset_ota_timeout_state();
@@ -611,7 +611,7 @@ mod tests {
         // The finish handler does not refresh the counter in this scenario.
         mock_rf_link_slave_ota_finish_handle().returns(());
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -630,7 +630,7 @@ mod tests {
         handle_ble_system_timer_irq,
         rf_link_slave_ota_finish_handle,
         rf_link_slave_ota_finish_led_and_reboot,
-        check_irq
+        take_rx_and_ack_tx_irq
     )]
     fn test_system_timer_irq_finish_check_refreshed_counter_skips_reboot() {
         reset_ota_timeout_state();
@@ -646,7 +646,7 @@ mod tests {
             crate::ota::set_timeout_for_test(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
         });
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 
@@ -667,13 +667,13 @@ mod tests {
     /// Acceptance: `TMR1` drives smooth dimming, so a missing acknowledge would
     /// re-enter the handler forever and a missing step would freeze transitions.
     #[test]
-    #[mry::lock(transition_step, check_irq)]
+    #[mry::lock(transition_step, take_rx_and_ack_tx_irq)]
     fn test_tmr1_irq_clears_status_and_steps_light_transition() {
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR1_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
         mock_transition_step().returns(());
-        mock_check_irq().returns(());
+        mock_take_rx_and_ack_tx_irq().returns(());
 
         handle_system_interrupts();
 

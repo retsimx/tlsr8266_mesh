@@ -97,7 +97,10 @@ static DROPPED_UART_TX: AtomicU32 = AtomicU32::new(0);
 /// load-modify-store form for that reason. Producers run in both task and
 /// interrupt context, so the update is masked. `critical_section` nesting is
 /// counted, so a producer that is already masked pays two register writes.
-fn count_drop(counter: &AtomicU32) {
+///
+/// `uart_manager`'s `UART_RX_DROPPED` counter shares this helper rather than
+/// hand-copying the CAS-free read-modify-write.
+pub(crate) fn count_drop(counter: &AtomicU32) {
     critical_section::with(|_| {
         counter.store(
             counter.load(Ordering::Relaxed).wrapping_add(1),

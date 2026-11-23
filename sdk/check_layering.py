@@ -78,6 +78,22 @@ Four permanent rules, one per line of defence won by R-9 (#45):
   host-only ``static mut`` is still an item.  Only the numeric budget ignores
   it; see ``strip_host_only_code``.
 
+One path-scoped rule rides in the same pass:
+
+* ``ota-purity`` — files directly under the firmware's ``ota/`` directory
+  (``rust/src/ota/**``) are the OTA subsystem, which owns every OTA static and
+  routine, so production code there may not name ``OTA_FORBIDDEN_MODULES``
+  (``crate::sdk``, ``crate::light_manager``, ``crate::main_light``,
+  ``crate::uart_manager``, ``crate::mesh``, ``crate::diagnostics``,
+  ``crate::logging``, the deleted ``crate::state``) or ``OTA_FORBIDDEN_CRATES``
+  (``tlsr8266_pac``).  ``crate::config``, ``mesh_protocol``, ``tlsr8266_hal``,
+  ``critical_section`` and the subsystem's own ``fsm`` stay legal.  The rule
+  reads ``production_code()`` only: ``ota``'s own tests use
+  ``tlsr8266_pac::fake_mmio::FakeMmio`` and must not be flagged, which is why a
+  raw text grep would be wrong.  Two rule names are reported:
+  ``ota-upward-dep`` (a forbidden ``crate::`` module) and ``ota-forbidden-crate``
+  (a forbidden external crate).
+
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
 running this exact rule on the finished tree, not by hand-counting tokens.
@@ -180,6 +196,30 @@ UPWARD_MODULES = frozenset(
         "embassy",
     }
 )
+
+# Modules `rust/src/ota/**` production code must never name.  `ota` is the OTA
+# subsystem and owns all OTA state and logic, so it may reach downward only:
+# `crate::config`, `mesh_protocol`, `tlsr8266_hal`, `critical_section`, and its
+# own `ota::fsm` (internal, reachable as `super::fsm` or `crate::ota::fsm`, so it
+# is not in this set).  Everything above `ota` is forbidden: the SDK, the light
+# and mesh managers, the UART bridge, diagnostics, logging and the deleted
+# `state` module.  Together with `OTA_FORBIDDEN_CRATES` this turns the issue's
+# "zero imports" criterion into a checked rule instead of a review note.
+OTA_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "light_manager",
+        "main_light",
+        "uart_manager",
+        "mesh",
+        "diagnostics",
+        "logging",
+        "state",
+    }
+)
+# `tlsr8266_pac` is the register-definition leaf: `ota` drives flash and the
+# radio only through `tlsr8266_hal`, never by poking registers itself.
+OTA_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
 
 LOGGING_MACROS = ("uprintln", "uprint")
 
@@ -864,6 +904,41 @@ def _statement_of(text: str, index: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OTA purity: `rust/src/ota/**` production code must not name the layers above.
+# ---------------------------------------------------------------------------
+
+
+def audit_ota_purity_source(text: str, path: str) -> list[Violation]:
+    """Audit one ``rust/src/ota/`` file for upward and forbidden names.
+
+    Runs on ``production_code()``, so the subsystem's own ``#[cfg(test)]``
+    modules are exempt: they legitimately use
+    ``tlsr8266_pac::fake_mmio::FakeMmio`` to stand in for the flash/radio
+    register block, and a raw text grep would fail a correct tree.  Production
+    code is what the issue's "zero imports" criterion is about, and that is what
+    this reads — the same stripping that makes ``MAX_PRODUCTION_UNSAFE`` a
+    production count.
+
+    ``crate::`` references are read from the whole production text (so a
+    qualified ``crate::sdk::..`` path is caught wherever it appears), while the
+    forbidden external crate is read from ``use`` statements, matching how
+    ``LAYER_EXTERNAL_CRATES`` has always worked.
+    """
+    code = production_code(text)
+    collector = _Collector(path, text)
+    for index, head in iter_crate_references(code):
+        module = head[0]
+        if module in OTA_FORBIDDEN_MODULES:
+            collector.add(index, "ota-upward-dep", f"crate::{module}")
+    for index, head in iter_imports(code):
+        root = head[0]
+        if root in OTA_FORBIDDEN_CRATES:
+            collector.add(index, "ota-forbidden-crate", root)
+    collector.found.sort(key=lambda item: (item.line, item.rule, item.violation))
+    return collector.found
+
+
+# ---------------------------------------------------------------------------
 # Universal rules (R-9): they apply to every file under `--src-root`.
 # ---------------------------------------------------------------------------
 
@@ -918,8 +993,13 @@ def _documented_above(text: str, stripped: bytearray, line: int) -> bool:
     return documented
 
 
-def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
+def audit_universal_source(
+    text: str, path: str, ota: bool = False
+) -> tuple[list[Violation], int]:
     """Apply the universal rules to one file.
+
+    ``ota`` marks a file under ``rust/src/ota/``, which also gets the
+    ``ota-purity`` rule: the subsystem may not name the layers above it.
 
     Returns the violations and the number of production ``unsafe`` tokens, so
     the caller can total the budget across the tree.
@@ -951,24 +1031,38 @@ def audit_universal_source(text: str, path: str) -> tuple[list[Violation], int]:
     target_code = blank_copy(text, strip_host_only_code(text, stripped))
     unsafe_total = len(_UNSAFE_RE.findall(target_code))
 
+    if ota:
+        collector.found.extend(audit_ota_purity_source(text, path))
+
     return collector.found, unsafe_total
 
 
 def audit_universal(
-    paths: list[str], label: str, enforce_budget: bool = True
+    paths: list[str],
+    label: str,
+    enforce_budget: bool = True,
+    ota_root: str | None = None,
 ) -> tuple[list[Violation], int]:
     """Audit every path; return violations and the tree-wide ``unsafe`` total.
 
     ``enforce_budget`` is asserted for the firmware root only: the ratchet was
     measured there, and the ``mesh-protocol`` crate is a separate tree whose
     ``unsafe`` sites are bounded by the rule itself, not by a ceiling.
+
+    ``ota_root`` is the firmware's ``ota/`` directory; every file directly in it
+    also gets the ``ota-purity`` rule.  ``None`` disables that rule, which is
+    what the workspace crate trees want (they have no ``ota`` subsystem).
     """
     violations: list[Violation] = []
     unsafe_total = 0
+    ota_dir = None if ota_root is None else os.path.normpath(ota_root)
     for path in paths:
         with open(path, "r", encoding="utf-8") as handle:
             text = handle.read()
-        found, count = audit_universal_source(text, _display_path(path))
+        in_ota = ota_dir is not None and os.path.normpath(
+            os.path.dirname(path)
+        ) == ota_dir
+        found, count = audit_universal_source(text, _display_path(path), ota=in_ota)
         violations.extend(found)
         unsafe_total += count
 
@@ -1149,7 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
         if run_universal:
             if run_src:
                 universal, _unsafe_total = audit_universal(
-                    src_paths, _display_path(src_root)
+                    src_paths,
+                    _display_path(src_root),
+                    ota_root=os.path.join(src_root, "ota"),
                 )
             for label, crate_root, crate_paths in crate_audits:
                 display = _display_path(crate_root)

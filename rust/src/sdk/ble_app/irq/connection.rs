@@ -13,6 +13,7 @@ use crate::sdk::ble_app::ble_ll_channel_selection::{
     ble_ll_build_available_channel_table, SLAVE_CHN_MAP,
 };
 use crate::sdk::ble_app::ble_ll_pair::{PAIR_LOGIN_OK, PAIR_SETTING_FLAG, SECURITY_ENABLE};
+use crate::sdk::ble_app::callbacks::{dispatch_ota_snapshot, dispatch_ota_tick};
 use crate::sdk::ble_app::flash_config::pair_load_key;
 use crate::sdk::ble_app::light_ll::connection_management::{
     back_to_rxmode_bridge, BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT,
@@ -28,10 +29,6 @@ use crate::sdk::ble_app::light_ll::connection_management::{
 };
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_node_flush_status, mesh_report_status_enable,
-};
-use crate::sdk::ble_app::light_ll::ota_management::rf_ota_save_data;
-use crate::sdk::ble_app::light_ll::ota_management::{
-    OTA_UPDATE_IN_PROGRESS, OTA_UPDATE_TIMEOUT_SECONDS,
 };
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_data,
@@ -294,7 +291,7 @@ fn check_connection_supervision_timeout() -> Option<BleConnectionEvent> {
         // Connection has timed out - handle cleanup first
         cleanup_ble_disconnection();
 
-        return Some(if OTA_UPDATE_IN_PROGRESS.get() {
+        return Some(if dispatch_ota_snapshot().in_progress {
             BleConnectionEvent::OtaErrorReboot
         } else {
             BleConnectionEvent::None
@@ -342,7 +339,7 @@ fn handle_ota_operations() -> Option<BleConnectionEvent> {
 
     static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
 
-    if !OTA_UPDATE_IN_PROGRESS.get() {
+    if !dispatch_ota_snapshot().in_progress {
         return None;
     }
 
@@ -352,18 +349,18 @@ fn handle_ota_operations() -> Option<BleConnectionEvent> {
     {
         RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
 
-        if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
-            OTA_UPDATE_TIMEOUT_SECONDS.dec();
-        }
+        dispatch_ota_tick();
     }
 
     // During OTA, schedule next connection event and return to RX state
     write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
     *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
 
-    // The composition root finishes the OTA, which may refresh the counter, so the
-    // zero check happens there. Report the candidate outcome here.
-    if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
+    // Read the snapshot again after the tick: `dispatch_ota_tick()` is what can
+    // zero the counter, so a value captured before it could never report the
+    // expiry. The composition root finishes the OTA (and may refresh the
+    // counter), so this is the candidate outcome, not the decision.
+    if dispatch_ota_snapshot().timeout_expired {
         Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)
     } else {
         Some(BleConnectionEvent::OtaFinishCheck)
@@ -1961,7 +1958,7 @@ mod tests {
         // Setup connection state
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000); // 1 second timeout
         SLAVE_CONNECTED_TICK.set(9500); // Connected 500 ticks ago
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         // Execute function
         let result = check_connection_supervision_timeout();
@@ -1986,7 +1983,7 @@ mod tests {
         // 100 * 32 = 3200 < 5000 ✓ (timeout condition met)
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(100); // 100 microsecond timeout
         SLAVE_CONNECTED_TICK.set(10000); // Connected at tick 10000, now at 15000 = 5000 ticks elapsed
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         // Execute function
         let result = check_connection_supervision_timeout();
@@ -2012,7 +2009,7 @@ mod tests {
 
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(100);
         SLAVE_CONNECTED_TICK.set(10000);
-        OTA_UPDATE_IN_PROGRESS.set(true);
+        crate::ota::set_in_progress_for_test(true);
 
         let result = check_connection_supervision_timeout();
 
@@ -2023,7 +2020,7 @@ mod tests {
         );
         mock_cleanup_ble_disconnection().assert_called(1);
 
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
     }
 
     /// Tests status read timeout handling.
@@ -2086,8 +2083,8 @@ mod tests {
         mock_write_reg_system_tick_irq(Any).returns(());
 
         // Setup: No OTA in progress
-        OTA_UPDATE_IN_PROGRESS.set(false);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        crate::ota::set_in_progress_for_test(false);
+        crate::ota::set_timeout_for_test(0);
 
         // Execute function
         let result = handle_ota_operations();
@@ -2102,13 +2099,17 @@ mod tests {
     fn test_handle_ota_operations_active() {
         // Mock functions
         mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(10000);
+        // One microsecond past the one-second gate, so the countdown branch runs
+        // on this pass. The gate is a strict `>` against the tick stamp (which
+        // starts at 0), so exactly one second would not fire.
+        mock_read_reg_system_tick().returns(CLOCK_SYS_CLOCK_1US * 1_000_000 + 1);
 
-        // Setup: OTA in progress with plenty of timeout left, so even if the
-        // one-second countdown fires the counter stays non-zero.
-        OTA_UPDATE_IN_PROGRESS.set(true);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(7);
+        // Setup: OTA in progress; the one-second countdown fires and leaves the
+        // counter non-zero.
+        crate::ota::set_in_progress_for_test(true);
+        crate::ota::set_timeout_for_test(7);
         SLAVE_NEXT_CONNECT_TICK.set(15000);
+        let timeout_before = crate::ota::timeout_seconds_for_test();
 
         // Execute function
         let result = handle_ota_operations();
@@ -2119,6 +2120,11 @@ mod tests {
             Some(BleConnectionEvent::OtaFinishCheck),
             "Should report OtaFinishCheck while the timeout counter is non-zero"
         );
+        assert_eq!(
+            crate::ota::timeout_seconds_for_test(),
+            timeout_before - 1,
+            "the one-second gate must decrement the countdown by exactly one"
+        );
         mock_write_reg_system_tick_irq(15000).assert_called(1);
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
@@ -2126,8 +2132,8 @@ mod tests {
             "Should transition to RX state during OTA"
         );
 
-        OTA_UPDATE_IN_PROGRESS.set(false);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        crate::ota::set_in_progress_for_test(false);
+        crate::ota::set_timeout_for_test(0);
     }
 
     /// A zero OTA timeout counter must report `OtaFinishCheckAndErrorReboot` — the
@@ -2137,10 +2143,14 @@ mod tests {
     #[mry::lock(write_reg_system_tick_irq, read_reg_system_tick)]
     fn test_handle_ota_operations_active_counter_zero() {
         mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(10000);
+        // The OTA tick stamp is process-global and monotonic: the test above
+        // stores the instant it fired at, and the countdown here is already zero,
+        // so read the same instant back (elapsed 0, gate stays idle) instead of a
+        // smaller tick, which would underflow the elapsed subtraction.
+        mock_read_reg_system_tick().returns(CLOCK_SYS_CLOCK_1US * 1_000_000 + 1);
 
-        OTA_UPDATE_IN_PROGRESS.set(true);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        crate::ota::set_in_progress_for_test(true);
+        crate::ota::set_timeout_for_test(0);
         SLAVE_NEXT_CONNECT_TICK.set(15000);
 
         let result = handle_ota_operations();
@@ -2157,7 +2167,7 @@ mod tests {
             "Should still transition to RX state when the counter is zero"
         );
 
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
     }
 
     /// Tests bridge operations handling.

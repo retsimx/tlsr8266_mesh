@@ -139,6 +139,18 @@ class TestRealSdkTree(unittest.TestCase):
         self.assertEqual(violations, [])
         self.assertEqual(total, check_layering.MAX_PRODUCTION_UNSAFE)
 
+    def test_real_ota_subtree_is_pure(self) -> None:
+        # C-6: the shipped OTA subsystem names no layer above it, and the gate
+        # now says so mechanically.  The unsafe budget is not the point here, so
+        # it is not enforced on this subtree.
+        ota_root = SRC_ROOT / "ota"
+        paths = check_layering.rust_files(str(ota_root))
+        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
+        violations, _total = check_layering.audit_universal(
+            paths, "rust/src/ota", enforce_budget=False, ota_root=str(ota_root)
+        )
+        self.assertEqual(violations, [])
+
 
 class _TempSrcTree(unittest.TestCase):
     """A disposable ``rust/src``, SDK root and mesh-protocol root per test.
@@ -369,19 +381,17 @@ class TestPmLeafRule(_TempTree):
     def test_pm_importing_ble_app_fails(self) -> None:
         path = self.write(
             "pm.rs",
-            _lines(
-                "use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;"
-            ),
+            _lines("use crate::sdk::ble_app::callbacks::dispatch_ota_write;"),
         )
         out = self.assert_violations(
             "1: layer-mcu: "
-            "crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS"
+            "crate::sdk::ble_app::callbacks::dispatch_ota_write"
         )
         self.assertEqual(len(out.splitlines()), 1)
         self.assertEqual(
             out.splitlines()[0],
             f"{path}:1: layer-mcu: "
-            "crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS",
+            "crate::sdk::ble_app::callbacks::dispatch_ota_write",
         )
 
     def test_pm_importing_light_fails(self) -> None:
@@ -840,6 +850,92 @@ class TestCli(_TempTree):
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertNotIn("rust src audit", out.getvalue())
         self.assertEqual(len(out.getvalue().splitlines()), 1)
+
+
+class TestOtaPurityRule(_TempSrcTree):
+    """`rust/src/ota/**` production code may not name the layers above it.
+
+    `ota` owns every OTA static and routine, so the seam is the only legal
+    direction: the subsystem may reach `crate::config`, `mesh_protocol`,
+    `tlsr8266_hal` and its own `fsm`, and nothing above it.  The rule reads
+    production code only, because `ota`'s own tests legitimately use
+    `tlsr8266_pac::fake_mmio::FakeMmio`.
+    """
+
+    def test_sdk_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "ota/mod.rs",
+            _lines("use crate::sdk::ble_app::callbacks::set_ota_hooks;"),
+        )
+        out = self.assert_violations("1: ota-upward-dep: crate::sdk")
+        self.assertEqual(out.splitlines()[0], f"{path}:1: ota-upward-dep: crate::sdk")
+
+    def test_qualified_app_path_is_rejected(self) -> None:
+        # Not an import: the rule reads every `crate::` reference, so a
+        # fully-qualified call cannot dodge it.
+        self.write_src(
+            "ota/mod.rs",
+            _lines("pub fn f() { crate::light_manager::set_brightness(1); }"),
+        )
+        self.assert_violations("1: ota-upward-dep: crate::light_manager")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src("ota/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;"))
+        self.assert_violations("1: ota-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        # The set is the whole application layer, not just `sdk`: `ota` must not
+        # name any of them, and `crate::state` is banned twice over.
+        banned = sorted(check_layering.OTA_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "ota" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_downward_and_internal_imports_are_accepted(self) -> None:
+        self.write_src(
+            "ota/mod.rs",
+            _lines(
+                "use core::sync::atomic::Ordering;",
+                "use critical_section;",
+                "use mesh_protocol::mesh_types::OtaState;",
+                "use tlsr8266_hal::flash::read_flash;",
+                "use crate::config::VENDOR_ID;",
+                "use crate::ota::fsm::OtaChunkDecision;",
+                "use super::fsm::evaluate_chunk;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
+        # A raw text grep would fail this file: the fake MMIO lives in a test
+        # module, and a test may legitimately stand the layers in.
+        self.write_src(
+            "ota/mod.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::sdk::ble_app::callbacks::set_ota_hooks;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_rule_is_scoped_to_the_ota_directory(self) -> None:
+        # Control: the same import one directory up is production code but not
+        # `ota` code, so the purity rule leaves it to the layering rules.
+        self.write_src(
+            "sdk/ble_app/callbacks.rs",
+            _lines("use tlsr8266_pac::write_reg8;"),
+        )
+        self.assert_clean()
 
 
 class TestStateRemovedRule(_TempSrcTree):

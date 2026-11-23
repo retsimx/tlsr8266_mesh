@@ -71,12 +71,27 @@ def _text(*blocks: str) -> str:
 # reaches the app's light-event handler only through another `bx rN`. The two
 # `mesh_pair_proc_*` lookalikes are present because the table's
 # ``mesh_pair_proc_hook`` entry must not be confused with them.
+#
+# The OTA seam is modelled the same way: one synthetic pair per ``INDIRECT_EDGES``
+# entry — the OTA write dispatcher 24 B / 40 B (the real shape: a GATT write
+# lands in ``dispatch_ota_write``, which reaches the OTA packet handler), the
+# snapshot hook 24 B / 16 B, the two flag-only hooks 24 B / 8 B, and the four
+# radio providers 8 B / 16 B. ``callbacks21dispatch_ota_write`` is a *direct*
+# callee of the GATT write entry, because that is the real firmware shape; every
+# other OTA dispatcher stays a leaf, so the maxima do not move.
 FIRMWARE_SHAPED = _text(
-    _fn("main_entrypoint", 40, (("rf_drv_826624rf_link_slave_data_write", False),)),
+    _fn(
+        "main_entrypoint",
+        40,
+        (("rf_drv_826624rf_link_slave_data_write", False),),
+    ),
     _fn(
         "rf_drv_826624rf_link_slave_data_write",
         184,
-        (("callbacks13on_light_data", False),),
+        (
+            ("callbacks13on_light_data", False),
+            ("callbacks21dispatch_ota_write", False),
+        ),
     ),
     _fn("callbacks13on_light_data", 24, indirect=True),
     _fn(
@@ -98,6 +113,24 @@ FIRMWARE_SHAPED = _text(
     _fn("main_light25rf_link_response_callback", 96),
     _fn("callbacks15on_uart_mesh_rx", 24, indirect=True),
     _fn("uart_manager16light_mesh_rx_cb", 72),
+    # OtaHooks: the four dispatchers in sdk/ble_app/callbacks.rs.
+    _fn("callbacks21dispatch_ota_write", 24, indirect=True),
+    _fn("ota21on_gatt_ota_packet", 40),
+    _fn("callbacks24dispatch_ota_snapshot", 24, indirect=True),
+    _fn("ota26ota_status_snapshot_impl", 16),
+    _fn("callbacks25dispatch_ota_terminate", 24, indirect=True),
+    _fn("ota31ota_request_termination_impl", 8),
+    _fn("callbacks19dispatch_ota_tick", 24, indirect=True),
+    _fn("ota27ota_tick_timeout_1s_impl", 8),
+    # OtaRadioOps: the four providers in ota/mod.rs.
+    _fn("ota17radio_stage_pkt", 8, indirect=True),
+    _fn("light_ll22stage_ota_packet", 16),
+    _fn("ota16radio_read_pkt", 8, indirect=True),
+    _fn("light_ll27read_staged_ota_packet", 16),
+    _fn("ota19radio_terminate_tx", 8, indirect=True),
+    _fn("app24ota_send_terminate_hook", 16),
+    _fn("ota22radio_begin_gatt_ota", 8, indirect=True),
+    _fn("app21ota_begin_gatt_hook", 16),
     _fn("irq_handler", 24, (("handle_system_interrupts", False),)),
     _fn(
         "handle_system_interrupts",
@@ -182,6 +215,25 @@ class TestApplyIndirectEdges(unittest.TestCase):
                     "main_light25rf_link_response_callback",
                 ),
                 ("callbacks15on_uart_mesh_rx", "uart_manager16light_mesh_rx_cb"),
+                # The OTA seam, in table order: four OtaHooks dispatchers...
+                ("callbacks21dispatch_ota_write", "ota21on_gatt_ota_packet"),
+                (
+                    "callbacks24dispatch_ota_snapshot",
+                    "ota26ota_status_snapshot_impl",
+                ),
+                (
+                    "callbacks25dispatch_ota_terminate",
+                    "ota31ota_request_termination_impl",
+                ),
+                (
+                    "callbacks19dispatch_ota_tick",
+                    "ota27ota_tick_timeout_1s_impl",
+                ),
+                # ...then the four OtaRadioOps providers.
+                ("ota17radio_stage_pkt", "light_ll22stage_ota_packet"),
+                ("ota16radio_read_pkt", "light_ll27read_staged_ota_packet"),
+                ("ota19radio_terminate_tx", "app24ota_send_terminate_hook"),
+                ("ota22radio_begin_gatt_ota", "app21ota_begin_gatt_hook"),
             ],
         )
         # The hook is the intermediate frame; the manager method keeps its own
@@ -246,19 +298,53 @@ class TestApplyIndirectEdges(unittest.TestCase):
             stack_analysis.apply_indirect_edges(funcs, edges)
         self.assertEqual({name: f.calls for name, f in funcs.items()}, before)
 
-    def test_table_covers_the_five_dispatchers(self) -> None:
+    def test_table_covers_every_dispatcher(self) -> None:
         self.assertEqual(
             sorted(stack_analysis.INDIRECT_EDGES),
             [
+                "dispatch_ota_snapshot",
+                "dispatch_ota_terminate",
+                "dispatch_ota_tick",
+                "dispatch_ota_write",
                 "emit_light_event",
                 "on_light_data",
                 "on_light_response",
                 "on_mesh_pair_proc",
                 "on_uart_mesh_rx",
+                "radio_begin_gatt_ota",
+                "radio_read_pkt",
+                "radio_stage_pkt",
+                "radio_terminate_tx",
             ],
         )
         for caller, callees in stack_analysis.INDIRECT_EDGES.items():
             self.assertEqual(len(callees), 1, caller)
+
+    def test_no_pattern_is_a_substring_of_another(self) -> None:
+        """`_resolve_one` fails closed on ambiguity, so the table must stay sharp.
+
+        Every caller and callee pattern is a substring searched over the whole
+        symbol table: if one pattern were contained in another, whichever
+        symbol matched both would resolve as ambiguous and the gate would fail
+        on a correct image.  `stage_ota_packet` vs `read_staged_ota_packet` is
+        the pair this guards — the extra `d` is what keeps them distinct.
+        """
+        patterns = list(stack_analysis.INDIRECT_EDGES)
+        for callees in stack_analysis.INDIRECT_EDGES.values():
+            patterns.extend(callees)
+        self.assertEqual(len(patterns), 26)
+        self.assertEqual(len(set(patterns)), 26, "a pattern is listed twice")
+        for pattern in patterns:
+            for other in patterns:
+                if pattern == other:
+                    continue
+                self.assertNotIn(
+                    pattern,
+                    other,
+                    f"{pattern!r} is a substring of {other!r}: _resolve_one "
+                    "would be ambiguous",
+                )
+        self.assertNotIn("stage_ota_packet", "read_staged_ota_packet")
 
 
 class TestIndirectEdgesFeedDepth(unittest.TestCase):
@@ -274,6 +360,19 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertEqual(after - before, 336)
         self.assertEqual(cycles, [])
         self.assertIn("main_light28rf_link_light_event_callback", chain)
+        # The OTA branch of the same GATT write entry is real but shorter
+        # (24 + 40), so it is wired in without moving the maximum.
+        ota_depth, ota_chain, _ = stack_analysis.longest_path(
+            funcs, "callbacks21dispatch_ota_write"
+        )
+        self.assertEqual(ota_depth, 24 + 40, "dispatch -> on_gatt_ota_packet")
+        self.assertEqual(
+            ota_chain,
+            ["callbacks21dispatch_ota_write", "ota21on_gatt_ota_packet"],
+        )
+        # The light-data branch (24 + 128 + 8 + 200) stays the deepest callee of
+        # the GATT write entry, so wiring the OTA branch in moves no maximum.
+        self.assertLess(ota_depth, 24 + 128 + 8 + 200)
 
     def test_irq_chain_reaches_through_the_dispatcher(self) -> None:
         funcs = _parse()
@@ -283,17 +382,25 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
             depth, 24 + 272 + 8 + 200, "irq_handler -> isr -> emit -> callback"
         )
         self.assertIn("main_light28rf_link_light_event_callback", chain)
+        # No OTA dispatcher is reachable from the IRQ root: the seam's frames
+        # only enter the IRQ stack through the handlers that call them.
+        self.assertNotIn("callbacks21dispatch_ota_write", chain)
 
     def test_roots_no_longer_contain_indirect_only_callees(self) -> None:
         funcs = _parse()
         roots = set(stack_analysis.all_roots(funcs))
         self.assertIn("main_light21rf_link_data_callback", roots)
         self.assertIn("main_light28rf_link_light_event_callback", roots)
+        # The OTA callees are roots only because nothing `bl`s them yet.
+        self.assertIn("ota21on_gatt_ota_packet", roots)
+        self.assertIn("app24ota_send_terminate_hook", roots)
         stack_analysis.apply_indirect_edges(funcs)
         roots = set(stack_analysis.all_roots(funcs))
         self.assertNotIn("main_light21rf_link_data_callback", roots)
         self.assertNotIn("main_light28rf_link_light_event_callback", roots)
         self.assertNotIn("app19mesh_pair_proc_hook", roots)
+        self.assertNotIn("ota21on_gatt_ota_packet", roots)
+        self.assertNotIn("app24ota_send_terminate_hook", roots)
         self.assertIn("main_entrypoint", roots)
 
     def test_introducing_a_cycle_fails_the_gate(self) -> None:
@@ -319,10 +426,15 @@ class TestMain(unittest.TestCase):
     def test_pass_reports_resolved_edges_and_margins(self) -> None:
         code, out = _run_main(FIRMWARE_SHAPED)
         self.assertEqual(code, 0, out)
-        self.assertIn("indirect dispatch edges (5):", out)
+        self.assertIn("indirect dispatch edges (13):", out)
         self.assertIn(
             "callbacks15on_uart_mesh_rx -> uart_manager16light_mesh_rx_cb", out
         )
+        # The OTA seam must be reported, not silently resolved.
+        self.assertIn(
+            "callbacks21dispatch_ota_write -> ota21on_gatt_ota_packet", out
+        )
+        self.assertIn("ota17radio_stage_pkt -> light_ll22stage_ota_packet", out)
         self.assertIn("main: free 4096 B - max 584 B = margin 3512 B", out)
         self.assertIn("irq:  size 1792 B - max 532 B = margin 1260 B", out)
         self.assertIn("PASS", out)
@@ -338,6 +450,20 @@ class TestMain(unittest.TestCase):
         self.assertIn("FAIL: INDIRECT_EDGES['on_uart_mesh_rx']", out)
         self.assertIn("matches no parsed function", out)
         # Fail closed before any depth number is reported as trustworthy.
+        self.assertNotIn("RAM GATE", out)
+
+    def test_missing_ota_callee_fails_closed(self) -> None:
+        # A stale OTA entry is the failure this table exists to catch: without
+        # on_gatt_ota_packet the OTA write subtree would score as 0 B and the
+        # gate would under-report both margins instead of failing.
+        text = FIRMWARE_SHAPED.replace(_fn("ota21on_gatt_ota_packet", 40) + "\n", "")
+        self.assertNotIn("ota21on_gatt_ota_packet", text)
+        # The dispatcher survives; only its callee is gone.
+        self.assertIn("callbacks21dispatch_ota_write", text)
+        code, out = _run_main(text)
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL: INDIRECT_EDGES['dispatch_ota_write']", out)
+        self.assertIn("matches no parsed function", out)
         self.assertNotIn("RAM GATE", out)
 
     def test_margin_below_minimum_still_fails(self) -> None:

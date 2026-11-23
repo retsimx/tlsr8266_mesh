@@ -8,14 +8,16 @@ use crate::diagnostics::{
     boot_init, check_panic_info, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP,
 };
 use crate::main_light::{main_loop, user_init};
+use crate::ota::{set_ota_radio_ops, OtaRadioOps};
 use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_PWD_ENCODE_SK;
-use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, BleAppHooks};
+use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, set_ota_hooks, BleAppHooks, OtaHooks};
 use crate::sdk::ble_app::rf_drv_8266::rf_drv_init;
 use crate::sdk::light::*;
 use crate::uart_manager::{uart_receiver, uart_sender};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
 use heapless::Vec;
+use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::{clock_init, is_16mhz_xtal};
 use tlsr8266_hal::mcu::dma::dma_init;
 use tlsr8266_hal::mcu::gpio::gpio_init;
@@ -51,7 +53,19 @@ pub async fn main_task(spawner: Spawner) {
 
     // Wire the SDK's callback seams to the application before any RF or pairing
     // path can run, so neither slot is ever observed empty.
-    crate::sdk::app_att_light::set_ota_write_handler(crate::ota::rf_link_slave_data_ota);
+    set_ota_radio_ops(OtaRadioOps {
+        try_begin_gatt_ota: ota_begin_gatt_hook,
+        stage_packet: crate::sdk::ble_app::light_ll::connection_management::stage_ota_packet,
+        read_staged_packet:
+            crate::sdk::ble_app::light_ll::connection_management::read_staged_ota_packet,
+        try_send_terminate_packet: ota_send_terminate_hook,
+    });
+    set_ota_hooks(OtaHooks {
+        on_gatt_ota_write: crate::ota::on_gatt_ota_packet,
+        status_snapshot: crate::ota::ota_status_snapshot_impl,
+        request_termination: crate::ota::ota_request_termination_impl,
+        tick_timeout_1s: crate::ota::ota_tick_timeout_1s_impl,
+    });
     crate::sdk::rf_drv::set_light_event_handler(crate::main_light::rf_link_light_event_callback);
     set_ble_app_hooks(BleAppHooks {
         on_mesh_pair_proc: mesh_pair_proc_hook,
@@ -139,9 +153,41 @@ fn mesh_pair_proc_hook() {
     crate::mesh::mesh_pair_proc();
 }
 
+/// `OtaRadioOps::try_begin_gatt_ota`: the pairing gate plus "stop a busy status
+/// read" from the old GATT OTA write prologue.
+///
+/// This only *reports* whether the GATT OTA may start. The in-progress flag and
+/// `pm::set_reboot_ota_active(true)` stay owned by `ota`, which is why there is
+/// no `start_gatt_ota` for this hook to call.
+#[inline(never)]
+fn ota_begin_gatt_hook() -> bool {
+    if !crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK.get() {
+        return false;
+    }
+    if crate::sdk::ble_app::light_ll::status_management::SLAVE_READ_STATUS_BUSY.get() != 0 {
+        crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop();
+    }
+    true
+}
+
+/// `OtaRadioOps::try_send_terminate_packet`: `true` only when `PKT_TERMINATE`
+/// was actually queued, so a full buffer neither arms the countdown nor reboots.
+#[inline(never)]
+fn ota_send_terminate_hook() -> bool {
+    if !crate::sdk::ble_app::light_ll::packet_processing::is_add_packet_buf_ready() {
+        return false;
+    }
+    let _ = crate::sdk::ble_app::light_ll::packet_processing::rf_link_add_tx_packet(
+        &crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE,
+    );
+    true
+}
+
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
+    use super::*;
+
     /// `main_task` is the composition root for the SDK callback seams, but it
     /// cannot be executed on the host: `rf_drv_init` and `user_init` are not
     /// `mry`-mockable and both touch hardware registers, and the slots they fill
@@ -167,9 +213,12 @@ mod tests {
             .find("\n}\n")
             .expect("main_task must be a well-formed task body")];
 
-        let ota = task_body
-            .find("set_ota_write_handler(crate::ota::rf_link_slave_data_ota)")
-            .expect("main_task must register the OTA write handler");
+        let ota_ops = task_body
+            .find("set_ota_radio_ops(OtaRadioOps {")
+            .expect("main_task must register the OTA radio ops");
+        let ota_hooks = task_body
+            .find("set_ota_hooks(OtaHooks {")
+            .expect("main_task must register the OTA hooks");
         let light = task_body
             .find("set_light_event_handler(")
             .expect("main_task must register the light event handler");
@@ -181,8 +230,64 @@ mod tests {
             .expect("main_task must initialise the RF driver");
 
         assert!(
-            ota < rf_drv && light < rf_drv && hooks < rf_drv,
+            ota_ops < rf_drv && ota_hooks < rf_drv && light < rf_drv && hooks < rf_drv,
             "every handler registration must precede rf_drv_init(true)"
         );
+    }
+
+    /// `ota_send_terminate_hook` must report `false` without a free packet slot
+    /// and `true` once `PKT_TERMINATE` is queued.
+    #[test]
+    fn test_ota_send_terminate_hook_reports_whether_the_packet_was_queued() {
+        use tlsr8266_pac::fake_mmio::FakeMmio;
+
+        // Datasheet offsets of the DMA TX queue registers.
+        const REG_DMA_TX_RPTR: u32 = 0x52a;
+        const REG_DMA_TX_WPTR: u32 = 0x52b;
+
+        // Buffer near capacity: (5 - 2) & 7 == 3, so `is_add_packet_buf_ready`
+        // is false and nothing may be queued.
+        FakeMmio::reset();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 5);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 2);
+        assert_eq!(
+            ota_send_terminate_hook(),
+            false,
+            "a full packet buffer must not report a queued terminate packet"
+        );
+
+        // Plenty of room: (2 - 0) & 7 == 2, so the packet is queued.
+        FakeMmio::reset();
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 2);
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
+        assert_eq!(
+            ota_send_terminate_hook(),
+            true,
+            "a free packet buffer must report the queued terminate packet"
+        );
+    }
+
+    /// `ota_begin_gatt_hook` must refuse a GATT OTA until pairing succeeds.
+    #[test]
+    fn test_ota_begin_gatt_hook_requires_pairing() {
+        use crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK;
+        use crate::sdk::ble_app::light_ll::status_management::SLAVE_READ_STATUS_BUSY;
+
+        SLAVE_READ_STATUS_BUSY.set(0);
+        PAIR_LOGIN_OK.set(false);
+        assert_eq!(
+            ota_begin_gatt_hook(),
+            false,
+            "an unpaired link must not begin a GATT OTA"
+        );
+
+        PAIR_LOGIN_OK.set(true);
+        assert_eq!(
+            ota_begin_gatt_hook(),
+            true,
+            "a paired link with an idle status read may begin a GATT OTA"
+        );
+
+        PAIR_LOGIN_OK.set(false);
     }
 }

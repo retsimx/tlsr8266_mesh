@@ -41,7 +41,7 @@ pub enum RecoverStatus {
 static REBOOT_LIGHT_OFF: AtomicBool = AtomicBool::new(true);
 
 /// Set once an OTA update is under way, so the reboot path can tell it must
-/// leave the recovery payload behind instead of reading `ota_management`.
+/// leave the recovery payload behind instead of reading `ota`'s staging state.
 static REBOOT_OTA_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Publishes that an OTA update is in progress for `light_sw_reboot_callback`.

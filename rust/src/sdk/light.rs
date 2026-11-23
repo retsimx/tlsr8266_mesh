@@ -1,7 +1,6 @@
 use crate::sdk::factory_reset::CFG_ADR_MAC_512K_FLASH;
 
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
-pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
 pub const LOOP_INTERVAL_US: u64 = 10000;
 
 // must be 255
@@ -86,8 +85,6 @@ pub fn mesh_status_offline_sweeps(node_count: u32) -> u8 {
 pub const AUTH_TIME: u32 = 60;
 pub const MAX_GROUP_COUNT: u8 = 8;
 
-pub const START_UP_FLAG: u32 = 0x544c4e4b;
-
 //app use
 pub const PAR_READ_MESH_PAIR_CONFIRM: u8 = 0x0a;
 
@@ -121,13 +118,6 @@ pub const DEV_ADDR_PAR_WITH_MAC: u8 = 0x01;
 pub const LGT_CMD_DEV_ADDR_RSP: u8 = 0x21;
 //rsp
 pub const LGT_CMD_KICK_OUT: u8 = 0x23;
-
-pub const LGT_CMD_START_OTA_REQ: u8 = 0x24;
-pub const LGT_CMD_START_OTA_RSP: u8 = 0x25;
-pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x26;
-pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x27;
-pub const LGT_CMD_END_OTA_REQ: u8 = 0x28;
-pub const LGT_CMD_END_OTA_RSP: u8 = 0x29;
 
 pub const LGT_CMD_USER_NOTIFY_REQ: u8 = 0x2a;
 pub const LGT_CMD_USER_NOTIFY_RSP: u8 = 0x2b;
@@ -188,16 +178,6 @@ pub enum ePairState {
     PairSetMeshTxStart = 2,
     PairSetMeshTxDone = 3, // send notify req, get mesh nodes' ac
     PairSetMeshRxDone = 4, // received all mesh nodes' ac, send cmd to switch to new mesh
-}
-
-#[repr(C)]
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum OtaState {
-    Continue = 0,
-    // must zero
-    Ok = 1,
-    Error = 2,
-    MasterOtaRebootOnly = 3,
 }
 
 #[derive(Clone, Copy)]
@@ -753,9 +733,6 @@ mod tests {
 
         // Bridge constants
         assert_eq!(BRIDGE_MAX_CNT, 8);
-
-        // OTA constants
-        assert_eq!(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, 30);
     }
 
     /// Tests the cadence-derived offline deadline, including the documented
@@ -814,11 +791,12 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Test BlePeripheralLinkState discriminant values
-    /// 2. Test OtaState discriminant values
+    /// 2. Test ePairState discriminant values
     ///
     /// # Notes
     ///
     /// * Discriminant values must match protocol specifications
+    /// * The OTA completion states moved with their type to `mesh_protocol`
     #[test]
     fn test_enum_discriminants() {
         // BlePeripheralLinkState values
@@ -827,12 +805,6 @@ mod tests {
         assert_eq!(BlePeripheralLinkState::Mesh as u8, 4);
         assert_eq!(BlePeripheralLinkState::Connected as u8, 5);
         assert_eq!(BlePeripheralLinkState::Receiving as u8, 7);
-
-        // OtaState values
-        assert_eq!(OtaState::Continue as u8, 0);
-        assert_eq!(OtaState::Ok as u8, 1);
-        assert_eq!(OtaState::Error as u8, 2);
-        assert_eq!(OtaState::MasterOtaRebootOnly as u8, 3);
 
         // ePairState values
         assert_eq!(ePairState::PairSetted as u8, 0);

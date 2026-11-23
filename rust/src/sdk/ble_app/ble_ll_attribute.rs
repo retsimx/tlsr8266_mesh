@@ -8,14 +8,12 @@ use num_traits::FromPrimitive;
 use crate::sdk::app_att_light::{
     get_gAttributes, AttributeT, GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
 };
+use crate::sdk::ble_app::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate};
 use crate::sdk::ble_app::light_ll::connection_management::{
     BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
 };
-use crate::sdk::ble_app::light_ll::ota_management::{
-    OTA_UPDATE_TERMINATION_REQUESTED, RF_SLAVE_OTA_FINISHED_FLAG,
-};
 use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
-use crate::sdk::light::OtaState;
+use mesh_protocol::mesh_types::OtaState;
 use mesh_protocol::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
     PacketL2capHead, PacketVersionInd,
@@ -899,7 +897,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 /// * **SEND_TO_MASTER**: If the attribute's value pointer is SEND_TO_MASTER,
 ///   clear the SEND_TO_MASTER array after reading
 /// * **OTA Termination**: If reading attribute 0x18 and OTA state is not "Continue",
-///   set OTA_UPDATE_TERMINATION_REQUESTED to trigger OTA termination
+///   ask the OTA subsystem for termination
 ///
 /// # Notes
 ///
@@ -948,9 +946,9 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
             SEND_TO_MASTER.lock().fill(0);
         }
         // Special case: handle OTA termination flag for handle 0x18
-        else if att_num == 0x18 && *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
+        else if att_num == 0x18 && dispatch_ota_snapshot().finish_status != OtaState::Continue {
             // Mark OTA for termination
-            OTA_UPDATE_TERMINATION_REQUESTED.set(true);
+            dispatch_ota_terminate();
         }
 
         // Prepare and return the response packet
@@ -2540,7 +2538,7 @@ mod tests {
     #[test]
     fn test_l2cap_att_handler_read_req_ota_terminate() {
         // This test verifies that reading attribute 0x18 when OTA state is not Continue
-        // results in OTA_UPDATE_TERMINATION_REQUESTED being set to true
+        // results in the OTA subsystem's terminate request being set
 
         // Save original attribute properties
         let temp_attr_idx = 0x18;
@@ -2557,26 +2555,22 @@ mod tests {
         data[1] = temp_attr_idx as u8;
 
         // Test case 1: OTA state is Continue - flag should not be set
-        unsafe {
-            *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
-        }
+        crate::ota::set_finished_flag_for_test(OtaState::Continue);
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
 
         // Verify flag was not set
-        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), false);
+        assert_eq!(crate::ota::is_termination_requested(), false);
 
         // Test case 2: OTA state is not Continue - flag should be set
-        unsafe {
-            *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok;
-        }
+        crate::ota::set_finished_flag_for_test(OtaState::Ok);
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
 
         // Verify flag was set
-        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), true);
+        assert_eq!(crate::ota::is_termination_requested(), true);
 
         // Restore original attribute properties
         unsafe {
@@ -2584,10 +2578,8 @@ mod tests {
         }
 
         // Reset flags
-        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
-        unsafe {
-            *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
-        }
+        crate::ota::set_termination_requested_for_test(false);
+        crate::ota::set_finished_flag_for_test(OtaState::Continue);
     }
 
     #[test]
@@ -2624,10 +2616,8 @@ mod tests {
         data[3] = 0;
 
         // Set initial state of flags
-        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
-        unsafe {
-            *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok; // Not Continue
-        }
+        crate::ota::set_termination_requested_for_test(false);
+        crate::ota::set_finished_flag_for_test(OtaState::Ok); // Not Continue
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
@@ -2639,7 +2629,7 @@ mod tests {
 
         // Verify OTA terminate flag was NOT set despite the OTA state condition being true
         // because the SEND_TO_MASTER condition should take precedence
-        assert_eq!(OTA_UPDATE_TERMINATION_REQUESTED.get(), false);
+        assert_eq!(crate::ota::is_termination_requested(), false);
 
         // Restore original attribute properties
         unsafe {
@@ -2651,10 +2641,8 @@ mod tests {
         }
 
         // Reset flags
-        OTA_UPDATE_TERMINATION_REQUESTED.set(false);
-        unsafe {
-            *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
-        }
+        crate::ota::set_termination_requested_for_test(false);
+        crate::ota::set_finished_flag_for_test(OtaState::Continue);
     }
 
     #[test]

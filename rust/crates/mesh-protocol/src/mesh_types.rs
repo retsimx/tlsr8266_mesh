@@ -1,8 +1,9 @@
-//! Mesh node status records and pairing protocol constants.
+//! Mesh node status records, pairing protocol constants and OTA wire constants.
 //!
 //! Both ends of the wire agree on these byte layouts and discriminants: the
-//! status advertisement payload, the pairing opcodes the central writes, and
-//! the pairing state machine the firmware reports back.
+//! status advertisement payload, the pairing opcodes the central writes, the
+//! pairing state machine the firmware reports back, and the OTA opcodes and
+//! completion states exchanged during a firmware transfer.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -100,3 +101,104 @@ pub const PAIR_OP_GET_MESH_LTK: u8 = 0x08; // Request long-term key
 pub const PAIR_OP_RESET_MESH: u8 = 0x0A; // Reset mesh configuration
 pub const PAIR_OP_VERIFY_CREDENTIALS: u8 = 0x0C; // Verify credentials
 pub const PAIR_OP_DELETE_PAIRING: u8 = 0x0E; // Delete pairing information
+
+// --- OTA transfer ---------------------------------------------------------
+
+/// OTA transfer completion state, shared by both ends of the wire.
+#[repr(C)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum OtaState {
+    Continue = 0,
+    // must zero
+    Ok = 1,
+    Error = 2,
+    MasterOtaRebootOnly = 3,
+}
+
+/// OTA state as observed by a layer that may not own it.
+///
+/// Not part of the wire contract: it is the read-only projection the BLE link
+/// layer needs, so a seam can carry three flags in one `fn() -> ..` call and
+/// `mergefunc` has nothing to fold.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct OtaStatusSnapshot {
+    pub in_progress: bool,
+    pub finish_status: OtaState,
+    pub timeout_expired: bool,
+}
+
+/// Boot flag word written into the new-firmware header.
+pub const START_UP_FLAG: u32 = 0x544c4e4b;
+
+/// Default mesh-OTA supervision timeout, in seconds.
+pub const RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS: u16 = 30;
+
+// OTA opcodes; `LGT_CMD_*` shares the `11xxxxxxzzzzzzzzzzzzzzzz` command space
+// with the light commands. The `_REQ`/`_RSP` pairs are contiguous by design.
+pub const LGT_CMD_START_OTA_REQ: u8 = 0x24;
+pub const LGT_CMD_START_OTA_RSP: u8 = 0x25;
+pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x26;
+pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x27;
+pub const LGT_CMD_END_OTA_REQ: u8 = 0x28;
+pub const LGT_CMD_END_OTA_RSP: u8 = 0x29;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The completion states cross the wire as these exact discriminants.
+    #[test]
+    fn ota_state_discriminants_are_pinned() {
+        assert_eq!(OtaState::Continue as u8, 0);
+        assert_eq!(OtaState::Ok as u8, 1);
+        assert_eq!(OtaState::Error as u8, 2);
+        assert_eq!(OtaState::MasterOtaRebootOnly as u8, 3);
+    }
+
+    /// The boot flag and supervision timeout are shared with the host tooling
+    /// and the new-firmware header, so their values are part of the contract.
+    #[test]
+    fn ota_wire_constants_are_pinned() {
+        assert_eq!(START_UP_FLAG, 0x544c4e4b);
+        assert_eq!(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, 30);
+    }
+
+    /// Six contiguous opcodes: start, data and end each with a request and a
+    /// response.
+    #[test]
+    fn ota_opcodes_are_pinned() {
+        assert_eq!(LGT_CMD_START_OTA_REQ, 0x24);
+        assert_eq!(LGT_CMD_START_OTA_RSP, 0x25);
+        assert_eq!(LGT_CMD_OTA_DATA_REQ, 0x26);
+        assert_eq!(LGT_CMD_OTA_DATA_RSP, 0x27);
+        assert_eq!(LGT_CMD_END_OTA_REQ, 0x28);
+        assert_eq!(LGT_CMD_END_OTA_RSP, 0x29);
+    }
+
+    /// The snapshot is an ordinary `Copy` value type, not a wire struct: it is
+    /// constructed field-by-field and compared by value.
+    #[test]
+    fn ota_status_snapshot_projects_state() {
+        let idle = OtaStatusSnapshot {
+            in_progress: false,
+            finish_status: OtaState::Continue,
+            timeout_expired: false,
+        };
+        assert_eq!(
+            idle,
+            OtaStatusSnapshot {
+                in_progress: false,
+                finish_status: OtaState::Continue,
+                timeout_expired: false,
+            }
+        );
+        assert_ne!(
+            idle,
+            OtaStatusSnapshot {
+                in_progress: true,
+                finish_status: OtaState::Ok,
+                timeout_expired: true,
+            }
+        );
+    }
+}

@@ -17,24 +17,6 @@ use mesh_protocol::service::{
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 
-/// OTA GATT write handler, registered once from `App::init()` so this module
-/// never imports the application's OTA manager.
-static OTA_WRITE_CB: critical_section::Mutex<core::cell::Cell<Option<fn(&Packet)>>> =
-    critical_section::Mutex::new(core::cell::Cell::new(None));
-
-/// Registers the handler that receives `TELINK_SPP_DATA_OTA_UUID` writes.
-pub fn set_ota_write_handler(cb: fn(&Packet)) {
-    critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).set(Some(cb)));
-}
-
-/// Forwards an OTA GATT write to the registered handler, if any.
-fn ota_write_trampoline(p: &Packet) {
-    let cb = critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).get());
-    if let Some(cb) = cb {
-        cb(p);
-    }
-}
-
 /** @addtogroup GATT_Characteristic_Property GATT characteristic properties
  * @{
  */
@@ -460,7 +442,7 @@ const GATT_TABLE: GAttributesType = GAttributesType([
         16,
         TELINK_SPP_DATA_OTA_UUID,
         SPP_DATA_OTA_DATA,
-        Some(ota_write_trampoline),
+        Some(crate::sdk::ble_app::callbacks::dispatch_ota_write),
         None
     ), //value
     attrdef!(
@@ -803,20 +785,27 @@ mod tests {
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0xDD);
     }
 
-    // OTA write slot tests. `OTA_WRITE_CB` is process-wide, so these tests must
-    // run with `--test-threads=1` and each one resets the slot on entry and exit.
+    // OTA write seam tests. The `OtaHooks` slot is process-wide, so these tests
+    // must run with `--test-threads=1` and each one restores the host-test
+    // default on exit.
     use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::sdk::ble_app::callbacks::{
+        dispatch_ota_write, set_ota_hooks, OtaHooks, TEST_OTA_HOOKS,
+    };
 
     static OTA_WRITE_HITS: AtomicUsize = AtomicUsize::new(0);
     static OTA_WRITE_L2CAP_LEN: AtomicUsize = AtomicUsize::new(0);
     static OTA_WRITE_FIRST_WORD: AtomicUsize = AtomicUsize::new(0);
+    static OTA_SNAPSHOT_HITS: AtomicUsize = AtomicUsize::new(0);
 
-    /// Clears the registered handler and the observation counters.
+    /// Restores the host-test default hooks and clears the observation counters.
     fn reset_ota_write_slot() {
-        critical_section::with(|cs| OTA_WRITE_CB.borrow(cs).set(None));
+        set_ota_hooks(TEST_OTA_HOOKS);
         OTA_WRITE_HITS.store(0, Ordering::SeqCst);
         OTA_WRITE_L2CAP_LEN.store(0, Ordering::SeqCst);
         OTA_WRITE_FIRST_WORD.store(0, Ordering::SeqCst);
+        OTA_SNAPSHOT_HITS.store(0, Ordering::SeqCst);
     }
 
     /// Test handler: records how often it ran and what it received.
@@ -830,8 +819,20 @@ mod tests {
         );
     }
 
+    /// Recorder for a neighbouring slot, so a swapped registration is visible.
+    fn recording_ota_snapshot() -> mesh_protocol::mesh_types::OtaStatusSnapshot {
+        OTA_SNAPSHOT_HITS.fetch_add(1, Ordering::SeqCst);
+        mesh_protocol::mesh_types::OtaStatusSnapshot {
+            in_progress: false,
+            finish_status: mesh_protocol::mesh_types::OtaState::Continue,
+            timeout_expired: false,
+        }
+    }
+
+    /// The OTA characteristic's write callback must route the packet through the
+    /// `OtaHooks` slot, with the packet contents intact.
     #[test]
-    fn test_ota_write_trampoline_dispatches_to_registered_handler() {
+    fn test_ota_characteristic_write_dispatches_to_registered_hook() {
         reset_ota_write_slot();
 
         let mut pkt = Packet {
@@ -845,10 +846,14 @@ mod tests {
         };
         pkt.att_val_mut().value[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-        set_ota_write_handler(recording_ota_handler);
+        set_ota_hooks(OtaHooks {
+            on_gatt_ota_write: recording_ota_handler,
+            status_snapshot: recording_ota_snapshot,
+            ..TEST_OTA_HOOKS
+        });
 
-        // Act
-        ota_write_trampoline(&pkt);
+        // Act: go through the same entry point the attribute table holds.
+        dispatch_ota_write(&pkt);
 
         // Assert: exactly one delivery with the packet contents intact
         assert_eq!(OTA_WRITE_HITS.load(Ordering::SeqCst), 1);
@@ -857,13 +862,18 @@ mod tests {
             OTA_WRITE_FIRST_WORD.load(Ordering::SeqCst),
             u32::from_le_bytes([0xDE, 0xAD, 0xBE, 0xEF]) as usize
         );
+        // Only the write slot fired.
+        assert_eq!(OTA_SNAPSHOT_HITS.load(Ordering::SeqCst), 0);
 
         reset_ota_write_slot();
     }
 
+    /// The host-test default must be safe to call without any registration
+    /// setup: it reaches the real OTA subsystem instead of panicking.
     #[test]
-    fn test_ota_write_trampoline_noop_when_no_handler_registered() {
+    fn test_ota_write_test_default_is_safe() {
         reset_ota_write_slot();
+        crate::ota::reset_for_test();
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -876,14 +886,17 @@ mod tests {
         };
         pkt.att_val_mut().value[0..4].copy_from_slice(&[0x01, 0x02, 0x03, 0x04]);
 
-        // Act - nothing registered, must not panic
-        ota_write_trampoline(&pkt);
+        // Act - the default hooks are installed, so this must not panic.
+        dispatch_ota_write(&pkt);
 
-        // Assert: no handler ran
-        assert_eq!(OTA_WRITE_HITS.load(Ordering::SeqCst), 0);
-        assert_eq!(OTA_WRITE_L2CAP_LEN.load(Ordering::SeqCst), 0);
-        assert_eq!(OTA_WRITE_FIRST_WORD.load(Ordering::SeqCst), 0);
+        // The mesh-blocked/finish-flag gates keep the real handler inert here.
+        assert_eq!(
+            crate::ota::ota_status_snapshot_impl().in_progress,
+            false,
+            "a packet on an idle OTA must not claim the transfer"
+        );
 
+        crate::ota::reset_for_test();
         reset_ota_write_slot();
     }
 }

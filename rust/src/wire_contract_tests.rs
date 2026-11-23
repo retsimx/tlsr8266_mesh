@@ -19,11 +19,11 @@
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, MESH_LTK, MESH_NAME, MESH_PWD, OUT_OF_MESH};
 use crate::ota::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
-use crate::sdk::light::{
+use core::mem::size_of;
+use mesh_protocol::mesh_types::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_REQ,
     LGT_CMD_START_OTA_RSP,
 };
-use core::mem::size_of;
 use tlsr8266_hal::mcu::crypto::fake_crypto;
 use tlsr8266_hal::mcu::crypto::{
     aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet,

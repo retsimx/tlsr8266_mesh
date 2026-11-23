@@ -24,7 +24,6 @@ use tlsr8266_pac::{
 /// * The register offset is calculated as (id << 2) because each PWM channel's
 ///   registers are spaced 4 bytes apart in the register map
 /// * Lower compare values result in shorter duty cycles
-#[cfg_attr(test, mry::mry)]
 pub fn pwm_set_cmp(id: u32, cmp: u16) {
     // Each PWM channel's registers are spaced 4 bytes apart
     // Calculate the offset by shifting the ID left by 2 (multiplying by 4)
@@ -55,7 +54,6 @@ pub fn pwm_set_cmp(id: u32, cmp: u16) {
 /// * The PWM frequency is determined by the system clock divided by max_tick
 /// * The register offset is calculated as (id << 2) because each PWM channel's
 ///   registers are spaced 4 bytes apart
-#[cfg_attr(test, mry::mry)]
 pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
     // Combine the max and compare values into a single 32-bit register value
     // FLD_PWM::CMP and FLD_PWM::MAX define the bit positions for these values
@@ -92,7 +90,6 @@ pub fn pwm_set_duty(id: u32, max_tick: u16, cmp_tick: u16) {
 /// * The function preserves the state of other PWM channels
 /// * Each bit in the enable register corresponds to one PWM channel
 /// * The channel must be properly configured before starting
-#[cfg_attr(test, mry::mry)]
 pub fn pwm_start(id: u32) {
     // Read current enable register value to preserve other channel states
     let current = read_reg_pwm_enable();
@@ -141,40 +138,49 @@ pub fn pwm_stop(id: u32) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use tlsr8266_pac::{
-        mock_read_reg_pwm_enable, mock_write_reg_pwm_cmp, mock_write_reg_pwm_cycle,
-        mock_write_reg_pwm_enable,
-    };
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// `reg_pwm_enable`: one enable bit per channel.
+    const REG_PWM_ENABLE: u32 = 0x780;
+    /// `reg_pwm_cycle` / `reg_pwm_cmp` base: each channel is 4 bytes apart.
+    const REG_PWM_CYCLE_BASE: u32 = 0x794;
+
+    /// The register bank is a process-wide singleton, so every test starts from
+    /// a known-empty device.
+    fn reset_fakes() {
+        FakeMmio::reset();
+    }
 
     /// Tests the pwm_set_cmp function.
     ///
     /// This test verifies that the pwm_set_cmp function correctly:
     /// - Calculates the register offset based on the PWM ID
-    /// - Passes the correct compare value to the register write function
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock the write_reg_pwm_cmp function
-    /// 2. Call pwm_set_cmp with test parameters
-    /// 3. Verify that write_reg_pwm_cmp was called with the correct parameters
+    /// - Writes the compare value to the channel's compare register
     ///
     /// # Notes
     ///
     /// * The register offset is calculated as (id << 2)
-    /// * The compare value is passed directly to the register
+    /// * The compare value is written as a 16-bit field
     #[test]
-    #[mry::lock(write_reg_pwm_cmp)]
     fn test_pwm_set_cmp() {
-        // Configure mock behavior
-        mock_write_reg_pwm_cmp(500, 4).returns(());
+        reset_fakes();
 
         // Call the function being tested
         pwm_set_cmp(1, 500);
 
-        // Verify the register was written with correct parameters:
-        // - cmp value of 500
-        // - offset of 4 (1 << 2 = 4)
-        mock_write_reg_pwm_cmp(500, 4).assert_called(1);
+        // Channel 1's compare register sits at the base + (1 << 2).
+        let cmp_addr = REG_PWM_CYCLE_BASE + 4;
+        assert_eq!(
+            FakeMmio::reg16(cmp_addr),
+            500,
+            "the compare value must land in the channel's compare register"
+        );
+
+        let writes = FakeMmio::writes();
+        assert_eq!(writes.len(), 1, "pwm_set_cmp performs exactly one write");
+        assert_eq!(writes[0].addr, cmp_addr | tlsr8266_pac::REG_BASE_ADDR);
+        assert_eq!(writes[0].width, 2, "the compare field is 16 bits wide");
+        assert_eq!(writes[0].value, 500);
     }
 
     /// Tests the pwm_set_duty function.
@@ -182,22 +188,16 @@ mod tests {
     /// This test verifies that the pwm_set_duty function correctly:
     /// - Calculates the register offset based on the PWM ID
     /// - Properly combines the max and compare values using MASK_VAL
-    /// - Calls the register write function with the correct parameters
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock the write_reg_pwm_cycle function
-    /// 2. Call pwm_set_duty with test parameters
-    /// 3. Calculate the expected masked value manually
-    /// 4. Verify that write_reg_pwm_cycle was called with the correct parameters
+    /// - Writes the combined value to the channel's cycle register
     ///
     /// # Notes
     ///
     /// * The register offset is calculated as (id << 2)
     /// * The masked value combines both max_tick and cmp_tick
     #[test]
-    #[mry::lock(write_reg_pwm_cycle)]
     fn test_pwm_set_duty() {
+        reset_fakes();
+
         // Test parameters
         let pwm_id = 2;
         let max_tick = 1000;
@@ -211,16 +211,22 @@ mod tests {
             max_tick as u32
         );
 
-        // Configure mock behavior
-        mock_write_reg_pwm_cycle(expected_value, 8).returns(());
-
         // Call the function being tested
         pwm_set_duty(pwm_id, max_tick, cmp_tick);
 
-        // Verify the register was written with correct parameters:
-        // - calculated mask value
-        // - offset of 8 (2 << 2 = 8)
-        mock_write_reg_pwm_cycle(expected_value, 8).assert_called(1);
+        // Channel 2's cycle register sits at the base + (2 << 2).
+        let cycle_addr = REG_PWM_CYCLE_BASE + 8;
+        assert_eq!(
+            FakeMmio::reg32(cycle_addr),
+            expected_value,
+            "the cycle register must hold both the max and compare fields"
+        );
+
+        let writes = FakeMmio::writes();
+        assert_eq!(writes.len(), 1, "pwm_set_duty performs exactly one write");
+        assert_eq!(writes[0].addr, cycle_addr | tlsr8266_pac::REG_BASE_ADDR);
+        assert_eq!(writes[0].width, 4, "the cycle register is 32 bits wide");
+        assert_eq!(writes[0].value, expected_value);
     }
 
     /// Tests the pwm_start function.
@@ -230,38 +236,31 @@ mod tests {
     /// - Sets the appropriate bit for the specified PWM ID
     /// - Writes the updated value back to the register
     ///
-    /// # Algorithm
-    ///
-    /// 1. Mock the read_reg_pwm_enable and write_reg_pwm_enable functions
-    /// 2. Configure read_reg_pwm_enable to return a test value
-    /// 3. Call pwm_start with a test PWM ID
-    /// 4. Verify that write_reg_pwm_enable was called with the correctly modified value
-    ///
     /// # Notes
     ///
     /// * This test verifies the bit manipulation logic for enabling a PWM channel
     #[test]
-    #[mry::lock(read_reg_pwm_enable, write_reg_pwm_enable)]
     fn test_pwm_start() {
+        reset_fakes();
+
         // Setup existing register value (bits 0 and 2 already enabled)
-        let existing_value = 0b0101;
-        mock_read_reg_pwm_enable().returns(existing_value);
+        let existing_value = 0b0101u8;
+        FakeMmio::set_reg8(REG_PWM_ENABLE, existing_value);
 
         // We're going to enable PWM channel 1 (bit 1)
         let pwm_id = 1;
         let expected_new_value = existing_value | BIT!(pwm_id); // Should be 0b0111
 
-        // Configure mock write
-        mock_write_reg_pwm_enable(expected_new_value).returns(());
-
         // Call the function being tested
         pwm_start(pwm_id);
 
-        // Verify register was read
-        mock_read_reg_pwm_enable().assert_called(1);
+        // The channel is now enabled and the unrelated channels are untouched.
+        assert_eq!(FakeMmio::reg8(REG_PWM_ENABLE), expected_new_value);
 
-        // Verify register was written with correct new value
-        mock_write_reg_pwm_enable(expected_new_value).assert_called(1);
+        let writes = FakeMmio::writes();
+        assert_eq!(writes.len(), 1, "pwm_start performs exactly one write");
+        assert_eq!(writes[0].addr, REG_PWM_ENABLE | tlsr8266_pac::REG_BASE_ADDR);
+        assert_eq!(writes[0].value, u32::from(expected_new_value));
     }
 
     /// Tests the pwm_stop function.
@@ -271,37 +270,30 @@ mod tests {
     /// - Clears the appropriate bit for the specified PWM ID
     /// - Writes the updated value back to the register
     ///
-    /// # Algorithm
-    ///
-    /// 1. Mock the read_reg_pwm_enable and write_reg_pwm_enable functions
-    /// 2. Configure read_reg_pwm_enable to return a test value
-    /// 3. Call pwm_stop with a test PWM ID
-    /// 4. Verify that write_reg_pwm_enable was called with the correctly modified value
-    ///
     /// # Notes
     ///
     /// * This test verifies the bit manipulation logic for disabling a PWM channel
     #[test]
-    #[mry::lock(read_reg_pwm_enable, write_reg_pwm_enable)]
     fn test_pwm_stop() {
+        reset_fakes();
+
         // Setup existing register value (bits 0, 1, and 2 enabled)
-        let existing_value = 0b0111;
-        mock_read_reg_pwm_enable().returns(existing_value);
+        let existing_value = 0b0111u8;
+        FakeMmio::set_reg8(REG_PWM_ENABLE, existing_value);
 
         // We're going to disable PWM channel 1 (bit 1)
         let pwm_id = 1;
         let expected_new_value = existing_value & !BIT!(pwm_id); // Should be 0b0101
 
-        // Configure mock write
-        mock_write_reg_pwm_enable(expected_new_value).returns(());
-
         // Call the function being tested
         pwm_stop(pwm_id);
 
-        // Verify register was read
-        mock_read_reg_pwm_enable().assert_called(1);
+        // Only the target channel was disabled.
+        assert_eq!(FakeMmio::reg8(REG_PWM_ENABLE), expected_new_value);
 
-        // Verify register was written with correct new value
-        mock_write_reg_pwm_enable(expected_new_value).assert_called(1);
+        let writes = FakeMmio::writes();
+        assert_eq!(writes.len(), 1, "pwm_stop performs exactly one write");
+        assert_eq!(writes[0].addr, REG_PWM_ENABLE | tlsr8266_pac::REG_BASE_ADDR);
+        assert_eq!(writes[0].value, u32::from(expected_new_value));
     }
 }

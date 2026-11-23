@@ -1,5 +1,13 @@
 # TLSR8266 Mesh Light Project - Development Context
 
+> **Update (C-5, #67):** the peripheral drivers (`spi`, `flash`, `pwm`, `uart`) now live in
+> `crates/tlsr8266-hal/src/drivers/` and no longer use `mry`. Tests of code that calls them
+> must drive the real functions against the host fakes:
+> `tlsr8266_hal::drivers::flash::fake_flash::FakeFlash` (`InMemory` default — `reset`,
+> `write_slice` / `read_slice`, `erase_count`, `fail_verify_next_write`) and
+> `tlsr8266_pac::fake_mmio::FakeMmio`. The `mry` guidance below still applies to the modules
+> that retain mocks (`read_flash_byte`, `pair_*`, `rf_*`, `mesh_*`, and pac register accessors).
+
 ## Hardware Platform
 
 **Target MCU:** Telink TLSR8266F512 BLE SoC

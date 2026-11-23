@@ -25,10 +25,6 @@ pub mod version;
 /// `use crate::{BIT, ...}` paths keep resolving.
 pub use tlsr8266_pac::{BIT, BIT_MASK_LEN, BIT_RNG};
 
-/// Helper macros moved to the HAL crate; re-exported here because
-/// `sdk/drivers/pwm.rs` invokes `MASK_VAL!` through a `crate::` path.
-pub use tlsr8266_hal::MASK_VAL;
-
 #[cfg(test)]
 mod wire_contract_tests;
 

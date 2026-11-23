@@ -19,7 +19,12 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 * ``sdk/common/`` may only import ``crate::sdk::common``, root macros, and a
   small set of external crates;
 * ``sdk/mcu/`` additionally may import ``crate::sdk::mcu``;
-* ``sdk/drivers/`` additionally may import ``crate::sdk::drivers``;
+* no other ``crate::sdk`` sibling is nameable from either layer.  Before C-5
+  there was a third layer directory, ``sdk/drivers/``, allowed ``common``,
+  ``mcu`` and ``drivers``; the peripheral drivers (``flash``, ``pwm``, ``spi``,
+  ``uart``) now live in ``tlsr8266-hal``, so no layer directory remains under
+  ``rust/src/sdk/`` besides ``ble_app``, which is not one.  The two layer rules
+  stay armed for any future ``rust/src/sdk/<layer>`` path;
 * ``sdk/pm.rs`` is a leaf even though it sits at the SDK root, so it obeys the
   ``mcu`` rule set: ``crate::sdk::common`` plus ``crate::sdk::mcu``, root macros
   and the ``mcu`` external crates, and nothing else.  It is the module the HAL
@@ -32,8 +37,8 @@ is an *external* crate to every SDK layer: it is a sibling workspace member
 with no firmware dependencies, so importing it is never an inversion.  It is
 listed in ``LAYER_EXTERNAL_CRATES`` next to ``core`` and ``critical_section``.
 ``tlsr8266_pac`` (``rust/crates/tlsr8266-pac/``) is the same kind of leaf
-crate — register definitions and bit macros — but only ``mcu`` and ``drivers``
-may name it: ``sdk/common`` sits below the MCU and has no register access.
+crate — register definitions and bit macros — but only ``mcu`` may name it:
+``sdk/common`` sits below the MCU and has no register access.
 
 **Pass 2 — universal rules** over the firmware root and every workspace crate
 root: ``--src-root`` (default ``rust/src``, the firmware) and the repeatable
@@ -148,7 +153,13 @@ DEFAULT_CRATE_ROOTS = (
 # C-4 (#66) moved the HAL layer into `rust/crates/tlsr8266-hal/`: `sync.rs` 9 +
 # `irq_i.rs` 3 + `executor.rs` 1 = 13 documented sites leave the firmware tree
 # (`pm.rs` contributed 0), so the ceiling follows them down: 81 - 13 = 68.
-MAX_PRODUCTION_UNSAFE = 68
+#
+# C-5 (#67) moved `flash.rs` out of the firmware tree: three documented sites
+# move with it, and the dead `core::slice::from_raw_parts` binding at the old
+# `flash.rs:455` is deleted in the same change, so 4 leave the firmware tree:
+# 68 - 4 = 64. (The HAL crate now holds 16 audited sites in total, of which
+# 3 came from `flash.rs`; the firmware ceiling does not count the HAL.)
+MAX_PRODUCTION_UNSAFE = 64
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
@@ -196,11 +207,14 @@ ROOT_MACROS = frozenset(
 )
 
 # The `crate::sdk::<layer>` each layer may import.  Every layer may import the
-# layers below it; nothing may import a layer above it.
+# layers below it; nothing may import a layer above it.  `common` and `mcu` are
+# the only layer directories the gate knows: C-4 moved them, and C-5 moved
+# `drivers`, into `tlsr8266-hal`, so nothing under `rust/src/sdk/` is a layer
+# now besides `ble_app` (which never was one).  The table stays armed for any
+# future `rust/src/sdk/<layer>` path.
 LAYER_SDK_IMPORTS = {
     "common": frozenset({"common"}),
     "mcu": frozenset({"common", "mcu"}),
-    "drivers": frozenset({"common", "mcu", "drivers"}),
 }
 
 # External crates each layer may import.  Adding a dependency here is a
@@ -209,8 +223,9 @@ LAYER_SDK_IMPORTS = {
 # MMIO or app dependencies, so every layer may name it.  `tlsr8266_pac` is the
 # register/bit-macro leaf crate: it is MMIO, so `common` — below the MCU — may
 # not name it.  `tlsr8266_hal` (C-4) is the extracted HAL layer: the remaining
-# `mcu` and `drivers` modules consume it; `sdk/common` no longer exists in the
-# firmware tree, so `common` stays exactly as it was.
+# `mcu` modules consume it; `sdk/common` no longer exists in the firmware tree,
+# so `common` stays exactly as it was.  The `drivers` row left with C-5, when
+# the peripheral drivers themselves moved into `tlsr8266-hal`.
 LAYER_EXTERNAL_CRATES = {
     "common": frozenset({"core", "critical_section", "mesh_protocol"}),
     "mcu": frozenset(
@@ -218,18 +233,6 @@ LAYER_EXTERNAL_CRATES = {
             "core",
             "critical_section",
             "bitflags",
-            "mesh_protocol",
-            "tlsr8266_pac",
-            "tlsr8266_hal",
-        }
-    ),
-    "drivers": frozenset(
-        {
-            "core",
-            "critical_section",
-            "bitflags",
-            "embassy_sync",
-            "embassy_time",
             "mesh_protocol",
             "tlsr8266_pac",
             "tlsr8266_hal",
@@ -784,10 +787,10 @@ def audit_source(
 ) -> list[Violation]:
     """Audit one Rust source file.
 
-    ``layer`` is ``common``/``mcu``/``drivers``.  ``depth`` is how many
-    directories the file sits below the SDK root (``0`` for ``rust/src/sdk/``
-    itself), which bounds how far a ``super::`` chain may climb before it
-    leaves the SDK subtree.  ``None`` skips that bound.
+    ``layer`` is ``common``/``mcu``, or ``None`` outside a layer directory.
+    ``depth`` is how many directories the file sits below the SDK root (``0``
+    for ``rust/src/sdk/`` itself), which bounds how far a ``super::`` chain may
+    climb before it leaves the SDK subtree.  ``None`` skips that bound.
     """
     code = production_code(text)
     collector = _Collector(path, text)
@@ -985,6 +988,14 @@ def audit_universal(
 
 
 def _layer_of(path: str, root: str) -> str | None:
+    """The layer directory of ``path``: ``common``, ``mcu``, or ``None``.
+
+    Only those two directory names are layers.  ``drivers`` was the third until
+    C-5 moved the peripheral drivers into ``tlsr8266-hal``; after C-4 and C-5 no
+    layer directory remains under ``rust/src/sdk/`` besides ``ble_app``, which
+    is not one.  The lookup stays for any future ``rust/src/sdk/<layer>`` path.
+    ``pm.rs`` alone sits at the SDK root and is a leaf held to the ``mcu`` rules.
+    """
     parts = os.path.relpath(path, root).split(os.sep)
     if parts == ["pm.rs"]:
         return "mcu"          # sdk/pm.rs is a leaf: common + mcu only

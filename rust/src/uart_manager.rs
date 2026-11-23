@@ -21,7 +21,6 @@ use portable_atomic::AtomicBool;
 use crate::mesh;
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
 use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
-use crate::sdk::drivers::uart::{UartDriver, UartIrqMask};
 use crate::uprintln;
 use heapless::Vec;
 use mesh_protocol::packet_types::{AppCmdValue, Packet};
@@ -30,6 +29,7 @@ use mesh_protocol::uart::UART_CRC_OFFSET;
 use mesh_protocol::uart::{compute_crc, verify_crc, UartData, UartMsg, UART_DATA_LEN};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::uart::{UartDriver, UartIrqMask};
 
 pub(crate) const MSG_TYPE_INDEX: usize = 2;
 const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;

@@ -779,6 +779,7 @@ dependencies = [
  "embassy-executor",
  "embassy-time-driver",
  "embassy-time-queue-utils",
+ "mesh-protocol",
  "tlsr8266-pac",
 ]
 

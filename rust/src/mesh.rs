@@ -27,13 +27,13 @@ use crate::sdk::ble_app::rf_drv_8266::{
 use crate::sdk::ble_app::rf_drv_8266::{
     DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
 };
-use crate::sdk::drivers::flash::flash_write_page;
 use crate::sdk::light::*;
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
 use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::flash::flash_write_page;
 use tlsr8266_hal::mcu::clock::{
     clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
 };
@@ -847,11 +847,11 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
         mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
     };
-    use crate::sdk::drivers::flash::mock_flash_write_page;
     use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
     use heapless::Vec;
     use mry::Any;
     use tlsr8266_hal::common::sync::CriticalSectionMutexGuard;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::FLD_RF_IRQ_MASK;
@@ -871,6 +871,7 @@ mod tests {
     fn reset_fakes() {
         FakeMmio::reset();
         fake_clock::reset();
+        FakeFlash::reset();
     }
 
     /// Borrow the pairing state for one field access.
@@ -1154,22 +1155,26 @@ mod tests {
 
     /// Tests mesh_device_address_validation_completed with mesh pair enabled
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_mesh_device_address_validation_completed_pair_enabled() {
         // Setup
+        reset_fakes();
         reset_for_test();
         MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
         MESH_PAIR_ENABLE.set(true);
         FLASH_CONFIGURATION_INDEX.set(10);
 
-        mock_flash_write_page((FLASH_ADR_PAIRING as i32 + 10 + 1) as u32, 1, Any).returns(());
-
         // Execute
         mesh_device_address_validation_completed();
 
-        // Verify
+        // Verify: the validation flag byte in the stored header is cleared.
         assert!(!MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
-        mock_flash_write_page((FLASH_ADR_PAIRING as i32 + 10 + 1) as u32, 1, Any).assert_called(1);
+        let addr = (FLASH_ADR_PAIRING as i32 + 10 + 1) as u32;
+        let mut cleared = [0xFFu8; 1];
+        FakeFlash::read_slice(addr, &mut cleared);
+        assert_eq!(
+            cleared[0], 0x00,
+            "byte [1] of the config header must be programmed to zero"
+        );
     }
 
     /// Tests mesh_device_address_validation_completed without mesh pair

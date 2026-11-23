@@ -3,7 +3,7 @@ use core::mem::size_of;
 use core::ops::Range;
 use core::ptr::addr_of;
 use core::slice;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
@@ -71,11 +71,18 @@ pub static UART_HW: CriticalSectionMutex<UartDriver> =
 /// an async mutex.
 static UART_TX_LOCK: Mutex<CsRawMutex, ()> = Mutex::new(());
 
-/// Latched TX-complete notification, signalled by [`check_irq`].
+/// Latched TX-complete notification, signalled by [`take_rx_and_ack_tx_irq`].
 static UART_TX_DONE: Signal<CsRawMutex, ()> = Signal::new();
 
-/// Validated frames waiting for the [`uart_receiver`] task.
+/// Raw frames straight out of the DMA buffer, waiting for the [`uart_receiver`]
+/// task, which validates them in task context.
 pub static UART_RX_CHANNEL: Channel<CsRawMutex, UartData, 12> = Channel::new();
+
+/// Frames dropped because [`UART_RX_CHANNEL`] was full.
+///
+/// Bumped from interrupt context by [`take_rx_and_ack_tx_irq`]; the
+/// [`uart_receiver`] task turns the delta into a log line.
+static UART_RX_DROPPED: AtomicU32 = AtomicU32::new(0);
 
 /// Fingerprints of the frames this device has already handled, so a mesh echo
 /// of our own command is not forwarded to the host twice.
@@ -160,10 +167,15 @@ pub async fn uart_sender() {
 #[coverage(off)]
 #[embassy_executor::task]
 pub async fn uart_receiver() {
+    let mut last_reported_rx_drops: u32 = 0;
+
     loop {
         let msg = wait_for_received_message().await;
-        let sno = process_received_message(&msg);
-        ack_msg(&msg, &Vec::from_slice(&sno).unwrap()).await;
+        report_rx_drops(&mut last_reported_rx_drops);
+
+        if let Some(sno) = handle_received_frame(&msg) {
+            ack_msg(&msg, &Vec::from_slice(&sno).unwrap()).await;
+        }
     }
 }
 
@@ -208,11 +220,14 @@ pub fn send_message(msg: &UartData) -> Result<(), ()> {
 ///
 /// Reads and clears the DMA RX/TX flags and copies any received frame out
 /// under a short [`UART_HW`] critical section, **drops the guard**, then
-/// signals [`UART_TX_DONE`] on TX complete or hands the frame to
-/// [`handle_rx`].
+/// signals [`UART_TX_DONE`] on TX complete and queues the raw frame for
+/// [`uart_receiver`] — counting a drop if that channel is full.
+///
+/// No validation, logging or status reporting happens here: CRC checks, the
+/// bridge start-up and drop logging all run in task context.
 #[inline(always)]
 #[cfg_attr(test, mry::mry)]
-pub fn check_irq() {
+pub fn take_rx_and_ack_tx_irq() {
     let (rx_frame, tx_done) = {
         let mut hw = UART_HW.lock();
         let irq_s = UartDriver::get_and_clear_irq_source();
@@ -235,7 +250,22 @@ pub fn check_irq() {
     }
 
     if let Some(frame) = rx_frame {
-        handle_rx(frame);
+        queue_rx_frame(frame);
+    }
+}
+
+/// Queue one raw RX frame and count a drop when the channel is full.
+///
+/// `#[inline(never)]` on purpose: [`take_rx_and_ack_tx_irq`] is
+/// `#[inline(always)]`, so anything inlined here is charged to
+/// `handle_system_interrupts` — the frame the IRQ stack gate measures, and that
+/// frame is on the deepest (timer) chain, which never runs the UART branch.
+/// Keeping the channel internals out of line puts their ~100 B on the UART branch
+/// only. Measured: 1436 B -> 1332 B IRQ max, margin 356 B -> 460 B.
+#[inline(never)]
+fn queue_rx_frame(frame: UartData) {
+    if UART_RX_CHANNEL.try_send(frame).is_err() {
+        queues::count_drop(&UART_RX_DROPPED);
     }
 }
 
@@ -394,6 +424,50 @@ fn report_queue_drops(dropped_uart_tx_seen: &mut u32) {
     *dropped_uart_tx_seen = total;
 }
 
+/// Surface UART RX channel overflow, one log line per change (task context only).
+///
+/// Mirrors [`report_queue_drops`], minus its headroom guard: the line goes to
+/// `UART_TX_CHANNEL`, which is not the queue that overflowed, so it cannot
+/// amplify its own condition.
+fn report_rx_drops(last_reported_rx_drops: &mut u32) {
+    let total = UART_RX_DROPPED.load(Ordering::Relaxed);
+    if total == *last_reported_rx_drops {
+        return;
+    }
+
+    uprintln!(
+        "uart rx queue full: +{} (total {})",
+        total.wrapping_sub(*last_reported_rx_drops),
+        total
+    );
+    *last_reported_rx_drops = total;
+}
+
+/// Validate and handle one frame in task context.
+///
+/// Returns the sno to ACK, or `None` for an invalid-CRC frame — invalid frames
+/// are never ACKed and never start the bridge, exactly as before the RX path
+/// moved out of the interrupt handler.
+fn handle_received_frame(msg: &UartData) -> Option<[u8; 3]> {
+    if !verify_crc(msg) {
+        return None;
+    }
+
+    // The first valid frame is what starts the bridge: wake the parked
+    // `uart_sender` and enable the status reporting the host expects.
+    if !UART_SENDER_STARTED.swap(true, Ordering::Relaxed) {
+        UART_STARTED_SIGNAL.signal(());
+
+        // Enable status reporting before calling mesh_report_status_enable so
+        // that the initial dump fired inside that function can actually reach
+        // the UART send path.
+        enable_uart_status_reporting();
+        mesh_report_status_enable(true);
+    }
+
+    Some(process_received_message(msg))
+}
+
 async fn wait_for_received_message() -> UartData {
     UART_RX_CHANNEL.receive().await
 }
@@ -499,34 +573,6 @@ async fn send_with_retry(msg: &UartData, ack_counter: u8) {
     }
 }
 
-/// Kept out of line so its ~220 B frame does not fold into the interrupt
-/// dispatcher's frame: `check_irq` is `#[inline(always)]`, and the IRQ stack
-/// gate measures `handle_system_interrupts` directly.
-#[inline(never)]
-pub fn handle_rx(msg: UartData) {
-    // Check the crc of the packet
-    if !verify_crc(&msg) {
-        // CRC is invalid, drop the packet
-        return;
-    }
-
-    // If we receive a message, then it means we need to start the uart and notification
-    // tasks
-    if !UART_SENDER_STARTED.swap(true, Ordering::Relaxed) {
-        // Wake the already-spawned `uart_sender` task, which parks on this signal.
-        UART_STARTED_SIGNAL.signal(());
-
-        // Enable status reporting before calling mesh_report_status_enable so that the
-        // initial dump fired inside that function can actually reach the UART send path.
-        enable_uart_status_reporting();
-        mesh_report_status_enable(true);
-    }
-
-    if UART_RX_CHANNEL.try_send(msg).is_err() {
-        uprintln!("uart rx handler recv_channel full");
-    }
-}
-
 /// Reset every piece of module state a host test can observe.
 ///
 /// This is the replacement for the deleted singleton reset helper: host tests
@@ -539,6 +585,7 @@ pub fn reset_for_test() {
     UART_SENT_DEDUP.lock().clear();
     UART_SENDER_STARTED.store(false, Ordering::Relaxed);
     UART_LAST_ACK.store(0, Ordering::Relaxed);
+    UART_RX_DROPPED.store(0, Ordering::Relaxed);
     UART_STARTED_SIGNAL.reset();
     UART_ACK_SIGNAL.reset();
     UART_TX_DONE.reset();
@@ -616,7 +663,7 @@ mod tests {
     }
 
     /// Builds a `UartData` frame with a valid CRC, matching the pattern used by
-    /// the `handle_rx`/`check_irq` tests below.
+    /// the `take_rx_and_ack_tx_irq`/`handle_received_frame` tests below.
     fn frame_with_valid_crc() -> UartData {
         let mut msg = UartData {
             len: UART_DATA_LEN as u32,
@@ -1003,46 +1050,61 @@ mod tests {
         assert_eq!(msg.data[43], expected_crc_high);
     }
 
-    /// Tests the handle_rx function with a valid CRC.
+    /// Tests that an invalid-CRC frame is rejected in task context.
     ///
     /// # Algorithm
     ///
     /// 1. Reset the module state (sender not started)
-    /// 2. Create a test message with valid CRC
-    /// 3. Call handle_rx with the test message
-    /// 4. Verify message was added to the receive channel and the sender started
+    /// 2. Build a frame whose CRC trailer does not match its payload
+    /// 3. Call `handle_received_frame`
+    /// 4. Verify it returns `None`, signals nothing and reports no status
     #[test]
-    fn test_handle_rx_with_valid_crc() {
-        reset_for_test();
-        assert!(!started());
-
-        let msg = frame_with_valid_crc();
-
-        handle_rx(msg);
-
-        assert_eq!(UART_RX_CHANNEL.len(), 1);
-        assert!(started());
-    }
-
-    /// Tests the handle_rx function with an invalid CRC.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Reset the module state
-    /// 2. Create a test message with invalid CRC
-    /// 3. Call handle_rx with the test message
-    /// 4. Verify message was not added to the receive channel
-    #[test]
-    fn test_handle_rx_with_invalid_crc() {
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_handle_received_frame_invalid_crc_returns_none() {
         reset_for_test();
 
         let mut msg = frame_with_valid_crc();
-        msg.data[42] = 0;
-        msg.data[43] = 0;
+        msg.data[42] ^= 0xff;
 
-        handle_rx(msg);
+        let sno = handle_received_frame(&msg);
 
-        assert_eq!(UART_RX_CHANNEL.len(), 0);
+        assert!(sno.is_none());
+        assert!(!UART_STARTED_SIGNAL.signaled());
+        assert!(!started());
+        mock_mesh_report_status_enable(true).assert_called(0);
+    }
+
+    /// Tests that the first valid frame starts the bridge exactly once, and that
+    /// it enables UART status reporting *before* the initial status dump.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset the module state and stub `mesh_report_status_enable` with a body
+    ///    that asserts reporting is already enabled when the dump fires
+    /// 2. Handle one valid frame: `Some(sno)`, start signal latched, started
+    /// 3. Handle a second valid frame: bridge start-up must not run again
+    #[test]
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_handle_received_frame_first_valid_starts_bridge_once() {
+        reset_for_test();
+        mock_mesh_report_status_enable(true).returns_with(|_enable| {
+            assert!(
+                queues::uart_status_reporting_enabled(),
+                "status reporting must be enabled before the initial node-status dump"
+            );
+        });
+
+        let first = frame_with_valid_crc();
+        assert!(handle_received_frame(&first).is_some());
+
+        assert!(UART_STARTED_SIGNAL.signaled());
+        assert!(started());
+        mock_mesh_report_status_enable(true).assert_called(1);
+
+        let second = frame_with_valid_crc();
+        assert!(handle_received_frame(&second).is_some());
+
+        mock_mesh_report_status_enable(true).assert_called(1);
     }
 
     /// Tests that a fresh module state has not signalled the started signal.
@@ -1053,32 +1115,39 @@ mod tests {
         assert!(!UART_STARTED_SIGNAL.signaled());
     }
 
-    /// Tests that the first valid RX frame signals `UART_STARTED_SIGNAL`.
+    /// Tests that an RX drop is surfaced once per change, from task context.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset the module state; an unchanged counter must log nothing
+    /// 2. Bump `UART_RX_DROPPED` twice and report: one or more frames land in
+    ///    the TX channel and the local seen-total follows
+    /// 3. Report again without a new drop: no additional frame is enqueued
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
-    fn test_handle_rx_with_valid_crc_signals_started_signal() {
+    fn test_report_rx_drops_logs_one_line_per_change() {
         reset_for_test();
-        mock_mesh_report_status_enable(true).returns(());
+        let mut last_reported = 0;
 
-        handle_rx(frame_with_valid_crc());
+        report_rx_drops(&mut last_reported);
+        assert_eq!(UART_TX_CHANNEL.len(), 0);
+        assert_eq!(last_reported, 0);
 
-        assert!(UART_STARTED_SIGNAL.signaled());
-        assert!(started());
-        mock_mesh_report_status_enable(true).assert_called(1);
-    }
+        UART_RX_DROPPED.store(2, Ordering::Relaxed);
+        report_rx_drops(&mut last_reported);
 
-    /// Tests that an invalid RX frame does not signal `UART_STARTED_SIGNAL`.
-    #[test]
-    fn test_handle_rx_with_invalid_crc_does_not_signal_started_signal() {
-        reset_for_test();
+        assert!(
+            UART_TX_CHANNEL.len() >= 1,
+            "a drop delta must produce a log frame"
+        );
+        assert_eq!(last_reported, 2);
+        let logged = UART_TX_CHANNEL.len();
 
-        let mut msg = frame_with_valid_crc();
-        msg.data[42] ^= 0xff;
-
-        handle_rx(msg);
-
-        assert!(!UART_STARTED_SIGNAL.signaled());
-        assert!(!started());
+        report_rx_drops(&mut last_reported);
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            logged,
+            "an unchanged counter must not log again"
+        );
     }
 
     /// Tests the started function.
@@ -1108,6 +1177,7 @@ mod tests {
             .unwrap();
         UART_SENDER_STARTED.store(true, Ordering::Relaxed);
         UART_LAST_ACK.store(7, Ordering::Relaxed);
+        UART_RX_DROPPED.store(3, Ordering::Relaxed);
         UART_STARTED_SIGNAL.signal(());
         UART_ACK_SIGNAL.signal(1);
         UART_TX_DONE.signal(());
@@ -1119,6 +1189,7 @@ mod tests {
         assert!(!started());
         assert!(!UART_STARTED_SIGNAL.signaled());
         assert_eq!(UART_LAST_ACK.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_RX_DROPPED.load(Ordering::Relaxed), 0);
         assert!(UART_ACK_SIGNAL.try_take().is_none());
         assert!(UART_TX_DONE.try_take().is_none());
         assert_eq!(UART_RX_CHANNEL.len(), 0);
@@ -1373,17 +1444,18 @@ mod tests {
 
     /// A TX-complete interrupt clears the busy flag and wakes an async sender.
     #[test]
-    fn test_check_irq_tx_complete_clears_busy_and_signals_tx_done() {
+    fn test_take_rx_and_ack_tx_irq_tx_complete_clears_busy_and_signals_tx_done() {
         reset_for_test();
         reset_fakes();
-        // `check_irq` reads the DMA/UART flag register through the real
-        // `get_and_clear_irq_source`, which writes the value back to clear it.
+        // `take_rx_and_ack_tx_irq` reads the DMA/UART flag register through the
+        // real `get_and_clear_irq_source`, which writes the value back to clear
+        // it.
         FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Tx as u8);
 
         UART_HW.lock().start_tx_unchecked(&empty_frame());
         assert!(UART_HW.lock().is_tx_busy());
 
-        check_irq();
+        take_rx_and_ack_tx_irq();
 
         assert!(!UART_HW.lock().is_tx_busy());
         assert!(UART_TX_DONE.try_take().is_some());
@@ -1398,26 +1470,35 @@ mod tests {
         );
     }
 
-    /// An RX-complete interrupt copies the frame into the RX channel and runs
-    /// the normal `handle_rx` bookkeeping.
+    /// An RX-complete interrupt queues the **raw** frame: no CRC check, no
+    /// bridge start-up and no status dump happen on the interrupt stack.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset; put a frame with a deliberately invalid CRC in the DMA buffer
+    /// 2. Raise the RX flag and call `take_rx_and_ack_tx_irq`
+    /// 3. The frame is in `UART_RX_CHANNEL` byte for byte, the bridge is still
+    ///    unstarted and `mesh_report_status_enable` was never called
     #[test]
     #[mry::lock(mesh_report_status_enable)]
-    fn test_check_irq_rx_copies_frame_into_rx_channel() {
+    fn test_take_rx_and_ack_tx_irq_pushes_raw_frame_without_crc_or_status_enable() {
         reset_for_test();
         reset_fakes();
-        let frame = frame_with_valid_crc();
+        let mut frame = frame_with_valid_crc();
+        frame.data[42] ^= 0xff;
         UART_HW.lock().rx_data_buf = frame;
 
-        // `check_irq` reads the DMA/UART flag register through the real
-        // `get_and_clear_irq_source`, which writes the value back to clear it.
+        // `take_rx_and_ack_tx_irq` reads the DMA/UART flag register through the
+        // real `get_and_clear_irq_source`, which writes the value back to clear
+        // it.
         FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Rx as u8);
-        mock_mesh_report_status_enable(true).returns(());
 
-        check_irq();
+        take_rx_and_ack_tx_irq();
 
         let received = UART_RX_CHANNEL.try_receive().unwrap();
         assert_eq!(received.data, frame.data);
-        assert!(started());
+        assert!(!started());
+        assert!(!UART_STARTED_SIGNAL.signaled());
         assert_eq!(
             FakeMmio::writes()
                 .into_iter()
@@ -1427,7 +1508,39 @@ mod tests {
             1,
             "the RX flag must be cleared exactly once"
         );
-        mock_mesh_report_status_enable(true).assert_called(1);
+        mock_mesh_report_status_enable(true).assert_called(0);
+    }
+
+    /// A full RX channel costs a counter bump in the ISR, not a log line.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset; fill `UART_RX_CHANNEL` to its 12-slot capacity
+    /// 2. Raise the RX flag with a frame in the DMA buffer and call the ISR body
+    /// 3. `UART_RX_DROPPED` is 1, the channel still holds 12 frames, and
+    ///    `UART_TX_CHANNEL` is untouched: the drop line belongs to the receive
+    ///    task, so no `uprintln!`/`enqueue_uart_tx` is reachable from the IRQ
+    #[test]
+    fn test_take_rx_and_ack_tx_irq_counts_drop_when_channel_full() {
+        reset_for_test();
+        reset_fakes();
+        let frame = frame_with_valid_crc();
+        for _ in 0..12 {
+            UART_RX_CHANNEL.try_send(frame).unwrap();
+        }
+        UART_HW.lock().rx_data_buf = frame;
+
+        FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Rx as u8);
+
+        take_rx_and_ack_tx_irq();
+
+        assert_eq!(UART_RX_DROPPED.load(Ordering::Relaxed), 1);
+        assert_eq!(UART_RX_CHANNEL.len(), 12);
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            0,
+            "the ISR must not log; the drop line belongs to the receive task"
+        );
     }
 
     /// The panic sink arms DMA1 synchronously and does not touch the queue.

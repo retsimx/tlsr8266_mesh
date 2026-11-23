@@ -904,7 +904,9 @@ irq_handler()
     │   ├── Clear: write 0x02 to reg_tmr_sta (0x623)
     │   └── Call light::transition_step()
     └── UART IRQ:
-        └── Call uart_manager.check_irq()
+        └── Call uart_manager.take_rx_and_ack_tx_irq()
+            (frame queued for uart_receiver; CRC, bridge start and
+             status-report enabling run in that task)
 ```
 
 **Interrupt clear values (write-1-to-clear):**

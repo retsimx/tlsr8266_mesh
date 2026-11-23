@@ -61,10 +61,12 @@ pub fn crc16(data: &[u8]) -> u16 {
     // Unrolled loop for 8-byte chunks - reduces loop overhead by 87.5%
     for chunk in chunks {
         // Manual unrolling of 8 iterations
-        // SAFETY: (5) check-free access on the UART-IRQ path. `as_chunks::<8>()` yields
-        // chunks of exactly 8 bytes, so `add(0..=7)` never leaves the chunk; a checked
-        // `chunk[i]` can emit `panic_bounds_check`, which the stack gate counts on the
-        // IRQ path (`handle_rx`), so it must stay unchecked.
+        // SAFETY: (5) check-free access. `as_chunks::<8>()` yields chunks of exactly 8
+        // bytes, so `add(0..=7)` never leaves the chunk and the access is sound. A
+        // checked `chunk[i]` can still emit `panic_bounds_check`, which inflates a
+        // frame in the static stack gate in every context that inlines this loop —
+        // notably the `uart_manager::uart_receiver` task and the OTA save path on the
+        // timer interrupt — so the access stays unchecked.
         unsafe {
             // Use unsafe to avoid bounds checking in hot loop
             let chunk_ptr = chunk.as_ptr();

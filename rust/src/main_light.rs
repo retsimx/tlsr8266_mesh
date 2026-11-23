@@ -44,10 +44,6 @@ use crate::sdk::mcu::clock::{
 };
 use crate::sdk::mcu::gpio::{gpio_set_func, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::register::{
-    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt,
-    write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
-};
 use crate::sdk::pm::{light_sw_reboot, usb_dp_pullup_en};
 use crate::sdk::rf_drv::*;
 use crate::vendor_light::vendor_set_adv_data;
@@ -55,6 +51,10 @@ use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
 use heapless::Vec;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
+use tlsr8266_pac::{
+    read_reg_irq_mask, read_reg_tmr_ctrl, write_reg_irq_mask, write_reg_tmr0_capt,
+    write_reg_tmr0_tick, write_reg_tmr1_capt, write_reg_tmr_ctrl, FLD_IRQ, FLD_TMR,
+};
 
 pub const LED_INDICATE_VAL: u16 = MAX_LUM_BRIGHTNESS_VALUE;
 pub const LED_MASK: u8 = 0x07;
@@ -597,11 +597,6 @@ mod tests {
         CLOCK_SYS_CLOCK_1US,
     };
     use crate::sdk::mcu::gpio::mock_gpio_set_func;
-    use crate::sdk::mcu::register::{
-        mock_read_reg_irq_mask, mock_read_reg_tmr_ctrl, mock_write_reg_irq_mask,
-        mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
-        mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
-    };
     use crate::sdk::pm::mock_light_sw_reboot;
     use crate::sdk::pm::mock_usb_dp_pullup_en;
     use crate::vendor_light::mock_vendor_set_adv_data;
@@ -609,6 +604,11 @@ mod tests {
     use futures::executor::block_on;
     use mesh_protocol::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use mry::Any;
+    use tlsr8266_pac::{
+        mock_read_reg_irq_mask, mock_read_reg_tmr_ctrl, mock_write_reg_irq_mask,
+        mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick, mock_write_reg_tmr1_capt,
+        mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl, write_reg_tmr1_tick,
+    };
 
     // --- Helper Functions ---
 

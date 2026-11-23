@@ -3,7 +3,10 @@ use core::ptr::addr_of;
 
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
-use crate::sdk::mcu::register::{
+use crate::sdk::mcu::watchdog::wd_clear;
+use crate::BIT;
+use mesh_protocol::uart::{UartData, UART_DATA_LEN};
+use tlsr8266_pac::{
     read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0,
     read_reg_irq_mask, read_reg_uart_status, write_reg16, write_reg8, write_reg_dma0_addr,
     write_reg_dma0_ctrl, write_reg_dma0_mode, write_reg_dma1_addr, write_reg_dma1_mode,
@@ -12,9 +15,6 @@ use crate::sdk::mcu::register::{
     write_reg_uart_rx_timeout, write_reg_uart_rx_timeout_cnt, write_reg_uart_status, FLD_DMA,
     FLD_IRQ, FLD_UART_CLK_DIV, FLD_UART_CTRL0, FLD_UART_CTRL1, FLD_UART_STATUS,
 };
-use crate::sdk::mcu::watchdog::wd_clear;
-use crate::BIT;
-use mesh_protocol::uart::{UartData, UART_DATA_LEN};
 
 /// UART interrupt mask flags for controlling the UART interrupt sources.
 ///
@@ -420,7 +420,8 @@ mod tests {
     // Import mock versions of the functions from their original modules
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
     use crate::sdk::mcu::gpio::{mock_gpio_set_func, mock_gpio_set_input_en};
-    use crate::sdk::mcu::register::{
+    use crate::sdk::mcu::watchdog::mock_wd_clear;
+    use tlsr8266_pac::{
         mock_read_reg_dma_chn_en, mock_read_reg_dma_chn_irq_msk, mock_read_reg_dma_rx_rdy0,
         mock_read_reg_irq_mask, mock_read_reg_uart_status, mock_write_reg_dma0_addr,
         mock_write_reg_dma0_ctrl, mock_write_reg_dma0_mode, mock_write_reg_dma1_addr,
@@ -430,7 +431,6 @@ mod tests {
         mock_write_reg_uart_rx_timeout, mock_write_reg_uart_rx_timeout_cnt,
         mock_write_reg_uart_status,
     };
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
 
     /// Tests the default constructor for the UART driver.
     ///

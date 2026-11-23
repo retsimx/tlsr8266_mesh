@@ -49,7 +49,7 @@ use crate::sdk::light::{
     SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-use crate::sdk::mcu::register::*;
+use tlsr8266_pac::*;
 
 /// Outcome of one BLE connected-state dispatch, reported up to the interrupt
 /// composition root (the crate root) which owns the `ota_manager` calls.
@@ -674,12 +674,12 @@ mod tests {
     };
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use crate::sdk::mcu::register::{
+    use mesh_protocol::packet_types::{Packet, PacketAttData};
+    use tlsr8266_pac::{
         mock_read_reg_system_tick, mock_write_reg8, mock_write_reg_dma3_mode,
         mock_write_reg_dma_tx_rptr, mock_write_reg_rf_tx_wail_settle_time_lo,
         mock_write_reg_system_tick_irq,
     };
-    use mesh_protocol::packet_types::{Packet, PacketAttData};
 
     // Import mock for functions in the same module
     use super::mock_cleanup_ble_disconnection;

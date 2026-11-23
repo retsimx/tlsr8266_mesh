@@ -1,0 +1,16 @@
+[package]
+name = "tlsr8266-pac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.9.0"
+paste = "1.0"
+mry = { version = "0.13.0", optional = true }
+
+[features]
+default = []
+# Transitional dev-only bridge: generates `mock_*` siblings for the register
+# accessors so the not-yet-migrated legacy `mock_*_reg*` test call sites in the
+# firmware crate keep compiling. Deleted once C-10 finishes the migration.
+mry-compat = ["dep:mry"]

@@ -1398,9 +1398,9 @@ mod tests {
     use crate::sdk::mcu::clock::{
         clock_time64, mock_clock_time, mock_clock_time64, mock_clock_time_exceed,
     };
-    use crate::sdk::mcu::register::{mock_read_reg_system_tick, read_reg_system_tick};
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
+    use tlsr8266_pac::{mock_read_reg_system_tick, read_reg_system_tick};
 
     /// Mock wall-clock for sweep tests: ~31 s, far beyond one sweep, and
     /// deterministic so `Instant::now()` never depends on prior test state.

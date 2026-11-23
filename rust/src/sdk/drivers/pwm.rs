@@ -1,7 +1,7 @@
-use crate::sdk::mcu::register::{
+use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
+use tlsr8266_pac::{
     read_reg_pwm_enable, write_reg_pwm_cmp, write_reg_pwm_cycle, write_reg_pwm_enable, FLD_PWM,
 };
-use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 
 /// Sets the compare value for a PWM channel.
 ///
@@ -141,7 +141,7 @@ pub fn pwm_stop(id: u32) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_pwm_enable, mock_write_reg_pwm_cmp, mock_write_reg_pwm_cycle,
         mock_write_reg_pwm_enable,
     };

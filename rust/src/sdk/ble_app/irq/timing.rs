@@ -22,7 +22,7 @@ use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
-use crate::sdk::mcu::register::*;
+use tlsr8266_pac::*;
 
 /// Handles the BLE receive state interrupt.
 ///
@@ -133,7 +133,7 @@ mod tests {
     use crate::sdk::mcu::clock::{mock_sleep_us, CLOCK_SYS_CLOCK_1US};
     use mry::Any;
 
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
         mock_write_reg_dma3_mode, mock_write_reg_rf_access_code, mock_write_reg_rf_crc,
         mock_write_reg_rf_tx_wail_settle_time_lo, mock_write_reg_system_tick_irq,

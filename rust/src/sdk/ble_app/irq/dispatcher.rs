@@ -12,7 +12,7 @@
 
 use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
 use crate::sdk::light::RfOperationState;
-use crate::sdk::mcu::register::*;
+use tlsr8266_pac::*;
 
 use super::advertisement::handle_ble_advertisement_state;
 use super::connection::{handle_ble_connected_state, BleConnectionEvent};
@@ -110,7 +110,7 @@ mod tests {
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
     use crate::sdk::ble_app::irq::timing::mock_configure_ble_receive_state;
-    use crate::sdk::mcu::register::{mock_read_reg_rf_irq_status, mock_write_reg_irq_src};
+    use tlsr8266_pac::{mock_read_reg_rf_irq_status, mock_write_reg_irq_src};
 
     /// Restores the process-wide RF operation state between tests.
     fn reset_rf_state() {

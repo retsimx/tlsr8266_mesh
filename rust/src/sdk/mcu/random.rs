@@ -4,7 +4,7 @@
 //! suitable for non-cryptographic applications on the TLSR8266 platform.
 
 use crate::sdk::mcu::clock::clock_time;
-use crate::sdk::mcu::register::read_reg_rnd_number;
+use tlsr8266_pac::read_reg_rnd_number;
 
 /// Generates a 16-bit pseudo-random number.
 ///
@@ -41,7 +41,7 @@ mod tests {
 
     // Import mocked versions of the functions from their original modules
     use crate::sdk::mcu::clock::mock_clock_time;
-    use crate::sdk::mcu::register::mock_read_reg_rnd_number;
+    use tlsr8266_pac::mock_read_reg_rnd_number;
 
     /// Tests that the rand function correctly combines clock_time and hardware RNG values.
     ///

@@ -10,11 +10,11 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::sdk::mcu::analog::analog_read;
-use crate::sdk::mcu::register::{
+use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
+use tlsr8266_pac::{
     read_reg_clk_sel, read_reg_system_tick, write_reg_clk_sel, write_reg_rst_clk0,
     write_reg_tmr_ctrl, FLD_CLK_EN, FLD_CLK_SEL, FLD_TMR, WATCHDOG_TIMEOUT_COEFF,
 };
-use crate::{BIT, BIT_LOW_BIT, MASK_VAL};
 
 /// System clock frequency in Hz (32MHz)
 pub const CLOCK_SYS_CLOCK_HZ: u32 = 32000000;
@@ -490,14 +490,14 @@ mod tests {
 
     // Import mock functions from register module for testing
     use crate::sdk::mcu::analog::mock_analog_read;
-    use crate::sdk::mcu::register::mock_read_reg_clk_sel;
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
-    use crate::sdk::mcu::register::mock_write_reg_clk_sel;
-    use crate::sdk::mcu::register::mock_write_reg_rst_clk0;
-    use crate::sdk::mcu::register::mock_write_reg_tmr_ctrl;
     use mry::Any;
     use std::sync::atomic::AtomicU32;
     use std::sync::{Arc, Mutex};
+    use tlsr8266_pac::mock_read_reg_clk_sel;
+    use tlsr8266_pac::mock_read_reg_system_tick;
+    use tlsr8266_pac::mock_write_reg_clk_sel;
+    use tlsr8266_pac::mock_write_reg_rst_clk0;
+    use tlsr8266_pac::mock_write_reg_tmr_ctrl;
 
     /// Tests clock_init function for proper register configuration.
     ///

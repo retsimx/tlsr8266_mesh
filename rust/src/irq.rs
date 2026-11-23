@@ -25,7 +25,7 @@ use crate::sdk::common::sync::CriticalSectionMutex;
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
 use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
-use crate::sdk::mcu::register::*;
+use tlsr8266_pac::*;
 
 /// Timestamp of the last `TMR0` interrupt at which the OTA timeout was decremented.
 ///
@@ -171,11 +171,11 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
     use crate::sdk::light::{RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
     use crate::sdk::mcu::clock::mock_clock_time64;
-    use crate::sdk::mcu::register::{
+    use crate::uart_manager::{check_irq, mock_check_irq};
+    use tlsr8266_pac::{
         mock_read_reg_irq_src, mock_read_reg_rf_irq_status, mock_write_reg_irq_src,
         mock_write_reg_tmr_sta,
     };
-    use crate::uart_manager::{check_irq, mock_check_irq};
 
     /// Timeout used by the OTA countdown tests; any non-zero value that cannot be
     /// decremented to zero in a single interrupt works.

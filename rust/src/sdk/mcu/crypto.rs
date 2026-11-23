@@ -1,8 +1,8 @@
-use crate::sdk::mcu::register::{
-    read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key,
-};
 use core::cmp::min;
 use core::ptr::addr_of;
+use tlsr8266_pac::{
+    read_reg_aes_ctrl, read_reg_aes_data, write_reg_aes_ctrl, write_reg_aes_data, write_reg_aes_key,
+};
 
 /// Enum representing the direction of AES operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,11 +447,11 @@ mod tests {
     use crate::sdk::mcu::crypto::{
         mock_aes_att_decryption, mock_aes_att_encryption, mock_aes_ll_encryption,
     };
-    use crate::sdk::mcu::register::{
+    use mry::{self, Any};
+    use tlsr8266_pac::{
         mock_read_reg_aes_ctrl, mock_read_reg_aes_data, mock_write_reg_aes_ctrl,
         mock_write_reg_aes_data, mock_write_reg_aes_key,
     };
-    use mry::{self, Any};
 
     #[test]
     #[mry::lock(

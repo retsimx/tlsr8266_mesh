@@ -1,11 +1,11 @@
 use crate::sdk::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
-use crate::sdk::mcu::register::{
-    read_reg_tmr_ctrl8, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr_ctrl8,
-    write_reg_tmr_sta, FLD_TMR, FLD_TMR_STA,
-};
 use core::cell::RefCell;
 use core::task::Waker;
 use embassy_time_driver::Driver;
+use tlsr8266_pac::{
+    read_reg_tmr_ctrl8, write_reg_tmr0_capt, write_reg_tmr0_tick, write_reg_tmr_ctrl8,
+    write_reg_tmr_sta, FLD_TMR, FLD_TMR_STA,
+};
 
 /// Custom time driver implementation for the embassy-time crate
 ///
@@ -105,13 +105,13 @@ pub fn on_timer0_interrupt() {
 mod tests {
     use super::*;
     use crate::sdk::mcu::clock::{mock_clock_time64, reset_clock_time64_for_test};
-    use crate::sdk::mcu::register::fake_mmio::{FakeMmio, RegWrite};
-    use crate::sdk::mcu::register::{
+    use mry::{self, Any};
+    use std::sync::Mutex;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::{
         mock_read_reg_tmr_ctrl8, mock_write_reg_tmr0_capt, mock_write_reg_tmr0_tick,
         mock_write_reg_tmr_ctrl8, mock_write_reg_tmr_sta, REG_BASE_ADDR,
     };
-    use mry::{self, Any};
-    use std::sync::Mutex;
 
     /// Tag used to identify a mocked register write, in call order.
     #[derive(Clone, Debug, PartialEq, Eq)]

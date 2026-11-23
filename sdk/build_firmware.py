@@ -89,6 +89,8 @@ LLD_FLAGS = "--tc32 --gc-sections -T ./sdk/boot.link"
 VERSION_RS_REL = "rust/src/version.rs"
 CARGO_MANIFEST_REL = "rust/Cargo.toml"
 RUST_TOOLCHAIN_REL = "rust/rust-toolchain.toml"
+CARGO_LOCK_REL = "rust/Cargo.lock"
+WORKSPACE_CRATES_REL = "rust/crates"
 LINKER_SCRIPT_REL = "sdk/boot.link"
 
 DEFAULT_TOOLS = {
@@ -856,6 +858,24 @@ def _resolve_tools(
     return resolved
 
 
+def _build_inputs(repo_root: Path) -> list[Path]:
+    """The repo files whose content guards the LLVM pipeline cache.
+
+    The root manifest and the toolchain pin always participate. The lockfile and
+    the per-crate manifests are optional so a fresh checkout that has not
+    resolved dependencies (or a workspace with no member crates) still builds.
+    """
+    root = Path(repo_root)
+    inputs = [root / CARGO_MANIFEST_REL, root / RUST_TOOLCHAIN_REL]
+    lockfile = root / CARGO_LOCK_REL
+    if lockfile.is_file():
+        inputs.append(lockfile)
+    crates_dir = root / WORKSPACE_CRATES_REL
+    if crates_dir.is_dir():
+        inputs.extend(sorted(crates_dir.glob("*/Cargo.toml")))
+    return inputs
+
+
 def _run_build(args: argparse.Namespace) -> int:
     repo_root = REPO_ROOT
     out_root = _anchor(args.out_dir, repo_root)
@@ -883,10 +903,7 @@ def _run_build(args: argparse.Namespace) -> int:
     ll_paths = _cargo_build(manifest_path, features)
 
     linker_script = repo_root / LINKER_SCRIPT_REL
-    build_inputs = [
-        repo_root / CARGO_MANIFEST_REL,
-        repo_root / RUST_TOOLCHAIN_REL,
-    ]
+    build_inputs = _build_inputs(repo_root)
     stage_dir = out_root / slug
     stage = _stage_paths(stage_dir)
 

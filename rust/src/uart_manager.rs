@@ -553,11 +553,6 @@ mod tests {
     use crate::mesh::{mock_send_mesh_message, send_mesh_message};
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
     use crate::sdk::mcu::clock::{clock_time, mock_clock_time};
-    use crate::sdk::mcu::register::{
-        mock_read_reg_dma_rx_rdy0, mock_write_reg_dma1_addr, mock_write_reg_dma_rx_rdy0,
-        mock_write_reg_dma_tx_rdy0, read_reg_dma_rx_rdy0, write_reg_dma1_addr,
-        write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0,
-    };
     use core::future::Future;
     use futures::executor::block_on;
     use futures::task::noop_waker;
@@ -565,6 +560,11 @@ mod tests {
     use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
     use mry::Any;
     use std::task::{Context, Poll};
+    use tlsr8266_pac::{
+        mock_read_reg_dma_rx_rdy0, mock_write_reg_dma1_addr, mock_write_reg_dma_rx_rdy0,
+        mock_write_reg_dma_tx_rdy0, read_reg_dma_rx_rdy0, write_reg_dma1_addr,
+        write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0,
+    };
 
     /// Create a test packet with the given parameters
     fn create_test_packet(

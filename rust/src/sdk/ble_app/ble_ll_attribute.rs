@@ -17,11 +17,11 @@ use crate::sdk::ble_app::light_ll::ota_management::{
 use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::OtaState;
-use crate::sdk::mcu::register::read_reg_system_tick;
 use mesh_protocol::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
     PacketL2capHead, PacketVersionInd,
 };
+use tlsr8266_pac::read_reg_system_tick;
 
 #[cfg(not(test))]
 extern "C" {
@@ -1312,9 +1312,9 @@ mod tests {
         get_gAttributes, GATT_UUID_CHARACTER, GATT_UUID_PRIMARY_SERVICE,
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
     };
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use core::ptr::null_mut;
     use mesh_protocol::packet_types::{PacketAttData, PacketL2capData};
+    use tlsr8266_pac::mock_read_reg_system_tick;
 
     // Helper function to create UUID16 as a byte slice
     fn uuid16_to_bytes(uuid: u16) -> [u8; 2] {

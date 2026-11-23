@@ -34,12 +34,12 @@ use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{
     clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
 };
-use crate::sdk::mcu::register::{
-    read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
-};
 use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
 use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
+use tlsr8266_pac::{
+    read_reg_rnd_number, read_reg_system_tick, write_reg_rf_irq_status, FLD_RF_IRQ_MASK,
+};
 
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
 
@@ -856,11 +856,11 @@ mod tests {
     use crate::sdk::mcu::clock::{
         mock_clock_time, mock_clock_time64, mock_clock_time_exceed, mock_sleep_us,
     };
-    use crate::sdk::mcu::register::{
-        mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_rf_irq_status,
-    };
     use heapless::Vec;
     use mry::Any;
+    use tlsr8266_pac::{
+        mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_rf_irq_status,
+    };
 
     use crate::main_light::{mock_light_slave_tx_command, mock_rf_link_light_event_callback};
     use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};

@@ -72,6 +72,11 @@ def _text(*blocks: str) -> str:
 # `mesh_pair_proc_*` lookalikes are present because the table's
 # ``mesh_pair_proc_hook`` entry must not be confused with them.
 #
+# The light subsystem's status publish is modelled as the real firmware shape:
+# ``rf_link_light_event_callback`` calls ``light::device_status_update`` directly,
+# which calls the ``notify_status_update`` dispatcher, which reaches the SDK's
+# ``ll_device_status_update`` only through a ``bx rN``.
+#
 # The OTA seam is modelled the same way: one synthetic pair per ``INDIRECT_EDGES``
 # entry — the OTA write dispatcher 24 B / 40 B (the real shape: a GATT write
 # lands in ``dispatch_ota_write``, which reaches the OTA packet handler), the
@@ -95,12 +100,25 @@ FIRMWARE_SHAPED = _text(
     ),
     _fn("callbacks13on_light_data", 24, indirect=True),
     _fn(
-        "main_light21rf_link_data_callback",
+        "app21rf_link_data_callback",
         128,
         (("rf_drv16emit_light_event", False),),
     ),
     _fn("rf_drv16emit_light_event", 8, indirect=True),
-    _fn("main_light28rf_link_light_event_callback", 200),
+    _fn(
+        "app28rf_link_light_event_callback",
+        200,
+        (("light20device_status_update", False),),
+    ),
+    # The light subsystem's status publish: a real `bl` into the hook seam, then
+    # an indirect dispatch to the SDK's node-table writer.
+    _fn(
+        "light20device_status_update",
+        24,
+        (("light20notify_status_update", False),),
+    ),
+    _fn("light20notify_status_update", 8, indirect=True),
+    _fn("mesh_management23ll_device_status_update", 40),
     _fn("callbacks17on_mesh_pair_proc", 24, indirect=True),
     _fn(
         "app19mesh_pair_proc_hook",
@@ -110,7 +128,7 @@ FIRMWARE_SHAPED = _text(
     _fn("MeshManager14mesh_pair_proc", 180),
     _fn("MeshManager21mesh_pair_proc_effect", 60),
     _fn("callbacks17on_light_response", 24, indirect=True),
-    _fn("main_light25rf_link_response_callback", 96),
+    _fn("app25rf_link_response_callback", 96),
     _fn("callbacks15on_uart_mesh_rx", 24, indirect=True),
     _fn("uart_manager16light_mesh_rx_cb", 72),
     # OtaHooks: the four dispatchers in sdk/ble_app/callbacks.rs.
@@ -191,7 +209,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
         funcs = _parse()
         resolved = stack_analysis.apply_indirect_edges(funcs)
         self.assertIn(
-            ("main_light21rf_link_data_callback", False),
+            ("app21rf_link_data_callback", False),
             funcs["callbacks13on_light_data"].calls,
         )
         # An indirect dispatch pushes a return address: never a tail call.
@@ -206,15 +224,19 @@ class TestApplyIndirectEdges(unittest.TestCase):
             [
                 (
                     "rf_drv16emit_light_event",
-                    "main_light28rf_link_light_event_callback",
+                    "app28rf_link_light_event_callback",
                 ),
                 ("callbacks17on_mesh_pair_proc", "app19mesh_pair_proc_hook"),
-                ("callbacks13on_light_data", "main_light21rf_link_data_callback"),
+                ("callbacks13on_light_data", "app21rf_link_data_callback"),
                 (
                     "callbacks17on_light_response",
-                    "main_light25rf_link_response_callback",
+                    "app25rf_link_response_callback",
                 ),
                 ("callbacks15on_uart_mesh_rx", "uart_manager16light_mesh_rx_cb"),
+                (
+                    "light20notify_status_update",
+                    "mesh_management23ll_device_status_update",
+                ),
                 # The OTA seam, in table order: four OtaHooks dispatchers...
                 ("callbacks21dispatch_ota_write", "ota21on_gatt_ota_packet"),
                 (
@@ -246,7 +268,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
 
     def test_caller_with_zero_matches_is_rejected(self) -> None:
         funcs = _parse()
-        edges = {"no_such_dispatcher": ("main_light21rf_link_data_callback",)}
+        edges = {"no_such_dispatcher": ("app21rf_link_data_callback",)}
         with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
             stack_analysis.apply_indirect_edges(funcs, edges)
         message = str(ctx.exception)
@@ -291,7 +313,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
         funcs = _parse()
         before = {name: list(f.calls) for name, f in funcs.items()}
         edges = {
-            "on_light_data": ("main_light21rf_link_data_callback",),
+            "on_light_data": ("app21rf_link_data_callback",),
             "on_uart_mesh_rx": ("no_such_callback",),
         }
         with self.assertRaises(stack_analysis.IndirectEdgeError):
@@ -307,6 +329,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
                 "dispatch_ota_tick",
                 "dispatch_ota_write",
                 "emit_light_event",
+                "notify_status_update",
                 "on_light_data",
                 "on_light_response",
                 "on_mesh_pair_proc",
@@ -332,8 +355,8 @@ class TestApplyIndirectEdges(unittest.TestCase):
         patterns = list(stack_analysis.INDIRECT_EDGES)
         for callees in stack_analysis.INDIRECT_EDGES.values():
             patterns.extend(callees)
-        self.assertEqual(len(patterns), 26)
-        self.assertEqual(len(set(patterns)), 26, "a pattern is listed twice")
+        self.assertEqual(len(patterns), 28)
+        self.assertEqual(len(set(patterns)), 28, "a pattern is listed twice")
         for pattern in patterns:
             for other in patterns:
                 if pattern == other:
@@ -356,10 +379,11 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
             funcs, "main_entrypoint"
         )
         # The dispatch is a normal call chain: the whole callback subtree
-        # (128 + 8 + 200) that used to be scored as 0 B now counts.
-        self.assertEqual(after - before, 336)
+        # (128 + 200) plus the status publish it triggers (24 + 8 + 40) — all of
+        # it used to be scored as 0 B — now counts.
+        self.assertEqual(after - before, 408)
         self.assertEqual(cycles, [])
-        self.assertIn("main_light28rf_link_light_event_callback", chain)
+        self.assertIn("app28rf_link_light_event_callback", chain)
         # The OTA branch of the same GATT write entry is real but shorter
         # (24 + 40), so it is wired in without moving the maximum.
         ota_depth, ota_chain, _ = stack_analysis.longest_path(
@@ -379,9 +403,13 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         stack_analysis.apply_indirect_edges(funcs)
         depth, chain, _ = stack_analysis.longest_path(funcs, "irq_handler")
         self.assertEqual(
-            depth, 24 + 272 + 8 + 200, "irq_handler -> isr -> emit -> callback"
+            depth,
+            24 + 272 + 8 + 200 + 24 + 8 + 40,
+            "irq_handler -> isr -> emit -> callback -> device_status_update -> "
+            "notify_status_update -> ll_device_status_update",
         )
-        self.assertIn("main_light28rf_link_light_event_callback", chain)
+        self.assertIn("app28rf_link_light_event_callback", chain)
+        self.assertIn("mesh_management23ll_device_status_update", chain)
         # No OTA dispatcher is reachable from the IRQ root: the seam's frames
         # only enter the IRQ stack through the handlers that call them.
         self.assertNotIn("callbacks21dispatch_ota_write", chain)
@@ -389,15 +417,15 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
     def test_roots_no_longer_contain_indirect_only_callees(self) -> None:
         funcs = _parse()
         roots = set(stack_analysis.all_roots(funcs))
-        self.assertIn("main_light21rf_link_data_callback", roots)
-        self.assertIn("main_light28rf_link_light_event_callback", roots)
+        self.assertIn("app21rf_link_data_callback", roots)
+        self.assertIn("app28rf_link_light_event_callback", roots)
         # The OTA callees are roots only because nothing `bl`s them yet.
         self.assertIn("ota21on_gatt_ota_packet", roots)
         self.assertIn("app24ota_send_terminate_hook", roots)
         stack_analysis.apply_indirect_edges(funcs)
         roots = set(stack_analysis.all_roots(funcs))
-        self.assertNotIn("main_light21rf_link_data_callback", roots)
-        self.assertNotIn("main_light28rf_link_light_event_callback", roots)
+        self.assertNotIn("app21rf_link_data_callback", roots)
+        self.assertNotIn("app28rf_link_light_event_callback", roots)
         self.assertNotIn("app19mesh_pair_proc_hook", roots)
         self.assertNotIn("ota21on_gatt_ota_packet", roots)
         self.assertNotIn("app24ota_send_terminate_hook", roots)
@@ -409,7 +437,7 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
                 _fn("caller", 32, (("callbacks13on_light_data", False),)),
                 _fn("callbacks13on_light_data", 24, indirect=True),
                 _fn(
-                    "main_light21rf_link_data_callback",
+                    "app21rf_link_data_callback",
                     64,
                     (("caller", False),),
                 ),
@@ -426,7 +454,11 @@ class TestMain(unittest.TestCase):
     def test_pass_reports_resolved_edges_and_margins(self) -> None:
         code, out = _run_main(FIRMWARE_SHAPED)
         self.assertEqual(code, 0, out)
-        self.assertIn("indirect dispatch edges (13):", out)
+        self.assertIn("indirect dispatch edges (14):", out)
+        self.assertIn(
+            "light20notify_status_update -> mesh_management23ll_device_status_update",
+            out,
+        )
         self.assertIn(
             "callbacks15on_uart_mesh_rx -> uart_manager16light_mesh_rx_cb", out
         )
@@ -435,8 +467,8 @@ class TestMain(unittest.TestCase):
             "callbacks21dispatch_ota_write -> ota21on_gatt_ota_packet", out
         )
         self.assertIn("ota17radio_stage_pkt -> light_ll22stage_ota_packet", out)
-        self.assertIn("main: free 4096 B - max 584 B = margin 3512 B", out)
-        self.assertIn("irq:  size 1792 B - max 532 B = margin 1260 B", out)
+        self.assertIn("main: free 4096 B - max 656 B = margin 3440 B", out)
+        self.assertIn("irq:  size 1792 B - max 604 B = margin 1188 B", out)
         self.assertIn("PASS", out)
 
     def test_stale_caller_table_fails_closed(self) -> None:

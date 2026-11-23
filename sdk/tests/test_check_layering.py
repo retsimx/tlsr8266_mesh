@@ -151,6 +151,34 @@ class TestRealSdkTree(unittest.TestCase):
         )
         self.assertEqual(violations, [])
 
+    def test_real_light_subtree_is_pure(self) -> None:
+        # C-7: the light subsystem owns the lamp and names no layer above it —
+        # the mesh status publish goes through the hook `app.rs` registers.
+        light_root = SRC_ROOT / "light"
+        paths = check_layering.rust_files(str(light_root))
+        self.assertGreaterEqual(len(paths), 3)  # mod.rs + transitions.rs + effects.rs
+        violations, _total = check_layering.audit_universal(
+            paths,
+            "rust/src/light",
+            enforce_budget=False,
+            subsystem_roots={"light": str(light_root)},
+        )
+        self.assertEqual(violations, [])
+
+    def test_real_factory_reset_subtree_is_pure(self) -> None:
+        # C-7: the reset subsystem may not name a single layer above it, and the
+        # purity table covers it exactly like `ota`.
+        reset_root = SRC_ROOT / "factory_reset"
+        paths = check_layering.rust_files(str(reset_root))
+        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
+        violations, _total = check_layering.audit_universal(
+            paths,
+            "rust/src/factory_reset",
+            enforce_budget=False,
+            subsystem_roots={"factory_reset": str(reset_root)},
+        )
+        self.assertEqual(violations, [])
+
 
 class _TempSrcTree(unittest.TestCase):
     """A disposable ``rust/src``, SDK root and mesh-protocol root per test.
@@ -254,6 +282,8 @@ class TestGlobalBans(_TempTree):
         banned = [
             "app",
             "common",
+            "factory_reset",
+            "light",
             "main_light",
             "mesh",
             "light_manager",
@@ -936,6 +966,211 @@ class TestOtaPurityRule(_TempSrcTree):
             _lines("use tlsr8266_pac::write_reg8;"),
         )
         self.assert_clean()
+
+
+class TestFactoryResetPurityRule(_TempSrcTree):
+    """`rust/src/factory_reset/**` production code may not name the layers above.
+
+    C-7 turned C-6's single `ota-purity` rule into the `SUBSYSTEM_PURITY` table;
+    this class pins the new `factory_reset` row.  The reset subsystem owns boot
+    detection and the configuration erase, and reaches downward only:
+    `tlsr8266_hal`, `crate::config`, `core`, `critical_section` and its own
+    `fsm`.  Everything above it — including its sibling `light` — is forbidden.
+    """
+
+    def test_sdk_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "factory_reset/mod.rs",
+            _lines("use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_MESH_LTK;"),
+        )
+        out = self.assert_violations("1: factory_reset-upward-dep: crate::sdk")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: factory_reset-upward-dep: crate::sdk"
+        )
+
+    def test_qualified_light_path_is_rejected(self) -> None:
+        # `light` is a sibling subsystem, not a dependency: a fully-qualified
+        # call must not dodge the rule.
+        self.write_src(
+            "factory_reset/mod.rs",
+            _lines("pub fn f() { crate::light::device_status_update(); }"),
+        )
+        self.assert_violations("1: factory_reset-upward-dep: crate::light")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "factory_reset/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
+        )
+        self.assert_violations("1: factory_reset-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.FACTORY_RESET_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "factory_reset" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_downward_and_internal_imports_are_accepted(self) -> None:
+        self.write_src(
+            "factory_reset/mod.rs",
+            _lines(
+                "use core::sync::atomic::AtomicU32;",
+                "use critical_section;",
+                "use tlsr8266_hal::drivers::flash::flash_read_page;",
+                "use crate::config::FLASH_ADR_RESET_CNT;",
+                "mod fsm;",
+                "use fsm::ResetStep;",
+                "use super::fsm::boot_step_value;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
+        # The subsystem's own tests seed `FakeFlash`, which lives in the HAL, but
+        # they may also stand the PAC in: only production code is audited.
+        self.write_src(
+            "factory_reset/mod.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_MESH_LTK;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_rule_is_scoped_to_the_factory_reset_directory(self) -> None:
+        # Control: the same import one directory up is production code but not
+        # `factory_reset` code, so the purity rule leaves it to the layering
+        # rules (and `crate::sdk` there is legal).
+        self.write_src(
+            "sdk/ble_app/callbacks.rs",
+            _lines("use crate::sdk::ble_app::light_ll::packet_processing::*;"),
+        )
+        self.assert_clean()
+
+
+class TestLightPurityRule(_TempSrcTree):
+    """`rust/src/light/**` production code may not name the layers above it.
+
+    The light subsystem owns the lamp state, PWM, persistence, LED indication and
+    the light-domain wire protocol, and reaches downward only: `tlsr8266_hal`,
+    `mesh_protocol`, `crate::config` and the lamp's own maths/queue crates.
+    Everything above it is forbidden, `factory_reset` included: the two
+    subsystems are siblings, not dependencies.  Tests are exempt, because a
+    subsystem's own tests stand the HAL and PAC fakes in for hardware.
+    """
+
+    def test_sdk_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "light/mod.rs",
+            _lines("use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;"),
+        )
+        out = self.assert_violations("1: light-upward-dep: crate::sdk")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: light-upward-dep: crate::sdk"
+        )
+
+    def test_qualified_sibling_path_is_rejected(self) -> None:
+        # `factory_reset` is a sibling subsystem: a fully-qualified call must not
+        # dodge the rule.
+        self.write_src(
+            "light/transitions.rs",
+            _lines("pub fn f() { crate::factory_reset::erase_config_sectors(); }"),
+        )
+        self.assert_violations("1: light-upward-dep: crate::factory_reset")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "light/transitions.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
+        )
+        self.assert_violations("1: light-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.LIGHT_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "light" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_downward_and_internal_imports_are_accepted(self) -> None:
+        self.write_src(
+            "light/mod.rs",
+            _lines(
+                "use core::cmp::min;",
+                "use critical_section;",
+                "use fixed::types::I16F16;",
+                "use mesh_protocol::mesh_types::LGT_CMD_LIGHT_ONOFF;",
+                "use tlsr8266_hal::drivers::pwm::pwm_set_cmp;",
+                "use crate::config::VENDOR_ID;",
+                "use super::transitions::LIGHT_HW;",
+                "use transitions::dispatch_message;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
+        # The subsystem's own tests install the HAL's host fakes; only
+        # production code is audited.
+        self.write_src(
+            "light/effects.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+    def test_rule_is_scoped_to_the_light_directory(self) -> None:
+        # Control: the same import one directory up is production code but not
+        # `light` code, so the purity rule leaves it to the layering rules.
+        self.write_src(
+            "main_light.rs",
+            _lines("use crate::sdk::rf_drv::set_advertisement_manufacturer_data;"),
+        )
+        self.assert_clean()
+
+
+class TestSubsystemPurityTable(_TempSrcTree):
+    """The per-directory purity table is the single source of every row."""
+
+    def test_table_has_the_three_subsystems(self) -> None:
+        self.assertEqual(
+            set(check_layering.SUBSYSTEM_PURITY),
+            {"ota", "factory_reset", "light"},
+        )
+
+    def test_ota_row_still_matches_the_c6_constants(self) -> None:
+        # The generalisation must not quietly widen or narrow C-6's rule.
+        modules, crates = check_layering.SUBSYSTEM_PURITY["ota"]
+        self.assertEqual(modules, check_layering.OTA_FORBIDDEN_MODULES)
+        self.assertEqual(crates, check_layering.OTA_FORBIDDEN_CRATES)
+
+    def test_ota_helper_delegates_to_the_table(self) -> None:
+        # `audit_ota_purity_source` is C-6's public helper; it now reads the row.
+        violations = check_layering.audit_ota_purity_source(
+            _lines("use crate::sdk::ble_app::x;"), "ota/mod.rs"
+        )
+        self.assertEqual(
+            [(item.rule, item.violation) for item in violations],
+            [("ota-upward-dep", "crate::sdk")],
+        )
 
 
 class TestStateRemovedRule(_TempSrcTree):

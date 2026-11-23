@@ -78,21 +78,28 @@ Four permanent rules, one per line of defence won by R-9 (#45):
   host-only ``static mut`` is still an item.  Only the numeric budget ignores
   it; see ``strip_host_only_code``.
 
-One path-scoped rule rides in the same pass:
+One path-scoped family of rules rides in the same pass:
 
-* ``ota-purity`` — files directly under the firmware's ``ota/`` directory
-  (``rust/src/ota/**``) are the OTA subsystem, which owns every OTA static and
-  routine, so production code there may not name ``OTA_FORBIDDEN_MODULES``
-  (``crate::sdk``, ``crate::light_manager``, ``crate::main_light``,
-  ``crate::uart_manager``, ``crate::mesh``, ``crate::diagnostics``,
-  ``crate::logging``, the deleted ``crate::state``) or ``OTA_FORBIDDEN_CRATES``
-  (``tlsr8266_pac``).  ``crate::config``, ``mesh_protocol``, ``tlsr8266_hal``,
-  ``critical_section`` and the subsystem's own ``fsm`` stay legal.  The rule
-  reads ``production_code()`` only: ``ota``'s own tests use
+* ``<subsystem>-purity`` — files directly under a subsystem directory of the
+  firmware (``rust/src/<name>/**`` where ``<name>`` is a row of
+  ``SUBSYSTEM_PURITY``) own their domain, so production code there may not name
+  the ``crate::`` modules in that row nor import the external crates in it, and
+  ``crate::config``, ``mesh_protocol``, ``tlsr8266_hal``, ``critical_section``
+  and the subsystem's own ``fsm`` stay legal.  Two rule names are reported per
+  row: ``<name>-upward-dep`` (a forbidden ``crate::`` module) and
+  ``<name>-forbidden-crate`` (a forbidden external crate).  The rules read
+  ``production_code()`` only: a subsystem's own tests use
   ``tlsr8266_pac::fake_mmio::FakeMmio`` and must not be flagged, which is why a
-  raw text grep would be wrong.  Two rule names are reported:
-  ``ota-upward-dep`` (a forbidden ``crate::`` module) and ``ota-forbidden-crate``
-  (a forbidden external crate).
+  raw text grep would be wrong.  C-6 (#68) shipped the ``ota`` row; C-7 (#69)
+  turned it into the table and added ``factory_reset``, whose production code
+  may not name ``crate::sdk``, ``crate::light``, ``crate::ota``,
+  ``crate::uart_manager``, ``crate::mesh``, ``crate::diagnostics``,
+  ``crate::logging``, the deleted ``crate::state`` or ``tlsr8266_pac``, and
+  whose sibling ``light`` row forbids ``crate::sdk``, ``crate::ota``,
+  ``crate::uart_manager``, ``crate::mesh``, ``crate::factory_reset``,
+  ``crate::diagnostics``, ``crate::logging``, ``crate::state`` and
+  ``tlsr8266_pac`` (the lamp publishes its status through a hook the
+  application registers, so it never needs the node table).
 
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
@@ -175,16 +182,31 @@ DEFAULT_CRATE_ROOTS = (
 # `flash.rs:455` is deleted in the same change, so 4 leave the firmware tree:
 # 68 - 4 = 64. (The HAL crate now holds 16 audited sites in total, of which
 # 3 came from `flash.rs`; the firmware ceiling does not count the HAL.)
-MAX_PRODUCTION_UNSAFE = 64
+#
+# C-7 (#69) replaced `sdk/factory_reset.rs`'s `read_flash_byte` (a
+# `core::ptr::read_volatile` over the reset-count sector) with the HAL's safe
+# `flash_read_page`, so that documented site leaves the firmware tree:
+# 64 - 1 = 63.
+#
+# C-7 (#69) also deleted `vendor_light.rs`'s `slice::from_raw_parts` view of the
+# primary advertisement payload: `light::effects::adv_private_to_bytes` encodes
+# each field with `to_le_bytes()` instead, so one more documented site leaves
+# the firmware tree: 63 - 1 = 62.
+MAX_PRODUCTION_UNSAFE = 62
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
 # `crate::state` is absent here too, but it is *not* legal: the universal
-# `state-removed` rule bans it outright, tests included.
+# `state-removed` rule bans it outright, tests included.  C-7 (#69) added
+# `factory_reset` and `light`, which moved out of `sdk/` (and out of the old
+# `light_manager` module) into app-root subsystems.  `light_manager` and
+# `main_light` stay listed as retired-name fences: nothing may name them again.
 UPWARD_MODULES = frozenset(
     {
         "app",
         "common",
+        "factory_reset",
+        "light",
         "main_light",
         "mesh",
         "light_manager",
@@ -220,6 +242,66 @@ OTA_FORBIDDEN_MODULES = frozenset(
 # `tlsr8266_pac` is the register-definition leaf: `ota` drives flash and the
 # radio only through `tlsr8266_hal`, never by poking registers itself.
 OTA_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# Modules `rust/src/factory_reset/**` production code must never name.  The
+# subsystem owns boot-time reset detection and the configuration erase, and it
+# reaches downward only: `tlsr8266_hal` (flash, clock), `crate::config`, `core`
+# and the bare `critical_section` crate.  It returns `ResetAction`/
+# `KickoutAction` instead of calling the layer above, so the whole application
+# side of the reset (interrupts off, LED blink, reboot, credential writes) lives
+# in the caller and is testable without it.  `crate::light` is forbidden too:
+# `light` is a sibling subsystem, not a dependency.
+FACTORY_RESET_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "light",
+        "ota",
+        "uart_manager",
+        "mesh",
+        "diagnostics",
+        "logging",
+        "state",
+    }
+)
+# `tlsr8266_pac` is forbidden for the same reason as in `ota`: the reset path
+# drives flash through `tlsr8266_hal` only.
+FACTORY_RESET_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# Modules `rust/src/light/**` production code must never name.  The light
+# subsystem owns the lamp, its PWM, its persistence, the LED indicator and the
+# light-domain wire protocol, and it reaches downward only: `tlsr8266_hal`,
+# `mesh_protocol`, `crate::config` and the lamp's own maths/queue crates.  Every
+# layer above it is forbidden — including `factory_reset`, which is a sibling
+# subsystem and not a dependency — and so is the PAC: the lamp drives PWM, flash
+# and timers through the HAL.
+LIGHT_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "ota",
+        "uart_manager",
+        "mesh",
+        "factory_reset",
+        "diagnostics",
+        "logging",
+        "state",
+    }
+)
+LIGHT_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# One row per subsystem directory directly under `rust/src/`: the `crate::`
+# modules its production code must never name, and the external crates it must
+# never import.  The rule names are derived from the key, `<dir>-upward-dep` and
+# `<dir>-forbidden-crate`, so `ota` keeps its C-6 spelling and a new subsystem
+# only needs a row here.  `crate::config`, `mesh_protocol`, `tlsr8266_hal`,
+# `critical_section` and the subsystem's own `fsm` stay legal everywhere.
+SUBSYSTEM_PURITY = {
+    "ota": (OTA_FORBIDDEN_MODULES, OTA_FORBIDDEN_CRATES),
+    "factory_reset": (
+        FACTORY_RESET_FORBIDDEN_MODULES,
+        FACTORY_RESET_FORBIDDEN_CRATES,
+    ),
+    "light": (LIGHT_FORBIDDEN_MODULES, LIGHT_FORBIDDEN_CRATES),
+}
 
 LOGGING_MACROS = ("uprintln", "uprint")
 
@@ -904,12 +986,18 @@ def _statement_of(text: str, index: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# OTA purity: `rust/src/ota/**` production code must not name the layers above.
+# Subsystem purity: a `rust/src/<subsystem>/**` file must not name the layers
+# above it.  The table lives in `SUBSYSTEM_PURITY`.
 # ---------------------------------------------------------------------------
 
 
-def audit_ota_purity_source(text: str, path: str) -> list[Violation]:
-    """Audit one ``rust/src/ota/`` file for upward and forbidden names.
+def audit_subsystem_purity_source(
+    text: str, path: str, directory: str
+) -> list[Violation]:
+    """Audit one subsystem file for upward and forbidden names.
+
+    ``directory`` is the key of its row in [`SUBSYSTEM_PURITY`]; the reported
+    rules are ``<directory>-upward-dep`` and ``<directory>-forbidden-crate``.
 
     Runs on ``production_code()``, so the subsystem's own ``#[cfg(test)]``
     modules are exempt: they legitimately use
@@ -924,18 +1012,33 @@ def audit_ota_purity_source(text: str, path: str) -> list[Violation]:
     forbidden external crate is read from ``use`` statements, matching how
     ``LAYER_EXTERNAL_CRATES`` has always worked.
     """
+    forbidden_modules, forbidden_crates = SUBSYSTEM_PURITY[directory]
     code = production_code(text)
     collector = _Collector(path, text)
     for index, head in iter_crate_references(code):
         module = head[0]
-        if module in OTA_FORBIDDEN_MODULES:
-            collector.add(index, "ota-upward-dep", f"crate::{module}")
+        if module in forbidden_modules:
+            collector.add(index, f"{directory}-upward-dep", f"crate::{module}")
     for index, head in iter_imports(code):
         root = head[0]
-        if root in OTA_FORBIDDEN_CRATES:
-            collector.add(index, "ota-forbidden-crate", root)
+        if root in forbidden_crates:
+            collector.add(index, f"{directory}-forbidden-crate", root)
     collector.found.sort(key=lambda item: (item.line, item.rule, item.violation))
     return collector.found
+
+
+def audit_ota_purity_source(text: str, path: str) -> list[Violation]:
+    """The ``ota`` row of [`SUBSYSTEM_PURITY`] (C-6's original rule)."""
+    return audit_subsystem_purity_source(text, path, "ota")
+
+
+def _subsystem_of(path: str, roots: dict[str, str]) -> str | None:
+    """The subsystem whose directory directly holds ``path``, if any."""
+    directory = os.path.normpath(os.path.dirname(path))
+    for name, root in roots.items():
+        if directory == os.path.normpath(root):
+            return name
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -994,12 +1097,13 @@ def _documented_above(text: str, stripped: bytearray, line: int) -> bool:
 
 
 def audit_universal_source(
-    text: str, path: str, ota: bool = False
+    text: str, path: str, subsystem: str | None = None
 ) -> tuple[list[Violation], int]:
     """Apply the universal rules to one file.
 
-    ``ota`` marks a file under ``rust/src/ota/``, which also gets the
-    ``ota-purity`` rule: the subsystem may not name the layers above it.
+    ``subsystem`` names the [`SUBSYSTEM_PURITY`] row the file belongs to (a
+    directory name such as ``"ota"``); such a file also gets that subsystem's
+    purity rule: it may not name the layers above it.
 
     Returns the violations and the number of production ``unsafe`` tokens, so
     the caller can total the budget across the tree.
@@ -1031,8 +1135,10 @@ def audit_universal_source(
     target_code = blank_copy(text, strip_host_only_code(text, stripped))
     unsafe_total = len(_UNSAFE_RE.findall(target_code))
 
-    if ota:
-        collector.found.extend(audit_ota_purity_source(text, path))
+    if subsystem is not None:
+        collector.found.extend(
+            audit_subsystem_purity_source(text, path, subsystem)
+        )
 
     return collector.found, unsafe_total
 
@@ -1042,6 +1148,7 @@ def audit_universal(
     label: str,
     enforce_budget: bool = True,
     ota_root: str | None = None,
+    subsystem_roots: dict[str, str] | None = None,
 ) -> tuple[list[Violation], int]:
     """Audit every path; return violations and the tree-wide ``unsafe`` total.
 
@@ -1049,20 +1156,24 @@ def audit_universal(
     measured there, and the ``mesh-protocol`` crate is a separate tree whose
     ``unsafe`` sites are bounded by the rule itself, not by a ceiling.
 
-    ``ota_root`` is the firmware's ``ota/`` directory; every file directly in it
-    also gets the ``ota-purity`` rule.  ``None`` disables that rule, which is
-    what the workspace crate trees want (they have no ``ota`` subsystem).
+    ``subsystem_roots`` maps a [`SUBSYSTEM_PURITY`] directory name to the
+    directory it names; every file directly in one of them also gets that
+    subsystem's purity rule.  ``ota_root`` is C-6's spelling of the ``"ota"``
+    entry and is kept so existing callers do not have to change.  ``None`` on
+    both disables the purity rules, which is what the workspace crate trees want
+    (they have no subsystems).
     """
     violations: list[Violation] = []
     unsafe_total = 0
-    ota_dir = None if ota_root is None else os.path.normpath(ota_root)
+    roots = dict(subsystem_roots or {})
+    if ota_root is not None:
+        roots["ota"] = ota_root
     for path in paths:
         with open(path, "r", encoding="utf-8") as handle:
             text = handle.read()
-        in_ota = ota_dir is not None and os.path.normpath(
-            os.path.dirname(path)
-        ) == ota_dir
-        found, count = audit_universal_source(text, _display_path(path), ota=in_ota)
+        found, count = audit_universal_source(
+            text, _display_path(path), subsystem=_subsystem_of(path, roots)
+        )
         violations.extend(found)
         unsafe_total += count
 
@@ -1245,7 +1356,10 @@ def main(argv: list[str] | None = None) -> int:
                 universal, _unsafe_total = audit_universal(
                     src_paths,
                     _display_path(src_root),
-                    ota_root=os.path.join(src_root, "ota"),
+                    subsystem_roots={
+                        name: os.path.join(src_root, name)
+                        for name in SUBSYSTEM_PURITY
+                    },
                 )
             for label, crate_root, crate_paths in crate_audits:
                 display = _display_path(crate_root)

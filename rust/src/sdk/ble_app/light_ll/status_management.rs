@@ -80,7 +80,7 @@ use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::common::sync::{CriticalSectionMutex, SimplifyLS};
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
-use crate::sdk::mcu::register::{read_reg_rnd_number, read_reg_system_tick};
+use tlsr8266_pac::{read_reg_rnd_number, read_reg_system_tick};
 
 use super::mesh_management::{
     mesh_send_online_status, MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA,
@@ -385,9 +385,9 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_crc_adv, mock_rf_set_tx_rx_off,
     };
     use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use mry::Any;
     use std::sync::atomic::Ordering;
+    use tlsr8266_pac::mock_read_reg_system_tick;
 
     fn setup_test_state() {
         // Reset all status management state

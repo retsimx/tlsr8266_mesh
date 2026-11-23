@@ -7,7 +7,7 @@
 //! The TLSR8266 DMA controller provides multiple channels for data transfer operations,
 //! helping to offload the CPU and improve system performance for I/O operations.
 
-use crate::sdk::mcu::register::write_reg_dma_chn_irq_msk;
+use tlsr8266_pac::write_reg_dma_chn_irq_msk;
 
 /// Initialize the DMA controller.
 ///
@@ -34,8 +34,8 @@ pub fn dma_init() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::mock_write_reg_dma_chn_irq_msk;
     use mry::Any;
+    use tlsr8266_pac::mock_write_reg_dma_chn_irq_msk;
 
     /// Tests the DMA initialization function.
     ///

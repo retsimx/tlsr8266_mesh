@@ -15,13 +15,13 @@ use crate::sdk::mcu::crypto::{
     aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet,
     encode_password,
 };
-use crate::sdk::mcu::register::read_reg_system_tick;
 use mesh_protocol::mesh_types::{
     PairState, PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK,
     PAIR_OP_RESET_MESH, PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
     PAIR_OP_VERIFY_CREDENTIALS,
 };
 use mesh_protocol::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
+use tlsr8266_pac::read_reg_system_tick;
 
 //------------------------------------------------------------------------------
 // BLE Pairing and Security Module
@@ -1205,14 +1205,14 @@ mod tests {
         mock_aes_att_decryption, mock_aes_att_decryption_packet, mock_aes_att_encryption,
         mock_aes_att_encryption_packet, mock_encode_password,
     }; // Added mock_aes_att_decryption
-    use crate::sdk::mcu::register::mock_read_reg_system_tick;
     use crate::sdk::rf_drv::{emit_light_event, mock_emit_light_event}; // Added mock for callback
     use core::mem::size_of;
     use mesh_protocol::packet_types::{
         MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
     }; // Added PacketAttReadRsp
     use mry::send_wrapper::SendWrapper;
-    use mry::{self, Any}; // Added mock for delete pair
+    use mry::{self, Any};
+    use tlsr8266_pac::mock_read_reg_system_tick; // Added mock for delete pair
 
     #[test]
     fn test_pair_state_from_known_values() {

@@ -95,10 +95,10 @@ use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time64, CLOCK_SYS_CLOCK_1US};
-use crate::sdk::mcu::register::*;
 use crate::BIT;
 use mesh_protocol::mesh_types::*;
 use mesh_protocol::packet_types::*;
+use tlsr8266_pac::*;
 
 use super::mesh_management::{
     mesh_node_update_status, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
@@ -1596,7 +1596,7 @@ mod tests {
     };
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time64, CLOCK_SYS_CLOCK_1US};
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_dma_tx_rptr, mock_read_reg_dma_tx_wptr, mock_read_reg_rnd_number,
         mock_read_reg_system_tick, mock_write_reg_dma_tx_fifo,
     };

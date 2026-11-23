@@ -22,7 +22,7 @@ use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::RfOperationState;
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-use crate::sdk::mcu::register::*;
+use tlsr8266_pac::*;
 
 /// Returns the number of GATT advertisement cycles to perform.
 ///
@@ -158,7 +158,7 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
     use crate::sdk::mcu::analog::{analog_write, mock_analog_write};
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_rf_mode, mock_read_reg_system_tick, mock_write_reg8,
         mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_pll_rx_fine_div_tune,
         mock_write_reg_rf_access_code, mock_write_reg_rf_channel, mock_write_reg_rf_crc,

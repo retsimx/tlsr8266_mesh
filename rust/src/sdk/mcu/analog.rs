@@ -5,11 +5,11 @@
 //! are critical for configuring various hardware components including
 //! RF transceiver parameters, power management, and clock settings.
 
-use crate::sdk::mcu::register::{
+use critical_section;
+use tlsr8266_pac::{
     read_reg_ana_ctrl, read_reg_ana_data, write_reg_ana_addr, write_reg_ana_ctrl,
     write_reg_ana_data, FLD_ANA,
 };
-use critical_section;
 
 /// Waits until analog register operations are complete.
 ///
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
 
     // Import the mock functions from register module
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_ana_ctrl, mock_read_reg_ana_data, mock_write_reg_ana_addr,
         mock_write_reg_ana_ctrl, mock_write_reg_ana_data,
     };

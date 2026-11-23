@@ -661,6 +661,104 @@ class TestManifestAndCache(_RepoCase):
         self.assertEqual((self.out / "lightblemesh.bin").read_bytes(), b"binary image")
 
 
+class TestBuildInputs(_RepoCase):
+    """The cache key must cover every manifest that can change the emitted IR."""
+
+    def _compute_from_driver_inputs(self) -> dict:
+        """Build the manifest with exactly the input list the driver collects."""
+        return build_firmware.compute_manifest(
+            [],
+            [self.ll_a, self.ll_b],
+            3543,
+            build_firmware._build_inputs(self.repo),
+            self.boot_link,
+            self.tools,
+        )
+
+    def test_crate_manifests_and_lockfile_are_hashed(self) -> None:
+        pac_manifest = _write(
+            self.repo / "rust/crates/tlsr8266-pac/Cargo.toml",
+            '[package]\nname = "tlsr8266-pac"\n',
+        )
+        _write(self.repo / "rust/crates/alpha-sorted-first/Cargo.toml", "[package]\n")
+        _write(self.repo / "rust/Cargo.lock", "# lock\n")
+
+        with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
+            baseline = self._compute_from_driver_inputs()
+
+        self.assertEqual(
+            [entry["path"] for entry in baseline["build_inputs"]],
+            [
+                "rust/Cargo.toml",
+                "rust/rust-toolchain.toml",
+                "rust/Cargo.lock",
+                "rust/crates/alpha-sorted-first/Cargo.toml",
+                "rust/crates/tlsr8266-pac/Cargo.toml",
+            ],
+        )
+        self.assertIn(
+            {
+                "path": "rust/crates/tlsr8266-pac/Cargo.toml",
+                "sha256": hashlib.sha256(pac_manifest.read_bytes()).hexdigest(),
+            },
+            baseline["build_inputs"],
+        )
+
+        pac_manifest.write_text(
+            '[package]\nname = "tlsr8266-pac"\nedition = "2021"\n', encoding="utf-8"
+        )
+        with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
+            self.assertFalse(
+                build_firmware.manifests_equal(
+                    baseline, self._compute_from_driver_inputs()
+                )
+            )
+
+    def test_absent_lockfile_and_crates_dir_are_tolerated(self) -> None:
+        with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
+            manifest = self._compute_from_driver_inputs()
+        self.assertEqual(
+            [entry["path"] for entry in manifest["build_inputs"]],
+            ["rust/Cargo.toml", "rust/rust-toolchain.toml"],
+        )
+
+    def test_run_build_cache_key_covers_crate_manifests(self) -> None:
+        _write(self.repo / "rust/crates/tlsr8266-pac/Cargo.toml", "[package]\n")
+        stage = self.out / "default"
+        _write(stage / "lightblemesh", b"elf image")
+        _write(stage / "lightblemesh.bin", b"binary image")
+        args = build_firmware._build_parser().parse_args(
+            [
+                "--llc",
+                str(self.tools["llc"]),
+                "--llvm-link",
+                str(self.tools["llvm_link"]),
+                "--opt",
+                str(self.tools["opt"]),
+                "--ld",
+                str(self.tools["ld"]),
+                "--objcopy",
+                str(self.tools["objcopy"]),
+            ]
+        )
+
+        with mock.patch.object(build_firmware, "REPO_ROOT", self.repo):
+            seeded = self._compute_from_driver_inputs()
+            seeded["toolchain"] = FAKE_TOOLCHAIN
+            build_firmware._write_json(stage / "manifest.json", seeded)
+            with mock.patch.object(
+                build_firmware, "probe_toolchain", return_value=FAKE_TOOLCHAIN
+            ), mock.patch.object(
+                build_firmware, "_cargo_build", return_value=[self.ll_a, self.ll_b]
+            ), mock.patch.object(build_firmware, "run_command") as runner:
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(build_firmware._run_build(args), 0)
+
+        self.assertIn(CACHE_HIT_MESSAGE, printed.getvalue())
+        runner.assert_not_called()
+
+
 class TestPipelineCommands(_TempCase):
     """Pin the normative argv of the five-step pure-LLVM pipeline.
 

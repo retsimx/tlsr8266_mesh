@@ -772,10 +772,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "tlsr8266_mesh"
+name = "tlsr8266-pac"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.9.0",
+ "mry",
+ "paste",
+]
+
+[[package]]
+name = "tlsr8266_mesh"
+version = "0.1.0"
+dependencies = [
  "bytemuck",
  "const_format",
  "critical-section",
@@ -791,9 +799,9 @@ dependencies = [
  "mry",
  "num-derive",
  "num-traits",
- "paste",
  "portable-atomic",
  "static_cell",
+ "tlsr8266-pac",
 ]
 
 [[package]]

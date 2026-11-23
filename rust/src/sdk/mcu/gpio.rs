@@ -1,6 +1,8 @@
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::gpio::GPIO_PIN_TYPE::*;
-use crate::sdk::mcu::register::{
+use crate::BIT;
+use crate::{BM_CLR, BM_SET};
+use tlsr8266_pac::{
     read_reg_gpio_gpio_func, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_gpio_func,
     write_reg_gpio_oen, write_reg_gpio_out, write_reg_gpio_pa_setting1, write_reg_gpio_pa_setting2,
     write_reg_gpio_pb_setting1, write_reg_gpio_pb_setting2, write_reg_gpio_pc_setting1,
@@ -8,8 +10,6 @@ use crate::sdk::mcu::register::{
     write_reg_gpio_pe_setting1, write_reg_gpio_pe_setting2, write_reg_gpio_pf_setting1,
     write_reg_gpio_pf_setting2,
 };
-use crate::{regrw_idx, BIT};
-use crate::{BM_CLR, BM_SET};
 
 pub const RF_FAST_MODE_1M: u8 = 1;
 pub const PM_PIN_PULL_DEFAULT: u8 = 1;
@@ -1081,7 +1081,7 @@ pub fn gpio_write(pin: u32, value: u32) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_gpio_gpio_func, mock_read_reg_gpio_oen, mock_read_reg_gpio_out,
         mock_write_reg_gpio_gpio_func, mock_write_reg_gpio_oen, mock_write_reg_gpio_out,
     };

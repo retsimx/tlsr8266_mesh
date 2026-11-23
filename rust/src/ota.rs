@@ -27,13 +27,13 @@ use crate::sdk::light::*;
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::register::{
-    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
-};
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::sdk::pm::light_sw_reboot;
 use mesh_protocol::crc::crc16;
 use mesh_protocol::packet_types::{Packet, PacketAttData};
+use tlsr8266_pac::{
+    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
+};
 
 /// The mutable OTA runtime scalars shared by the GATT write handler, the mesh
 /// OTA command path and the system-timer interrupt.
@@ -543,15 +543,15 @@ mod tests {
     use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_sleep_us};
     use crate::sdk::mcu::gpio::mock_gpio_set_func;
-    use crate::sdk::mcu::register::{
-        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
-        mock_write_reg_gpio_out, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_oen,
-        write_reg_gpio_out,
-    };
     use crate::sdk::mcu::watchdog::mock_wd_clear;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
     use std::sync::{Arc, Mutex};
+    use tlsr8266_pac::{
+        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
+        mock_write_reg_gpio_out, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_oen,
+        write_reg_gpio_out,
+    };
 
     /// The GATT write handler stages packets without holding `OTA_STATE` while
     /// it copies into `BUFF_RESPONSE`, and advances the cursor once per packet.

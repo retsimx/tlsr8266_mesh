@@ -34,8 +34,8 @@ use crate::sdk::ble_app::rf_drv_8266::{
 use crate::sdk::common::sync::SimplifyLS;
 use crate::sdk::light::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-use crate::sdk::mcu::register::*;
 use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
+use tlsr8266_pac::*;
 
 /// Handles RF transmission complete interrupt.
 ///
@@ -435,13 +435,13 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::{mock_rf_start_stx2rx, mock_rf_stop_trx};
     use crate::sdk::light::{BlePeripheralLinkState, LightRxBuff, LIGHT_RX_BUFF_COUNT};
     use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use crate::sdk::mcu::register::{
+    use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
+    use tlsr8266_pac::{
         mock_read_reg_rf_rx_status, mock_read_reg_system_tick, mock_read_reg_system_tick_irq,
         mock_write_reg8, mock_write_reg_dma2_addr, mock_write_reg_dma3_addr,
         mock_write_reg_dma3_mode, mock_write_reg_rf_irq_status, mock_write_reg_rf_mode_control,
         mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
     };
-    use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.

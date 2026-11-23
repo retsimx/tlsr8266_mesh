@@ -18,11 +18,9 @@ use crate::sdk::light::{
 };
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::{clock_time, clock_time_exceed};
-use crate::sdk::mcu::register::{
-    read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_TMR,
-};
 use crate::sdk::pm::REGA_LIGHT_OFF;
 use mesh_protocol::mesh_types::MESH_NODE_ST_PAR_LEN;
+use tlsr8266_pac::{read_reg_tmr_ctrl, write_reg_tmr1_tick, write_reg_tmr_ctrl, FLD_TMR};
 
 const TRANSITION_TIME_MS: u64 = 1500;
 const LIGHT_SAVE_VALID_FLAG: u8 = 0xA5;
@@ -627,12 +625,10 @@ mod tests {
     use crate::sdk::mcu::analog::{mock_analog_read, mock_analog_write};
     use crate::sdk::mcu::clock::{clock_time64, mock_clock_time64};
     use crate::sdk::mcu::clock::{mock_clock_time, mock_clock_time_exceed};
-    use crate::sdk::mcu::register::{
-        mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl,
-    };
     use embassy_time::Instant;
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_pac::{mock_read_reg_tmr_ctrl, mock_write_reg_tmr1_tick, mock_write_reg_tmr_ctrl};
 
     // --- Helper Functions ---
 

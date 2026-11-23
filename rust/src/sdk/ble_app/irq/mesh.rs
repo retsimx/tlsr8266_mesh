@@ -30,8 +30,8 @@ use crate::sdk::light::{
     RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
 };
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1US;
-use crate::sdk::mcu::register::*;
 use mesh_protocol::mesh_types::{is_online, MESH_NODE_ST_VAL_LEN};
+use tlsr8266_pac::*;
 
 #[cfg_attr(test, mry::mry)]
 /// Reports mesh node status information for transmission to the BLE master.
@@ -238,7 +238,7 @@ mod tests {
     };
 
     // Import mock functions for register operations
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_system_tick_irq,
     };
 

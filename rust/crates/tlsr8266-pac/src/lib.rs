@@ -1,8 +1,9 @@
-extern crate core;
-extern crate paste;
+#![feature(coverage_attribute)]
+#![cfg_attr(target_os = "none", no_std)]
+#![allow(non_camel_case_types)]
 
-use crate::{BIT, BIT_MASK_LEN, BIT_RNG};
-use bitflags::bitflags;
+//! TLSR8266 register map: memory-mapped register addresses, volatile accessors
+//! and datasheet bit-field definitions, extracted from the firmware crate.
 
 //****************************************************
 // TLSR8266 Register Documentation
@@ -54,6 +55,35 @@ use bitflags::bitflags;
 //    write_reg_gpio_pa_out(out);
 //    ```
 
+/// Set bit `$x` of a zero-based word.
+#[macro_export]
+macro_rules! BIT {
+    ( $x:expr ) => {
+        1 << $x
+    };
+}
+
+/// Mask of the low `$x` bits, i.e. `BIT!($x) - 1`.
+#[macro_export]
+macro_rules! BIT_MASK_LEN {
+    ( $x:expr ) => {
+        $crate::BIT!($x) - 1
+    };
+}
+
+// bits range: BITS_RNG(4, 5)  0b000111110000,  start from 4, length = 5
+#[macro_export]
+macro_rules! BIT_RNG {
+    ( $s:expr, $e:expr ) => {
+        $crate::BIT_MASK_LEN!($e - $s + 1) << $s
+    };
+}
+
+#[cfg(not(target_os = "none"))]
+pub mod fake_mmio;
+
+use bitflags::bitflags;
+
 /// Base address for all memory-mapped registers
 pub const REG_BASE_ADDR: u32 = 0x800000;
 
@@ -69,17 +99,19 @@ pub const REG_BASE_ADDR: u32 = 0x800000;
 ///
 /// # Examples
 /// ```
+/// use tlsr8266_pac::write_reg8;
+///
 /// // Set the RF channel to 5
 /// write_reg8(0x40d, 5);
 /// ```
 #[coverage(off)]
-#[cfg_attr(test, mry::mry)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg8(addr: u32, v: u8) {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::write_u8(addr, v);
+        crate::fake_mmio::write_u8(addr, v)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `write_volatile` preserves the 8-bit
     // access, and no Rust reference aliases the register.
@@ -94,13 +126,13 @@ pub fn write_reg8(addr: u32, v: u8) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 16-bit value to write
 #[coverage(off)]
-#[cfg_attr(test, mry::mry)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg16(addr: u32, v: u16) {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::write_u16(addr, v);
+        crate::fake_mmio::write_u16(addr, v)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `write_volatile` preserves the 16-bit
     // access, and no Rust reference aliases the register.
@@ -115,13 +147,13 @@ pub fn write_reg16(addr: u32, v: u16) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 32-bit value to write
 #[coverage(off)]
-#[cfg_attr(test, mry::mry)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg32(addr: u32, v: u32) {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::write_u32(addr, v);
+        crate::fake_mmio::write_u32(addr, v)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO write. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `write_volatile` preserves the 32-bit
     // access, and no Rust reference aliases the register.
@@ -140,17 +172,19 @@ pub fn write_reg32(addr: u32, v: u32) {
 ///
 /// # Examples
 /// ```
+/// use tlsr8266_pac::read_reg8;
+///
 /// // Read the current RF channel
 /// let channel = read_reg8(0x40d);
 /// ```
 #[coverage(off)]
-#[cfg_attr(test, mry::mry)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg8(addr: u32) -> u8 {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::read_u8(addr);
+        crate::fake_mmio::read_u8(addr)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `read_volatile` preserves the 8-bit
     // access and the value is returned by copy, so no reference is created.
@@ -167,13 +201,13 @@ pub fn read_reg8(addr: u32) -> u8 {
 /// # Returns
 /// The 16-bit value read from the register
 #[coverage(off)]
-#[cfg_attr(test, mry::mry)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg16(addr: u32) -> u16 {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::read_u16(addr);
+        crate::fake_mmio::read_u16(addr)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `read_volatile` preserves the 16-bit
     // access and the value is returned by copy, so no reference is created.
@@ -189,14 +223,14 @@ pub fn read_reg16(addr: u32) -> u16 {
 ///
 /// # Returns
 /// The 32-bit value read from the register
-#[cfg_attr(test, mry::mry)]
 #[coverage(off)]
+#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg32(addr: u32) -> u32 {
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     {
-        return fake_mmio::read_u32(addr);
+        crate::fake_mmio::read_u32(addr)
     }
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     // SAFETY: (1) volatile MMIO read. `addr | REG_BASE_ADDR` is a datasheet
     // register offset in the 0x800000 map; `read_volatile` preserves the 32-bit
     // access and the value is returned by copy, so no reference is created.
@@ -209,16 +243,17 @@ pub fn read_reg32(addr: u32) -> u32 {
 // Register access macros
 //****************************************************
 
-#[macro_export]
 macro_rules! regrw_idx {
     ( $x:ident, $a:expr, $s:literal ) => {
         paste::paste! {
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>](i: u32) -> [<u $s>] {
-                return [<read_reg $s>]($a + i);
+                [<read_reg $s>]($a + i)
             }
 
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>], i: u32) {
                 [<write_reg $s>]($a + i, value);
             }
@@ -226,16 +261,17 @@ macro_rules! regrw_idx {
     };
 }
 
-#[macro_export]
 macro_rules! regrw {
     ( $x:ident, $a:expr, $s:expr ) => {
         paste::paste! {
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>]() -> [<u $s>] {
-                return [<read_reg $s>]($a);
+                [<read_reg $s>]($a)
             }
 
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>]) {
                 [<write_reg $s>]($a, value);
             }
@@ -243,16 +279,17 @@ macro_rules! regrw {
     };
 }
 
-#[macro_export]
 macro_rules! regrw_copy {
     ( $x:ident, $y:ident, $t:expr ) => {
         paste::paste! {
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>]() -> [<u $t>] {
                 [<read_ $y>]()
             }
 
-            #[cfg_attr(test, mry::mry)]
+            #[coverage(off)]
+            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $t>]) {
                 [<write_ $y>](value)
             }
@@ -2173,16 +2210,23 @@ bitflags! {
 
 ///////////////////// PM register /////////////////////////
 
+#[allow(non_upper_case_globals)]
 pub const rega_deepsleep_flag: u8 = 0x3f; //0x34 - 0x39 (watch dog reset)
                                           // #define		rega_deepsleep_flag: u8 =		0x34		//0x3a - 0x3b (power-on reset)
                                           // pub const  		flag_deepsleep_wakeup	(analog_read(0x3f) & 0x40)
 
+#[allow(non_upper_case_globals)]
 pub const rega_wakeup_en_val0: u8 = 0x41;
+#[allow(non_upper_case_globals)]
 pub const rega_wakeup_en_val1: u8 = 0x42;
+#[allow(non_upper_case_globals)]
 pub const rega_wakeup_en_val2: u8 = 0x43;
+#[allow(non_upper_case_globals)]
 pub const raga_gpio_wkup_pol: u8 = 0x44;
 
+#[allow(non_upper_case_globals)]
 pub const raga_pga_gain0: u8 = 0x86;
+#[allow(non_upper_case_globals)]
 pub const raga_pga_gain1: u8 = 0x87;
 
 // Analog (indirect) RF register addresses. Values are indices for
@@ -2199,483 +2243,56 @@ pub const REGA_RF_OUTPUT_MATCH: u8 = 0xa7; // RF output match network (TBL_RF_PO
 /// of `analog_write(0x06, 0)` is therefore not certain.
 pub const REGA_SAR_ADC_PWR: u8 = 0x06;
 
-//****************************************************
-// Test-only fake register bank
-//****************************************************
-
-/// In-process register bank that the `read_reg*` / `write_reg*` accessors route
-/// through under `cfg(test)` instead of touching silicon.
-///
-/// Storage is keyed **per byte** (`addr | REG_BASE_ADDR`), so a 32-bit register
-/// and the 8-bit view of one of its bytes are literally the same byte and
-/// overlapping silicon registers alias for free. A `BTreeMap` instead of a
-/// fixed-size array is what removes the address-bounds panic class: arbitrary
-/// addresses such as `0x1234` or `0x808004` are just sparse keys.
-///
-/// All state lives behind one `Mutex`, and every lock recovers from poisoning,
-/// so a single panicking test cannot break the rest of a `--test-threads=1` run.
-#[cfg(test)]
-pub mod fake_mmio {
-    use super::REG_BASE_ADDR;
-    use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard};
-    use std::vec::Vec;
-
-    type Hook8 = fn(usize) -> u8;
-    type Hook16 = fn(usize) -> u16;
-    type Hook32 = fn(usize) -> u32;
-
-    /// One logged write: normalized address, access width, zero-extended value.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct RegWrite {
-        /// Normalized address, i.e. `addr | REG_BASE_ADDR`.
-        pub addr: u32,
-        /// Access width in bytes: 1, 2 or 4.
-        pub width: u8,
-        /// Written value, zero-extended to 32 bits.
-        pub value: u32,
-    }
-
-    struct FakeMmioState {
-        regs: BTreeMap<u32, u8>,
-        writes: Vec<RegWrite>,
-        read_counts: BTreeMap<u32, usize>,
-        hooks8: BTreeMap<u32, Hook8>,
-        hooks16: BTreeMap<u32, Hook16>,
-        hooks32: BTreeMap<u32, Hook32>,
-    }
-
-    impl FakeMmioState {
-        const fn new() -> Self {
-            Self {
-                regs: BTreeMap::new(),
-                writes: Vec::new(),
-                read_counts: BTreeMap::new(),
-                hooks8: BTreeMap::new(),
-                hooks16: BTreeMap::new(),
-                hooks32: BTreeMap::new(),
-            }
-        }
-    }
-
-    static STATE: Mutex<FakeMmioState> = Mutex::new(FakeMmioState::new());
-
-    /// Lock the bank, recovering the inner state if an earlier test panicked
-    /// while holding the lock.
-    fn lock() -> MutexGuard<'static, FakeMmioState> {
-        STATE.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Normalize a datasheet offset into the memory-mapped window. `|` (not `+`)
-    /// keeps every documented user of `read_reg*`/`write_reg*` — including the
-    /// already-normalized `0x808004` form — on a single key.
-    fn norm(addr: u32) -> u32 {
-        addr | REG_BASE_ADDR
-    }
-
-    /// Unwritten bytes read as 0, like zeroed SRAM-backed registers.
-    fn read_byte(state: &FakeMmioState, addr: u32) -> u8 {
-        state.regs.get(&addr).copied().unwrap_or(0)
-    }
-
-    fn write_byte(state: &mut FakeMmioState, addr: u32, v: u8) {
-        state.regs.insert(addr, v);
-    }
-
-    /// 8-bit read used by `read_reg8`. Runs a registered hook if there is one.
-    pub fn read_u8(addr: u32) -> u8 {
-        let a = norm(addr);
-        let (hook, call_idx, stored) = {
-            let mut state = lock();
-            let call_idx = *state.read_counts.get(&a).unwrap_or(&0);
-            state.read_counts.insert(a, call_idx + 1);
-            let hook = state.hooks8.get(&a).copied();
-            (hook, call_idx, read_byte(&state, a))
-        };
-        // The guard is dropped above, so a hook may touch the bank re-entrantly.
-        match hook {
-            Some(hook) => hook(call_idx),
-            None => stored,
-        }
-    }
-
-    /// 16-bit little-endian read used by `read_reg16`.
-    pub fn read_u16(addr: u32) -> u16 {
-        let a = norm(addr);
-        let (hook, call_idx, stored) = {
-            let mut state = lock();
-            let call_idx = *state.read_counts.get(&a).unwrap_or(&0);
-            state.read_counts.insert(a, call_idx + 1);
-            let hook = state.hooks16.get(&a).copied();
-            let stored = u16::from_le_bytes([read_byte(&state, a), read_byte(&state, a + 1)]);
-            (hook, call_idx, stored)
-        };
-        match hook {
-            Some(hook) => hook(call_idx),
-            None => stored,
-        }
-    }
-
-    /// 32-bit little-endian read used by `read_reg32`.
-    pub fn read_u32(addr: u32) -> u32 {
-        let a = norm(addr);
-        let (hook, call_idx, stored) = {
-            let mut state = lock();
-            let call_idx = *state.read_counts.get(&a).unwrap_or(&0);
-            state.read_counts.insert(a, call_idx + 1);
-            let hook = state.hooks32.get(&a).copied();
-            let stored = u32::from_le_bytes([
-                read_byte(&state, a),
-                read_byte(&state, a + 1),
-                read_byte(&state, a + 2),
-                read_byte(&state, a + 3),
-            ]);
-            (hook, call_idx, stored)
-        };
-        match hook {
-            Some(hook) => hook(call_idx),
-            None => stored,
-        }
-    }
-
-    /// 8-bit write used by `write_reg8`. Logs exactly one `RegWrite`.
-    pub fn write_u8(addr: u32, v: u8) {
-        let a = norm(addr);
-        let mut state = lock();
-        write_byte(&mut state, a, v);
-        state.writes.push(RegWrite {
-            addr: a,
-            width: 1,
-            value: v as u32,
-        });
-    }
-
-    /// 16-bit little-endian write used by `write_reg16`. Logs exactly one `RegWrite`.
-    pub fn write_u16(addr: u32, v: u16) {
-        let a = norm(addr);
-        let mut state = lock();
-        for (i, byte) in v.to_le_bytes().iter().enumerate() {
-            write_byte(&mut state, a + i as u32, *byte);
-        }
-        state.writes.push(RegWrite {
-            addr: a,
-            width: 2,
-            value: v as u32,
-        });
-    }
-
-    /// 32-bit little-endian write used by `write_reg32`. Logs exactly one `RegWrite`.
-    pub fn write_u32(addr: u32, v: u32) {
-        let a = norm(addr);
-        let mut state = lock();
-        for (i, byte) in v.to_le_bytes().iter().enumerate() {
-            write_byte(&mut state, a + i as u32, *byte);
-        }
-        state.writes.push(RegWrite {
-            addr: a,
-            width: 4,
-            value: v,
-        });
-    }
-
-    /// Handle to the global fake register bank. The bank is process-wide, so
-    /// these are plain functions grouped under a name for readable call sites.
-    pub struct FakeMmio;
-
-    impl FakeMmio {
-        /// Clear the byte map, the write log, the read counters and all hooks.
-        pub fn reset() {
-            let mut state = lock();
-            state.regs.clear();
-            state.writes.clear();
-            state.read_counts.clear();
-            state.hooks8.clear();
-            state.hooks16.clear();
-            state.hooks32.clear();
-        }
-
-        /// Seed a byte directly. Seeding is test setup, not a register access, so
-        /// it neither appends to the write log nor consults a read hook.
-        pub fn set_reg8(addr: u32, v: u8) {
-            let mut state = lock();
-            write_byte(&mut state, norm(addr), v);
-        }
-
-        /// Seed two little-endian bytes directly (no write-log entry).
-        pub fn set_reg16(addr: u32, v: u16) {
-            let a = norm(addr);
-            let mut state = lock();
-            for (i, byte) in v.to_le_bytes().iter().enumerate() {
-                write_byte(&mut state, a + i as u32, *byte);
-            }
-        }
-
-        /// Seed four little-endian bytes directly (no write-log entry).
-        pub fn set_reg32(addr: u32, v: u32) {
-            let a = norm(addr);
-            let mut state = lock();
-            for (i, byte) in v.to_le_bytes().iter().enumerate() {
-                write_byte(&mut state, a + i as u32, *byte);
-            }
-        }
-
-        /// Peek one byte of the bank. Deliberately bypasses read hooks and the
-        /// read counters: this is the raw inspection API, so a read hook may
-        /// call it from inside itself without recursing or deadlocking.
-        pub fn reg8(addr: u32) -> u8 {
-            let state = lock();
-            read_byte(&state, norm(addr))
-        }
-
-        /// Peek two little-endian bytes of the bank (no hooks, no counters).
-        pub fn reg16(addr: u32) -> u16 {
-            let a = norm(addr);
-            let state = lock();
-            u16::from_le_bytes([read_byte(&state, a), read_byte(&state, a + 1)])
-        }
-
-        /// Peek four little-endian bytes of the bank (no hooks, no counters).
-        pub fn reg32(addr: u32) -> u32 {
-            let a = norm(addr);
-            let state = lock();
-            u32::from_le_bytes([
-                read_byte(&state, a),
-                read_byte(&state, a + 1),
-                read_byte(&state, a + 2),
-                read_byte(&state, a + 3),
-            ])
-        }
-
-        /// The ordered write log (`write_reg{8,16,32}` calls, oldest first).
-        pub fn writes() -> Vec<RegWrite> {
-            lock().writes.clone()
-        }
-
-        /// Drop the write-log entries, keeping the byte map intact.
-        pub fn clear_writes() {
-            lock().writes.clear();
-        }
-
-        /// Script 8-bit reads of `addr`: the hook receives the per-address call
-        /// index (0 on the first read, 1 on the second, ...).
-        pub fn on_read8(addr: u32, hook: fn(usize) -> u8) {
-            lock().hooks8.insert(norm(addr), hook);
-        }
-
-        /// Script 16-bit reads of `addr`; see [`FakeMmio::on_read8`].
-        pub fn on_read16(addr: u32, hook: fn(usize) -> u16) {
-            lock().hooks16.insert(norm(addr), hook);
-        }
-
-        /// Script 32-bit reads of `addr`; see [`FakeMmio::on_read8`].
-        pub fn on_read32(addr: u32, hook: fn(usize) -> u32) {
-            lock().hooks32.insert(norm(addr), hook);
-        }
-
-        /// Panic while holding the bank lock, so the next access has to recover
-        /// from a poisoned mutex. Exists only to prove the poisoning policy.
-        #[doc(hidden)]
-        pub fn poison_bank_for_test() {
-            let _guard = lock();
-            panic!("intentional panic while holding the FakeMmio lock");
-        }
-    }
-}
-
-//****************************************************
-// Fake register bank tests
-//****************************************************
-
-#[cfg(test)]
-#[coverage(off)]
-mod fake_mmio_tests {
-    use super::fake_mmio::{self, FakeMmio, RegWrite};
-    use super::{read_reg16, read_reg32, read_reg8, write_reg16, write_reg32, write_reg8};
-
-    #[test]
-    fn test_fake_mmio_byte_aliasing_32_and_8() {
-        FakeMmio::reset();
-
-        FakeMmio::set_reg32(0x620, 0xAABB_CCDD);
-        assert_eq!(FakeMmio::reg8(0x620), 0xDD);
-        assert_eq!(FakeMmio::reg8(0x621), 0xCC);
-        assert_eq!(FakeMmio::reg8(0x622), 0xBB);
-        assert_eq!(FakeMmio::reg8(0x623), 0xAA);
-        assert_eq!(FakeMmio::reg16(0x620), 0xCCDD);
-        assert_eq!(FakeMmio::reg32(0x620), 0xAABB_CCDD);
-
-        // An 8-bit write into the top byte shows up in the 32-bit view.
-        FakeMmio::set_reg8(0x623, 0x11);
-        assert_eq!(FakeMmio::reg32(0x620) & 0xFF00_0000, 0x1100_0000);
-        assert_eq!(FakeMmio::reg32(0x620), 0x11BB_CCDD);
-
-        // A 16-bit write is visible through both neighbours.
-        FakeMmio::set_reg16(0x620, 0x1234);
-        assert_eq!(FakeMmio::reg8(0x620), 0x34);
-        assert_eq!(FakeMmio::reg8(0x621), 0x12);
-
-        // The same aliasing holds through the real accessors.
-        FakeMmio::reset();
-        write_reg32(0x620, 0xAABB_CCDD);
-        assert_eq!(read_reg8(0x620), 0xDD);
-        assert_eq!(read_reg8(0x623), 0xAA);
-        write_reg8(0x623, 0x11);
-        assert_eq!(read_reg32(0x620), 0x11BB_CCDD);
-    }
-
-    #[test]
-    fn test_fake_mmio_high_unaligned_address() {
-        FakeMmio::reset();
-
-        FakeMmio::set_reg8(0x1234, 0x5A);
-        assert_eq!(FakeMmio::reg8(0x1234), 0x5A);
-        assert_eq!(read_reg8(0x1234), 0x5A);
-
-        // Command-table addresses are already normalized, so `addr | REG_BASE_ADDR`
-        // must leave them alone rather than shifting them into a new key.
-        FakeMmio::set_reg32(0x808004, 0x0102_0304);
-        assert_eq!(FakeMmio::reg8(0x808007), 0x01);
-        assert_eq!(read_reg32(0x808004), 0x0102_0304);
-        assert_eq!(FakeMmio::reg32(0x800000 | 0x808004), 0x0102_0304);
-    }
-
-    #[test]
-    fn test_fake_mmio_write_log() {
-        FakeMmio::reset();
-
-        write_reg8(0x620, 1);
-        write_reg16(0x622, 0x1234);
-        write_reg32(0x630, 0xDEAD_BEEF);
-
-        assert_eq!(
-            FakeMmio::writes(),
-            vec![
-                RegWrite {
-                    addr: 0x800620,
-                    width: 1,
-                    value: 0x0000_0001,
-                },
-                RegWrite {
-                    addr: 0x800622,
-                    width: 2,
-                    value: 0x0000_1234,
-                },
-                RegWrite {
-                    addr: 0x800630,
-                    width: 4,
-                    value: 0xDEAD_BEEF,
-                },
-            ]
-        );
-
-        FakeMmio::clear_writes();
-        assert!(FakeMmio::writes().is_empty());
-        // Clearing the log does not disturb the register contents.
-        assert_eq!(FakeMmio::reg32(0x630), 0xDEAD_BEEF);
-        assert_eq!(FakeMmio::reg16(0x622), 0x1234);
-    }
-
-    #[test]
-    fn test_fake_mmio_reentrant_read_hook() {
-        FakeMmio::reset();
-        FakeMmio::on_read8(0x700, |call_idx| {
-            // The hook runs with no lock held, so peeking at the bank is safe.
-            let _ = FakeMmio::reg8(0x700);
-            call_idx as u8
-        });
-
-        assert_eq!(read_reg8(0x700), 0);
-        assert_eq!(read_reg8(0x700), 1);
-        assert_eq!(fake_mmio::read_u8(0x700), 2);
-    }
-
-    #[test]
-    fn test_fake_mmio_reentrant_wide_read_hooks() {
-        FakeMmio::reset();
-        FakeMmio::set_reg16(0x710, 0x1234);
-        FakeMmio::set_reg32(0x720, 0xDEAD_BEEF);
-
-        // Both hooks re-enter the bank before returning a value derived from the
-        // call index, so a hook invoked while the bank lock were still held would
-        // deadlock here instead of returning.
-        FakeMmio::on_read16(0x710, |call_idx| {
-            let _ = FakeMmio::reg16(0x720);
-            let _ = FakeMmio::reg8(0x710);
-            0xAA00 | call_idx as u16
-        });
-        FakeMmio::on_read32(0x720, |call_idx| {
-            let _ = FakeMmio::reg32(0x720);
-            let _ = FakeMmio::reg16(0x710);
-            0xBB00_0000 | call_idx as u32
-        });
-
-        // The hook wins over the seeded bytes and advances once per read...
-        assert_eq!(read_reg16(0x710), 0xAA00);
-        assert_eq!(read_reg16(0x710), 0xAA01);
-        assert_eq!(read_reg32(0x720), 0xBB00_0000);
-        assert_eq!(read_reg32(0x720), 0xBB00_0001);
-        // ...while the bank itself keeps the seeded bytes untouched.
-        assert_eq!(FakeMmio::reg16(0x710), 0x1234);
-        assert_eq!(FakeMmio::reg32(0x720), 0xDEAD_BEEF);
-
-        // `reset` drops the hooks, so the stored bytes are observed again.
-        FakeMmio::reset();
-        FakeMmio::set_reg16(0x710, 0x1234);
-        FakeMmio::set_reg32(0x720, 0xDEAD_BEEF);
-        assert_eq!(read_reg16(0x710), 0x1234);
-        assert_eq!(read_reg32(0x720), 0xDEAD_BEEF);
-    }
-
-    #[test]
-    fn test_fake_mmio_poison_recovery() {
-        FakeMmio::reset();
-        FakeMmio::set_reg8(0x40, 0x5A);
-
-        let panicked = std::panic::catch_unwind(FakeMmio::poison_bank_for_test).is_err();
-        assert!(
-            panicked,
-            "the poisoning helper must panic while holding the lock"
-        );
-
-        // std now considers the mutex poisoned; the accessors recover the inner
-        // state instead of unwrapping the poisoning error.
-        FakeMmio::set_reg8(0x41, 0xA5);
-        assert_eq!(FakeMmio::reg8(0x40), 0x5A);
-        assert_eq!(FakeMmio::reg8(0x41), 0xA5);
-        assert_eq!(read_reg8(0x40), 0x5A);
-    }
-}
-
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
-    use super::*;
-    use mry::Any;
+    use super::{
+        write_reg_dma3_mode, write_reg_rf_event_clear, write_reg_rf_tx_wail_settle_time_lo,
+    };
+    use crate::fake_mmio::{FakeMmio, RegWrite};
 
     #[test]
-    #[mry::lock(write_reg8)]
     fn test_reg_dma3_mode_address() {
         // pins reg_dma3_mode to the upper byte of reg_dma3_ctrl (0x50e)
-        mock_write_reg8(0x50f, Any).returns(());
+        FakeMmio::reset();
         write_reg_dma3_mode(0x80);
-        mock_write_reg8(0x50f, 0x80).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x80050f,
+                width: 1,
+                value: 0x80,
+            }]
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
     fn test_reg_rf_event_clear_address() {
         // pins reg_rf_event_clear to 0xf28
-        mock_write_reg32(0xf28, Any).returns(());
+        FakeMmio::reset();
         write_reg_rf_event_clear(0xffffffff);
-        mock_write_reg32(0xf28, 0xffffffff).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x800f28,
+                width: 4,
+                value: 0xffff_ffff,
+            }]
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
     fn test_reg_rf_tx_wail_settle_time_lo_address() {
         // pins the low-byte accessor to 0xf04 (32-bit word reg_rf_tx_wail_settle_time)
-        mock_write_reg8(0xf04, Any).returns(());
+        FakeMmio::reset();
         write_reg_rf_tx_wail_settle_time_lo(0x67);
-        mock_write_reg8(0xf04, 0x67).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x800f04,
+                width: 1,
+                value: 0x67,
+            }]
+        );
     }
 }

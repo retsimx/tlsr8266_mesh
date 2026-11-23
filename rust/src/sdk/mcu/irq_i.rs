@@ -11,8 +11,8 @@
 //! - Initializing the interrupt system with default masks
 //!
 
-use crate::sdk::mcu::register::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
 use critical_section::RawRestoreState;
+use tlsr8266_pac::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
 
 /// The crate-wide `critical_section` implementation.
 ///
@@ -157,10 +157,8 @@ pub fn irq_init() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{
-        mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask,
-    };
     use mry::Any;
+    use tlsr8266_pac::{mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask};
 
     /// Tests enabling global interrupts.
     ///

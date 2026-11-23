@@ -63,7 +63,16 @@ use crate::sdk::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
 use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::random::rand;
-use crate::sdk::mcu::register::{
+use crate::sdk::pm::light_sw_reboot;
+use crate::version::BUILD_VERSION;
+use crate::BIT;
+use mesh_protocol::const_assert;
+use mesh_protocol::crc::crc16;
+use mesh_protocol::packet_types::{
+    AdvPrivate, AdvRspPrivate, Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp,
+    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+};
+use tlsr8266_pac::{
     read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode,
     write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl,
     write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src,
@@ -75,18 +84,7 @@ use crate::sdk::mcu::register::{
     FLD_RF_IRQ_MASK, FLD_RF_RX_MODE, REGA_RF_OUTPUT_MATCH, REGA_RF_OUTPUT_POWER, REGA_RF_PA_BIAS,
     REGA_RF_PA_GAIN, REGA_RF_TX_POWER, REGA_SAR_ADC_PWR,
 };
-use crate::sdk::mcu::register::{
-    rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode,
-};
-use crate::sdk::pm::light_sw_reboot;
-use crate::version::BUILD_VERSION;
-use crate::BIT;
-use mesh_protocol::const_assert;
-use mesh_protocol::crc::crc16;
-use mesh_protocol::packet_types::{
-    AdvPrivate, AdvRspPrivate, Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp,
-    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
-};
+use tlsr8266_pac::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode};
 
 const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
@@ -1351,12 +1349,12 @@ mod tests {
     use crate::sdk::mcu::crypto::mock_aes_att_decryption_packet;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
     use crate::sdk::mcu::random::mock_rand;
-    use crate::sdk::mcu::register::*;
     use crate::sdk::pm::mock_light_sw_reboot;
     use mesh_protocol::packet_types::Packet;
     use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_pac::*;
 
     #[test]
     fn test_rf_link_get_rsp_type() {

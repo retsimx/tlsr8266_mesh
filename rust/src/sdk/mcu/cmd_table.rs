@@ -4,7 +4,7 @@
 
 use crate::sdk::mcu::analog::analog_write;
 use crate::sdk::mcu::clock::sleep_us;
-use crate::sdk::mcu::register::write_reg8;
+use tlsr8266_pac::write_reg8;
 
 #[cfg(test)]
 use mry::mry;
@@ -54,8 +54,8 @@ mod tests {
     use super::*;
     use crate::sdk::mcu::analog::mock_analog_write;
     use crate::sdk::mcu::clock::mock_sleep_us;
-    use crate::sdk::mcu::register::mock_write_reg8;
     use mry::Any;
+    use tlsr8266_pac::mock_write_reg8;
 
     #[test]
     fn test_load_tbl_cmd_set_empty() {

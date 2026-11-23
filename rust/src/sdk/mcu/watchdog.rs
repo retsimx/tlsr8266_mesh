@@ -1,12 +1,10 @@
 use crate::sdk::mcu::clock::CLOCK_SYS_CLOCK_1MS;
-use crate::sdk::mcu::register::WATCHDOG_TIMEOUT_COEFF;
-use crate::sdk::mcu::register::{
-    read_reg_tmr_ctrl, write_reg_tmr2_tick, write_reg_tmr_ctrl, FLD_TMR,
-};
 use crate::CLR_FLD;
 use crate::{
     BIT, BIT_LOW_BIT, BM_CLR, BM_MASK_VAL, BM_SET, BM_SET_MASK_FLD, MASK_VAL, SET_FLD, SET_FLD_V,
 };
+use tlsr8266_pac::WATCHDOG_TIMEOUT_COEFF;
+use tlsr8266_pac::{read_reg_tmr_ctrl, write_reg_tmr2_tick, write_reg_tmr_ctrl, FLD_TMR};
 
 /// Watchdog Timer Module
 ///
@@ -141,9 +139,7 @@ pub fn wd_clear() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{
-        mock_read_reg_tmr_ctrl, mock_write_reg_tmr2_tick, mock_write_reg_tmr_ctrl,
-    };
+    use tlsr8266_pac::{mock_read_reg_tmr_ctrl, mock_write_reg_tmr2_tick, mock_write_reg_tmr_ctrl};
 
     /// Tests the watchdog interval setting functionality.
     ///

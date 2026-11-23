@@ -6,5 +6,4 @@ pub mod dma;
 pub mod gpio;
 pub mod irq_i;
 pub mod random;
-pub mod register;
 pub mod watchdog;

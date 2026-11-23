@@ -1,4 +1,4 @@
-use crate::sdk::mcu::register::{
+use tlsr8266_pac::{
     read_reg_master_spi_ctrl, read_reg_master_spi_data, write_reg_master_spi_ctrl,
     write_reg_master_spi_data, FLD_MASTER_SPI,
 };
@@ -177,7 +177,7 @@ pub fn mspi_read() -> u8 {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::mcu::register::{
+    use tlsr8266_pac::{
         mock_read_reg_master_spi_ctrl, mock_read_reg_master_spi_data,
         mock_write_reg_master_spi_ctrl, mock_write_reg_master_spi_data,
     };

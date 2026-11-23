@@ -22,6 +22,10 @@ mod uart_manager;
 mod vendor_light;
 pub mod version;
 
+/// Bit-manipulation macros live in the PAC crate; re-exported here so existing
+/// `use crate::{BIT, ...}` paths keep resolving.
+pub use tlsr8266_pac::{BIT, BIT_MASK_LEN, BIT_RNG};
+
 #[cfg(test)]
 mod wire_contract_tests;
 

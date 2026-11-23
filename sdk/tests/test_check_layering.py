@@ -5,8 +5,8 @@ Run from the repository root::
     python3 -m unittest discover -s sdk/tests -v
 
 Every test is hermetic: synthetic trees live in a temporary directory and the
-only real tree touched is ``rust/src/`` (read-only), by the handful of tests
-that assert the shipped tree is clean.
+only real trees touched are ``rust/src/`` and the workspace crates (read-only),
+by the handful of tests that assert the shipped trees are clean.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import check_layering  # noqa: E402  (sys.path set up above)
 SDK_ROOT = REPO_ROOT / "rust" / "src" / "sdk"
 SRC_ROOT = REPO_ROOT / "rust" / "src"
 CRATE_ROOT = REPO_ROOT / "rust" / "crates" / "mesh-protocol" / "src"
+PAC_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-pac" / "src"
 
 
 def _write(path: Path, content: str) -> Path:
@@ -102,9 +103,11 @@ class TestRealSdkTree(unittest.TestCase):
         self.assertIn("sdk layering OK", out.getvalue())
         self.assertIn("rust src audit OK", out.getvalue())
         self.assertIn("mesh-protocol audit OK", out.getvalue())
-        # Both universal roots are named in the summary.
-        self.assertIn(str(Path("rust", "src")), out.getvalue())
-        self.assertIn(str(Path("rust", "crates", "mesh-protocol", "src")), out.getvalue())
+        self.assertIn("tlsr8266-pac audit OK", out.getvalue())
+        # Every universal root is named in the summary, relative to the repo.
+        self.assertIn(str(SRC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
+        self.assertIn(str(CRATE_ROOT.relative_to(REPO_ROOT)), out.getvalue())
+        self.assertIn(str(PAC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
 
     def test_real_crate_tree_is_clean(self) -> None:
         paths = check_layering.rust_files(str(CRATE_ROOT))
@@ -1124,6 +1127,45 @@ class TestUniversalPassCli(_TempSrcTree):
             [line.split(":")[0] for line in out.splitlines()],
             ["sdk layering OK", "rust src audit OK", "mesh-protocol audit OK"],
         )
+
+
+class TestRepeatableCrateRoot(_TempSrcTree):
+    """`--crate-root` may be repeated, and an explicit value audits only itself."""
+
+    def test_both_explicit_crate_roots_are_audited(self) -> None:
+        second = self.crate_root.parent.parent / "second-crate" / "src"
+        _write(second / "lib.rs", _lines("pub static mut OTHER: u8 = 0;"))
+        self.write_crate("lib.rs", _lines("pub static mut SCRATCH: u8 = 0;"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--src-root",
+                    str(self.src_root),
+                    "--crate-root",
+                    str(self.crate_root),
+                    "--crate-root",
+                    str(second),
+                ]
+            )
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("static-mut: static mut SCRATCH", out.getvalue())
+        self.assertIn("static-mut: static mut OTHER", out.getvalue())
+        self.assertIn("mesh-protocol audit FAILED: 1 violation(s)", err.getvalue())
+        self.assertIn("second-crate audit FAILED: 1 violation(s)", err.getvalue())
+
+    def test_crate_root_alone_audits_only_that_crate(self) -> None:
+        # The repeatable flag replaces the default list: no implicit firmware
+        # pass and no implicit workspace crate is read along with it.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(["--crate-root", str(self.crate_root)])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn(f"under {self.crate_root}", out.getvalue())
+        self.assertNotIn("rust src audit", out.getvalue())
+        self.assertNotIn("tlsr8266-pac audit", out.getvalue())
 
 
 if __name__ == "__main__":

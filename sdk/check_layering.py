@@ -25,13 +25,17 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 is an *external* crate to every SDK layer: it is a sibling workspace member
 with no firmware dependencies, so importing it is never an inversion.  It is
 listed in ``LAYER_EXTERNAL_CRATES`` next to ``core`` and ``critical_section``.
+``tlsr8266_pac`` (``rust/crates/tlsr8266-pac/``) is the same kind of leaf
+crate — register definitions and bit macros — but only ``mcu`` and ``drivers``
+may name it: ``sdk/common`` sits below the MCU and has no register access.
 
-**Pass 2 — universal rules** over two roots: ``--src-root`` (default
-``rust/src``, the firmware) and ``--crate-root`` (default
-``rust/crates/mesh-protocol/src``).  Both are audited for zero production
-``static mut`` and full ``// SAFETY:`` coverage; the ``unsafe`` budget ratchet
-below is measured over the firmware root alone, so adding crate ``unsafe``
-sites can neither hide behind nor widen the firmware ceiling.
+**Pass 2 — universal rules** over the firmware root and every workspace crate
+root: ``--src-root`` (default ``rust/src``, the firmware) and the repeatable
+``--crate-root`` (default ``rust/crates/mesh-protocol/src`` and
+``rust/crates/tlsr8266-pac/src``).  All of them are audited for zero
+production ``static mut`` and full ``// SAFETY:`` coverage; the ``unsafe``
+budget ratchet below is measured over the firmware root alone, so adding crate
+``unsafe`` sites can neither hide behind nor widen the firmware ceiling.
 
 Four permanent rules, one per line of defence won by R-9 (#45):
 
@@ -60,17 +64,20 @@ Four permanent rules, one per line of defence won by R-9 (#45):
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
 running this exact rule on the finished tree, not by hand-counting tokens.
-It is applied to ``--src-root`` only: the ``mesh-protocol`` crate is audited
-for rule violations but is not budgeted.
+It is applied to ``--src-root`` only: the workspace crates are audited for
+rule violations but are not budgeted.
 
 Usage::
 
     python3 sdk/check_layering.py [--root rust/src/sdk] [--src-root rust/src]
-                                  [--crate-root rust/crates/mesh-protocol/src]
+                                  [--crate-root PATH ...]
 
-Passing ``--root`` explicitly without ``--src-root`` or ``--crate-root`` runs
-only the layering pass; that is what keeps the temp-tree unit tests hermetic.
-The no-argument form (CI) runs every pass.
+``--crate-root`` is repeatable.  When it is omitted every workspace crate root
+is audited; when it is given, exactly the named paths are, so a caller never
+gets an implicit extra tree.  Passing ``--root`` explicitly without
+``--src-root`` or ``--crate-root`` runs only the layering pass, and
+``--crate-root`` alone runs only those crate audits: that is what keeps the
+temp-tree unit tests hermetic.  The no-argument form (CI) runs every pass.
 
 Exit codes: ``0`` clean, ``1`` one or more violations in either pass, ``2``
 usage/IO error.  Violations are printed one per line as
@@ -98,6 +105,12 @@ REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_ROOT = os.path.join(REPO_ROOT, "rust", "src", "sdk")
 DEFAULT_SRC_ROOT = os.path.join(REPO_ROOT, "rust", "src")
 DEFAULT_CRATE_ROOT = os.path.join(REPO_ROOT, "rust", "crates", "mesh-protocol", "src")
+# Every workspace crate audited by the universal pass when `--crate-root` is
+# omitted.  A new crate is added here in the same change that creates it.
+DEFAULT_CRATE_ROOTS = (
+    DEFAULT_CRATE_ROOT,
+    os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-pac", "src"),
+)
 
 # One-way ratchet: lower this when `unsafe` sites disappear, never raise it.
 # Measured by running the `unsafe-budget` rule on the finished R-9 tree, so the
@@ -115,7 +128,10 @@ DEFAULT_CRATE_ROOT = os.path.join(REPO_ROOT, "rust", "crates", "mesh-protocol", 
 # documented sites now live in `rust/crates/mesh-protocol/`, which the gate
 # audits for rule violations but does not budget, so the firmware ceiling drops
 # with them: 132 - 45 = 87.
-MAX_PRODUCTION_UNSAFE = 87
+#
+# C-2 (#64) moved the six volatile MMIO sites into `rust/crates/tlsr8266-pac/`,
+# audited the same way and likewise unbudgeted: 87 - 6 = 81.
+MAX_PRODUCTION_UNSAFE = 81
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
@@ -139,8 +155,9 @@ UPWARD_MODULES = frozenset(
 
 LOGGING_MACROS = ("uprintln", "uprint")
 
-# Root macros exported from `crate` (see sdk/common/bit.rs and
-# sdk/mcu/register.rs).  Importing a macro is never a layering violation.
+# Root macros exported from `crate` (see sdk/common/bit.rs, plus the bit macros
+# re-exported from `tlsr8266_pac` in rust/src/lib.rs).  Importing a macro is
+# never a layering violation.
 ROOT_MACROS = frozenset(
     {
         "BIT",
@@ -172,10 +189,14 @@ LAYER_SDK_IMPORTS = {
 # External crates each layer may import.  Adding a dependency here is a
 # deliberate act: it widens what the bottom of the SDK is allowed to assume.
 # `mesh_protocol` is the pure wire-format workspace crate: it has no firmware,
-# MMIO or app dependencies, so every layer may name it.
+# MMIO or app dependencies, so every layer may name it.  `tlsr8266_pac` is the
+# register/bit-macro leaf crate: it is MMIO, so `common` — below the MCU — may
+# not name it.
 LAYER_EXTERNAL_CRATES = {
     "common": frozenset({"core", "critical_section", "mesh_protocol"}),
-    "mcu": frozenset({"core", "critical_section", "bitflags", "mesh_protocol"}),
+    "mcu": frozenset(
+        {"core", "critical_section", "bitflags", "mesh_protocol", "tlsr8266_pac"}
+    ),
     "drivers": frozenset(
         {
             "core",
@@ -184,6 +205,7 @@ LAYER_EXTERNAL_CRATES = {
             "embassy_sync",
             "embassy_time",
             "mesh_protocol",
+            "tlsr8266_pac",
         }
     ),
 }
@@ -931,10 +953,13 @@ def check_file(path: str, root: str) -> list[Violation]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    default_crates = ", ".join(
+        os.path.relpath(item, REPO_ROOT) for item in DEFAULT_CRATE_ROOTS
+    )
     parser = argparse.ArgumentParser(
         description=(
-            "Audit rust/src/ for layering invariants and rust/src/ plus "
-            "rust/crates/mesh-protocol/src/ for `unsafe` invariants."
+            "Audit rust/src/ for layering invariants and rust/src/ plus every "
+            "rust/crates/*/src/ workspace crate for `unsafe` invariants."
         )
     )
     parser.add_argument(
@@ -956,11 +981,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--crate-root",
+        action="append",
         default=None,
         help=(
-            "mesh-protocol source root for the universal pass "
-            f"(default: {os.path.relpath(DEFAULT_CRATE_ROOT, REPO_ROOT)}; "
-            "skipped when --root is given without --src-root/--crate-root)"
+            "workspace crate source root for the universal pass; repeatable "
+            f"(default: every workspace crate, currently {default_crates}; "
+            "explicit values audit only those paths)"
         ),
     )
     return parser
@@ -974,14 +1000,22 @@ def _resolve(value: str | None, default: str, flag: str) -> str | None:
     return root
 
 
+def _crate_label(root: str) -> str:
+    """The summary label for a crate root: ``rust/crates/<name>/src`` -> name."""
+    return os.path.basename(os.path.dirname(root))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     root_given = args.root is not None
+    crate_roots_given = args.crate_root is not None
+    # An explicit `--crate-root` names exactly the trees to audit: the default
+    # list is a convenience for the no-argument run, never an implicit extra
+    # root, and the firmware pass then runs only when `--src-root` asks for it.
     # An explicit `--root` on its own keeps the temp-tree unit tests hermetic:
     # they exercise the layering pass only.
-    run_universal = (
-        args.src_root is not None or args.crate_root is not None or not root_given
-    )
+    run_src = args.src_root is not None or (not root_given and not crate_roots_given)
+    run_universal = run_src or crate_roots_given or not root_given
 
     root = _resolve(args.root, DEFAULT_ROOT, "--root")
     if root is None:
@@ -993,40 +1027,55 @@ def main(argv: list[str] | None = None) -> int:
 
     src_root = ""
     src_paths: list[str] = []
-    crate_root = ""
-    crate_paths: list[str] = []
+    # `(label, source root, .rs files)` per audited workspace crate.
+    crate_audits: list[tuple[str, str, list[str]]] = []
     if run_universal:
-        resolved_src = _resolve(args.src_root, DEFAULT_SRC_ROOT, "--src-root")
-        if resolved_src is None:
-            return 2
-        src_root = resolved_src
-        src_paths = rust_files(src_root)
-        if not src_paths:
-            print(f"error: no .rs files under {src_root}", file=sys.stderr)
-            return 2
+        if run_src:
+            resolved_src = _resolve(args.src_root, DEFAULT_SRC_ROOT, "--src-root")
+            if resolved_src is None:
+                return 2
+            src_root = resolved_src
+            src_paths = rust_files(src_root)
+            if not src_paths:
+                print(f"error: no .rs files under {src_root}", file=sys.stderr)
+                return 2
 
-        resolved_crate = _resolve(args.crate_root, DEFAULT_CRATE_ROOT, "--crate-root")
-        if resolved_crate is None:
-            return 2
-        crate_root = resolved_crate
-        crate_paths = rust_files(crate_root)
-        if not crate_paths:
-            print(f"error: no .rs files under {crate_root}", file=sys.stderr)
-            return 2
+        crate_values = (
+            args.crate_root if crate_roots_given else list(DEFAULT_CRATE_ROOTS)
+        )
+        for value in crate_values:
+            resolved_crate = _resolve(value, value, "--crate-root")
+            if resolved_crate is None:
+                return 2
+            crate_paths = rust_files(resolved_crate)
+            if not crate_paths:
+                print(f"error: no .rs files under {resolved_crate}", file=sys.stderr)
+                return 2
+            crate_audits.append(
+                (_crate_label(resolved_crate), resolved_crate, crate_paths)
+            )
 
     violations: list[Violation] = []
     universal: list[Violation] = []
     crate_universal: list[Violation] = []
+    # `(label, display root, file count, violations)` per crate, so each root
+    # reports itself instead of being folded into one anonymous total.
+    crate_results: list[tuple[str, str, int, list[Violation]]] = []
     try:
         for path in paths:
             violations.extend(check_file(path, root))
         if run_universal:
-            universal, _unsafe_total = audit_universal(
-                src_paths, _display_path(src_root)
-            )
-            crate_universal, _crate_unsafe_total = audit_universal(
-                crate_paths, _display_path(crate_root), enforce_budget=False
-            )
+            if run_src:
+                universal, _unsafe_total = audit_universal(
+                    src_paths, _display_path(src_root)
+                )
+            for label, crate_root, crate_paths in crate_audits:
+                display = _display_path(crate_root)
+                found, _crate_unsafe_total = audit_universal(
+                    crate_paths, display, enforce_budget=False
+                )
+                crate_universal.extend(found)
+                crate_results.append((label, display, len(crate_paths), found))
     except (OSError, UnicodeDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1034,14 +1083,16 @@ def main(argv: list[str] | None = None) -> int:
     if not violations and not universal and not crate_universal:
         print(f"sdk layering OK: {len(paths)} files scanned, 0 violations")
         if run_universal:
-            print(
-                f"rust src audit OK: {len(src_paths)} files scanned under "
-                f"{_display_path(src_root)}, 0 violations"
-            )
-            print(
-                f"mesh-protocol audit OK: {len(crate_paths)} files scanned under "
-                f"{_display_path(crate_root)}, 0 violations"
-            )
+            if run_src:
+                print(
+                    f"rust src audit OK: {len(src_paths)} files scanned under "
+                    f"{_display_path(src_root)}, 0 violations"
+                )
+            for label, display, count, _found in crate_results:
+                print(
+                    f"{label} audit OK: {count} files scanned under "
+                    f"{display}, 0 violations"
+                )
         return 0
 
     for violation in sorted(
@@ -1060,12 +1111,13 @@ def main(argv: list[str] | None = None) -> int:
             f"in {len(src_paths)} files",
             file=sys.stderr,
         )
-    if crate_universal:
-        print(
-            f"mesh-protocol audit FAILED: {len(crate_universal)} violation(s) "
-            f"in {len(crate_paths)} files",
-            file=sys.stderr,
-        )
+    for label, _display, count, found in crate_results:
+        if found:
+            print(
+                f"{label} audit FAILED: {len(found)} violation(s) "
+                f"in {count} files",
+                file=sys.stderr,
+            )
     return 1
 
 

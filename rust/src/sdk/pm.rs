@@ -10,10 +10,10 @@ use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
 use crate::sdk::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use crate::sdk::mcu::irq_i::irq_disable;
-use crate::sdk::mcu::register::write_reg_pwdn_ctrl;
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::BIT;
 use critical_section;
+use tlsr8266_pac::write_reg_pwdn_ctrl;
 
 // Analog-retention register addresses and their sentinel values. These live in the
 // SDK because `light_sw_reboot` owns the retention writes; `common` and
@@ -419,14 +419,14 @@ mod tests {
     use crate::sdk::mcu::cmd_table::mock_load_tbl_cmd_set;
     use crate::sdk::mcu::gpio::mock_gpio_set_func;
     use crate::sdk::mcu::irq_i::mock_irq_disable;
-    use crate::sdk::mcu::register::{
+    use crate::sdk::mcu::watchdog::mock_wd_clear;
+    use mry::Any;
+    use std::sync::{Arc, Mutex};
+    use tlsr8266_pac::{
         mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
         mock_write_reg_gpio_out, mock_write_reg_pwdn_ctrl, read_reg_gpio_oen, read_reg_gpio_out,
         write_reg_gpio_oen, write_reg_gpio_out,
     };
-    use crate::sdk::mcu::watchdog::mock_wd_clear;
-    use mry::Any;
-    use std::sync::{Arc, Mutex};
 
     /// Tests usb_dp_pullup_en function with enable=true
     ///

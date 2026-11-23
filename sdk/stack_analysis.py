@@ -23,8 +23,9 @@ Model and caveats (reported alongside the result):
   * Indirect dispatch (``fn`` pointers, ``bx rN`` / legacy ``tjex``) has no
     ``bl`` edge to walk, so the known dispatchers are declared explicitly in
     ``INDIRECT_EDGES`` (caller substring -> callee substrings, resolved against
-    the linked symbols). That covers both fn-pointer seams: the app callback
-    seam and the OTA ``OtaHooks`` / ``OtaRadioOps`` seam. An indirect dispatch
+    the linked symbols). That covers every fn-pointer seam: the app callback
+    seam, the OTA ``OtaHooks`` / ``OtaRadioOps`` seam, and the light subsystem's
+    status-update hook (``light::notify_status_update``). An indirect dispatch
     pushes a return address, so it is modelled as a *normal* call, never a tail
     call. Every entry must resolve to exactly one function; otherwise the gate
     fails rather than silently scoring the missing callee as 0 B (which is what
@@ -91,6 +92,14 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "on_light_data": ("rf_link_data_callback",),
     "on_light_response": ("rf_link_response_callback",),
     "on_uart_mesh_rx": ("light_mesh_rx_cb",),
+    # The light subsystem publishes its own on/off state through a hook `app.rs`
+    # registers at boot, so `device_status_update` reaches the SDK's node-table
+    # writer with a `bx rN`, not a `bl`.  The dispatcher is IRQ-reachable:
+    # `rf_link_light_event_callback -> device_status_update ->
+    # notify_status_update`, which is on the deepest IRQ path today.  The
+    # dispatcher itself is `#[inline(never)]`, so the pattern survives on the
+    # optimised image.
+    "notify_status_update": ("ll_device_status_update",),
     # The four OtaHooks dispatchers.  ``stage_ota_packet`` is deliberately not a
     # substring of ``read_staged_ota_packet`` (the latter has ``staged_``), which
     # is why the two provider names differ in that one letter: a shared stem

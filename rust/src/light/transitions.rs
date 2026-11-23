@@ -1,3 +1,11 @@
+//! Lamp state, PWM output, easing and the persisted luminance record.
+//!
+//! Everything here is decision-free hardware driving: the mesh command path in
+//! [`super`] decides *what* the lamp should do, this module owns *how* a
+//! transition, a PWM compare value or a flash record is produced. The two
+//! process-wide owners ([`LIGHT_HW`] and [`LIGHT_CMD_CHANNEL`]) live here
+//! because both are shared by the TMR1 ISR, the light task and the main loop.
+
 use core::cmp::min;
 use core::mem::size_of;
 use core::ptr::addr_of;
@@ -7,12 +15,11 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant};
 use fixed::types::{I16F16, U16F16};
 
+use super::{device_status_update, PMW_MAX_TICK};
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
-use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
-use crate::sdk::light::{
-    LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK,
+use mesh_protocol::mesh_types::{
+    LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM,
 };
-use mesh_protocol::mesh_types::MESH_NODE_ST_PAR_LEN;
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use tlsr8266_hal::drivers::pwm::pwm_set_cmp;
@@ -269,7 +276,7 @@ impl LightTransitionCore {
 pub static LIGHT_HW: CriticalSectionMutex<LightTransitionCore> =
     CriticalSectionMutex::new(LightTransitionCore::new());
 
-/// Commands handed from the BLE stack / main loop to [`light_manager_task`].
+/// Commands handed from the BLE stack / main loop to [`super::light_manager_task`].
 pub static LIGHT_CMD_CHANNEL: Channel<CsRawMutex, Message, 10> = Channel::new();
 
 fn calculate_lumen_map(val: I16F16) -> u32 {
@@ -389,37 +396,9 @@ pub fn get_current_light_state() -> LightState {
     }
 }
 
-/// Report the current on/off state to the mesh status buffer.
-#[cfg_attr(test, mry::mry)]
-pub fn device_status_update() {
-    // Snapshot the on/off state under the lock; the mesh notification below
-    // must not run inside the critical section.
-    let on = {
-        let core = LIGHT_HW.lock();
-        if core.is_light_off() {
-            0
-        } else {
-            1
-        }
-    };
-
-    // packet
-    let mut st_val_par: [u8; MESH_NODE_ST_PAR_LEN] = [0xff; MESH_NODE_ST_PAR_LEN];
-
-    st_val_par[0] = on;
-    st_val_par[1] = 0xff;
-
-    ll_device_status_update(&st_val_par);
-}
-
-/// Queue a command for [`light_manager_task`]. Dropped if the queue is full.
-pub fn send_light_message(cmd: u8, params: [u8; 16]) {
-    let _ = LIGHT_CMD_CHANNEL.try_send(Message { cmd, params });
-}
-
 /// Apply one queued command. Each arm takes [`LIGHT_HW`] once; the status
 /// report is a separate lock-once call, so no guard is ever held twice.
-fn dispatch_message(msg: Message) {
+pub(super) fn dispatch_message(msg: Message) {
     match msg.cmd {
         LGT_CMD_LIGHT_ONOFF => {
             LIGHT_HW.lock().handle_on_off(msg.params[0]);
@@ -427,15 +406,6 @@ fn dispatch_message(msg: Message) {
         }
         LGT_CMD_SET_LIGHT => LIGHT_HW.lock().handle_transition(&msg.params),
         _ => {}
-    }
-}
-
-/// The one owner of the light command queue.
-#[coverage(off)]
-pub async fn light_manager_task() {
-    loop {
-        let msg = LIGHT_CMD_CHANNEL.receive().await;
-        dispatch_message(msg);
     }
 }
 
@@ -614,16 +584,21 @@ pub fn reset_for_test() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_ll_device_status_update;
-    use embassy_time::Instant;
-    use mry::Any;
+    use crate::light::status_probe;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::FLD_TMR;
 
     // --- Helper Functions ---
+
+    /// `TMR1_EN` as it appears in the 8-bit `reg_tmr_ctrl8` (0x620) view:
+    /// datasheet bit 3 of the timer control register, which the HAL's
+    /// `tmr1_start` / `tmr1_stop` set and clear.
+    const TMR1_EN: u8 = 1 << 3;
+
+    /// `reg_pwm_cmp` base: `pwm_set_cmp(id, cmp)` writes a `u16` at `base + id*4`.
+    const PWM_CMP_BASE: u32 = 0x794;
 
     /// The HAL host seams are process-wide singletons, so every test that
     /// observes them starts from a known-empty bank, analog plane and clock.
@@ -642,12 +617,6 @@ mod tests {
         let mut core = LIGHT_HW.lock();
         f(&mut core)
     }
-
-    /// `TMR1_EN` as it appears in the 8-bit `reg_tmr_ctrl8` (0x620) view.
-    const TMR1_EN: u8 = FLD_TMR::TMR1_EN.bits() as u8;
-
-    /// `reg_pwm_cmp` base: `pwm_set_cmp(id, cmp)` writes a `u16` at `base + id*4`.
-    const PWM_CMP_BASE: u32 = 0x794;
 
     /// The compare value the driver last wrote for PWM channel `id`.
     fn pwm_cmp(id: u32) -> u16 {
@@ -760,34 +729,6 @@ mod tests {
         }
     }
 
-    /// Create test message for independent CW/WW control
-    #[allow(dead_code)]
-    fn create_cw_ww_message(cw: u16, ww: u16) -> Message {
-        let cw_bytes = cw.to_le_bytes();
-        let ww_bytes = ww.to_le_bytes();
-        Message {
-            cmd: LGT_CMD_SET_LIGHT,
-            params: [
-                0,
-                0,
-                cw_bytes[0],
-                cw_bytes[1],
-                ww_bytes[0],
-                ww_bytes[1],
-                0,
-                0,
-                0x4, // Independent CW/WW flag
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ],
-        }
-    }
-
     // --- Basic Initialization Tests ---
 
     #[test]
@@ -830,7 +771,7 @@ mod tests {
         reset_for_test();
         let test_params = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-        send_light_message(LGT_CMD_LIGHT_ONOFF, test_params);
+        crate::light::send_light_message(LGT_CMD_LIGHT_ONOFF, test_params);
 
         assert_eq!(LIGHT_CMD_CHANNEL.len(), 1);
         let msg = LIGHT_CMD_CHANNEL.try_receive().unwrap();
@@ -846,11 +787,11 @@ mod tests {
 
         // Fill the channel (capacity is 10)
         for i in 0..10 {
-            send_light_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
+            crate::light::send_light_message(LGT_CMD_LIGHT_ONOFF, [i; 16]);
         }
 
         // Try to add one more - should be ignored
-        send_light_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
+        crate::light::send_light_message(LGT_CMD_LIGHT_ONOFF, [99; 16]);
 
         // All 10 retained messages are received in order and the 11th was dropped
         for i in 0..10 {
@@ -862,7 +803,6 @@ mod tests {
     // --- On/Off Handling Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_turns_light_on() {
         reset_fakes();
         // This test verifies that handle_on_off correctly processes LIGHT_ON_PARAM
@@ -871,7 +811,7 @@ mod tests {
         reset_mmio_for_start();
         with_core(|core| core.brightness = 500);
 
-        mock_ll_device_status_update([1, 0xff]).returns(());
+        status_probe::reset();
         // First transition_step call (at t=0, brightness=0)
         fake_clock::set_ticks(1000);
 
@@ -884,7 +824,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_turns_light_off() {
         reset_fakes();
         // This test verifies that handle_on_off correctly processes LIGHT_OFF_PARAM
@@ -896,8 +835,8 @@ mod tests {
             core.brightness_tr.to = I16F16::from_num(1000);
         });
 
-        mock_ll_device_status_update([0, 0xff]).returns(()); // Light off status
-                                                             // Initial transition_step at brightness=1000
+        status_probe::reset();
+        // Initial transition_step at brightness=1000
         fake_clock::set_ticks(1000);
 
         dispatch_message(create_onoff_message(LIGHT_OFF_PARAM));
@@ -909,7 +848,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_invalid_param_defaults_to_on() {
         reset_fakes();
         // This test verifies that handle_on_off treats invalid params as ON
@@ -918,7 +856,7 @@ mod tests {
         reset_mmio_for_start();
         with_core(|core| core.brightness = 300);
 
-        mock_ll_device_status_update([1, 0xff]).returns(());
+        status_probe::reset();
         // Initial transition_step at brightness=0
         fake_clock::set_ticks(1000);
 
@@ -1410,7 +1348,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_restores_state_and_turns_on() {
         reset_fakes();
         // This test verifies retrieve_from_flash correctly restores saved state
@@ -1427,8 +1364,8 @@ mod tests {
 
         // Analog memory indicates light was NOT off
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
-        mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
-                                                             // Initial transition_step at brightness=0 (before restore)
+        status_probe::reset();
+        // Initial transition_step at brightness=0 (before restore)
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -1450,7 +1387,8 @@ mod tests {
         );
 
         // The light_onoff should have been called
-        mock_ll_device_status_update([1, 0xff]).assert_called(1);
+        assert_eq!(status_probe::calls(), 1, "restoring on/off reports once");
+        assert_eq!(status_probe::last(), Some([1, 0xff]), "light on status");
 
         assert_tmr1_started();
     }
@@ -1626,38 +1564,6 @@ mod tests {
         assert_eq!(result, 0);
     }
 
-    // --- Device Status Update Tests ---
-
-    #[test]
-    #[mry::lock(ll_device_status_update)]
-    fn test_device_status_update_reports_on() {
-        // This test verifies device_status_update reports correct status when light is on
-
-        reset_for_test();
-        with_core(|core| core.brightness_tr.current = I16F16::from_num(500));
-
-        mock_ll_device_status_update([1, 0xff]).returns(()); // Status 0 = light on
-
-        device_status_update();
-
-        mock_ll_device_status_update([1, 0xff]).assert_called(1);
-    }
-
-    #[test]
-    #[mry::lock(ll_device_status_update)]
-    fn test_device_status_update_reports_off() {
-        // This test verifies device_status_update reports correct status when light is off
-
-        reset_for_test();
-        // brightness_tr defaults to current=0, to=0 — light is already off
-
-        mock_ll_device_status_update([0, 0xff]).returns(()); // Status 0 = light off
-
-        device_status_update();
-
-        mock_ll_device_status_update([0, 0xff]).assert_called(1);
-    }
-
     // --- Begin Transition Tests ---
 
     #[test]
@@ -1719,7 +1625,6 @@ mod tests {
     // --- Message Processing Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_process_message_handles_onoff() {
         reset_fakes();
         // This test verifies process_message correctly handles on/off messages
@@ -1728,13 +1633,13 @@ mod tests {
         reset_mmio_for_start();
         with_core(|core| core.brightness = 500);
 
-        mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
-                                                             // Initial transition_step at brightness=0
+        status_probe::reset();
+        // Initial transition_step at brightness=0
         fake_clock::set_ticks(1000);
 
         let msg = create_onoff_message(LIGHT_ON_PARAM);
 
-        send_light_message(msg.cmd, msg.params);
+        crate::light::send_light_message(msg.cmd, msg.params);
         dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
         assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 500);
@@ -1743,7 +1648,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_process_message_impl_parks_until_send_message() {
         reset_fakes();
         use core::future::Future;
@@ -1755,10 +1659,10 @@ mod tests {
         reset_mmio_for_start();
         with_core(|core| core.brightness = 500);
 
-        mock_ll_device_status_update(Any).returns(());
+        status_probe::reset();
         fake_clock::set_ticks(1000);
 
-        let future = light_manager_task();
+        let future = crate::light::light_manager_task();
         futures::pin_mut!(future);
 
         let waker = noop_waker();
@@ -1770,7 +1674,7 @@ mod tests {
 
         // A message wakes the parked receive.
         let msg = create_onoff_message(LIGHT_ON_PARAM);
-        send_light_message(msg.cmd, msg.params);
+        crate::light::send_light_message(msg.cmd, msg.params);
 
         // The task consumes and dispatches it, then parks on the empty channel
         // again, so the poll as a whole is still pending.
@@ -1800,7 +1704,7 @@ mod tests {
 
         let msg = create_brightness_message(1000);
 
-        send_light_message(msg.cmd, msg.params);
+        crate::light::send_light_message(msg.cmd, msg.params);
         dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
         assert_eq!(with_core(|core| core.brightness), 1000);
@@ -1824,7 +1728,7 @@ mod tests {
             params: [0; 16],
         };
 
-        send_light_message(msg.cmd, msg.params);
+        crate::light::send_light_message(msg.cmd, msg.params);
         dispatch_message(LIGHT_CMD_CHANNEL.try_receive().unwrap());
 
         // State should be unchanged
@@ -1834,7 +1738,6 @@ mod tests {
     // --- Integration Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_full_transition_sequence() {
         reset_fakes();
         // This test verifies transition state updates correctly
@@ -1844,7 +1747,7 @@ mod tests {
         with_core(|core| core.brightness = 1000);
         // brightness_tr defaults to current=0 (light is off)
 
-        mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
+        status_probe::reset();
         fake_clock::set_ticks(0);
         // Initial transition_step at brightness=0
 
@@ -1865,6 +1768,9 @@ mod tests {
         ));
 
         assert_tmr1_started();
+        // `light_onoff` is the one entry point that also reports the new state.
+        assert_eq!(status_probe::calls(), 1, "light_onoff reports the state");
+        assert_eq!(status_probe::last(), Some([1, 0xff]));
     }
 
     #[test]
@@ -1944,7 +1850,6 @@ mod tests {
     // --- retrieve_from_flash: light-was-off + invalid-entry + full-sector-scan ---
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_light_was_off_turns_light_off() {
         reset_fakes();
         // When the LightOff bit is set in analog memory, light_onoff(false) is called.
@@ -1964,7 +1869,7 @@ mod tests {
         // light_onoff(false) → light_onoff_hw(false) → timer + pwm + status
         // Note: same-target guard fires (brightness_tr starts at 0, target is 0),
         // so transition_step immediately stops the timer (tmr1_stop()).
-        mock_ll_device_status_update([0, 0xff]).returns(());
+        status_probe::reset();
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -1981,7 +1886,8 @@ mod tests {
             0x00,
             "the light-off bit must be cleared in analog memory"
         );
-        mock_ll_device_status_update([0, 0xff]).assert_called(1);
+        assert_eq!(status_probe::calls(), 1, "restoring on/off reports once");
+        assert_eq!(status_probe::last(), Some([0, 0xff]), "light off status");
 
         assert!(
             FakeMmio::reg8(0x620) & TMR1_EN == 0,
@@ -1995,7 +1901,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_skips_invalid_flash_entry() {
         reset_fakes();
         // An entry with a save_flag that is neither 0xA5 nor 0xFF is silently skipped.
@@ -2021,7 +1926,7 @@ mod tests {
         );
 
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
-        mock_ll_device_status_update([1, 0xff]).returns(());
+        status_probe::reset();
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -2046,7 +1951,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_full_sector_uses_post_loop_restore() {
         reset_fakes();
         // When the entire flash sector is full of valid entries (no 0xFF terminator),
@@ -2061,7 +1965,7 @@ mod tests {
 
         // Light was on at prior shutdown
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
-        mock_ll_device_status_update([1, 0xff]).returns(());
+        status_probe::reset();
         fake_clock::set_ticks(1000);
 
         let _store = LightFlashStore::retrieve_from_flash();
@@ -2076,13 +1980,13 @@ mod tests {
             with_core(|core| core.ww_tr.current.to_num::<u16>()),
             saved_ww
         );
-        mock_ll_device_status_update([1, 0xff]).assert_called(1);
+        assert_eq!(status_probe::calls(), 1, "restoring on/off reports once");
+        assert_eq!(status_probe::last(), Some([1, 0xff]), "light on status");
 
         assert_tmr1_started();
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_full_sector_light_was_off() {
         reset_fakes();
         // Full sector, no 0xFF terminator, AND the light was off at prior shutdown.
@@ -2099,7 +2003,7 @@ mod tests {
         // Light WAS off at prior shutdown
         let light_off_bit = RecoverStatus::LightOff as u8;
         FakeAnalog::set(REGA_LIGHT_OFF, light_off_bit);
-        mock_ll_device_status_update([0, 0xff]).returns(());
+        status_probe::reset();
         fake_clock::set_ticks(1000);
 
         let _store = LightFlashStore::retrieve_from_flash();
@@ -2111,7 +2015,8 @@ mod tests {
             0x00,
             "the light-off bit must be cleared in analog memory"
         );
-        mock_ll_device_status_update([0, 0xff]).assert_called(1);
+        assert_eq!(status_probe::calls(), 1, "restoring on/off reports once");
+        assert_eq!(status_probe::last(), Some([0, 0xff]), "light off status");
 
         assert!(
             FakeMmio::reg8(0x620) & TMR1_EN == 0,

@@ -8,17 +8,16 @@ use tlsr8266_hal::runtime::executor::Executor;
 mod app;
 mod config;
 mod diagnostics;
+mod factory_reset;
 mod irq;
-mod light_manager;
+mod light;
 mod logging;
-mod main_light;
 mod mesh;
 mod ota;
 mod sdk;
 #[cfg(target_os = "none")]
 mod startup;
 mod uart_manager;
-mod vendor_light;
 pub mod version;
 
 /// Bit-manipulation macros live in the PAC crate; re-exported here so existing

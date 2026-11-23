@@ -902,7 +902,7 @@ irq_handler()
     │   └── OTA timeout decrement (if active)
     ├── Timer 1 IRQ (reg_tmr_sta bit 1):
     │   ├── Clear: write 0x02 to reg_tmr_sta (0x623)
-    │   └── Call light_manager.transition_step()
+    │   └── Call light::transition_step()
     └── UART IRQ:
         └── Call uart_manager.check_irq()
 ```

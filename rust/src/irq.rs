@@ -88,7 +88,7 @@ fn handle_system_interrupts() {
     if irq_source.is_tmr1() {
         tmr1_ack_irq();
 
-        crate::light_manager::transition_step();
+        crate::light::transition_step();
     }
 
     // Handle UART interrupts for external communication
@@ -139,7 +139,7 @@ mod tests {
     use mry::Any;
 
     // Import mock functions from their original modules
-    use crate::light_manager::{mock_transition_step, transition_step};
+    use crate::light::transitions::{mock_transition_step, transition_step};
     use crate::ota::{
         mock_rf_link_slave_ota_finish_handle, mock_rf_link_slave_ota_finish_led_and_reboot,
         rf_link_slave_ota_finish_handle, rf_link_slave_ota_finish_led_and_reboot,

@@ -1,19 +1,19 @@
 use core::mem::size_of;
 use core::ptr::addr_of;
 
+use crate::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
+use crate::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
+use crate::mcu::watchdog::wd_clear;
 use crate::BIT;
 use mesh_protocol::uart::{UartData, UART_DATA_LEN};
-use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_HZ};
-use tlsr8266_hal::mcu::gpio::{gpio_set_func, gpio_set_input_en, AS_UART, GPIO_PIN_TYPE};
-use tlsr8266_hal::mcu::watchdog::wd_clear;
 use tlsr8266_pac::{
-    read_reg8, read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0,
-    read_reg_irq_mask, read_reg_uart_status, write_reg16, write_reg8, write_reg_dma0_addr,
-    write_reg_dma0_ctrl, write_reg_dma0_mode, write_reg_dma1_addr, write_reg_dma1_mode,
-    write_reg_dma_chn_en, write_reg_dma_chn_irq_msk, write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0,
-    write_reg_irq_mask, write_reg_uart_clk_div, write_reg_uart_ctrl0, write_reg_uart_ctrl1,
-    write_reg_uart_rx_timeout, write_reg_uart_rx_timeout_cnt, write_reg_uart_status, FLD_DMA,
-    FLD_IRQ, FLD_UART_CLK_DIV, FLD_UART_CTRL0, FLD_UART_CTRL1, FLD_UART_STATUS,
+    read_reg_dma_chn_en, read_reg_dma_chn_irq_msk, read_reg_dma_rx_rdy0, read_reg_irq_mask,
+    read_reg_uart_status, write_reg_dma0_addr, write_reg_dma0_ctrl, write_reg_dma0_mode,
+    write_reg_dma1_addr, write_reg_dma1_mode, write_reg_dma_chn_en, write_reg_dma_chn_irq_msk,
+    write_reg_dma_rx_rdy0, write_reg_dma_tx_rdy0, write_reg_irq_mask, write_reg_uart_clk_div,
+    write_reg_uart_ctrl0, write_reg_uart_ctrl1, write_reg_uart_rx_timeout,
+    write_reg_uart_rx_timeout_cnt, write_reg_uart_status, FLD_DMA, FLD_IRQ, FLD_UART_CLK_DIV,
+    FLD_UART_CTRL0, FLD_UART_STATUS,
 };
 
 /// UART interrupt mask flags for controlling the UART interrupt sources.
@@ -44,6 +44,7 @@ impl UartIrqMask {
 ///
 /// These modes define various hardware flow control and parity options
 /// for the UART peripheral on the TLSR8266.
+#[allow(dead_code)] // full hardware mode table from the datasheet; a subset is used here
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardwareControl {
     /// Enable CTS hardware flow control with odd parity checking
@@ -417,18 +418,8 @@ impl UartDriver {
 mod tests {
     use super::*;
 
-    // Import mock versions of the functions from their original modules
-    use tlsr8266_hal::mcu::clock::fake_clock;
+    use crate::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{
-        mock_read_reg_dma_chn_en, mock_read_reg_dma_chn_irq_msk, mock_read_reg_dma_rx_rdy0,
-        mock_read_reg_irq_mask, mock_read_reg_uart_status, mock_write_reg_dma0_addr,
-        mock_write_reg_dma0_ctrl, mock_write_reg_dma0_mode, mock_write_reg_dma1_mode,
-        mock_write_reg_dma_chn_en, mock_write_reg_dma_chn_irq_msk, mock_write_reg_dma_rx_rdy0,
-        mock_write_reg_irq_mask, mock_write_reg_uart_clk_div, mock_write_reg_uart_ctrl0,
-        mock_write_reg_uart_ctrl1, mock_write_reg_uart_rx_timeout,
-        mock_write_reg_uart_rx_timeout_cnt, mock_write_reg_uart_status,
-    };
 
     /// `reg_system_tick`: the free-running tick `clock_time()` reads.
     const REG_SYSTEM_TICK: u32 = 0x740;
@@ -440,6 +431,34 @@ mod tests {
     const REG_GPIO_PC_OEN: u32 = 0x582 + 0x10;
     /// `reg_dma_rx_rdy0`: DMA/UART interrupt flags, write-1-to-clear.
     const REG_DMA_RX_RDY0: u32 = 0x526;
+    /// `reg_dma_tx_rdy0`: write to trigger the DMA1 transfer.
+    const REG_DMA_TX_RDY0: u32 = 0x524;
+    /// `reg_uart_clk_div`: 16-bit divider plus the clock-enable bit.
+    const REG_UART_CLK_DIV: u32 = 0x094;
+    /// `reg_uart_ctrl0`: bit width plus the RX/TX DMA enables.
+    const REG_UART_CTRL0: u32 = 0x096;
+    /// `reg_uart_ctrl1`: flow control and parity.
+    const REG_UART_CTRL1: u32 = 0x097;
+    /// `reg_uart_rx_timeout`: receive timeout value.
+    const REG_UART_RX_TIMEOUT: u32 = 0x09a;
+    /// `reg_uart_rx_timeout_cnt`: receive timeout safety margin.
+    const REG_UART_RX_TIMEOUT_CNT: u32 = 0x09b;
+    /// `reg_uart_status`: UART status flags including the error bit.
+    const REG_UART_STATUS: u32 = 0x09d;
+    /// `reg_dma0_addr`: receive buffer address for DMA0 (16-bit).
+    const REG_DMA0_ADDR: u32 = 0x500;
+    /// `reg_dma0_ctrl`: receive buffer size for DMA0 (16-bit).
+    const REG_DMA0_CTRL: u32 = 0x502;
+    /// `reg_dma0_mode`: receive channel mode.
+    const REG_DMA0_MODE: u32 = 0x503;
+    /// `reg_dma1_mode`: transmit channel mode.
+    const REG_DMA1_MODE: u32 = 0x507;
+    /// `reg_dma_chn_en`: per-channel DMA enables.
+    const REG_DMA_CHN_EN: u32 = 0x520;
+    /// `reg_dma_chn_irq_msk`: per-channel DMA interrupt masks.
+    const REG_DMA_CHN_IRQ_MSK: u32 = 0x521;
+    /// `reg_irq_mask`: global interrupt mask (32-bit).
+    const REG_IRQ_MASK: u32 = 0x640;
 
     /// The HAL host seams are process-wide singletons, so every test that
     /// observes them starts from a known-empty bank and tick count.
@@ -448,8 +467,15 @@ mod tests {
         fake_clock::reset();
     }
 
-    /// `reg_dma_tx_rdy0`: write to trigger the DMA1 transfer.
-    const REG_DMA_TX_RDY0: u32 = 0x524;
+    /// Values written to `addr`, oldest first.
+    fn values_written_to(addr: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == addr | tlsr8266_pac::REG_BASE_ADDR)
+            .map(|write| write.value)
+            .collect()
+    }
+
     /// Number of DMA1 transmit triggers, i.e. `start_tx_unchecked` arms.
     fn dma1_arms() -> usize {
         FakeMmio::writes()
@@ -471,10 +497,6 @@ mod tests {
     /// - Initializes transmit and receive buffers correctly
     /// - Sets the busy flag to false
     /// - Creates a ready-to-use driver instance
-    ///
-    /// # Notes
-    ///
-    /// * No mock functions needed since this only tests struct initialization
     #[test]
     fn test_uart_driver_default() {
         // Create a new driver instance using the default constructor
@@ -489,30 +511,23 @@ mod tests {
         assert_eq!(driver.rx_data_buf.data, [0; UART_DATA_LEN]);
 
         // Verify transmit busy flag is initially false
-        assert_eq!(driver.is_tx_busy, false);
+        assert!(!driver.is_tx_busy);
     }
 
     /// Tests the tx_busy accessor method.
-    ///
-    /// This test verifies that the tx_busy method correctly:
-    /// - Returns the current state of the is_tx_busy flag
-    ///
-    /// # Notes
-    ///
-    /// * Tests both true and false states to ensure proper functionality
     #[test]
     fn test_tx_busy() {
         // Create a driver with default settings
         let mut driver = UartDriver::default_const();
 
         // Initially, the busy flag should be false
-        assert_eq!(driver.is_tx_busy(), false);
+        assert!(!driver.is_tx_busy());
 
         // Set the busy flag to true
         driver.is_tx_busy = true;
 
         // Now the busy flag should be true
-        assert_eq!(driver.is_tx_busy(), true);
+        assert!(driver.is_tx_busy());
     }
 
     /// Tests the UART initialization function.
@@ -520,74 +535,20 @@ mod tests {
     /// This test verifies that the init method correctly:
     /// - Configures GPIO pins for UART functionality
     /// - Initializes DMA buffers for TX/RX
-    /// - Sets up UART with appropriate baud rate and settings
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock GPIO and register access functions
-    /// 2. Call the init method
-    /// 3. Verify all expected hardware configuration calls
-    /// 4. Check that the correct parameters were used for each call
+    /// - Programs the UART registers for 115200 baud
+    /// - Enables both DMA channels and their interrupts
     ///
     /// # Notes
     ///
-    /// * Validates the initialization sequence is correct
-    /// * Checks that GPIO pins are properly configured
-    /// * Confirms DMA is set up correctly
+    /// * Assertions are the register contents the peripheral would hold after
+    ///   `init()` returns
     #[test]
-    #[mry::lock(
-        write_reg_dma0_addr,
-        write_reg_dma0_ctrl,
-        read_reg_dma_rx_rdy0,
-        write_reg_dma_rx_rdy0,
-        read_reg_dma_chn_irq_msk,
-        write_reg_dma_chn_irq_msk,
-        read_reg_irq_mask,
-        write_reg_irq_mask,
-        read_reg_dma_chn_en,
-        write_reg_dma_chn_en,
-        write_reg_uart_clk_div,
-        write_reg_uart_ctrl0,
-        write_reg_uart_rx_timeout,
-        write_reg_uart_rx_timeout_cnt,
-        write_reg_uart_ctrl1,
-        write_reg_dma0_mode,
-        write_reg_dma1_mode
-    )]
     fn test_uart_init() {
         reset_fakes();
         // Seed both UART pins as peripheral-selected (bits set) so the
         // `AS_UART` clears below are observable, and the OEN bank at 0.
         FakeMmio::set_reg8(REG_GPIO_PC_FUNC, 0xff);
         FakeMmio::set_reg8(REG_GPIO_PC_OEN, 0x00);
-
-        // Setup mock responses for DMA buffer initialization
-        mock_write_reg_dma0_addr(mry::Any).returns(());
-        mock_write_reg_dma0_ctrl(mry::Any).returns(());
-
-        // Setup mock responses for UART register configuration
-        mock_write_reg_uart_clk_div(69 | FLD_UART_CLK_DIV::CLK_EN.bits()).returns(()); // Clock divider
-        mock_write_reg_uart_ctrl0(
-            FLD_UART_CTRL0::RX_DMA_EN.bits() | FLD_UART_CTRL0::TX_DMA_EN.bits() | 3,
-        )
-        .returns(()); // Bit width
-        mock_write_reg_uart_rx_timeout(0xff).returns(()); // Timeout
-        mock_write_reg_uart_rx_timeout_cnt(3).returns(()); // Safety margin
-        mock_write_reg_uart_ctrl1(0x00).returns(()); // Hardware control
-        mock_write_reg_dma0_mode(0x01).returns(()); // DMA0 mode
-        mock_write_reg_dma1_mode(0x00).returns(()); // DMA1 mode
-
-        // Setup mock responses for interrupt clearing
-        mock_read_reg_dma_rx_rdy0().returns(0);
-        mock_write_reg_dma_rx_rdy0(0).returns(());
-
-        // Setup mock responses for IRQ configuration
-        mock_read_reg_dma_chn_irq_msk().returns(0);
-        mock_write_reg_dma_chn_irq_msk(mry::Any).returns(());
-        mock_read_reg_irq_mask().returns(0);
-        mock_write_reg_irq_mask(mry::Any).returns(());
-        mock_read_reg_dma_chn_en().returns(0);
-        mock_write_reg_dma_chn_en(mry::Any).returns(());
 
         // Create a new driver and initialize it
         let mut driver = UartDriver::default_const();
@@ -608,46 +569,69 @@ mod tests {
         );
 
         // Verify UART register initialization
-        mock_write_reg_uart_clk_div(69 | FLD_UART_CLK_DIV::CLK_EN.bits()).assert_called(1); // Clock divider
-        mock_write_reg_uart_ctrl0(
+        assert_eq!(
+            FakeMmio::reg16(REG_UART_CLK_DIV),
+            69u16 | FLD_UART_CLK_DIV::CLK_EN.bits(),
+            "clock divider 69 with the clock enabled"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_UART_CTRL0),
             FLD_UART_CTRL0::RX_DMA_EN.bits() | FLD_UART_CTRL0::TX_DMA_EN.bits() | 3,
-        )
-        .assert_called(1); // Bit width with DMA enable
-        mock_write_reg_uart_ctrl1(0x00).assert_called(1); // Hardware control
+            "bit width 3 with both DMA directions enabled"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_UART_CTRL1),
+            0x00,
+            "no hardware flow control or parity"
+        );
+        // A 115200 baud configuration uses the maximum timeout and margin 3.
+        assert_eq!(FakeMmio::reg8(REG_UART_RX_TIMEOUT), 0xff);
+        assert_eq!(FakeMmio::reg8(REG_UART_RX_TIMEOUT_CNT), 3);
 
-        // Verify DMA configuration
-        mock_write_reg_dma0_mode(0x01).assert_called(1); // DMA0 mode (receive)
-        mock_write_reg_dma1_mode(0x00).assert_called(1); // DMA1 mode (transmit)
+        // Verify DMA configuration: DMA0 receives, DMA1 transmits.
+        assert_eq!(FakeMmio::reg8(REG_DMA0_MODE), 0x01);
+        assert_eq!(FakeMmio::reg8(REG_DMA1_MODE), 0x00);
+        assert_eq!(
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![0],
+            "the pending interrupt flags were read and cleared once"
+        );
 
-        // Verify IRQ configuration
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(0).assert_called(1);
+        // Verify the interrupt/DMA enables accumulated from a zeroed bank:
+        // both channel interrupts masked, the global DMA interrupt enabled and
+        // both channels enabled.
+        assert_eq!(
+            FakeMmio::reg8(REG_DMA_CHN_IRQ_MSK),
+            (FLD_DMA::ETH_RX.bits() | FLD_DMA::ETH_TX.bits()) as u8
+        );
+        assert_eq!(
+            FakeMmio::reg32(REG_IRQ_MASK),
+            FLD_IRQ::DMA_EN.bits(),
+            "the global DMA interrupt must be unmasked"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_DMA_CHN_EN),
+            (BIT!(0) | BIT!(1)) as u8,
+            "both DMA channels must be enabled"
+        );
 
-        // Verify DMA channel and interrupt configuration
-        // (exact values depend on FLD_DMA and FLD_IRQ enums)
-        mock_read_reg_dma_chn_irq_msk().assert_called(2);
-        mock_write_reg_dma_chn_irq_msk(mry::Any).assert_called(2);
-        mock_read_reg_irq_mask().assert_called(2);
-        mock_write_reg_irq_mask(mry::Any).assert_called(2);
-        mock_read_reg_dma_chn_en().assert_called(2);
-        mock_write_reg_dma_chn_en(mry::Any).assert_called(2);
+        // DMA0 is pointed at the driver's receive buffer.
+        assert_eq!(
+            values_written_to(REG_DMA0_ADDR),
+            vec![u32::from(addr_of!(driver.rx_data_buf) as u16)],
+            "DMA0 must be pointed at the RX buffer"
+        );
+        assert_eq!(
+            values_written_to(REG_DMA0_CTRL),
+            vec![(size_of::<UartData>() / 16) as u32],
+            "DMA0 must be told the RX buffer size in 16-byte units"
+        );
     }
 
     /// Tests that the UART initialization function correctly validates the bit width parameter.
     ///
     /// This test verifies that the uart_init method returns Err(()) when:
     /// - The bit width parameter (bwpc) is less than the minimum required value of 3
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Create a driver instance
-    /// 2. Call uart_init with an invalid bit width parameter (less than 3)
-    /// 3. Verify the function returns Err(())
-    ///
-    /// # Notes
-    ///
-    /// * No mocks are needed for this test since we're only validating the parameter check
-    /// * The function should return early with an error without making any register modifications
     #[test]
     fn test_uart_init_invalid_bit_width() {
         // Create a new driver with default settings
@@ -661,19 +645,6 @@ mod tests {
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with no flags set.
-    ///
-    /// This test verifies that the get_and_clear_irq_source method correctly:
-    /// - Reads the DMA ready register to get interrupt status
-    /// - Clears the interrupt flags by writing back the same value
-    /// - Returns zero when no flags are set
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock register access functions with no flags set
-    /// 2. Call the get_and_clear_irq_source method
-    /// 3. Verify the correct register is read
-    /// 4. Verify the same value is written back to clear flags
-    /// 5. Verify the returned value is zero
     #[test]
     fn test_get_and_clear_irq_source_no_flags() {
         // No interrupt flags set
@@ -684,29 +655,10 @@ mod tests {
         assert_eq!(result, 0);
 
         // The raw value is written back to clear the flags.
-        assert_eq!(
-            FakeMmio::writes()
-                .into_iter()
-                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR && w.value == 0)
-                .count(),
-            1
-        );
+        assert_eq!(values_written_to(REG_DMA_RX_RDY0), vec![0]);
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with RX flag set.
-    ///
-    /// This test verifies that the get_and_clear_irq_source method correctly:
-    /// - Reads the DMA ready register with RX flag set
-    /// - Clears the interrupt flags by writing back the same value
-    /// - Returns the RX flag value
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock register access functions with RX flag set
-    /// 2. Call the get_and_clear_irq_source method
-    /// 3. Verify the correct register is read
-    /// 4. Verify the same value is written back to clear flags
-    /// 5. Verify the returned value matches the RX flag
     #[test]
     fn test_get_and_clear_irq_source_rx_flag() {
         // RX interrupt flag set
@@ -718,29 +670,12 @@ mod tests {
 
         // The raw value is written back to clear the flags.
         assert_eq!(
-            FakeMmio::writes()
-                .into_iter()
-                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
-                    && w.value == u32::from(UartIrqMask::Rx.bits()))
-                .count(),
-            1
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![u32::from(UartIrqMask::Rx.bits())]
         );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with TX flag set.
-    ///
-    /// This test verifies that the get_and_clear_irq_source method correctly:
-    /// - Reads the DMA ready register with TX flag set
-    /// - Clears the interrupt flags by writing back the same value
-    /// - Returns the TX flag value
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock register access functions with TX flag set
-    /// 2. Call the get_and_clear_irq_source method
-    /// 3. Verify the correct register is read
-    /// 4. Verify the same value is written back to clear flags
-    /// 5. Verify the returned value matches the TX flag
     #[test]
     fn test_get_and_clear_irq_source_tx_flag() {
         // TX interrupt flag set
@@ -752,29 +687,12 @@ mod tests {
 
         // The raw value is written back to clear the flags.
         assert_eq!(
-            FakeMmio::writes()
-                .into_iter()
-                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
-                    && w.value == u32::from(UartIrqMask::Tx.bits()))
-                .count(),
-            1
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![u32::from(UartIrqMask::Tx.bits())]
         );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with both RX and TX flags set.
-    ///
-    /// This test verifies that the get_and_clear_irq_source method correctly:
-    /// - Reads the DMA ready register with both RX and TX flags set
-    /// - Clears the interrupt flags by writing back the same value
-    /// - Returns the combined flag value
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock register access functions with both flags set
-    /// 2. Call the get_and_clear_irq_source method
-    /// 3. Verify the correct register is read
-    /// 4. Verify the same value is written back to clear flags
-    /// 5. Verify the returned value matches the combined flags
     #[test]
     fn test_get_and_clear_irq_source_all_flags() {
         // Both RX and TX interrupt flags set
@@ -786,29 +704,12 @@ mod tests {
 
         // The raw value is written back to clear the flags.
         assert_eq!(
-            FakeMmio::writes()
-                .into_iter()
-                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
-                    && w.value == u32::from(UartIrqMask::all()))
-                .count(),
-            1
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![u32::from(UartIrqMask::all())]
         );
     }
 
     /// Tests the UART IRQ source and flag clearing functionality with masking of irrelevant bits.
-    ///
-    /// This test verifies that the get_and_clear_irq_source method correctly:
-    /// - Reads the DMA ready register with extra irrelevant bits set
-    /// - Clears the interrupt flags by writing back the same value
-    /// - Returns only the relevant UART bits (masking out irrelevant bits)
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock register access functions with both relevant and irrelevant bits set
-    /// 2. Call the get_and_clear_irq_source method
-    /// 3. Verify the correct register is read
-    /// 4. Verify the same value is written back to clear flags
-    /// 5. Verify the returned value has irrelevant bits masked out
     #[test]
     fn test_get_and_clear_irq_source_with_masking() {
         // Additional irrelevant bits set (should be masked out)
@@ -821,25 +722,13 @@ mod tests {
 
         // The raw value is written back to clear the flags.
         assert_eq!(
-            FakeMmio::writes()
-                .into_iter()
-                .filter(|w| w.addr == REG_DMA_RX_RDY0 | tlsr8266_pac::REG_BASE_ADDR
-                    && w.value == u32::from(raw_value))
-                .count(),
-            1
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![u32::from(raw_value)],
+            "the whole register is written back, not just the UART bits"
         );
     }
 
     /// Tests the TX busy flag manipulation methods.
-    ///
-    /// This test verifies that start_tx_unchecked and clear_tx_busy_flag:
-    /// - Arm a transfer (busy flag set, DMA1 pointed and triggered)
-    /// - Report the busy state through is_tx_busy
-    /// - Clear the busy flag on completion
-    ///
-    /// # Notes
-    ///
-    /// * Simple state manipulation test
     #[test]
     fn test_tx_busy_flag_manipulation() {
         reset_fakes();
@@ -847,7 +736,7 @@ mod tests {
         let mut driver = UartDriver::default_const();
 
         // Initial state should be not busy
-        assert_eq!(driver.is_tx_busy(), false);
+        assert!(!driver.is_tx_busy());
 
         // Arm a transfer: busy flag set, DMA1 configured and triggered
         let msg = UartData {
@@ -855,12 +744,12 @@ mod tests {
             data: [0; UART_DATA_LEN],
         };
         driver.start_tx_unchecked(&msg);
-        assert_eq!(driver.is_tx_busy(), true);
+        assert!(driver.is_tx_busy());
         assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
 
         // Clear busy flag
         driver.clear_tx_busy_flag();
-        assert_eq!(driver.is_tx_busy(), false);
+        assert!(!driver.is_tx_busy());
     }
 
     /// Tests the synchronous UART data transmission function when the driver is not busy.
@@ -868,21 +757,8 @@ mod tests {
     /// This test verifies that the send method correctly:
     /// - Sets the busy flag
     /// - Copies message data to the internal TX buffer
-    /// - Configures DMA with the buffer address
     /// - Triggers the DMA transfer
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access functions
-    /// 2. Create test message data
-    /// 3. Call send with test message
-    /// 4. Verify DMA configuration and trigger
-    /// 5. Verify no waiting was performed
-    ///
-    /// # Notes
-    ///
-    /// * Tests the case where the driver is not busy
-    /// * No waiting or watchdog kicks should occur
+    /// - Does not wait (so the watchdog is never kicked)
     #[test]
     fn test_send_not_busy() {
         reset_fakes();
@@ -902,7 +778,11 @@ mod tests {
         driver.send(&msg);
 
         // Verify result and busy flag
-        assert_eq!(driver.is_tx_busy, true);
+        assert!(driver.is_tx_busy);
+
+        // The message was copied into the DMA buffer the driver points at.
+        assert_eq!(driver.tx_data_buf.len, msg.len);
+        assert_eq!(driver.tx_data_buf.data, msg.data);
 
         // Verify DMA configuration: `start_tx_unchecked` armed DMA1 once.
         assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
@@ -919,33 +799,19 @@ mod tests {
     /// This test verifies that the send method correctly:
     /// - Waits for any previous transmission to complete
     /// - Kicks the watchdog during the wait
-    /// - Sets the busy flag after waiting
-    /// - Copies message data to the internal TX buffer
-    /// - Configures DMA with the buffer address
-    /// - Triggers the DMA transfer
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access and timing functions
-    /// 2. Create test message data and a busy driver
-    /// 3. Configure mocks to simulate the busy condition clearing after some time
-    /// 4. Call send with test message
-    /// 5. Verify DMA configuration and trigger
-    /// 6. Verify proper waiting and watchdog handling
-    ///
-    /// # Notes
-    ///
-    /// * Tests the case where the driver is initially busy but becomes available
-    /// * Verifies watchdog is kicked during the busy-wait
+    /// - Arms the transfer once the wait times out
     #[test]
     fn test_send_busy() {
         reset_fakes();
 
-        // The busy-wait reads the system tick through `clock_time()`. Each read
-        // advances the fake tick by 200_000 ticks, so the 10 ms timeout
-        // (10_000 * CLOCK_SYS_CLOCK_1US = 320_000 ticks) trips on the second
-        // `clock_time_exceed` probe and the loop body runs exactly once.
-        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| call_idx as u32 * 200_000);
+        // `send` spins on `clock_time_exceed(t_timeout, 10 ms)` while the tick
+        // register (0x740) does not auto-advance, so the test scripts the tick:
+        // the first read establishes the reference, and every later read jumps
+        // 200_000 ticks (6.25 ms at 32 MHz). The 320_000-tick timeout therefore
+        // trips on the second probe and the loop body runs exactly once.
+        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| {
+            1_000 + call_idx as u32 * 200_000
+        });
 
         // Create a test message
         let mut msg = UartData {
@@ -964,15 +830,16 @@ mod tests {
         driver.send(&msg);
 
         // Verify result and final busy state
-        assert_eq!(driver.is_tx_busy, true);
+        assert!(driver.is_tx_busy);
 
-        // Verify DMA was configured
+        // The message was still handed to the DMA engine.
+        assert_eq!(driver.tx_data_buf.data, msg.data);
         assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
 
         // Verify waiting occurred: one kick per loop iteration. With the tick
         // advancing 200_000 per read, the 320_000-tick timeout is reached on the
-        // second probe, so exactly one iteration (one kick) may run — a third
-        // probe would mean the loop body ran twice.
+        // second probe, so exactly one iteration (one kick) may run — a second
+        // kick would mean the loop body ran twice.
         assert_eq!(
             watchdog_clears(),
             1,
@@ -981,23 +848,9 @@ mod tests {
     }
 
     /// Tests the DMA buffer initialization for UART reception.
-    ///
-    /// This test verifies that the uart_buff_init method correctly:
-    /// - Calculates the proper buffer size based on UartData structure
-    /// - Configures DMA0 with the address of the RX buffer
-    /// - Sets the DMA0 control register with the correct buffer size
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for DMA register functions
-    /// 2. Create a driver instance and call uart_buff_init
-    /// 3. Verify DMA0 was configured with the correct buffer address and size
     #[test]
-    #[mry::lock(write_reg_dma0_addr, write_reg_dma0_ctrl)]
     fn test_uart_buff_init() {
-        // Setup mock responses for DMA configuration
-        mock_write_reg_dma0_addr(mry::Any).returns(());
-        mock_write_reg_dma0_ctrl(mry::Any).returns(());
+        reset_fakes();
 
         // Create a driver and call buffer initialization
         let mut driver = UartDriver::default_const();
@@ -1006,168 +859,87 @@ mod tests {
         // Calculate expected buffer size
         let expected_buf_len = size_of::<UartData>() / 16;
 
-        // Verify DMA was configured correctly
-        mock_write_reg_dma0_addr(mry::Any).assert_called(1);
-        mock_write_reg_dma0_ctrl(expected_buf_len as u16).assert_called(1);
+        // DMA0 is pointed at the driver's receive buffer and told its size.
+        assert_eq!(
+            values_written_to(REG_DMA0_ADDR),
+            vec![u32::from(addr_of!(driver.rx_data_buf) as u16)],
+            "DMA0 must be pointed at the RX buffer"
+        );
+        assert_eq!(
+            values_written_to(REG_DMA0_CTRL),
+            vec![u32::from(expected_buf_len as u16)],
+            "DMA0 must be told the RX buffer size in 16-byte units"
+        );
     }
 
     /// Tests the UART error clearing functionality when no error is present.
     ///
-    /// This test verifies that the clear_error method correctly:
+    /// This test verifies that the clear_error method:
     /// - Reads the UART status register
     /// - Detects that no error is present (bit 7 not set)
-    /// - Does not attempt to clear anything
     /// - Performs no write when no error is detected
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access with no error flag set
-    /// 2. Call clear_error method
-    /// 3. Verify the status register was read
-    /// 4. Verify no write was performed
-    /// 5. Verify no write was performed
     #[test]
-    #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_no_error() {
+        reset_fakes();
         // No error present (bit 7 not set)
-        mock_read_reg_uart_status().returns(0x00);
+        FakeMmio::set_reg8(REG_UART_STATUS, 0x00);
 
         UartDriver::clear_error();
 
-        // Verify interactions
-        mock_read_reg_uart_status().assert_called(1);
-        mock_write_reg_uart_status(mry::Any).assert_called(0); // No write should occur
+        // No write should occur.
+        assert!(
+            values_written_to(REG_UART_STATUS).is_empty(),
+            "a clean status register must not be written"
+        );
+        assert_eq!(FakeMmio::reg8(REG_UART_STATUS), 0x00);
     }
 
     /// Tests the UART error clearing functionality when a basic error is present.
-    ///
-    /// This test verifies that the clear_error method correctly:
-    /// - Reads the UART status register
-    /// - Detects error condition (bit 7 set)
-    /// - Clears the error by setting bit 6
-    /// - Clears the error condition
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access with error flag set
-    /// 2. Call clear_error method
-    /// 3. Verify the status register was read
-    /// 4. Verify the correct value was written back (with bit 6 set)
-    /// 5. Verify the clear write was performed
     #[test]
-    #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_basic_error() {
+        reset_fakes();
         // Error present (bit 7 set)
-        mock_read_reg_uart_status().returns(FLD_UART_STATUS::ERR_FLAG.bits());
-        mock_write_reg_uart_status(
-            FLD_UART_STATUS::ERR_FLAG.bits() | FLD_UART_STATUS::ERR_CLR.bits(),
-        )
-        .returns(());
+        FakeMmio::set_reg8(REG_UART_STATUS, FLD_UART_STATUS::ERR_FLAG.bits());
 
         UartDriver::clear_error();
 
-        // Verify interactions
-        mock_read_reg_uart_status().assert_called(1);
-        mock_write_reg_uart_status(
-            FLD_UART_STATUS::ERR_FLAG.bits() | FLD_UART_STATUS::ERR_CLR.bits(),
-        )
-        .assert_called(1); // Should write with bit 6 set
+        // The clear bit is set on top of the observed status.
+        let expected = FLD_UART_STATUS::ERR_FLAG.bits() | FLD_UART_STATUS::ERR_CLR.bits();
+        assert_eq!(
+            values_written_to(REG_UART_STATUS),
+            vec![u32::from(expected)]
+        );
+        assert_eq!(FakeMmio::reg8(REG_UART_STATUS), expected);
     }
 
     /// Tests the UART error clearing functionality when an error with other flags is present.
-    ///
-    /// This test verifies that the clear_error method correctly:
-    /// - Reads the UART status register
-    /// - Detects error condition (bit 7 set) among other flag bits
-    /// - Clears the error by setting bit 6 while preserving other bits
-    /// - Clears the error condition while preserving unrelated bits
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Setup mock responses for register access with error flag and other bits set
-    /// 2. Call clear_error method
-    /// 3. Verify the status register was read
-    /// 4. Verify the correct value was written back (with bit 6 set and other bits preserved)
-    /// 5. Verify the clear write was performed
     #[test]
-    #[mry::lock(read_reg_uart_status, write_reg_uart_status)]
     fn test_clear_error_with_other_bits() {
+        reset_fakes();
         // Error with other bits set (bits 0, 2 and 7 set)
         let status_with_error = FLD_UART_STATUS::ERR_FLAG.bits() | 0x05; // 0x05 for bits 0 and 2
-        mock_read_reg_uart_status().returns(status_with_error);
-        mock_write_reg_uart_status(status_with_error | FLD_UART_STATUS::ERR_CLR.bits()).returns(());
+        FakeMmio::set_reg8(REG_UART_STATUS, status_with_error);
 
         UartDriver::clear_error();
 
-        // Verify interactions
-        mock_read_reg_uart_status().assert_called(1);
-        mock_write_reg_uart_status(status_with_error | FLD_UART_STATUS::ERR_CLR.bits())
-            .assert_called(1); // Should preserve other bits
+        // The other bits are preserved; only the clear bit is added.
+        let expected = status_with_error | FLD_UART_STATUS::ERR_CLR.bits();
+        assert_eq!(
+            values_written_to(REG_UART_STATUS),
+            vec![u32::from(expected)]
+        );
+        assert_eq!(FakeMmio::reg8(REG_UART_STATUS), expected);
     }
 
     /// Tests the UART initialization function with 9600 baud rate configuration.
     ///
     /// This test verifies that the uart_init method correctly:
     /// - Configures registers for a low baud rate (9600)
-    /// - Sets the appropriate timeout value based on bit width
+    /// - Sets the timeout from the bit width: (bwpc + 1) * 12 = 168
     /// - Sets the lower safety margin (1 instead of 3)
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Mock GPIO and register access functions
-    /// 2. Call uart_init with parameters for 9600 baud (clkdiv=237, bwpc=13)
-    /// 3. Verify all expected hardware configuration calls
-    /// 4. Check that timeout and safety margin are configured for low baud rate
-    ///
-    /// # Notes
-    ///
-    /// * Validates the specific timing configuration for baud rates below 100000
-    /// * Verifies the timeout is calculated as (bwpc+1)*12
-    /// * Verifies safety margin is set to 1
     #[test]
-    #[mry::lock(
-        read_reg_dma_rx_rdy0,
-        write_reg_dma_rx_rdy0,
-        read_reg_dma_chn_irq_msk,
-        write_reg_dma_chn_irq_msk,
-        read_reg_irq_mask,
-        write_reg_irq_mask,
-        read_reg_dma_chn_en,
-        write_reg_dma_chn_en,
-        write_reg_uart_clk_div,
-        write_reg_uart_ctrl0,
-        write_reg_uart_rx_timeout,
-        write_reg_uart_rx_timeout_cnt,
-        write_reg_uart_ctrl1,
-        write_reg_dma0_mode,
-        write_reg_dma1_mode
-    )]
     fn test_uart_init_9600_baud() {
-        // Setup mock responses for UART register configuration
-        mock_write_reg_uart_clk_div(237 | FLD_UART_CLK_DIV::CLK_EN.bits()).returns(()); // Clock divider for 9600 baud
-        mock_write_reg_uart_ctrl0(
-            FLD_UART_CTRL0::RX_DMA_EN.bits() | FLD_UART_CTRL0::TX_DMA_EN.bits() | 13,
-        )
-        .returns(()); // Bit width (13) with DMA enable
-
-        // For 9600 baud, timeout should be (bwpc+1)*12 = (13+1)*12 = 168
-        mock_write_reg_uart_rx_timeout(168).returns(()); // Timeout for low baud rate
-        mock_write_reg_uart_rx_timeout_cnt(1).returns(()); // Lower safety margin (1)
-
-        mock_write_reg_uart_ctrl1(0x00).returns(()); // Hardware control (NOCONTROL)
-        mock_write_reg_dma0_mode(0x01).returns(()); // DMA0 mode (receive)
-        mock_write_reg_dma1_mode(0x00).returns(()); // DMA1 mode (transmit)
-
-        // Setup mock responses for interrupt clearing and configuration
-        mock_read_reg_dma_rx_rdy0().returns(0);
-        mock_write_reg_dma_rx_rdy0(0).returns(());
-
-        mock_read_reg_dma_chn_irq_msk().returns(0);
-        mock_write_reg_dma_chn_irq_msk(mry::Any).returns(());
-        mock_read_reg_irq_mask().returns(0);
-        mock_write_reg_irq_mask(mry::Any).returns(());
-        mock_read_reg_dma_chn_en().returns(0);
-        mock_write_reg_dma_chn_en(mry::Any).returns(());
+        reset_fakes();
 
         // Create a new driver and initialize UART with 9600 baud parameters
         // For 32MHz system clock, 9600 baud: clkdiv=237, bwpc=13
@@ -1178,31 +950,37 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify UART register configuration
-        mock_write_reg_uart_clk_div(237 | FLD_UART_CLK_DIV::CLK_EN.bits()).assert_called(1); // Clock divider
-        mock_write_reg_uart_ctrl0(
-            FLD_UART_CTRL0::RX_DMA_EN.bits() | FLD_UART_CTRL0::TX_DMA_EN.bits() | 13,
-        )
-        .assert_called(1); // Bit width with DMA enable
+        assert_eq!(
+            FakeMmio::reg16(REG_UART_CLK_DIV),
+            237u16 | FLD_UART_CLK_DIV::CLK_EN.bits()
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_UART_CTRL0),
+            FLD_UART_CTRL0::RX_DMA_EN.bits() | FLD_UART_CTRL0::TX_DMA_EN.bits() | 13
+        );
 
         // Verify specific low baud rate configuration
-        mock_write_reg_uart_rx_timeout(168).assert_called(1); // Timeout: (13+1)*12 = 168
-        mock_write_reg_uart_rx_timeout_cnt(1).assert_called(1); // Lower safety margin
+        assert_eq!(
+            FakeMmio::reg8(REG_UART_RX_TIMEOUT),
+            168,
+            "timeout: (13 + 1) * 12 = 168"
+        );
+        assert_eq!(FakeMmio::reg8(REG_UART_RX_TIMEOUT_CNT), 1);
 
         // Verify hardware control setting
-        mock_write_reg_uart_ctrl1(0x00).assert_called(1);
+        assert_eq!(FakeMmio::reg8(REG_UART_CTRL1), 0x00);
 
         // Verify DMA configuration
-        mock_write_reg_dma0_mode(0x01).assert_called(1); // DMA0 mode
-        mock_write_reg_dma1_mode(0x00).assert_called(1); // DMA1 mode
+        assert_eq!(FakeMmio::reg8(REG_DMA0_MODE), 0x01);
+        assert_eq!(FakeMmio::reg8(REG_DMA1_MODE), 0x00);
 
         // Verify interrupt configuration
-        mock_read_reg_dma_rx_rdy0().assert_called(1);
-        mock_write_reg_dma_rx_rdy0(0).assert_called(1);
-        mock_read_reg_dma_chn_irq_msk().assert_called(2);
-        mock_write_reg_dma_chn_irq_msk(mry::Any).assert_called(2);
-        mock_read_reg_irq_mask().assert_called(2);
-        mock_write_reg_irq_mask(mry::Any).assert_called(2);
-        mock_read_reg_dma_chn_en().assert_called(2);
-        mock_write_reg_dma_chn_en(mry::Any).assert_called(2);
+        assert_eq!(values_written_to(REG_DMA_RX_RDY0), vec![0]);
+        assert_eq!(
+            FakeMmio::reg8(REG_DMA_CHN_IRQ_MSK),
+            (FLD_DMA::ETH_RX.bits() | FLD_DMA::ETH_TX.bits()) as u8
+        );
+        assert_eq!(FakeMmio::reg32(REG_IRQ_MASK), FLD_IRQ::DMA_EN.bits());
+        assert_eq!(FakeMmio::reg8(REG_DMA_CHN_EN), (BIT!(0) | BIT!(1)) as u8);
     }
 }

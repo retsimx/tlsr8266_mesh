@@ -99,10 +99,11 @@ class TestRealSdkTree(unittest.TestCase):
             code = check_layering.main([])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
         self.assertIn("0 violations", out.getvalue())
-        # C-4 moved `common/`, `mcu/` and `pm.rs` into `tlsr8266-hal`, so the
-        # shipped SDK tree is smaller; the floor only guards against the gate
-        # silently scanning an empty/wrong directory.
-        self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 30)
+        # C-4 moved `common/`, `mcu/` and `pm.rs` into `tlsr8266-hal`, and C-5
+        # moved `drivers/`, so the shipped SDK tree is smaller (28 files); the
+        # floor only guards against the gate silently scanning an empty/wrong
+        # directory.
+        self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 25)
 
     def test_real_tree_reports_every_pass(self) -> None:
         out, err = io.StringIO(), io.StringIO()
@@ -293,14 +294,12 @@ class TestLayerRules(_TempTree):
             "1: layer-common: crate::sdk::mcu::clock::clock_time"
         )
 
-    def test_mcu_may_not_import_drivers(self) -> None:
-        self.write("mcu/clock_user.rs", _lines("use crate::sdk::drivers::uart::uart_init;"))
-        self.assert_violations("1: layer-mcu: crate::sdk::drivers::uart::uart_init")
-
-    def test_drivers_may_not_import_app_layer(self) -> None:
-        self.write("drivers/uart_user.rs", _lines("use crate::mesh::is_online;"))
-        out = self.assert_violations("layer-drivers", "upward-dep: crate::mesh")
-        self.assertEqual(len(out.splitlines()), 2)
+    def test_mcu_may_not_import_a_sibling_module(self) -> None:
+        # `mcu` may only name `common`/`mcu` under `crate::sdk`; a sibling
+        # module (the old `drivers/` layer, now `rf_drv` at the SDK root) is an
+        # upward jump out of the layer.
+        self.write("mcu/clock_user.rs", _lines("use crate::sdk::rf_drv::init;"))
+        self.assert_violations("1: layer-mcu: crate::sdk::rf_drv::init")
 
     def test_layer_bottom_up_imports_are_legal(self) -> None:
         self.write(
@@ -314,21 +313,12 @@ class TestLayerRules(_TempTree):
                 "use crate::sdk::mcu::register::read_reg8;",
             ),
         )
-        self.write(
-            "drivers/uart_user.rs",
-            _lines(
-                "use crate::sdk::common::sync::CriticalSectionMutex;",
-                "use crate::sdk::mcu::register::read_reg8;",
-                "use crate::sdk::drivers::spi::spi_write;",
-                "use embassy_time::Instant;",
-            ),
-        )
         self.assert_clean()
 
     def test_root_macros_are_legal_imports(self) -> None:
         self.write("common/bits.rs", _lines("use crate::{BIT, MASK_VAL};"))
         self.write("mcu/bits.rs", _lines("use crate::{regrw_idx, BIT_LOW_BIT};"))
-        self.write("drivers/bits.rs", _lines("use crate::{BM_CLR, BM_SET, CLR_FLD};"))
+        self.write("mcu/more_bits.rs", _lines("use crate::{BM_CLR, BM_SET, CLR_FLD};"))
         self.assert_clean()
 
     def test_new_external_crate_in_a_layer_is_rejected(self) -> None:
@@ -336,7 +326,9 @@ class TestLayerRules(_TempTree):
         self.assert_violations("1: layer-common: external crate `embassy_sync`")
 
     def test_layer_rules_do_not_apply_outside_the_layer_directories(self) -> None:
-        self.write("ble_app/sibling.rs", _lines("use crate::sdk::drivers::uart::uart_init;"))
+        # `ble_app` never was a layer directory, so a sibling `crate::sdk` import
+        # that would fail from `mcu`/`common` is clean here.
+        self.write("ble_app/sibling.rs", _lines("use crate::sdk::rf_drv::init;"))
         self.assert_clean()
 
     def test_multi_line_use_reports_the_use_line(self) -> None:
@@ -350,19 +342,15 @@ class TestLayerRules(_TempTree):
         )
         self.assert_violations("1: layer-common: crate::sdk::mcu::register::read_reg8")
 
-    def test_tlsr8266_hal_is_legal_in_mcu_and_drivers(self) -> None:
-        # C-4: the extracted HAL crate is what the remaining `mcu`/`drivers`
-        # modules consume, so naming it is not an inversion there.
+    def test_tlsr8266_hal_is_legal_in_mcu(self) -> None:
+        # C-4: the extracted HAL crate is what the remaining `mcu` modules
+        # consume, so naming it is not an inversion there.
         self.write("mcu/hal_user.rs", _lines("use tlsr8266_hal::mcu::clock::clock_time;"))
-        self.write(
-            "drivers/hal_user.rs",
-            _lines("use tlsr8266_hal::common::sync::SimplifyLS;"),
-        )
         self.assert_clean()
 
     def test_tlsr8266_hal_is_rejected_in_common(self) -> None:
         # `sdk/common` no longer exists in the firmware tree, and the allowance
-        # was not widened: only `mcu` and `drivers` may name the HAL.
+        # was not widened: only `mcu` may name the HAL.
         self.write(
             "common/hal_user.rs",
             _lines("use tlsr8266_hal::common::sync::SimplifyLS;"),
@@ -441,15 +429,11 @@ class TestMeshProtocolExternalCrate(_TempTree):
         self.write(
             "mcu/mesh_user.rs", _lines("use mesh_protocol::packet_types::Packet;")
         )
-        self.write(
-            "drivers/uart_user.rs",
-            _lines("use mesh_protocol::uart::{UartData, UART_DATA_LEN};"),
-        )
         self.assert_clean()
 
     def test_mesh_protocol_multiline_grouped_import_is_legal(self) -> None:
         self.write(
-            "drivers/uart_user.rs",
+            "mcu/mesh_user.rs",
             _lines(
                 "use mesh_protocol::{",
                 "    packet_types::{Packet, PacketL2capHead},",
@@ -459,13 +443,13 @@ class TestMeshProtocolExternalCrate(_TempTree):
         )
         self.assert_clean()
 
-    def test_another_external_crate_is_still_rejected_in_drivers(self) -> None:
+    def test_another_external_crate_is_still_rejected_in_mcu(self) -> None:
         # The allowance names one crate; it does not open the whole namespace.
-        self.write("drivers/x.rs", _lines("use serde::Serialize;"))
-        self.assert_violations("1: layer-drivers: external crate `serde`")
+        self.write("mcu/x.rs", _lines("use serde::Serialize;"))
+        self.assert_violations("1: layer-mcu: external crate `serde`")
 
     def test_mesh_protocol_does_not_unlock_app_layer_paths(self) -> None:
-        self.write("drivers/x.rs", _lines("use crate::app::App;"))
+        self.write("mcu/x.rs", _lines("use crate::app::App;"))
         self.assert_violations("upward-dep: crate::app")
 
 

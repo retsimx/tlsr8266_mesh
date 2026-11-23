@@ -15,7 +15,6 @@ use tlsr8266_pac::{
 ///   SPI transactions, as it's typically called in tight loops.
 /// * For proper SPI operation, ensure mspi_high() is called after completing a transaction.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_high() {
     write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits());
 }
@@ -34,7 +33,6 @@ pub fn mspi_high() {
 /// * The TLSR8266 SPI peripheral uses active-low CS signals, which is the standard for
 ///   most SPI devices.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_low() {
     write_reg_master_spi_ctrl(0);
 }
@@ -57,7 +55,6 @@ pub fn mspi_low() {
 /// * The byte written will be shifted out MSB (Most Significant Bit) first, which
 ///   is the standard SPI protocol.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_write(c: u8) {
     write_reg_master_spi_data(c);
 }
@@ -82,7 +79,6 @@ pub fn mspi_write(c: u8) {
 /// * The function is inlined to minimize function call overhead in timing-sensitive operations.
 /// * No timeout mechanism is implemented - in case of hardware failure, this could deadlock.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_wait() {
     while read_reg_master_spi_ctrl() & (FLD_MASTER_SPI::BUSY.bits()) != 0 {}
 }
@@ -108,7 +104,6 @@ pub fn mspi_wait() {
 /// * This function is marked as `inline(always)` to maintain consistent timing
 ///   in time-critical SPI operations.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_ctrl_write(c: u8) {
     write_reg_master_spi_ctrl(c);
 }
@@ -133,7 +128,6 @@ pub fn mspi_ctrl_write(c: u8) {
 /// * This function is marked as `inline(always)` to minimize function call overhead in
 ///   timing-sensitive SPI operations.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_get() -> u8 {
     read_reg_master_spi_data()
 }
@@ -166,132 +160,154 @@ pub fn mspi_get() -> u8 {
 /// * This function is marked as `inline(always)` for performance in timing-critical
 ///   operations.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn mspi_read() -> u8 {
     mspi_write(0); // Send dummy byte to generate clock pulses
     mspi_wait(); // Wait for transmission to complete
-    return mspi_get(); // Read and return the received byte
+    mspi_get() // Read and return the received byte
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use tlsr8266_pac::{
-        mock_read_reg_master_spi_ctrl, mock_read_reg_master_spi_data,
-        mock_write_reg_master_spi_ctrl, mock_write_reg_master_spi_data,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// `reg_master_spi_data`: the byte shifted out/in on the SPI bus.
+    const REG_MASTER_SPI_DATA: u32 = 0x0c;
+    /// `reg_master_spi_ctrl`: chip select and busy bits.
+    const REG_MASTER_SPI_CTRL: u32 = 0x0d;
+
+    /// The register bank is a process-wide singleton, so every test starts from
+    /// a known-empty device.
+    fn reset_fakes() {
+        FakeMmio::reset();
+    }
+
+    /// Values written to `addr`, oldest first, in the order the SPI peripheral
+    /// would have shifted them onto the wire.
+    fn values_written_to(addr: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == addr | tlsr8266_pac::REG_BASE_ADDR)
+            .map(|write| write.value)
+            .collect()
+    }
+
+    /// Reads of the SPI control register observed by [`busy_then_idle`].
+    static CTRL_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Reports BUSY for the first two polls, then "transfer complete". The hook
+    /// is a plain `fn` pointer, so the poll count lives in a static.
+    fn busy_then_idle(_call_idx: usize) -> u8 {
+        let polls = CTRL_POLLS.fetch_add(1, Ordering::Relaxed) + 1;
+        if polls <= 2 {
+            FLD_MASTER_SPI::BUSY.bits()
+        } else {
+            0
+        }
+    }
 
     /// Tests that mspi_high sets the SPI CS high by writing the correct bit to the control register.
     #[test]
-    #[mry::lock(write_reg_master_spi_ctrl)]
     fn test_mspi_high() {
-        // Set up expectations
-        mock_write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits()).returns(());
+        reset_fakes();
 
         // Execute function under test
         mspi_high();
 
-        // Verify the control register was written correctly
-        mock_write_reg_master_spi_ctrl(FLD_MASTER_SPI::CS.bits()).assert_called(1);
+        // The control register now holds exactly the CS bit, and that single
+        // write is the only traffic on the bus.
+        assert_eq!(
+            FakeMmio::reg8(REG_MASTER_SPI_CTRL),
+            FLD_MASTER_SPI::CS.bits()
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL),
+            vec![u32::from(FLD_MASTER_SPI::CS.bits())]
+        );
     }
 
     /// Tests that mspi_low clears the SPI CS bit by writing 0 to the control register.
     #[test]
-    #[mry::lock(write_reg_master_spi_ctrl)]
     fn test_mspi_low() {
-        // Set up expectations
-        mock_write_reg_master_spi_ctrl(0).returns(());
+        reset_fakes();
+        // Start from an asserted CS so the clear is observable.
+        FakeMmio::set_reg8(REG_MASTER_SPI_CTRL, FLD_MASTER_SPI::CS.bits());
 
         // Execute function under test
         mspi_low();
 
         // Verify the control register was written correctly
-        mock_write_reg_master_spi_ctrl(0).assert_called(1);
+        assert_eq!(FakeMmio::reg8(REG_MASTER_SPI_CTRL), 0);
+        assert_eq!(values_written_to(REG_MASTER_SPI_CTRL), vec![0]);
     }
 
     /// Tests that mspi_write correctly writes data to the SPI data register.
     #[test]
-    #[mry::lock(write_reg_master_spi_data)]
     fn test_mspi_write() {
-        // Set up expectations for different data values
-        mock_write_reg_master_spi_data(0x42).returns(());
-        mock_write_reg_master_spi_data(0xFF).returns(());
+        reset_fakes();
 
         // Execute function under test with different values
         mspi_write(0x42);
         mspi_write(0xFF);
 
-        // Verify each call was made correctly
-        mock_write_reg_master_spi_data(0x42).assert_called(1);
-        mock_write_reg_master_spi_data(0xFF).assert_called(1);
+        // Both bytes reached the data register, in call order.
+        assert_eq!(FakeMmio::reg8(REG_MASTER_SPI_DATA), 0xFF);
+        assert_eq!(values_written_to(REG_MASTER_SPI_DATA), vec![0x42, 0xFF]);
     }
 
     /// Tests that mspi_wait polls the busy bit until the operation completes.
     #[test]
-    #[mry::lock(read_reg_master_spi_ctrl)]
     fn test_mspi_wait() {
-        // Use a static mutable counter to ensure proper tracking across function calls
-        static mut CALL_COUNT: usize = 0;
-
-        // Reset the counter at the start of the test
-        unsafe { CALL_COUNT = 0 };
-
-        // Set up the behavior of the mocked function using our static counter
-        mock_read_reg_master_spi_ctrl().returns_with(|| {
-            // Safely increment the counter - this is within test code only
-            let count = unsafe {
-                CALL_COUNT += 1;
-                CALL_COUNT
-            };
-
-            if count <= 2 {
-                FLD_MASTER_SPI::BUSY.bits() // First two calls: busy
-            } else {
-                0 // Third call: no longer busy
-            }
-        });
+        reset_fakes();
+        // The bank starts with the peripheral busy; the hook below reports the
+        // transfer completing on the third poll.
+        FakeMmio::set_reg8(REG_MASTER_SPI_CTRL, FLD_MASTER_SPI::BUSY.bits());
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, busy_then_idle);
 
         // Execute function under test
         mspi_wait();
 
-        // Verify control register was read exactly 3 times
-        mock_read_reg_master_spi_ctrl().assert_called(3);
+        // Two BUSY polls then one idle poll: the loop observed the flag and only
+        // returned once it cleared.
+        assert_eq!(
+            CTRL_POLLS.load(Ordering::Relaxed),
+            3,
+            "mspi_wait must poll the BUSY flag until it clears"
+        );
     }
 
     /// Tests that mspi_ctrl_write correctly writes to the SPI control register.
     #[test]
-    #[mry::lock(write_reg_master_spi_ctrl)]
     fn test_mspi_ctrl_write() {
-        // Set up expectations for different control values
-        mock_write_reg_master_spi_ctrl(0x0A).returns(());
-        mock_write_reg_master_spi_ctrl(0x01).returns(());
+        reset_fakes();
 
         // Execute function under test with different values
         mspi_ctrl_write(0x0A);
         mspi_ctrl_write(0x01);
 
-        // Verify each call was made correctly
-        mock_write_reg_master_spi_ctrl(0x0A).assert_called(1);
-        mock_write_reg_master_spi_ctrl(0x01).assert_called(1);
+        // The last value wins in the register; both writes are on the wire.
+        assert_eq!(FakeMmio::reg8(REG_MASTER_SPI_CTRL), 0x01);
+        assert_eq!(values_written_to(REG_MASTER_SPI_CTRL), vec![0x0A, 0x01]);
     }
 
     /// Tests that mspi_get correctly reads data from the SPI data register.
     #[test]
-    #[mry::lock(read_reg_master_spi_data)]
     fn test_mspi_get() {
-        // Set up expectations for data register reads
-        mock_read_reg_master_spi_data().returns(0x42);
+        reset_fakes();
+        // Seed the byte the slave shifted in during the previous transfer.
+        FakeMmio::set_reg8(REG_MASTER_SPI_DATA, 0x42);
 
         // Execute function under test
         let result = mspi_get();
 
-        // Verify result and call count
+        // Verify result
         assert_eq!(
             result, 0x42,
             "mspi_get should return the value from the data register"
         );
-        mock_read_reg_master_spi_data().assert_called(1);
     }
 
     /// Tests that mspi_read performs the complete read sequence:
@@ -299,51 +315,34 @@ mod tests {
     /// 2. Waits for operation to complete
     /// 3. Gets the received data
     #[test]
-    #[mry::lock(mspi_write, mspi_wait, mspi_get)]
     fn test_mspi_read() {
-        // Set up expectations
-        mock_mspi_write(0).returns(());
-        mock_mspi_wait().returns(());
-        mock_mspi_get().returns(0xA5);
+        reset_fakes();
+        // The slave answers every clocked byte with 0xA5.
+        FakeMmio::on_read8(REG_MASTER_SPI_DATA, |_| 0xA5);
 
         // Execute function under test
         let result = mspi_read();
 
-        // Verify result and calls
+        // The dummy byte was clocked out and the received byte returned.
         assert_eq!(
             result, 0xA5,
-            "mspi_read should return the value from mspi_get"
+            "mspi_read should return the byte shifted in from the slave"
         );
-        mock_mspi_write(0).assert_called(1);
-        mock_mspi_wait().assert_called(1);
-        mock_mspi_get().assert_called(1);
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_DATA),
+            vec![0],
+            "mspi_read must clock out exactly one dummy byte"
+        );
     }
 
     /// Tests the integration between mspi functions in a typical SPI transaction.
     #[test]
-    #[mry::lock(mspi_high, mspi_low, mspi_write, mspi_wait, mspi_get)]
     fn test_spi_transaction() {
-        // Set up for a typical SPI command-response transaction
-        // For functions called multiple times, use counters and closures
-
-        mock_mspi_high().returns(());
-        mock_mspi_low().returns(());
-
-        // Handle different mspi_write parameters
-        mock_mspi_write(0x9F).returns(()); // JEDEC ID command
-
-        mock_mspi_write(0).returns(());
-
-        mock_mspi_wait().returns(());
-
-        // Track mspi_get calls with different return values
-        let mut get_count = 0;
-        mock_mspi_get().returns_with(move || {
-            get_count += 1;
-            match get_count {
-                1 => 0xEF, // First byte of JEDEC ID (manufacturer)
-                _ => 0x40, // Second byte of JEDEC ID (device type)
-            }
+        reset_fakes();
+        // The slave shifts out the two JEDEC ID bytes on successive reads.
+        FakeMmio::on_read8(REG_MASTER_SPI_DATA, |call_idx| match call_idx {
+            0 => 0xEF, // First byte of JEDEC ID (manufacturer)
+            _ => 0x40, // Second byte of JEDEC ID (device type)
         });
 
         // Execute a sequence that resembles a typical SPI transaction
@@ -368,12 +367,21 @@ mod tests {
         assert_eq!(byte1, 0xEF, "First JEDEC ID byte should be 0xEF");
         assert_eq!(byte2, 0x40, "Second JEDEC ID byte should be 0x40");
 
-        // Verify call sequence
-        mock_mspi_high().assert_called(2);
-        mock_mspi_low().assert_called(1);
-        mock_mspi_write(0x9F).assert_called(1);
-        mock_mspi_write(0).assert_called(2);
-        mock_mspi_wait().assert_called(3);
-        mock_mspi_get().assert_called(2);
+        // Verify the wire sequence: CS high, CS low, JEDEC command, two dummy
+        // bytes, then CS high again to end the transaction.
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL),
+            vec![
+                u32::from(FLD_MASTER_SPI::CS.bits()),
+                0,
+                u32::from(FLD_MASTER_SPI::CS.bits()),
+            ],
+            "chip select must be asserted for the command and released at the end"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_DATA),
+            vec![0x9F, 0, 0],
+            "the JEDEC command must be followed by two dummy clock bytes"
+        );
     }
 }

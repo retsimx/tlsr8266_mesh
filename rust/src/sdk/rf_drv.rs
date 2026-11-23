@@ -13,9 +13,9 @@ use crate::sdk::ble_app::rf_drv_8266::{
     DEVICE_ADDRESS, GROUP_ADDRESS, MESH_DEVICE_ADDRESS_NEXT_POSITION,
     MESH_GROUP_ADDRESS_NEXT_POSITION, PKT_ADV, SET_UUID_FLAG,
 };
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 
 /// Mesh light-event handler, registered once from `App::init()` so this module
 /// never imports the application layer.
@@ -719,10 +719,7 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
 mod tests {
     use super::mock_remove_group;
     use super::*;
-    use crate::sdk::drivers::flash::{
-        mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
-    };
-    use mry::send_wrapper::SendWrapper;
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, SECTOR_SIZE_BYTES};
 
     /// Helper function to reset global state for clean test environment
     fn reset_test_state() {
@@ -747,6 +744,9 @@ mod tests {
                 .iter_mut()
                 .for_each(|b| *b = 0);
         });
+
+        // Blank the process-global NOR device so every test starts from 0xFF.
+        FakeFlash::reset();
     }
 
     /// Helper function to create a test advertisement packet with specific data
@@ -1121,17 +1121,12 @@ mod tests {
     /// Verifies that flash cleanup is skipped when position pointers
     /// are within acceptable limits.
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_dev_grp_flash_clean_no_cleanup_needed() {
         reset_test_state();
 
         // Set positions well within limits
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(100);
         MESH_DEVICE_ADDRESS_NEXT_POSITION.set(200);
-
-        // Mock flash operations - these should not be called
-        mock_flash_erase_sector(mry::Any).returns(());
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         // Call function
         compact_flash_storage();
@@ -1140,9 +1135,16 @@ mod tests {
         assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), 100);
         assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), 200);
 
-        // Verify flash functions were not called
-        mock_flash_erase_sector(mry::Any).assert_called(0);
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(0);
+        // Verify nothing was erased or programmed: the whole storage sector is
+        // still blank.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_DEV_GRP_ADR), 0);
+        let mut sector = [0u8; SECTOR_SIZE_BYTES];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut sector);
+        assert_eq!(
+            sector.iter().position(|&b| b != 0xFF),
+            None,
+            "the storage sector must stay blank"
+        );
     }
 
     /// Tests dev_grp_flash_clean when cleanup is needed
@@ -1150,7 +1152,6 @@ mod tests {
     /// Verifies that flash cleanup correctly erases sector and rewrites data
     /// when position pointers exceed maximum values.
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_dev_grp_flash_clean_cleanup_needed() {
         reset_test_state();
 
@@ -1165,10 +1166,6 @@ mod tests {
         });
         DEVICE_ADDRESS.set(0xABCD);
 
-        // Mock flash operations
-        mock_flash_erase_sector(FLASH_ADR_DEV_GRP_ADR).returns(());
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-
         // Call function
         compact_flash_storage();
 
@@ -1182,9 +1179,18 @@ mod tests {
             INITIAL_ADDR_OFFSET as u16
         );
 
-        // Verify flash operations were called
-        mock_flash_erase_sector(FLASH_ADR_DEV_GRP_ADR).assert_called(1);
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(2); // Group + device address
+        // Verify the sector was erased and the live addresses were re-written
+        // at the start of the sector.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_DEV_GRP_ADR), 1);
+        let mut groups = [0u8; 16];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut groups);
+        let mut expected_groups = [0u8; 16];
+        expected_groups[0..2].copy_from_slice(&0x1234u16.to_le_bytes());
+        expected_groups[2..4].copy_from_slice(&0x5678u16.to_le_bytes());
+        assert_eq!(groups, expected_groups);
+        let mut device = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + GROUP_ADDR_STORAGE_SIZE, &mut device);
+        assert_eq!(device, 0xABCDu16.to_le_bytes());
     }
 
     /// Tests rf_link_add_dev_addr with valid device ID
@@ -1192,12 +1198,11 @@ mod tests {
     /// Verifies that a valid device address is correctly added to both
     /// memory and flash storage.
     #[test]
-    #[mry::lock(flash_write_page, emit_light_event)]
+    #[mry::lock(emit_light_event)]
     fn test_add_dev_addr_valid() {
         reset_test_state();
 
         // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         mock_emit_light_event(mry::Any).returns(());
 
         let dev_id = 0x1234;
@@ -1219,8 +1224,10 @@ mod tests {
             DEVICE_ADDR_SIZE as u16
         );
 
-        // Verify flash write was called
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        // Verify the address really landed in flash at the first slot.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, dev_id.to_le_bytes());
         // Verify callback was called
         mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
     }
@@ -1280,12 +1287,11 @@ mod tests {
     /// Verifies that replacing an existing device address correctly
     /// clears the old address in flash.
     #[test]
-    #[mry::lock(flash_write_page, emit_light_event)]
+    #[mry::lock(emit_light_event)]
     fn test_add_dev_addr_replace_existing() {
         reset_test_state();
 
         // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         mock_emit_light_event(mry::Any).returns(());
 
         // Set up existing address
@@ -1306,8 +1312,12 @@ mod tests {
         assert_eq!(MESH_GROUP_ADDRESS_NEXT_POSITION.get(), 12); // 10 + DEVICE_ADDR_SIZE
         assert_eq!(MESH_DEVICE_ADDRESS_NEXT_POSITION.get(), 12);
 
-        // Verify flash operations: clear old + write new
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(2);
+        // The old slot was zeroed and the new address written.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR - 2 + 5, &mut got);
+        assert_eq!(got, [0x00, 0x00], "the previous slot must be cleared");
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 10, &mut got);
+        assert_eq!(got, new_dev_id.to_le_bytes());
         // Verify callback was called
         mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
     }
@@ -1331,22 +1341,13 @@ mod tests {
     /// Verifies that GROUP_DELETE_ALL correctly removes all group addresses
     /// from both memory and flash.
     #[test]
-    #[mry::lock(flash_write_page, flash_read_page)]
     fn test_del_group_delete_all() {
         reset_test_state();
 
-        // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        // Mock flash read to return group addresses (simulate valid group data in flash)
-        mock_flash_read_page(mry::Any, mry::Any, mry::Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    // Write a group address pattern (high bit set to distinguish from device addresses)
-                    let group_bytes = 0x8001u16.to_le_bytes();
-                    core::ptr::copy_nonoverlapping(group_bytes.as_ptr(), *buf, 2);
-                }
-            },
-        );
+        // Seed flash with three valid group addresses at slots 0, 2 and 4.
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR, &0x8001u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 2, &0x8002u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 4, &0x8003u16.to_le_bytes());
 
         // Set up some group addresses
         critical_section::with(|_| {
@@ -1367,6 +1368,13 @@ mod tests {
                 assert_eq!(GROUP_ADDRESS.lock()[i], 0);
             }
         });
+
+        // Every stored slot was zeroed on the device.
+        for slot in [0u32, 2, 4] {
+            let mut got = [0xFFu8; 2];
+            FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + slot, &mut got);
+            assert_eq!(got, [0x00, 0x00], "slot {} must be cleared", slot);
+        }
     }
 
     /// Tests rf_link_del_group deleting specific group
@@ -1374,22 +1382,14 @@ mod tests {
     /// Verifies that a specific group address is correctly removed
     /// from both memory and flash.
     #[test]
-    #[mry::lock(flash_write_page, flash_read_page)]
     fn test_del_group_specific() {
         reset_test_state();
 
-        // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
-        // Mock flash read to return the target group address we want to delete
-        mock_flash_read_page(mry::Any, mry::Any, mry::Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    // Write the target group address we're trying to delete
-                    let group_bytes = 0x8002u16.to_le_bytes();
-                    core::ptr::copy_nonoverlapping(group_bytes.as_ptr(), *buf, 2);
-                }
-            },
-        );
+        // Seed flash with three valid group addresses; only the middle one is
+        // the deletion target.
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR, &0x8001u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 2, &0x8002u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 4, &0x8003u16.to_le_bytes());
 
         // Set up group addresses
         critical_section::with(|_| {
@@ -1409,6 +1409,15 @@ mod tests {
             // The function clears the first match it finds
             assert_eq!(GROUP_ADDRESS.lock()[1], 0);
         });
+
+        // Only the matching slot was zeroed on the device.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 2, &mut got);
+        assert_eq!(got, [0x00, 0x00], "the matching slot must be cleared");
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, 0x8001u16.to_le_bytes(), "other slots must survive");
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 4, &mut got);
+        assert_eq!(got, 0x8003u16.to_le_bytes(), "other slots must survive");
     }
 
     /// Tests rf_link_add_group with valid group ID
@@ -1416,12 +1425,8 @@ mod tests {
     /// Verifies that a valid group address is correctly added to both
     /// memory and flash storage.
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_add_group_valid() {
         reset_test_state();
-
-        // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         let group_id = 0x8001; // Valid group ID that passes validation
         let result = add_group(group_id);
@@ -1440,8 +1445,10 @@ mod tests {
             DEVICE_ADDR_SIZE as u16
         );
 
-        // Verify flash write was called
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        // Verify the group really landed in flash at the first slot.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, group_id.to_le_bytes());
     }
 
     /// Tests rf_link_add_group with invalid group ID
@@ -1468,25 +1475,25 @@ mod tests {
     ///
     /// Verifies that duplicate group addresses are rejected.
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_add_group_duplicate() {
         reset_test_state();
-
-        // Mock flash write for initial insertion
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         let group_id = 0x8001; // Valid group ID that should succeed initially
 
         // Add group first time
         assert!(add_group(group_id).is_ok());
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, group_id.to_le_bytes());
 
         // Try to add same group again
         let result = add_group(group_id);
 
-        // Verify function returns false and no additional flash write occurs
+        // Verify function returns false and the next slot stays blank: no
+        // additional flash write may occur.
         assert!(result.is_err());
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + DEVICE_ADDR_SIZE, &mut got);
+        assert_eq!(got, [0xFF, 0xFF], "duplicate must not write a new slot");
     }
 
     /// Tests rf_link_add_group with full group slots using rotation policy
@@ -1494,12 +1501,11 @@ mod tests {
     /// Verifies that when all group slots are full, the oldest group
     /// is replaced using the rotation policy.
     #[test]
-    #[mry::lock(flash_write_page, remove_group)]
+    #[mry::lock(remove_group)]
     fn test_add_group_rotation_policy() {
         reset_test_state();
 
         // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
         mock_remove_group(mry::Any).returns(Ok(()));
 
         // Fill all group slots with valid group IDs
@@ -1520,6 +1526,12 @@ mod tests {
         critical_section::with(|_| {
             assert_eq!(GROUP_ADDRESS.lock()[0], new_group_id);
         });
+
+        // The replacement group is appended to the flash log at the current
+        // position.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 10, &mut got);
+        assert_eq!(got, new_group_id.to_le_bytes());
     }
 
     /// Tests rf_link_add_group with empty slot available
@@ -1527,12 +1539,8 @@ mod tests {
     /// Verifies that when empty slots are available, new groups
     /// are added to the first available slot.
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_add_group_empty_slot() {
         reset_test_state();
-
-        // Mock flash operations
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         // Set up some existing groups with empty slots
         critical_section::with(|_| {
@@ -1553,104 +1561,98 @@ mod tests {
             assert_eq!(GROUP_ADDRESS.lock()[1], new_group_id);
         });
 
-        // Verify flash write was called
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+        // Verify the write landed at the current log position.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 4, &mut got);
+        assert_eq!(got, new_group_id.to_le_bytes());
     }
 
     // No flash entry matches: we fall through the loop without returning,
     // so the closing braces get marked covered.
     #[test]
-    #[mry::lock(flash_read_page, flash_write_page)]
     fn test_delete_groups_from_flash_no_match_returns_false() {
-        use mry::send_wrapper::SendWrapper;
-
+        reset_test_state();
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(4);
-        let entries = [0x9000u16, 0x9001];
-        let mut idx = 0usize;
 
-        mock_flash_read_page(mry::Any, 2, mry::Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    core::slice::from_raw_parts_mut(*buf, 2)
-                        .copy_from_slice(&entries[idx].to_le_bytes());
-                }
-                idx += 1;
-            },
-        );
+        // Both stored entries are group addresses, but neither is the target.
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR, &0x9000u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 2, &0x9001u16.to_le_bytes());
 
         assert!(delete_groups_from_flash(0x9555, false).is_err());
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(0);
+
+        // Neither entry may be cleared.
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, 0x9000u16.to_le_bytes());
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 2, &mut got);
+        assert_eq!(got, 0x9001u16.to_le_bytes());
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_write_page)]
     fn test_delete_groups_from_flash_specific_group_returns_true() {
-        use mry::send_wrapper::SendWrapper;
-
+        reset_test_state();
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(2);
         let flash_addr = FLASH_ADR_DEV_GRP_ADR;
         let group_id = 0x9234u16;
 
-        mock_flash_read_page(flash_addr, 2, mry::Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::slice::from_raw_parts_mut(*buf, 2).copy_from_slice(&group_id.to_le_bytes());
-            },
-        );
-        mock_flash_write_page(flash_addr, DEVICE_ADDR_SIZE, mry::Any).returns(());
+        FakeFlash::write_slice(flash_addr, &group_id.to_le_bytes());
 
         assert!(delete_groups_from_flash(group_id, false).is_ok());
-        mock_flash_write_page(flash_addr, DEVICE_ADDR_SIZE, mry::Any).assert_called(1);
+
+        let mut got = [0xFFu8; 2];
+        FakeFlash::read_slice(flash_addr, &mut got);
+        assert_eq!(got, [0x00, 0x00], "the matching group must be cleared");
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_write_page)]
     fn test_delete_groups_from_flash_skips_device_addresses() {
-        use mry::send_wrapper::SendWrapper;
-
+        reset_test_state();
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(4);
-        let entries = [0x1000u16, 0x2000];
-        let mut idx = 0usize;
 
-        mock_flash_read_page(mry::Any, 2, mry::Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    core::slice::from_raw_parts_mut(*buf, 2)
-                        .copy_from_slice(&entries[idx].to_le_bytes());
-                }
-                idx += 1;
-            },
-        );
+        // Device addresses (bit 15 clear) must be skipped even if one matched.
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR, &0x1000u16.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_DEV_GRP_ADR + 2, &0x2000u16.to_le_bytes());
 
         assert!(delete_groups_from_flash(0x8000, false).is_err());
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(0);
+
+        let mut got = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(got, 0x1000u16.to_le_bytes());
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 2, &mut got);
+        assert_eq!(got, 0x2000u16.to_le_bytes());
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_write_page)]
     fn test_delete_groups_from_flash_delete_all_hits_limit() {
-        use mry::send_wrapper::SendWrapper;
-
+        reset_test_state();
         // Nine entries ⇒ the loop deletes eight, then the guard breaks.
         MESH_GROUP_ADDRESS_NEXT_POSITION.set(18); // 0,2,4,…,16
         let entries: [u16; 9] = [
             0x9000, 0x9001, 0x9002, 0x9003, 0x9004, 0x9005, 0x9006, 0x9007, 0x9008,
         ];
-        let mut idx = 0usize;
 
-        mock_flash_read_page(mry::Any, 2, mry::Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    core::slice::from_raw_parts_mut(*buf, 2)
-                        .copy_from_slice(&entries[idx].to_le_bytes());
-                }
-                idx += 1;
-            },
-        );
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).returns(());
+        for (index, entry) in entries.iter().enumerate() {
+            FakeFlash::write_slice(
+                FLASH_ADR_DEV_GRP_ADR + (index as u32 * 2),
+                &entry.to_le_bytes(),
+            );
+        }
 
         assert!(delete_groups_from_flash(0, true).is_ok());
-        // The guard fires after the 8th deletion.
-        mock_flash_write_page(mry::Any, DEVICE_ADDR_SIZE, mry::Any).assert_called(8);
+
+        // The guard fires after the 8th deletion: slots 2..=16 are cleared but
+        // the oldest entry at slot 0 survives untouched.
+        let mut got = [0u8; 2];
+        for slot in (2u32..=16).step_by(2) {
+            FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + slot, &mut got);
+            assert_eq!(got, [0x00, 0x00], "slot {} must be cleared", slot);
+        }
+        FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
+        assert_eq!(
+            got,
+            0x9000u16.to_le_bytes(),
+            "the ninth entry must survive the write limit"
+        );
     }
 
     /// Last light event code delivered to the test handler.

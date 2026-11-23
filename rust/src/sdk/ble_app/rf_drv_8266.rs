@@ -46,7 +46,6 @@ use crate::sdk::ble_app::light_ll::status_management::{
     SLAVE_STATUS_RECORD,
 };
 use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::drivers::flash::{flash_read_page, flash_write_page};
 use crate::sdk::light::{
     LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
     GET_GROUP2, GET_GROUP3, GET_STATUS, GET_USER_NOTIFY, LGT_CMD_CONFIG_DEV_ADDR,
@@ -66,6 +65,7 @@ use mesh_protocol::packet_types::{
     PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::drivers::flash::{flash_read_page, flash_write_page};
 use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 use tlsr8266_hal::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_hal::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
@@ -1353,12 +1353,11 @@ mod tests {
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_par_init;
     use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
     use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI};
-    use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
     use mesh_protocol::packet_types::Packet;
     use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
-    use mry::send_wrapper::SendWrapper;
     use mry::Any;
     use tlsr8266_hal::common::sync::SimplifyLS;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
@@ -1367,11 +1366,13 @@ mod tests {
     /// Reset the PAC/HAL host fakes so a test never inherits another test's
     /// register bank, analog bank, clock or AES transport (the suite runs
     /// `--test-threads=1`, so all of these are process-wide singletons).
+    /// The NOR device is reset too: it stores what production code writes.
     fn reset_host_fakes() {
         FakeMmio::reset();
         FakeAnalog::reset();
         fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+        FakeFlash::reset();
     }
 
     /// A value the analog bank never legitimately holds in these tests, seeded
@@ -2046,7 +2047,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_enable() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
@@ -2057,24 +2058,7 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
         }
 
-        // Mock flash_read_page to return default values (0xFF) for power settings
-        // This is important to test the default branch of the condition in rf_drv_init
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            |addr, len, buf_ptr: SendWrapper<*mut u8>| {
-                assert_eq!(addr, FLASH_ADR_MAC);
-                assert_eq!(len, 0x13);
-
-                // Create a sample power settings array with all bytes set to 0xFF (default flash value)
-                let sample_settings = [0xFFu8; 0x13];
-
-                // Copy settings to the output buffer
-                unsafe {
-                    let buf_slice = core::slice::from_raw_parts_mut(*buf_ptr, len as usize);
-                    let copy_len = core::cmp::min(sample_settings.len(), len as usize);
-                    buf_slice[0..copy_len].copy_from_slice(&sample_settings[0..copy_len]);
-                }
-            },
-        );
+        // Blank flash: power settings read back as 0xFF (the default branch).
 
         // Set some initial values for global variables
         let initial_base = 0x22;
@@ -2093,9 +2077,6 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).assert_called(1);
         }
 
-        // Verify flash_read_page was called with correct parameters
-        mock_flash_read_page(FLASH_ADR_MAC, 0x13, Any).assert_called(1);
-
         // With all 0xFF values in power_settings, RF_TP_BASE and RF_TP_GAIN should remain unchanged
         assert_eq!(RF_TP_BASE.get(), initial_base);
         assert_eq!(RF_TP_GAIN.get(), initial_gain);
@@ -2112,7 +2093,7 @@ mod tests {
     /// `rf_drv_init` actually reads the detected flag, exactly once, and still
     /// loads a table.
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_reads_detected_xtal_flag() {
         reset_host_fakes();
         // Deepsleep flag clear, and a 16MHz crystal detected at boot
@@ -2123,16 +2104,8 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
         }
 
-        // Erased-flash power settings: leave RF_TP_BASE / RF_TP_GAIN alone
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            |_addr, len, buf_ptr: SendWrapper<*mut u8>| {
-                // SAFETY: the caller passes a writable buffer of `len` bytes,
-                // the same contract the other flash_read_page mocks in this
-                // module rely on
-                let buf_slice = unsafe { core::slice::from_raw_parts_mut(*buf_ptr, len as usize) };
-                buf_slice.fill(0xFF);
-            },
-        );
+        // Erased flash: no power calibration, so RF_TP_BASE / RF_TP_GAIN are
+        // left alone.
 
         let result = rf_drv_init(true);
 
@@ -2208,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_power_settings() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
@@ -2219,24 +2192,9 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
         }
 
-        // Mock flash_read_page to return power settings
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            |addr, len, buf_ptr: SendWrapper<*mut u8>| {
-                assert_eq!(addr, FLASH_ADR_MAC);
-
-                // Create a sample power settings array with custom values at positions 0x11 and 0x12
-                let mut sample_settings = [0u8; 0x13];
-                sample_settings[0x11] = 0x25; // Non-default value for RF_TP_BASE
-                sample_settings[0x12] = 0x10; // Non-default value for RF_TP_GAIN calculation
-
-                // Copy settings to the output buffer
-                unsafe {
-                    let buf_slice = core::slice::from_raw_parts_mut(*buf_ptr, len as usize);
-                    let copy_len = core::cmp::min(sample_settings.len(), len as usize);
-                    buf_slice[0..copy_len].copy_from_slice(&sample_settings[0..copy_len]);
-                }
-            },
-        );
+        // Seed custom power calibration values at offsets 0x11 and 0x12 of the
+        // MAC sector.
+        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x25, 0x10]);
 
         // Reset the global variables to ensure they're modified by the function
         RF_TP_BASE.set(0);
@@ -2244,9 +2202,6 @@ mod tests {
 
         // Call with enable=true - should initialize the driver
         let result = rf_drv_init(true);
-
-        // Verify flash_read_page was called with correct parameters
-        mock_flash_read_page(FLASH_ADR_MAC, 0x13, Any).assert_called(1);
 
         // Verify that RF_TP_BASE and RF_TP_GAIN were updated with the values from flash
         assert_eq!(RF_TP_BASE.get(), 0x25); // Should be set directly from power_settings[0x11]
@@ -2261,7 +2216,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_default_power_settings() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
@@ -2272,22 +2227,7 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
         }
 
-        // Mock flash_read_page to return default values (0xFF) for power settings
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            |addr, len, buf_ptr: SendWrapper<*mut u8>| {
-                assert_eq!(addr, FLASH_ADR_MAC);
-
-                // Create settings with 0xFF values (default for erased flash)
-                let sample_settings = [0xFFu8; 0x13];
-
-                // Copy settings to the output buffer
-                unsafe {
-                    let buf_slice = core::slice::from_raw_parts_mut(*buf_ptr, len as usize);
-                    let copy_len = core::cmp::min(sample_settings.len(), len as usize);
-                    buf_slice[0..copy_len].copy_from_slice(&sample_settings[0..copy_len]);
-                }
-            },
-        );
+        // Blank flash: both calibration bytes read back as 0xFF.
 
         // Set initial values to verify they don't change when flash contains default values
         let initial_base = 0x22;
@@ -2298,9 +2238,6 @@ mod tests {
         // Call with enable=true - should initialize the driver
         let result = rf_drv_init(true);
 
-        // Verify flash_read_page was called with correct parameters
-        mock_flash_read_page(FLASH_ADR_MAC, 0x13, Any).assert_called(1);
-
         // When power_settings contains 0xFF (default), the values should remain unchanged
         assert_eq!(RF_TP_BASE.get(), initial_base);
         assert_eq!(RF_TP_GAIN.get(), initial_gain);
@@ -2310,15 +2247,19 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page)]
     fn test_rf_drv_init_disabled() {
         reset_host_fakes();
         // Seed the deepsleep flag and the SAR ADC power register
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
         FakeAnalog::set(6, ANA_UNWRITTEN);
 
-        // Ensure flash_read_page is NOT called when disabled
-        mock_flash_read_page(Any, Any, Any).returns(());
+        // Seed valid calibration values: if the disabled path read flash they
+        // would be applied, so unchanged globals prove the read never happened.
+        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x30, 0x05]);
+        let initial_base = 0x22;
+        let initial_gain = 0x33;
+        RF_TP_BASE.set(initial_base);
+        RF_TP_GAIN.set(initial_gain);
 
         // Call with enable=false - should power off the RF driver
         let result = rf_drv_init(false);
@@ -2326,15 +2267,16 @@ mod tests {
         // Verify that the SAR ADC was powered off
         assert_eq!(FakeAnalog::get(6), 0, "SAR ADC power must be cleared");
 
-        // Verify flash_read_page was NOT called
-        mock_flash_read_page(Any, Any, Any).assert_called(0);
+        // Verify the power calibration was NOT applied
+        assert_eq!(RF_TP_BASE.get(), initial_base);
+        assert_eq!(RF_TP_GAIN.get(), initial_gain);
 
         // Verify the function returns the deepsleep flag value
         assert_eq!(result, 0x40);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc, flash_read_page)]
+    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_partial_power_settings() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
@@ -2345,23 +2287,8 @@ mod tests {
             mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
         }
 
-        // Mock flash_read_page to return power settings with only the first value set
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            |addr, len, buf_ptr: SendWrapper<*mut u8>| {
-                assert_eq!(addr, FLASH_ADR_MAC);
-
-                // Create a sample power settings array with only position 0x11 set
-                let mut sample_settings = [0xFFu8; 0x13]; // Default all to 0xFF
-                sample_settings[0x11] = 0x29; // Only set the first value
-
-                // Copy settings to the output buffer
-                unsafe {
-                    let buf_slice = core::slice::from_raw_parts_mut(*buf_ptr, len as usize);
-                    let copy_len = core::cmp::min(sample_settings.len(), len as usize);
-                    buf_slice[0..copy_len].copy_from_slice(&sample_settings[0..copy_len]);
-                }
-            },
-        );
+        // Only the first calibration byte is set; the second stays 0xFF.
+        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x29]);
 
         // Reset the global variables to ensure they're modified by the function
         RF_TP_BASE.set(0);
@@ -2369,9 +2296,6 @@ mod tests {
 
         // Call with enable=true - should initialize the driver
         let result = rf_drv_init(true);
-
-        // Verify flash_read_page was called with correct parameters
-        mock_flash_read_page(FLASH_ADR_MAC, 0x13, Any).assert_called(1);
 
         // Verify that RF_TP_BASE was updated with the value from flash
         assert_eq!(RF_TP_BASE.get(), 0x29);
@@ -3855,8 +3779,6 @@ mod tests {
     #[test]
     #[mry::lock(
         blc_ll_init_basic_mcu,
-        flash_write_page,
-        flash_read_page,
         rf_link_slave_set_adv,
         pair_load_key,
         retrieve_dev_grp_address,
@@ -3868,7 +3790,9 @@ mod tests {
         write_reg16
     )]
     fn test_rf_link_slave_init_mac_not_set() {
-        // Arrange - MAC address not set (u32::MAX)
+        reset_host_fakes();
+
+        // Arrange - MAC address not set (u32::MAX); a blank device reads 0xFFFFFFFF.
         let test_interval = 1000;
 
         // Set MAC_ID to known value for testing
@@ -3893,41 +3817,6 @@ mod tests {
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x1234);
         let expected_rand = 0x1234u16 ^ (0x1234_5678u32 as u16);
 
-        // Mock flash read for MAC check (returns u32::MAX to trigger MAC generation)
-        mock_flash_read_page(FLASH_ADR_MAC, 4, Any).returns_with(
-            |addr, len, buf: SendWrapper<*mut u8>| unsafe {
-                *(*buf as *mut u32) = u32::MAX;
-            },
-        );
-
-        // Mock flash read for MAC (6 bytes for rf_link_slave_set_adv)
-        mock_flash_read_page(FLASH_ADR_MAC, 6, Any).returns(());
-
-        // Capture the MAC the driver writes so the generated value is checked
-        let written_mac = std::sync::Arc::new(std::sync::Mutex::new([0u8; 4]));
-        let written_mac_clone = std::sync::Arc::clone(&written_mac);
-        mock_flash_write_page(FLASH_ADR_MAC, 4, Any).returns_with(
-            move |_addr, len, buf: SendWrapper<*const u8>| {
-                // SAFETY: `buf`/`len` are the arguments `flash_write_page` was
-                // called with, so `[buf, buf+len)` is the caller's live buffer
-                // for the duration of this call.
-                let data = unsafe { core::slice::from_raw_parts(*buf, len as usize) };
-                written_mac_clone.lock().unwrap()[..data.len()].copy_from_slice(data);
-            },
-        );
-
-        // Mock flash read for pairing check (returns non-zero, so pairing is configured)
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 4, Any).returns_with(
-            |addr, len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0x12345678;
-                } // Non-zero = configured
-            },
-        );
-
-        // Mock flash read for existing pairing (returns non-zero, so no reboot)
-        mock_flash_read_page(FLASH_ADR_PAIRING + 1, 16, Any).returns(());
-
         // Mock advertisement setup
         mock_rf_link_slave_set_adv(Any).returns(());
 
@@ -3943,21 +3832,37 @@ mod tests {
         // Act
         rf_link_slave_init(test_interval);
 
-        // Assert - verify MAC was generated and written to flash
-        mock_flash_write_page(FLASH_ADR_MAC, 4, Any).assert_called(1); // MAC written to flash
+        // Assert - the generated MAC really landed in flash.
+        let expected_mac_bytes = [
+            (expected_rand & 0xff) as u8,
+            (expected_rand >> 8) as u8,
+            (expected_rand & 0xff) as u8,
+            (expected_rand >> 8) as u8,
+        ];
+        let mut written_mac = [0u8; 4];
+        FakeFlash::read_slice(FLASH_ADR_MAC, &mut written_mac);
         assert_eq!(
-            *written_mac.lock().unwrap(),
-            [
-                (expected_rand & 0xff) as u8,
-                (expected_rand >> 8) as u8,
-                (expected_rand & 0xff) as u8,
-                (expected_rand >> 8) as u8,
-            ],
+            written_mac, expected_mac_bytes,
             "both rand() calls must feed the generated MAC"
         );
 
+        // The subsequent 6-byte read takes the freshly written MAC, and the
+        // trailing bytes are the still-blank 0xFF tail of the page.
+        assert_eq!(
+            *MAC_ID.lock(),
+            [
+                expected_mac_bytes[0],
+                expected_mac_bytes[1],
+                expected_mac_bytes[2],
+                expected_mac_bytes[3],
+                0xFF,
+                0xFF,
+            ],
+            "the MAC read-back must consume what the driver just wrote"
+        );
+
         // Calculate expected CRC for assertion
-        let expected_mac_u32 = 0x44332211u32; // From MAC_ID [0x11, 0x22, 0x33, 0x44]
+        let expected_mac_u32 = u32::from_le_bytes(expected_mac_bytes);
         let crc_data = [
             (expected_mac_u32 & 0xFF) as u8,
             ((expected_mac_u32 >> 8) & 0xFF) as u8,
@@ -3980,7 +3885,6 @@ mod tests {
     #[test]
     #[mry::lock(
         blc_ll_init_basic_mcu,
-        flash_read_page,
         rf_link_slave_set_adv,
         rf_set_ble_access_code,
         pair_load_key,
@@ -3993,8 +3897,15 @@ mod tests {
         write_reg16
     )]
     fn test_rf_link_slave_init_normal_initialization() {
+        reset_host_fakes();
+
         // Arrange - MAC set, pairing already configured
         let test_interval = 2000;
+
+        // Seed a real MAC in flash so the check reads a non-MAX word and the
+        // 6-byte read returns the stored address.
+        let stored_mac = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66];
+        FakeFlash::write_slice(FLASH_ADR_MAC, &stored_mac);
 
         // Set MAC_ID to known value for testing
         {
@@ -4028,19 +3939,6 @@ mod tests {
         let expected_crc = crc16(&crc_data);
         mock_write_reg16(0x80800c, expected_crc).returns(());
 
-        // Mock flash reads with specific address/length combinations
-        // First call: MAC check (FLASH_ADR_MAC, 4 bytes) - returns non-MAX so MAC is already set
-        mock_flash_read_page(FLASH_ADR_MAC, 4, Any).returns_with(
-            |_addr, _len, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    *(*buf as *mut u32) = 0xAABBCCDD;
-                } // Not MAX, so MAC exists
-            },
-        );
-
-        // Third call: MAC read (FLASH_ADR_MAC, 6 bytes)
-        mock_flash_read_page(FLASH_ADR_MAC, 6, Any).returns(());
-
         // Mock advertisement setup
         mock_rf_link_slave_set_adv(Any).returns(());
 
@@ -4061,8 +3959,14 @@ mod tests {
 
         // Assert - normal initialization path
         mock_blc_ll_init_basic_mcu().assert_called(1);
-        mock_flash_read_page(FLASH_ADR_MAC, 4, Any).assert_called(1); // MAC check
-        mock_flash_read_page(FLASH_ADR_MAC, 6, Any).assert_called(1); // MAC read
+        // The stored MAC was not replaced.
+        let mut written_mac = [0u8; 6];
+        FakeFlash::read_slice(FLASH_ADR_MAC, &mut written_mac);
+        assert_eq!(
+            written_mac, stored_mac,
+            "an existing MAC must not be rewritten"
+        );
+        assert_eq!(*MAC_ID.lock(), stored_mac);
         mock_rf_link_slave_set_adv(Any).assert_called(1);
         mock_rf_set_ble_access_code(Any).assert_called(1); // Access code set
         mock_pair_load_key().assert_called(1);

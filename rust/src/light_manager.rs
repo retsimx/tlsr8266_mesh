@@ -9,13 +9,13 @@ use fixed::types::{I16F16, U16F16};
 
 use crate::config::{FLASH_ADR_LUM, FLASH_SECTOR_SIZE, MAX_LUM_BRIGHTNESS_VALUE, PWMID_B, PWMID_G};
 use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
-use crate::sdk::drivers::pwm::pwm_set_cmp;
 use crate::sdk::light::{
     LGT_CMD_LIGHT_ONOFF, LGT_CMD_SET_LIGHT, LIGHT_OFF_PARAM, LIGHT_ON_PARAM, PMW_MAX_TICK,
 };
 use mesh_protocol::mesh_types::MESH_NODE_ST_PAR_LEN;
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
+use tlsr8266_hal::drivers::pwm::pwm_set_cmp;
 use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed};
 use tlsr8266_hal::mcu::timer::{tmr1_start, tmr1_stop};
@@ -615,13 +615,9 @@ pub fn reset_for_test() {
 mod tests {
     use super::*;
     use crate::sdk::ble_app::light_ll::mesh_management::mock_ll_device_status_update;
-    use crate::sdk::drivers::flash::{
-        mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
-    };
-    use crate::sdk::drivers::pwm::mock_pwm_set_cmp;
     use embassy_time::Instant;
-    use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -635,6 +631,7 @@ mod tests {
         FakeMmio::reset();
         FakeAnalog::reset();
         fake_clock::reset();
+        FakeFlash::reset();
     }
 
     /// Run `f` with exclusive access to the global light transition core.
@@ -648,6 +645,14 @@ mod tests {
 
     /// `TMR1_EN` as it appears in the 8-bit `reg_tmr_ctrl8` (0x620) view.
     const TMR1_EN: u8 = FLD_TMR::TMR1_EN.bits() as u8;
+
+    /// `reg_pwm_cmp` base: `pwm_set_cmp(id, cmp)` writes a `u16` at `base + id*4`.
+    const PWM_CMP_BASE: u32 = 0x794;
+
+    /// The compare value the driver last wrote for PWM channel `id`.
+    fn pwm_cmp(id: u32) -> u16 {
+        FakeMmio::reg16(PWM_CMP_BASE + id * 4)
+    }
 
     /// Reset the fake register bank and leave a stale tick so a start has to
     /// clear it.
@@ -667,6 +672,32 @@ mod tests {
             0,
             "starting TMR1 must zero the tick counter"
         );
+    }
+
+    /// Program one valid packed `LumSaveT` entry at `addr` in the fake device.
+    fn seed_lum_entry(addr: u32, brightness: u16, cw: u16, ww: u16) {
+        let mut entry = [0u8; size_of::<LumSaveT>()];
+        entry[0] = LIGHT_SAVE_VALID_FLAG;
+        entry[1..3].copy_from_slice(&brightness.to_le_bytes());
+        entry[3..5].copy_from_slice(&cw.to_le_bytes());
+        entry[5..7].copy_from_slice(&ww.to_le_bytes());
+        FakeFlash::write_slice(addr, &entry);
+    }
+
+    /// Program the whole luminance sector with valid entries, leaving no 0xFF
+    /// terminator. The range covers one entry past the last scan chunk's start,
+    /// so the straddling final entry is a complete record too.
+    fn seed_full_lum_sector(brightness: u16, cw: u16, ww: u16) {
+        let entry = size_of::<LumSaveT>();
+        let bytes = (usize::from(FLASH_SECTOR_SIZE) + entry * 10).div_ceil(entry) * entry;
+        let mut sector = vec![0u8; bytes];
+        for record in sector.chunks_mut(entry) {
+            record[0] = LIGHT_SAVE_VALID_FLAG;
+            record[1..3].copy_from_slice(&brightness.to_le_bytes());
+            record[3..5].copy_from_slice(&cw.to_le_bytes());
+            record[5..7].copy_from_slice(&ww.to_le_bytes());
+        }
+        FakeFlash::write_slice(FLASH_ADR_LUM, &sector);
     }
 
     /// Create test message for on/off command
@@ -831,7 +862,7 @@ mod tests {
     // --- On/Off Handling Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_turns_light_on() {
         reset_fakes();
         // This test verifies that handle_on_off correctly processes LIGHT_ON_PARAM
@@ -842,8 +873,6 @@ mod tests {
 
         mock_ll_device_status_update([1, 0xff]).returns(());
         // First transition_step call (at t=0, brightness=0)
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel at brightness 0
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel (always 10455 for low brightness)
         fake_clock::set_ticks(1000);
 
         dispatch_message(create_onoff_message(LIGHT_ON_PARAM));
@@ -855,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_turns_light_off() {
         reset_fakes();
         // This test verifies that handle_on_off correctly processes LIGHT_OFF_PARAM
@@ -869,8 +898,6 @@ mod tests {
 
         mock_ll_device_status_update([0, 0xff]).returns(()); // Light off status
                                                              // Initial transition_step at brightness=1000
-        mock_pwm_set_cmp(0, 71).returns(()); // CW channel at brightness 1000
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         dispatch_message(create_onoff_message(LIGHT_OFF_PARAM));
@@ -882,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_handle_on_off_invalid_param_defaults_to_on() {
         reset_fakes();
         // This test verifies that handle_on_off treats invalid params as ON
@@ -893,8 +920,6 @@ mod tests {
 
         mock_ll_device_status_update([1, 0xff]).returns(());
         // Initial transition_step at brightness=0
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel at brightness 0
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         dispatch_message(create_onoff_message(0x99)); // Invalid value
@@ -907,7 +932,6 @@ mod tests {
     // --- Transition Handling Tests ---
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_handle_transition_brightness_only() {
         reset_fakes();
         // This test verifies that handle_transition correctly processes brightness changes
@@ -930,8 +954,6 @@ mod tests {
 
         fake_clock::set_ticks(1000);
         // Initial transition_step at brightness=100 (pwm_set_lum scales values down)
-        mock_pwm_set_cmp(0, 6).returns(()); // CW channel at brightness 100
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
         LIGHT_HW.lock().handle_transition(&params);
 
@@ -946,7 +968,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_handle_transition_temperature_only() {
         reset_fakes();
         // This test verifies that handle_transition correctly processes temperature changes
@@ -967,8 +988,6 @@ mod tests {
         ];
 
         // Initial transition_step at brightness=500, cw=MAX
-        mock_pwm_set_cmp(0, 33).returns(()); // CW channel at brightness 500
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         LIGHT_HW.lock().handle_transition(&params);
@@ -984,7 +1003,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_handle_transition_independent_cw_ww() {
         reset_fakes();
         // This test verifies that handle_transition correctly processes independent CW/WW
@@ -1005,8 +1023,6 @@ mod tests {
         ];
 
         // Initial transition_step at brightness=500, cw=MAX
-        mock_pwm_set_cmp(0, 33).returns(()); // CW channel at brightness 500
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         LIGHT_HW.lock().handle_transition(&params);
@@ -1018,7 +1034,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_handle_transition_when_light_is_off_sets_brightness_zero() {
         reset_fakes();
         // This test verifies that transitions when light is off keep brightness at 0
@@ -1036,8 +1051,6 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0,
         ];
 
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel (light off)
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel (light off)
         fake_clock::set_ticks(1000);
 
         LIGHT_HW.lock().handle_transition(&params);
@@ -1107,7 +1120,6 @@ mod tests {
     // --- Transition Step Tests ---
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_transition_step_completes_when_time_reached() {
         reset_fakes();
         // This test verifies transition_step finalizes state when target time is reached
@@ -1140,8 +1152,6 @@ mod tests {
         });
 
         fake_clock::set_ticks(100);
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
         transition_step();
 
@@ -1165,7 +1175,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_transition_step_interpolates_during_transition() {
         reset_fakes();
         // This test verifies transition_step correctly interpolates values mid-transition
@@ -1196,8 +1205,6 @@ mod tests {
         });
 
         // At 50% progress
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(50);
 
         transition_step();
@@ -1326,27 +1333,29 @@ mod tests {
     // --- Flash Save/Retrieve Tests ---
 
     #[test]
-    #[mry::lock(flash_erase_sector)]
     fn test_light_lum_erase_resets_address() {
         // This test verifies light_lum_erase resets address and erases sector
 
+        reset_fakes();
         reset_for_test();
         let mut store = LightFlashStore::default();
         store.light_lum_addr = 0x1234;
 
-        mock_flash_erase_sector(FLASH_ADR_LUM).returns(());
-
         store.light_lum_erase();
 
         assert_eq!(store.light_lum_addr, FLASH_ADR_LUM);
-        mock_flash_erase_sector(FLASH_ADR_LUM).assert_called(1);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_LUM),
+            1,
+            "erasing the luminance sector must reach the driver exactly once"
+        );
     }
 
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_light_state_save_writes_to_flash() {
         // This test verifies light_state_save writes current state to flash
 
+        reset_fakes();
         reset_for_test();
         let mut store = LightFlashStore::default();
         store.light_lum_addr = FLASH_ADR_LUM;
@@ -1356,42 +1365,52 @@ mod tests {
             core.ww_tr.current = I16F16::from_num(200);
         });
 
-        mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).returns(());
-
         store.light_state_save();
 
         assert_eq!(
             store.light_lum_addr,
             FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
         );
-        mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).assert_called(1);
+
+        // The packed entry that production programmed is now in the fake device.
+        let mut entry = [0u8; size_of::<LumSaveT>()];
+        FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
+        assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
+        assert_eq!(u16::from_le_bytes([entry[1], entry[2]]), 500);
+        assert_eq!(u16::from_le_bytes([entry[3], entry[4]]), 300);
+        assert_eq!(u16::from_le_bytes([entry[5], entry[6]]), 200);
     }
 
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_light_state_save_erases_when_sector_full() {
         // This test verifies light_state_save erases sector when address reaches end
 
+        reset_fakes();
         reset_for_test();
         let mut store = LightFlashStore::default();
         store.light_lum_addr =
             FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32;
         with_core(|core| core.brightness = 500);
 
-        mock_flash_erase_sector(FLASH_ADR_LUM).returns(());
-        mock_flash_write_page(FLASH_ADR_LUM, size_of::<LumSaveT>() as u32, Any).returns(());
-
         store.light_state_save();
 
         assert_eq!(
             store.light_lum_addr,
             FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
         );
-        mock_flash_erase_sector(FLASH_ADR_LUM).assert_called(1);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_LUM),
+            1,
+            "a full sector is erased before the entry is written at its start"
+        );
+        let mut entry = [0u8; size_of::<LumSaveT>()];
+        FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
+        assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
+        assert_eq!(u16::from_le_bytes([entry[1], entry[2]]), 500);
     }
 
     #[test]
-    #[mry::lock(flash_read_page, ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_restores_state_and_turns_on() {
         reset_fakes();
         // This test verifies retrieve_from_flash correctly restores saved state
@@ -1399,44 +1418,17 @@ mod tests {
         reset_for_test();
         reset_mmio_for_start();
 
-        // Create a mock flash buffer with saved light state
         let saved_brightness = 800u16;
         let saved_cw = 600u16;
         let saved_ww = 400u16;
 
-        // Mock flash_read_page to return a buffer with valid saved data
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
-                let mut buffer = vec![0xFFu8; len as usize];
+        // Seed one valid entry; the blank device supplies the 0xFF terminator.
+        seed_lum_entry(FLASH_ADR_LUM, saved_brightness, saved_cw, saved_ww);
 
-                // Write a valid LumSaveT structure at the beginning
-                if len >= size_of::<LumSaveT>() as u32 {
-                    buffer[0] = LIGHT_SAVE_VALID_FLAG;
-                    buffer[1] = (saved_brightness & 0xFF) as u8;
-                    buffer[2] = ((saved_brightness >> 8) & 0xFF) as u8;
-                    buffer[3] = (saved_cw & 0xFF) as u8;
-                    buffer[4] = ((saved_cw >> 8) & 0xFF) as u8;
-                    buffer[5] = (saved_ww & 0xFF) as u8;
-                    buffer[6] = ((saved_ww >> 8) & 0xFF) as u8;
-
-                    // Write 0xFF after the valid entry to signal end of data
-                    if len >= size_of::<LumSaveT>() as u32 * 2 {
-                        buffer[size_of::<LumSaveT>()] = 0xFF;
-                    }
-                }
-
-                unsafe {
-                    core::ptr::copy_nonoverlapping(buffer.as_ptr(), *buf, len as usize);
-                }
-            },
-        );
-
-        // Mock analog read to indicate light was NOT off
+        // Analog memory indicates light was NOT off
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
         mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
                                                              // Initial transition_step at brightness=0 (before restore)
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel at brightness 0
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -1464,24 +1456,30 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_write_page)]
     fn test_check_light_state_save_saves_after_timeout() {
         reset_fakes();
         // This test verifies check_light_state_save saves after 5 seconds
 
         reset_for_test();
-        let mut store = LightFlashStore::default();
+        let mut store = LightFlashStore {
+            light_lum_addr: FLASH_ADR_LUM,
+        };
         with_core(|core| core.last_transition_time = 1000);
 
         // 5 s (160_000_000 ticks) have elapsed since the transition stamp.
         fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
-        // flash_write_page(addr, size, pointer) - size is size_of::<LumSaveT>() = 7
-        mock_flash_write_page(Any, 7, Any).returns(());
 
         store.check_light_state_save();
 
         assert_eq!(with_core(|core| core.last_transition_time), 0);
-        mock_flash_write_page(Any, 7, Any).assert_called(1);
+        // The 7-byte packed entry landed at the store's write pointer.
+        let mut entry = [0u8; size_of::<LumSaveT>()];
+        FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
+        assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
+        assert_eq!(
+            u16::from_le_bytes([entry[1], entry[2]]),
+            MAX_LUM_BRIGHTNESS_VALUE
+        );
     }
 
     #[test]
@@ -1546,55 +1544,56 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_light_adjust_cw_sets_correct_pwm() {
         // This test verifies light_adjust_cw correctly sets PWM value
 
+        reset_fakes();
         reset_for_test();
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
-
-        mock_pwm_set_cmp(PWMID_G, 10455).returns(()); // Max value, pol=false
 
         light_adjust_cw(val, lum);
 
-        mock_pwm_set_cmp(PWMID_G, 10455).assert_called(1);
+        // Full brightness maps to the full PWM tick on the non-inverted channel.
+        assert_eq!(pwm_cmp(PWMID_G), PMW_MAX_TICK);
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_light_adjust_ww_sets_correct_pwm() {
         // This test verifies light_adjust_ww correctly sets PWM value
 
+        reset_fakes();
         reset_for_test();
+        // Seed a non-zero compare so a missing write cannot pass by default.
+        FakeMmio::set_reg16(PWM_CMP_BASE + PWMID_B * 4, 0xFFFF);
         let val = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
         let lum = I16F16::from_num(MAX_LUM_BRIGHTNESS_VALUE);
 
-        mock_pwm_set_cmp(PWMID_B, 0).returns(()); // Max inverted (pol=true)
-
         light_adjust_ww(val, lum);
 
-        mock_pwm_set_cmp(PWMID_B, 0).assert_called(1);
+        // The warm-white channel is inverted, so full brightness compares at 0.
+        assert_eq!(pwm_cmp(PWMID_B), 0);
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_light_adjust_rgb_hw_calls_both_adjusters() {
         // This test verifies light_adjust_rgb_hw calls both CW and WW adjusters
 
+        reset_fakes();
         reset_for_test();
+        // Seed both compare registers so a missing write cannot pass.
+        FakeMmio::set_reg16(PWM_CMP_BASE, 0xFFFF);
+        FakeMmio::set_reg16(PWM_CMP_BASE + PWMID_B * 4, 0xFFFF);
         let cw = I16F16::from_num(500);
         let ww = I16F16::from_num(300);
         let lum = I16F16::from_num(1000);
 
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel (PWMID_G)
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel (PWMID_B)
-
         light_adjust_rgb_hw(cw, ww, lum);
 
-        // Should be called once for each channel
-        mock_pwm_set_cmp(0, 0).assert_called(1);
-        mock_pwm_set_cmp(1, 10455).assert_called(1);
+        // Both channels were driven: the dim CW value scales to zero ticks and
+        // the dim WW value inverts to the full tick.
+        assert_eq!(pwm_cmp(PWMID_G), 0);
+        assert_eq!(pwm_cmp(PWMID_B), PMW_MAX_TICK);
     }
 
     #[test]
@@ -1662,7 +1661,6 @@ mod tests {
     // --- Begin Transition Tests ---
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_begin_transition_updates_state() {
         reset_fakes();
         // This test verifies begin_transition correctly sets up new transition
@@ -1679,8 +1677,6 @@ mod tests {
         });
 
         fake_clock::set_ticks(5000);
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
         begin_transition(500, 300, 800);
 
@@ -1697,7 +1693,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_begin_transition_does_not_update_time_if_no_color_change() {
         reset_fakes();
         // This test verifies begin_transition doesn't update time if only brightness changes
@@ -1713,7 +1708,6 @@ mod tests {
         });
 
         fake_clock::set_ticks(5000);
-        mock_pwm_set_cmp(Any, Any).returns(());
 
         begin_transition(500, 300, 800); // Same CW/WW, different brightness
 
@@ -1725,7 +1719,7 @@ mod tests {
     // --- Message Processing Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_process_message_handles_onoff() {
         reset_fakes();
         // This test verifies process_message correctly handles on/off messages
@@ -1736,8 +1730,6 @@ mod tests {
 
         mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
                                                              // Initial transition_step at brightness=0
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel at brightness 0
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         let msg = create_onoff_message(LIGHT_ON_PARAM);
@@ -1751,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_process_message_impl_parks_until_send_message() {
         reset_fakes();
         use core::future::Future;
@@ -1764,7 +1756,6 @@ mod tests {
         with_core(|core| core.brightness = 500);
 
         mock_ll_device_status_update(Any).returns(());
-        mock_pwm_set_cmp(Any, Any).returns(());
         fake_clock::set_ticks(1000);
 
         let future = light_manager_task();
@@ -1793,7 +1784,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_process_message_handles_transition() {
         reset_fakes();
         // This test verifies process_message correctly handles transition messages
@@ -1806,8 +1796,6 @@ mod tests {
         });
 
         // Initial transition_step at brightness=500, cw=MAX
-        mock_pwm_set_cmp(0, 33).returns(()); // CW channel at brightness 500
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
         fake_clock::set_ticks(1000);
 
         let msg = create_brightness_message(1000);
@@ -1846,7 +1834,7 @@ mod tests {
     // --- Integration Tests ---
 
     #[test]
-    #[mry::lock(ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_full_transition_sequence() {
         reset_fakes();
         // This test verifies transition state updates correctly
@@ -1859,8 +1847,6 @@ mod tests {
         mock_ll_device_status_update([1, 0xff]).returns(()); // Light on status
         fake_clock::set_ticks(0);
         // Initial transition_step at brightness=0
-        mock_pwm_set_cmp(0, 0).returns(()); // CW channel at brightness 0
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
         // Turn light on - should set up a transition
         light_onoff(true);
@@ -1882,7 +1868,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_color_temperature_adjustment() {
         reset_fakes();
         // This test verifies adjusting color temperature while light is on
@@ -1900,8 +1885,6 @@ mod tests {
 
         fake_clock::set_ticks(1000);
         // Initial transition_step at brightness=1000, cw=MAX
-        mock_pwm_set_cmp(0, 71).returns(()); // CW channel at brightness 1000
-        mock_pwm_set_cmp(1, 10455).returns(()); // WW channel
 
         // Adjust to warm white (WW high, CW low)
         let params = create_temperature_message(MAX_LUM_BRIGHTNESS_VALUE - 100);
@@ -1961,7 +1944,7 @@ mod tests {
     // --- retrieve_from_flash: light-was-off + invalid-entry + full-sector-scan ---
 
     #[test]
-    #[mry::lock(flash_read_page, ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_light_was_off_turns_light_off() {
         reset_fakes();
         // When the LightOff bit is set in analog memory, light_onoff(false) is called.
@@ -1972,26 +1955,7 @@ mod tests {
         let saved_brightness = 800u16;
         let saved_cw = 600u16;
         let saved_ww = 400u16;
-
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
-                let mut buffer = vec![0xFFu8; len as usize];
-                if len as usize >= size_of::<LumSaveT>() {
-                    buffer[0] = LIGHT_SAVE_VALID_FLAG;
-                    buffer[1] = (saved_brightness & 0xFF) as u8;
-                    buffer[2] = ((saved_brightness >> 8) & 0xFF) as u8;
-                    buffer[3] = (saved_cw & 0xFF) as u8;
-                    buffer[4] = ((saved_cw >> 8) & 0xFF) as u8;
-                    buffer[5] = (saved_ww & 0xFF) as u8;
-                    buffer[6] = ((saved_ww >> 8) & 0xFF) as u8;
-                    // 0xFF after the first entry → triggers early return
-                    if len as usize >= size_of::<LumSaveT>() * 2 {
-                        buffer[size_of::<LumSaveT>()] = 0xFF;
-                    }
-                }
-                unsafe { core::ptr::copy_nonoverlapping(buffer.as_ptr(), *buf, len as usize) };
-            },
-        );
+        seed_lum_entry(FLASH_ADR_LUM, saved_brightness, saved_cw, saved_ww);
 
         // Light WAS off at prior shutdown
         let light_off_bit = RecoverStatus::LightOff as u8;
@@ -2001,8 +1965,6 @@ mod tests {
         // Note: same-target guard fires (brightness_tr starts at 0, target is 0),
         // so transition_step immediately stops the timer (tmr1_stop()).
         mock_ll_device_status_update([0, 0xff]).returns(());
-        mock_pwm_set_cmp(0, 0).returns(());
-        mock_pwm_set_cmp(1, 10455).returns(());
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -2033,7 +1995,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page, ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_skips_invalid_flash_entry() {
         reset_fakes();
         // An entry with a save_flag that is neither 0xA5 nor 0xFF is silently skipped.
@@ -2045,40 +2007,21 @@ mod tests {
         let saved_ww = 5678u16;
         let saved_brightness = 999u16;
 
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
-                let mut buffer = vec![0xFFu8; len as usize];
-                let entry_size = size_of::<LumSaveT>();
-                // First entry: invalid flag byte (0x42)
-                if len as usize >= entry_size {
-                    buffer[0] = 0x42; // neither 0xA5 nor 0xFF
-                    buffer[1] = 0;
-                    buffer[2] = 0;
-                    buffer[3] = 0;
-                    buffer[4] = 0;
-                    buffer[5] = 0;
-                    buffer[6] = 0;
-                }
-                // Second entry: valid
-                if len as usize >= entry_size * 2 {
-                    buffer[entry_size] = LIGHT_SAVE_VALID_FLAG;
-                    buffer[entry_size + 1] = (saved_brightness & 0xFF) as u8;
-                    buffer[entry_size + 2] = ((saved_brightness >> 8) & 0xFF) as u8;
-                    buffer[entry_size + 3] = (saved_cw & 0xFF) as u8;
-                    buffer[entry_size + 4] = ((saved_cw >> 8) & 0xFF) as u8;
-                    buffer[entry_size + 5] = (saved_ww & 0xFF) as u8;
-                    buffer[entry_size + 6] = ((saved_ww >> 8) & 0xFF) as u8;
-                }
-                // Third entry: 0xFF → terminates scan
-                // (buffer is already 0xFF-initialized, so this is implicit)
-                unsafe { core::ptr::copy_nonoverlapping(buffer.as_ptr(), *buf, len as usize) };
-            },
+        // First entry: a flag that is neither valid nor the 0xFF terminator, so
+        // the scan skips it. Second entry: valid. The blank device supplies the
+        // 0xFF terminator at entry 2.
+        let mut invalid = [0xFFu8; size_of::<LumSaveT>()];
+        invalid[0] = 0x42;
+        FakeFlash::write_slice(FLASH_ADR_LUM, &invalid);
+        seed_lum_entry(
+            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32,
+            saved_brightness,
+            saved_cw,
+            saved_ww,
         );
 
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
         mock_ll_device_status_update([1, 0xff]).returns(());
-        mock_pwm_set_cmp(0, 0).returns(());
-        mock_pwm_set_cmp(1, 10455).returns(());
         fake_clock::set_ticks(1000);
 
         let store = LightFlashStore::retrieve_from_flash();
@@ -2103,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page, ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_full_sector_uses_post_loop_restore() {
         reset_fakes();
         // When the entire flash sector is full of valid entries (no 0xFF terminator),
@@ -2114,32 +2057,11 @@ mod tests {
         let saved_brightness = 300u16;
         let saved_cw = 200u16;
         let saved_ww = 100u16;
-
-        // Return only valid entries — no 0xFF anywhere
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
-                let entry_size = size_of::<LumSaveT>();
-                let num_entries = len as usize / entry_size;
-                let mut buffer = vec![0u8; len as usize];
-                for i in 0..num_entries {
-                    let off = i * entry_size;
-                    buffer[off] = LIGHT_SAVE_VALID_FLAG;
-                    buffer[off + 1] = (saved_brightness & 0xFF) as u8;
-                    buffer[off + 2] = ((saved_brightness >> 8) & 0xFF) as u8;
-                    buffer[off + 3] = (saved_cw & 0xFF) as u8;
-                    buffer[off + 4] = ((saved_cw >> 8) & 0xFF) as u8;
-                    buffer[off + 5] = (saved_ww & 0xFF) as u8;
-                    buffer[off + 6] = ((saved_ww >> 8) & 0xFF) as u8;
-                }
-                unsafe { core::ptr::copy_nonoverlapping(buffer.as_ptr(), *buf, len as usize) };
-            },
-        );
+        seed_full_lum_sector(saved_brightness, saved_cw, saved_ww);
 
         // Light was on at prior shutdown
         FakeAnalog::set(REGA_LIGHT_OFF, 0x00);
         mock_ll_device_status_update([1, 0xff]).returns(());
-        mock_pwm_set_cmp(0, 0).returns(());
-        mock_pwm_set_cmp(1, 10455).returns(());
         fake_clock::set_ticks(1000);
 
         let _store = LightFlashStore::retrieve_from_flash();
@@ -2160,7 +2082,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_read_page, ll_device_status_update, pwm_set_cmp)]
+    #[mry::lock(ll_device_status_update)]
     fn test_light_lum_retrieve_full_sector_light_was_off() {
         reset_fakes();
         // Full sector, no 0xFF terminator, AND the light was off at prior shutdown.
@@ -2172,32 +2094,12 @@ mod tests {
         let saved_brightness = 300u16;
         let saved_cw = 200u16;
         let saved_ww = 100u16;
-
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, len: u32, buf: SendWrapper<*mut u8>| {
-                let entry_size = size_of::<LumSaveT>();
-                let num_entries = len as usize / entry_size;
-                let mut buffer = vec![0u8; len as usize];
-                for i in 0..num_entries {
-                    let off = i * entry_size;
-                    buffer[off] = LIGHT_SAVE_VALID_FLAG;
-                    buffer[off + 1] = (saved_brightness & 0xFF) as u8;
-                    buffer[off + 2] = ((saved_brightness >> 8) & 0xFF) as u8;
-                    buffer[off + 3] = (saved_cw & 0xFF) as u8;
-                    buffer[off + 4] = ((saved_cw >> 8) & 0xFF) as u8;
-                    buffer[off + 5] = (saved_ww & 0xFF) as u8;
-                    buffer[off + 6] = ((saved_ww >> 8) & 0xFF) as u8;
-                }
-                unsafe { core::ptr::copy_nonoverlapping(buffer.as_ptr(), *buf, len as usize) };
-            },
-        );
+        seed_full_lum_sector(saved_brightness, saved_cw, saved_ww);
 
         // Light WAS off at prior shutdown
         let light_off_bit = RecoverStatus::LightOff as u8;
         FakeAnalog::set(REGA_LIGHT_OFF, light_off_bit);
         mock_ll_device_status_update([0, 0xff]).returns(());
-        mock_pwm_set_cmp(0, 0).returns(());
-        mock_pwm_set_cmp(1, 10455).returns(());
         fake_clock::set_ticks(1000);
 
         let _store = LightFlashStore::retrieve_from_flash();
@@ -2225,7 +2127,6 @@ mod tests {
     // --- Independent Channel / Same-Target Guard Tests ---
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_same_target_guard_does_not_reset_transition() {
         reset_fakes();
         // Verifies that begin_transition with the same brightness target mid-transition
@@ -2246,7 +2147,6 @@ mod tests {
 
         // cw/ww already at defaults (to = MAX and 0), pass the same so guard fires for them too
         fake_clock::set_ticks(0);
-        mock_pwm_set_cmp(Any, Any).returns(());
 
         // begin_transition with same brightness target — guard should fire, end unchanged
         begin_transition(MAX_LUM_BRIGHTNESS_VALUE, 0, 500);
@@ -2260,7 +2160,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_onoff_does_not_reset_colour_transition() {
         reset_fakes();
         // Verifies that light_onoff_hw only starts a brightness transition and
@@ -2280,7 +2179,6 @@ mod tests {
         });
 
         fake_clock::set_ticks(50);
-        mock_pwm_set_cmp(Any, Any).returns(());
 
         // Turn light on — only brightness_tr should change
         light_onoff_hw(true);
@@ -2300,7 +2198,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_colour_command_does_not_reset_brightness_transition() {
         reset_fakes();
         // Verifies that a colour-only change via begin_transition does not reset
@@ -2321,7 +2218,6 @@ mod tests {
 
         fake_clock::set_ticks(50);
         fake_clock::set_ticks(0);
-        mock_pwm_set_cmp(Any, Any).returns(());
 
         // New colour, same brightness — guard fires for brightness
         begin_transition(100, 500, 1000);

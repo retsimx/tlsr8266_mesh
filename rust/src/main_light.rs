@@ -32,8 +32,6 @@ use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_MESH_OPERATIONS_BL
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS, MAC_ID, MAX_MESH_NAME_LEN};
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_write_page};
-use crate::sdk::drivers::pwm::{pwm_set_duty, pwm_start};
 use crate::sdk::factory_reset::{
     factory_reset_cnt_check, factory_reset_handle, kick_out, KickoutReason,
 };
@@ -45,6 +43,8 @@ use crate::{uprintln, BIT};
 use heapless::Vec;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_write_page};
+use tlsr8266_hal::drivers::pwm::{pwm_set_duty, pwm_start};
 use tlsr8266_hal::mcu::clock::{
     clock_time, clock_time_exceed, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
 };
@@ -577,12 +577,6 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
     use crate::sdk::ble_app::rf_drv_8266::ADV_DATA;
-    use crate::sdk::drivers::flash::{
-        flash_read_page, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
-    };
-    use crate::sdk::drivers::pwm::{
-        mock_pwm_set_cmp, mock_pwm_set_duty, mock_pwm_start, pwm_set_cmp,
-    };
     use crate::sdk::factory_reset::mock_factory_reset_cnt_check;
     use crate::sdk::factory_reset::mock_factory_reset_handle;
     use crate::vendor_light::mock_vendor_set_adv_data;
@@ -590,6 +584,7 @@ mod tests {
     use futures::executor::block_on;
     use mesh_protocol::packet_types::{Packet, PacketAttValue, PacketL2capHead};
     use mry::Any;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -606,6 +601,7 @@ mod tests {
         FakeMmio::reset();
         FakeAnalog::reset();
         fake_clock::reset();
+        FakeFlash::reset();
     }
 
     // --- Helper Functions ---
@@ -1688,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, flash_erase_sector, flash_write_page)]
+    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_set_mac_addr() {
         // This test verifies MAC address setting and reboot
 
@@ -1708,17 +1704,26 @@ mod tests {
             params,
             0,
         ));
-        mock_flash_erase_sector(Any).returns(());
-        mock_flash_write_page(Any, Any, Any).returns(());
 
         reset_fakes();
 
         // Execute
         rf_link_data_callback(&packet);
 
-        // Verify
-        mock_flash_erase_sector(Any).assert_called(1);
-        mock_flash_write_page(Any, Any, Any).assert_called(1);
+        // Verify: the MAC is erased-then-programmed at its fixed flash address.
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_MAC),
+            1,
+            "the MAC sector is erased before programming"
+        );
+        let mut mac = [0xFFu8; 7];
+        FakeFlash::read_slice(FLASH_ADR_MAC, &mut mac);
+        assert_eq!(
+            &mac[..6],
+            &params[..6],
+            "the six MAC bytes are programmed at FLASH_ADR_MAC"
+        );
+        assert_eq!(mac[6], 0xFF, "only the six MAC bytes are written");
         assert!(
             FakeMmio::writes()
                 .iter()
@@ -2108,13 +2113,10 @@ mod tests {
         rf_link_slave_pairing_enable,
         rf_set_power_level_index,
         light_hw_timer_config,
-        pwm_set_duty,
-        pwm_start,
         rf_link_slave_init,
         factory_reset_handle,
         vendor_set_adv_data,
         check_ota_area_startup,
-        flash_read_page,
         light_onoff_hw,
         device_status_update,
         mesh_pair_init,
@@ -2135,10 +2137,9 @@ mod tests {
         mock_mesh_security_enable(Any).returns(());
         mock_device_status_update().returns(());
 
-        // `LightFlashStore::retrieve_from_flash` scans flash and then restores the
-        // persisted on/off state. Report "no saved entry" (buffer stays 0xFF) and
-        // "lamp was not off", then assert both halves of that path ran.
-        mock_flash_read_page(Any, Any, Any).returns(());
+        // `LightFlashStore::retrieve_from_flash` scans the blank flash (no saved
+        // entry) and then restores the persisted on/off state, which is observed
+        // through `light_onoff_hw`.
         mock_light_onoff_hw(Any).returns(());
 
         // Mock functions that light_init_default calls
@@ -2148,10 +2149,6 @@ mod tests {
         mock_light_hw_timer_config().returns(());
 
         // Mock functions that user_init calls directly
-        mock_pwm_set_duty(0, 10455, 0).returns(());
-        mock_pwm_set_duty(1, 10455, 10455).returns(());
-        mock_pwm_start(0).returns(());
-        mock_pwm_start(1).returns(());
         mock_rf_link_slave_init(40000).returns(());
         mock_factory_reset_handle().returns(());
         mock_vendor_set_adv_data().returns(());
@@ -2171,20 +2168,31 @@ mod tests {
         );
         mock_light_hw_timer_config().assert_called(1);
         mock_mesh_pair_init().assert_called(1);
-        mock_pwm_set_duty(0, 10455, 0).assert_called(1);
-        mock_pwm_set_duty(1, 10455, 10455).assert_called(1);
-        mock_pwm_start(0).assert_called(1);
-        mock_pwm_start(1).assert_called(1);
         assert_eq!(
             FakeMmio::reg8(REG_GPIO_PC_FUNC),
             0xfa,
             "user_init must select the peripheral function for PB0 and PB2"
         );
-        // The luminance store was retrieved (one flash scan chunk) and the lamp
-        // on/off state restored from analog memory.
-        mock_flash_read_page(Any, Any, Any).assert_called(1);
-        // The zeroed analog bank means the lamp was recorded as on, so the
-        // restore path drives `light_onoff_hw(true)`.
+        // The PWM setup reached the real driver: both cycle registers hold the
+        // max tick, with G's compare at 0 and B's compare at max (inverted).
+        let max_tick = u32::from(PMW_MAX_TICK);
+        assert_eq!(
+            FakeMmio::reg32(0x794),
+            max_tick << 16,
+            "channel G must be configured with max tick and compare 0"
+        );
+        assert_eq!(
+            FakeMmio::reg32(0x798),
+            max_tick | (max_tick << 16),
+            "channel B must be configured with max tick and compare max"
+        );
+        assert_eq!(
+            FakeMmio::reg8(0x780),
+            0b11,
+            "both PWM channels must be enabled"
+        );
+        // The blank flash has no saved luminance entry, so the retrieve path ran
+        // and the zeroed analog bank records the lamp as on.
         mock_light_onoff_hw(true).assert_called(1);
         mock_rf_link_slave_init(40000).assert_called(1);
         mock_factory_reset_handle().assert_called(1);
@@ -2197,12 +2205,7 @@ mod tests {
     // --- Tests for light_user_func ---
 
     #[test]
-    #[mry::lock(
-        pwm_set_cmp,
-        flash_write_page,
-        factory_reset_cnt_check,
-        mesh_pair_proc_effect
-    )]
+    #[mry::lock(factory_reset_cnt_check, mesh_pair_proc_effect)]
     fn test_light_user_func_structure() {
         // `check_light_state_save` is an inherent method on the flash store and is
         // deliberately not mockable, so this test drives the real function and
@@ -2216,7 +2219,6 @@ mod tests {
         // Seed a pending luminance save: a colour transition stamps
         // `last_transition_time`.
         fake_clock::set_ticks(1000);
-        mock_pwm_set_cmp(Any, Any).returns(());
         begin_transition(500, 300, 800);
 
         // The colour command started a transition, so TMR1 must be running.
@@ -2232,7 +2234,6 @@ mod tests {
 
         // 5 s (160_000_000 ticks) have elapsed since that transition.
         fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
-        mock_flash_write_page(Any, Any, Any).returns(());
         mock_factory_reset_cnt_check().returns(());
         mock_mesh_pair_proc_effect().returns(());
 
@@ -2245,7 +2246,24 @@ mod tests {
         light_user_func(&mut flash_store);
 
         // Verify the save path ran, and the other three steps of the tick ran.
-        mock_flash_write_page(Any, Any, Any).assert_called(1);
+        let mut saved = [0u8; 7];
+        FakeFlash::read_slice(0, &mut saved);
+        assert_eq!(saved[0], 0xA5, "the saved luminance entry is valid");
+        assert_eq!(
+            u16::from_le_bytes([saved[1], saved[2]]),
+            MAX_LUM_BRIGHTNESS_VALUE,
+            "the entry records the core's current brightness"
+        );
+        assert_eq!(
+            u16::from_le_bytes([saved[3], saved[4]]),
+            MAX_LUM_BRIGHTNESS_VALUE,
+            "the entry records the transition's current CW"
+        );
+        assert_eq!(
+            u16::from_le_bytes([saved[5], saved[6]]),
+            0,
+            "the entry records the transition's current WW"
+        );
         mock_factory_reset_cnt_check().assert_called(1);
         mock_mesh_pair_proc_effect().assert_called(1);
 
@@ -2254,7 +2272,10 @@ mod tests {
         // well past the window, so a second write could only come from a timer
         // that was not cleared.
         light_user_func(&mut flash_store);
-        mock_flash_write_page(Any, Any, Any).assert_called(1);
+        let mut after = [0u8; 14];
+        FakeFlash::read_slice(0, &mut after);
+        assert_eq!(&after[..7], &saved, "the first entry is unchanged");
+        assert_eq!(&after[7..], &[0xFF; 7], "no second entry was programmed");
         mock_factory_reset_cnt_check().assert_called(2);
         mock_mesh_pair_proc_effect().assert_called(2);
     }
@@ -2301,7 +2322,6 @@ mod tests {
     /// state owned by `light_manager`; the SDK test tree may no longer inject an
     /// application state object.
     #[test]
-    #[mry::lock(pwm_set_cmp)]
     fn test_rf_link_response_callback_to_slave_add_status_layout() {
         use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
 
@@ -2313,8 +2333,6 @@ mod tests {
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
         DEVICE_STATUS_RECORD_INDEX.set(0);
         SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
-
-        mock_pwm_set_cmp(Any, Any).returns(());
 
         reset_fakes();
         fake_clock::set_ticks(1);

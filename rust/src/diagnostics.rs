@@ -16,8 +16,8 @@ use core::ptr::addr_of_mut;
 use core::slice;
 
 use crate::config::{FLASH_ADR_PANIC_INFO, PANIC_VALID_FLAG};
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page};
 use crate::sdk::light::LGT_PANIC_MSG;
+use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page};
 use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 
 // Panic-path imports: `write_panic_info`/`panic` exist only on the target build
@@ -25,14 +25,14 @@ use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 // never sees these.
 #[cfg(any(target_os = "none", test))]
 use crate::logging::UartStream;
-#[cfg(any(target_os = "none", test))]
-use crate::sdk::drivers::flash::flash_write_page;
 #[cfg(target_os = "none")]
 use core::fmt::Write;
 #[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 #[cfg(any(target_os = "none", test))]
 use core::ptr::addr_of;
+#[cfg(any(target_os = "none", test))]
+use tlsr8266_hal::drivers::flash::flash_write_page;
 #[cfg(target_os = "none")]
 use tlsr8266_hal::pm::light_sw_reboot;
 
@@ -523,12 +523,10 @@ pub mod rtt {
 mod tests {
     use super::*;
     use crate::mesh::{mock_send_mesh_message, send_mesh_message};
-    use crate::sdk::drivers::flash::{
-        flash_erase_sector, mock_flash_erase_sector, mock_flash_read_page, mock_flash_write_page,
-    };
     use crate::uart_manager::{mock_send_message, reset_for_test, send_message};
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
-    use mry::{send_wrapper::SendWrapper, Any};
+    use mry::Any;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_pac::fake_mmio::FakeMmio;
 
@@ -566,7 +564,16 @@ mod tests {
         reset_for_test();
         FakeMmio::reset();
         FakeAnalog::reset();
+        FakeFlash::reset();
         mock_send_message(Any).returns(Ok(()));
+    }
+
+    /// Seed the panic-info sector with the layout `write_panic_info` produces:
+    /// valid flag at `+0`, `len` at `+1`, `body` at `+3`.
+    fn seed_panic_info(body: &[u8], len: u16) {
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG]);
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 1, &len.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 3, body);
     }
 
     #[test]
@@ -641,31 +648,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(send_message, flash_read_page, flash_erase_sector)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_panic_message() {
         mock_uart_print();
 
         let body = b"panic body";
-        let len = body.len() as u16;
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, len as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(body.as_ptr(), *buf, body.len());
-            },
-        );
+        seed_panic_info(body, body.len() as u16);
 
         report_reset_reason();
 
@@ -681,37 +672,25 @@ mod tests {
             "the analog register must hold the written value"
         );
         // `check_panic_info()` owns erasing the sector, not the boot report.
-        mock_flash_erase_sector(Any).assert_called(0);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            0,
+            "the boot report must leave the panic sector intact"
+        );
     }
 
     /// A panic body longer than the stream budget is clipped and marked, and the
     /// whole line still fits the 128-byte `UartStream` used by `uprintln!`.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_panic_message_truncated() {
         mock_uart_print();
 
         let body = [b'x'; 200];
-        let len = body.len() as u16;
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, PANIC_READ_MAX as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(body.as_ptr(), *buf, PANIC_READ_MAX);
-            },
-        );
+        seed_panic_info(&body, body.len() as u16);
 
         let mut expected = Vec::new();
         expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
@@ -735,7 +714,7 @@ mod tests {
     /// when the bytes that *were* read decode to exactly the 72-byte budget, so
     /// a cut can never look complete.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_panic_message_marks_short_body_cut_by_read() {
         mock_uart_print();
 
@@ -743,26 +722,10 @@ mod tests {
         // data beyond the read window: the decoded prefix is exactly the budget.
         let mut body = [b'a'; 200];
         body[PANIC_LOG_BODY_MAX] = 0xFF;
-        let len = body.len() as u16;
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, PANIC_READ_MAX as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(body.as_ptr(), *buf, PANIC_READ_MAX);
-            },
-        );
+        seed_panic_info(&body, body.len() as u16);
 
         let mut expected = Vec::new();
         expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
@@ -779,31 +742,15 @@ mod tests {
     /// A message that fits the flash read window exactly but not the 72-byte
     /// stream budget is still marked, i.e. the clip alone can require `...`.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_panic_message_marks_body_clipped_within_read() {
         mock_uart_print();
 
         let body = [b'w'; PANIC_READ_MAX];
-        let len = body.len() as u16;
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, PANIC_READ_MAX as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(body.as_ptr(), *buf, PANIC_READ_MAX);
-            },
-        );
+        seed_panic_info(&body, body.len() as u16);
 
         let mut expected = Vec::new();
         expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
@@ -820,25 +767,18 @@ mod tests {
     /// AC4: an invalid panic flag means the sector is not trusted at all, so the
     /// boot report stays silent but still marks this boot as running.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_panic_invalid_flag() {
         mock_uart_print();
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG ^ 0xFF, 1);
-            },
-        );
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG ^ 0xFF]);
 
         report_reset_reason();
 
-        // No line at all, and the length/body were never read.
+        // No line at all: the invalid flag short-circuits before the length read.
         mock_send_message(Any).assert_called(0);
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, Any, Any).assert_called(0);
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
         assert_eq!(
             FakeAnalog::get(REGA_RESET_SENTINEL),
             SENTINEL_RUNNING,
@@ -854,7 +794,7 @@ mod tests {
     /// AC4: a length beyond the 256-byte sector record is rejected before any
     /// body bytes are read, and nothing is logged.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_panic_length_over_limit() {
         mock_uart_print();
 
@@ -862,24 +802,13 @@ mod tests {
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_MAIN_LOOP);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).returns(());
+        seed_panic_info(&[b'x'; 8], len);
 
         report_reset_reason();
 
         mock_send_message(Any).assert_called(0);
-        // The over-limit length must short-circuit before the body read.
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, Any, Any).assert_called(0);
+        // The over-limit length must short-circuit before the body read, so the
+        // seeded body is never logged.
         assert_eq!(
             FakeAnalog::get(REGA_RESET_SENTINEL),
             SENTINEL_RUNNING,
@@ -896,7 +825,7 @@ mod tests {
     /// code point is dropped (`from_utf8` error clamp), never replaced and never
     /// logged raw, and the clipped line is marked with `...`.
     #[test]
-    #[mry::lock(send_message, flash_read_page)]
+    #[mry::lock(send_message)]
     fn test_boot_sentinel_panic_truncated_utf8() {
         mock_uart_print();
 
@@ -920,22 +849,7 @@ mod tests {
 
         FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_PANIC);
         FakeAnalog::set(REGA_BREADCRUMB, CRUMB_PANIC);
-
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), *buf, 2);
-            },
-        );
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, PANIC_READ_MAX as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(body.as_ptr(), *buf, PANIC_READ_MAX);
-            },
-        );
+        seed_panic_info(&body, len);
 
         report_reset_reason();
 
@@ -970,100 +884,82 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_write_panic_info() {
+        FakeFlash::reset();
+
         // Create a test stream with some panic data
         let mut stream = UartStream::<128>::new();
         let test_data = b"Panic occurred!";
         let _ = stream.write_all(test_data);
 
-        // Mock flash operations
-        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns(());
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 3, test_data.len() as u32, Any).returns(());
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO, 1, Any).returns(());
-
-        // Call write_panic_info
         write_panic_info(&stream);
 
-        // Verify flash operations were called correctly
-        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).assert_called(1);
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).assert_called(1);
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO + 3, test_data.len() as u32, Any)
-            .assert_called(1);
-        mock_flash_write_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            1,
+            "the panic sector must be erased once before the record is written"
+        );
+
+        let mut flag = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO, &mut flag);
+        assert_eq!(flag[0], PANIC_VALID_FLAG, "the valid flag is written last");
+
+        let mut len_bytes = [0u8; 2];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO + 1, &mut len_bytes);
+        assert_eq!(
+            u16::from_le_bytes(len_bytes),
+            test_data.len() as u16,
+            "the length word sits at +1"
+        );
+
+        let mut body = [0u8; 32];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO + 3, &mut body);
+        assert_eq!(&body[..test_data.len()], test_data, "the body sits at +3");
+
+        // Only `len` body bytes were programmed; the rest of the erased sector
+        // must still read as 0xFF.
+        let mut tail = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO + 3 + test_data.len() as u32, &mut tail);
+        assert_eq!(tail[0], 0xFF);
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_erase_sector)]
     fn test_check_panic_info_no_valid_flag() {
         reset_for_test();
-
-        // Mock reading invalid flag
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| {
-                unsafe {
-                    core::ptr::write_bytes(*buf, 0x00, 1); // Write invalid flag
-                }
-            },
-        );
+        // A blank sector reads 0xFF, which is not a valid panic flag.
+        FakeFlash::reset();
 
         // Run check_panic_info (should return early)
         let future = check_panic_info();
         futures::executor::block_on(future);
 
-        // Verify only the flag read was called
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1);
-        mock_flash_erase_sector(Any).assert_called(0); // Should not clear panic info
+        // Nothing was reported, so the sector must not be cleared.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 0);
     }
 
     #[test]
-    #[mry::lock(flash_read_page, flash_erase_sector, send_mesh_message)]
+    #[mry::lock(send_mesh_message)]
     fn test_check_panic_info_with_valid_data() {
         reset_for_test();
 
         let test_message = b"Test panic message";
         let message_len = test_message.len() as u16;
-
-        // Mock reading valid flag
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).returns_with(
-            |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::write_bytes(*buf, PANIC_VALID_FLAG, 1);
-            },
-        );
-
-        // Mock reading message length
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                let len_bytes = message_len.to_le_bytes();
-                core::ptr::copy_nonoverlapping(len_bytes.as_ptr(), *buf, 2);
-            },
-        );
-
-        // Mock reading message data
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, message_len as u32, Any).returns_with(
-            move |_, _, buf: SendWrapper<*mut u8>| unsafe {
-                core::ptr::copy_nonoverlapping(test_message.as_ptr(), *buf, test_message.len());
-            },
-        );
+        seed_panic_info(test_message, message_len);
 
         // Mock the mesh send so the report never touches the radio
         mock_send_mesh_message(Any, Any, Any, Any).returns([1, 2, 3]);
-
-        // Mock final erase
-        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).returns(());
 
         // Run check_panic_info
         let future = check_panic_info();
         futures::executor::block_on(future);
 
-        // Verify all operations were called
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO, 1, Any).assert_called(1); // Flag read
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, Any).assert_called(1); // Length read
-        mock_flash_read_page(FLASH_ADR_PANIC_INFO + 3, message_len as u32, Any).assert_called(1); // Data read
-        mock_flash_erase_sector(FLASH_ADR_PANIC_INFO).assert_called(1); // Final erase
-
         // Verify mesh messages were sent (3: two data chunks + one empty terminator)
         mock_send_mesh_message(Any, Any, Any, Any).assert_called(3);
+
+        // The report ends by erasing the sector, so the flag is back to blank.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 1);
+        let mut flag = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO, &mut flag);
+        assert_eq!(flag[0], 0xFF, "the panic sector is cleared after reporting");
     }
 }

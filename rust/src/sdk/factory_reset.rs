@@ -115,10 +115,10 @@ use crate::sdk::ble_app::ble_ll_pair::{
     MESH_PAIR_ENABLE, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_PWD_ENCODE_SK,
 };
 use crate::sdk::ble_app::rf_drv_8266::MESH_DEVICE_ADDRESS_VALIDATION_PENDING;
-use crate::sdk::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use crate::BIT;
 use critical_section;
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 use tlsr8266_hal::mcu::clock::clock_time_exceed;
 use tlsr8266_hal::mcu::crypto::encode_password;
 use tlsr8266_hal::mcu::irq_i::irq_disable;
@@ -1040,10 +1040,8 @@ pub fn kick_out(par: KickoutReason) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::drivers::flash::{mock_flash_erase_sector, mock_flash_write_page};
-    use core::slice;
     use core::sync::atomic::Ordering;
-    use mry::send_wrapper::SendWrapper;
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, SECTOR_SIZE_BYTES};
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::fake_crypto;
@@ -1062,6 +1060,7 @@ mod tests {
         FakeAnalog::reset();
         fake_clock::reset();
         fake_crypto::reset();
+        FakeFlash::reset();
     }
 
     /// Test the compile-time validation of power cycle timing configuration
@@ -1348,8 +1347,9 @@ mod tests {
 
     /// Test init_reset_sequence when sector is full
     #[test]
-    #[mry::lock(read_flash_byte, flash_erase_sector)]
+    #[mry::lock(read_flash_byte)]
     fn test_init_reset_sequence_sector_full() {
+        reset_fakes();
         let base_addr = FLASH_ADR_RESET_CNT;
 
         // Mock entire sector as used (no 0xFF values)
@@ -1357,14 +1357,11 @@ mod tests {
             mock_read_flash_byte(base_addr + i).returns(0xFE);
         }
 
-        // Mock sector erase
-        mock_flash_erase_sector(base_addr).returns(());
-
         init_reset_sequence();
 
         // Should erase sector and reset index to 0
         assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
-        mock_flash_erase_sector(base_addr).assert_called(1);
+        assert_eq!(FakeFlash::erase_count(base_addr), 1);
     }
 
     /// Test read_reset_sequence with different flash values
@@ -1401,90 +1398,100 @@ mod tests {
 
     /// Test write_reset_sequence progression
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_write_reset_sequence_integration() {
+        reset_fakes();
         FACTORY_RESET_STATE.flash_address_index.set(10);
         let addr = FLASH_ADR_RESET_CNT + 10;
 
         // Test Step 1 on erased flash
         mock_read_flash_byte(addr).returns(0xFF);
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_reset_sequence(1);
 
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0xFE, "Step 1 must clear the first completion bit");
+
         // Test Step 2 progression
         mock_read_flash_byte(addr).returns(0xFE); // Previous Step 1
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_reset_sequence(2);
 
-        // Should have been called twice total (once for Step 1, once for Step 2)
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(2);
+        // The device must now hold Step 2's value: the second write really landed.
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0xFC, "Step 2 must clear the second completion bit");
     }
 
     /// Test write_reset_sequence sector boundary handling
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
+    #[mry::lock(read_flash_byte)]
     fn test_write_reset_sequence_sector_boundary() {
+        reset_fakes();
         // Set up at sector boundary
         FACTORY_RESET_STATE.flash_address_index.set(4095);
         let addr = FLASH_ADR_RESET_CNT + 4095;
 
         mock_read_flash_byte(addr).returns(0xFF);
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).returns(());
 
         write_reset_sequence(0x80); // Write FactoryReset step to complete sequence
 
-        // Should trigger sector management
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(1);
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
+        // Should trigger sector management: the completed sequence erased the
+        // sector and wrapped the index back to its start.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_RESET_CNT), 1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0xFF, "the sector erase must leave the page blank");
         assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
     }
 
     /// Test timing validation integration
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_write_timing_validation_integration() {
+        reset_fakes();
         // Set up Step 4 complete
         FACTORY_RESET_STATE.flash_address_index.set(15);
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
         let addr = FLASH_ADR_RESET_CNT + 15;
 
         mock_read_flash_byte(addr).returns(ResetStep::Step4.flash_value()); // 0xF0
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_timing_validation();
 
-        // Should write timing validation bit for Step 4
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0xD0, "Step 4 timing bit must be cleared in flash");
 
         // Test Step 5 timing validation
         FACTORY_RESET_STATE.consecutive_reset_count.set(5);
         mock_read_flash_byte(addr).returns(0xD0); // Step 4 with timing
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_timing_validation();
 
-        // Should have been called twice total (once for Step 4, once for Step 5)
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(2);
+        // Both writes landed: 0xD0 AND 0x90 leaves Step 5's timing bit cleared.
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0x90, "Step 5 timing bit must be cleared in flash");
     }
 
     /// Test clear_reset_sequence integration
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_clear_reset_sequence_integration() {
+        reset_fakes();
         FACTORY_RESET_STATE.flash_address_index.set(20);
         let addr = FLASH_ADR_RESET_CNT + 20;
 
         mock_read_flash_byte(addr).returns(ResetStep::Step3.flash_value()); // 0xF8
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         let initial_index = FACTORY_RESET_STATE.flash_address_index.get();
 
         clear_reset_sequence();
 
         // Should write invalidation and increment index
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0x78, "invalidation must clear bit 7 in flash");
         assert_eq!(
             FACTORY_RESET_STATE.flash_address_index.get(),
             initial_index + 1
@@ -1493,27 +1500,29 @@ mod tests {
 
     /// Test clear_reset_sequence at sector boundary
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page, flash_erase_sector)]
+    #[mry::lock(read_flash_byte)]
     fn test_clear_reset_sequence_sector_boundary() {
+        reset_fakes();
         FACTORY_RESET_STATE.flash_address_index.set(4095);
         let addr = FLASH_ADR_RESET_CNT + 4095;
 
         mock_read_flash_byte(addr).returns(ResetStep::Step2.flash_value());
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).returns(());
 
         clear_reset_sequence();
 
         // Should trigger sector management
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(1);
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_RESET_CNT), 1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(got[0], 0xFF, "the sector erase must leave the page blank");
         assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 0);
     }
 
     /// Test factory_reset_handle complete workflow
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_handle_complete_flow() {
+        reset_fakes();
         // Reset state
         FACTORY_RESET_STATE.consecutive_reset_count.set(0);
         FACTORY_RESET_STATE.clear_state.set(0);
@@ -1538,14 +1547,14 @@ mod tests {
             });
         }
 
-        // Mock write operation for Step 1
         let current_addr = FLASH_ADR_RESET_CNT + 2; // Last used position
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         factory_reset_handle();
 
-        // Verify write operation occurred
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        // Verify the Step 2 bit really landed in flash.
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0xFC, "Step 2 must be written at the active slot");
 
         // Verify state setup
         assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 2); // Step1 -> Step2
@@ -1559,8 +1568,9 @@ mod tests {
 
     /// Test factory_reset_handle step progression
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_handle_step_progression() {
+        reset_fakes();
         let current_step = 2;
 
         // Set up initial state - simulate sector already initialized
@@ -1588,13 +1598,12 @@ mod tests {
             });
         }
 
-        // Mock write for next step (Step 3)
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
-
         factory_reset_handle();
 
-        // Verify write operation happened
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        // Verify the next step's bit really landed in flash.
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0xF8, "Step 3 must be written at the active slot");
 
         // Verify state updates
         assert_eq!(
@@ -1611,7 +1620,7 @@ mod tests {
 
     /// Test factory_reset_handle factory reset completion
     #[test]
-    #[mry::lock(read_flash_byte, flash_erase_sector, factory_reset)]
+    #[mry::lock(read_flash_byte, factory_reset)]
     fn test_factory_reset_handle_completed_sequence() {
         reset_fakes();
         // Set up initial state
@@ -1619,7 +1628,6 @@ mod tests {
         FACTORY_RESET_STATE.consecutive_reset_count.set(0);
         FACTORY_RESET_STATE.clear_state.set(0);
 
-        let current_addr = FLASH_ADR_RESET_CNT + 10;
         let base_addr = FLASH_ADR_RESET_CNT;
 
         // Mock the sector scan that init_reset_sequence performs
@@ -1637,7 +1645,6 @@ mod tests {
         // Set up the LED-success path: `blink_ota_led_ok` runs for real now, so
         // its six 1 Hz sleeps land in `fake_clock::sleeps()`.
         mock_factory_reset().returns(());
-        mock_flash_erase_sector(mry::Any).returns(());
 
         factory_reset_handle();
 
@@ -1668,14 +1675,13 @@ mod tests {
 
     /// Test factory_reset_handle with fresh sector (Clear case)
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_handle_clear_case() {
+        reset_fakes();
         // Set up initial state - fresh sector
         FACTORY_RESET_STATE.flash_address_index.set(0);
         FACTORY_RESET_STATE.consecutive_reset_count.set(0);
         FACTORY_RESET_STATE.clear_state.set(0);
-
-        let base_addr = FLASH_ADR_RESET_CNT;
 
         // Mock the sector scan that init_reset_sequence performs
         // All flash reads return 0xFF (erased sector)
@@ -1684,9 +1690,6 @@ mod tests {
                 0xFF // Entire sector is erased
             });
         }
-
-        // Mock flash_write_page (called during Clear case)
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         // Call factory_reset_handle (no parameters)
         factory_reset_handle();
@@ -1697,15 +1700,17 @@ mod tests {
         assert_eq!(FACTORY_RESET_STATE.consecutive_reset_count.get(), 1);
         assert!(FACTORY_RESET_STATE.clear_state.get() > 0); // Timing started
 
-        // Verify the mocks were called appropriately
-        // The Clear case writes Step1 to flash but doesn't trigger LED indication
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(1); // Clear case writes Step1
+        // The Clear case writes Step1 to the first slot; the content proves it.
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_RESET_CNT, &mut got);
+        assert_eq!(got[0], 0xFE, "Clear case must write Step 1 to flash");
     }
 
     /// Test factory_reset_cnt_check with invalid state
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_cnt_check_invalid_state() {
+        reset_fakes();
         // Set up invalid state
         FACTORY_RESET_STATE.consecutive_reset_count.set(0); // Invalid
         FACTORY_RESET_STATE.clear_state.set(1); // But active timing check
@@ -1715,20 +1720,21 @@ mod tests {
 
         // Mock reading current sequence and invalidation write
         mock_read_flash_byte(current_addr).returns(ResetStep::Step3.flash_value());
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
         // Should clear sequence due to invalid state
         mock_read_flash_byte(current_addr).assert_called(1);
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0x78, "the invalidated step must land in flash");
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
         assert_eq!(FACTORY_RESET_STATE.flash_address_index.get(), 16); // Incremented
     }
 
     /// Test timing check remains pending when minimum time has not elapsed
     #[test]
-    #[mry::lock(write_timing_validation, flash_write_page)]
+    #[mry::lock(write_timing_validation)]
     fn test_factory_reset_cnt_check_min_time_not_elapsed() {
         // Set up state 1 for step 4 (requires timing validation)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
@@ -1749,12 +1755,24 @@ mod tests {
             "precondition: the minimum window must not have elapsed at tick 0"
         );
         mock_write_timing_validation().returns(());
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
         mock_write_timing_validation().assert_called(0);
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(0);
+        // Nothing may be programmed anywhere in the reset-count sector while the
+        // window is pending: no timing bit and no erase.
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_RESET_CNT),
+            0,
+            "the pending window must not erase the reset-count sector"
+        );
+        let mut sector = [0u8; SECTOR_SIZE_BYTES];
+        FakeFlash::read_slice(FLASH_ADR_RESET_CNT, &mut sector);
+        assert_eq!(
+            sector.iter().position(|&b| b != 0xFF),
+            None,
+            "no byte of the reset-count sector may be programmed too early"
+        );
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 1);
         assert_eq!(
             FACTORY_RESET_STATE.timing_check_timestamp.get(),
@@ -1764,7 +1782,7 @@ mod tests {
 
     /// Test factory_reset_cnt_check timing state machine
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_cnt_check_timing_state_machine() {
         // Set up valid state 1 (checking minimum time)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4); // Step 4
@@ -1781,7 +1799,6 @@ mod tests {
         reset_fakes();
         fake_clock::set_ticks(u32::MAX as u64);
         mock_read_flash_byte(current_addr).returns(ResetStep::Step4.flash_value());
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
@@ -1792,12 +1809,14 @@ mod tests {
             POWER_CYCLE_TIMING[3].1 as u32
         );
         mock_read_flash_byte(current_addr).assert_called(1);
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0xD0, "Step 4 timing bit must be cleared in flash");
     }
 
     /// Test factory_reset_cnt_check maximum time exceeded
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_cnt_check_max_time_exceeded() {
         // Set up state 2 (checking maximum time)
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
@@ -1814,13 +1833,14 @@ mod tests {
         reset_fakes();
         fake_clock::set_ticks(u32::MAX as u64);
         mock_read_flash_byte(current_addr).returns(ResetStep::Step4.flash_value());
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         factory_reset_cnt_check();
 
         // Should clear sequence and reset state
         mock_read_flash_byte(current_addr).assert_called(1);
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0x70, "the invalidated step must land in flash");
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0);
     }
 
@@ -1843,8 +1863,9 @@ mod tests {
 
     /// Test factory_reset_cnt_check with invalid clear state (covers lines 812-815)
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_factory_reset_cnt_check_invalid_clear_state() {
+        reset_fakes();
         // Set up state with invalid clear state
         FACTORY_RESET_STATE.clear_state.set(3); // Invalid clear state (not 0, 1, or 2)
         FACTORY_RESET_STATE.consecutive_reset_count.set(2);
@@ -1854,27 +1875,28 @@ mod tests {
 
         // Mock flash operations for clear_reset_sequence
         mock_read_flash_byte(current_addr).returns(ResetStep::Step2.flash_value());
-        mock_flash_write_page(current_addr, 1, mry::Any).returns(());
 
         // Call factory_reset_cnt_check - should hit default case (lines 812-815)
         factory_reset_cnt_check();
 
         // Should clear the sequence and reset state due to invalid clear state
         mock_read_flash_byte(current_addr).assert_called(1);
-        mock_flash_write_page(current_addr, 1, mry::Any).assert_called(1);
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(current_addr, &mut got);
+        assert_eq!(got[0], 0x7C, "the invalidated step must land in flash");
         assert_eq!(FACTORY_RESET_STATE.clear_state.get(), 0); // Should be reset to 0
     }
 
     /// Test complete sequence with timing validation
     #[test]
-    #[mry::lock(read_flash_byte, flash_write_page)]
+    #[mry::lock(read_flash_byte)]
     fn test_complete_sequence_with_timing_validation() {
+        reset_fakes();
         FACTORY_RESET_STATE.flash_address_index.set(30);
         let addr = FLASH_ADR_RESET_CNT + 30;
 
         // Start with erased flash
         mock_read_flash_byte(addr).returns(0xFF);
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         // Progress through all steps
         for step in 1..=5 {
@@ -1886,7 +1908,6 @@ mod tests {
                 5 => 0xF0,
                 _ => unreachable!(),
             });
-            mock_flash_write_page(addr, 1, mry::Any).returns(());
 
             write_reset_sequence(step);
         }
@@ -1894,19 +1915,23 @@ mod tests {
         // Now test timing validation for steps 4 and 5
         FACTORY_RESET_STATE.consecutive_reset_count.set(4);
         mock_read_flash_byte(addr).returns(0xE0); // All steps complete
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_timing_validation(); // Add Step 4 timing
 
         FACTORY_RESET_STATE.consecutive_reset_count.set(5);
         mock_read_flash_byte(addr).returns(0xC0); // Step 4 timing added
-        mock_flash_write_page(addr, 1, mry::Any).returns(());
 
         write_timing_validation(); // Add Step 5 timing
 
-        // Verify all flash operations occurred
-        // Each step writes once, plus 2 timing validations = 7 total writes
-        mock_flash_write_page(addr, 1, mry::Any).assert_called(7);
+        // Verify every step landed: five completion bits plus both timing bits
+        // AND together to the factory-reset-ready flag.
+        let mut got = [0u8; 1];
+        FakeFlash::read_slice(addr, &mut got);
+        assert_eq!(
+            got[0],
+            ResetStep::FactoryReset.flash_value(),
+            "the full sequence must be programmed into flash"
+        );
     }
 
     /// Test attack prevention - rapid reset without timing
@@ -1933,19 +1958,21 @@ mod tests {
 
     /// Test factory reset function execution
     #[test]
-    #[mry::lock(flash_erase_sector)]
     fn test_factory_reset_execution() {
-        // Mock sector erasure for all the configuration sectors
-        mock_flash_erase_sector(mry::Any).returns(());
+        reset_fakes();
+        FACTORY_RESET_STATE.flash_address_index.set(0);
 
         factory_reset();
 
         // Verify reset counter sector was erased (should be last operation)
-        mock_flash_erase_sector(FLASH_ADR_RESET_CNT).assert_called(1);
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_RESET_CNT), 1);
 
         // Verify other configuration sectors were also erased
-        // (The exact number depends on the configuration, but there should be multiple calls)
-        // We can't easily get a call count with mry, so we just verify the reset sector was called
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PAIRING),
+            1,
+            "the pairing sector must be erased too"
+        );
     }
 
     /// Test KickoutReason enum conversion
@@ -1987,7 +2014,6 @@ mod tests {
 
     /// Test that kick_out writes default credentials and pairing flags to flash
     #[test]
-    #[mry::lock(flash_erase_sector, flash_write_page)]
     fn test_kick_out_out_of_mesh_writes_credentials_and_flags() {
         // Ensure a known LTK is stored before invoking kick_out
         let expected_ltk = [0xAAu8; 16];
@@ -2024,30 +2050,20 @@ mod tests {
 
         let pairing_addr = FLASH_ADR_PAIRING;
 
-        mock_flash_erase_sector(mry::Any).returns(());
-
-        let expected_flags_closure = expected_flags;
-        let expected_name_closure = expected_name;
-        let expected_ltk_closure = expected_ltk;
-        let encoded_password_closure = encoded_password;
-
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).returns_with(
-            move |addr: u32, len: u32, buf: SendWrapper<*const u8>| {
-                assert_eq!(len, 16);
-                let data = unsafe { slice::from_raw_parts(*buf, len as usize) };
-                match addr {
-                    a if a == pairing_addr + 48 => assert_eq!(data, &expected_ltk_closure),
-                    a if a == pairing_addr + 32 => assert_eq!(data, &encoded_password_closure),
-                    a if a == pairing_addr + 16 => assert_eq!(data, &expected_name_closure),
-                    a if a == pairing_addr => assert_eq!(data, &expected_flags_closure),
-                    a => panic!("unexpected flash write address: 0x{:x}", a),
-                }
-            },
-        );
-
         kick_out(KickoutReason::OutOfMesh);
 
-        mock_flash_write_page(mry::Any, mry::Any, mry::Any).assert_called(4);
+        // The four 16-byte blocks must actually be present in flash, in the
+        // documented slot layout: flags, name, encoded password, LTK.
+        let mut got = [0u8; 16];
+        FakeFlash::read_slice(pairing_addr, &mut got);
+        assert_eq!(got, expected_flags, "pairing flags must be written");
+        FakeFlash::read_slice(pairing_addr + 16, &mut got);
+        assert_eq!(got, expected_name, "out-of-mesh name must be written");
+        FakeFlash::read_slice(pairing_addr + 32, &mut got);
+        assert_eq!(got, encoded_password, "encoded password must be written");
+        FakeFlash::read_slice(pairing_addr + 48, &mut got);
+        assert_eq!(got, expected_ltk, "mesh LTK must be written");
+
         assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
         assert_eq!(
             fake_clock::sleeps(),

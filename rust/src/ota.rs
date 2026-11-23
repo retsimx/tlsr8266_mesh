@@ -17,15 +17,15 @@ use crate::sdk::ble_app::light_ll::status_management::{
     rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY,
 };
 use crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE;
-use crate::sdk::drivers::flash::{
-    flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE,
-};
 use crate::sdk::light::*;
 use mesh_protocol::crc::crc16;
 use mesh_protocol::packet_types::{Packet, PacketAttData};
 use tlsr8266_hal::common::bit::ONES_32;
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::drivers::flash::{
+    flash_erase_sector, flash_read_page, flash_write_page, PAGE_SIZE,
+};
 use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed, sleep_us};
 use tlsr8266_hal::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_GPIO};
 use tlsr8266_hal::mcu::irq_i::irq_disable;
@@ -536,10 +536,9 @@ pub fn rf_link_slave_ota_finish_handle() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::drivers::flash::{mock_flash_read_page, mock_flash_write_page};
-    use mry::send_wrapper::SendWrapper;
     use mry::Any;
     use std::sync::{Arc, Mutex};
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
@@ -558,6 +557,7 @@ mod tests {
     fn reset_fakes() {
         FakeMmio::reset();
         fake_clock::reset();
+        FakeFlash::reset();
     }
 
     /// The GATT write handler stages packets without holding `OTA_STATE` while
@@ -641,13 +641,16 @@ mod tests {
         assert_eq!(st.terminate_cnt, 0);
     }
 
-    /// Staging one mesh packet must reach the flash paths with **no**
-    /// `OTA_STATE` guard held: the flash mocks take the lock themselves, which
-    /// would trip the `cfg(test)` re-entrancy probe if a critical section
-    /// spanned the blocking flash calls.
+    /// Staging one mesh packet drives the real flash path: the payload is
+    /// programmed into the OTA staging area and the write cursor only advances
+    /// after the driver's read-back verification matches.
+    ///
+    /// This test cannot observe lock re-entrancy: the driver owns its fake
+    /// device, so nothing here can take `OTA_STATE` on the flash side. That
+    /// invariant is documented at the production call site instead — see the
+    /// "Critical-section invariant" note on `rf_link_slave_data_ota_save`.
     #[test]
-    #[mry::lock(flash_write_page, flash_read_page)]
-    fn test_ota_save_reaches_flash_without_ota_state_lock() {
+    fn test_ota_save_programs_and_verifies_staged_packet() {
         reset_fakes();
         reset_for_test();
         *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
@@ -663,31 +666,18 @@ mod tests {
         BUFF_RESPONSE.lock()[0] = Packet { att_data: staged };
         OTA_STATE.lock().slave_ota_data_cache_idx = 1;
 
-        let writes = Arc::new(Mutex::new(0u32));
-        let written = Arc::clone(&writes);
-        mock_flash_write_page(Any, Any, Any).returns_with(
-            move |_addr: u32, _len: u32, _buf: SendWrapper<*const u8>| {
-                // Panics here would mean the save path held OTA_STATE across
-                // flash_write_page.
-                let _probe = OTA_STATE.lock();
-                *written.lock().unwrap() += 1;
-            },
-        );
-
-        let reads = Arc::new(Mutex::new(0u32));
-        let read = Arc::clone(&reads);
-        mock_flash_read_page(Any, Any, Any).returns_with(
-            move |_addr: u32, _len: u32, _buf: SendWrapper<*mut u8>| {
-                let _probe = OTA_STATE.lock();
-                *read.lock().unwrap() += 1;
-            },
-        );
         fake_clock::set_ticks(1234);
 
         rf_link_slave_data_ota_save();
 
-        assert_eq!(*writes.lock().unwrap(), 1, "one staged packet is written");
-        assert_eq!(*reads.lock().unwrap(), 1, "the write is read back once");
+        // The 8-byte payload is programmed at the start of the staging area.
+        let mut staged_bytes = [0u8; 8];
+        FakeFlash::read_slice(FLASH_ADR_LIGHT_NEW_FW, &mut staged_bytes);
+        assert_eq!(staged_bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        // `rf_ota_save_data` advances the cursor only when its read-back
+        // verification matches, so address 8 proves write and verify both ran.
+        assert_eq!(OTA_UPDATE_CURRENT_FLASH_ADDRESS.get(), 8);
 
         let st = OTA_STATE.lock();
         assert_eq!(
@@ -698,10 +688,13 @@ mod tests {
             st.ota_rcv_last_idx, 0,
             "the first data packet leaves the cursor at index 0"
         );
+        // The write read back byte-exact, so verification succeeded and the
+        // transfer stays in progress (no finish time, flag still `Continue`).
         assert_eq!(
-            st.rf_slave_ota_finished_time, 1234,
-            "the finish flag stamps the clock"
+            st.rf_slave_ota_finished_time, 0,
+            "a verified mid-transfer packet must not finish the transfer"
         );
+        assert_eq!(*RF_SLAVE_OTA_FINISHED_FLAG.lock(), OtaState::Continue);
 
         OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);

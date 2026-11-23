@@ -1433,7 +1433,7 @@ struct AttributeT {
 | 21 | 128-bit | Char Value | 16 | Command buffer | `rf_link_slave_data_write` | — |
 | 22 | 0x2901 | User Desc | 7 | "Command" | — | — |
 | 23 | 0x2803 | Characteristic | 1 | OTA (R\|W_NoRsp) | — | — |
-| 24 | 128-bit | Char Value | 16 | OTA data buffer | `rf_link_slave_data_ota` | — |
+| 24 | 128-bit | Char Value | 16 | OTA data buffer | `on_gatt_ota_packet` | — |
 | 25 | 0x2901 | User Desc | 3 | "OTA" | — | — |
 | 26 | 0x2803 | Characteristic | 1 | Pair (R\|W) | — | — |
 | 27 | 128-bit | Char Value | 16 | Pairing data buffer | `pair_write` | `pair_read` |
@@ -1650,7 +1650,7 @@ When the last packet is received (`cur_idx == ota_pkt_total`):
 3. Verify that at least 3 packets were received.
 4. All checks passed → `OtaState::Ok` → device reboots and applies the staged firmware.
 
-The firmware itself never compares versions and cannot reject a downgrade — `rust/src/ota.rs` checks only the packet count and CRC. The version check is entirely host-side and runs *before* the first packet is sent: the Python tools read the device version (Firmware Revision characteristic over BLE, `OTA_START_RESP` over UART) and the new version from image offset 2, then refuse to transfer when `dev_ver >= fw_ver` unless `--force` is given (`flash_fw.py`, `flash_fw_uart.py`).
+The firmware itself never compares versions and cannot reject a downgrade — `rust/src/ota/mod.rs` checks only the packet count and CRC. The version check is entirely host-side and runs *before* the first packet is sent: the Python tools read the device version (Firmware Revision characteristic over BLE, `OTA_START_RESP` over UART) and the new version from image offset 2, then refuse to transfer when `dev_ver >= fw_ver` unless `--force` is given (`flash_fw.py`, `flash_fw_uart.py`).
 
 ### 15.6 Version Word
 

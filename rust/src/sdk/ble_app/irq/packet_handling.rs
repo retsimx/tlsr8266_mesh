@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
+use crate::sdk::ble_app::callbacks::dispatch_ota_snapshot;
 use crate::sdk::ble_app::light_ll::connection_management::{
     rf_link_slave_connect, rf_link_timing_adjust, BLE_PERIPHERAL_CONNECTION_ACTIVE,
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG,
@@ -22,7 +23,6 @@ use crate::sdk::ble_app::light_ll::connection_management::{
     LIGHT_CONN_SN_MASTER, SLAVE_CONNECTED_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK,
     SLAVE_WINDOW_SIZE, SLAVE_WINDOW_SIZE_UPDATE,
 };
-use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;
 use crate::sdk::ble_app::light_ll::packet_processing::{
     is_exist_in_rc_pkt_buf, parse_ble_packet_op_params, rf_link_slave_data,
 };
@@ -196,7 +196,7 @@ fn process_received_packet_slow_path(
         }
 
         // Process mesh network packets (when not in OTA mode and not in active BLE RX state)
-        if !OTA_UPDATE_IN_PROGRESS.get()
+        if !dispatch_ota_snapshot().in_progress
             && BLE_PERIPHERAL_LINK_STATE.get()
                 != crate::sdk::light::BlePeripheralLinkState::Receiving
         {
@@ -473,7 +473,7 @@ mod tests {
         LIGHT_RX_BUFFER_WRITE_POINTER.set(0);
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
         LAST_PACKET_RECEIVED_TIMESTAMP.set(0);
         LIGHT_CONN_SN_MASTER.set(0);
         SLAVE_CONNECTED_TICK.set(0);
@@ -1770,7 +1770,7 @@ mod tests {
 
         // Set state to NOT advertising and NOT in OTA to trigger mesh path (lines 170-173)
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected); // Not advertising
-        OTA_UPDATE_IN_PROGRESS.set(false); // Not in OTA
+        crate::ota::set_in_progress_for_test(false); // Not in OTA
 
         // Create a buffer structure for mesh packet (cmd != 3 and != 5)
         let test_dma_len = 25u8;
@@ -1837,7 +1837,7 @@ mod tests {
         // Set state to trigger BLE connection data path (line 176)
         // This happens when: NOT in advertising, AND (in OTA OR in Receiving state)
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Receiving); // In receiving state
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         // Create a buffer structure for BLE connection data
         let test_dma_len = 25u8;
@@ -2028,7 +2028,7 @@ mod tests {
         // - We can be in OTA mode, which makes (!OTA && != Receiving) = false regardless of Receiving state
         // Let's use OTA mode:
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
-        OTA_UPDATE_IN_PROGRESS.set(true); // In OTA mode to skip mesh handler
+        crate::ota::set_in_progress_for_test(true); // In OTA mode to skip mesh handler
 
         // Create a buffer structure with cmd that is neither 3 nor 5
         let test_dma_len = 25u8;

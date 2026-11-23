@@ -82,7 +82,9 @@ use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_channel_selection::SLAVE_CHN_MAP;
 use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet;
-use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response, on_uart_mesh_rx};
+use crate::sdk::ble_app::callbacks::{
+    dispatch_ota_snapshot, on_light_data, on_light_response, on_uart_mesh_rx,
+};
 use crate::sdk::ble_app::flash_config::rf_update_conn_para;
 use crate::sdk::ble_app::light_ll::connection_management::{
     BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT, BLE_PERIPHERAL_CONNECTION_ACTIVE,
@@ -105,7 +107,6 @@ use super::mesh_management::{
     MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST, PKT_LIGHT_DATA,
     PKT_LIGHT_STATUS, RC_PKT_BUF, STATUS_MESSAGE_SEQUENCE_NUMBER,
 };
-use super::ota_management::OTA_UPDATE_IN_PROGRESS;
 use super::status_management::{
     DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
     DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX, NOTIFICATION_REQUEST_MASK_INDEX,
@@ -369,7 +370,7 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet) {
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_is_notify_req(value: u8) -> bool {
     // Suspend normal request processing during OTA updates
-    if OTA_UPDATE_IN_PROGRESS.get() {
+    if dispatch_ota_snapshot().in_progress {
         return false; // All requests disabled during OTA
     }
 
@@ -1693,7 +1694,7 @@ mod tests {
         SLAVE_DATA_VALID.set(0);
         *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [0x01, 0x02, 0x03];
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0x04, 0x05, 0x06];
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         // Reset PKT_LIGHT_DATA to clean state
         *PKT_LIGHT_DATA.lock() = Packet {
@@ -1883,7 +1884,7 @@ mod tests {
     #[mry::lock()]
     fn test_rf_link_is_notify_req_normal_operation() {
         reset_test_state();
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS), true);
         assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ), true);
@@ -1900,7 +1901,7 @@ mod tests {
     #[mry::lock()]
     fn test_rf_link_is_notify_req_during_ota() {
         reset_test_state();
-        OTA_UPDATE_IN_PROGRESS.set(true);
+        crate::ota::set_in_progress_for_test(true);
 
         // All requests should be blocked during OTA
         assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS), false);
@@ -1914,7 +1915,7 @@ mod tests {
     #[mry::lock()]
     fn test_rf_link_is_notify_req_non_requests() {
         reset_test_state();
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
 
         assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_STATUS), false);
         assert_eq!(rf_link_is_notify_req(LGT_CMD_DEV_ADDR_RSP), false);

@@ -28,7 +28,6 @@ use crate::sdk::ble_app::light_ll::connection_management::{
     BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
 };
 use crate::sdk::ble_app::light_ll::mesh_management::{mesh_construct_packet, mesh_node_table_init};
-use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_MESH_OPERATIONS_BLOCKED;
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
 use crate::sdk::ble_app::rf_drv_8266::{rf_link_slave_init, rf_set_power_level_index};
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS, MAC_ID, MAX_MESH_NAME_LEN};
@@ -41,6 +40,7 @@ use crate::vendor_light::vendor_set_adv_data;
 use crate::version::BUILD_VERSION;
 use crate::{uprintln, BIT};
 use heapless::Vec;
+use mesh_protocol::mesh_types::{LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP};
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -416,8 +416,7 @@ pub fn rf_link_response_callback(
             ppp.val[5] = (BUILD_VERSION >> 16) as u8;
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
-            OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
-            tlsr8266_hal::pm::set_reboot_ota_active(true);
+            crate::ota::start_mesh_ota();
         }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
@@ -1305,7 +1304,7 @@ mod tests {
 
         // Setup
         DEVICE_ADDRESS.set(0x1234);
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        crate::ota::reset_for_test();
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1327,7 +1326,7 @@ mod tests {
         assert_eq!(response.val[5], ((BUILD_VERSION >> 16) & 0xFF) as u8);
         assert_eq!(response.val[6], ((BUILD_VERSION >> 24) & 0xFF) as u8);
         assert!(
-            OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get(),
+            crate::ota::is_mesh_ota_blocked(),
             "OTA operations should be blocked"
         );
     }

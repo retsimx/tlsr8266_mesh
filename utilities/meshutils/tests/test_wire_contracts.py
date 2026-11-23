@@ -486,7 +486,7 @@ class OtaConstantsTests(unittest.TestCase):
         )
 
     def test_flash_layout(self):
-        # rust/src/ota.rs:39-40 and rust/src/config.rs:46. The host tools do not
+        # rust/src/ota/mod.rs:133-135 and rust/src/config.rs:46. The host tools do not
         # name these addresses, but they are shared layout: the ready flag sits
         # in the 4 KiB sector directly below the staging area.
         ready_flag_address = FIXTURE.as_u32("ota.flash_adr_ota_ready_flag")

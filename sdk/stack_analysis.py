@@ -21,12 +21,13 @@ Model and caveats (reported alongside the result):
   * Interrupt nesting on the IRQ stack is not modelled (assumes non-nested);
     the ``__irq`` register-save preamble is added as a fixed constant.
   * Indirect dispatch (``fn`` pointers, ``bx rN`` / legacy ``tjex``) has no
-    ``bl`` edge to walk, so the handful of known dispatchers are declared
-    explicitly in ``INDIRECT_EDGES`` (caller substring -> callee substrings,
-    resolved against the linked symbols). An indirect dispatch pushes a return
-    address, so it is modelled as a *normal* call, never a tail call. Every
-    entry must resolve to exactly one function; otherwise the gate fails rather
-    than silently scoring the missing callee as 0 B (which is what
+    ``bl`` edge to walk, so the known dispatchers are declared explicitly in
+    ``INDIRECT_EDGES`` (caller substring -> callee substrings, resolved against
+    the linked symbols). That covers both fn-pointer seams: the app callback
+    seam and the OTA ``OtaHooks`` / ``OtaRadioOps`` seam. An indirect dispatch
+    pushes a return address, so it is modelled as a *normal* call, never a tail
+    call. Every entry must resolve to exactly one function; otherwise the gate
+    fails rather than silently scoring the missing callee as 0 B (which is what
     ``longest_path`` does with an unknown name).
 
 Usage:
@@ -72,6 +73,13 @@ INDIRECT_RE = re.compile(r"\btjex\b|\bbx\s+(?!lr\b)\w")
 # Substrings rather than full names because the mangling hash changes whenever
 # the crate is rebuilt, but a stale/ambiguous entry is a hard gate failure (see
 # ``apply_indirect_edges``) instead of a silently missing edge.
+#
+# The OTA seam is the same shape and therefore needs the same entries: ``OtaHooks``
+# (``sdk/ble_app/callbacks.rs``) and ``OtaRadioOps`` (``ota/mod.rs``) are plain
+# structs of ``fn`` pointers registered at boot, so each of the eight seam calls
+# compiles to a ``bx rN`` and its real callee — the OTA write path, the flash
+# save loop, the ``BUFF_RESPONSE`` staging shims — would otherwise be scored as
+# 0 B, hiding an OTA frame from both stack maxima.
 INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "emit_light_event": ("rf_link_light_event_callback",),
     # Deliberately the hook, not ``mesh::mesh_pair_proc``: the dispatcher calls
@@ -83,6 +91,20 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "on_light_data": ("rf_link_data_callback",),
     "on_light_response": ("rf_link_response_callback",),
     "on_uart_mesh_rx": ("light_mesh_rx_cb",),
+    # The four OtaHooks dispatchers.  ``stage_ota_packet`` is deliberately not a
+    # substring of ``read_staged_ota_packet`` (the latter has ``staged_``), which
+    # is why the two provider names differ in that one letter: a shared stem
+    # would make one of the two entries ambiguous.
+    "dispatch_ota_write": ("on_gatt_ota_packet",),
+    "dispatch_ota_snapshot": ("ota_status_snapshot_impl",),
+    "dispatch_ota_terminate": ("ota_request_termination_impl",),
+    "dispatch_ota_tick": ("ota_tick_timeout_1s_impl",),
+    # The four OtaRadioOps dispatchers: `ota` reaches staging/RF upward only
+    # through these slots, never with a direct `bl`.
+    "radio_stage_pkt": ("stage_ota_packet",),
+    "radio_read_pkt": ("read_staged_ota_packet",),
+    "radio_terminate_tx": ("ota_send_terminate_hook",),
+    "radio_begin_gatt_ota": ("ota_begin_gatt_hook",),
 }
 
 

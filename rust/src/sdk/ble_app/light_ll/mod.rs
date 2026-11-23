@@ -56,12 +56,6 @@ pub mod connection_management;
 /// duplicate detection, acknowledgment handling, and protocol parsing.
 pub mod packet_processing;
 
-/// Over-The-Air (OTA) update management
-///
-/// Provides secure firmware update capabilities over the mesh network,
-/// with flash memory management and verification algorithms.
-pub mod ota_management;
-
 /// Device status and reporting management
 ///
 /// Coordinates status reporting between BLE and mesh networks, implementing

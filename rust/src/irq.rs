@@ -18,22 +18,9 @@
 //! - OTA timeout countdown driven by `TMR0` elapsed time
 
 use crate::sdk::ble_app::irq::BleConnectionEvent;
-use crate::sdk::ble_app::light_ll::ota_management::{
-    OTA_UPDATE_MESH_OPERATIONS_BLOCKED, OTA_UPDATE_TIMEOUT_SECONDS, RF_SLAVE_OTA_FINISHED_FLAG,
-};
-use crate::sdk::light::OtaState;
-use tlsr8266_hal::common::sync::CriticalSectionMutex;
-use tlsr8266_hal::common::sync::SimplifyLS;
-use tlsr8266_hal::mcu::clock::{clock_time64, CLOCK_SYS_CLOCK_1S};
+use mesh_protocol::mesh_types::OtaState;
 use tlsr8266_hal::mcu::irq_i::read_irq_sources;
 use tlsr8266_hal::mcu::timer::{tmr0_ack_irq, tmr1_ack_irq};
-
-/// Timestamp of the last `TMR0` interrupt at which the OTA timeout was decremented.
-///
-/// `TMR0` is reprogrammed dynamically for embassy timers, so it no longer ticks at a
-/// fixed 1 Hz. Stamping the tick here lets `OTA_UPDATE_TIMEOUT_SECONDS` keep counting
-/// real seconds. Module-scoped (rather than function-local) so unit tests can reset it.
-static LAST_OTA_TIMEOUT_TICK: CriticalSectionMutex<u64> = CriticalSectionMutex::new(0);
 
 /// Main interrupt handler for the BLE mesh lighting system.
 ///
@@ -77,62 +64,22 @@ fn handle_system_interrupts() {
 
     // Handle system timer interrupt (BLE state machine)
     if irq_source.is_system_timer() {
-        match crate::sdk::ble_app::irq::handle_ble_system_timer_irq() {
-            BleConnectionEvent::None => {}
-            BleConnectionEvent::OtaFinishCheck => {
-                crate::ota::rf_link_slave_ota_finish_handle();
-            }
-            BleConnectionEvent::OtaErrorReboot => {
-                crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
-            }
-            BleConnectionEvent::OtaFinishCheckAndErrorReboot => {
-                // rf_link_slave_ota_finish_handle() -> rf_link_slave_data_ota_save() can
-                // refresh the counter to 30s, so it MUST run before the zero check.
-                crate::ota::rf_link_slave_ota_finish_handle();
-                if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                    crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
-                }
-            }
-        }
+        handle_system_timer_irq();
     }
 
     // Handle Timer 0: embassy timer alarms, clock overflow detection and OTA
     // timeout management. `TMR0` fires whenever the earliest embassy deadline or
-    // the one-second clock-overflow cap is reached, so the OTA countdown below is
-    // gated on elapsed time instead of on the interrupt rate.
+    // the one-second clock-overflow cap is reached, so the OTA countdown is gated
+    // on elapsed time instead of on the interrupt rate.
     if irq_source.is_tmr0() {
         tmr0_ack_irq();
 
         // Deliver expired embassy timers and re-arm TMR0 for the next deadline.
         tlsr8266_hal::runtime::time_driver::on_timer0_interrupt();
 
-        // Update 64-bit clock to handle 32-bit overflow
-        let now = clock_time64();
-
-        if !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
-            // Restamp while OTA is idle so the first interrupt after OTA begins
-            // cannot decrement the timeout immediately.
-            *LAST_OTA_TIMEOUT_TICK.lock() = now;
-        } else {
-            let mut last = LAST_OTA_TIMEOUT_TICK.lock();
-            if now.saturating_sub(*last) >= CLOCK_SYS_CLOCK_1S as u64 {
-                *last = now;
-                drop(last);
-
-                // Handle mesh OTA timeout countdown
-                if OTA_UPDATE_TIMEOUT_SECONDS.get() != 0 {
-                    OTA_UPDATE_TIMEOUT_SECONDS.dec();
-                    if OTA_UPDATE_TIMEOUT_SECONDS.get() == 0 {
-                        // OTA timeout reached: finish with current status.
-                        //
-                        // Copy the flag out before rebooting: the reboot path
-                        // erases the OTA staging area and burns the reboot
-                        // latch, so the guard must not be alive across it.
-                        let finished_state = *RF_SLAVE_OTA_FINISHED_FLAG.lock();
-                        crate::ota::rf_link_slave_ota_finish_led_and_reboot(finished_state);
-                    }
-                }
-            }
+        // Mesh OTA supervision countdown (also extends the 64-bit clock).
+        if let Some(state) = crate::ota::on_1s_tick() {
+            crate::ota::rf_link_slave_ota_finish_led_and_reboot(state);
         }
     }
 
@@ -146,6 +93,43 @@ fn handle_system_interrupts() {
 
     // Handle UART interrupts for external communication
     crate::uart_manager::check_irq();
+}
+
+/// Handles one `SYSTEM_TIMER` interrupt: the BLE state machine plus the OTA
+/// finish arms its event reports.
+///
+/// # Why this is out of line
+///
+/// `handle_system_interrupts` keeps **one** frame shared by every interrupt
+/// branch, but the deepest chain (UART) never runs the BLE state machine. Once
+/// `handle_ble_system_timer_irq` (and, through it, the whole connection state
+/// machine) is inlined into that frame, its locals are charged to the IRQ stack
+/// gate on a branch the gate's maximum never walks: measured, they were 248 B of
+/// the handler's 320 B frame. Keeping the dispatch out of line moves them onto
+/// the only branch that uses them, which drops the deepest IRQ chain from
+/// 1396 B to 1340 B (margin 396 B -> 452 B).
+///
+/// Only the stack layout changes: the same handlers run, in the same order, for
+/// the same interrupt source.
+#[inline(never)]
+fn handle_system_timer_irq() {
+    match crate::sdk::ble_app::irq::handle_ble_system_timer_irq() {
+        BleConnectionEvent::None => {}
+        BleConnectionEvent::OtaFinishCheck => {
+            crate::ota::rf_link_slave_ota_finish_handle();
+        }
+        BleConnectionEvent::OtaErrorReboot => {
+            crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+        }
+        BleConnectionEvent::OtaFinishCheckAndErrorReboot => {
+            // rf_link_slave_ota_finish_handle() -> rf_link_slave_data_ota_save() can
+            // refresh the counter to 30s, so it MUST run before the zero check.
+            crate::ota::rf_link_slave_ota_finish_handle();
+            if crate::ota::is_timeout_expired() {
+                crate::ota::rf_link_slave_ota_finish_led_and_reboot(OtaState::Error);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,9 +153,10 @@ mod tests {
         mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
     };
     use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
-    use crate::sdk::light::{RfOperationState, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS};
+    use crate::sdk::light::RfOperationState;
     use crate::uart_manager::{check_irq, mock_check_irq};
-    use tlsr8266_hal::mcu::clock::fake_clock;
+    use mesh_protocol::mesh_types::RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS;
+    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1S};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
         mock_read_reg_rf_irq_status, mock_write_reg_irq_src, read_reg_rf_irq_status,
@@ -182,14 +167,12 @@ mod tests {
     /// decremented to zero in a single interrupt works.
     const TEST_OTA_TIMEOUT_SECONDS: u16 = 7;
 
-    /// Restores the module-scoped tick and the OTA statics between tests.
+    /// Restores the OTA subsystem and the HAL seams between tests.
     ///
     /// Tests run in one process with `--test-threads=1`, so process-wide resetting
     /// is safe.
     fn reset_ota_timeout_state() {
-        *LAST_OTA_TIMEOUT_TICK.lock() = 0;
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+        crate::ota::reset_for_test();
         // The HAL host seams are process-wide singletons, so every TMR0 test
         // starts from a zeroed bank, tick count and write log.
         FakeMmio::reset();
@@ -380,7 +363,7 @@ mod tests {
     #[mry::lock(check_irq)]
     fn test_tmr0_irq_restamps_ota_tick_when_ota_inactive() {
         reset_ota_timeout_state();
-        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
+        crate::ota::set_timeout_for_test(TEST_OTA_TIMEOUT_SECONDS);
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
@@ -391,12 +374,12 @@ mod tests {
         handle_system_interrupts();
 
         assert_eq!(
-            *LAST_OTA_TIMEOUT_TICK.lock(),
+            crate::ota::last_ota_timeout_tick_for_test(),
             50_000,
             "OTA tick should track the latest interrupt while OTA is inactive"
         );
         assert_eq!(
-            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            crate::ota::timeout_seconds_for_test(),
             TEST_OTA_TIMEOUT_SECONDS,
             "OTA inactive must not decrement the timeout"
         );
@@ -415,9 +398,9 @@ mod tests {
     #[mry::lock(check_irq)]
     fn test_tmr0_irq_ota_elapsed_under_one_second_does_not_decrement() {
         reset_ota_timeout_state();
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
-        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
+        crate::ota::set_mesh_ota_blocked_for_test(true);
+        crate::ota::set_timeout_for_test(TEST_OTA_TIMEOUT_SECONDS);
+        crate::ota::set_last_ota_timeout_tick_for_test(1_000);
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
@@ -428,12 +411,12 @@ mod tests {
         handle_system_interrupts();
 
         assert_eq!(
-            *LAST_OTA_TIMEOUT_TICK.lock(),
+            crate::ota::last_ota_timeout_tick_for_test(),
             1_000,
             "OTA tick should not move before one second of clock ticks elapses"
         );
         assert_eq!(
-            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            crate::ota::timeout_seconds_for_test(),
             TEST_OTA_TIMEOUT_SECONDS,
             "OTA timeout must not decrement before one second elapses"
         );
@@ -452,9 +435,9 @@ mod tests {
     #[mry::lock(check_irq)]
     fn test_tmr0_irq_ota_elapsed_one_second_decrements_once() {
         reset_ota_timeout_state();
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(TEST_OTA_TIMEOUT_SECONDS);
-        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
+        crate::ota::set_mesh_ota_blocked_for_test(true);
+        crate::ota::set_timeout_for_test(TEST_OTA_TIMEOUT_SECONDS);
+        crate::ota::set_last_ota_timeout_tick_for_test(1_000);
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
@@ -466,12 +449,12 @@ mod tests {
         handle_system_interrupts();
 
         assert_eq!(
-            *LAST_OTA_TIMEOUT_TICK.lock(),
+            crate::ota::last_ota_timeout_tick_for_test(),
             now,
             "OTA tick should be restamped when the timeout decrements"
         );
         assert_eq!(
-            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            crate::ota::timeout_seconds_for_test(),
             TEST_OTA_TIMEOUT_SECONDS - 1,
             "exactly one second should be consumed by one interrupt"
         );
@@ -487,24 +470,25 @@ mod tests {
     ///
     /// Acceptance: `rf_link_slave_ota_finish_led_and_reboot` erases the OTA staging
     /// area and then blocks for six seconds blinking the error LED, so a
-    /// `RF_SLAVE_OTA_FINISHED_FLAG` guard held across the call would mask interrupts
-    /// for that whole window. The mock body re-locks the flag; the `cfg(test)`
-    /// re-entrancy probe turns that into a panic if the guard is still alive.
+    /// OTA-flag guard held across the call would mask interrupts for that whole
+    /// window. The mock body re-reads the snapshot (which re-locks the flag); the
+    /// `cfg(test)` re-entrancy probe turns that into a panic if the guard is
+    /// still alive.
     #[test]
     #[mry::lock(rf_link_slave_ota_finish_led_and_reboot, check_irq)]
     fn test_tmr0_irq_ota_timeout_copies_finish_flag_before_reboot() {
         reset_ota_timeout_state();
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
-        OTA_UPDATE_TIMEOUT_SECONDS.set(1);
-        *LAST_OTA_TIMEOUT_TICK.lock() = 1_000;
-        *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Ok;
+        crate::ota::set_mesh_ota_blocked_for_test(true);
+        crate::ota::set_timeout_for_test(1);
+        crate::ota::set_last_ota_timeout_tick_for_test(1_000);
+        crate::ota::set_finished_flag_for_test(OtaState::Ok);
         FakeMmio::set_reg32(0x648, FLD_IRQ::TMR0_EN.bits());
         FakeMmio::set_reg8(0x623, 0);
 
         fake_clock::set_ticks(1_000 + CLOCK_SYS_CLOCK_1S as u64);
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns_with(|st: OtaState| {
             // Panics if the caller still holds the flag's critical section.
-            drop(RF_SLAVE_OTA_FINISHED_FLAG.lock());
+            let _probe = crate::ota::ota_status_snapshot_impl();
             assert_eq!(st, OtaState::Ok, "the reboot must see the copied flag");
         });
         mock_check_irq().returns(());
@@ -517,7 +501,7 @@ mod tests {
             FLD_TMR_STA::TMR0.bits(),
             "the TMR0 status bit must be acknowledged"
         );
-        *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
+        crate::ota::set_finished_flag_for_test(OtaState::Continue);
     }
 
     // ================================================================================
@@ -617,7 +601,7 @@ mod tests {
     )]
     fn test_system_timer_irq_finish_check_and_zero_counter_reboots() {
         reset_ota_timeout_state();
-        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        crate::ota::set_timeout_for_test(0);
 
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
         mock_write_reg_irq_src(Any).returns(());
@@ -634,7 +618,7 @@ mod tests {
         mock_rf_link_slave_ota_finish_handle().assert_called(1);
         mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Error).assert_called(1);
 
-        OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+        crate::ota::set_timeout_for_test(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
     }
 
     /// `OtaFinishCheckAndErrorReboot` must NOT reboot when the finish handler
@@ -650,7 +634,7 @@ mod tests {
     )]
     fn test_system_timer_irq_finish_check_refreshed_counter_skips_reboot() {
         reset_ota_timeout_state();
-        OTA_UPDATE_TIMEOUT_SECONDS.set(0);
+        crate::ota::set_timeout_for_test(0);
 
         FakeMmio::set_reg32(0x648, FLD_IRQ::SYSTEM_TIMER.bits());
         mock_write_reg_irq_src(Any).returns(());
@@ -659,7 +643,7 @@ mod tests {
 
         // The finish handler refreshes the counter to the OTA default (30s).
         mock_rf_link_slave_ota_finish_handle().returns_with(|| {
-            OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+            crate::ota::set_timeout_for_test(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
         });
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
         mock_check_irq().returns(());
@@ -669,12 +653,12 @@ mod tests {
         mock_rf_link_slave_ota_finish_handle().assert_called(1);
         mock_rf_link_slave_ota_finish_led_and_reboot(Any).assert_called(0);
         assert_eq!(
-            OTA_UPDATE_TIMEOUT_SECONDS.get(),
+            crate::ota::timeout_seconds_for_test(),
             RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
             "the finish handler must have refreshed the counter"
         );
 
-        OTA_UPDATE_TIMEOUT_SECONDS.set(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+        crate::ota::set_timeout_for_test(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
     }
 
     /// Tests that a `TMR1` interrupt acknowledges the timer and steps the light

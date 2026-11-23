@@ -12,11 +12,11 @@
 use core::ptr::addr_of;
 
 use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_select_next_data_channel;
+use crate::sdk::ble_app::callbacks::dispatch_ota_snapshot;
 use crate::sdk::ble_app::light_ll::connection_management::{
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED,
     BRIDGE_RECEIVE_TIMING_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
 };
-use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
 use crate::sdk::light::RfOperationState;
@@ -87,7 +87,7 @@ pub fn configure_ble_receive_state() {
     SLAVE_NEXT_CONNECT_TICK.set(SLAVE_LINK_INTERVAL.get() + read_reg_system_tick_irq());
 
     // Configure interrupt timing based on operational mode
-    if OTA_UPDATE_IN_PROGRESS.get() == false {
+    if dispatch_ota_snapshot().in_progress == false {
         // Normal operation: use window size or minimum timing (0xed8 = ~3.8ms)
         if SLAVE_WINDOW_SIZE.get() == 0 || SLAVE_WINDOW_SIZE.get() <= CLOCK_SYS_CLOCK_1US * 0xed8 {
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());
@@ -157,7 +157,7 @@ mod tests {
         SLAVE_WINDOW_SIZE.set(50000); // 50ms default
         SLAVE_NEXT_CONNECT_TICK.set(0);
         BRIDGE_RECEIVE_TIMING_TICK.set(0);
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
         BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(false);
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
 
@@ -270,7 +270,7 @@ mod tests {
 
     /// Tests BLE receive state configuration with normal timing (no OTA).
     ///
-    /// Verifies that when OTA_UPDATE_IN_PROGRESS is false:
+    /// Verifies that when the OTA snapshot reports no OTA:
     /// - Uses window size if it's greater than minimum timing
     /// - Uses minimum timing (0xed8 = ~3.8ms) if window size is too small
     /// - Calculates correct next connection event timing
@@ -295,7 +295,7 @@ mod tests {
         reset_global_state();
 
         // Setup: Normal operation, no OTA
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(150000); // 150ms, greater than minimum (121600)
 
         // Execute function
@@ -341,7 +341,7 @@ mod tests {
         reset_global_state();
 
         // Setup: Window size too small (less than 0xed8 * CLOCK_SYS_CLOCK_1US)
-        OTA_UPDATE_IN_PROGRESS.set(false);
+        crate::ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(1000); // Very small, should trigger minimum timing
 
         // Execute function
@@ -355,7 +355,7 @@ mod tests {
 
     /// Tests BLE receive state configuration during OTA update.
     ///
-    /// Verifies that when OTA_UPDATE_IN_PROGRESS is true:
+    /// Verifies that when the OTA snapshot reports an OTA:
     /// - Uses longer timeout (10ms) instead of normal timing
     /// - Ignores window size settings
     /// - Provides more time for OTA operations
@@ -380,7 +380,7 @@ mod tests {
         reset_global_state();
 
         // Setup: OTA update in progress
-        OTA_UPDATE_IN_PROGRESS.set(true);
+        crate::ota::set_in_progress_for_test(true);
         SLAVE_WINDOW_SIZE.set(75000); // Should be ignored during OTA
 
         // Execute function

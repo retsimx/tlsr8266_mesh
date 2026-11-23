@@ -1,10 +1,6 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sdk::ble_app::light_ll::ota_management::{
-    OTA_UPDATE_IN_PROGRESS, OTA_UPDATE_MESH_OPERATIONS_BLOCKED,
-};
 use crate::sdk::common::sync::SimplifyLS;
-use crate::sdk::light::RecoverStatus;
 use crate::sdk::mcu::analog::{analog_read, analog_write};
 use crate::sdk::mcu::clock::sleep_us;
 use crate::sdk::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
@@ -13,7 +9,9 @@ use crate::sdk::mcu::irq_i::irq_disable;
 use crate::sdk::mcu::watchdog::wd_clear;
 use crate::BIT;
 use critical_section;
-use tlsr8266_pac::write_reg_pwdn_ctrl;
+use tlsr8266_pac::{
+    write_reg_clk_en1, write_reg_pwdn_ctrl, write_reg_rst1, write_reg_system_tick_ctrl, FldPwdnCtrl,
+};
 
 // Analog-retention register addresses and their sentinel values. These live in the
 // SDK because `light_sw_reboot` owns the retention writes; `common` and
@@ -33,9 +31,25 @@ pub const SENTINEL_RUNNING: u8 = 0xA5;
 /// The firmware panicked; `FLASH_ADR_PANIC_INFO` holds the message.
 pub const SENTINEL_PANIC: u8 = 0xE1;
 
+/// Bit flags written to [`REGA_LIGHT_OFF`] so the next boot can recover the
+/// state the previous one was in.
+pub enum RecoverStatus {
+    LightOff = BIT!(0),
+    MeshOtaMaster100 = BIT!(1),
+}
+
 /// Last published light on/off state, so the reboot path can record whether the
 /// lamp was off without reaching into `LightManager`.
 static REBOOT_LIGHT_OFF: AtomicBool = AtomicBool::new(true);
+
+/// Set once an OTA update is under way, so the reboot path can tell it must
+/// leave the recovery payload behind instead of reading `ota_management`.
+static REBOOT_OTA_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Publishes that an OTA update is in progress for `light_sw_reboot_callback`.
+pub fn set_reboot_ota_active(active: bool) {
+    REBOOT_OTA_ACTIVE.store(active, Ordering::Relaxed);
+}
 
 /// Publishes the current on/off state for `light_sw_reboot_callback`.
 pub fn set_reboot_light_off_state(is_off: bool) {
@@ -352,7 +366,7 @@ pub fn cpu_wakeup_init() {
 // recover status before software reboot
 #[cfg_attr(test, mry::mry)]
 fn light_sw_reboot_callback() {
-    if OTA_UPDATE_IN_PROGRESS.get() || OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get() {
+    if REBOOT_OTA_ACTIVE.load(Ordering::Relaxed) {
         // rf_slave_ota_busy means mesh ota master busy also.
         analog_write(
             REGA_LIGHT_OFF,
@@ -365,6 +379,20 @@ fn light_sw_reboot_callback() {
     }
 }
 
+/// Enable peripheral clocks and the system tick for the boot-time OTA flash copy.
+#[inline(always)]
+pub fn ota_enable_clocks_for_copy() {
+    write_reg_rst1(0);
+    write_reg_clk_en1(0xff);
+    write_reg_system_tick_ctrl(0x01);
+}
+
+/// Trigger an immediate hardware MCU reboot.
+#[inline(always)]
+pub fn mcu_trigger_reboot() {
+    write_reg_pwdn_ctrl(FldPwdnCtrl::Reboot.bits());
+}
+
 #[link_section = ".ram_code"]
 #[cfg_attr(test, mry::mry)]
 fn light_sw_reboot_ll() {
@@ -372,7 +400,7 @@ fn light_sw_reboot_ll() {
     // unsafe { cpu_sleep_wakeup(1, 0x40, ((CLOCK_SYS_CLOCK_1US) * 10000) + read_reg_system_tick()); }
 
     // Instead, let's just reset the MCU as described in the docs
-    write_reg_pwdn_ctrl(0x20);
+    mcu_trigger_reboot();
 
     // Don't loop forever in tests - just return instead
     #[cfg(not(test))]
@@ -422,10 +450,11 @@ mod tests {
     use crate::sdk::mcu::watchdog::mock_wd_clear;
     use mry::Any;
     use std::sync::{Arc, Mutex};
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::{
         mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
         mock_write_reg_gpio_out, mock_write_reg_pwdn_ctrl, read_reg_gpio_oen, read_reg_gpio_out,
-        write_reg_gpio_oen, write_reg_gpio_out,
+        write_reg_gpio_oen, write_reg_gpio_out, REG_BASE_ADDR,
     };
 
     /// Tests usb_dp_pullup_en function with enable=true
@@ -484,16 +513,14 @@ mod tests {
         mock_load_tbl_cmd_set().assert_called(1);
     }
 
-    /// Tests light_sw_reboot_callback when OTA is not in progress
+    /// Tests light_sw_reboot_callback when no OTA update is active
     ///
-    /// Verifies that when neither OTA_UPDATE_IN_PROGRESS nor
-    /// OTA_UPDATE_MESH_OPERATIONS_BLOCKED are set, no analog_write occurs.
+    /// Verifies that when the OTA mirror is clear, no analog_write occurs.
     #[test]
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_no_ota() {
-        // Setup: No OTA flags set
-        OTA_UPDATE_IN_PROGRESS.set(false);
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        // Setup: OTA mirror clear
+        set_reboot_ota_active(false);
         // Light state must not leak in from another test
         set_reboot_light_off_state(false);
 
@@ -506,16 +533,15 @@ mod tests {
         mock_analog_write(Any, Any).assert_called(0);
     }
 
-    /// Tests light_sw_reboot_callback when OTA is in progress and light is off
+    /// Tests light_sw_reboot_callback when OTA is active and light is off
     ///
-    /// Verifies that when OTA flags are set and the published state says the
+    /// Verifies that when the OTA mirror is set and the published state says the
     /// light is off, analog_write is called with RecoverStatus::LightOff.
     #[test]
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_off() {
-        // Setup: OTA flags set, light is off
-        OTA_UPDATE_IN_PROGRESS.set(true);
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
+        // Setup: OTA mirror set, light is off
+        set_reboot_ota_active(true);
         set_reboot_light_off_state(true);
 
         mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
@@ -525,18 +551,20 @@ mod tests {
 
         // Verify: analog_write called with correct parameters
         mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).assert_called(1);
+
+        // The mirror is process-global: leave it clear for later tests.
+        set_reboot_ota_active(false);
     }
 
-    /// Tests light_sw_reboot_callback when OTA is in progress and light is on
+    /// Tests light_sw_reboot_callback when OTA is active and light is on
     ///
-    /// Verifies that when OTA flags are set and the published state says the
+    /// Verifies that when the OTA mirror is set and the published state says the
     /// light is on, analog_write is called with 0.
     #[test]
     #[mry::lock(analog_write)]
     fn test_light_sw_reboot_callback_ota_light_on() {
-        // Setup: OTA flags set, light is on
-        OTA_UPDATE_IN_PROGRESS.set(false);
-        OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+        // Setup: OTA mirror set, light is on
+        set_reboot_ota_active(true);
         set_reboot_light_off_state(false);
 
         mock_analog_write(REGA_LIGHT_OFF, 0).returns(());
@@ -546,6 +574,106 @@ mod tests {
 
         // Verify: analog_write called with correct parameters
         mock_analog_write(REGA_LIGHT_OFF, 0).assert_called(1);
+
+        // The mirror is process-global: leave it clear for later tests.
+        set_reboot_ota_active(false);
+    }
+
+    /// The mirror is the callback's only input: clearing it after a call stops
+    /// the next one from writing, so the decision is made per call and not
+    /// latched by an earlier OTA update.
+    #[test]
+    #[mry::lock(analog_write)]
+    fn test_light_sw_reboot_callback_follows_mirror() {
+        set_reboot_light_off_state(true);
+        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).returns(());
+
+        set_reboot_ota_active(true);
+        light_sw_reboot_callback();
+        mock_analog_write(REGA_LIGHT_OFF, RecoverStatus::LightOff as u8).assert_called(1);
+
+        set_reboot_ota_active(false);
+        light_sw_reboot_callback();
+        mock_analog_write(Any, Any).assert_called(1);
+
+        // Leave the mirror clear for any later test in this binary.
+        set_reboot_ota_active(false);
+    }
+
+    /// The recovery payload written to `REGA_LIGHT_OFF` is a wire contract
+    /// shared with the next boot and the host tools.
+    #[test]
+    fn test_recover_status_bit_values() {
+        assert_eq!(RecoverStatus::LightOff as u8, 1);
+        assert_eq!(RecoverStatus::MeshOtaMaster100 as u8, 2);
+    }
+
+    /// `ota_enable_clocks_for_copy` must release the peripheral resets, enable
+    /// the peripheral clocks and start the system tick with those exact values:
+    /// the boot-time flash copy cannot run without them.
+    #[test]
+    fn test_ota_enable_clocks_for_copy_writes_clock_registers() {
+        FakeMmio::reset();
+
+        ota_enable_clocks_for_copy();
+
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0x61 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0,
+                },
+                RegWrite {
+                    addr: 0x64 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0xff,
+                },
+                RegWrite {
+                    addr: 0x74f | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x01,
+                },
+            ]
+        );
+    }
+
+    /// `mcu_trigger_reboot` must fire the hardware reboot bit, not a magic
+    /// number that could drift away from the PAC definition.
+    #[test]
+    fn test_mcu_trigger_reboot_writes_reboot_bit() {
+        FakeMmio::reset();
+
+        mcu_trigger_reboot();
+
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x6f | REG_BASE_ADDR,
+                width: 1,
+                value: FldPwdnCtrl::Reboot.bits() as u32,
+            }]
+        );
+        assert_eq!(FldPwdnCtrl::Reboot.bits(), 0x20);
+    }
+
+    /// `light_sw_reboot_ll` reboots through the shared helper, so the register
+    /// effect is the same one `mcu_trigger_reboot` produces.
+    #[test]
+    fn test_light_sw_reboot_ll_triggers_reboot() {
+        FakeMmio::reset();
+
+        light_sw_reboot_ll();
+
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x6f | REG_BASE_ADDR,
+                width: 1,
+                value: FldPwdnCtrl::Reboot.bits() as u32,
+            }]
+        );
     }
 
     /// `blink_ota_led_ok` configures the pin as an output and genuinely

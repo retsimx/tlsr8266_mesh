@@ -340,6 +340,69 @@ class TestLayerRules(_TempTree):
         self.assert_violations("1: layer-common: crate::sdk::mcu::register::read_reg8")
 
 
+class TestPmLeafRule(_TempTree):
+    """`sdk/pm.rs` sits at the SDK root but is a leaf: it follows `mcu` rules.
+
+    C-4 moves the module into `tlsr8266-hal`, so it may not reach sideways into
+    `sdk/ble_app` or `sdk/light`, which a root-level file would otherwise be
+    free to do.
+    """
+
+    def test_pm_importing_ble_app_fails(self) -> None:
+        path = self.write(
+            "pm.rs",
+            _lines(
+                "use crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS;"
+            ),
+        )
+        out = self.assert_violations(
+            "1: layer-mcu: "
+            "crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS"
+        )
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(
+            out.splitlines()[0],
+            f"{path}:1: layer-mcu: "
+            "crate::sdk::ble_app::light_ll::ota_management::OTA_UPDATE_IN_PROGRESS",
+        )
+
+    def test_pm_importing_light_fails(self) -> None:
+        path = self.write("pm.rs", _lines("use crate::sdk::light::RecoverStatus;"))
+        out = self.assert_violations("1: layer-mcu: crate::sdk::light::RecoverStatus")
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(
+            out.splitlines()[0],
+            f"{path}:1: layer-mcu: crate::sdk::light::RecoverStatus",
+        )
+
+    def test_pm_importing_common_mcu_and_pac_is_clean(self) -> None:
+        self.write(
+            "pm.rs",
+            _lines(
+                "use core::sync::atomic::{AtomicBool, Ordering};",
+                "use crate::sdk::common::sync::SimplifyLS;",
+                "use crate::sdk::mcu::clock::clock_time;",
+                "use crate::BIT;",
+                "use critical_section;",
+                "use tlsr8266_pac::write_reg_pwdn_ctrl;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_leaf_rule_is_scoped_to_pm_rs(self) -> None:
+        # Control: another root-level `sdk/*.rs` file keeps its current
+        # behaviour (no layer), so the same import is legal there.  The branch
+        # is an exact file match, not "every SDK-root file is a leaf".
+        self.write("factory_reset.rs", _lines("use crate::sdk::light::RecoverStatus;"))
+        self.assert_clean()
+        self.assertEqual(
+            check_layering._layer_of(str(self.root / "pm.rs"), str(self.root)), "mcu"
+        )
+        self.assertIsNone(
+            check_layering._layer_of(str(self.root / "factory_reset.rs"), str(self.root))
+        )
+
+
 class TestMeshProtocolExternalCrate(_TempTree):
     """`mesh_protocol` is a pure workspace crate, legal in every SDK layer."""
 

@@ -487,6 +487,18 @@ pub fn blc_ll_init_basic_mcu() {
 }
 
 /**
+ * Clear the RF receive interrupt status bit
+ *
+ * Acknowledges the RX event by writing only `IRQ_RX` to `reg_rf_irq_status`
+ * (0xf20), which is write-1-to-clear. Callers use this after they have consumed
+ * the packet sitting in the RX buffer, so a stale RX status cannot be mistaken
+ * for a new packet.
+ */
+pub fn rf_clear_rx_irq() {
+    write_reg_rf_irq_status(FLD_RF_IRQ_MASK::IRQ_RX.bits())
+}
+
+/**
  * Determine the appropriate response type for a command
  *
  * Maps BLE command opcodes to their corresponding response types based on the command
@@ -1354,6 +1366,7 @@ mod tests {
     use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
     use mry::send_wrapper::SendWrapper;
     use mry::Any;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::*;
 
     #[test]
@@ -4075,5 +4088,36 @@ mod tests {
 
         // Verify advertising is enabled
         assert_eq!(BLE_PERIPHERAL_ADVERTISING_ENABLED.get(), true);
+    }
+
+    // Proof slice for the RF RX ack helper: no mry lock attribute, so the real
+    // accessor body runs and routes through the in-process `FakeMmio` bank.
+
+    /// Tests that rf_clear_rx_irq acknowledges only the RX status bit.
+    ///
+    /// # Notes
+    ///
+    /// * `reg_rf_irq_status` is 16 bits wide and write-1-to-clear, so the write
+    ///   must be exactly `IRQ_RX` at width 2
+    #[test]
+    fn test_rf_clear_rx_irq_writes_rx_status_bit() {
+        FakeMmio::reset();
+        FakeMmio::clear_writes();
+
+        rf_clear_rx_irq();
+
+        assert_eq!(
+            FakeMmio::reg16(0xf20),
+            FLD_RF_IRQ_MASK::IRQ_RX.bits(),
+            "only the RX status bit may be acknowledged"
+        );
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0xf20 | REG_BASE_ADDR,
+                width: 2,
+                value: FLD_RF_IRQ_MASK::IRQ_RX.bits() as u32,
+            }]
+        );
     }
 }

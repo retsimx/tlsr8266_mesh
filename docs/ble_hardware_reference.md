@@ -333,6 +333,8 @@ All addresses are offsets from `REG_BASE_ADDR = 0x800000`.
 | 2 | `TMR2` | Timer 2 interrupt pending |
 | 3 | `WD` | Watchdog interrupt pending |
 
+> **Caution:** The 32-bit `reg_tmr_ctrl` view at 0x620 overlaps the write-1-to-clear status byte at 0x623. A read-modify-write through that 32-bit view re-writes `reg_tmr_sta` and retires pending timer interrupts. Use the 8-bit `reg_tmr_ctrl8` accessor (0x620) for control updates; it still reaches `TMR0_EN` (bit 0) and `TMR1_EN` (bit 3).
+
 **Watchdog timeout coefficient:** `WATCHDOG_TIMEOUT_COEFF = 18`  
 **Watchdog init timeout:** 2000 ms → register value = `2000 × 32000 >> 18`
 

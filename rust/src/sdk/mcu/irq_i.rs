@@ -12,7 +12,10 @@
 //!
 
 use critical_section::RawRestoreState;
-use tlsr8266_pac::{read_reg_irq_en, write_reg_irq_en, write_reg_irq_mask, FLD_IRQ};
+use tlsr8266_pac::{
+    read_reg_irq_en, read_reg_irq_mask, read_reg_irq_src, write_reg_irq_en, write_reg_irq_mask,
+    FLD_IRQ,
+};
 
 /// The crate-wide `critical_section` implementation.
 ///
@@ -152,12 +155,73 @@ pub fn irq_init() {
     write_reg_irq_mask(IRQ_INIT_VALUE);
 }
 
+/// Snapshot of the pending interrupt sources (`reg_irq_src`).
+///
+/// # Notes
+///
+/// * A newtype rather than a bare `u32` keeps "which bit means what" inside
+///   this module, so callers ask predicates instead of re-deriving masks
+/// * Constructed by [`read_irq_sources`] and consumed immediately by the
+///   interrupt dispatcher; it owns the value, so it is not `Copy`
+pub struct IrqSources(u32);
+
+/// Reads the pending interrupt sources.
+///
+/// # Returns
+///
+/// * [`IrqSources`] wrapping the current `reg_irq_src` value
+pub fn read_irq_sources() -> IrqSources {
+    IrqSources(read_reg_irq_src())
+}
+
+impl IrqSources {
+    /// Returns whether the system timer interrupt is pending.
+    #[inline(always)]
+    pub fn is_system_timer(&self) -> bool {
+        self.0 & FLD_IRQ::SYSTEM_TIMER.bits() != 0
+    }
+
+    /// Returns whether the TMR0 interrupt is pending.
+    #[inline(always)]
+    pub fn is_tmr0(&self) -> bool {
+        self.0 & FLD_IRQ::TMR0_EN.bits() != 0
+    }
+
+    /// Returns whether the TMR1 interrupt is pending.
+    #[inline(always)]
+    pub fn is_tmr1(&self) -> bool {
+        self.0 & FLD_IRQ::TMR1_EN.bits() != 0
+    }
+}
+
+/// Unmasks the TMR0 interrupt source.
+///
+/// # Notes
+///
+/// * Read-modify-write of `reg_irq_mask`, so already enabled sources stay
+///   enabled
+pub fn irq_enable_tmr0() {
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR0_EN.bits());
+}
+
+/// Unmasks the TMR1 interrupt source.
+///
+/// # Notes
+///
+/// * Read-modify-write of `reg_irq_mask`, so already enabled sources stay
+///   enabled
+pub fn irq_enable_tmr1() {
+    write_reg_irq_mask(read_reg_irq_mask() | FLD_IRQ::TMR1_EN.bits());
+}
+
 /// Test suite for the interrupt control interface
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
     use mry::Any;
+    use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
+    use tlsr8266_pac::REG_BASE_ADDR;
     use tlsr8266_pac::{mock_read_reg_irq_en, mock_write_reg_irq_en, mock_write_reg_irq_mask};
 
     /// Tests enabling global interrupts.
@@ -436,5 +500,128 @@ mod tests {
         // Step 5: Verify write_reg_irq_en was called correctly for both operations
         mock_write_reg_irq_en(0).assert_called(1); // First call with 0 to disable interrupts
         mock_write_reg_irq_en(1).assert_called(1); // Second call with 1 to restore enabled state
+    }
+
+    // Proof slices for the semantic IRQ helpers: these carry no mry lock
+    // attribute, so the real accessor bodies run and route through the
+    // in-process `FakeMmio` bank. Each test resets the bank first because it is
+    // process-wide (`--test-threads=1`).
+
+    /// Tests that the system timer predicate follows bit 20 of `reg_irq_src`.
+    #[test]
+    fn test_read_irq_sources_reports_system_timer() {
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x648, 0x0010_0000); // FLD_IRQ::SYSTEM_TIMER
+
+        let sources = read_irq_sources();
+
+        assert!(sources.is_system_timer(), "bit 20 is the system timer");
+        assert!(!sources.is_tmr0(), "TMR0 must not be reported");
+        assert!(!sources.is_tmr1(), "TMR1 must not be reported");
+    }
+
+    /// Tests that the TMR0 predicate follows bit 0 of `reg_irq_src`.
+    #[test]
+    fn test_read_irq_sources_reports_tmr0() {
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x648, 0x0000_0001); // FLD_IRQ::TMR0_EN
+
+        let sources = read_irq_sources();
+
+        assert!(sources.is_tmr0(), "bit 0 is TMR0");
+        assert!(
+            !sources.is_system_timer(),
+            "the system timer must not be reported"
+        );
+        assert!(!sources.is_tmr1(), "TMR1 must not be reported");
+    }
+
+    /// Tests that the TMR1 predicate follows bit 1 of `reg_irq_src`.
+    #[test]
+    fn test_read_irq_sources_reports_tmr1() {
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x648, 0x0000_0002); // FLD_IRQ::TMR1_EN
+
+        let sources = read_irq_sources();
+
+        assert!(sources.is_tmr1(), "bit 1 is TMR1");
+        assert!(
+            !sources.is_system_timer(),
+            "the system timer must not be reported"
+        );
+        assert!(!sources.is_tmr0(), "TMR0 must not be reported");
+    }
+
+    /// Tests that a cleared `reg_irq_src` reports no pending source.
+    #[test]
+    fn test_read_irq_sources_zero_reports_nothing() {
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x648, 0);
+
+        let sources = read_irq_sources();
+
+        assert!(!sources.is_system_timer());
+        assert!(!sources.is_tmr0());
+        assert!(!sources.is_tmr1());
+    }
+
+    /// Tests that irq_enable_tmr0 ORs only the TMR0 mask bit.
+    ///
+    /// # Notes
+    ///
+    /// * The seeded mask holds unrelated bits (9, 11 and 13), which must survive
+    ///   the read-modify-write untouched
+    #[test]
+    fn test_irq_enable_tmr0_preserves_existing_mask_bits() {
+        const EXISTING_MASK: u32 = 0x0000_2A00;
+
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x640, EXISTING_MASK);
+        FakeMmio::clear_writes();
+
+        irq_enable_tmr0();
+
+        assert_eq!(
+            FakeMmio::reg32(0x640),
+            EXISTING_MASK | FLD_IRQ::TMR0_EN.bits()
+        );
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x640 | REG_BASE_ADDR,
+                width: 4,
+                value: EXISTING_MASK | FLD_IRQ::TMR0_EN.bits(),
+            }]
+        );
+    }
+
+    /// Tests that irq_enable_tmr1 ORs only the TMR1 mask bit.
+    ///
+    /// # Notes
+    ///
+    /// * The seeded mask holds unrelated bits (9, 11 and 13), which must survive
+    ///   the read-modify-write untouched
+    #[test]
+    fn test_irq_enable_tmr1_preserves_existing_mask_bits() {
+        const EXISTING_MASK: u32 = 0x0000_2A00;
+
+        FakeMmio::reset();
+        FakeMmio::set_reg32(0x640, EXISTING_MASK);
+        FakeMmio::clear_writes();
+
+        irq_enable_tmr1();
+
+        assert_eq!(
+            FakeMmio::reg32(0x640),
+            EXISTING_MASK | FLD_IRQ::TMR1_EN.bits()
+        );
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x640 | REG_BASE_ADDR,
+                width: 4,
+                value: EXISTING_MASK | FLD_IRQ::TMR1_EN.bits(),
+            }]
+        );
     }
 }

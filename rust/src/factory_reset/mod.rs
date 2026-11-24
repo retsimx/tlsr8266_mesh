@@ -161,7 +161,9 @@ fn read_flash_byte(addr: u32) -> u8 {
 /// Program one byte of flash: the only write shape the sequence needs.
 fn write_flash_byte(addr: u32, value: u8) {
     let data = [value];
-    flash_write_page(addr, 1, data.as_ptr());
+    // The reset sequence tolerates a lost step: the boot scan reads whatever the
+    // slot actually holds, so a failed program is not separately reported.
+    let _ = flash_write_page(addr, 1, data.as_ptr());
 }
 
 /// Address of the slot currently in use.
@@ -173,7 +175,9 @@ fn active_slot() -> u32 {
 fn advance_slot() {
     FACTORY_RESET_STATE.flash_address_index.inc();
     if FACTORY_RESET_STATE.flash_address_index.get() >= RESET_SECTOR_SLOTS {
-        flash_erase_sector(FLASH_ADR_RESET_CNT);
+        // A failed erase leaves the sector as it was; the boot scan then reads
+        // the stale slots rather than the intended blank sequence.
+        let _ = flash_erase_sector(FLASH_ADR_RESET_CNT);
         FACTORY_RESET_STATE.flash_address_index.set(0);
     }
 }
@@ -286,7 +290,9 @@ fn init_reset_sequence() {
 
     // No erased slot left (or the cursor ran past the sector): start over.
     if latest_idx >= RESET_SECTOR_SLOTS - 1 {
-        flash_erase_sector(FLASH_ADR_RESET_CNT);
+        // A failed erase is not fatal here: the scan already picked a slot from
+        // whatever the sector holds, and the next boot re-runs the same decision.
+        let _ = flash_erase_sector(FLASH_ADR_RESET_CNT);
         latest_idx = 0;
         latest_value = 0xFF;
     }
@@ -430,11 +436,15 @@ pub fn erase_config_sectors() {
 
             // Skip the active reset-count slot's sector during the main pass.
             if active_slot() != adr {
-                flash_erase_sector(adr);
+                // A sector that fails to erase simply stays intact; the config
+                // record it holds is then still found by the boot scan.
+                let _ = flash_erase_sector(adr);
             }
         }
 
-        flash_erase_sector(active_slot());
+        // A failed erase of the reset-count sector is not fatal: the sequence
+        // restarts from whatever the sector still holds on the next boot.
+        let _ = flash_erase_sector(active_slot());
     });
 }
 

@@ -160,7 +160,9 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 /// Final address = `FLASH_ADR_PAIRING + FLASH_CONFIGURATION_INDEX + adr`
 pub fn save_pair_info(adr: u32, p: &[u8]) {
     let flash_adr_pairing = radio_config().flash_adr_pairing;
-    flash_write_page(
+    // No read-back verification exists: a lost program leaves this block erased
+    // (0xFF) until the next pairing save rewrites the whole record.
+    let _ = flash_write_page(
         (flash_adr_pairing as i32 + FLASH_CONFIGURATION_INDEX.get() + adr as i32) as u32,
         p.len() as u32,
         p.as_ptr(),
@@ -477,9 +479,11 @@ pub fn pair_flash_clean() {
         // Read current configuration from previous slot into backup buffer
         flash_read_page(src_addr, CONFIG_SIZE as u32, config_backup.as_mut_ptr());
 
-        // Erase sector and write configuration to the beginning
-        flash_erase_sector(flash_adr_pairing);
-        flash_write_page(
+        // Erase sector and re-write the saved record at offset 0. A skipped
+        // write after a landed erase leaves the sector blank, so discovery
+        // finds no record and the device has to be re-paired.
+        let _ = flash_erase_sector(flash_adr_pairing);
+        let _ = flash_write_page(
             flash_adr_pairing,
             CONFIG_SIZE as u32,
             config_backup.as_ptr(),

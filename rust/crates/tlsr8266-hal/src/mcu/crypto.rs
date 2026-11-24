@@ -16,16 +16,32 @@ pub enum AesDirection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MicMismatch;
 
+/// Maximum number of done-bit polls the AES completion wait performs.
+pub const AES_WAIT_MAX_ITERS: u32 = 10_000;
+
 /// Runs the SoC's AES write/poll/read sequence against the `0x540` (control),
 /// `0x548` (data) and `0x550` (key) MMIO registers.
 ///
 /// The sequence is unchanged from the pre-extraction code; it is only factored
 /// out so the device path and the host `MmioRegisters` fake drive the same
 /// registers in the same order.
+///
+/// # Returns
+///
+/// `true` once the hardware sets its done bit, `false` if it never did within
+/// [`AES_WAIT_MAX_ITERS`] polls. `out` is written only on success, so an
+/// infallible caller can pre-load it with the zero-block fallback.
+///
+/// The block is written through `out` rather than returned in a `Result` so the
+/// ISR callers pay no stack for the timeout plumbing (the 17-byte `Result`
+/// return needs a scratch slot; see the RAM gate in `make check`).
 #[inline(always)]
-fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] {
-    let mut result = [0u8; 16];
-
+fn aes_mmio_run_into(
+    key: &[u8],
+    source: &[u8],
+    direction: AesDirection,
+    out: &mut [u8; 16],
+) -> bool {
     // Set operation mode based on the enum variant
     write_reg_aes_ctrl(direction as u8);
 
@@ -49,8 +65,19 @@ fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] 
     }
 
     // Wait for AES operation to complete
-    // Bit 2 (value 4) of the AES_CTRL register is set when operation is done
-    while read_reg_aes_ctrl() & 4 == 0 {}
+    // Bit 2 (value 4) of the AES_CTRL register is set when operation is done.
+    // The budget bounds the spin: a stuck block reports a timeout instead of
+    // hanging the firmware.
+    let mut done = false;
+    for _ in 0..AES_WAIT_MAX_ITERS {
+        if read_reg_aes_ctrl() & 4 != 0 {
+            done = true;
+            break;
+        }
+    }
+    if !done {
+        return false;
+    }
 
     // Read the result from AES data registers
     // Each register returns a 32-bit word, and we need to read 4 words (16 bytes)
@@ -61,13 +88,81 @@ fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] 
         // Store result in destination buffer
         // Extract individual bytes from the 32-bit register value
         // in little-endian order (LSB first)
-        result[idx] = tmp as u8; // LSB (least significant byte)
-        result[idx + 1] = (tmp >> 8) as u8; // 2nd byte
-        result[idx + 2] = (tmp >> 16) as u8; // 3rd byte
-        result[idx + 3] = (tmp >> 24) as u8; // MSB (most significant byte)
+        out[idx] = tmp as u8; // LSB (least significant byte)
+        out[idx + 1] = (tmp >> 8) as u8; // 2nd byte
+        out[idx + 2] = (tmp >> 16) as u8; // 3rd byte
+        out[idx + 3] = (tmp >> 24) as u8; // MSB (most significant byte)
     }
 
-    result
+    true
+}
+
+/// [`aes_mmio_run_into`] with the timeout reported as `Result`.
+///
+/// # Returns
+///
+/// * `Ok` with the 16-byte block once the hardware sets its done bit
+/// * `Err(())` if the done bit never appeared within [`AES_WAIT_MAX_ITERS`]
+///   polls, i.e. the crypto block is stuck
+fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> Result<[u8; 16], ()> {
+    let mut result = [0u8; 16];
+    if aes_mmio_run_into(key, source, direction, &mut result) {
+        Ok(result)
+    } else {
+        Err(())
+    }
+}
+
+/// Host/device dispatch for the AES block, writing the result through `out`.
+///
+/// Returns `false` on a hardware timeout; `out` is then untouched, so the
+/// caller's pre-loaded zero block is the documented fallback.
+fn aes_run_into(key: &[u8], source: &[u8], direction: AesDirection, out: &mut [u8; 16]) -> bool {
+    #[cfg(not(target_os = "none"))]
+    {
+        fake_crypto::encryption_into(key, source, direction, out)
+    }
+    #[cfg(target_os = "none")]
+    {
+        // Execute AES operation in a critical section to prevent interrupts
+        // during hardware crypto operations
+        critical_section::with(|_| aes_mmio_run_into(key, source, direction, out))
+    }
+}
+
+/// Low-level AES encryption/decryption, reporting a hardware timeout.
+///
+/// This is [`aes_ll_encryption`] with the stuck-hardware case surfaced to the
+/// caller instead of being collapsed into a zero block. Use it where a silent
+/// all-zero block would be mistaken for a valid result (e.g. MIC checks, which
+/// must fail closed).
+///
+/// # Parameters
+/// * `key` - The AES key (at least 16 bytes)
+/// * `source` - The data to encrypt/decrypt (at least 16 bytes)
+/// * `direction` - Operation mode: `AesDirection::Encrypt` or `AesDirection::Decrypt`
+///
+/// # Returns
+/// * `Ok` with the 16-byte encrypted/decrypted result
+/// * `Err(())` if the AES block never reported completion (see
+///   [`AES_WAIT_MAX_ITERS`])
+// The project convention for fallible hardware calls is `Result<_, ()>`
+// (docs/checklists/firmware.md); there is no extra information to carry, so a
+// bespoke error type would be noise.
+#[allow(clippy::result_unit_err)]
+pub fn aes_ll_encryption_checked(
+    key: &[u8],
+    source: &[u8],
+    direction: AesDirection,
+) -> Result<[u8; 16], ()> {
+    #[cfg(not(target_os = "none"))]
+    {
+        fake_crypto::encryption_checked(key, source, direction)
+    }
+    #[cfg(target_os = "none")]
+    {
+        critical_section::with(|_| aes_mmio_run(key, source, direction))
+    }
 }
 
 /// Low-level AES encryption/decryption function for the TLSR8266 hardware.
@@ -83,7 +178,9 @@ fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] 
 /// * `direction` - Operation mode: `AesDirection::Encrypt` or `AesDirection::Decrypt`
 ///
 /// # Returns
-/// A 16-byte array containing the encrypted/decrypted result
+/// A 16-byte array containing the encrypted/decrypted result, or `[0u8; 16]` if
+/// the hardware never reported completion ([`aes_ll_encryption_checked`] is the
+/// form that reports the timeout).
 ///
 /// # AES Implementation Notes
 /// - On device: uses hardware AES acceleration; the TLSR8266 requires keys to be
@@ -94,16 +191,27 @@ fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] 
 ///   on the poll bit; `MmioRegisters` keeps the register loop for tests that are
 ///   about the bus protocol.
 pub fn aes_ll_encryption(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] {
-    #[cfg(not(target_os = "none"))]
-    {
-        fake_crypto::encryption(key, source, direction)
+    // Pre-loaded with the fallback: `aes_run_into` leaves it untouched on a
+    // hardware timeout, so the caller never sees a partially written block.
+    let mut result = [0u8; 16];
+    let _ = aes_run_into(key, source, direction, &mut result);
+    result
+}
+
+/// [`aes_att_encryption`] that reports a hardware timeout instead of returning a
+/// zero block, and writes through `out`.
+///
+/// Byte order is the same as [`aes_att_encryption`]. Taking `out` rather than
+/// returning a `Result` keeps the fail-closed MIC path at the same stack cost as
+/// the infallible one (see [`aes_mmio_run_into`]).
+#[inline(always)]
+fn aes_att_encryption_into(key: &[u8; 16], source: &[u8; 16], out: &mut [u8; 16]) -> bool {
+    if !aes_run_into(key, source, AesDirection::Encrypt, out) {
+        return false;
     }
-    #[cfg(target_os = "none")]
-    {
-        // Execute AES operation in a critical section to prevent interrupts
-        // during hardware crypto operations
-        critical_section::with(|_| aes_mmio_run(key, source, direction))
-    }
+    // Reverse the bytes of the result to match the required endianness/format.
+    out.reverse();
+    true
 }
 
 /// Performs AES-128 encryption suitable for Bluetooth Attribute Protocol (ATT) operations.
@@ -124,7 +232,9 @@ pub fn aes_ll_encryption(key: &[u8], source: &[u8], direction: AesDirection) -> 
 /// * `source` - A 16-byte array representing the plaintext data to be encrypted.
 ///
 /// # Returns
-/// A 16-byte array containing the encrypted and byte-swapped data.
+/// A 16-byte array containing the encrypted and byte-swapped data, or the zero
+/// block if the AES hardware timed out (the peer rejects it; [`aes_att_decryption_packet`]
+/// is the fail-closed path).
 pub fn aes_att_encryption(key: &[u8; 16], source: &[u8; 16]) -> [u8; 16] {
     // Perform low-level encryption using hardware acceleration.
     let mut result = aes_ll_encryption(key, source, AesDirection::Encrypt);
@@ -235,6 +345,9 @@ pub fn decode_password(key: &[u8; 16], password: &[u8; 16]) -> [u8; 16] {
 /// * `Ok(())` if the calculated MIC matches the `expected_mic` (verification passed)
 /// * `Err(MicMismatch)` if verification failed, indicating corrupted data or wrong
 ///   encryption key
+///
+/// A hardware AES timeout also returns `Err(MicMismatch)`: a MIC check must fail
+/// closed rather than validate against a block the hardware never computed.
 pub fn aes_att_decryption_packet(
     key: &[u8; 16],
     ivm: &[u8; 8],
@@ -252,7 +365,11 @@ pub fn aes_att_decryption_packet(
 
         // Generate authentication tag (MIC) directly (no data to process)
         // This is similar to CBC-MAC of an empty message
-        let auth_tag = aes_att_encryption(key, &ivs);
+        let mut auth_tag = [0u8; 16];
+        if !aes_att_encryption_into(key, &ivs, &mut auth_tag) {
+            // A hardware AES hang must never look like a valid tag.
+            return Err(MicMismatch);
+        }
 
         // Verify expected MIC matches the calculated tag by comparing the first n bytes
         // where n is the length of expected_mic
@@ -266,6 +383,8 @@ pub fn aes_att_decryption_packet(
 
     // Phase 1: Decrypt packet data using AES-CTR mode
     // Note: This happens BEFORE authentication (decrypt-then-authenticate pattern)
+    // A hardware AES timeout maps to `Err(MicMismatch)`, so a stuck crypto block
+    // can never be mistaken for a valid (all-zero keystream) packet.
 
     // Initialize counter block for AES-CTR mode
     // Format: [counter(1 byte) | IVM(8 bytes) | zeros(7 bytes)]
@@ -273,7 +392,10 @@ pub fn aes_att_decryption_packet(
     counter_block[1..9].copy_from_slice(ivm);
 
     // Generate initial keystream block for the first 16 bytes
-    let mut keystream_block = aes_att_encryption(key, &counter_block);
+    let mut keystream_block = [0u8; 16];
+    if !aes_att_encryption_into(key, &counter_block, &mut keystream_block) {
+        return Err(MicMismatch);
+    }
 
     // Process data in blocks of 16 bytes
     let mut index = 0;
@@ -285,7 +407,9 @@ pub fn aes_att_decryption_packet(
         if index & 0xf == 0 && index > 0 {
             // Increment counter for next block
             counter_block[0] += 1;
-            keystream_block = aes_att_encryption(key, &counter_block);
+            if !aes_att_encryption_into(key, &counter_block, &mut keystream_block) {
+                return Err(MicMismatch);
+            }
         }
 
         // Apply keystream to decrypt data using XOR
@@ -305,7 +429,10 @@ pub fn aes_att_decryption_packet(
 
     // Generate initial authentication value by encrypting the auth block
     // This creates the starting state for authentication
-    let mut auth_value = aes_att_encryption(key, &auth_block);
+    let mut auth_value = [0u8; 16];
+    if !aes_att_encryption_into(key, &auth_block, &mut auth_value) {
+        return Err(MicMismatch);
+    }
 
     // Process packet data to compute authentication tag using CBC-MAC-like approach
     // Each byte is XORed with the current authentication value at the corresponding position
@@ -320,8 +447,13 @@ pub fn aes_att_decryption_packet(
         // - index == packet_data.len() - 1 handles the final byte
         if (index & 0xf) == 0xf || index == packet_data.len() - 1 {
             // Process the block by encrypting the current state
-            // This is similar to a CBC-MAC operation
-            auth_value = aes_att_encryption(key, &auth_value);
+            // This is similar to a CBC-MAC operation. The tag is both input and
+            // output, so it round-trips through one scratch block.
+            let mut next_auth_value = [0u8; 16];
+            if !aes_att_encryption_into(key, &auth_value, &mut next_auth_value) {
+                return Err(MicMismatch);
+            }
+            auth_value = next_auth_value;
         }
 
         index += 1;
@@ -500,10 +632,33 @@ pub mod fake_crypto {
         *lock() = FakeAesMode::SoftwareAes;
     }
 
-    /// Host `aes_ll_encryption` body.
-    pub(crate) fn encryption(key: &[u8], source: &[u8], direction: AesDirection) -> [u8; 16] {
+    /// Host `aes_mmio_run_into` body: writes the block through `out`.
+    ///
+    /// The pure-Rust transport cannot time out, so it always reports success;
+    /// the `MmioRegisters` transport surfaces the bounded AES completion wait.
+    pub(crate) fn encryption_into(
+        key: &[u8],
+        source: &[u8],
+        direction: AesDirection,
+        out: &mut [u8; 16],
+    ) -> bool {
         match mode() {
-            FakeAesMode::SoftwareAes => software_aes::ll_parity(key, source, direction),
+            FakeAesMode::SoftwareAes => {
+                *out = software_aes::ll_parity(key, source, direction);
+                true
+            }
+            FakeAesMode::MmioRegisters => super::aes_mmio_run_into(key, source, direction, out),
+        }
+    }
+
+    /// Host `aes_ll_encryption_checked` body.
+    pub(crate) fn encryption_checked(
+        key: &[u8],
+        source: &[u8],
+        direction: AesDirection,
+    ) -> Result<[u8; 16], ()> {
+        match mode() {
+            FakeAesMode::SoftwareAes => Ok(software_aes::ll_parity(key, source, direction)),
             FakeAesMode::MmioRegisters => super::aes_mmio_run(key, source, direction),
         }
     }
@@ -712,6 +867,7 @@ mod software_aes {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::REG_BASE_ADDR;
 
@@ -971,6 +1127,75 @@ mod tests {
                 0xDD, 0xCC, 0xBB, 0xAA, 0x11, 0x00, 0xFF, 0xEE, 0x55, 0x44, 0x33, 0x22, 0x99, 0x88,
                 0x77, 0x66
             ]
+        );
+    }
+
+    /// Reads of `reg_aes_ctrl` observed by [`stuck_done_bit`].
+    static AES_CTRL_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Reports an AES block that never sets its done bit (bit 2 of `reg_aes_ctrl`).
+    fn stuck_done_bit(_call_idx: usize) -> u8 {
+        AES_CTRL_POLLS.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    /// A done bit that never appears is reported by the checked form, and the
+    /// infallible form falls back to the zero block.
+    #[test]
+    fn test_aes_ll_encryption_checked_times_out() {
+        use_mmio_transport();
+        AES_CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(AES_CTRL, stuck_done_bit);
+
+        let key = [0x11u8; 16];
+        let source = [0x22u8; 16];
+
+        // Act
+        let checked = aes_ll_encryption_checked(&key, &source, AesDirection::Encrypt);
+
+        // Assert
+        assert_eq!(
+            checked,
+            Err(()),
+            "a stuck done bit must be reported, not silently zeroed"
+        );
+        assert_eq!(
+            AES_CTRL_POLLS.load(Ordering::Relaxed),
+            AES_WAIT_MAX_ITERS as usize,
+            "the completion wait must stop after AES_WAIT_MAX_ITERS polls"
+        );
+
+        // The infallible wrapper collapses the same timeout to the zero block.
+        assert_eq!(
+            aes_ll_encryption(&key, &source, AesDirection::Encrypt),
+            [0u8; 16],
+            "the infallible form must fall back to the zero block"
+        );
+    }
+
+    /// A hardware AES hang must fail `aes_att_decryption_packet` closed rather
+    /// than validating a packet against an all-zero (never computed) tag.
+    #[test]
+    fn test_aes_att_decryption_packet_fails_closed_on_hang() {
+        use_mmio_transport();
+        AES_CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(AES_CTRL, stuck_done_bit);
+
+        let key = [0x01u8; 16];
+        let ivm = [0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28];
+        // An all-zero expected MIC would "match" a zeroed tag, so this test
+        // proves the hang is reported before any comparison happens.
+        let expected_mic = [0x00u8; 4];
+        let mut packet_data = [0xA1u8, 0xA2, 0xA3];
+
+        // Act
+        let result = aes_att_decryption_packet(&key, &ivm, &expected_mic, &mut packet_data);
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(MicMismatch),
+            "a hardware AES timeout must be rejected as a MIC mismatch"
         );
     }
 

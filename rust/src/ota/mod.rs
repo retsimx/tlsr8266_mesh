@@ -138,6 +138,14 @@ pub const FW_SIZE_MAX_K: u32 = 128;
 /// Sectors erased before a staged image is copied out.
 pub const ERASE_SECTORS_FOR_OTA: u32 = FW_SIZE_MAX_K.div_ceil(4);
 
+/// Slots in the shared response buffer, and therefore the most GATT OTA packets
+/// a single drain can stage.
+///
+/// Must match `tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT`. `ota` may not
+/// name the radio crate (the layering gate forbids it), so the equality is
+/// asserted at compile time in `app.rs`, which owns both sides.
+pub const OTA_STAGING_SLOTS: usize = 16;
+
 /// Apply a staged firmware image from the OTA area and reboot into it.
 ///
 /// Runs at boot before any task or interrupt exists, so it takes no lock at all
@@ -175,11 +183,16 @@ pub fn handle_ota_update() {
     // 4-byte-aligned page; the 256-byte TC32 frame slot provides that alignment.
     let new_fw_size = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
 
+    // Fail-safe contract: on a bus stall the loop returns *before* the ready
+    // flag is cleared, so the retry flag survives and the copy is attempted
+    // again after the next reset. Clearing it after a partial copy would leave a
+    // blank running image with no way back except a SWire reflash.
     let mut current_addr = 0;
     while current_addr < new_fw_size {
         // Check if we need to clear the next sector
-        if current_addr % FLASH_SECTOR_SIZE as u32 == 0 {
-            flash_erase_sector(current_addr);
+        if current_addr % FLASH_SECTOR_SIZE as u32 == 0 && flash_erase_sector(current_addr).is_err()
+        {
+            return;
         }
 
         // Read the page at this address from the new firmware
@@ -190,14 +203,18 @@ pub fn handle_ota_update() {
         );
 
         // Write the page to the real firmware
-        flash_write_page(current_addr, PAGE_SIZE, buff.as_mut_ptr());
+        if flash_write_page(current_addr, PAGE_SIZE, buff.as_mut_ptr()).is_err() {
+            return;
+        }
 
         current_addr += PAGE_SIZE;
     }
 
     // Clear the OTA ready flag
     buff[0] = 0;
-    flash_write_page(FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
+    // The copy already succeeded, so a stall here is harmless: the flag stays
+    // armed and the next boot re-runs this same (idempotent) copy.
+    let _ = flash_write_page(FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
     // Force reboot
     tlsr8266_hal::pm::mcu_trigger_reboot();
@@ -236,7 +253,10 @@ fn is_ota_area_valid() -> Result<bool, ()> {
 /// Erase every sector of the OTA staging area.
 fn erase_ota_data() {
     for i in 0..ERASE_SECTORS_FOR_OTA {
-        flash_erase_sector(FLASH_ADR_LIGHT_NEW_FW + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000);
+        // A sector that fails to erase still reads non-erased, so
+        // `is_ota_area_valid` rejects the area and the next boot erases again.
+        let _ =
+            flash_erase_sector(FLASH_ADR_LIGHT_NEW_FW + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000);
     }
 }
 
@@ -322,7 +342,8 @@ fn radio_terminate_tx() -> bool {
 ///
 /// Stages one packet in the shared response buffer; the cache cursor moves in
 /// and out of [`OTA_STATE`] under a short critical section, so no lock is held
-/// while the packet is copied.
+/// while the packet is copied. A full window drops the packet instead of
+/// claiming a slot past [`OTA_STAGING_SLOTS`].
 ///
 /// [`radio_begin_gatt_ota`] only reports whether a GATT OTA may start — the
 /// OTA flags stay owned here, which is why there is no `start_gatt_ota` entry
@@ -341,15 +362,24 @@ pub fn on_gatt_ota_packet(data: &Packet) {
         }
 
         OTA_UPDATE_IN_PROGRESS.set(true);
+        // A new session starts over at index 0, so the mesh path's
+        // monotonicity cursor must not survive the previous transfer.
+        LAST_INDEX.store(u16::MAX, Ordering::Relaxed);
         tlsr8266_hal::pm::set_reboot_ota_active(true);
     }
 
     // Claim the next staging slot under a short critical section, then drop the
     // guard before touching the staging buffer (a second, independent lock).
+    // The window holds at most `OTA_STAGING_SLOTS` packets: once it is full the
+    // packet has nowhere to go, so it is dropped rather than indexing the
+    // provider's buffer out of bounds.
     let cache_idx = {
         let mut st = OTA_STATE.lock();
         let cache_idx = st.slave_ota_data_cache_idx;
-        st.slave_ota_data_cache_idx += 1;
+        if cache_idx >= OTA_STAGING_SLOTS {
+            return;
+        }
+        st.slave_ota_data_cache_idx = cache_idx + 1;
         cache_idx
     };
 
@@ -358,8 +388,13 @@ pub fn on_gatt_ota_packet(data: &Packet) {
 
 /// Mesh OTA data command handler.
 ///
-/// Returns the last accepted packet index (or `u16::MAX` when the packet was
-/// rejected). Every [`OTA_STATE`] access is a short snapshot or store; the
+/// Returns the index the packet was staged under, so a caller can acknowledge
+/// what it actually sent. The last accepted index comes back when the packet is
+/// refused as stale, and `u16::MAX` when it never reached the staging path (the
+/// mesh path does not own the transfer). A staged packet that then aborts the
+/// transfer still answers with its own index: the finish funnel has already
+/// cleared the cursor, so re-reading it would answer for the abort instead of
+/// for this packet. Every [`OTA_STATE`] access is a short snapshot or store; the
 /// persistence work happens in [`rf_link_slave_data_ota_save`].
 pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
     if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue
@@ -375,8 +410,8 @@ pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
 
     let index = data.dat[0] as u16 | ((data.dat[1] as u16) << 8);
 
-    if LAST_INDEX.load(Ordering::Relaxed) == u16::MAX || LAST_INDEX.load(Ordering::Relaxed) < index
-    {
+    let last_index = LAST_INDEX.load(Ordering::Relaxed);
+    if last_index == u16::MAX || last_index < index {
         LAST_INDEX.store(index, Ordering::Relaxed);
 
         radio_stage_pkt(0, &Packet { att_data: data });
@@ -393,9 +428,14 @@ pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
         if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue {
             OTA_UPDATE_TIMEOUT_SECONDS.set(4);
         }
+
+        // Report the index this packet was staged under. The finish funnel
+        // clears the static on an abort so the *next* session starts at index 0;
+        // re-reading it here would report the abort, not the packet.
+        return index;
     }
 
-    LAST_INDEX.load(Ordering::Relaxed)
+    last_index
 }
 
 /// Save one OTA firmware packet to flash memory with verification.
@@ -410,7 +450,10 @@ pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
 fn rf_ota_save_data(data: &[u8]) -> OtaState {
     let addr = OTA_UPDATE_CURRENT_FLASH_ADDRESS.get() + FLASH_ADR_LIGHT_NEW_FW;
 
-    flash_write_page(addr, data.len() as u32, data.as_ptr());
+    // A failed page program leaves the staging bytes unchanged, and the
+    // read-back verification below reports `OtaState::Error` for it just as it
+    // does for a corrupted write.
+    let _ = flash_write_page(addr, data.len() as u32, data.as_ptr());
 
     // Verification buffer; the largest packet this path carries is 16 bytes.
     let mut tmp = [0u8; 0x10];
@@ -446,18 +489,33 @@ fn rf_link_slave_data_ota_save() {
         let st = OTA_STATE.lock();
         (st.slave_ota_data_cache_idx, st.ota_rcv_last_idx)
     };
+    // The provider owns the wrap, but the count is only ever read back through
+    // `radio_read_pkt`, which does not: clamp it to the window that exists.
+    let cache_len = cache_len.min(OTA_STAGING_SLOTS);
 
     for i in 0..cache_len {
         // Copy the staged packet out; the staging guard is a temporary that dies
         // at the end of this statement.
         let p = radio_read_pkt(i);
-        let n_data_len = (p.head().l2cap_len - 7) as usize;
+
+        // `l2cap_len` is peer-controlled: the payload length is `l2cap_len - 7`
+        // and the trailing CRC pair sits at `n_data_len + 2..n_data_len + 4`, so
+        // both bounds are established before any `dat[..]` index. `dat` is a
+        // 23-byte array.
+        let l2cap_len = p.head().l2cap_len as usize;
+        let n_data_len = l2cap_len.saturating_sub(7);
+        let frame_ok = l2cap_len >= 7 && n_data_len + 4 <= p.att_data().dat.len();
 
         // Every arm below assigns the finish state, so it is declared without an
         // initial value: a pre-loop `Continue` would be provably dead.
         let reset_flag: OtaState;
 
-        if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
+        if !frame_ok {
+            // A malformed frame is a CRC-level failure: abort exactly like one.
+            OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
+            ota_rcv_last_idx = 0;
+            reset_flag = OtaState::Error;
+        } else if OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
             || crc16(&p.att_data().dat[0..n_data_len + 2])
                 == p.att_data().dat[n_data_len + 2] as u16
                     | (p.att_data().dat[n_data_len + 3] as u16) << 8
@@ -568,13 +626,19 @@ fn rf_ota_set_flag() {
     flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
     if 0x4b != flag0 {
         flag0 = 0x4b;
-        flash_write_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
+        // The flag rewrite is re-attempted by the next staged transfer if it
+        // fails; the ready flag below is only armed after this point.
+        let _ = flash_write_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
         //Set FW flag, make sure valid. because the firmware may be from 8267 by mesh ota
     }
 
-    flash_erase_sector(FLASH_ADR_OTA_READY_FLAG);
+    // A failed erase leaves the sentinel byte un-erased, so the flag write below
+    // keeps the old value and the staged image is not armed this time.
+    let _ = flash_erase_sector(FLASH_ADR_OTA_READY_FLAG);
     let flag: u32 = FLASH_OTA_READY_FLAG as u32;
-    flash_write_page(FLASH_ADR_OTA_READY_FLAG, 4, addr_of!(flag) as *mut u8);
+    // A failed flag write leaves the sentinel unarmed rather than claiming a
+    // copy that never starts; the transfer is retried by the peer.
+    let _ = flash_write_page(FLASH_ADR_OTA_READY_FLAG, 4, addr_of!(flag) as *mut u8);
 }
 
 /// Signal a successful OTA with the LED pattern.
@@ -617,9 +681,14 @@ pub fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState) {
 }
 
 /// Publish the transfer-finish flag and stamp the time it was set.
+///
+/// Also the single abort/finish funnel for the mesh-OTA monotonicity cursor: the
+/// next session has to be able to send index 0 again, so the cursor goes back to
+/// its boot value here.
 fn rf_slave_ota_finished_flag_set(reset_flag: OtaState) {
     let finished_time = clock_time();
     *RF_SLAVE_OTA_FINISHED_FLAG.lock() = reset_flag;
+    LAST_INDEX.store(u16::MAX, Ordering::Relaxed);
 
     let mut st = OTA_STATE.lock();
     st.rf_slave_ota_finished_time = finished_time;
@@ -740,6 +809,9 @@ pub fn install_hooks_for_test() {
 /// Start a mesh OTA: claim the mesh path and arm the boot-time image copier.
 pub fn start_mesh_ota() {
     OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
+    // A new session starts over at index 0: clear the previous transfer's
+    // monotonicity cursor so its final index cannot refuse the first packet.
+    LAST_INDEX.store(u16::MAX, Ordering::Relaxed);
     tlsr8266_hal::pm::set_reboot_ota_active(true);
 }
 
@@ -1901,6 +1973,190 @@ mod tests {
         }
 
         assert_eq!(current_flash_address_for_test(), offset);
+    }
+
+    // ================================================================================
+    // Tests for the staging bounds and the index-cursor reset (C-13, #75)
+    // ================================================================================
+
+    /// The staging window is exactly [`OTA_STAGING_SLOTS`] deep: a twentieth GATT
+    /// write is dropped instead of claiming a seventeenth slot, and the drain
+    /// reads back at most sixteen packets and closes the window.
+    #[test]
+    fn test_gatt_staging_is_bounded_and_drain_is_clamped() {
+        reset_fakes();
+        reset_for_test();
+        fake_radio::set_begin_ok(true);
+
+        // Well-formed bridge frames: index `i` at `dat[0..2]`, 16 payload bytes at
+        // `dat[2..18]` and the CRC over `dat[0..18]` at `dat[18..20]`.
+        for i in 0..20u8 {
+            let mut staged = PacketAttData::default();
+            staged.head.l2cap_len = 7 + 16;
+            staged.dat[0] = i;
+            staged.dat[1] = 0;
+            staged.dat[2..18].fill(i);
+            let crc = crc16(&staged.dat[0..18]).to_le_bytes();
+            staged.dat[18..20].copy_from_slice(&crc);
+
+            on_gatt_ota_packet(&Packet { att_data: staged });
+        }
+
+        assert_eq!(
+            OTA_STATE.lock().slave_ota_data_cache_idx,
+            OTA_STAGING_SLOTS,
+            "the window must stop at the provider's depth, not at 20"
+        );
+
+        fake_clock::set_ticks(1234);
+        rf_link_slave_data_ota_save();
+
+        // Each of the sixteen verified packets advances the cursor by 16 bytes;
+        // a seventeenth read would either panic or write a seventeenth block.
+        assert_eq!(
+            current_flash_address_for_test(),
+            OTA_STAGING_SLOTS as u32 * 16,
+            "the drain must persist exactly the staged sixteen packets"
+        );
+        assert_eq!(
+            OTA_STATE.lock().slave_ota_data_cache_idx,
+            0,
+            "the drain resets the staging cursor"
+        );
+        assert_eq!(
+            *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
+            OtaState::Continue,
+            "sixteen in-sequence packets are a healthy transfer"
+        );
+
+        reset_for_test();
+    }
+
+    /// A frame whose `l2cap_len` is smaller than the 7-byte header is rejected
+    /// before the payload length is computed. The old `l2cap_len - 7` underflowed
+    /// here, which panics in a debug build and reads nonsense on device.
+    #[test]
+    fn test_drain_rejects_l2cap_len_below_header_size() {
+        reset_fakes();
+        reset_for_test();
+        set_current_flash_address_for_test(8);
+
+        let mut staged = PacketAttData::default();
+        staged.head.l2cap_len = 6;
+        radio_stage_pkt(0, &Packet { att_data: staged });
+        OTA_STATE.lock().slave_ota_data_cache_idx = 1;
+
+        fake_clock::set_ticks(1234);
+        rf_link_slave_data_ota_save();
+
+        assert_eq!(
+            *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
+            OtaState::Error,
+            "a malformed frame must finish the transfer as an error"
+        );
+        assert_eq!(
+            current_flash_address_for_test(),
+            0,
+            "the malformed-frame arm zeroes the flash cursor like a CRC failure"
+        );
+        assert_eq!(
+            OTA_STATE.lock().slave_ota_data_cache_idx,
+            0,
+            "the staging window is drained on the failure path"
+        );
+        assert_eq!(
+            OTA_STATE.lock().ota_rcv_last_idx,
+            0,
+            "the accepted-index cursor restarts with the transfer"
+        );
+
+        reset_for_test();
+    }
+
+    /// A frame whose payload plus CRC pair does not fit the 23-byte `dat` array
+    /// takes the same error arm instead of indexing past the buffer.
+    #[test]
+    fn test_drain_rejects_payload_past_the_att_buffer() {
+        reset_fakes();
+        reset_for_test();
+        set_current_flash_address_for_test(8);
+
+        let mut staged = PacketAttData::default();
+        // n_data_len = 20, so the CRC pair would sit at dat[22..24] and the last
+        // index is one past the 23-byte array.
+        staged.head.l2cap_len = 7 + 20;
+        radio_stage_pkt(0, &Packet { att_data: staged });
+        OTA_STATE.lock().slave_ota_data_cache_idx = 1;
+
+        fake_clock::set_ticks(1234);
+        rf_link_slave_data_ota_save();
+
+        assert_eq!(
+            *RF_SLAVE_OTA_FINISHED_FLAG.lock(),
+            OtaState::Error,
+            "an oversized payload must finish the transfer as an error"
+        );
+        assert_eq!(
+            current_flash_address_for_test(),
+            0,
+            "the oversized-frame arm zeroes the flash cursor like a CRC failure"
+        );
+        assert_eq!(OTA_STATE.lock().slave_ota_data_cache_idx, 0);
+
+        reset_for_test();
+    }
+
+    /// `LAST_INDEX` gates the mesh OTA index stream and both session boundaries
+    /// put it back to `u16::MAX`: the start ([`start_mesh_ota`]) and the
+    /// abort/finish funnel ([`rf_slave_ota_finished_flag_set`]). Without that,
+    /// the last index of one transfer refused index 0 of the next for good.
+    #[test]
+    fn test_last_index_resets_on_session_start_and_abort() {
+        reset_fakes();
+        reset_for_test();
+        // A stale cursor left behind by an earlier transfer.
+        LAST_INDEX.store(7, Ordering::Relaxed);
+
+        start_mesh_ota();
+        assert_eq!(
+            LAST_INDEX.load(Ordering::Relaxed),
+            u16::MAX,
+            "a session start must clear the previous transfer's index"
+        );
+
+        // Index 5 against `ota_rcv_last_idx == 0xffff` is a gap, so the drain
+        // aborts through the finish funnel.
+        let mut gap = [0u8; 10];
+        gap[0] = 5;
+        assert_eq!(
+            rf_mesh_data_ota(&gap, false),
+            5,
+            "the response still reports the index the caller sent"
+        );
+        assert_eq!(*RF_SLAVE_OTA_FINISHED_FLAG.lock(), OtaState::Error);
+        assert_eq!(
+            LAST_INDEX.load(Ordering::Relaxed),
+            u16::MAX,
+            "an abort must clear the index cursor"
+        );
+
+        // Second session in the same boot: index 0 is accepted again.
+        set_finished_flag_for_test(OtaState::Continue);
+        start_mesh_ota();
+        let mut first = [0u8; 10];
+        first[2] = 0xA5;
+        assert_eq!(
+            rf_mesh_data_ota(&first, false),
+            0,
+            "the next session must accept index 0"
+        );
+        assert_eq!(*RF_SLAVE_OTA_FINISHED_FLAG.lock(), OtaState::Continue);
+
+        let mut programmed = [0u8; 8];
+        FakeFlash::read_slice(FLASH_ADR_LIGHT_NEW_FW, &mut programmed);
+        assert_eq!(programmed[0], 0xA5, "index 0 is staged to flash");
+
+        reset_for_test();
     }
 
     /// Tests rf_ota_save_data buffer boundary conditions.

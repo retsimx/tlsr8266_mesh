@@ -69,6 +69,11 @@ impl From<FLASH_CMD> for u8 {
 ///
 /// * `cmd` - The flash command to send (from FLASH_CMD enum)
 ///
+/// # Returns
+///
+/// * `true` if the command byte was fully transmitted
+/// * `false` if the SPI busy flag never cleared (see [`mspi_wait`])
+///
 /// # Algorithm
 ///
 /// 1. Set chip select high (deactivated) to ensure clean state
@@ -90,12 +95,12 @@ impl From<FLASH_CMD> for u8 {
 /// peripheral is properly initialized before calling this function.
 #[inline(never)]
 #[link_section = ".ram_code"]
-fn flash_send_cmd(cmd: FLASH_CMD) {
+fn flash_send_cmd(cmd: FLASH_CMD) -> bool {
     mspi_high(); // Deactivate chip select
     sleep_us(1); // Ensure minimum CS high time
     mspi_low(); // Activate chip select
     mspi_write(u8::from(cmd)); // Send command byte using idiomatic conversion
-    mspi_wait(); // Wait for completion
+    mspi_wait() // Report whether the transmission completed
 }
 
 /// Sends a 24-bit memory address to the flash over SPI.
@@ -106,6 +111,11 @@ fn flash_send_cmd(cmd: FLASH_CMD) {
 /// # Parameters
 ///
 /// * `addr` - The 24-bit flash memory address to send
+///
+/// # Returns
+///
+/// * `true` if all three address bytes were fully transmitted
+/// * `false` if the SPI busy flag never cleared (see [`mspi_wait`])
 ///
 /// # Algorithm
 ///
@@ -121,7 +131,7 @@ fn flash_send_cmd(cmd: FLASH_CMD) {
 /// * Supports 16MB address space (24-bit addressing)
 #[inline(never)]
 #[link_section = ".ram_code"]
-fn flash_send_addr(addr: u32) {
+fn flash_send_addr(addr: u32) -> bool {
     // Extract address bytes in big-endian order (MSB first)
     let addr_bytes = [
         ((addr >> 16) & 0xff) as u8, // High byte (bits 23-16)
@@ -132,8 +142,11 @@ fn flash_send_addr(addr: u32) {
     // Send each byte and wait for transmission to complete
     for &byte in addr_bytes.iter() {
         mspi_write(byte);
-        mspi_wait();
+        if !mspi_wait() {
+            return false;
+        }
     }
+    true
 }
 
 /// Reads data from flash memory or reads the status of flash.
@@ -197,19 +210,32 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 
     // Use critical section for atomic SPI operation
     critical_section::with(|_| {
-        // Start transaction by sending read command
-        flash_send_cmd(FLASH_CMD::READ_CMD);
+        // A stuck bus aborts the transfer: every failure path below releases
+        // chip select before returning, so the flash part cannot stay selected.
+        if !flash_send_cmd(FLASH_CMD::READ_CMD) {
+            mspi_high();
+            return;
+        }
 
         // Send address (always required for flash_read_page)
-        flash_send_addr(addr);
+        if !flash_send_addr(addr) {
+            mspi_high();
+            return;
+        }
 
         // Issue additional clock cycle to prepare for data reading
         mspi_write(0x00);
-        mspi_wait();
+        if !mspi_wait() {
+            mspi_high();
+            return;
+        }
 
         // Set SPI controller to auto mode (0x0a) for efficient reading
         mspi_ctrl_write(0x0a);
-        mspi_wait();
+        if !mspi_wait() {
+            mspi_high();
+            return;
+        }
 
         // Read requested data bytes into the provided buffer using a safer pattern
         // Still unsafe due to raw pointer usage, but more contained and idiomatic
@@ -223,7 +249,9 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
             // Use iterator instead of raw pointer arithmetic
             for byte in buffer.iter_mut() {
                 *byte = mspi_get();
-                mspi_wait();
+                if !mspi_wait() {
+                    break;
+                }
             }
         }
 
@@ -244,6 +272,12 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 /// * `addr` - Starting address in flash for write operation
 /// * `data` - Pointer to data buffer containing bytes to write
 /// * `data_len` - Number of bytes to write
+///
+/// # Returns
+///
+/// * `true` if every byte was transmitted and the status poll ran to completion
+/// * `false` if the SPI busy flag never cleared (see [`mspi_wait`]); the caller
+///   is responsible for releasing chip select
 ///
 /// # Algorithm
 ///
@@ -266,17 +300,23 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 /// * Uses safe code with slices when possible to access the data buffer
 #[inline(never)]
 #[link_section = ".ram_code"]
-fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u32) {
+fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u32) -> bool {
     // Use critical section for atomic SPI operation
     critical_section::with(|_| {
         // Send write enable command (required before any write operation)
-        flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD);
+        if !flash_send_cmd(FLASH_CMD::WRITE_ENABLE_CMD) {
+            return false;
+        }
 
         // Send the main write command
-        flash_send_cmd(cmd);
+        if !flash_send_cmd(cmd) {
+            return false;
+        }
 
         // Send address
-        flash_send_addr(addr);
+        if !flash_send_addr(addr) {
+            return false;
+        }
 
         // Send all data bytes from buffer - use a safer pattern if data is present
         if !data.is_null() && data_len > 0 {
@@ -289,7 +329,9 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
             // Use iterator for more idiomatic access
             for &byte in data_slice {
                 mspi_write(byte);
-                mspi_wait();
+                if !mspi_wait() {
+                    return false;
+                }
             }
         }
 
@@ -301,7 +343,9 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
         sleep_us(100);
 
         // Send command to read flash status register
-        flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE);
+        if !flash_send_cmd(FLASH_CMD::READ_STATUS_CMD_LOWBYTE) {
+            return false;
+        }
 
         // Poll busy flag with timeout protection using a more idiomatic approach
         const BUSY_BIT: u8 = 0x01;
@@ -316,7 +360,8 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
 
         // Deactivate SPI chip select regardless of success/failure
         mspi_high(); // Use a more structured approach to waiting for completion
-    });
+        true
+    })
 }
 
 /// Writes data from a buffer to flash memory with cross-page support.
@@ -330,6 +375,12 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
 /// * `addr` - Starting flash address to write to (24-bit address)
 /// * `len` - Number of bytes to write
 /// * `buf` - Pointer to buffer containing data to be written
+///
+/// # Returns
+///
+/// * `Ok(())` when every page was programmed
+/// * `Err(())` when the SPI bus stalled; chip select is released and the
+///   remaining pages are not written
 ///
 /// # Algorithm
 ///
@@ -359,10 +410,14 @@ fn flash_mspi_write_ram(cmd: FLASH_CMD, addr: u32, data: *const u8, data_len: u3
 // The documented caller contract is a raw-pointer buffer ABI (`buf` valid for
 // `len` readable bytes), kept as a safe fn to preserve the firmware API.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
+// The project convention for fallible hardware calls is `Result<_, ()>`
+// (docs/checklists/firmware.md item 23); the only failure is a bus timeout, so a
+// bespoke error type would carry no information.
+#[allow(clippy::result_unit_err)]
+pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) -> Result<(), ()> {
     // Early return if there's nothing to write
     if len == 0 || buf.is_null() {
-        return;
+        return Ok(());
     }
 
     #[cfg(not(target_os = "none"))]
@@ -372,7 +427,7 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
         FakeFlash::write_slice(addr, unsafe {
             core::slice::from_raw_parts(buf, len as usize)
         });
-        return;
+        return Ok(());
     }
 
     // Track current position in data and address
@@ -396,12 +451,17 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
         let current_data_ptr = unsafe { buf.add(bytes_written) };
 
         // Write current chunk to flash
-        flash_mspi_write_ram(
+        if !flash_mspi_write_ram(
             FLASH_CMD::WRITE_CMD,
             current_addr,
             current_data_ptr,
             write_size,
-        );
+        ) {
+            // A stuck bus aborts the rest of the write: release chip select and
+            // stop instead of driving a dead peripheral through more pages.
+            mspi_high();
+            return Err(());
+        }
 
         // Update tracking variables
         bytes_written += write_size as usize;
@@ -411,6 +471,8 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
         // For subsequent pages, use full page size
         current_page_remaining = PAGE_SIZE;
     }
+
+    Ok(())
 }
 
 /// Erases a flash memory sector (typically 4KB).
@@ -422,6 +484,11 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
 /// # Parameters
 ///
 /// * `addr` - Any address within the sector to be erased (sector aligned automatically)
+///
+/// # Returns
+///
+/// * `Ok(())` when the erase command completed on the wire
+/// * `Err(())` when the SPI bus stalled; chip select is released
 ///
 /// # Algorithm
 ///
@@ -444,19 +511,29 @@ pub fn flash_write_page(addr: u32, len: u32, buf: *const u8) {
 /// Flash operations may fail under low voltage conditions which could corrupt data.
 /// Ensure proper power supply voltage before calling this function.
 #[inline(always)]
-pub fn flash_erase_sector(addr: u32) {
+// The project convention for fallible hardware calls is `Result<_, ()>`
+// (docs/checklists/firmware.md item 23); the only failure is a bus timeout, so a
+// bespoke error type would carry no information.
+#[allow(clippy::result_unit_err)]
+pub fn flash_erase_sector(addr: u32) -> Result<(), ()> {
     // Clear watchdog timer to prevent resets during long erase operation
     wd_clear();
 
     #[cfg(not(target_os = "none"))]
     if FakeFlash::mode() == fake_flash::FakeFlashMode::InMemory {
         FakeFlash::erase_sector(addr);
-        return;
+        return Ok(());
     }
 
     // Send sector erase command with the target address
     // No data is needed for erase operation (null pointer, 0 length)
-    flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, null_mut(), 0);
+    if !flash_mspi_write_ram(FLASH_CMD::SECT_ERASE_CMD, addr, null_mut(), 0) {
+        // A stuck bus aborts the erase: release chip select before returning.
+        mspi_high();
+        return Err(());
+    }
+
+    Ok(())
 }
 
 /// In-process 512 KiB NOR flash model that the public `flash_*` entry points
@@ -630,6 +707,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::fake_flash::{FakeFlash, FakeFlashMode};
+    use crate::drivers::spi::MSPI_WAIT_MAX_ITERS;
     use crate::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::FLD_MASTER_SPI;
@@ -791,7 +869,7 @@ mod tests {
         let data_ptr = vec_to_raw(&data);
 
         // Call function with address at start of a page boundary
-        flash_write_page(0x1000, 4, data_ptr);
+        assert!(flash_write_page(0x1000, 4, data_ptr).is_ok());
 
         // WRITE_ENABLE, WRITE_CMD, the address, the payload, then the status
         // command and its dummy clock.
@@ -838,7 +916,7 @@ mod tests {
 
         // Start near the end of a page to force crossing the boundary.
         let start_addr = 0x10FA; // 6 bytes before page boundary
-        flash_write_page(start_addr, 300, data_ptr);
+        assert!(flash_write_page(start_addr, 300, data_ptr).is_ok());
 
         // Reconstruct the expected byte stream: one write-enable + write command
         // + 24-bit address + payload + status command per page.
@@ -880,7 +958,7 @@ mod tests {
         let _restore = RestoreDefault;
 
         // Call function to erase sector
-        flash_erase_sector(0x2000);
+        assert!(flash_erase_sector(0x2000).is_ok());
 
         // Verify watchdog was cleared
         assert_eq!(
@@ -919,7 +997,10 @@ mod tests {
         let _restore = RestoreDefault;
 
         // Test address: 0x123456 - should send bytes 0x12, 0x34, 0x56 in that order
-        flash_send_addr(0x123456);
+        assert!(
+            flash_send_addr(0x123456),
+            "the address phase must report success"
+        );
 
         assert_eq!(
             values_written_to(REG_MASTER_SPI_DATA),
@@ -961,7 +1042,7 @@ mod tests {
         assert_eq!(read_buffer, [0xFF; 4]);
 
         // Step 2: erase the sector to prepare for the write.
-        flash_erase_sector(ADDR);
+        assert!(flash_erase_sector(ADDR).is_ok());
         assert_eq!(
             watchdog_clears(),
             1,
@@ -970,7 +1051,7 @@ mod tests {
 
         // Step 3: write data to flash.
         let write_data = [0xA1u8, 0xB2, 0xC3, 0xD4];
-        flash_write_page(ADDR, 4, write_data.as_ptr());
+        assert!(flash_write_page(ADDR, 4, write_data.as_ptr()).is_ok());
 
         // Step 4: read the data back.
         let mut verify_buffer = [0u8; 4];
@@ -1008,8 +1089,9 @@ mod tests {
         let data_ptr = vec_to_raw(&data);
 
         // Call the function - it must complete after FLASH_WAIT_ITERATIONS cycles
-        // without hanging indefinitely.
-        flash_write_page(0x1000, 4, data_ptr);
+        // without hanging indefinitely. The bus itself never stalled, so the
+        // page program reports success even though the part stayed busy.
+        assert!(flash_write_page(0x1000, 4, data_ptr).is_ok());
 
         // Every budgeted poll happened, and no more.
         assert_eq!(
@@ -1023,6 +1105,120 @@ mod tests {
             values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
             Some(cs_asserted()),
             "a timed-out write must still release chip select"
+        );
+    }
+
+    /// Reads of `reg_master_spi_ctrl` observed by [`stuck_spi`].
+    static CTRL_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Reports an SPI peripheral whose BUSY flag never clears, i.e. a bus that
+    /// hangs mid-transaction.
+    fn stuck_spi(_call_idx: usize) -> u8 {
+        CTRL_POLLS.fetch_add(1, Ordering::Relaxed);
+        FLD_MASTER_SPI::BUSY.bits()
+    }
+
+    /// A stuck SPI bus aborts `flash_read_page`: only the command byte reaches
+    /// the wire, the caller's buffer is untouched, and chip select is released.
+    #[test]
+    fn test_flash_read_page_stuck_spi_releases_cs() {
+        reset_protocol_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreDefault;
+
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, stuck_spi);
+
+        let mut buffer = [0x11u8; 4];
+        flash_read_page(0x1000, 4, buffer.as_mut_ptr());
+
+        // The command byte was clocked out; the address phase never started.
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_DATA),
+            vec![0x03],
+            "a timed-out read must not send the address or dummy bytes"
+        );
+
+        // The caller's buffer was not written from a dead bus.
+        assert_eq!(
+            buffer, [0x11; 4],
+            "a timed-out read must leave the buffer untouched"
+        );
+
+        // The budget was spent exactly once and the chip is deselected.
+        assert_eq!(
+            CTRL_POLLS.load(Ordering::Relaxed),
+            MSPI_WAIT_MAX_ITERS as usize,
+            "the completion wait must stop after MSPI_WAIT_MAX_ITERS polls"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
+            Some(cs_asserted()),
+            "a timed-out read must still release chip select"
+        );
+    }
+
+    /// A stuck SPI bus aborts `flash_write_page` before any payload byte reaches
+    /// the wire, and chip select is released.
+    #[test]
+    fn test_flash_write_page_stuck_spi_releases_cs() {
+        reset_protocol_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreDefault;
+
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, stuck_spi);
+
+        let data = vec![0x11, 0x22, 0x33, 0x44];
+        assert!(
+            flash_write_page(0x1000, 4, vec_to_raw(&data)).is_err(),
+            "a stalled bus must report a failed page program"
+        );
+
+        // The write-enable command was clocked out; the write command, address
+        // and payload never were.
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_DATA),
+            vec![0x06],
+            "a timed-out write must not send command, address or payload"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
+            Some(cs_asserted()),
+            "a timed-out write must still release chip select"
+        );
+    }
+
+    /// A stuck SPI bus aborts `flash_erase_sector` with chip select deasserted,
+    /// and the watchdog is still kicked first.
+    #[test]
+    fn test_flash_erase_sector_stuck_spi_releases_cs() {
+        reset_protocol_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreDefault;
+
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, stuck_spi);
+
+        assert!(
+            flash_erase_sector(0x2000).is_err(),
+            "a stalled bus must report a failed sector erase"
+        );
+
+        assert_eq!(
+            watchdog_clears(),
+            1,
+            "the erase path must kick the watchdog"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_DATA),
+            vec![0x06],
+            "a timed-out erase must not send the erase command or address"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
+            Some(cs_asserted()),
+            "a timed-out erase must still release chip select"
         );
     }
 
@@ -1045,10 +1241,10 @@ mod tests {
         let data_ptr = vec_to_raw(&data);
 
         // Case 1: Test with zero length but valid buffer
-        flash_write_page(0x1000, 0, data_ptr);
+        assert!(flash_write_page(0x1000, 0, data_ptr).is_ok());
 
         // Case 2: Test with null buffer but non-zero length
-        flash_write_page(0x1000, 4, std::ptr::null());
+        assert!(flash_write_page(0x1000, 4, std::ptr::null()).is_ok());
 
         // No register was touched at all: no chip select, no command, no poll.
         assert!(
@@ -1080,7 +1276,7 @@ mod tests {
         FakeFlash::write_slice(last_byte_in_sector, &[0x00]);
 
         // Erased silicon reads 0xFF.
-        flash_erase_sector(ADDR);
+        assert!(flash_erase_sector(ADDR).is_ok());
         let mut erased = [0u8; 8];
         flash_read_page(ADDR, 8, erased.as_mut_ptr());
         assert_eq!(erased, [0xFF; 8]);
@@ -1092,17 +1288,17 @@ mod tests {
 
         // A pattern written through the public API reads back byte-exact.
         let pattern = [0xA5u8, 0x5A, 0x0F, 0xF0];
-        flash_write_page(ADDR, pattern.len() as u32, pattern.as_ptr());
+        assert!(flash_write_page(ADDR, pattern.len() as u32, pattern.as_ptr()).is_ok());
         let mut readback = [0u8; 4];
         flash_read_page(ADDR, 4, readback.as_mut_ptr());
         assert_eq!(readback, pattern);
 
         // NOR writes can only clear bits: 0xFF & 0x0F & 0xF0 == 0x00.
-        flash_erase_sector(ADDR);
+        assert!(flash_erase_sector(ADDR).is_ok());
         let ones_nibble = [0x0Fu8];
-        flash_write_page(ADDR, 1, ones_nibble.as_ptr());
+        assert!(flash_write_page(ADDR, 1, ones_nibble.as_ptr()).is_ok());
         let high_nibble = [0xF0u8];
-        flash_write_page(ADDR, 1, high_nibble.as_ptr());
+        assert!(flash_write_page(ADDR, 1, high_nibble.as_ptr()).is_ok());
         let mut merged = [0xFFu8; 1];
         flash_read_page(ADDR, 1, merged.as_mut_ptr());
         assert_eq!(merged[0], 0x00);

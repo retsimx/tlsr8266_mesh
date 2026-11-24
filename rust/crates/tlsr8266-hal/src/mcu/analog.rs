@@ -10,6 +10,9 @@ use tlsr8266_pac::{
     write_reg_ana_data, FLD_ANA,
 };
 
+/// Maximum number of busy-flag polls [`analog_wait`] performs before giving up.
+pub const ANALOG_WAIT_MAX_ITERS: u32 = 10_000;
+
 /// Waits until analog register operations are complete.
 ///
 /// # Details
@@ -19,16 +22,26 @@ use tlsr8266_pac::{
 /// has completed. This is a blocking operation and must be called between
 /// analog register accesses to ensure proper timing.
 ///
+/// # Returns
+///
+/// * `true` if the busy flag cleared within [`ANALOG_WAIT_MAX_ITERS`] polls
+/// * `false` if the poll budget ran out, i.e. the analog bus is stuck
+///
 /// # Notes
 ///
 /// * This function is marked inline(always) for performance since it's
 ///   frequently called in time-critical sections
-/// * No timeout mechanism is implemented - assumes hardware will eventually
-///   clear the busy flag
+/// * The budget bounds the spin: a stuck bus costs at most the poll budget
+///   instead of hanging the firmware
 #[inline(always)]
-pub fn analog_wait() {
-    // Poll the busy bit in the analog control register until it clears
-    while read_reg_ana_ctrl() & (FLD_ANA::BUSY.bits()) != 0 {}
+pub fn analog_wait() -> bool {
+    // Poll the busy bit in the analog control register until it clears.
+    for _ in 0..ANALOG_WAIT_MAX_ITERS {
+        if read_reg_ana_ctrl() & (FLD_ANA::BUSY.bits()) == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Runs the SoC's read sequence on the `0xb8`/`0xb9`/`0xba` analog bus and
@@ -39,6 +52,9 @@ pub fn analog_wait() {
 /// bus identically. `inline(always)` keeps it inside `analog_read`'s
 /// `.ram_code` section on device — a flash-resident copy would change the
 /// flash-access timing this sequence must not depend on.
+///
+/// If the busy flag never clears, the operation is aborted (control cleared)
+/// and the byte reads as `0`.
 #[inline(always)]
 fn read_registers(addr: u8) -> u8 {
     // 1. Set the address register to the target analog register
@@ -51,13 +67,14 @@ fn read_registers(addr: u8) -> u8 {
     //   Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RSV) << 16) | addr;"
     //   This will fail because of time sequence and more over size is bigger
 
-    // 3. Wait for the analog operation to complete
-    analog_wait();
+    // 3. Wait for the analog operation to complete. A stuck bus reports `false`
+    //    and the caller below returns the zero byte instead of hanging.
+    let completed = analog_wait();
 
     // 4. Read the data from the data register
-    let data = read_reg_ana_data();
+    let data = if completed { read_reg_ana_data() } else { 0 };
 
-    // 5. Clear control register to finish operation
+    // 5. Clear control register to finish operation (also the abort path)
     write_reg_ana_ctrl(0); // finish
 
     data
@@ -82,8 +99,9 @@ fn write_registers(addr: u8, v: u8) {
     //	 Can't use one line setting "reg_ana_ctrl32 = ((FLD_ANA_START | FLD_ANA_RW) << 16) | (v << 8) | addr;"
     //   This will fail because of time sequence and more over size is bigger
 
-    // 4. Wait for the analog operation to complete
-    analog_wait();
+    // 4. Wait for the analog operation to complete. A stuck bus cannot be
+    //    retried here, so the control clear below still terminates it.
+    let _ = analog_wait();
 
     // 5. Clear control register to finish operation
     write_reg_ana_ctrl(0); // finish
@@ -267,6 +285,7 @@ pub mod fake_analog {
 mod tests {
     use super::*;
     use crate::mcu::analog::fake_analog::{FakeAnalog, FakeAnalogMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::REG_BASE_ADDR;
 
@@ -282,12 +301,22 @@ mod tests {
         FakeAnalog::reset();
     }
 
+    /// Values written to `addr`, oldest first, in the order the analog bus would
+    /// have seen them.
+    fn values_written_to(addr: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == addr | REG_BASE_ADDR)
+            .map(|write| write.value)
+            .collect()
+    }
+
     /// Tests analog_wait function for proper busy bit polling behavior.
     ///
     /// This test verifies that the analog_wait function correctly:
     /// - Polls the analog control register's busy flag
     /// - Exits when the busy flag clears
-    /// - Properly handles various busy flag states
+    /// - Reports completion to the caller
     ///
     /// # Algorithm
     ///
@@ -313,13 +342,70 @@ mod tests {
         });
 
         // Call the function being tested
-        analog_wait();
+        assert!(analog_wait(), "a clearing busy flag must report success");
 
         // Verify the function polled past every busy sample
         assert_eq!(
             read_reg_ana_ctrl(),
             0,
             "analog_wait must poll until the busy flag clears"
+        );
+    }
+
+    /// Reads of `reg_ana_ctrl` observed by [`always_busy_analog`].
+    static ANA_CTRL_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Reports an analog bus that never finishes its operation.
+    fn always_busy_analog(_call_idx: usize) -> u8 {
+        ANA_CTRL_POLLS.fetch_add(1, Ordering::Relaxed);
+        FLD_ANA::BUSY.bits()
+    }
+
+    /// A stuck busy flag exhausts the poll budget instead of spinning forever.
+    ///
+    /// The poll count is the proof: exactly one read per budgeted iteration,
+    /// and the function reports failure instead of hanging.
+    #[test]
+    fn test_analog_wait_times_out() {
+        reset_fakes();
+        ANA_CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(ANA_CTRL, always_busy_analog);
+
+        assert!(
+            !analog_wait(),
+            "a busy flag that never clears must report a timeout"
+        );
+        assert_eq!(
+            ANA_CTRL_POLLS.load(Ordering::Relaxed),
+            ANALOG_WAIT_MAX_ITERS as usize,
+            "the busy wait must stop after ANALOG_WAIT_MAX_ITERS polls"
+        );
+    }
+
+    /// A stuck analog bus makes `analog_read` return `0` and still terminate the
+    /// operation by clearing the control register.
+    #[test]
+    fn test_analog_read_stuck_bus_returns_zero() {
+        reset_fakes();
+        FakeAnalog::set_mode(FakeAnalogMode::MmioRegisters);
+        ANA_CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(ANA_CTRL, always_busy_analog);
+        // The data register must not be read: the operation never completed.
+        FakeMmio::set_reg8(ANA_DATA, 0xAB);
+
+        assert_eq!(analog_read(0x42), 0, "a timed-out read must return zero");
+
+        // The address and the start command reached the bus, and the last write
+        // cleared the control register to finish the aborted operation.
+        assert_eq!(
+            values_written_to(ANA_CTRL),
+            vec![u32::from((FLD_ANA::START | FLD_ANA::RSV).bits()), 0],
+            "a timed-out read must still clear the control register"
+        );
+        assert_eq!(
+            FakeMmio::reg8(ANA_CTRL),
+            0,
+            "the control register must end cleared"
         );
     }
 

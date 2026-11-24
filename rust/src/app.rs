@@ -60,6 +60,13 @@ use tlsr8266_radio::{
     write_out_of_mesh_credentials,
 };
 
+// One number, two crates: `ota` owns the staging bound but may not name the
+// radio (the layering gate forbids it), so the equality with the buffer the
+// radio actually provides is checked here, at compile time, for free.
+mesh_protocol::const_assert!(
+    crate::ota::OTA_STAGING_SLOTS == tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT
+);
+
 /// The board configuration the radio layer runs with.
 ///
 /// `sdk/` may not name `crate::config` or `crate::version` (design 031 / C-9), so
@@ -566,8 +573,11 @@ pub fn rf_link_data_callback(p: &Packet) {
             }
         }
         LightCommandAction::SetMacAddr(mac) => {
-            flash_erase_sector(FLASH_ADR_MAC);
-            flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
+            // The reboot below happens either way, so a failed program is not
+            // observable in this path; the MAC is regenerated on the next boot
+            // when flash still reads erased.
+            let _ = flash_erase_sector(FLASH_ADR_MAC);
+            let _ = flash_write_page(FLASH_ADR_MAC, mac.len() as u32, addr_of!(mac) as *const u8);
             light_sw_reboot();
         }
         LightCommandAction::KickOut(kick_out_param) => {

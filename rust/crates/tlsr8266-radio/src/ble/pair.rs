@@ -15,7 +15,10 @@ use mesh_protocol::mesh_types::{
     PAIR_OP_RESET_MESH, PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
     PAIR_OP_VERIFY_CREDENTIALS,
 };
-use mesh_protocol::packet_types::{Packet, PacketAttReadRsp, PacketAttValue, PacketL2capHead};
+use mesh_protocol::packet_types::{
+    AppCmdValue, Packet, PacketAttReadRsp, PacketAttValue, PacketAttWrite, PacketL2capHead,
+    PacketLlApp,
+};
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::mcu::crypto::{
     aes_att_decryption, aes_att_decryption_packet, aes_att_encryption, aes_att_encryption_packet,
@@ -248,6 +251,21 @@ pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
     // Calculate data length from packet header
     let l2len = ps.head().l2cap_len as usize;
 
+    // Bound the peer-controlled `l2cap_len` locally, from the wire layout, so
+    // the in-place slice below cannot leave `PacketAttWrite`:
+    // `DST_OFFSET` (18) is where the encrypted payload starts, and
+    // `MAX_ENC_PAYLOAD` (25) is every byte from there to the end of the packet
+    // struct. `l2cap_len` itself counts the 8-byte L2CAP header plus the
+    // encrypted payload, so the accepted range is 9..=33.
+    const DST_OFFSET: usize =
+        core::mem::offset_of!(PacketAttWrite, value) + core::mem::offset_of!(PacketAttValue, dst);
+    const MAX_ENC_PAYLOAD: usize = core::mem::size_of::<PacketAttWrite>() - DST_OFFSET;
+    const MIN_L2CAP_LEN: usize = 9;
+    const MAX_L2CAP_LEN: usize = 8 + MAX_ENC_PAYLOAD;
+    if !(MIN_L2CAP_LEN..=MAX_L2CAP_LEN).contains(&l2len) {
+        return Err(());
+    }
+
     // Create a slice pointing to the payload data that needs decryption
     let data_ptr = addr_of_mut!(ps.att_write_mut().value.dst) as *mut u8;
     let data_len = l2len - 8;
@@ -258,15 +276,13 @@ pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
     // Perform decryption using AES-CCM.
     //
     // SAFETY: `data_ptr` is `PacketAttValue::dst` in the caller's `&mut Packet`
-    // (packet offset 18) and `data_len = l2cap_len - 8` is the encrypted payload
-    // length. The producers of encrypted ATT writes set `l2cap_len` to 0x17 or
-    // 0x21, so `data_len <= 25` and `[18, 18 + data_len)` stays inside the
-    // 48-byte `Packet` union (25 bytes remain from `dst` to the end of
-    // `PacketAttValue`). The range is disjoint from the `pair_ivm` and `src`
-    // buffers and from the session key, and the slice is consumed only by the
-    // in-place AES-CCM call, so no other view of those bytes is live across it.
-    // `l2cap_len` is not re-clamped locally: this relies on the producer
-    // invariant noted above.
+    // (packet offset 18) and `data_len = l2cap_len - 8`. The local check above
+    // requires `9 <= l2cap_len <= 8 + MAX_ENC_PAYLOAD`, so `1 <= data_len <= 25`
+    // and `[18, 18 + data_len)` ends at most at 43, inside the 48-byte `Packet`
+    // union (25 bytes remain from `dst` to the end of `PacketAttValue`). The
+    // range is disjoint from the `pair_ivm` and `src` buffers and from the
+    // session key, and the slice is consumed only by the in-place AES-CCM call,
+    // so no other view of those bytes is live across it.
     let result = unsafe {
         // Create data slice and decrypt in-place
         let data = slice_from_raw_parts_mut(data_ptr, data_len);
@@ -331,8 +347,25 @@ pub fn pair_enc_packet(ps: &mut Packet) {
     // Get session key for encryption
     let session_key = &PAIR_STATE.lock().pair_sk;
 
-    // Calculate data length from L2CAP header length
-    let data_len = ((ps.head().l2cap_len & 0xff) - L2CAP_HEADER_LEN) as usize;
+    // Calculate data length from L2CAP header length.
+    //
+    // `l2cap_len` is peer-controlled, so subtract checked (a low byte below 10
+    // would otherwise underflow) and clamp to the bytes that actually follow
+    // `value.op`: `OP_OFFSET` (20) is where the ciphertext starts and
+    // `MAX_ENC_DATA_LEN` (23) is every byte from there to the end of
+    // `PacketLlApp`. No `rf_len` check: these ATT packets carry `rf_len == 0`
+    // until the link layer fills it in.
+    const OP_OFFSET: usize =
+        core::mem::offset_of!(PacketLlApp, value) + core::mem::offset_of!(AppCmdValue, op);
+    const MAX_ENC_DATA_LEN: usize = core::mem::size_of::<PacketLlApp>() - OP_OFFSET;
+    let Some(data_len) =
+        ((ps.head().l2cap_len & 0xff) as usize).checked_sub(L2CAP_HEADER_LEN as usize)
+    else {
+        return;
+    };
+    if data_len > MAX_ENC_DATA_LEN {
+        return;
+    }
 
     // Create destination and payload slices for encryption.
     //
@@ -346,12 +379,12 @@ pub fn pair_enc_packet(ps: &mut Packet) {
 
     let data_slice =
         // SAFETY: `addr_of_mut!(ps.ll_app_mut().value.op)` is `AppCmdValue::op` at
-        // packet offset 20 and `data_len = (l2cap_len & 0xff) - 10` is the ciphertext
-        // length. Producers set `l2cap_len` to 0x16/0x17/0x21, so `data_len <= 23`
-        // and `[20, 20 + data_len)` ends at most at 43, inside the 48-byte `Packet`
-        // union (`AppCmdValue` ends at 33 and `PacketLlApp::rsv` follows). The range
-        // is disjoint from `dst_slice` at [18, 20) and is written in place by AES-CCM
-        // with no other live view of those bytes.
+        // packet offset 20 and `data_len = (l2cap_len & 0xff) - 10`, clamped above
+        // to `<= MAX_ENC_DATA_LEN` (23), so `[20, 20 + data_len)` ends at most at
+        // 43, inside the 48-byte `Packet` union (`AppCmdValue` ends at 33 and
+        // `PacketLlApp::rsv` follows). The range is disjoint from `dst_slice` at
+        // [18, 20) and is written in place by AES-CCM with no other live view of
+        // those bytes.
         unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.ll_app_mut().value.op), data_len) };
 
     // Perform encryption using AES-CCM
@@ -382,9 +415,13 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
         return Err(());
     }
 
-    // Check if packet length is within valid range for decryption
+    // Check if packet length is within valid range for decryption. `rf_len` is
+    // peer-controlled, so the subtraction is checked: a short frame must be
+    // rejected rather than underflow.
     let rf_len = ps.head().rf_len;
-    let payload_len = rf_len - 0x12;
+    let Some(payload_len) = (rf_len as usize).checked_sub(0x12) else {
+        return Err(());
+    };
     if payload_len > 0x13 {
         return Err(());
     }
@@ -434,13 +471,13 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
             // is read-only for the call.
             unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) }, // IV
             // SAFETY: the expected MIC is 4 bytes at `sno + (rf_len - 0xb)`,
-            // i.e. packet offset `rf_len + 2`. Above, `payload_len = rf_len - 0x12`
-            // is rejected when it exceeds 0x13, so `rf_len <= 0x25` and
-            // `[rf_len + 2, rf_len + 6)` ends at most at 43, inside the 48-byte
-            // `Packet`. Provenance is preserved by `addr_of!().cast::<u8>().add(n)`
-            // and `rf_len - 0xb <= 0x1a`, so the result stays inside the 48-byte
-            // `Packet`. The range is only read and does not overlap the IV or the
-            // data block.
+            // i.e. packet offset `rf_len + 2`. Above, `rf_len - 0x12` is computed
+            // with `checked_sub` and rejected when it exceeds 0x13, so
+            // `0x12 <= rf_len <= 0x25` and `[rf_len + 2, rf_len + 6)` ends at most
+            // at 43, inside the 48-byte `Packet`. Provenance is preserved by
+            // `addr_of!().cast::<u8>().add(n)` and `rf_len - 0xb <= 0x1a`, so the
+            // result stays inside the 48-byte `Packet`. The range is only read and
+            // does not overlap the IV or the data block.
             unsafe {
                 slice::from_raw_parts(
                     addr_of!(ps.mesh().sno)
@@ -450,13 +487,12 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
                 )
             }, // Expected MIC
             // SAFETY: the payload is `payload_len = rf_len - 0x12 <= 0x13` bytes
-            // starting at `op` (packet offset 20), i.e. `[20, rf_len + 2)`. With
-            // `rf_len <= 0x25` that ends at most at 39, inside the 48-byte
-            // `Packet`, and it ends exactly where the MIC range starts, so the
-            // in-place AES-CCM write does not disturb the IV or the MIC.
-            unsafe {
-                slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len as usize)
-            }, // Data
+            // (checked above) starting at `op` (packet offset 20), i.e.
+            // `[20, rf_len + 2)`. With `rf_len <= 0x25` that ends at most at 39,
+            // inside the 48-byte `Packet`, and it ends exactly where the MIC range
+            // starts, so the in-place AES-CCM write does not disturb the IV or the
+            // MIC.
+            unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len) }, // Data
         )
     };
     if result.is_ok() {
@@ -516,13 +552,24 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
             // alignment 1 suffices for `[u8; 8]`.
             let iv = unsafe { &*(addr_of!(ps.mesh().handle1) as *const [u8; 8]) };
 
+            // - Bound the peer-controlled `rf_len` before any pointer arithmetic:
+            // the direct payload is `rf_len - 0x12` bytes and the MIC starts at
+            // `rf_len + 2`, so a short frame must be dropped (checked subtraction)
+            // and a long one is rejected past the 0x13-byte payload ceiling.
+            let Some(payload_len) = (ps.head().rf_len as usize).checked_sub(0x12) else {
+                return;
+            };
+            if payload_len > 0x13 {
+                return;
+            }
+
             // - Use destination address from position calculated based on rf_len as the MIC output buffer (4 bytes)
             // SAFETY: pointer arithmetic only, no dereference: `sno` is packet
-            // offset 13 and `rf_len - 0xb` is at most 0x1a, so the result is at
-            // most offset 39 inside the 48-byte `Packet` (never past
-            // one-past-the-end). Provenance is preserved by
-            // `addr_of_mut!().cast::<u8>().add(n)`, which also keeps the mutable
-            // borrow that the later write requires.
+            // offset 13 and the local bound above guarantees `rf_len <= 0x25`, so
+            // `rf_len - 0xb <= 0x1a` and the result is at most offset 39 inside
+            // the 48-byte `Packet` (never past one-past-the-end). Provenance is
+            // preserved by `addr_of_mut!().cast::<u8>().add(n)`, which also keeps
+            // the mutable borrow that the later write requires.
             let dst_ptr = unsafe {
                 addr_of_mut!(ps.mesh_mut().sno)
                     .cast::<u8>()
@@ -530,18 +577,16 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
             };
             // SAFETY: the 4-byte MIC output starts at `rf_len + 2` and the
             // payload below ends there, so `[rf_len + 2, rf_len + 6)` is inside the
-            // 48-byte `Packet` for every `rf_len <= 0x25` and never overlaps the IV
-            // `[12, 20)` or the payload `[20, rf_len + 2)`.
+            // 48-byte `Packet` for every `rf_len <= 0x25` (enforced above) and
+            // never overlaps the IV `[12, 20)` or the payload `[20, rf_len + 2)`.
             let dst = unsafe { slice::from_raw_parts_mut(dst_ptr, 4) };
 
             // - Encrypt payload starting from op field with length based on rf_len
-            let payload_len = ps.head().rf_len as usize - 0x12;
             let payload =
-                // SAFETY: `op` is packet offset 20 and `payload_len = rf_len - 0x12`,
-                // so the payload is `[20, rf_len + 2)`. The mesh send path builds
-                // encrypted packets with `rf_len = 0x25` (payload_len 0x13), which
-                // keeps the range inside the 48-byte `Packet` and flush against the
-                // MIC buffer.
+                // SAFETY: `op` is packet offset 20 and `payload_len = rf_len - 0x12`
+                // is `<= 0x13` (enforced above), so the payload is
+                // `[20, rf_len + 2)` and stays inside the 48-byte `Packet`, flush
+                // against the MIC buffer.
                 unsafe { slice::from_raw_parts_mut(addr_of_mut!(ps.mesh_mut().op), payload_len) };
 
             // Perform encryption using AES-CCM
@@ -1504,6 +1549,46 @@ mod tests {
     }
 
     #[test]
+    fn test_pair_dec_packet_l2cap_len_bounds() {
+        // `l2cap_len` is peer-controlled and `data_len = l2cap_len - 8`, so the
+        // function must reject lengths that underflow it or make the in-place
+        // slice leave `PacketAttWrite` (accepted range 9..=33).
+        for l2cap_len in [0u16, 8, 34, 255] {
+            reset_host_fakes();
+            setup_pair_state();
+            let mut packet = create_test_packet();
+            packet.head_mut().l2cap_len = l2cap_len;
+            let before = packet_bytes(&packet);
+
+            assert_eq!(
+                pair_dec_packet(&mut packet),
+                Err(()),
+                "l2cap_len {l2cap_len} must be rejected"
+            );
+            assert_eq!(
+                packet_bytes(&packet),
+                before,
+                "l2cap_len {l2cap_len}: a rejected packet must not be decrypted"
+            );
+        }
+
+        // Both boundaries are legitimate: seal them so the real AES-CCM
+        // authentication succeeds on the smallest and largest payload.
+        for l2cap_len in [9u16, 33] {
+            reset_host_fakes();
+            setup_pair_state();
+            let mut packet = create_test_packet();
+            packet.head_mut().l2cap_len = l2cap_len;
+            seal_pair_packet(&mut packet);
+
+            assert!(
+                pair_dec_packet(&mut packet).is_ok(),
+                "l2cap_len {l2cap_len} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn test_pair_dec_packet_iv_updates() {
         // Arrange
         reset_host_fakes();
@@ -1757,6 +1842,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_pair_enc_packet_l2cap_len_bounds() {
+        // The low byte of `l2cap_len` drives `data_len = (l2cap_len & 0xff) - 10`:
+        // below 10 it would underflow, above 33 it would leave `PacketLlApp`.
+        // Both must return before the AES call instead of panicking, leaving the
+        // MIC and payload bytes untouched (`rf_len` is 0 here, as it is on the
+        // real ATT path before the link layer fills it in).
+        for l2cap_len in [9u16, 0, 34] {
+            reset_host_fakes();
+            setup_pair_state();
+            write_reg_system_tick(0x123456);
+            let mut packet = create_test_ll_packet();
+            packet.head_mut().l2cap_len = l2cap_len;
+            let before = packet_bytes(&packet);
+
+            pair_enc_packet(&mut packet);
+
+            let after = packet_bytes(&packet);
+            assert_eq!(
+                &after[18..],
+                &before[18..],
+                "l2cap_len {l2cap_len}: the MIC and payload must not be written"
+            );
+        }
+
+        // The legitimate length still encrypts: 20 -> data_len 10.
+        reset_host_fakes();
+        setup_pair_state();
+        write_reg_system_tick(0x123456);
+        let mut packet = create_test_ll_packet(); // l2cap_len == 20
+        let before = packet_bytes(&packet);
+
+        pair_enc_packet(&mut packet);
+
+        let after = packet_bytes(&packet);
+        assert_ne!(
+            &after[20..30],
+            &before[20..30],
+            "l2cap_len 20 must still encrypt its 10-byte payload"
+        );
+    }
+
     // Helper function to create a test mesh packet
     fn create_test_mesh_packet(is_broadcast: bool) -> Packet {
         let mut packet = Packet {
@@ -1849,6 +1976,31 @@ mod tests {
             before,
             "an over-long packet must not be decrypted"
         );
+    }
+
+    #[test]
+    fn test_pair_dec_packet_mesh_direct_rf_len_bounds() {
+        // Same bound on the decrypt side: a short frame must be rejected by the
+        // checked subtraction instead of underflowing, an over-long one by the
+        // 0x13 ceiling that protects the `rf_len - 0xb` MIC pointer.
+        for rf_len in [0x11u8, 0x26] {
+            reset_host_fakes();
+            SECURITY_ENABLE.set(true);
+            let mut packet = create_test_mesh_packet(false);
+            packet.head_mut().rf_len = rf_len;
+            let before = packet_bytes(&packet);
+
+            assert_eq!(
+                pair_dec_packet_mesh(&mut packet),
+                Err(()),
+                "rf_len {rf_len:#04x} must be rejected"
+            );
+            assert_eq!(
+                packet_bytes(&packet),
+                before,
+                "rf_len {rf_len:#04x}: a rejected frame must not be decrypted"
+            );
+        }
     }
 
     #[test]
@@ -2252,6 +2404,45 @@ mod tests {
         assert!(
             pair_dec_packet_mesh(&mut packet).is_ok(),
             "the direct packet must decrypt with the LTK the state holds"
+        );
+    }
+
+    #[test]
+    fn test_pair_enc_packet_mesh_direct_rf_len_bounds() {
+        // Direct branch only: `payload_len = rf_len - 0x12` and the MIC pointer
+        // sits at `sno + (rf_len - 0xb)`, so a short or over-long `rf_len` must
+        // return before any pointer arithmetic or AES call.
+        for rf_len in [0x11u8, 0x26] {
+            reset_host_fakes();
+            SECURITY_ENABLE.set(true);
+            PAIR_STATE.lock().pair_ltk.fill(0xEE);
+            let mut packet = create_test_mesh_packet(false);
+            packet.head_mut().rf_len = rf_len;
+            let before = packet_bytes(&packet);
+
+            pair_enc_packet_mesh(&mut packet);
+
+            assert_eq!(
+                packet_bytes(&packet),
+                before,
+                "rf_len {rf_len:#04x}: an out-of-range direct frame must not be encrypted"
+            );
+        }
+
+        // 0x1e is a legitimate direct frame (payload_len 0x0c) and still encrypts.
+        reset_host_fakes();
+        SECURITY_ENABLE.set(true);
+        PAIR_STATE.lock().pair_ltk.fill(0xEE);
+        let mut packet = create_test_mesh_packet(false); // rf_len == 0x1e
+        let before = packet_bytes(&packet);
+
+        pair_enc_packet_mesh(&mut packet);
+
+        let after = packet_bytes(&packet);
+        assert_ne!(
+            &after[20..20 + (0x1e - 0x12)],
+            &before[20..20 + (0x1e - 0x12)],
+            "a 0x1e direct frame must still be encrypted"
         );
     }
 

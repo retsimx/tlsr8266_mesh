@@ -69,13 +69,54 @@ struct SavedState(UnsafeCell<critical_section::RestoreState>);
 // by the outermost acquire path, so no ISR can observe it concurrently.
 unsafe impl Sync for SavedState {}
 
-/// Number of currently held mutex guards.
-#[cfg(any(target_os = "none", test))]
+/// Number of currently held critical-section levels.
+///
+/// Compiled on every target so there is exactly **one** depth counter in the
+/// process. On device [`enter_cs`]/[`exit_cs`] own it; on host builds the
+/// `critical_section` platform impl (`mcu::irq_i::TlsrCriticalSection`) owns it
+/// through [`host_enter_cs`]/[`host_exit_cs`]. Host mutex guards are *not*
+/// counted — the host `lock` uses its re-entrancy flag instead of a critical
+/// section, so a host `cs_depth()` reports critical-section nesting only.
 static CS_DEPTH: AtomicU8 = AtomicU8::new(0);
 /// Restore state captured by the outermost `critical_section::acquire`.
 #[cfg(any(target_os = "none", test))]
 static CS_SAVED: SavedState =
     SavedState(UnsafeCell::new(critical_section::RestoreState::invalid()));
+
+/// Current number of held critical-section levels.
+///
+/// Exists so any host-build test — in this crate or in a crate above it — can
+/// prove that a code region it drives holds no critical section: the depth must
+/// read the same value across a callback that must not run with interrupts
+/// disabled. Host-only seam; the device build never compiles it, and on device
+/// the depth is not readable at all.
+///
+/// Read it against a captured baseline rather than a literal `0`: a test that
+/// panics inside a `critical_section::with` scope leaks a level for the rest of
+/// the process, so only the *delta* is meaningful.
+#[cfg(not(target_os = "none"))]
+pub fn cs_depth() -> u8 {
+    CS_DEPTH.load(Ordering::Relaxed)
+}
+
+/// Account one host critical-section level, mirroring [`enter_cs`]'s counting.
+///
+/// The host `critical_section` platform impl calls this from `acquire`, so host
+/// units see the same counter the device counts in [`enter_cs`]. The
+/// `critical_section` crate guarantees 1:1 nesting, so a plain increment is
+/// correct; no restore state is involved because host builds touch no hardware.
+#[cfg(not(target_os = "none"))]
+#[inline]
+pub(crate) fn host_enter_cs() {
+    CS_DEPTH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Account one host critical-section level leaving, mirroring [`exit_cs`].
+#[cfg(not(target_os = "none"))]
+#[inline]
+pub(crate) fn host_exit_cs() {
+    CS_DEPTH.fetch_sub(1, Ordering::Relaxed);
+}
 
 /// Enter one nesting level, disabling interrupts only at the outermost level.
 #[cfg(any(target_os = "none", test))]
@@ -321,6 +362,43 @@ mod tests {
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `cs_depth` is the exposed view of the global guard depth: zero outside a
+    /// critical section, one inside it, and zero again after the outermost exit.
+    #[test]
+    fn cs_depth_tracks_the_outermost_critical_section() {
+        let _serial = serial();
+        assert_eq!(cs_depth(), 0, "no guard is held at test start");
+
+        enter_cs(|| critical_section::RestoreState::invalid());
+        assert_eq!(cs_depth(), 1, "one held guard must read as depth 1");
+
+        exit_cs(|_| {});
+        assert_eq!(cs_depth(), 0, "the released guard must return to depth 0");
+    }
+
+    /// The platform impl (`mcu::irq_i::TlsrCriticalSection`) must feed the same
+    /// counter `enter_cs` feeds, so a plain `critical_section::with` is visible
+    /// to `cs_depth`: one level above the baseline inside the scope, and the
+    /// baseline again once it returns.
+    #[test]
+    fn critical_section_with_is_visible_to_cs_depth() {
+        let _serial = serial();
+        let base = cs_depth();
+        assert_eq!(base, 0, "no critical section is held at test start");
+
+        let inside = critical_section::with(|_| cs_depth());
+        assert_eq!(
+            inside,
+            base + 1,
+            "a `critical_section::with` scope must read as one level deep"
+        );
+        assert_eq!(
+            cs_depth(),
+            base,
+            "the depth must return to the baseline once the scope exits"
+        );
     }
 
     #[test]

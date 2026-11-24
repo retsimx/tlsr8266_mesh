@@ -40,6 +40,13 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
         if cfg!(target_os = "none") {
             return irq_disable();
         };
+        // Host builds count here because the device counting in
+        // `common::sync::enter_cs` is not compiled off-target (host mutex guards
+        // use their re-entrancy flag instead of a critical section). One shared
+        // counter either way, so `common::sync::cs_depth` reports real depth on
+        // the host. The call is compiled out on device, where `enter_cs` counts.
+        #[cfg(not(target_os = "none"))]
+        crate::common::sync::host_enter_cs();
         0
     }
 
@@ -49,6 +56,8 @@ unsafe impl critical_section::Impl for TlsrCriticalSection {
         if cfg!(target_os = "none") {
             irq_restore(state)
         }
+        #[cfg(not(target_os = "none"))]
+        crate::common::sync::host_exit_cs();
     }
 }
 

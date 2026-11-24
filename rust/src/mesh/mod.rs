@@ -374,7 +374,10 @@ pub fn mesh_device_address_validation_completed() {
         // validation state, so that byte is programmed to zero.
         if let Some(index) = flash_config_index() {
             let mut data: [u8; 1] = [0];
-            flash_write_page(
+            // The address validation is reported to the peer over BLE, not by a
+            // return value; a failed byte program is retried by the next
+            // validation cycle, as before.
+            let _ = flash_write_page(
                 (FLASH_ADR_PAIRING as i32 + index as i32 + 1) as u32,
                 1,
                 data.as_mut_ptr(),
@@ -518,19 +521,28 @@ fn reload_saved_key() {
 /// buffered one). This function keeps only the mesh-layer bookkeeping: the
 /// completion notification, the flash save, the radio re-tuning and the
 /// application event.
+///
+/// Locking contract: nothing here runs under a held lock. The blocking flash
+/// write, the application callback and the 1 ms settle delay are all unlocked;
+/// only the two single-register RF writes take a critical section of their own.
+/// The statement order is load-bearing — the new access code is installed
+/// before the callback, and the stale-RX clear still follows the 1 ms settle
+/// window.
 fn save_and_apply(name: [u8; 16], pwd: [u8; 16], ltk: [u8; 16], use_pair_ltk: bool) {
     apply_new_mesh_credentials(&name, &pwd, &ltk, use_pair_ltk);
 
     mesh_pair_complete_notify();
 
     // make sure not receive legacy mesh data from now on
-    critical_section::with(|_| {
-        pair_save_key(); // flash write: MESH_PAIR is not held
-        rf_set_ble_access_code(current_access_code()); // use new access code at once.
-        dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
-        sleep_us(1000);
-        tlsr8266_radio::rf::drv_8266::rf_clear_rx_irq(); // clear current rx in buffer
-    });
+    pair_save_key(); // flash write, unlocked
+
+    critical_section::with(|_| rf_set_ble_access_code(current_access_code())); // use new access code at once.
+
+    dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init(), unlocked
+
+    sleep_us(1000); // unlocked settle window for the new access code
+
+    critical_section::with(|_| tlsr8266_radio::rf::drv_8266::rf_clear_rx_irq()); // clear current rx in buffer
 
     safe_effect_new_mesh_finish();
 }
@@ -1002,6 +1014,80 @@ mod tests {
 
         pub fn count() -> u32 {
             PACKETS.load(Ordering::Relaxed)
+        }
+    }
+
+    /// The `on_light_event` hook that proves the pairing effect's callback runs
+    /// with no critical section held and with the switch fully applied.
+    ///
+    /// `save_and_apply` used to wrap the flash write, the radio re-tune, the
+    /// application callback and the 1 ms settle delay in one
+    /// `critical_section::with`. The host build can now see that window:
+    /// `tlsr8266_hal::common::sync::cs_depth` reads the HAL's one depth counter,
+    /// which the host `critical_section` platform impl maintains. The probe
+    /// records the depth it observed, so a guard held across the callback fails
+    /// the test mechanically instead of merely being documented.
+    ///
+    /// It also pins the locks the pairing path owns (`MESH_PAIR`, `PAIR_STATE`
+    /// through the facade, `MESH_EVENT_HOOKS`): none may be alive while the
+    /// callback runs. The host `CriticalSectionMutex::lock` aborts on a
+    /// re-entrant acquisition, so an inherited guard fails here too.
+    mod unlocked_light_event {
+        use super::*;
+        use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
+        pub static CALLS: AtomicU32 = AtomicU32::new(0);
+        pub static LAST_CMD: AtomicU32 = AtomicU32::new(0);
+        /// Access-code (`0x408`) writes already in the MMIO log when the hook ran.
+        pub static ACCESS_CODE_WRITES: AtomicU32 = AtomicU32::new(0);
+        /// Stale-RX (`0xf20`) writes already in the MMIO log when the hook ran.
+        pub static RX_CLEAR_WRITES: AtomicU32 = AtomicU32::new(0);
+        /// `cs_depth()` captured by the test just before it drives the effect.
+        pub static BASE_DEPTH: AtomicU8 = AtomicU8::new(0);
+        /// `cs_depth()` observed from inside the callback.
+        pub static CALLBACK_DEPTH: AtomicU8 = AtomicU8::new(0);
+
+        fn record(cmd: u8) {
+            // Mechanical proof that the callback adds no critical-section level.
+            // Compared against the captured baseline, not a literal `0`: a test
+            // that panicked inside a `critical_section::with` earlier in this
+            // process would leak a level, and only the delta is meaningful.
+            let depth = tlsr8266_hal::common::sync::cs_depth();
+            CALLBACK_DEPTH.store(depth, Ordering::Relaxed);
+            assert_eq!(
+                depth,
+                BASE_DEPTH.load(Ordering::Relaxed),
+                "the mesh-info callback must run outside any critical section"
+            );
+
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            LAST_CMD.store(cmd as u32, Ordering::Relaxed);
+            // Statement order, observed from the inside: the radio has already
+            // been retuned, and the stale-RX clear has not happened yet.
+            ACCESS_CODE_WRITES.store(writes_at(0x408) as u32, Ordering::Relaxed);
+            RX_CLEAR_WRITES.store(writes_at(0xf20) as u32, Ordering::Relaxed);
+
+            // Every lock in the switch path must be free here. A guard inherited
+            // across the call trips the host build's re-entrancy probe.
+            drop(MESH_PAIR.lock());
+            drop(MESH_EVENT_HOOKS.lock());
+            let _ = pair_credentials_snapshot(); // PAIR_STATE
+        }
+
+        /// Zero the counters and install the probe in place of the default
+        /// recording hooks. Call after `reset_for_test`, which reinstalls the
+        /// default set, and store [`BASE_DEPTH`] before driving the effect.
+        pub fn install() {
+            CALLS.store(0, Ordering::Relaxed);
+            LAST_CMD.store(0, Ordering::Relaxed);
+            ACCESS_CODE_WRITES.store(0, Ordering::Relaxed);
+            RX_CLEAR_WRITES.store(0, Ordering::Relaxed);
+            BASE_DEPTH.store(0, Ordering::Relaxed);
+            CALLBACK_DEPTH.store(0, Ordering::Relaxed);
+            set_mesh_event_hooks(MeshEventHooks {
+                on_light_event: record,
+                ..test_hooks::hooks()
+            });
         }
     }
 
@@ -1919,6 +2005,116 @@ mod tests {
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
             "the pending RX interrupt must be acknowledged during the mesh switch"
+        );
+    }
+
+    /// The pairing effect fires the application callback with no pairing lock
+    /// and no critical section held, and still saves the credentials and
+    /// re-tunes the radio.
+    ///
+    /// The stale-RX clear and the access-code write are each their own short
+    /// critical section; the flash write, the callback and the 1 ms settle
+    /// delay between them run unlocked. The probe installed as `on_light_event`
+    /// asserts that the HAL's critical-section depth it inherits equals the
+    /// baseline captured just before the effect was driven (so the callback adds
+    /// no level), and takes every pairing-path mutex from inside the callback,
+    /// which the host build only allows when no guard was inherited. The
+    /// assertions below pin the effects on either side of it (persisted
+    /// credentials, access-code register, stale-RX acknowledgement).
+    #[test]
+    fn test_save_effect_new_mesh_callback_runs_without_locks() {
+        // Setup: the deterministic normal-save arm, with the probe hook.
+        reset_for_test();
+        set_dev_addr_validation_pending(false);
+        set_ble_connected(true);
+        set_paired_login(true);
+        set_device_address(0x0001);
+        set_current_access_code(0xABCDEF12);
+        unlocked_light_event::install();
+
+        pair().default_mesh_time_ref = 0;
+        pair().effect_new_mesh = 0;
+        pair().effect_new_mesh_delay_time = 1000;
+        pair().mesh_pair_cmd_interval = 500;
+        pair().new_mesh_name = [1; 16];
+        pair().new_mesh_pwd = [2; 16];
+        pair().new_mesh_ltk = [3; 16];
+
+        reset_fakes();
+        fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
+        seed_tx_ring(0);
+        FakeMmio::set_reg16(0xf20, 0);
+
+        // Execute
+        let base_depth = tlsr8266_hal::common::sync::cs_depth();
+        unlocked_light_event::BASE_DEPTH.store(base_depth, Ordering::Relaxed);
+        mesh_pair_proc_effect();
+
+        // Verify: the callback ran exactly once, received the mesh-info event,
+        // and inherited neither a pairing lock nor a critical section. The
+        // counters prove the probe was actually reached.
+        assert_eq!(
+            unlocked_light_event::CALLBACK_DEPTH.load(Ordering::Relaxed),
+            base_depth,
+            "the callback must observe the baseline critical-section depth"
+        );
+        assert_eq!(
+            unlocked_light_event::CALLS.load(Ordering::Relaxed),
+            1,
+            "the mesh-info callback must run exactly once"
+        );
+        assert_eq!(
+            unlocked_light_event::LAST_CMD.load(Ordering::Relaxed),
+            LGT_CMD_SET_MESH_INFO as u32,
+            "the callback receives the mesh-info command"
+        );
+        // Statement order, from the callback's own viewpoint: the access code
+        // was already installed, the stale-RX clear had not run yet.
+        assert_eq!(
+            unlocked_light_event::ACCESS_CODE_WRITES.load(Ordering::Relaxed),
+            1,
+            "the radio is retuned before the application is told"
+        );
+        assert_eq!(
+            unlocked_light_event::RX_CLEAR_WRITES.load(Ordering::Relaxed),
+            0,
+            "the stale-RX clear still follows the callback and its settle window"
+        );
+
+        // The credentials were still persisted: the real save path advanced the
+        // wear-levelling slot and wrote the network name.
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the save path still advances the wear-levelling slot"
+        );
+        let mut slot = [0u8; 16];
+        FakeFlash::read_slice(FLASH_ADR_PAIRING + 0x50, &mut slot);
+        assert_eq!(slot, [1; 16], "the mesh name is persisted");
+
+        // The radio was re-tuned: `rf_set_ble_access_code` byte-swaps the new
+        // access code into `reg_rf_access_code` (0x408), exactly once.
+        assert_eq!(
+            writes_at(0x408),
+            1,
+            "the access code register is written once, inside its own critical section"
+        );
+        assert_eq!(
+            FakeMmio::reg32(0x408),
+            access_code(&[1; 16], &[2; 16]).swap_bytes(),
+            "the register holds the newly recomputed access code"
+        );
+
+        // The stale-RX clear also happened, and only after the settle window.
+        assert_eq!(
+            writes_at(0xf20),
+            1,
+            "the pending RX interrupt is acknowledged once"
+        );
+        assert_eq!(
+            FakeMmio::reg16(0xf20),
+            FLD_RF_IRQ_MASK::IRQ_RX.bits(),
+            "the pending RX interrupt is acknowledged during the mesh switch"
         );
     }
 

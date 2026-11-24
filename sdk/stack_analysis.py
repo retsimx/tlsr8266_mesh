@@ -356,7 +356,12 @@ def longest_path(
 
 
 def _llvm_tool(name: str, env_key: str, *defaults: str) -> str:
-    """Resolve an LLVM tool: explicit env var, then the repo build, then PATH."""
+    """Resolve an LLVM tool: explicit env var, then the repo builds in order, then PATH.
+
+    ``../llvm/build-native/bin/`` is probed before ``../llvm/build/bin/`` (same
+    order as ``build_firmware.py``): the ``build/`` tree on this host is a
+    generic LLVM without the TC32 backend.
+    """
     from os import environ
     from pathlib import Path
     from shutil import which
@@ -377,8 +382,8 @@ def objdump(elf: str) -> str:
     tool = _llvm_tool(
         "llvm-objdump",
         "LLVM_OBJDUMP",
-        "../llvm/build/bin/llvm-objdump",
         "../llvm/build-native/bin/llvm-objdump",
+        "../llvm/build/bin/llvm-objdump",
     )
     try:
         proc = subprocess.run(
@@ -474,8 +479,8 @@ def read_symbols(elf: str) -> dict[str, int]:
     tool = _llvm_tool(
         "llvm-nm",
         "LLVM_NM",
-        "../llvm/build/bin/llvm-nm",
         "../llvm/build-native/bin/llvm-nm",
+        "../llvm/build/bin/llvm-nm",
     )
     try:
         proc = subprocess.run(

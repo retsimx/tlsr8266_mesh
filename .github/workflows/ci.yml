@@ -54,6 +54,26 @@ jobs:
         working-directory: rust
         run: cargo test -p mesh-protocol
 
+      - name: Test per-crate suites (32-bit host)
+        # --target i686 is mandatory: the suites are gated on a 32-bit host, so a
+        # plain x86_64 `cargo test` compiles zero tests for these crates.
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          cargo test -p mesh-protocol  --target i686-unknown-linux-gnu -- --test-threads=1
+          cargo test -p tlsr8266-pac   --target i686-unknown-linux-gnu -- --test-threads=1
+          cargo test -p tlsr8266-hal   --target i686-unknown-linux-gnu -- --test-threads=1
+          cargo test -p tlsr8266-radio --target i686-unknown-linux-gnu -- --test-threads=1
+
+      - name: Check per-crate no_std builds (thumbv6m)
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          cargo check -p mesh-protocol  --target thumbv6m-none-eabi
+          cargo check -p tlsr8266-pac   --target thumbv6m-none-eabi
+          cargo check -p tlsr8266-hal   --target thumbv6m-none-eabi
+          cargo check -p tlsr8266-radio --target thumbv6m-none-eabi
+
       - name: Run tests with coverage
         id: coverage
         working-directory: rust
@@ -152,7 +172,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check SDK layering (no sdk -> app dependencies)
+      - name: Check Cargo DAG, subsystem isolation and unsafe ratchet
         run: python3 sdk/check_layering.py
       - name: Run SDK tests
         run: python3 -m unittest discover -s sdk/tests -v

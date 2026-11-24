@@ -178,11 +178,17 @@ class TestToolTable(unittest.TestCase):
         self.assertEqual(
             build_firmware.DEFAULT_TOOLS,
             {
-                "llc": "../llvm/build/bin/llc",
-                "llvm_link": "../llvm/build/bin/llvm-link",
-                "opt": "../llvm/build/bin/opt",
-                "ld": "../llvm/build/bin/ld.lld",
-                "objcopy": "../llvm/build/bin/llvm-objcopy",
+                "llc": ("../llvm/build-native/bin/llc", "../llvm/build/bin/llc"),
+                "llvm_link": (
+                    "../llvm/build-native/bin/llvm-link",
+                    "../llvm/build/bin/llvm-link",
+                ),
+                "opt": ("../llvm/build-native/bin/opt", "../llvm/build/bin/opt"),
+                "ld": ("../llvm/build-native/bin/ld.lld", "../llvm/build/bin/ld.lld"),
+                "objcopy": (
+                    "../llvm/build-native/bin/llvm-objcopy",
+                    "../llvm/build/bin/llvm-objcopy",
+                ),
             },
         )
         self.assertEqual(
@@ -250,46 +256,50 @@ class TestDotenvAndToolResolution(_TempCase):
 
     def test_resolve_tool_precedence(self) -> None:
         repo = self.root / "repo"
-        default = "../llvm/build/bin/llc"
+        defaults = ("../llvm/build-native/bin/llc", "../llvm/build/bin/llc")
         with mock.patch.dict(os.environ, {"LLC": "env/llc"}):
             self.assertEqual(
-                build_firmware.resolve_tool("cli/llc", "LLC", {"LLC": "dotenv/llc"}, default, repo),
+                build_firmware.resolve_tool("cli/llc", "LLC", {"LLC": "dotenv/llc"}, defaults, repo),
                 repo / "cli/llc",
             )
             self.assertEqual(
-                build_firmware.resolve_tool("", "LLC", {"LLC": "dotenv/llc"}, default, repo),
+                build_firmware.resolve_tool("", "LLC", {"LLC": "dotenv/llc"}, defaults, repo),
                 repo / "env/llc",
             )
             self.assertEqual(
                 build_firmware.resolve_tool(
-                    None, "BUILD_FIRMWARE_TEST_UNSET", {"BUILD_FIRMWARE_TEST_UNSET": "dotenv/llc"}, default, repo
+                    None, "BUILD_FIRMWARE_TEST_UNSET", {"BUILD_FIRMWARE_TEST_UNSET": "dotenv/llc"}, defaults, repo
                 ),
                 repo / "dotenv/llc",
             )
             self.assertEqual(
-                build_firmware.resolve_tool(None, "BUILD_FIRMWARE_TEST_UNSET", {}, default, repo),
-                repo / default,
+                build_firmware.resolve_tool(None, "BUILD_FIRMWARE_TEST_UNSET", {}, defaults, repo),
+                repo / "../llvm/build-native/bin/llc",
             )
         self.assertEqual(
-            build_firmware.resolve_tool("/abs/tool", "LLC", {}, default, repo),
+            build_firmware.resolve_tool("/abs/tool", "LLC", {}, defaults, repo),
             Path("/abs/tool"),
         )
 
     def test_resolve_tool_anchors_at_repo_root_not_cwd(self) -> None:
         repo = self.root / "repo"
+        repo.mkdir()
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()
+        defaults = ("../llvm/build-native/bin/opt", "../llvm/build/bin/opt")
         with contextlib.chdir(elsewhere):
             self.assertEqual(
                 build_firmware.resolve_tool(
-                    None, "BUILD_FIRMWARE_TEST_UNSET", {"BUILD_FIRMWARE_TEST_UNSET": "tools/opt"}, "ignored", repo
+                    None, "BUILD_FIRMWARE_TEST_UNSET", {"BUILD_FIRMWARE_TEST_UNSET": "tools/opt"}, defaults, repo
                 ),
                 repo / "tools/opt",
             )
-        self.assertEqual(
-            build_firmware.resolve_tool(None, "BUILD_FIRMWARE_TEST_UNSET", {}, "../llvm/build/bin/opt", repo),
-            repo / "../llvm/build/bin/opt",
-        )
+        native = _executable(repo / "../llvm/build-native/bin/opt")
+        with contextlib.chdir(elsewhere):
+            self.assertEqual(
+                build_firmware.resolve_tool(None, "BUILD_FIRMWARE_TEST_UNSET", {}, defaults, repo),
+                native,
+            )
 
     def test_resolve_tools_prefers_cli_then_environment(self) -> None:
         repo = self.root / "repo"
@@ -318,6 +328,73 @@ class TestDotenvAndToolResolution(_TempCase):
                 build_firmware._resolve_tools(args, {}, self.root / "repo")
         self.assertEqual(caught.exception.exit_code, 2)
         self.assertIn("--llc", str(caught.exception))
+
+
+class TestToolPrecedenceChain(_TempCase):
+    """The full resolution chain, asserted in one place.
+
+    CLI flag > environment > ``.env`` > ``build-native`` default >
+    ``build`` default, plus the fail-closed error when no default exists.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.cli = _executable(self.root / "cli/ld.lld")
+        self.env = _executable(self.root / "env/ld.lld")
+        self.dotenv = _executable(self.root / "dotenv/ld.lld")
+        self.native = _executable(self.root / "llvm/build-native/bin/ld.lld")
+        self.build = _executable(self.root / "llvm/build/bin/ld.lld")
+
+    def resolve(self, cli_value=None, dotenv=None) -> Path:
+        return build_firmware.resolve_tool(
+            cli_value,
+            "LLD",
+            {} if dotenv is None else dotenv,
+            build_firmware.DEFAULT_TOOLS["ld"],
+            self.repo,
+        )
+
+    def test_cli_flag_beats_environment_and_dotenv(self) -> None:
+        with mock.patch.dict(os.environ, {"LLD": str(self.env)}, clear=True):
+            self.assertEqual(
+                self.resolve(str(self.cli), {"LLD": str(self.dotenv)}), self.cli
+            )
+
+    def test_environment_beats_dotenv(self) -> None:
+        with mock.patch.dict(os.environ, {"LLD": str(self.env)}, clear=True):
+            self.assertEqual(self.resolve(dotenv={"LLD": str(self.dotenv)}), self.env)
+
+    def test_dotenv_beats_defaults(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                self.resolve(dotenv={"LLD": str(self.dotenv)}), self.dotenv
+            )
+
+    def test_defaults_prefer_build_native_when_both_exist(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                self.resolve(), self.repo / "../llvm/build-native/bin/ld.lld"
+            )
+
+    def test_defaults_fall_back_to_build_when_build_native_is_absent(self) -> None:
+        self.native.unlink()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(self.resolve(), self.repo / "../llvm/build/bin/ld.lld")
+
+    def test_no_default_candidate_exists_names_both_paths_and_flag(self) -> None:
+        self.native.unlink()
+        self.build.unlink()
+        args = build_firmware._build_parser().parse_args([])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(build_firmware.BuildError) as caught:
+                build_firmware._resolve_tools(args, {}, self.repo)
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.exit_code, 2)
+        self.assertIn(str(self.repo / "../llvm/build-native/bin/llc"), message)
+        self.assertIn(str(self.repo / "../llvm/build/bin/llc"), message)
+        self.assertIn("pass --llc <path> or set LLC", message)
 
 
 class TestArtifactResolution(_RepoCase):

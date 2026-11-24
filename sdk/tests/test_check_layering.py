@@ -1,12 +1,14 @@
-"""Unit tests for the layering and universal ``unsafe`` gates.
+"""Unit tests for the Cargo DAG, subsystem isolation and ``unsafe`` gates.
 
 Run from the repository root::
 
     python3 -m unittest discover -s sdk/tests -v
 
-Every test is hermetic: synthetic trees live in a temporary directory and the
-only real trees touched are ``rust/src/`` and the workspace crates (read-only),
-by the handful of tests that assert the shipped trees are clean.
+Every test is hermetic: synthetic trees live in a temporary directory and
+synthetic Cargo metadata is a dict, so neither cargo nor the network is needed.
+The only real trees touched are ``rust/src/`` and the workspace crates
+(read-only), by the tests that assert the shipped trees are clean and that the
+per-crate ``unsafe`` ceilings equal their measured counts.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "sdk"))
@@ -31,6 +34,15 @@ PAC_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-pac" / "src"
 HAL_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-hal" / "src"
 RADIO_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-radio" / "src"
 
+# The five shipping roots and the Cargo package each one belongs to.
+SHIPPING_ROOTS = {
+    SRC_ROOT: "tlsr8266_mesh",
+    CRATE_ROOT: "mesh-protocol",
+    PAC_ROOT: "tlsr8266-pac",
+    HAL_ROOT: "tlsr8266-hal",
+    RADIO_ROOT: "tlsr8266-radio",
+}
+
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,45 +54,101 @@ def _lines(*lines: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class _TempTree(unittest.TestCase):
-    """A disposable ``sdk/`` root for one test."""
+def _cargo_dependency(name: str, kind: str | None = None) -> dict:
+    dependency = {"name": name, "source": None, "req": "*", "kind": kind}
+    if kind is None:
+        dependency["path"] = f"/repo/rust/crates/{name}"
+    return dependency
 
-    def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name) / "sdk"
-        self.root.mkdir()
 
-    def write(self, relative: str, content: str) -> Path:
-        return _write(self.root / relative, content)
+def _cargo_package(name: str, dependencies: list[dict]) -> dict:
+    return {
+        "name": name,
+        "version": "0.1.0",
+        "id": f"path+file:///repo/rust#{name}@0.1.0",
+        "dependencies": dependencies,
+    }
 
-    def run_gate(self) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(["--root", str(self.root)])
-        return code, out.getvalue(), err.getvalue()
 
-    def assert_clean(self) -> None:
-        code, out, err = self.run_gate()
-        self.assertEqual(code, 0, out + err)
-        self.assertIn("0 violations", out)
+def _shipping_metadata() -> dict:
+    """``cargo metadata --no-deps`` for the real workspace, as a dict."""
+    return {
+        "packages": [
+            _cargo_package(
+                "tlsr8266_mesh",
+                [
+                    _cargo_dependency("mesh-protocol"),
+                    _cargo_dependency("tlsr8266-pac"),
+                    _cargo_dependency("tlsr8266-hal"),
+                    _cargo_dependency("tlsr8266-radio"),
+                    _cargo_dependency("embassy-time"),
+                    _cargo_dependency("critical-section"),
+                    _cargo_dependency("futures", "dev"),
+                ],
+            ),
+            _cargo_package(
+                "mesh-protocol", [_cargo_dependency("bytemuck")]
+            ),
+            _cargo_package(
+                "tlsr8266-pac",
+                [_cargo_dependency("bitflags"), _cargo_dependency("paste")],
+            ),
+            _cargo_package(
+                "tlsr8266-hal",
+                [
+                    _cargo_dependency("tlsr8266-pac"),
+                    _cargo_dependency("mesh-protocol"),
+                    _cargo_dependency("critical-section"),
+                    _cargo_dependency("embassy-executor"),
+                ],
+            ),
+            _cargo_package(
+                "tlsr8266-radio",
+                [
+                    _cargo_dependency("tlsr8266-pac"),
+                    _cargo_dependency("tlsr8266-hal"),
+                    _cargo_dependency("mesh-protocol"),
+                    _cargo_dependency("heapless"),
+                ],
+            ),
+        ],
+        "workspace_members": [
+            f"path+file:///repo/rust#{name}@0.1.0"
+            for name in check_layering.CARGO_DAG
+        ],
+        "version": 1,
+    }
 
-    def assert_violations(self, *expected: str) -> str:
-        code, out, err = self.run_gate()
-        self.assertEqual(code, 1, out + err)
-        for text in expected:
-            self.assertIn(text, out)
-        return out
+
+def _metadata_with(package: str, *dependencies: dict) -> dict:
+    """The shipping metadata with ``dependencies`` added to ``package``."""
+    metadata = _shipping_metadata()
+    for entry in metadata["packages"]:
+        if entry["name"] == package:
+            entry["dependencies"].extend(dependencies)
+    return metadata
+
+
+def _without_package(name: str) -> dict:
+    metadata = _shipping_metadata()
+    metadata["packages"] = [
+        entry for entry in metadata["packages"] if entry["name"] != name
+    ]
+    return metadata
 
 
 class TestRealTrees(unittest.TestCase):
-    """The refactor is complete: every shipped tree must pass every pass.
+    """Every shipped tree must pass every pass, and the CI run must say so."""
 
-    C-10 (#72) deleted ``rust/src/sdk``, so the real-tree cover is now the
-    composition root plus all four workspace crates — the exact set the
-    no-argument (CI) run audits.  The layering pass has no shipped tree left to
-    read; the hermetic ``_TempTree`` / ``_TempSrcTree`` suites are its cover.
-    """
+    @classmethod
+    def setUpClass(cls) -> None:
+        # The no-argument run audits ~80 files in five roots, so the two tests
+        # that assert on its output share one run rather than paying twice.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cls.exit_code = check_layering.main([])
+        cls.stdout = out.getvalue()
+        cls.stderr = err.getvalue()
 
     def test_default_src_root_is_the_repo_src(self) -> None:
         self.assertEqual(
@@ -93,9 +161,9 @@ class TestRealTrees(unittest.TestCase):
         )
 
     def test_default_crate_roots_cover_every_workspace_crate(self) -> None:
-        # C-4 added the HAL, and C-10 (#72) added the extracted radio crate: the
-        # no-argument run audits the composition root plus these four, and a new
-        # crate must be added here in the same change that creates it.
+        # C-4 added the HAL and C-10 (#72) the radio crate: the no-argument run
+        # audits the composition root plus these four, and a new crate must be
+        # added here in the same change that creates it.
         roots = [Path(item).resolve() for item in check_layering.DEFAULT_CRATE_ROOTS]
         self.assertEqual(
             roots,
@@ -108,37 +176,28 @@ class TestRealTrees(unittest.TestCase):
         )
 
     def test_real_trees_are_clean(self) -> None:
-        # The no-argument run is what CI executes: the composition root and all
-        # four workspace crates, zero violations.
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main([])
-        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertEqual(out.getvalue().count("0 violations"), 5)
-        self.assertEqual(err.getvalue(), "")
+        # The no-argument run is what CI executes: the Cargo DAG, the
+        # composition root and all four workspace crates, zero violations.
+        self.assertEqual(self.exit_code, 0, self.stdout + self.stderr)
+        self.assertEqual(self.stdout.count("0 violations"), 6)
+        self.assertEqual(self.stderr, "")
         # Every tree is named in the summary, relative to the repo, so a root
         # silently dropped from the default list fails here.
-        for root in (SRC_ROOT, CRATE_ROOT, PAC_ROOT, HAL_ROOT, RADIO_ROOT):
-            self.assertIn(str(root.relative_to(REPO_ROOT)), out.getvalue())
+        for root in SHIPPING_ROOTS:
+            self.assertIn(str(root.relative_to(REPO_ROOT)), self.stdout)
 
     def test_real_tree_reports_every_pass(self) -> None:
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main([])
-        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertIn("rust src audit OK", out.getvalue())
-        self.assertIn("mesh-protocol audit OK", out.getvalue())
-        self.assertIn("tlsr8266-pac audit OK", out.getvalue())
-        self.assertIn("tlsr8266-hal audit OK", out.getvalue())
-        self.assertIn("tlsr8266-radio audit OK", out.getvalue())
-        # C-10 (#72) deleted the layering root, so the default run has no
-        # layering pass and must not pretend it ran one.
-        self.assertNotIn("sdk layering OK", out.getvalue())
-        self.assertEqual(len(out.getvalue().splitlines()), 5)
+        lines = self.stdout.splitlines()
+        self.assertEqual(len(lines), 6)
+        self.assertTrue(lines[0].startswith("cargo dag OK"), lines[0])
+        self.assertIn("rust src audit OK", lines[1])
+        self.assertIn("mesh-protocol audit OK", self.stdout)
+        self.assertIn("tlsr8266-pac audit OK", self.stdout)
+        self.assertIn("tlsr8266-hal audit OK", self.stdout)
+        self.assertIn("tlsr8266-radio audit OK", self.stdout)
 
     def test_every_real_tree_passes_the_universal_rules(self) -> None:
-        # Direct audit of each tree, independent of the CLI summary: the radio
-        # crate is audited exactly like the other three, only unbudgeted.
+        # Direct audit of each tree, independent of the CLI summary.
         floors = {
             SRC_ROOT: 15,
             CRATE_ROOT: 5,
@@ -157,10 +216,8 @@ class TestRealTrees(unittest.TestCase):
 
     def test_radio_crate_carries_the_injected_config_seam(self) -> None:
         # C-9 (#71) replaced the radio layer's reads of the application's root
-        # `config`/`version` modules with an injected `RadioConfig`.  C-10 (#72)
-        # moves that seam with the code, and in a separate crate it is the only
-        # way to reach board constants at all: `crate::config` is the crate's
-        # own module, and the application's `crate::version` cannot resolve.
+        # `config`/`version` modules with an injected `RadioConfig`; in a
+        # separate crate the application's `crate::version` cannot resolve.
         config = (RADIO_ROOT / "config.rs").read_text(encoding="utf-8")
         self.assertIn("pub struct RadioConfig", config)
         self.assertIn("pub fn set_radio_config", config)
@@ -171,135 +228,115 @@ class TestRealTrees(unittest.TestCase):
                 f"{path} still names the application's version module",
             )
 
-    def test_production_unsafe_ceiling_equals_the_measured_count(self) -> None:
-        # The ratchet may be lowered, never raised: raising it without removing
-        # `unsafe` sites leaves the measured count below the ceiling and fails
-        # this assertion, and so does lowering it without the removals.
-        # C-10 (#72) ratcheted 60 -> 16 when the 44 RF/BLE sites moved into
-        # `tlsr8266-radio`, which is audited but not budgeted.
-        self.assertEqual(check_layering.MAX_PRODUCTION_UNSAFE, 16)
-        violations, total = check_layering.audit_universal(
-            check_layering.rust_files(str(SRC_ROOT)), str(SRC_ROOT)
+    def test_ratchet_matches_shipping_tree(self) -> None:
+        # The one-way half of the ratchet: removing `unsafe` must lower the map,
+        # because strict equality with the measured count is asserted here.  The
+        # tool itself only fails on an excess, so an improvement mid-refactor
+        # does not block the developer — this assertion is what makes the
+        # ceiling follow the code down.
+        self.assertEqual(
+            set(check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE), set(SHIPPING_ROOTS.values())
         )
-        self.assertEqual(violations, [])
-        self.assertEqual(total, check_layering.MAX_PRODUCTION_UNSAFE)
+        for root, name in SHIPPING_ROOTS.items():
+            with self.subTest(crate=name):
+                paths = check_layering.rust_files(str(root))
+                violations, total = check_layering.audit_universal(
+                    paths, str(root), enforce_budget=False
+                )
+                self.assertEqual(violations, [])
+                self.assertEqual(
+                    total,
+                    check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE[name],
+                    f"{name}: measured {total} production `unsafe` sites; the "
+                    "map must equal the measured count",
+                )
 
-    def test_real_ota_subtree_is_pure(self) -> None:
-        # C-6: the shipped OTA subsystem names no layer above it, and the gate
-        # now says so mechanically.  The unsafe budget is not the point here, so
-        # it is not enforced on this subtree.
-        ota_root = SRC_ROOT / "ota"
-        paths = check_layering.rust_files(str(ota_root))
-        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
-        violations, _total = check_layering.audit_universal(
-            paths, "rust/src/ota", enforce_budget=False, ota_root=str(ota_root)
+    def test_root_crate_names_maps_the_firmware_root(self) -> None:
+        # `rust/src` is the firmware crate even though its directory is not the
+        # package name; every crate root takes its manifest directory's name.
+        self.assertEqual(
+            check_layering.ROOT_CRATE_NAMES,
+            {os.path.normpath(str(SRC_ROOT)): "tlsr8266_mesh"},
         )
-        self.assertEqual(violations, [])
+        for root, name in SHIPPING_ROOTS.items():
+            with self.subTest(crate=name):
+                self.assertEqual(check_layering._crate_name(str(root)), name)
 
-    def test_real_light_subtree_is_pure(self) -> None:
-        # C-7: the light subsystem owns the lamp and names no layer above it —
-        # the mesh status publish goes through the hook `app.rs` registers.
-        light_root = SRC_ROOT / "light"
-        paths = check_layering.rust_files(str(light_root))
-        self.assertGreaterEqual(len(paths), 3)  # mod.rs + transitions.rs + effects.rs
-        violations, _total = check_layering.audit_universal(
-            paths,
-            "rust/src/light",
-            enforce_budget=False,
-            subsystem_roots={"light": str(light_root)},
-        )
-        self.assertEqual(violations, [])
+    def test_every_shipping_subsystem_is_pure(self) -> None:
+        # One row per vertical subsystem: the shipped production code names no
+        # layer above it.  The fixtures below pin each rule's behaviour; this
+        # asserts the real tree, which is what makes the table a ratchet rather
+        # than a migration.
+        roots = check_layering.subsystem_roots(str(SRC_ROOT))
+        purity = check_layering.subsystem_roots(str(SRC_ROOT))
+        for name, subsystem_root in roots.items():
+            with self.subTest(subsystem=name):
+                # `logging` is a single module file, not a directory.
+                paths = (
+                    [subsystem_root]
+                    if os.path.isfile(subsystem_root)
+                    else check_layering.rust_files(subsystem_root)
+                )
+                self.assertGreaterEqual(len(paths), 1, f"{name} has no files")
+                violations, _total = check_layering.audit_universal(
+                    paths,
+                    str(SRC_ROOT),
+                    enforce_budget=False,
+                    purity_roots=purity,
+                )
+                self.assertEqual(violations, [])
 
-    def test_real_factory_reset_subtree_is_pure(self) -> None:
-        # C-7: the reset subsystem may not name a single layer above it, and the
-        # purity table covers it exactly like `ota`.
-        reset_root = SRC_ROOT / "factory_reset"
-        paths = check_layering.rust_files(str(reset_root))
-        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
-        violations, _total = check_layering.audit_universal(
-            paths,
-            "rust/src/factory_reset",
-            enforce_budget=False,
-            subsystem_roots={"factory_reset": str(reset_root)},
-        )
-        self.assertEqual(violations, [])
-
-    def test_real_diagnostics_subtree_is_pure(self) -> None:
-        # C-8: `diagnostics` is the leaf of the application layer — the panic
-        # sector, the breadcrumbs and the RTT mirror, and nothing above it.
-        diagnostics_root = SRC_ROOT / "diagnostics"
-        paths = check_layering.rust_files(str(diagnostics_root))
-        self.assertGreaterEqual(len(paths), 2)  # mod.rs + rtt.rs
-        violations, _total = check_layering.audit_universal(
-            paths,
-            "rust/src/diagnostics",
-            enforce_budget=False,
-            subsystem_roots={"diagnostics": str(diagnostics_root)},
-        )
-        self.assertEqual(violations, [])
-
-    def test_real_logging_module_is_pure(self) -> None:
-        # C-8: `logging` is a single module file, so its row is matched by exact
-        # path. Its only legal `crate::` edges are `diagnostics::rtt` (the RTT
-        # mirror) and itself.
-        logging_file = SRC_ROOT / "logging.rs"
-        self.assertTrue(logging_file.is_file())
-        violations, _total = check_layering.audit_universal(
-            [str(logging_file)],
-            "rust/src/logging.rs",
-            enforce_budget=False,
-            subsystem_roots={"logging": str(logging_file)},
-        )
-        self.assertEqual(violations, [])
-
-    def test_real_uart_subtree_is_pure(self) -> None:
-        # C-8: the UART bridge owns framing, ACK/retry and its two tasks, and
-        # reaches `crate::logging` / the HAL; it names neither `mesh` nor `sdk`.
-        uart_root = SRC_ROOT / "uart"
-        paths = check_layering.rust_files(str(uart_root))
-        self.assertGreaterEqual(len(paths), 2)  # mod.rs + protocol.rs
-        violations, _total = check_layering.audit_universal(
-            paths,
-            "rust/src/uart",
-            enforce_budget=False,
-            subsystem_roots={"uart": str(uart_root)},
-        )
-        self.assertEqual(violations, [])
-
-    def test_real_mesh_subtree_is_pure(self) -> None:
-        # C-8: `mesh` owns the radio and the pairing state machine but may not
-        # name the UART bridge or the lamp; both arrive through hooks. `sdk` is
-        # legal here (the node table and the radio driver live there).
-        mesh_root = SRC_ROOT / "mesh"
-        paths = check_layering.rust_files(str(mesh_root))
-        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
-        violations, _total = check_layering.audit_universal(
-            paths,
-            "rust/src/mesh",
-            enforce_budget=False,
-            subsystem_roots={"mesh": str(mesh_root)},
-        )
-        self.assertEqual(violations, [])
+    def test_shipping_additional_rules_are_clean(self) -> None:
+        # `app-pac` and `logging-macro` are live rules on the real tree, so they
+        # are asserted directly here rather than only through the CLI summary
+        # (which cannot tell which rule was clean).
+        for path in ("app.rs", "irq.rs"):
+            text = (SRC_ROOT / path).read_text(encoding="utf-8")
+            self.assertIsNone(
+                check_layering._PAC_REF_RE.search(
+                    check_layering.production_code(text)
+                ),
+                f"{path} references the PAC in production code",
+            )
+        for subsystem in check_layering.LOGGING_MACRO_FORBIDDEN_SUBSYSTEMS:
+            root = SRC_ROOT / subsystem
+            paths = (
+                [str(root)]
+                if root.is_file()
+                else check_layering.rust_files(str(root))
+            )
+            for path in paths:
+                text = Path(path).read_text(encoding="utf-8")
+                self.assertIsNone(
+                    check_layering._LOGGING_RE.search(
+                        check_layering.production_code(text)
+                    ),
+                    f"{path} logs from a leaf subsystem",
+                )
 
 
 class _TempSrcTree(unittest.TestCase):
-    """A disposable ``rust/src``, SDK root and mesh-protocol root per test.
+    """A disposable firmware root and workspace crate root per test.
 
-    The gate runs every pass here: ``--root`` keeps the layering pass on the
-    fake SDK tree, ``--src-root`` points the firmware universal pass at the fake
-    source tree and ``--crate-root`` at a fake workspace-crate tree, so no real
-    tree is ever read.
+    The gate runs in hermetic mode here: ``--src-root``/``--crate-root`` are
+    explicit, so the Cargo DAG pass and the per-crate ratchet are skipped and no
+    real tree is read.  A test that names only one of the two roots exercises
+    the default for the other, which is what pins the banner's shape.
     """
+
+    # What a hermetic run that names both roots announces on stdout before any
+    # summary or violation.  A `--crate-root`-only run names one more skipped
+    # pass, which `test_crate_root_alone_audits_only_that_crate` pins.
+    HERMETIC_NOTICE = "hermetic mode: cargo DAG and unsafe ratchet skipped"
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.src_root = Path(tmp.name) / "src"
-        self.root = self.src_root / "sdk"
-        self.root.mkdir(parents=True)
-        self.crate_root = Path(tmp.name) / "mesh-protocol" / "src"
+        self.tmp = Path(tmp.name)
+        self.src_root = self.tmp / "src"
+        self.src_root.mkdir(parents=True)
+        self.crate_root = self.tmp / "mesh-protocol" / "src"
         self.crate_root.mkdir(parents=True)
-        _write(self.root / "clean.rs", _lines("pub fn f() {}"))
         _write(self.src_root / "clean.rs", _lines("pub fn f() {}"))
         _write(self.crate_root / "lib.rs", _lines("pub fn f() {}"))
 
@@ -309,23 +346,27 @@ class _TempSrcTree(unittest.TestCase):
     def write_crate(self, relative: str, content: str) -> Path:
         return _write(self.crate_root / relative, content)
 
-    def write(self, relative: str, content: str) -> Path:
-        return _write(self.root / relative, content)
-
     def run_gate(self) -> tuple[int, str, str]:
+        """Run the hermetic gate, checking and removing its one-line banner.
+
+        Every test here names a root, so every run is hermetic and says so.
+        Asserting the banner here is what keeps it from disappearing — a silent
+        hermetic run must fail the whole class — and stripping it lets the
+        tests below read the output exactly like the bare CI gate's.
+        """
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main(
                 [
-                    "--root",
-                    str(self.root),
                     "--src-root",
                     str(self.src_root),
                     "--crate-root",
                     str(self.crate_root),
                 ]
             )
-        return code, out.getvalue(), err.getvalue()
+        stdout = out.getvalue()
+        self.assertTrue(stdout.startswith(self.HERMETIC_NOTICE + "\n"), stdout)
+        return code, stdout.split("\n", 1)[1], err.getvalue()
 
     def assert_clean(self) -> None:
         code, out, err = self.run_gate()
@@ -341,392 +382,67 @@ class _TempSrcTree(unittest.TestCase):
         return out
 
 
-class TestViolationFormat(_TempTree):
+class TestViolationFormat(_TempSrcTree):
     def test_format_is_file_line_rule_violation(self) -> None:
-        path = self.write("plain.rs", _lines("fn a() {}", "use crate::app::App;"))
-        out = self.assert_violations("upward-dep")
+        path = self.write_src(
+            "ota/plain.rs", _lines("fn a() {}", "use crate::app::App;")
+        )
+        out = self.assert_violations("ota-upward-dep")
         self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(out.splitlines()[0], f"{path}:2: upward-dep: crate::app")
+        self.assertEqual(out.splitlines()[0], f"{path}:2: ota-upward-dep: crate::app")
 
     def test_one_line_per_violation_in_file_order(self) -> None:
-        self.write("b.rs", _lines("use crate::mesh::is_online;", "uprintln!(\"x\");"))
-        self.write("a.rs", _lines("use crate::logging::log;"))
-        out = self.assert_violations("upward-dep: crate::logging")
+        self.write_src("ota/b.rs", _lines("use crate::mesh::is_online;", 'uprintln!("x");'))
+        self.write_src("ota/a.rs", _lines("use crate::app::App;"))
+        out = self.assert_violations("ota-upward-dep: crate::app")
         self.assertEqual(
             [line.split(": ", 1)[1] for line in out.splitlines()],
-            ["upward-dep: crate::logging", "upward-dep: crate::mesh", "logging: uprintln!"],
+            [
+                "ota-upward-dep: crate::app",
+                "ota-upward-dep: crate::mesh",
+                "logging-macro: uprintln!",
+            ],
         )
-        self.assertLess(out.index("a.rs"), out.index("b.rs"))
+        self.assertLess(out.index("ota/a.rs"), out.index("ota/b.rs"))
 
 
-class TestGlobalBans(_TempTree):
-    def test_upward_app_import_fails(self) -> None:
-        self.write("x.rs", _lines("use crate::app::App;"))
-        self.assert_violations("1: upward-dep: crate::app")
-
-    def test_upward_common_import_fails(self) -> None:
-        self.write("x.rs", _lines("use crate::common::foo;"))
-        self.assert_violations("upward-dep: crate::common")
-
-    def test_uprintln_macro_fails(self) -> None:
-        self.write("x.rs", _lines("pub fn f() {", '    uprintln!("x");', "}"))
-        self.assert_violations('2: logging: uprintln!')
-
-    def test_uprint_macro_fails(self) -> None:
-        self.write("x.rs", _lines('pub fn f() { uprint!("x"); }'))
-        self.assert_violations("logging: uprint!")
-
-    def test_grouped_crate_import_fails(self) -> None:
-        self.write("x.rs", _lines("use crate::{app, BIT};"))
-        self.assert_violations("1: upward-dep: crate::app")
-
-    def test_every_banned_module_is_rejected(self) -> None:
-        # `UPWARD_MODULES` (reported as `upward-dep`) plus the two crate-root
-        # constant modules C-9 banned (reported as `sdk-root-dep`).  Both sets
-        # are exercised in one loop because the assertion is on the reported
-        # `crate::<module>`, which is what a reviewer reads either way.
-        banned = [
-            "app",
-            "common",
-            "config",
-            "factory_reset",
-            "light",
-            "main_light",
-            "mesh",
-            "light_manager",
-            "uart",
-            "uart_manager",
-            "ota",
-            "diagnostics",
-            "logging",
-            "irq",
-            "embassy",
-            "version",
-        ]
-        for module in banned:
-            with self.subTest(module=module):
-                _write(self.root / f"{module}.rs", _lines(f"use crate::{module}::thing;"))
-        out = self.assert_violations(*[f"crate::{m}" for m in banned])
-        self.assertEqual(len(out.splitlines()), len(banned))
-
-    def test_sdk_and_root_macro_imports_are_legal(self) -> None:
-        # `crate::sdk` siblings and the root macros stay legal; only the
-        # application layer and the root constant modules are banned.
-        self.write(
-            "x.rs",
-            _lines(
-                "use crate::sdk::common::sync::CriticalSectionMutex;",
-                "use crate::BIT;",
-            ),
-        )
-        self.assert_clean()
-
-    def test_config_root_import_is_rejected(self) -> None:
-        # C-9 (#71): `crate::config` was the legitimate root constant module and
-        # is now the one upward dependency that keeps `sdk/` from being
-        # extracted, so the gate rejects it inside the SDK tree.
-        path = self.write(
-            "x.rs",
-            _lines("pub fn f() -> u16 {", "    crate::config::VENDOR_ID", "}"),
-        )
-        out = self.assert_violations("sdk-root-dep: crate::config")
-        self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(
-            out.splitlines()[0], f"{path}:2: sdk-root-dep: crate::config"
-        )
-
-    def test_version_root_import_is_rejected(self) -> None:
-        # `crate::version::BUILD_VERSION` is the other half of the same ban: the
-        # extracted radio crate receives the version word through `RadioConfig`.
-        path = self.write("x.rs", _lines("use crate::version::BUILD_VERSION;"))
-        out = self.assert_violations("sdk-root-dep: crate::version")
-        self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(
-            out.splitlines()[0], f"{path}:1: sdk-root-dep: crate::version"
-        )
-
-    def test_root_import_inside_cfg_test_is_exempt(self) -> None:
-        # The rule reads `production_code()`, so a test-only import is not
-        # flagged here.  The issue's criterion is a literal grep, which is
-        # stricter and covers tests too: both are enforced, at different scopes.
-        self.write(
-            "x.rs",
-            _lines(
-                "pub fn f() {}",
-                "",
-                "#[cfg(test)]",
-                "mod tests {",
-                "    use crate::config::VENDOR_ID;",
-                "    use crate::version::BUILD_VERSION;",
-                "}",
-            ),
-        )
-        self.assert_clean()
-
-    def test_identifiers_that_merely_contain_a_banned_name_are_legal(self) -> None:
-        self.write(
-            "x.rs",
-            _lines(
-                "use crate::sdk::app_att_light::APP_ATT_LIGHT;",
-                "use crate::mesh_protocol::ping;",
-                "pub fn f(p: &Packet) {",
-                "    let _ = p.ll_app();",
-                "    app_att_light::run();",
-                "    crate::mesh_protocol::ping();",
-                "}",
-            ),
-        )
-        self.assert_clean()
-
-
-class TestSdkRootBanScope(_TempSrcTree):
-    """`sdk-root-dep` is scoped to the extracted subtree, not the whole tree.
-
-    The rule lives in the layering pass, which only ever reads ``--root``; the
-    shipped subtree it was written for (``rust/src/sdk``) was deleted by C-10
-    (#72), so these fixtures are its only caller.  `crate::config` is the
-    legitimate root constant module for the application, so a non-SDK file that
-    names it must stay clean — otherwise the ban would be an app-wide refactor
-    instead of a seam.
-    """
-
-    def test_crate_config_is_legal_outside_the_sdk_tree(self) -> None:
-        self.write_src("app.rs", _lines("use crate::config::VENDOR_ID;"))
-        self.write("ble_app/clean.rs", _lines("pub fn f() {}"))
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(
-                [
-                    "--root",
-                    str(self.root),
-                    "--src-root",
-                    str(self.src_root),
-                    "--crate-root",
-                    str(self.crate_root),
-                ]
-            )
-        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertNotIn("sdk-root-dep", out.getvalue())
-
-    def test_the_same_import_inside_the_sdk_tree_is_rejected(self) -> None:
-        # Same file content, SDK path: the only difference is the subtree.
-        path = self.write_src("sdk/ble_app/config_user.rs", _lines("use crate::config::VENDOR_ID;"))
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(
-                [
-                    "--root",
-                    str(self.root),
-                    "--src-root",
-                    str(self.src_root),
-                    "--crate-root",
-                    str(self.crate_root),
-                ]
-            )
-        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
-        self.assertIn(f"{path}:1: sdk-root-dep: crate::config", out.getvalue())
-
-
-class TestLayerRules(_TempTree):
-    def test_common_may_not_import_mcu(self) -> None:
-        self.write("common/clock_user.rs", _lines("use crate::sdk::mcu::clock::clock_time;"))
-        self.assert_violations(
-            "1: layer-common: crate::sdk::mcu::clock::clock_time"
-        )
-
-    def test_mcu_may_not_import_a_sibling_module(self) -> None:
-        # `mcu` may only name `common`/`mcu` under `crate::sdk`; a sibling
-        # module (the old `drivers/` layer, now `rf_drv` at the SDK root) is an
-        # upward jump out of the layer.
-        self.write("mcu/clock_user.rs", _lines("use crate::sdk::rf_drv::init;"))
-        self.assert_violations("1: layer-mcu: crate::sdk::rf_drv::init")
-
-    def test_layer_bottom_up_imports_are_legal(self) -> None:
-        self.write(
-            "common/sync_user.rs",
-            _lines("use crate::sdk::common::sync::CriticalSectionMutex;"),
-        )
-        self.write(
-            "mcu/clock_user.rs",
-            _lines(
-                "use crate::sdk::common::sync::CriticalSectionMutex;",
-                "use crate::sdk::mcu::register::read_reg8;",
-            ),
-        )
-        self.assert_clean()
-
-    def test_root_macros_are_legal_imports(self) -> None:
-        self.write("common/bits.rs", _lines("use crate::{BIT, MASK_VAL};"))
-        self.write("mcu/bits.rs", _lines("use crate::{regrw_idx, BIT_LOW_BIT};"))
-        self.write("mcu/more_bits.rs", _lines("use crate::{BM_CLR, BM_SET, CLR_FLD};"))
-        self.assert_clean()
-
-    def test_new_external_crate_in_a_layer_is_rejected(self) -> None:
-        self.write("common/dep.rs", _lines("use embassy_sync::signal::Signal;"))
-        self.assert_violations("1: layer-common: external crate `embassy_sync`")
-
-    def test_layer_rules_do_not_apply_outside_the_layer_directories(self) -> None:
-        # `ble_app` never was a layer directory, so a sibling `crate::sdk` import
-        # that would fail from `mcu`/`common` is clean here.
-        self.write("ble_app/sibling.rs", _lines("use crate::sdk::rf_drv::init;"))
-        self.assert_clean()
-
-    def test_multi_line_use_reports_the_use_line(self) -> None:
-        self.write(
-            "common/user.rs",
-            _lines(
-                "use crate::sdk::mcu::register::{",
-                "    read_reg8, write_reg8,",
-                "};",
-            ),
-        )
-        self.assert_violations("1: layer-common: crate::sdk::mcu::register::read_reg8")
-
-    def test_tlsr8266_hal_is_legal_in_mcu(self) -> None:
-        # C-4: the extracted HAL crate is what the remaining `mcu` modules
-        # consume, so naming it is not an inversion there.
-        self.write("mcu/hal_user.rs", _lines("use tlsr8266_hal::mcu::clock::clock_time;"))
-        self.assert_clean()
-
-    def test_tlsr8266_hal_is_rejected_in_common(self) -> None:
-        # `sdk/common` no longer exists in the firmware tree, and the allowance
-        # was not widened: only `mcu` may name the HAL.
-        self.write(
-            "common/hal_user.rs",
-            _lines("use tlsr8266_hal::common::sync::SimplifyLS;"),
-        )
-        self.assert_violations("1: layer-common: external crate `tlsr8266_hal`")
-
-
-class TestPmLeafRule(_TempTree):
-    """`sdk/pm.rs` sits at the SDK root but is a leaf: it follows `mcu` rules.
-
-    C-4 moves the module into `tlsr8266-hal`, so it may not reach sideways into
-    `sdk/ble_app` or `sdk/light`, which a root-level file would otherwise be
-    free to do.
-    """
-
-    def test_pm_importing_ble_app_fails(self) -> None:
-        path = self.write(
-            "pm.rs",
-            _lines("use crate::sdk::ble_app::callbacks::dispatch_ota_write;"),
-        )
-        out = self.assert_violations(
-            "1: layer-mcu: "
-            "crate::sdk::ble_app::callbacks::dispatch_ota_write"
-        )
-        self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(
-            out.splitlines()[0],
-            f"{path}:1: layer-mcu: "
-            "crate::sdk::ble_app::callbacks::dispatch_ota_write",
-        )
-
-    def test_pm_importing_light_fails(self) -> None:
-        path = self.write("pm.rs", _lines("use crate::sdk::light::RecoverStatus;"))
-        out = self.assert_violations("1: layer-mcu: crate::sdk::light::RecoverStatus")
-        self.assertEqual(len(out.splitlines()), 1)
-        self.assertEqual(
-            out.splitlines()[0],
-            f"{path}:1: layer-mcu: crate::sdk::light::RecoverStatus",
-        )
-
-    def test_pm_importing_common_mcu_and_pac_is_clean(self) -> None:
-        self.write(
-            "pm.rs",
-            _lines(
-                "use core::sync::atomic::{AtomicBool, Ordering};",
-                "use crate::sdk::common::sync::SimplifyLS;",
-                "use crate::sdk::mcu::clock::clock_time;",
-                "use crate::BIT;",
-                "use critical_section;",
-                "use tlsr8266_pac::write_reg_pwdn_ctrl;",
-            ),
-        )
-        self.assert_clean()
-
-    def test_leaf_rule_is_scoped_to_pm_rs(self) -> None:
-        # Control: another root-level `sdk/*.rs` file keeps its current
-        # behaviour (no layer), so the same import is legal there.  The branch
-        # is an exact file match, not "every SDK-root file is a leaf".
-        self.write("factory_reset.rs", _lines("use crate::sdk::light::RecoverStatus;"))
-        self.assert_clean()
-        self.assertEqual(
-            check_layering._layer_of(str(self.root / "pm.rs"), str(self.root)), "mcu"
-        )
-        self.assertIsNone(
-            check_layering._layer_of(str(self.root / "factory_reset.rs"), str(self.root))
-        )
-
-
-class TestMeshProtocolExternalCrate(_TempTree):
-    """`mesh_protocol` is a pure workspace crate, legal in every SDK layer."""
-
-    def test_mesh_protocol_imports_are_legal_in_every_layer(self) -> None:
-        self.write("common/crc_user.rs", _lines("use mesh_protocol::crc::crc16;"))
-        self.write(
-            "mcu/mesh_user.rs", _lines("use mesh_protocol::packet_types::Packet;")
-        )
-        self.assert_clean()
-
-    def test_mesh_protocol_multiline_grouped_import_is_legal(self) -> None:
-        self.write(
-            "mcu/mesh_user.rs",
-            _lines(
-                "use mesh_protocol::{",
-                "    packet_types::{Packet, PacketL2capHead},",
-                "    uart::UartData,",
-                "};",
-            ),
-        )
-        self.assert_clean()
-
-    def test_another_external_crate_is_still_rejected_in_mcu(self) -> None:
-        # The allowance names one crate; it does not open the whole namespace.
-        self.write("mcu/x.rs", _lines("use serde::Serialize;"))
-        self.assert_violations("1: layer-mcu: external crate `serde`")
-
-    def test_mesh_protocol_does_not_unlock_app_layer_paths(self) -> None:
-        self.write("mcu/x.rs", _lines("use crate::app::App;"))
-        self.assert_violations("upward-dep: crate::app")
-
-
-class TestTestCodeStripping(_TempTree):
+class TestTestCodeStripping(_TempSrcTree):
     """The parser must strip only `#[cfg(test)]` and never truncate a file."""
 
     def test_inline_cfg_test_item_above_a_violation_is_still_caught(self) -> None:
-        self.write(
-            "trap.rs",
+        path = self.write_src(
+            "ota/trap.rs",
             _lines(
-                "use crate::state::*;",          # 1
-                "",                               # 2
-                "#[cfg(test)]",                   # 3
-                "pub static mut SCRATCH: u32 = 0;",  # 4
-                "",                               # 5
-                "pub fn production() {}",         # 6
-                "",                               # 7
-                "use crate::app::App;",           # 8
+                "use crate::config::VENDOR_ID;",      # 1
+                "",                                    # 2
+                "#[cfg(test)]",                        # 3
+                "pub static mut SCRATCH: u32 = 0;",    # 4
+                "",                                    # 5
+                "pub fn production() {}",              # 6
+                "",                                    # 7
+                "use crate::app::App;",                # 8
             ),
         )
-        out = self.assert_violations("8: upward-dep: crate::app")
+        out = self.assert_violations(f"{path}:8: ota-upward-dep: crate::app")
+        self.assertEqual(len(out.splitlines()), 1)  # no static-mut from the mask
 
     def test_inline_cfg_test_brace_item_above_a_violation_is_still_caught(self) -> None:
-        self.write(
-            "trap.rs",
+        self.write_src(
+            "ota/trap.rs",
             _lines(
                 "#[cfg(test)]",
                 "fn helper() {",
                 "    let x = 0;",
                 "}",
                 "",
-                "pub fn production() { let _ = crate::uart_manager::x; }",
+                "pub fn production() { let _ = crate::logging::UartStream; }",
             ),
         )
-        self.assert_violations("6: upward-dep: crate::uart_manager")
+        self.assert_violations("6: ota-upward-dep: crate::logging")
 
     def test_cfg_test_module_is_exempt(self) -> None:
-        self.write(
-            "clean.rs",
+        self.write_src(
+            "ota/clean.rs",
             _lines(
                 "pub fn production() {}",
                 "",
@@ -740,8 +456,8 @@ class TestTestCodeStripping(_TempTree):
         self.assert_clean()
 
     def test_cfg_test_module_with_unbalanced_brace_in_comment_and_string(self) -> None:
-        self.write(
-            "clean.rs",
+        self.write_src(
+            "ota/clean.rs",
             _lines(
                 "pub fn production() {}",
                 "",
@@ -755,7 +471,7 @@ class TestTestCodeStripping(_TempTree):
                 "pub fn still_production() { let _ = crate::mesh::is_online(0); }",
             ),
         )
-        out = self.assert_violations("10: upward-dep: crate::mesh")
+        out = self.assert_violations("10: ota-upward-dep: crate::mesh")
         self.assertEqual(len(out.splitlines()), 1)
         self.assertNotIn("crate::app", out)
 
@@ -774,8 +490,8 @@ class TestTestCodeStripping(_TempTree):
         self.assertIn("crate::ota", code)
 
     def test_cfg_not_test_and_cfg_attr_are_production_code(self) -> None:
-        self.write(
-            "trap.rs",
+        self.write_src(
+            "ota/trap.rs",
             _lines(
                 "#[cfg(not(test))]",
                 "pub fn real() {}",
@@ -783,16 +499,16 @@ class TestTestCodeStripping(_TempTree):
                 "#[cfg_attr(test, mry::mry)]",
                 "pub fn mocked() {}",
                 "",
-                "pub fn bad() { let _ = crate::light_manager::x; }",
+                "pub fn bad() { let _ = crate::light::VENDOR_ID; }",
             ),
         )
-        self.assert_violations("7: upward-dep: crate::light_manager")
+        self.assert_violations("7: ota-upward-dep: crate::light")
 
     def test_cfg_test_on_a_struct_field_does_not_mask_the_next_item(self) -> None:
         # H-1: the field attribute used to run to the next brace block, hiding
         # the production item that followed it.
-        self.write(
-            "trap.rs",
+        self.write_src(
+            "ota/trap.rs",
             _lines(
                 "pub struct S {",
                 "    #[cfg(test)]",
@@ -802,27 +518,27 @@ class TestTestCodeStripping(_TempTree):
                 "pub fn production() { let _ = crate::app::App; }",
             ),
         )
-        self.assert_violations("6: upward-dep: crate::app")
+        self.assert_violations("6: ota-upward-dep: crate::app")
 
     def test_cfg_test_on_a_statement_does_not_mask_the_rest_of_the_body(self) -> None:
-        # Same root cause, statement shape (`uart_manager::uart_send_async`).
-        self.write(
-            "trap.rs",
+        # Same root cause, statement shape.
+        self.write_src(
+            "ota/trap.rs",
             _lines(
                 "pub fn f() {",
                 "    #[cfg(test)]",
                 "    let scratch = 0;",
-                "    let _ = crate::ota::plan();",
+                "    let _ = crate::uart::send_message();",
                 "    loop {",
                 "        break;",
                 "    }",
                 "}",
             ),
         )
-        self.assert_violations("4: upward-dep: crate::ota")
+        self.assert_violations("4: ota-upward-dep: crate::uart")
 
 
-class TestTestStrippingExtent(_TempTree):
+class TestTestStrippingExtent(unittest.TestCase):
     """The stripper's extent: an item is removed whole, a field/statement unit
     only up to its own `,`/`;` (the H-1 root cause)."""
 
@@ -874,277 +590,500 @@ class TestTestStrippingExtent(_TempTree):
         self.assertIn("unsafe { production() }", code)
 
 
-class TestCommentAndStringPolicy(_TempTree):
+class TestCommentAndStringPolicy(_TempSrcTree):
     """Comments and strings are prose, not dependencies: they never count."""
 
     def test_banned_path_in_line_comment_is_ignored(self) -> None:
-        self.write("x.rs", _lines("// historically: use crate::app::App;"))
+        self.write_src("ota/x.rs", _lines("// historically: use crate::app::App;"))
         self.assert_clean()
 
     def test_banned_path_in_block_comment_is_ignored(self) -> None:
-        self.write("x.rs", _lines("/* crate::mesh::is_online */", "pub fn f() {}"))
+        self.write_src("ota/x.rs", _lines("/* crate::mesh::is_online */", "pub fn f() {}"))
         self.assert_clean()
 
     def test_banned_path_in_string_literal_is_ignored(self) -> None:
-        self.write("x.rs", _lines('pub const S: &str = "crate::app";'))
+        self.write_src("ota/x.rs", _lines('pub const S: &str = "crate::app";'))
         self.assert_clean()
 
     def test_unbalanced_brace_in_comment_does_not_break_the_parser(self) -> None:
-        self.write(
-            "x.rs",
+        self.write_src(
+            "ota/x.rs",
             _lines(
                 "// if (flag) {",
                 "pub fn f() { let _ = crate::app::App::default(); }",
             ),
         )
-        self.assert_violations("2: upward-dep: crate::app")
+        self.assert_violations("2: ota-upward-dep: crate::app")
 
 
-class TestHistoricalTrapFiles(_TempTree):
-    """The historical trap *shapes*, inlined as synthetic fixtures.
+class TestPathBypasses(unittest.TestCase):
+    """Relative and aliased paths must not be able to dodge the `crate::` rules."""
 
-    These used to read and inject into copies of
-    ``rust/src/sdk/ble_app/*.rs`` — a tree C-10 (#72) deleted.  Each test now
-    writes the same shape from scratch: a violation injected after the exact
-    construct that once defeated the mask, in a file whose directory depth and
-    layer are the same as the original's.
-    """
-
-    def test_cfg_test_static_mut_above_production_does_not_truncate(self) -> None:
-        # Shape of the deleted `ble_app/ble_ll_attribute.rs`: an inline
-        # `#[cfg(test)] pub static mut` sitting between production items.  The
-        # stripper used to run from that attribute to the next brace block and
-        # hide every production line that followed it.
-        path = self.write(
-            "ble_app/ble_ll_attribute.rs",
-            _lines(
-                "use tlsr8266_pac::read_reg_system_tick;",       # 1
-                "",                                               # 2
-                "#[cfg(test)]",                                   # 3
-                "pub static mut __RAM_START_ADDR: u32 = 0;",      # 4
-                "",                                               # 5
-                "pub fn production() {}",                         # 6
-                "",                                               # 7
-                "use crate::app::App;",                           # 8
-            ),
+    def _audit(self, *lines: str, module: tuple[str, ...] = ()) -> list:
+        violations, _total = check_layering.audit_universal_source(
+            _lines(*lines), "x.rs", module=module
         )
-        out = self.assert_violations(f"{path}:8: upward-dep: crate::app")
-        self.assertEqual(len(out.splitlines()), 1)
+        return violations
 
-    def test_fn_local_import_is_production(self) -> None:
-        # Shape of the deleted `ble_app/light_ll/packet_processing.rs`: the
-        # violation is a `use` *inside* a `#[cfg_attr(test, mry::mry)]`
-        # function, so a stripper that treated the attribute as test code lost
-        # the whole body.
-        path = self.write(
-            "ble_app/light_ll/packet_processing.rs",
-            _lines(
-                "#[cfg_attr(test, mry::mry)]",                        # 1
-                "pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {",  # 2
-                "    use crate::mesh::MESH_NODE_ST_VAL_LEN;",         # 3
-                "    let _ = packet;",                                # 4
-                "    Ok(())",                                         # 5
-                "}",                                                  # 6
-            ),
+    def test_super_chain_at_the_root_is_rejected(self) -> None:
+        violations = self._audit("use super::super::app::app;", module=())
+        self.assertEqual(
+            [(item.rule, item.violation) for item in violations],
+            [
+                (
+                    "super-escape",
+                    "super::2 past the audited root (chain of 2, depth 0)",
+                )
+            ],
         )
-        self.assert_violations(f"{path}:3: upward-dep: crate::mesh")
 
-    def test_irq_fn_local_import_is_production(self) -> None:
-        # Shape of the deleted `ble_app/irq/connection.rs`: a module-level
-        # `use` inside a fn body, two directories below the root.
-        path = self.write(
-            "ble_app/irq/connection.rs",
-            _lines(
-                "#[cfg_attr(test, mry::mry)]",                        # 1
-                "fn process_mesh_operations() {",                     # 2
-                "    use crate::uart_manager::UartMsg;",              # 3
-                "    let _ = core::mem::size_of::<UartMsg>();",       # 4
-                "}",                                                  # 5
-            ),
+    def test_super_chain_deeper_than_the_module_depth_is_rejected(self) -> None:
+        violations = self._audit(
+            "use super::super::super::app::app;", module=("ota", "fsm")
         )
-        self.assert_violations(f"{path}:3: upward-dep: crate::uart_manager")
+        self.assertEqual([item.rule for item in violations], ["super-escape"])
 
-    def test_config_root_import_is_rejected_next_to_a_real_pac_import(self) -> None:
-        # C-9 (#71): the ten real import sites were spread across eight files of
-        # the extracted subtree, so the trap sits in a file that legitimately
-        # names the PAC and keeps its own `#[cfg(test)]` copy of the same path.
-        path = self.write(
-            "ble_app/ble_ll_attribute.rs",
-            _lines(
-                "use tlsr8266_pac::read_reg_system_tick;",            # 1
-                "use crate::config::VENDOR_ID;",                      # 2
-                "",                                                   # 3
-                "#[cfg(test)]",                                       # 4
-                "mod tests {",                                        # 5
-                "    use crate::config::VENDOR_ID;",                  # 6
-                "}",                                                  # 7
-            ),
-        )
-        out = self.assert_violations(f"{path}:2: sdk-root-dep: crate::config")
-        # The test-only copy is exempt: the rule reads production code only.
-        self.assertEqual(len(out.splitlines()), 1)
-
-
-class TestPathBypasses(_TempTree):
-    """Relative and aliased paths must not be able to dodge the crate:: rules."""
-
-    def test_super_chain_from_the_sdk_root_is_rejected(self) -> None:
-        self.write("x.rs", _lines("use super::super::app::app;"))
-        out = self.assert_violations("1: super-escape")
-        self.assertIn("chain of 2, depth 0", out)
-
-    def test_super_chain_that_leaves_the_sdk_from_a_subdirectory_is_rejected(self) -> None:
-        self.write("ble_app/light_ll/x.rs", _lines("use super::super::super::app::app;"))
-        self.assert_violations("1: super-escape")
-
-    def test_super_chain_that_stays_inside_the_sdk_is_legal(self) -> None:
-        self.write(
-            "ble_app/light_ll/status.rs",
-            _lines(
+    def test_super_chain_inside_the_audited_root_is_legal(self) -> None:
+        self.assertEqual(
+            self._audit(
                 "use super::mesh_management::mesh_send_online_status;",
                 "pub fn f() { super::super::queues::enqueue_mesh_rx(&PKT); }",
+                module=("radio", "ble"),
             ),
+            [],
         )
-        self.write("ble_app/irq/timing.rs", _lines("use super::mesh::handle_mesh_listening_state;"))
-        # A brace group composes with its prefix, but sibling chains do not
-        # stack: two hops, not four, so this stays legal at depth 2.
-        self.write(
-            "ble_app/light_ll/grouped.rs",
-            _lines("use super::{super::queues, super::mesh_management};"),
+
+    def test_sibling_super_chains_do_not_stack(self) -> None:
+        # `super::{super::a, super::b}` is two hops, not three: the deepest
+        # sibling wins, so it fits inside a two-segment module path.
+        self.assertEqual(
+            self._audit(
+                "use super::{super::queues, super::mesh_management};",
+                module=("radio", "ble"),
+            ),
+            [],
         )
-        self.assert_clean()
 
     def test_grouped_super_chain_that_escapes_is_rejected(self) -> None:
-        self.write("x.rs", _lines("use super::{super::app::app};"))
-        self.assert_violations("super-escape: super::2 past the audited root (chain of 2, depth 0)")
+        # The outer chain composes with the group (two hops) and the inner
+        # `super::` is a chain of its own (one hop); at the crate root both
+        # escape.
+        violations = self._audit("use super::{super::app::app};", module=())
+        self.assertEqual(
+            [item.rule for item in violations], ["super-escape", "super-escape"]
+        )
+        self.assertIn(
+            "super::2 past the audited root (chain of 2, depth 0)",
+            [item.violation for item in violations],
+        )
 
     def test_crate_alias_is_rejected(self) -> None:
-        self.write(
-            "x.rs",
-            _lines("use crate as krate;", "pub fn f() { let _ = krate::app::app(); }"),
+        violations = self._audit(
+            "use crate as krate;", "pub fn f() { let _ = krate::app::app(); }"
         )
-        self.assert_violations("1: crate-alias: crate as krate")
+        self.assertEqual(
+            [(item.line, item.rule, item.violation) for item in violations],
+            [(1, "crate-alias", "crate as krate")],
+        )
 
     def test_grouped_crate_alias_is_rejected(self) -> None:
-        self.write("x.rs", _lines("use crate::{self as krate};"))
-        self.assert_violations("1: crate-alias: crate::{self as krate}")
+        violations = self._audit("use crate::{self as krate};")
+        self.assertEqual(
+            [(item.rule, item.violation) for item in violations],
+            [("crate-alias", "crate::{self as krate}")],
+        )
 
     def test_extern_crate_self_alias_is_rejected(self) -> None:
         # `extern crate self as krate;` aliases the crate root like
         # `use crate as krate;` but is not a `use` statement.  The declaration
         # alone is the violation: it is what lets `krate::app::..` dodge the
         # path rules, whether or not this file happens to use it.
-        self.write("x.rs", _lines("extern crate self as krate;"))
-        out = self.assert_violations("1: crate-alias: extern crate self as krate")
-        self.assertEqual(len(out.splitlines()), 1)
+        violations = self._audit("extern crate self as krate;")
+        self.assertEqual(
+            [(item.line, item.rule, item.violation) for item in violations],
+            [(1, "crate-alias", "extern crate self as krate")],
+        )
 
     def test_extern_crate_self_alias_with_qualified_use_is_rejected(self) -> None:
-        self.write(
-            "x.rs",
-            _lines(
-                "extern crate self as krate;",
-                "pub fn f() { krate::app::app(); }",
-            ),
+        violations = self._audit(
+            "extern crate self as krate;",
+            "pub fn f() { krate::app::app(); }",
         )
-        self.assert_violations("1: crate-alias: extern crate self as krate")
+        self.assertEqual(
+            [item.violation for item in violations],
+            ["extern crate self as krate"],
+        )
 
     def test_plain_extern_crate_declarations_are_legal(self) -> None:
         # Control for the matcher above: the general `extern crate <name>;`
         # form is not a crate-root alias.  `extern crate core;` compiles in a
         # `#![no_std]` crate with no real dependency (verified with rustc); it
         # can only warn as an unused extern crate.
-        self.write(
-            "x.rs",
-            _lines(
+        self.assertEqual(
+            self._audit(
                 "extern crate core;",
                 "pub fn f() { core::mem::size_of::<u32>(); }",
             ),
+            [],
         )
-        self.assert_clean()
         for statement in ("extern crate core;", "extern crate std;", "extern crate alloc;"):
             self.assertIsNone(
                 check_layering._EXTERN_CRATE_SELF_RE.search(statement), statement
             )
 
+    def test_root_crate_file_may_use_one_super(self) -> None:
+        # Module depth, not directory depth: a file directly under the root is
+        # one `mod` below the crate root, so one `super::` stays inside the
+        # audited tree.  This is the shape `tlsr8266-radio/src/callbacks.rs`
+        # ships.
+        self.assertEqual(
+            self._audit(
+                "pub mod test_ota { use super::OtaHooks; }", module=("callbacks",)
+            ),
+            [],
+        )
 
-class TestCli(_TempTree):
-    def test_missing_root_exits_2(self) -> None:
+
+class TestModuleSegments(unittest.TestCase):
+    """`_module_segments` is the one file -> module mapping both rules share."""
+
+    def test_crate_root_files_are_the_empty_path(self) -> None:
+        for name in ("lib.rs", "main.rs"):
+            with self.subTest(name=name):
+                self.assertEqual(check_layering._module_segments(name, "."), ())
+
+    def test_a_mod_file_is_its_directory(self) -> None:
+        self.assertEqual(
+            check_layering._module_segments(os.path.join("light", "mod.rs"), "."),
+            ("light",),
+        )
+        self.assertEqual(
+            check_layering._module_segments(
+                os.path.join("light", "sub", "mod.rs"), "."
+            ),
+            ("light", "sub"),
+        )
+
+    def test_any_other_file_is_one_mod_deeper_than_its_sibling(self) -> None:
+        # This is the M-2 fix: `ota/fsm.rs` may spend two `super::` hops, the
+        # same count as `ota/mod.rs`'s one hop plus the `fsm` child.
+        self.assertEqual(
+            check_layering._module_segments(os.path.join("ota", "fsm.rs"), "."),
+            ("ota", "fsm"),
+        )
+        self.assertEqual(
+            check_layering._module_segments(
+                os.path.join("ota", "sub", "chunk.rs"), "."
+            ),
+            ("ota", "sub", "chunk"),
+        )
+        self.assertEqual(
+            check_layering._module_segments("app.rs", "."), ("app",)
+        )
+
+
+class TestCli(_TempSrcTree):
+    def test_missing_src_root_exits_2(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(["--root", str(self.root / "absent")])
+            code = check_layering.main(
+                [
+                    "--src-root",
+                    str(self.tmp / "absent"),
+                    "--crate-root",
+                    str(self.crate_root),
+                ]
+            )
         self.assertEqual(code, 2)
         self.assertIn("not a directory", err.getvalue())
 
-    def test_empty_root_exits_2(self) -> None:
+    def test_empty_src_root_exits_2(self) -> None:
+        empty = self.tmp / "empty"
+        empty.mkdir()
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(["--root", str(self.root)])
+            code = check_layering.main(
+                ["--src-root", str(empty), "--crate-root", str(self.crate_root)]
+            )
         self.assertEqual(code, 2)
         self.assertIn("no .rs files", err.getvalue())
 
-    def test_root_is_resolved_from_any_working_directory(self) -> None:
-        self.write("x.rs", _lines("use crate::app::App;"))
-        elsewhere = self.root.parent / "elsewhere"
+    def test_src_root_is_resolved_from_any_working_directory(self) -> None:
+        self.write_src("ota/x.rs", _lines("use crate::app::App;"))
+        elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
         out, err = io.StringIO(), io.StringIO()
         with contextlib.chdir(elsewhere):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = check_layering.main(["--root", "../sdk"])
+                code = check_layering.main(
+                    ["--src-root", "../src", "--crate-root", "../mesh-protocol/src"]
+                )
         self.assertEqual(code, 1, out.getvalue() + err.getvalue())
-        self.assertTrue(out.getvalue().startswith(str(self.root / "x.rs") + ":1: "))
-        self.assertTrue(re.search(r":1: upward-dep: crate::app$", out.getvalue()))
+        # The hermetic banner is one line on stdout; the violations follow it.
+        self.assertTrue(out.getvalue().startswith(self.HERMETIC_NOTICE + "\n"))
+        self.assertTrue(
+            out.getvalue().startswith(
+                f"{self.HERMETIC_NOTICE}\n{self.src_root / 'ota' / 'x.rs'}:1: "
+            )
+        )
+        self.assertTrue(re.search(r":1: ota-upward-dep: crate::app$", out.getvalue()))
 
     def test_stray_non_rust_files_are_ignored(self) -> None:
-        self.write("notes.txt", "use crate::app::App;\n")
-        self.write("clean.rs", _lines("use crate::sdk::light::RecoverStatus;"))
+        self.write_src("notes.txt", "use crate::app::App;\n")
         self.assert_clean()
 
-    def test_explicit_root_skips_the_universal_pass(self) -> None:
-        # Hermeticity: `--root` alone must never read the real `rust/src`.
-        self.write("x.rs", _lines("pub fn f() {}"))
+    def test_explicit_src_root_skips_the_cargo_dag_pass(self) -> None:
+        # Hermeticity: a fixture tree has no Cargo.toml, so the DAG pass and the
+        # ratchet must not run against the real workspace.
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("cargo dag OK", out)
+        self.assertNotIn("unsafe-budget", out)
+
+    def test_hermetic_run_announces_the_skipped_passes(self) -> None:
+        # `run_gate` checks and strips the banner for every other test, so the
+        # text is pinned here through a raw `main` call.  A copy-pasted
+        # `--src-root rust/src` must not look like the full gate.
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_layering.main(["--root", str(self.root)])
+            code = check_layering.main(
+                [
+                    "--src-root",
+                    str(self.src_root),
+                    "--crate-root",
+                    str(self.crate_root),
+                ]
+            )
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertNotIn("rust src audit", out.getvalue())
-        self.assertEqual(len(out.getvalue().splitlines()), 1)
+        self.assertEqual(
+            out.getvalue().splitlines()[0],
+            "hermetic mode: cargo DAG and unsafe ratchet skipped",
+        )
+        self.assertNotIn("cargo dag OK", out.getvalue())
+        # Both roots were named, so the firmware subsystem pass did run: the
+        # banner above must not claim otherwise.
+        self.assertIn("rust src audit OK", out.getvalue())
+
+    def test_src_root_only_banner_names_the_two_skipped_passes(self) -> None:
+        # `--src-root` alone still runs the firmware pass, so the banner names
+        # only the DAG and the ratchet, and a subsystem violation is reported.
+        self.write_src("ota/mod.rs", _lines("use crate::app::App;"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(["--src-root", str(self.src_root)])
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        lines = out.getvalue().splitlines()
+        self.assertEqual(
+            lines[0], "hermetic mode: cargo DAG and unsafe ratchet skipped"
+        )
+        self.assertIn("ota-upward-dep: crate::app", lines[1])
+
+
+class TestCargoDag(unittest.TestCase):
+    """`audit_cargo_dag` is a pure function over `cargo metadata` JSON."""
+
+    def test_real_shaped_metadata_passes(self) -> None:
+        self.assertEqual(check_layering.audit_cargo_dag(_shipping_metadata()), [])
+
+    def test_every_dag_violation_uses_the_cargo_dag_rule(self) -> None:
+        metadata = _metadata_with(
+            "tlsr8266-pac", _cargo_dependency("tlsr8266-hal")
+        )
+        violations = check_layering.audit_cargo_dag(metadata)
+        self.assertTrue(violations)
+        self.assertEqual({item.rule for item in violations}, {"cargo-dag"})
+        self.assertEqual(
+            {item.path for item in violations},
+            {check_layering.CARGO_MANIFEST_LABEL},
+        )
+        # An edge is a manifest property, so it has no source line and must not
+        # render a placeholder one.
+        for item in violations:
+            self.assertNotIn(":0:", item.render())
+            self.assertTrue(
+                item.render().startswith(
+                    f"{check_layering.CARGO_MANIFEST_LABEL}: cargo-dag: "
+                ),
+                item.render(),
+            )
+
+    def test_illegal_workspace_edge_fails(self) -> None:
+        # The PAC is the register leaf: it may not depend on the HAL above it.
+        violations = check_layering.audit_cargo_dag(
+            _metadata_with("tlsr8266-pac", _cargo_dependency("tlsr8266-hal"))
+        )
+        self.assertIn("tlsr8266-hal", " ".join(item.violation for item in violations))
+
+    def test_library_crate_depending_on_the_firmware_crate_fails(self) -> None:
+        violations = check_layering.audit_cargo_dag(
+            _metadata_with("tlsr8266-pac", _cargo_dependency("tlsr8266_mesh"))
+        )
+        # The edge also closes a cycle, so more than one message is expected;
+        # the firmware-crate one is the invariant this test pins.
+        self.assertTrue(
+            any("firmware crate" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_mry_fails_in_every_dependency_kind(self) -> None:
+        for kind in (None, "dev", "build"):
+            with self.subTest(kind=kind):
+                violations = check_layering.audit_cargo_dag(
+                    _metadata_with("tlsr8266-hal", _cargo_dependency("mry", kind))
+                )
+                self.assertTrue(
+                    any("banned in every crate" in item.violation for item in violations),
+                    [item.violation for item in violations],
+                )
+
+    def test_unlisted_external_dependency_fails(self) -> None:
+        violations = check_layering.audit_cargo_dag(
+            _metadata_with("tlsr8266-pac", _cargo_dependency("serde"))
+        )
+        self.assertTrue(
+            any("serde" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_unlisted_dev_dependency_fails(self) -> None:
+        violations = check_layering.audit_cargo_dag(
+            _metadata_with("mesh-protocol", _cargo_dependency("criterion", "dev"))
+        )
+        self.assertTrue(
+            any("dev-dependency" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_unlisted_build_dependency_fails_as_non_dev(self) -> None:
+        # Build-dependencies are external non-dev deps: a row with a non-dev
+        # ceiling must list them, and a row with `None` has no external ceiling.
+        violations = check_layering.audit_cargo_dag(
+            _metadata_with("mesh-protocol", _cargo_dependency("cc", "build"))
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("as a dependency", violations[0].violation)
+
+    def test_missing_workspace_member_fails(self) -> None:
+        violations = check_layering.audit_cargo_dag(_without_package("tlsr8266-hal"))
+        self.assertTrue(
+            any("is missing from the workspace" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_extra_workspace_member_fails(self) -> None:
+        metadata = _shipping_metadata()
+        metadata["packages"].append(_cargo_package("tlsr8266-extra", []))
+        violations = check_layering.audit_cargo_dag(metadata)
+        self.assertTrue(
+            any("is not in CARGO_DAG" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_cyclic_workspace_graph_fails(self) -> None:
+        metadata = _metadata_with(
+            "mesh-protocol", _cargo_dependency("tlsr8266-hal")
+        )
+        violations = check_layering.audit_cargo_dag(metadata)
+        self.assertTrue(
+            any("cycle" in item.violation for item in violations),
+            [item.violation for item in violations],
+        )
+
+    def test_empty_metadata_reports_every_missing_member(self) -> None:
+        violations = check_layering.audit_cargo_dag({})
+        self.assertEqual(len(violations), len(check_layering.CARGO_DAG))
+        self.assertTrue(all("missing" in item.violation for item in violations))
+
+    def test_cargo_failure_exits_2_and_says_why(self) -> None:
+        # Fail closed: a DAG pass that cannot run is exit 2, never a silent OK.
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            check_layering,
+            "load_cargo_metadata",
+            side_effect=check_layering.GateError("cargo metadata failed (exit 127)"),
+        ):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = check_layering.main([])
+        self.assertEqual(code, 2, out.getvalue() + err.getvalue())
+        self.assertIn("cargo metadata failed (exit 127)", err.getvalue())
+        self.assertNotIn("cargo dag OK", out.getvalue())
+
+    def test_dag_violation_fails_the_no_argument_run(self) -> None:
+        metadata = _metadata_with("tlsr8266-pac", _cargo_dependency("mry"))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            check_layering, "load_cargo_metadata", return_value=metadata
+        ):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = check_layering.main([])
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("cargo-dag", out.getvalue())
+        self.assertIn("cargo dag FAILED: 1 violation(s)", err.getvalue())
+
+    def test_the_live_metadata_matches_the_table(self) -> None:
+        # Integration with the real tool: the shipping workspace validates, and
+        # its members are exactly CARGO_DAG's keys.
+        metadata = check_layering.load_cargo_metadata(str(REPO_ROOT))
+        self.assertEqual(
+            {package["name"] for package in metadata["packages"]},
+            set(check_layering.CARGO_DAG),
+        )
+        self.assertEqual(check_layering.audit_cargo_dag(metadata), [])
 
 
 class TestOtaPurityRule(_TempSrcTree):
-    """`rust/src/ota/**` production code may not name the layers above it.
+    """`rust/src/ota/**` production code may not name the layers above it."""
 
-    `ota` owns every OTA static and routine, so the seam is the only legal
-    direction: the subsystem may reach `crate::config`, `mesh_protocol`,
-    `tlsr8266_hal` and its own `fsm`, and nothing above it.  The rule reads
-    production code only, because `ota`'s own tests legitimately use
-    `tlsr8266_pac::fake_mmio::FakeMmio`.
-    """
-
-    def test_sdk_import_is_rejected(self) -> None:
+    def test_sibling_import_is_rejected(self) -> None:
         path = self.write_src(
-            "ota/mod.rs",
-            _lines("use crate::sdk::ble_app::callbacks::set_ota_hooks;"),
+            "ota/mod.rs", _lines("use crate::app::set_ota_hooks;")
         )
-        out = self.assert_violations("1: ota-upward-dep: crate::sdk")
-        self.assertEqual(out.splitlines()[0], f"{path}:1: ota-upward-dep: crate::sdk")
+        out = self.assert_violations("1: ota-upward-dep: crate::app")
+        self.assertEqual(out.splitlines()[0], f"{path}:1: ota-upward-dep: crate::app")
 
-    def test_qualified_app_path_is_rejected(self) -> None:
+    def test_qualified_light_path_is_rejected(self) -> None:
         # Not an import: the rule reads every `crate::` reference, so a
         # fully-qualified call cannot dodge it.
         self.write_src(
             "ota/mod.rs",
-            _lines("pub fn f() { crate::light_manager::set_brightness(1); }"),
+            _lines("pub fn f() { crate::light::set_brightness(1); }"),
         )
-        self.assert_violations("1: ota-upward-dep: crate::light_manager")
+        self.assert_violations("1: ota-upward-dep: crate::light")
 
     def test_tlsr8266_pac_import_is_rejected(self) -> None:
         self.write_src("ota/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;"))
         self.assert_violations("1: ota-forbidden-crate: tlsr8266_pac")
 
+    def test_tlsr8266_radio_import_is_rejected(self) -> None:
+        self.write_src("ota/mod.rs", _lines("use tlsr8266_radio::rf::init;"))
+        self.assert_violations("1: ota-forbidden-crate: tlsr8266_radio")
+
+    def test_a_pac_call_without_an_import_is_rejected(self) -> None:
+        # The row bans the crate root, not the `use` statement: a fully
+        # qualified call reaches the same registers.
+        self.write_src(
+            "ota/mod.rs",
+            _lines("pub fn poke() { tlsr8266_pac::write_reg8(0x8000, 1); }"),
+        )
+        self.assert_violations("1: ota-forbidden-crate: tlsr8266_pac")
+
+    def test_a_use_inside_a_block_is_rejected(self) -> None:
+        # `_IMPORT_RE` is line-anchored, so a `use` after `{` used to be
+        # invisible; the reference scan does not care where the name sits.
+        self.write_src(
+            "ota/mod.rs",
+            _lines("pub fn poke() { use tlsr8266_pac::gpio; gpio::x(); }"),
+        )
+        self.assert_violations("1: ota-forbidden-crate: tlsr8266_pac")
+
+    def test_two_supers_from_a_child_module_reach_the_crate_root(self) -> None:
+        # `ota/fsm.rs` is `ota::fsm`, so two hops still land on the crate root;
+        # this is legal Rust the gate used to reject.
+        self.write_src("ota/fsm.rs", _lines("use super::super::config::VENDOR_ID;"))
+        self.assert_clean()
+
     def test_every_forbidden_module_is_rejected(self) -> None:
-        # The set is the whole application layer, not just `sdk`: `ota` must not
-        # name any of them, and `crate::state` is banned twice over.
-        banned = sorted(check_layering.OTA_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["ota"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1179,41 +1118,45 @@ class TestOtaPurityRule(_TempSrcTree):
                 "",
                 "#[cfg(test)]",
                 "mod tests {",
-                "    use crate::sdk::ble_app::callbacks::set_ota_hooks;",
+                "    use crate::app::set_ota_hooks;",
                 "    use tlsr8266_pac::fake_mmio::FakeMmio;",
                 "}",
             ),
         )
         self.assert_clean()
 
+    def test_logging_macro_is_rejected(self) -> None:
+        self.write_src(
+            "ota/fsm.rs",
+            _lines('pub fn f() { uprintln!("ota"); }'),
+        )
+        self.assert_violations("1: logging-macro: uprintln!")
+
+    def test_a_nested_module_still_belongs_to_the_row(self) -> None:
+        # A subdirectory must not let a module escape its subsystem's row.
+        self.write_src(
+            "ota/sub/chunk.rs", _lines("use crate::app::set_ota_hooks;")
+        )
+        self.assert_violations("1: ota-upward-dep: crate::app")
+
     def test_rule_is_scoped_to_the_ota_directory(self) -> None:
         # Control: the same import one directory up is production code but not
-        # `ota` code, so the purity rule leaves it to the layering rules.
-        self.write_src(
-            "sdk/ble_app/callbacks.rs",
-            _lines("use tlsr8266_pac::write_reg8;"),
-        )
+        # `ota` code, so the purity and logging rules leave it alone.
+        self.write_src("config.rs", _lines("use tlsr8266_pac::write_reg8;"))
         self.assert_clean()
 
 
 class TestFactoryResetPurityRule(_TempSrcTree):
-    """`rust/src/factory_reset/**` production code may not name the layers above.
+    """`rust/src/factory_reset/**` production code may not name the layers above."""
 
-    C-7 turned C-6's single `ota-purity` rule into the `SUBSYSTEM_PURITY` table;
-    this class pins the new `factory_reset` row.  The reset subsystem owns boot
-    detection and the configuration erase, and reaches downward only:
-    `tlsr8266_hal`, `crate::config`, `core`, `critical_section` and its own
-    `fsm`.  Everything above it — including its sibling `light` — is forbidden.
-    """
-
-    def test_sdk_import_is_rejected(self) -> None:
+    def test_sibling_import_is_rejected(self) -> None:
         path = self.write_src(
             "factory_reset/mod.rs",
-            _lines("use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_MESH_LTK;"),
+            _lines("use crate::app::reboot_into_pairing;"),
         )
-        out = self.assert_violations("1: factory_reset-upward-dep: crate::sdk")
+        out = self.assert_violations("1: factory_reset-upward-dep: crate::app")
         self.assertEqual(
-            out.splitlines()[0], f"{path}:1: factory_reset-upward-dep: crate::sdk"
+            out.splitlines()[0], f"{path}:1: factory_reset-upward-dep: crate::app"
         )
 
     def test_qualified_light_path_is_rejected(self) -> None:
@@ -1232,7 +1175,7 @@ class TestFactoryResetPurityRule(_TempSrcTree):
         self.assert_violations("1: factory_reset-forbidden-crate: tlsr8266_pac")
 
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.FACTORY_RESET_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["factory_reset"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1258,8 +1201,6 @@ class TestFactoryResetPurityRule(_TempSrcTree):
         self.assert_clean()
 
     def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
-        # The subsystem's own tests seed `FakeFlash`, which lives in the HAL, but
-        # they may also stand the PAC in: only production code is audited.
         self.write_src(
             "factory_reset/mod.rs",
             _lines(
@@ -1267,44 +1208,115 @@ class TestFactoryResetPurityRule(_TempSrcTree):
                 "",
                 "#[cfg(test)]",
                 "mod tests {",
-                "    use crate::sdk::ble_app::ble_ll_pair::PAIR_CONFIG_MESH_LTK;",
+                "    use crate::app::reboot_into_pairing;",
                 "    use tlsr8266_pac::fake_mmio::FakeMmio;",
                 "}",
             ),
         )
         self.assert_clean()
 
-    def test_rule_is_scoped_to_the_factory_reset_directory(self) -> None:
-        # Control: the same import one directory up is production code but not
-        # `factory_reset` code, so the purity rule leaves it to the layering
-        # rules (and `crate::sdk` there is legal).
+
+class TestLightPurityRule(_TempSrcTree):
+    """`rust/src/light/**` production code may not name the layers above it."""
+
+    def test_uart_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "light/mod.rs", _lines("use crate::uart::send_message;")
+        )
+        out = self.assert_violations("1: light-upward-dep: crate::uart")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: light-upward-dep: crate::uart"
+        )
+
+    def test_super_import_is_the_same_upward_dep(self) -> None:
+        # `super::uart` from `light/mod.rs` *is* `crate::uart`, and the report
+        # names the resolved module, not the spelling that reached it.
+        self.write_src("light/mod.rs", _lines("use super::uart::started;"))
+        out = self.assert_violations("1: light-upward-dep: crate::uart")
+        self.assertNotIn("super::", out)
+
+    def test_super_call_without_a_use_is_the_same_upward_dep(self) -> None:
+        # The relative spelling is an expression path here, not an import: the
+        # resolution reads every `super::` chain, so `super::uart::send()`
+        # cannot dodge the rule by skipping the `use`.
+        path = self.write_src(
+            "light/mod.rs", _lines("pub fn f() { super::uart::send(); }")
+        )
+        out = self.assert_violations("1: light-upward-dep: crate::uart")
+        self.assertEqual(
+            out.splitlines(), [f"{path}:1: light-upward-dep: crate::uart"]
+        )
+
+    def test_super_use_and_super_call_report_each_occurrence_once(self) -> None:
+        # Both spellings resolve to the same name, and each occurrence gets
+        # exactly one violation: never a duplicate, never a silent second form.
+        path = self.write_src(
+            "light/mod.rs",
+            _lines(
+                "use super::uart::started;",
+                "pub fn f() { super::uart::send(); }",
+            ),
+        )
+        out = self.assert_violations("1: light-upward-dep", "2: light-upward-dep")
+        self.assertEqual(
+            out.splitlines(),
+            [
+                f"{path}:1: light-upward-dep: crate::uart",
+                f"{path}:2: light-upward-dep: crate::uart",
+            ],
+        )
+
+    def test_a_super_chain_inside_a_use_group_is_reported_once(self) -> None:
+        # `iter_imports` composes the brace group and `super-escape` judges the
+        # composed chain; the expression-path scan must stay out of the use
+        # tree and not re-read the same chain as a second finding.
         self.write_src(
-            "sdk/ble_app/callbacks.rs",
-            _lines("use crate::sdk::ble_app::light_ll::packet_processing::*;"),
+            "light/mod.rs",
+            _lines("use super::{", "    super::uart::started,", "};"),
+        )
+        out = self.assert_violations("super-escape")
+        self.assertEqual(len(out.splitlines()), 1)
+
+    def test_inline_mod_super_chain_is_judged_by_the_file_scope(self) -> None:
+        # Known limitation, pinned: the `super` model is per file, so a chain
+        # inside an inline `mod` is resolved against `light/mod.rs` rather than
+        # `light::inner`.  It fails closed (reported, never silent), and no
+        # shipped subsystem has a production inline `mod`.
+        self.write_src(
+            "light/mod.rs",
+            _lines("mod inner { pub fn f() { super::uart::send(); } }"),
+        )
+        self.assert_violations("1: light-upward-dep: crate::uart")
+
+    def test_crate_root_glob_is_rejected(self) -> None:
+        # `use crate::*;` hands the whole root to the subsystem, so even a
+        # qualified `uart::send()` becomes reachable without a path the row can
+        # see.
+        self.write_src(
+            "light/mod.rs",
+            _lines("use crate::*;", "pub fn f() { uart::send_message(); }"),
+        )
+        self.assert_violations("1: light-glob-import: crate::*")
+
+    def test_super_glob_that_reaches_the_crate_root_is_rejected(self) -> None:
+        # One hop from `light/mod.rs` lands on the crate root, so this is the
+        # same glob as `use crate::*;` spelled relatively.
+        self.write_src("light/mod.rs", _lines("use super::*;"))
+        self.assert_violations("1: light-glob-import: crate::*")
+
+    def test_glob_of_a_deeper_module_is_accepted(self) -> None:
+        # A glob of the subsystem's own module reaches nothing above it.
+        self.write_src(
+            "light/mod.rs",
+            _lines("use crate::light::*;", "use super::transitions::*;"),
         )
         self.assert_clean()
 
-
-class TestLightPurityRule(_TempSrcTree):
-    """`rust/src/light/**` production code may not name the layers above it.
-
-    The light subsystem owns the lamp state, PWM, persistence, LED indication and
-    the light-domain wire protocol, and reaches downward only: `tlsr8266_hal`,
-    `mesh_protocol`, `crate::config` and the lamp's own maths/queue crates.
-    Everything above it is forbidden, `factory_reset` included: the two
-    subsystems are siblings, not dependencies.  Tests are exempt, because a
-    subsystem's own tests stand the HAL and PAC fakes in for hardware.
-    """
-
-    def test_sdk_import_is_rejected(self) -> None:
-        path = self.write_src(
-            "light/mod.rs",
-            _lines("use crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update;"),
-        )
-        out = self.assert_violations("1: light-upward-dep: crate::sdk")
-        self.assertEqual(
-            out.splitlines()[0], f"{path}:1: light-upward-dep: crate::sdk"
-        )
+    def test_leading_colons_pac_path_is_rejected(self) -> None:
+        # The absolute-path form is not a `use crate::` import and used to slip
+        # past the import-only scan.
+        self.write_src("light/mod.rs", _lines("use ::tlsr8266_pac::BIT;"))
+        self.assert_violations("1: light-forbidden-crate: tlsr8266_pac")
 
     def test_qualified_sibling_path_is_rejected(self) -> None:
         # `factory_reset` is a sibling subsystem: a fully-qualified call must not
@@ -1321,8 +1333,12 @@ class TestLightPurityRule(_TempSrcTree):
         )
         self.assert_violations("1: light-forbidden-crate: tlsr8266_pac")
 
+    def test_tlsr8266_radio_import_is_rejected(self) -> None:
+        self.write_src("light/transitions.rs", _lines("use tlsr8266_radio::rf::init;"))
+        self.assert_violations("1: light-forbidden-crate: tlsr8266_radio")
+
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.LIGHT_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["light"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1348,9 +1364,16 @@ class TestLightPurityRule(_TempSrcTree):
         )
         self.assert_clean()
 
+    def test_logging_is_allowed_because_the_row_omits_it(self) -> None:
+        # The lamp publishes state through a hook, but `crate::logging` is not
+        # in the light row, so naming it is not an inversion.
+        self.write_src(
+            "light/effects.rs",
+            _lines("use crate::logging::UartStream;", 'pub fn f() { uprintln!("l"); }'),
+        )
+        self.assert_clean()
+
     def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
-        # The subsystem's own tests install the HAL's host fakes; only
-        # production code is audited.
         self.write_src(
             "light/effects.rs",
             _lines(
@@ -1358,100 +1381,18 @@ class TestLightPurityRule(_TempSrcTree):
                 "",
                 "#[cfg(test)]",
                 "mod tests {",
-                "    use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;",
+                "    use crate::uart::reset_for_test;",
                 "    use tlsr8266_pac::fake_mmio::FakeMmio;",
                 "}",
             ),
         )
         self.assert_clean()
 
-    def test_rule_is_scoped_to_the_light_directory(self) -> None:
-        # Control: the same import one directory up is production code but not
-        # `light` code, so the purity rule leaves it to the layering rules.
-        self.write_src(
-            "main_light.rs",
-            _lines("use crate::sdk::rf_drv::set_advertisement_manufacturer_data;"),
-        )
-        self.assert_clean()
-
-
-class TestSubsystemPurityTable(_TempSrcTree):
-    """The per-directory purity table is the single source of every row."""
-
-    def test_table_has_every_application_subsystem(self) -> None:
-        # C-6 shipped `ota`, C-7 added `factory_reset` and `light`, and C-8
-        # completed the application layer with these four.
-        self.assertEqual(
-            set(check_layering.SUBSYSTEM_PURITY),
-            {
-                "ota",
-                "factory_reset",
-                "light",
-                "diagnostics",
-                "logging",
-                "uart",
-                "mesh",
-            },
-        )
-
-    def test_ota_row_still_matches_the_c6_constants(self) -> None:
-        # The generalisation must not quietly widen or narrow C-6's rule.
-        modules, crates = check_layering.SUBSYSTEM_PURITY["ota"]
-        self.assertEqual(modules, check_layering.OTA_FORBIDDEN_MODULES)
-        self.assertEqual(crates, check_layering.OTA_FORBIDDEN_CRATES)
-
-    def test_ota_helper_delegates_to_the_table(self) -> None:
-        # `audit_ota_purity_source` is C-6's public helper; it now reads the row.
-        violations = check_layering.audit_ota_purity_source(
-            _lines("use crate::sdk::ble_app::x;"), "ota/mod.rs"
-        )
-        self.assertEqual(
-            [(item.rule, item.violation) for item in violations],
-            [("ota-upward-dep", "crate::sdk")],
-        )
-
-    def test_no_row_forbids_its_own_name(self) -> None:
-        # A row lists siblings and layers *above* the subsystem. Adding the
-        # subsystem's own name would ban its own intra-module paths.
-        for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items():
-            with self.subTest(row=name):
-                self.assertNotIn(name, modules)
-
-    def test_uart_is_a_retired_name_fence_everywhere_but_its_own_row(self) -> None:
-        # C-8 renamed the bridge to `crate::uart`; the deleted spelling stays
-        # banned in every other row so it cannot come back by import. The bridge
-        # itself is the one row that omits it, because `uart` is its own name.
-        for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items():
-            if name == "uart":
-                continue
-            with self.subTest(row=name):
-                self.assertIn("uart_manager", modules)
-
-    def test_logging_row_resolves_to_the_module_file(self) -> None:
-        # `logging` is a single file, not a directory: the override keeps one
-        # table, and the match accepts an exact file path.
-        roots = check_layering.subsystem_roots("/src")
-        self.assertEqual(roots["logging"], os.path.join("/src", "logging.rs"))
-        self.assertEqual(roots["uart"], os.path.join("/src", "uart"))
-        self.assertEqual(roots["mesh"], os.path.join("/src", "mesh"))
-        self.assertEqual(
-            check_layering._subsystem_of("/src/logging.rs", roots), "logging"
-        )
-        self.assertEqual(
-            check_layering._subsystem_of("/src/uart/mod.rs", roots), "uart"
-        )
-        self.assertIsNone(check_layering._subsystem_of("/src/app.rs", roots))
-
 
 class TestDiagnosticsPurityRule(_TempSrcTree):
-    """`rust/src/diagnostics/**` production code may not name the layers above.
+    """`rust/src/diagnostics/**` production code may not name the layers above."""
 
-    `diagnostics` is the leaf of the application layer, so the whole rest of the
-    application is forbidden — `logging` included, because the sink is what
-    writes a panic body and the direction is `logging -> diagnostics::rtt`.
-    """
-
-    def test_sibling_import_is_rejected(self) -> None:
+    def test_logging_import_is_rejected(self) -> None:
         path = self.write_src(
             "diagnostics/mod.rs", _lines("use crate::logging::UartStream;")
         )
@@ -1460,8 +1401,15 @@ class TestDiagnosticsPurityRule(_TempSrcTree):
             out.splitlines()[0], f"{path}:1: diagnostics-upward-dep: crate::logging"
         )
 
+    def test_super_logging_import_is_rejected(self) -> None:
+        # `diagnostics/mod.rs` sits directly under the crate root, so
+        # `super::logging` is the sibling it may not name.
+        self.write_src(
+            "diagnostics/mod.rs", _lines("use super::logging::LOG_LEVEL_STATE;")
+        )
+        self.assert_violations("1: diagnostics-upward-dep: crate::logging")
+
     def test_qualified_uart_path_is_rejected(self) -> None:
-        # A fully-qualified call is not an import, and must not dodge the rule.
         self.write_src(
             "diagnostics/rtt.rs",
             _lines("pub fn f() { crate::uart::init(); }"),
@@ -1475,7 +1423,7 @@ class TestDiagnosticsPurityRule(_TempSrcTree):
         self.assert_violations("1: diagnostics-forbidden-crate: tlsr8266_pac")
 
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.DIAGNOSTICS_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["diagnostics"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1499,6 +1447,13 @@ class TestDiagnosticsPurityRule(_TempSrcTree):
         )
         self.assert_clean()
 
+    def test_logging_macro_is_rejected(self) -> None:
+        self.write_src(
+            "diagnostics/rtt.rs",
+            _lines('pub fn f() { uprint!("d"); }'),
+        )
+        self.assert_violations("1: logging-macro: uprint!")
+
     def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
         self.write_src(
             "diagnostics/mod.rs",
@@ -1516,12 +1471,7 @@ class TestDiagnosticsPurityRule(_TempSrcTree):
 
 
 class TestLoggingPurityRule(_TempSrcTree):
-    """`rust/src/logging.rs` production code may not name its siblings.
-
-    `logging` sits above `diagnostics` and below `uart`, so the transport and
-    every subsystem are forbidden while `crate::diagnostics` is legal. The row
-    is keyed on the module file itself, not a directory.
-    """
+    """`rust/src/logging.rs` production code may not name its siblings."""
 
     def test_uart_import_is_rejected(self) -> None:
         path = self.write_src("logging.rs", _lines("use crate::uart::send_message;"))
@@ -1542,7 +1492,7 @@ class TestLoggingPurityRule(_TempSrcTree):
         self.assert_clean()
 
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.LOGGING_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["logging"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1554,27 +1504,17 @@ class TestLoggingPurityRule(_TempSrcTree):
         self.assertEqual(len(banned), 7)
 
     def test_tlsr8266_pac_import_is_rejected(self) -> None:
-        self.write_src(
-            "logging.rs", _lines("use tlsr8266_pac::write_reg8;")
-        )
+        self.write_src("logging.rs", _lines("use tlsr8266_pac::write_reg8;"))
         self.assert_violations("1: logging-forbidden-crate: tlsr8266_pac")
 
     def test_rule_does_not_apply_to_an_app_root_file(self) -> None:
         # Control: the override is an exact path, not "every root-level file".
-        self.write_src(
-            "app.rs", _lines("use crate::uart::send_sync_panic;")
-        )
+        self.write_src("config.rs", _lines("use crate::uart::send_sync_panic;"))
         self.assert_clean()
 
 
 class TestUartPurityRule(_TempSrcTree):
-    """`rust/src/uart/**` production code may not name `mesh`, `sdk` or a peer.
-
-    The bridge owns framing, ACK/retry and the two embassy tasks, and reaches
-    `crate::logging` (for `uprintln!`) and the HAL. The mesh relay and the host
-    command execution arrive through `MeshEventHooks` / `UartCommandHandler`, so
-    `crate::mesh` and `crate::sdk` must stay out.
-    """
+    """`rust/src/uart/**` production code may not name `mesh` or a peer."""
 
     def test_mesh_import_is_rejected(self) -> None:
         path = self.write_src(
@@ -1585,21 +1525,64 @@ class TestUartPurityRule(_TempSrcTree):
             out.splitlines()[0], f"{path}:1: uart-upward-dep: crate::mesh"
         )
 
-    def test_sdk_import_is_rejected(self) -> None:
+    def test_light_import_is_rejected(self) -> None:
         self.write_src(
             "uart/protocol.rs",
-            _lines("use crate::sdk::ble_app::queues::enqueue_uart_tx;"),
+            _lines("use crate::light::transitions::LIGHT_HW;"),
         )
-        self.assert_violations("1: uart-upward-dep: crate::sdk")
+        self.assert_violations("1: uart-upward-dep: crate::light")
+
+    def test_super_mesh_import_is_rejected(self) -> None:
+        self.write_src("uart/mod.rs", _lines("use super::mesh::is_online;"))
+        self.assert_violations("1: uart-upward-dep: crate::mesh")
+
+    def test_crate_root_glob_is_rejected(self) -> None:
+        self.write_src(
+            "uart/mod.rs",
+            _lines("use crate::*;", "pub fn f() { mesh::is_online(); }"),
+        )
+        self.assert_violations("1: uart-glob-import: crate::*")
+
+    def test_crate_root_glob_inside_a_function_body_is_rejected(self) -> None:
+        # A `use` may begin a statement, not only a line: a block-local glob is
+        # the same crate-root glob and used to be invisible to the import scan.
+        self.write_src(
+            "uart/mod.rs",
+            _lines("pub fn f() { use crate::*; mesh::is_online(); }"),
+        )
+        self.assert_violations("1: uart-glob-import: crate::*")
+
+    def test_crate_root_glob_after_a_statement_is_rejected(self) -> None:
+        # The second statement position: after a `;`, so the glob starts
+        # mid-line rather than right after the block's `{`.
+        self.write_src(
+            "uart/mod.rs",
+            _lines("pub fn f() { let _ = 1; use super::*; }"),
+        )
+        self.assert_violations("1: uart-glob-import: crate::*")
+
+    def test_glob_of_a_deeper_module_inside_a_function_body_is_accepted(
+        self,
+    ) -> None:
+        # A glob of the subsystem's own subtree reaches nothing above it, so the
+        # wider statement detection must not turn every block-local glob red.
+        self.write_src(
+            "uart/mod.rs",
+            _lines(
+                "pub fn f() {",
+                "    use crate::uart::protocol::*;",
+                "    use super::protocol::*;",
+                "}",
+            ),
+        )
+        self.assert_clean()
 
     def test_tlsr8266_pac_import_is_rejected(self) -> None:
-        self.write_src(
-            "uart/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
-        )
+        self.write_src("uart/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;"))
         self.assert_violations("1: uart-forbidden-crate: tlsr8266_pac")
 
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.UART_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["uart"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1620,6 +1603,7 @@ class TestUartPurityRule(_TempSrcTree):
                 "use mesh_protocol::uart::UartData;",
                 "use tlsr8266_hal::drivers::uart::UartDriver;",
                 "use crate::logging::UartStream;",
+                "pub fn f() { uprintln!(\"uart\"); }",
                 "use protocol::decode_command;",
             ),
         )
@@ -1627,18 +1611,7 @@ class TestUartPurityRule(_TempSrcTree):
 
 
 class TestMeshPurityRule(_TempSrcTree):
-    """`rust/src/mesh/**` production code may not name `uart`, the lamp or `light`.
-
-    In the synthetic tree this fixture builds, `mesh` is the one subsystem
-    allowed `crate::sdk` — it owns the radio, the node table and `ble_app`'s
-    queues — and `crate::config` / `crate::logging` like everything else. The
-    row stays armed for that fixture; the shipped tree names `tlsr8266_radio`
-    instead (C-10 (#72) deleted `rust/src/sdk/`, and `git grep crate::sdk --
-    rust/` is empty). `app` (the composition root) and `irq` (its ISR layer)
-    are forbidden as well, so the module doc's "it never names `app`" is a
-    checked claim. The four application edges go through `MeshEventHooks`, which
-    is what keeps this row possible.
-    """
+    """`rust/src/mesh/**` production code may not name `uart` or the lamp."""
 
     def test_uart_import_is_rejected(self) -> None:
         path = self.write_src(
@@ -1656,13 +1629,32 @@ class TestMeshPurityRule(_TempSrcTree):
         self.assert_violations("1: mesh-upward-dep: crate::light")
 
     def test_tlsr8266_pac_import_is_rejected(self) -> None:
-        self.write_src(
-            "mesh/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
-        )
+        self.write_src("mesh/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;"))
         self.assert_violations("1: mesh-forbidden-crate: tlsr8266_pac")
 
+    def test_tlsr8266_radio_is_allowed(self) -> None:
+        # `mesh` owns the node table and drives the radio glue: it is the only
+        # row whose forbidden-crate set omits `tlsr8266_radio`.
+        self.write_src(
+            "mesh/mod.rs",
+            _lines(
+                "use tlsr8266_radio::facade::ble_init;",
+                "use tlsr8266_hal::mcu::clock::clock_time;",
+                "use crate::logging::UartStream;",
+                "pub fn f() { uprintln!(\"mesh\"); }",
+            ),
+        )
+        self.assert_clean()
+
+    def test_super_logging_call_is_allowed(self) -> None:
+        # Control for the expression-path scan: `logging` is absent from the
+        # mesh row, so `super::logging::x()` in `mesh/mod.rs` is `crate::logging`
+        # and stays legal in either spelling.
+        self.write_src("mesh/mod.rs", _lines("pub fn f() { super::logging::x(); }"))
+        self.assert_clean()
+
     def test_every_forbidden_module_is_rejected(self) -> None:
-        banned = sorted(check_layering.MESH_FORBIDDEN_MODULES - {"state"})
+        banned = sorted(check_layering.SUBSYSTEM_PURITY["mesh"][0])
         for module in banned:
             with self.subTest(module=module):
                 _write(
@@ -1673,9 +1665,8 @@ class TestMeshPurityRule(_TempSrcTree):
         self.assertEqual(len(out.splitlines()), len(banned))
 
     def test_composition_root_and_the_isr_layer_are_rejected(self) -> None:
-        # L5: the module doc claims `mesh` never names `app`, and `irq` sits
-        # above it. Both names must be in the row, or the claim is a comment
-        # that lets `mesh -> app` back in silently.
+        # The subsystem docs claim `mesh` never names `app`; `irq` sits above
+        # it.  Both names must be in the row, or the claim is a comment.
         self.write_src(
             "mesh/mod.rs",
             _lines(
@@ -1687,27 +1678,10 @@ class TestMeshPurityRule(_TempSrcTree):
             "1: mesh-upward-dep: crate::app", "2: mesh-upward-dep: crate::irq"
         )
         self.assertLessEqual(
-            {"app", "irq"}, set(check_layering.MESH_FORBIDDEN_MODULES)
+            {"app", "irq"}, set(check_layering.SUBSYSTEM_PURITY["mesh"][0])
         )
-
-    def test_sdk_config_and_logging_are_accepted(self) -> None:
-        # The legal downward direction: the SDK (radio + node table), `config`,
-        # the HAL, the wire crate and `uprintln!`.
-        self.write_src(
-            "mesh/mod.rs",
-            _lines(
-                "use critical_section;",
-                "use mesh_protocol::packet_types::Packet;",
-                "use tlsr8266_hal::mcu::clock::clock_time;",
-                "use crate::config::VENDOR_ID;",
-                "use crate::sdk::ble_app::queues::enqueue_mesh_tx;",
-                "pub fn f() { uprintln!(\"mesh\"); }",
-            ),
-        )
-        self.assert_clean()
 
     def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
-        # The subsystem's own tests use the lamp and the PAC fakes as oracles.
         self.write_src(
             "mesh/mod.rs",
             _lines(
@@ -1716,6 +1690,156 @@ class TestMeshPurityRule(_TempSrcTree):
                 "#[cfg(test)]",
                 "mod tests {",
                 "    use crate::light::transitions::LIGHT_CMD_CHANNEL;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+
+class TestSubsystemPurityTable(unittest.TestCase):
+    """The per-subsystem purity table is the single source of every row."""
+
+    def test_table_is_exactly_the_issue_sets(self) -> None:
+        # The normative table, pinned literally: widening or narrowing a row is
+        # a deliberate act that has to change this test too.
+        expected = {
+            "diagnostics": (
+                {"logging", "factory_reset", "ota", "light", "uart", "mesh", "app", "irq"},
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "logging": (
+                {"factory_reset", "ota", "light", "uart", "mesh", "app", "irq"},
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "factory_reset": (
+                {"diagnostics", "logging", "ota", "light", "uart", "mesh", "app", "irq"},
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "ota": (
+                {
+                    "diagnostics",
+                    "logging",
+                    "factory_reset",
+                    "light",
+                    "uart",
+                    "mesh",
+                    "app",
+                    "irq",
+                },
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "light": (
+                {"diagnostics", "factory_reset", "ota", "uart", "mesh", "app", "irq"},
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "uart": (
+                {"diagnostics", "factory_reset", "ota", "light", "mesh", "app", "irq"},
+                {"tlsr8266_pac", "tlsr8266_radio"},
+            ),
+            "mesh": (
+                {"diagnostics", "factory_reset", "ota", "light", "uart", "app", "irq"},
+                {"tlsr8266_pac"},
+            ),
+        }
+        actual = {
+            name: (set(modules), set(crates))
+            for name, (modules, crates) in check_layering.SUBSYSTEM_PURITY.items()
+        }
+        self.assertEqual(actual, expected)
+
+    def test_no_row_forbids_its_own_name(self) -> None:
+        # A row lists siblings and layers *above* the subsystem.  Adding the
+        # subsystem's own name would ban its own intra-module paths.
+        for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items():
+            with self.subTest(row=name):
+                self.assertNotIn(name, modules)
+
+    def test_every_row_bans_the_pac(self) -> None:
+        for name, (_modules, crates) in check_layering.SUBSYSTEM_PURITY.items():
+            with self.subTest(row=name):
+                self.assertIn("tlsr8266_pac", crates)
+
+    def test_only_the_mesh_row_allows_the_radio_crate(self) -> None:
+        allowed = {
+            name
+            for name, (_modules, crates) in check_layering.SUBSYSTEM_PURITY.items()
+            if "tlsr8266_radio" not in crates
+        }
+        self.assertEqual(allowed, {"mesh"})
+
+    def test_logging_is_allowed_in_the_rows_that_omit_it(self) -> None:
+        allowed = {
+            name
+            for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items()
+            if "logging" not in modules
+        }
+        # A row never names itself, so `logging` is expected too.
+        self.assertEqual(allowed, {"logging", "light", "uart", "mesh"})
+
+    def test_logging_macro_bans_only_the_leaf_subsystems(self) -> None:
+        self.assertEqual(
+            check_layering.LOGGING_MACRO_FORBIDDEN_SUBSYSTEMS,
+            frozenset({"diagnostics", "factory_reset", "ota"}),
+        )
+        for subsystem in check_layering.LOGGING_MACRO_FORBIDDEN_SUBSYSTEMS:
+            self.assertIn(subsystem, check_layering.SUBSYSTEM_PURITY)
+
+    def test_logging_row_resolves_to_the_module_file(self) -> None:
+        # `logging` is a single file, not a directory: the override keeps one
+        # table, and the match accepts an exact file path.
+        roots = check_layering.subsystem_roots("/src")
+        self.assertEqual(roots["logging"], os.path.join("/src", "logging.rs"))
+        self.assertEqual(roots["uart"], os.path.join("/src", "uart"))
+        self.assertEqual(roots["mesh"], os.path.join("/src", "mesh"))
+        self.assertEqual(
+            check_layering._subsystem_of("/src/logging.rs", roots), "logging"
+        )
+        self.assertEqual(
+            check_layering._subsystem_of("/src/uart/mod.rs", roots), "uart"
+        )
+        self.assertIsNone(check_layering._subsystem_of("/src/app.rs", roots))
+
+
+class TestAppPacRule(_TempSrcTree):
+    """The composition root and its ISR layer may not reference the PAC."""
+
+    def test_app_reference_is_rejected(self) -> None:
+        path = self.write_src(
+            "app.rs",
+            _lines("pub fn f() { tlsr8266_pac::write_reg8(0x408, 1); }"),
+        )
+        out = self.assert_violations("1: app-pac: tlsr8266_pac")
+        self.assertEqual(out.splitlines()[0], f"{path}:1: app-pac: tlsr8266_pac")
+
+    def test_irq_import_is_rejected(self) -> None:
+        self.write_src(
+            "irq.rs", _lines("use tlsr8266_pac::REG_IRQ_SRC;")
+        )
+        self.assert_violations("1: app-pac: tlsr8266_pac")
+
+    def test_a_reference_that_is_not_a_use_is_still_rejected(self) -> None:
+        # The rule is a reference check: a fully-qualified constant expression
+        # must not slip past it.
+        self.write_src(
+            "irq.rs",
+            _lines("pub fn f() { let _ = 0x630 | tlsr8266_pac::REG_BASE_ADDR; }"),
+        )
+        self.assert_violations("1: app-pac: tlsr8266_pac")
+
+    def test_the_rule_is_scoped_to_app_and_irq(self) -> None:
+        self.write_src("config.rs", _lines("use tlsr8266_pac::REG_BASE_ADDR;"))
+        self.assert_clean()
+
+    def test_test_only_pac_use_is_exempt(self) -> None:
+        # `app.rs`'s own tests stand `FakeMmio` in for the register block.
+        self.write_src(
+            "app.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
                 "    use tlsr8266_pac::fake_mmio::FakeMmio;",
                 "}",
             ),
@@ -1772,9 +1896,19 @@ class TestStaticMutRule(_TempSrcTree):
         self.write_src("x.rs", _lines("pub(crate) static mut X: u8 = 0;"))
         self.assert_violations("1: static-mut: static mut X")
 
+    def test_static_mut_split_across_lines_fails(self) -> None:
+        # Whitespace is not a token boundary: `static`, `mut` and the name may
+        # each start on a new line, and `cargo fmt` does not run over
+        # `#[rustfmt::skip]` code.
+        self.write_src("a.rs", _lines("pub static", "    mut X: u32 = 0;"))
+        self.write_src("b.rs", _lines("pub static mut", "    Y: u32 = 0;"))
+        out = self.assert_violations("1: static-mut: static mut X")
+        self.assertIn("b.rs:1: static-mut: static mut Y", out)
+        # The reported snippet is normalised to one line even though the item
+        # is not: a violation line must stay readable in a CI log.
+        self.assertEqual(len(out.splitlines()), 2, out)
+
     def test_static_mut_reference_forms_are_legal(self) -> None:
-        # Both patterns exist in the tree: the #44 executor receiver and the
-        # attribute-table accessor.
         self.write_src(
             "executor.rs",
             _lines(
@@ -1838,8 +1972,6 @@ class TestStaticMutRule(_TempSrcTree):
         self.assert_violations("1: static-mut: static mut X")
 
     def test_cfg_test_field_inside_a_test_module_is_ignored(self) -> None:
-        # No false positive: a field/statement attribute *inside* a test module
-        # is test code like the module itself.
         self.write_src(
             "x.rs",
             _lines(
@@ -1949,9 +2081,9 @@ class TestUndocumentedUnsafeRule(_TempSrcTree):
         self.assert_violations("4: undocumented-unsafe")
 
     def test_cfg_test_field_before_documented_unsafe_impls_is_clean(self) -> None:
-        # The exact shape shipped in `sdk/common/sync.rs`: the attribute is on a
+        # The shape the HAL's `sync.rs` once shipped: the attribute is on a
         # field, and both production `unsafe impl`s must stay visible *and*
-        # documented, so the real tree stays clean with the corrected count.
+        # documented.
         self.write_src(
             "x.rs",
             _lines(
@@ -1970,8 +2102,8 @@ class TestUndocumentedUnsafeRule(_TempSrcTree):
         self.assert_clean()
 
 
-class TestUnsafeBudgetRule(_TempSrcTree):
-    """The production `unsafe` count is a one-way ratchet."""
+class TestUnsafeRatchet(unittest.TestCase):
+    """The per-crate production `unsafe` ceiling is a one-way ratchet."""
 
     def _documented_sites(self, count: int) -> str:
         blocks = [
@@ -1980,17 +2112,88 @@ class TestUnsafeBudgetRule(_TempSrcTree):
         ]
         return "\n".join(blocks) + "\n"
 
+    def test_the_map_covers_the_whole_workspace(self) -> None:
+        self.assertEqual(
+            check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE,
+            {
+                "tlsr8266_mesh": 16,
+                "tlsr8266-pac": 6,
+                "tlsr8266-hal": 16,
+                "tlsr8266-radio": 44,
+                "mesh-protocol": 45,
+            },
+        )
+
     def test_at_the_ceiling_passes(self) -> None:
-        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
-        self.write_src("budget.rs", self._documented_sites(ceiling))
-        self.assert_clean()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / "src"
+        root.mkdir(parents=True)
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE["tlsr8266_mesh"]
+        _write(root / "budget.rs", self._documented_sites(ceiling))
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(root)),
+            str(root),
+            crate_name="tlsr8266_mesh",
+            enforce_budget=True,
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, ceiling)
 
     def test_exceeding_the_ceiling_fails(self) -> None:
-        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
-        self.write_src("budget.rs", self._documented_sites(ceiling + 1))
-        out = self.assert_violations("unsafe-budget")
-        self.assertIn(f"exceeds ceiling {ceiling}", out)
-        self.assertNotIn("undocumented-unsafe", out)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / "src"
+        root.mkdir(parents=True)
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE["tlsr8266-pac"]
+        _write(root / "budget.rs", self._documented_sites(ceiling + 1))
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(root)),
+            str(root),
+            crate_name="tlsr8266-pac",
+            enforce_budget=True,
+        )
+        self.assertEqual(total, ceiling + 1)
+        self.assertEqual(
+            [(item.rule, item.line) for item in violations],
+            [("unsafe-budget", 0)],
+        )
+        message = violations[0].violation
+        self.assertIn(f"{ceiling + 1} production unsafe tokens", message)
+        self.assertIn(f"ceiling {ceiling} for tlsr8266-pac", message)
+        # The advice must be right for an *added* site, which is the only way
+        # this violation can fire: the one-way framing belongs in the map's
+        # docstring, not in a message read in the opposite direction.
+        self.assertIn(
+            "remove unsafe, or justify and ratchet the map deliberately", message
+        )
+        self.assertNotIn("never raise it", message)
+        # A budget belongs to the whole tree, not to a source line: the report
+        # must not send a reader looking for line 0.
+        rendered = violations[0].render()
+        self.assertNotIn(":0:", rendered)
+        self.assertIn(": unsafe-budget: ", rendered)
+
+    def test_budget_is_off_for_an_explicit_root(self) -> None:
+        # Hermetic fixtures must not be charged to a shipping ceiling: the CLI
+        # passes `enforce_budget=False` whenever a root was named explicitly.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / "src"
+        root.mkdir(parents=True)
+        _write(root / "budget.rs", self._documented_sites(100))
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(root)), str(root), enforce_budget=False
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 100)
+
+    def test_an_unknown_crate_with_a_budget_is_an_error(self) -> None:
+        # Fail closed: a root without a ceiling must not be silently unbudgeted.
+        with self.assertRaises(check_layering.GateError):
+            check_layering.audit_universal(
+                [], "/tmp/whatever/src", crate_name="no-such-crate", enforce_budget=True
+            )
 
 
 class TestHostOnlyUnsafeBudget(_TempSrcTree):
@@ -2001,14 +2204,14 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
     audited tree and still compiled for host tests.
     """
 
-    def _audit_source(self, *lines: str) -> tuple[list, int]:
+    def _audit_file(self, *lines: str) -> tuple[list, int]:
         path = self.write_src("x.rs", _lines(*lines))
         return check_layering.audit_universal_source(
-            path.read_text(encoding="utf-8"), str(path)
+            path.read_text(encoding="utf-8"), str(path), module=("x",)
         )
 
     def test_host_only_item_is_excluded_from_the_budget(self) -> None:
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '#[cfg(not(target_os = "none"))]',
             "// SAFETY: (1) host-only probe.",
             "unsafe fn host_probe() {}",
@@ -2019,7 +2222,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(total, 1)  # only the production site is charged
 
     def test_host_only_unsafe_without_safety_still_fails(self) -> None:
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '#[cfg(not(target_os = "none"))]',
             "unsafe fn host_probe() {}",
         )
@@ -2030,7 +2233,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(total, 0)  # excluded from the budget, not from SAFETY
 
     def test_host_only_unsafe_with_safety_raises_nothing(self) -> None:
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '#[cfg(not(target_os = "none"))]',
             "// SAFETY: (1) host-only probe.",
             "unsafe fn host_probe() {}",
@@ -2039,7 +2242,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(total, 0)
 
     def test_host_only_static_mut_is_still_reported(self) -> None:
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '#[cfg(not(target_os = "none"))]',
             "static mut HOST_SCRATCH: u8 = 0;",
         )
@@ -2050,9 +2253,8 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(total, 0)
 
     def test_production_unsafe_is_still_counted(self) -> None:
-        # Positive control for the exclusion above: nothing but ordinary
-        # production code here, and it must move the budget.
-        violations, total = self._audit_source(
+        # Positive control for the exclusion above.
+        violations, total = self._audit_file(
             "// SAFETY: (1) production probe.",
             "unsafe fn production_probe() {}",
             "",
@@ -2063,7 +2265,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(total, 2)
 
     def test_unsafe_impl_and_nested_unsafe_inside_a_host_only_item(self) -> None:
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '#[cfg(not(target_os = "none"))]',
             "mod host {",
             "    // SAFETY: (4) audited wrapper.",
@@ -2084,7 +2286,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         # The host-only attribute here annotates a bare block, not an item, so
         # the extent is `_annotation_extent`'s job: stopping one block early
         # would hide the target branch below it from the budget.
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             "pub fn probe(v: u8) -> u8 {",
             '    #[cfg(not(target_os = "none"))]',
             "    {",
@@ -2105,7 +2307,7 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         # The attribute is matched on the raw text because `mask_source` blanks
         # the `"none"` literal; the mask guard is what keeps a copy of it in a
         # comment from swallowing the production `unsafe` below.
-        violations, total = self._audit_source(
+        violations, total = self._audit_file(
             '// historically: #[cfg(not(target_os = "none"))]',
             "",
             "// SAFETY: (1) production probe.",
@@ -2114,10 +2316,10 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
         self.assertEqual(violations, [])
         self.assertEqual(total, 1)
 
-    def test_host_only_sites_are_not_charged_to_the_firmware_ceiling(self) -> None:
+    def test_host_only_sites_are_not_charged_to_the_crate_ceiling(self) -> None:
         # Gate-level proof: more documented host-only `unsafe` sites than the
         # whole firmware ceiling must still pass, because none of them ship.
-        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE["tlsr8266_mesh"]
         self.write_src(
             "host.rs",
             "\n".join(
@@ -2128,11 +2330,18 @@ class TestHostOnlyUnsafeBudget(_TempSrcTree):
             )
             + "\n",
         )
-        self.assert_clean()
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(self.src_root)),
+            str(self.src_root),
+            crate_name="tlsr8266_mesh",
+            enforce_budget=True,
+        )
+        self.assertEqual(violations, [])
+        self.assertEqual(total, 0)
 
 
-class TestMeshProtocolCrateUniversalRules(_TempSrcTree):
-    """The workspace crate is audited like the firmware for `unsafe` invariants."""
+class TestWorkspaceCrateUniversalRules(_TempSrcTree):
+    """A workspace crate is audited like the firmware for `unsafe` invariants."""
 
     def test_static_mut_inside_the_crate_tree_fails(self) -> None:
         path = self.write_crate(
@@ -2166,20 +2375,29 @@ class TestMeshProtocolCrateUniversalRules(_TempSrcTree):
         )
         self.assert_clean()
 
-    def test_crate_unsafe_is_not_charged_to_the_firmware_budget(self) -> None:
-        # The ratchet is measured over rust/src only: a crate tree carrying more
-        # unsafe sites than the whole firmware ceiling must still pass.
-        ceiling = check_layering.MAX_PRODUCTION_UNSAFE
-        self.write_crate(
-            "crc.rs",
-            _lines(
-                *(
-                    f"// SAFETY: generated probe {index}.\nunsafe fn probe_{index}() {{}}"
-                    for index in range(ceiling + 1)
-                )
-            ),
+    def test_crate_ceiling_is_its_own(self) -> None:
+        # The PA C ceiling is 6, not the firmware's 16: `enforce_budget` on a
+        # crate root reads that crate's row.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        crate = Path(tmp.name) / "tlsr8266-pac" / "src"
+        crate.mkdir(parents=True)
+        ceiling = check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE["tlsr8266-pac"]
+        _write(
+            crate / "lib.rs",
+            "\n".join(
+                f"// SAFETY: probe {index}.\nunsafe fn probe_{index}() {{}}"
+                for index in range(ceiling + 1)
+            )
+            + "\n",
         )
-        self.assert_clean()
+        violations, total = check_layering.audit_universal(
+            check_layering.rust_files(str(crate)),
+            str(crate),
+            enforce_budget=True,
+        )
+        self.assertEqual(total, ceiling + 1)
+        self.assertEqual([item.rule for item in violations], ["unsafe-budget"])
 
     def test_crate_failure_is_labelled_with_its_own_root(self) -> None:
         self.write_crate("uart.rs", _lines("pub static mut SCRATCH: u8 = 0;"))
@@ -2196,32 +2414,21 @@ class TestMeshProtocolCrateUniversalRules(_TempSrcTree):
 
 
 class TestUniversalPassCli(_TempSrcTree):
-    """Each pass reports independently; either failure exits 1."""
+    """Each universal root reports independently; a failure exits 1."""
 
-    def test_universal_only_failure_exits_1(self) -> None:
+    def test_universal_failure_exits_1(self) -> None:
         self.write_src("x.rs", _lines("static mut GLOBAL: u8 = 0;"))
         code, out, err = self.run_gate()
         self.assertEqual(code, 1, out + err)
         self.assertIn("static-mut", out)
-        self.assertNotIn("upward-dep", out)
         self.assertIn("rust src audit FAILED", err)
-        self.assertNotIn("sdk layering FAILED", err)
 
-    def test_layering_only_failure_exits_1(self) -> None:
-        self.write("x.rs", _lines("use crate::app::App;"))
-        code, out, err = self.run_gate()
-        self.assertEqual(code, 1, out + err)
-        self.assertIn("upward-dep: crate::app", out)
-        self.assertIn("sdk layering FAILED", err)
-        self.assertNotIn("static-mut", out)
-        self.assertNotIn("undocumented-unsafe", out)
-
-    def test_all_passes_clean_prints_three_summaries(self) -> None:
+    def test_all_passes_clean_prints_one_summary_per_root(self) -> None:
         code, out, err = self.run_gate()
         self.assertEqual(code, 0, out + err)
         self.assertEqual(
             [line.split(":")[0] for line in out.splitlines()],
-            ["sdk layering OK", "rust src audit OK", "mesh-protocol audit OK"],
+            ["rust src audit OK", "mesh-protocol audit OK"],
         )
 
 
@@ -2236,8 +2443,6 @@ class TestRepeatableCrateRoot(_TempSrcTree):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main(
                 [
-                    "--root",
-                    str(self.root),
                     "--src-root",
                     str(self.src_root),
                     "--crate-root",
@@ -2254,7 +2459,10 @@ class TestRepeatableCrateRoot(_TempSrcTree):
 
     def test_crate_root_alone_audits_only_that_crate(self) -> None:
         # The repeatable flag replaces the default list: no implicit firmware
-        # pass and no implicit workspace crate is read along with it.
+        # pass and no implicit workspace crate is read along with it.  The
+        # banner names that third skipped pass too, so a copy-pasted invocation
+        # cannot look green with the purity rows unexecuted.
+        self.write_src("ota/mod.rs", _lines("use crate::app::App;"))
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main(["--crate-root", str(self.crate_root)])
@@ -2263,6 +2471,14 @@ class TestRepeatableCrateRoot(_TempSrcTree):
         self.assertNotIn("rust src audit", out.getvalue())
         self.assertNotIn("tlsr8266-pac audit", out.getvalue())
         self.assertNotIn("tlsr8266-hal audit", out.getvalue())
+        self.assertNotIn("cargo dag OK", out.getvalue())
+        # The planted firmware violation proves the skipped pass really is off.
+        self.assertNotIn("ota-upward-dep", out.getvalue())
+        self.assertEqual(
+            out.getvalue().splitlines()[0],
+            "hermetic mode: cargo DAG, unsafe ratchet and rust/src subsystem "
+            "pass skipped",
+        )
 
 
 if __name__ == "__main__":

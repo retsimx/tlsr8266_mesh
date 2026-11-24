@@ -13,7 +13,6 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
 use crate::sdk::ble_app::callbacks::dispatch_ota_snapshot;
 use crate::sdk::ble_app::light_ll::connection_management::{

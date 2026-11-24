@@ -1,7 +1,9 @@
+use core::cmp::min;
 use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+use crate::sdk::ble_app::config::RadioConfig;
 use crate::sdk::ble_app::flash_config::{
     pair_flash_clean, pair_load_key, pair_update_key, save_pair_info,
 };
@@ -66,22 +68,26 @@ use tlsr8266_pac::read_reg_system_tick;
 
 /// Mesh network name used for pairing and access control.
 /// 16-byte string identifier that devices must match to join the mesh network.
-pub(crate) static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
+///
+/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the
+/// only entry point from outside `sdk/`, and `crate::sdk` is the extraction
+/// boundary for C-10 (`crates/tlsr8266-radio`).
+pub(in crate::sdk) static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Mesh network password used for authentication during pairing.
 /// 16-byte password that must be provided to join the mesh network.
-pub(crate) static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
+pub(in crate::sdk) static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Long-Term Key (LTK) for mesh network encryption.
 /// 16-byte cryptographic key used to encrypt/decrypt mesh communications.
-pub(crate) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
+pub(in crate::sdk) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Current state of the mesh pairing process.
 /// Tracks progress through pairing sequence: idle, setting, transmitting, receiving, etc.
-pub(crate) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
+pub(in crate::sdk) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
     CriticalSectionMutex::new(ePairState::PairSetted);
 
 /// Initialization Vector for Master (IVM) used in mesh encryption.
@@ -91,14 +97,38 @@ static PAIR_IVM: CriticalSectionMutex<[u8; 8]> =
 
 /// Session key derived from mesh password for secure pairing.
 /// 16-byte key used during the pairing process to encrypt configuration data.
-pub(crate) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
+pub(in crate::sdk) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
+
+/// Seed the pairing configuration buffers from an injected [`RadioConfig`].
+///
+/// Each 16-byte buffer is rebuilt from zero, so a short configured value leaves
+/// trailing NULs and a value longer than the buffer is clamped with `min`,
+/// never overflowing it.
+pub(in crate::sdk::ble_app) fn seed_pair_config(cfg: &RadioConfig) {
+    let mut encode_sk = [0u8; 16];
+    let len = min(cfg.default_mesh_pwd_encode_sk.len(), encode_sk.len());
+    encode_sk[..len].copy_from_slice(&cfg.default_mesh_pwd_encode_sk.as_bytes()[..len]);
+    *PAIR_CONFIG_PWD_ENCODE_SK.lock() = encode_sk;
+
+    let mut mesh_name = [0u8; 16];
+    let len = min(cfg.default_mesh_name.len(), mesh_name.len());
+    mesh_name[..len].copy_from_slice(&cfg.default_mesh_name.as_bytes()[..len]);
+    *PAIR_CONFIG_MESH_NAME.lock() = mesh_name;
+
+    let mut mesh_pwd = [0u8; 16];
+    let len = min(cfg.default_mesh_pwd.len(), mesh_pwd.len());
+    mesh_pwd[..len].copy_from_slice(&cfg.default_mesh_pwd.as_bytes()[..len]);
+    *PAIR_CONFIG_MESH_PWD.lock() = mesh_pwd;
+
+    *PAIR_CONFIG_MESH_LTK.lock() = cfg.default_mesh_ltk;
+}
 
 /// Initialization Vector for Slave (IVS) used in mesh encryption.
 /// 8-byte nonce used with AES encryption for securing mesh communications from slave.
 static PAIR_IVS: CriticalSectionMutex<[u8; 8]> = CriticalSectionMutex::new([0; 8]);
 
-pub(crate) struct PairStateData {
+pub struct PairStateData {
     pub pair_ltk: [u8; 16],
     pub pair_sk: [u8; 16],
     pub pair_work: [u8; 16],
@@ -110,25 +140,29 @@ pub(crate) struct PairStateData {
     pub pair_randm: [u8; 8],
 }
 
+/// Power-on pairing state, shared by the static initialiser and the test reset
+/// so a reset cannot drift from a fresh boot.
+pub(in crate::sdk::ble_app) const DEFAULT_PAIR_STATE: PairStateData = PairStateData {
+    pair_ltk: [0; 16],
+    pair_sk: [0; 16],
+    pair_work: [0; 16],
+    pair_nn: [0; 16],
+    pair_pass: [0; 16],
+    pair_ltk_mesh: [0; 16],
+    pair_sk_copy: [0; 16],
+    pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
+    pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
+};
+
 /// Comprehensive pairing state data containing all cryptographic material.
 /// Stores LTK, session keys, work buffers, network names, passwords, and random values
 /// used during the mesh pairing and authentication process.
-pub(crate) static PAIR_STATE: CriticalSectionMutex<PairStateData> =
-    CriticalSectionMutex::new(PairStateData {
-        pair_ltk: [0; 16],
-        pair_sk: [0; 16],
-        pair_work: [0; 16],
-        pair_nn: [0; 16],
-        pair_pass: [0; 16],
-        pair_ltk_mesh: [0; 16],
-        pair_sk_copy: [0; 16],
-        pair_rands: [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7],
-        pair_randm: [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
-    });
+pub(in crate::sdk) static PAIR_STATE: CriticalSectionMutex<PairStateData> =
+    CriticalSectionMutex::new(DEFAULT_PAIR_STATE);
 
 /// Global flag indicating whether mesh pairing mode is currently active.
 /// When true, the device accepts pairing commands and can join new mesh networks.
-pub(crate) static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
+pub(in crate::sdk) static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Current state of the BLE pairing finite state machine.
 /// Tracks progress through pairing steps: idle, random exchange, key exchange, etc.
@@ -136,7 +170,7 @@ static BLE_PAIR_ST: AtomicPairState = AtomicPairState::new(PairState::Idle);
 
 /// Flag indicating successful completion of pairing login process.
 /// Set to true when device has been authenticated and can access mesh functions.
-pub(crate) static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
+pub(in crate::sdk) static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
 
 /// Flag indicating whether mesh encryption is currently enabled.
 /// When true, all mesh communications are encrypted using the configured LTK.
@@ -144,7 +178,7 @@ static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Access code derived from mesh name and password for RF communication.
 /// 32-bit value used to identify and filter mesh network traffic.
-pub(crate) static PAIR_AC: AtomicU32 = AtomicU32::new(0);
+pub(in crate::sdk) static PAIR_AC: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating a pairing read operation is waiting for response.
 /// Used to track pending configuration read requests during pairing.
@@ -152,7 +186,7 @@ static PAIR_READ_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Global security enable flag for mesh communications.
 /// When true, all mesh packets are encrypted before transmission.
-pub(crate) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
+pub(in crate::sdk) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
 
 // Replace the raw atomic with an atomic PairState wrapper
 pub(crate) struct AtomicPairState(AtomicU8);

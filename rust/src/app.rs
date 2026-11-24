@@ -1,5 +1,4 @@
 #![coverage(off)]
-use core::cmp::min;
 use core::ptr::addr_of;
 use core::sync::atomic::Ordering;
 
@@ -27,22 +26,18 @@ use crate::mesh::{
     mesh_security_enable, set_mesh_event_hooks, MeshEventHooks,
 };
 use crate::ota::{check_ota_area_startup, rf_mesh_data_ota, set_ota_radio_ops, OtaRadioOps};
-use crate::sdk::ble_app::ble_ll_pair::{
-    MESH_PAIR_ENABLE, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
-    PAIR_CONFIG_PWD_ENCODE_SK, PAIR_LOGIN_OK, SECURITY_ENABLE,
-};
 use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, set_ota_hooks, BleAppHooks, OtaHooks};
 use crate::sdk::ble_app::flash_config::{dev_addr_with_mac_flag, dev_addr_with_mac_match};
 use crate::sdk::ble_app::light_ll::connection_management::{
     light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
-    BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
 };
 use crate::sdk::ble_app::light_ll::mesh_management::mesh_node_table_init;
 use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
-use crate::sdk::ble_app::rf_drv_8266::{
-    rf_drv_init, rf_link_slave_init, rf_set_power_level_index, ADV_PRI_DATA, ADV_RSP_PRI_DATA,
-    DEVICE_ADDRESS, GROUP_ADDRESS, MAC_ID, MAX_MESH_NAME_LEN,
-    MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
+use crate::sdk::ble_app::rf_drv_8266::{rf_drv_init, rf_link_slave_init, rf_set_power_level_index};
+use crate::sdk::ble_app::{
+    check_auth_timeout, device_address, group_addresses, is_paired_login, mac_id, radio_config,
+    set_adv_private_data, stop_slave_read_status_if_busy, try_send_terminate_packet,
+    write_out_of_mesh_credentials,
 };
 use crate::sdk::light::*;
 use crate::sdk::rf_drv::*;
@@ -53,18 +48,38 @@ use heapless::Vec;
 use mesh_protocol::mesh_types::{LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP};
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use mesh_protocol::uart::UartData;
-use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_write_page};
 use tlsr8266_hal::drivers::pwm::{pwm_set_duty, pwm_start};
 use tlsr8266_hal::mcu::clock::{
-    clock_init, clock_time_exceed, is_16mhz_xtal, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
+    clock_init, is_16mhz_xtal, CLOCK_SYS_CLOCK_1S, CLOCK_SYS_CLOCK_1US,
 };
-use tlsr8266_hal::mcu::crypto::encode_password;
 use tlsr8266_hal::mcu::dma::dma_init;
 use tlsr8266_hal::mcu::gpio::{gpio_init, gpio_set_func, AS_GPIO};
 use tlsr8266_hal::mcu::irq_i::{irq_disable, irq_enable, irq_init};
 use tlsr8266_hal::mcu::watchdog::wd_clear;
 use tlsr8266_hal::pm::{blink_ota_led_ok, light_sw_reboot, usb_dp_pullup_en};
+
+/// The board configuration the radio layer runs with.
+///
+/// `sdk/` may not name `crate::config` or `crate::version` (design 031 / C-9), so
+/// this composition root is the single place the two meet: `main_task` installs
+/// the struct before the radio starts, and the default is only the host-test
+/// fallback.
+pub(crate) const RADIO_CONFIG: crate::sdk::ble_app::RadioConfig =
+    crate::sdk::ble_app::RadioConfig {
+        vendor_id: crate::config::VENDOR_ID,
+        build_version: crate::version::BUILD_VERSION,
+        device_name: crate::config::DEVICE_NAME,
+        default_mesh_name: crate::config::MESH_NAME,
+        default_mesh_pwd: crate::config::MESH_PWD,
+        default_mesh_pwd_encode_sk: crate::config::MESH_PWD_ENCODE_SK,
+        default_mesh_ltk: crate::config::MESH_LTK,
+        out_of_mesh_name: crate::config::OUT_OF_MESH,
+        pair_valid_flag: crate::config::PAIR_VALID_FLAG,
+        flash_adr_mac: crate::config::FLASH_ADR_MAC,
+        flash_adr_pairing: crate::config::FLASH_ADR_PAIRING,
+        flash_adr_dev_grp_adr: crate::config::FLASH_ADR_DEV_GRP_ADR,
+    };
 
 /// The application's single root task.
 ///
@@ -150,9 +165,11 @@ pub async fn main_task(spawner: Spawner) {
         crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update,
     );
 
-    // Copy the password in to the pair config
-    PAIR_CONFIG_PWD_ENCODE_SK.lock()[0..MESH_PWD_ENCODE_SK.len()]
-        .copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[0..MESH_PWD_ENCODE_SK.len()]);
+    // Install the board configuration and the GATT values it drives before the
+    // radio starts: the first advertisement must already carry the vendor id and
+    // the first GATT read the configured names and version.
+    crate::sdk::ble_app::set_radio_config(RADIO_CONFIG);
+    crate::sdk::app_att_light::init_gatt_profile(&RADIO_CONFIG);
 
     rf_drv_init(true);
 
@@ -321,7 +338,7 @@ fn uart_command_hook(cmd: UartCommand) -> [u8; 3] {
 /// never imports the SDK.
 #[inline(never)]
 pub fn uart_mesh_rx_hook(pkt: &Packet) {
-    crate::uart::on_mesh_rx_packet(pkt, DEVICE_ADDRESS.get());
+    crate::uart::on_mesh_rx_packet(pkt, device_address());
 }
 
 #[cfg_attr(test, mry::mry)]
@@ -338,16 +355,6 @@ pub fn light_hw_timer_config() {
 #[cfg_attr(test, mry::mry)]
 fn light_init_default() {
     light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
-
-    PAIR_CONFIG_MESH_NAME.lock().fill(0);
-    let len = min(MESH_NAME.len(), MAX_MESH_NAME_LEN);
-    PAIR_CONFIG_MESH_NAME.lock()[0..len].copy_from_slice(&MESH_NAME.as_bytes()[0..len]);
-
-    PAIR_CONFIG_MESH_PWD.lock().fill(0);
-    let len = min(MESH_PWD.len(), 16);
-    PAIR_CONFIG_MESH_PWD.lock()[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-
-    PAIR_CONFIG_MESH_LTK.lock()[0..16].copy_from_slice(&MESH_LTK[0..16]);
 
     rf_link_slave_pairing_enable(true);
     rf_set_power_level_index(RfPower::Power8dBm as u32);
@@ -382,19 +389,16 @@ pub fn user_init() -> LightFlashStore {
     rf_link_slave_init(40000);
 
     // Print MAC address now that it has been loaded from flash (reversed byte order)
-    {
-        // Scoped: the advertisement payload below takes the same lock.
-        let mac = MAC_ID.lock();
-        uprintln!(
-            "MAC Address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            mac[5],
-            mac[4],
-            mac[3],
-            mac[2],
-            mac[1],
-            mac[0]
-        );
-    }
+    let mac = mac_id();
+    uprintln!(
+        "MAC Address: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[5],
+        mac[4],
+        mac[3],
+        mac[2],
+        mac[1],
+        mac[0]
+    );
 
     match factory_reset::handle_boot_sequence() {
         ResetAction::FactoryResetAndReboot => {
@@ -407,11 +411,11 @@ pub fn user_init() -> LightFlashStore {
     }
 
     // Brand the device: the light subsystem builds the two private advertisement
-    // payloads from the loaded MAC, the vendor id and the device address.
-    let (pri, rsp) = build_vendor_adv_data(*MAC_ID.lock(), VENDOR_ID, DEVICE_ADDRESS.get());
-    *ADV_PRI_DATA.lock() = pri;
-    *ADV_RSP_PRI_DATA.lock() = rsp;
-    set_advertisement_manufacturer_data(&adv_private_to_bytes(&pri));
+    // payloads from the loaded MAC, the configured vendor id and the device
+    // address, and the radio facade installs them together with the manufacturer
+    // bytes the advertisement filter matches on.
+    let (pri, rsp) = build_vendor_adv_data(mac_id(), radio_config().vendor_id, device_address());
+    set_adv_private_data(pri, &adv_private_to_bytes(&pri), rsp);
 
     device_status_update();
     mesh_security_enable(true);
@@ -420,17 +424,10 @@ pub fn user_init() -> LightFlashStore {
 }
 
 fn light_auth_check() {
-    if SECURITY_ENABLE.get()
-        && !PAIR_LOGIN_OK.get()
-        && BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get() != 0
-        && clock_time_exceed(
-            BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(),
-            AUTH_TIME * 1000 * 1000,
-        )
-    {
-        //rf_link_slave_disconnect(); // must login in 60s after connected, if need
-        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0);
-    }
+    // The auth-window policy lives on the radio facade: with security on and no
+    // login, the first-connection timestamp is cleared once `AUTH_TIME` has
+    // elapsed. The connection itself is kept.
+    check_auth_timeout(AUTH_TIME);
 }
 
 /// One main-loop tick's worth of light work.
@@ -473,9 +470,9 @@ pub fn rf_link_response_callback(
     if crate::light::build_light_status_response(
         ppp,
         p_req,
-        DEVICE_ADDRESS.get(),
-        &GROUP_ADDRESS.lock(),
-        *MAC_ID.lock(),
+        device_address(),
+        &group_addresses(),
+        mac_id(),
     )
     .is_ok()
     {
@@ -483,9 +480,10 @@ pub fn rf_link_response_callback(
     }
 
     // Everything else is the OTA seam: the same prologue, then the three opcodes.
+    let address = device_address();
     ppp.dst = p_req.src;
-    ppp.src[0] = (DEVICE_ADDRESS.get() & 0xff) as u8;
-    ppp.src[1] = ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
+    ppp.src[0] = (address & 0xff) as u8;
+    ppp.src[1] = ((address >> 8) & 0xff) as u8;
 
     let params = &p_req.val[3..13];
     ppp.val[3..10 + 3].fill(0);
@@ -603,44 +601,6 @@ pub fn rf_link_data_callback(p: &Packet) {
     }
 }
 
-/// Re-write the out-of-mesh pairing credentials after a kick-out erased the
-/// configuration sectors.
-///
-/// Four 16-byte blocks, in the slot layout the pairing code reads:
-/// flags at `+0` (LTK at `+48`, encoded password at `+32`, network name at
-/// `+16`).
-fn write_out_of_mesh_credentials() {
-    let pairing_addr = FLASH_ADR_PAIRING;
-    let mut flags: [u8; 16] = [0; 16];
-    let mut name: [u8; 16] = [0; 16];
-    let mut password: [u8; 16] = [0; 16];
-
-    flags[0] = PAIR_VALID_FLAG;
-    flags[15] = PAIR_VALID_FLAG;
-    let len = min(OUT_OF_MESH.len(), name.len());
-    name[0..len].copy_from_slice(&OUT_OF_MESH.as_bytes()[0..len]);
-    let len = min(MESH_PWD.len(), password.len());
-    password[0..len].copy_from_slice(&MESH_PWD.as_bytes()[0..len]);
-
-    // Encrypt the password before storing. The key is copied out of the mutex
-    // first so the lock is released before `encode_password` runs (its AES call
-    // masks interrupts).
-    let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
-    let encoded_password = encode_password(&key, &password);
-
-    // Only write the rejoin flag when mesh pairing is enabled.
-    if MESH_PAIR_ENABLE.get() {
-        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
-        flags[1] = 1;
-    }
-
-    let mut ltk: [u8; 16] = *PAIR_CONFIG_MESH_LTK.lock();
-    flash_write_page(pairing_addr + 48, 16, ltk.as_mut_ptr());
-    flash_write_page(pairing_addr + 32, 16, encoded_password.as_ptr());
-    flash_write_page(pairing_addr + 16, 16, name.as_ptr());
-    flash_write_page(pairing_addr, 16, flags.as_ptr());
-}
-
 #[inline(never)]
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_light_event_callback(status: u8) {
@@ -736,12 +696,10 @@ fn mesh_pair_proc_hook() {
 /// no `start_gatt_ota` for this hook to call.
 #[inline(never)]
 fn ota_begin_gatt_hook() -> bool {
-    if !crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK.get() {
+    if !is_paired_login() {
         return false;
     }
-    if crate::sdk::ble_app::light_ll::status_management::SLAVE_READ_STATUS_BUSY.get() != 0 {
-        crate::sdk::ble_app::light_ll::status_management::rf_link_slave_read_status_stop();
-    }
+    stop_slave_read_status_if_busy();
     true
 }
 
@@ -749,13 +707,7 @@ fn ota_begin_gatt_hook() -> bool {
 /// was actually queued, so a full buffer neither arms the countdown nor reboots.
 #[inline(never)]
 fn ota_send_terminate_hook() -> bool {
-    if !crate::sdk::ble_app::light_ll::packet_processing::is_add_packet_buf_ready() {
-        return false;
-    }
-    let _ = crate::sdk::ble_app::light_ll::packet_processing::rf_link_add_tx_packet(
-        &crate::sdk::ble_app::rf_drv_8266::PKT_TERMINATE,
-    );
-    true
+    try_send_terminate_packet()
 }
 
 #[cfg(test)]
@@ -783,7 +735,6 @@ mod tests {
     use crate::sdk::ble_app::flash_config::{
         mock_dev_addr_with_mac_flag, mock_dev_addr_with_mac_match,
     };
-    use crate::sdk::ble_app::light_ll::connection_management::BUFF_RESPONSE;
     use crate::sdk::ble_app::light_ll::connection_management::{
         mock_light_check_tick_per_us, mock_rf_link_slave_pairing_enable, mock_rf_link_slave_proc,
     };
@@ -794,11 +745,17 @@ mod tests {
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::ble_app::light_ll::status_management::{
         DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-        DEVICE_STATUS_RECORD_INDEX, SLAVE_READ_STATUS_BUSY,
+        DEVICE_STATUS_RECORD_INDEX,
     };
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
-    use crate::sdk::ble_app::rf_drv_8266::ADV_DATA;
+    use crate::sdk::ble_app::{
+        adv_private_data, buffered_response, dev_addr_validation_pending,
+        first_connection_timestamp, reset_radio_state_for_test, set_dev_addr_validation_pending,
+        set_device_address, set_first_connection_timestamp, set_group_addresses, set_mac_id,
+        set_mesh_pair_enabled, set_pair_config_mesh_credentials, set_paired_login,
+        set_security_enabled, set_slave_read_status_busy,
+    };
     use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;
     use crate::uart::{
         mock_on_mesh_rx_packet, mock_send_message, on_mesh_rx_packet, reset_for_test, send_message,
@@ -807,10 +764,11 @@ mod tests {
     use mesh_protocol::packet_types::PacketL2capHead;
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use mry::Any;
+    use tlsr8266_hal::common::sync::SimplifyLS;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
-    use tlsr8266_hal::mcu::crypto::fake_crypto;
+    use tlsr8266_hal::mcu::crypto::{encode_password, fake_crypto};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{FLD_IRQ, FLD_TMR};
 
@@ -842,9 +800,9 @@ mod tests {
 
     /// Resets global state for testing
     fn reset_test_globals() {
-        SECURITY_ENABLE.set(false);
-        PAIR_LOGIN_OK.set(false);
-        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0);
+        set_security_enabled(false);
+        set_paired_login(false);
+        set_first_connection_timestamp(0);
     }
 
     /// Creates a test PacketAttValue with default values
@@ -925,6 +883,12 @@ mod tests {
         let rf_drv = task_body
             .find("rf_drv_init(true)")
             .expect("main_task must initialise the RF driver");
+        let radio_config = task_body
+            .find("set_radio_config(")
+            .expect("main_task must install the radio configuration");
+        let gatt_profile = task_body
+            .find("init_gatt_profile(")
+            .expect("main_task must initialise the GATT profile");
 
         assert!(
             uart_init < uart_tx_ops && uart_tx_ops < log_sinks && uart_cmd < banner,
@@ -944,6 +908,27 @@ mod tests {
                 && status_hook < rf_drv
                 && mesh_hooks < rf_drv,
             "every handler registration must precede rf_drv_init(true)"
+        );
+        assert!(
+            radio_config < gatt_profile && gatt_profile < rf_drv,
+            "the radio configuration must be installed and the config-driven GATT \
+             values written before rf_drv_init(true)"
+        );
+
+        // `RADIO_CONFIG` is defined above `main_task`, so search only the head of
+        // the file: this test's own literals would otherwise satisfy the needle.
+        let config_head = &src[..task_start];
+        let config_start = config_head
+            .find("const RADIO_CONFIG:")
+            .expect("app.rs must define RADIO_CONFIG");
+        let config_tail = &config_head[config_start..];
+        let config_body = &config_tail[..config_tail
+            .find("};")
+            .expect("RADIO_CONFIG must be a struct literal")];
+
+        assert!(
+            config_body.contains("build_version: crate::version::BUILD_VERSION"),
+            "RADIO_CONFIG must carry the build version, or the target reports 0"
         );
     }
 
@@ -1014,7 +999,7 @@ mod tests {
     #[mry::lock(on_mesh_rx_packet)]
     fn test_uart_mesh_rx_hook_passes_the_device_address() {
         reset_for_test();
-        DEVICE_ADDRESS.set(0x1234);
+        set_device_address(0x1234);
         mock_on_mesh_rx_packet(Any, 0x1234).returns(());
 
         uart_mesh_rx_hook(&create_test_packet());
@@ -1055,25 +1040,22 @@ mod tests {
     /// `ota_begin_gatt_hook` must refuse a GATT OTA until pairing succeeds.
     #[test]
     fn test_ota_begin_gatt_hook_requires_pairing() {
-        use crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK;
-        use crate::sdk::ble_app::light_ll::status_management::SLAVE_READ_STATUS_BUSY;
-
-        SLAVE_READ_STATUS_BUSY.set(0);
-        PAIR_LOGIN_OK.set(false);
+        set_slave_read_status_busy(0);
+        set_paired_login(false);
         assert_eq!(
             ota_begin_gatt_hook(),
             false,
             "an unpaired link must not begin a GATT OTA"
         );
 
-        PAIR_LOGIN_OK.set(true);
+        set_paired_login(true);
         assert_eq!(
             ota_begin_gatt_hook(),
             true,
             "a paired link with an idle status read may begin a GATT OTA"
         );
 
-        PAIR_LOGIN_OK.set(false);
+        set_paired_login(false);
     }
 
     // --- Tests for light_hw_timer_config ---
@@ -1133,9 +1115,9 @@ mod tests {
         reset_test_globals();
 
         // Setup: Security enabled, not logged in, and timeout exceeded
-        SECURITY_ENABLE.set(true);
-        PAIR_LOGIN_OK.set(false);
-        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(1000000);
+        set_security_enabled(true);
+        set_paired_login(false);
+        set_first_connection_timestamp(1000000);
 
         // The authentication window is 60 s: park the tick past it.
         reset_fakes();
@@ -1146,7 +1128,7 @@ mod tests {
 
         // Verify: Timestamp should be cleared
         assert_eq!(
-            BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(),
+            first_connection_timestamp(),
             0,
             "Timestamp should be cleared after timeout"
         );
@@ -1160,17 +1142,18 @@ mod tests {
         reset_test_globals();
 
         // Setup: Security enabled and logged in
-        SECURITY_ENABLE.set(true);
-        PAIR_LOGIN_OK.set(true);
-        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(1000000);
+        set_security_enabled(true);
+        set_paired_login(true);
+        set_first_connection_timestamp(1000000);
 
         // Execute
         light_auth_check();
 
         // Verify: Function should not crash (logged in means condition check short-circuits)
-        // Since PAIR_LOGIN_OK is true, the whole condition is false and function returns early
+        // Since the host is already logged in, the whole condition is false and
+        // the function returns early.
         assert_eq!(
-            BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(),
+            first_connection_timestamp(),
             1000000,
             "Timestamp should remain unchanged"
         );
@@ -1184,15 +1167,15 @@ mod tests {
         reset_test_globals();
 
         // Setup: Security disabled
-        SECURITY_ENABLE.set(false);
-        PAIR_LOGIN_OK.set(false);
-        BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(1000000);
+        set_security_enabled(false);
+        set_paired_login(false);
+        set_first_connection_timestamp(1000000);
 
         // Execute
         light_auth_check();
 
         // Verify: Timestamp should remain unchanged
-        assert_eq!(BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get(), 1000000);
+        assert_eq!(first_connection_timestamp(), 1000000);
     }
 
     // --- Tests for rf_link_response_callback ---
@@ -1203,7 +1186,7 @@ mod tests {
 
         // Setup
         crate::light::reset_for_test();
-        DEVICE_ADDRESS.set(0x1234);
+        set_device_address(0x1234);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1231,15 +1214,12 @@ mod tests {
         // This test verifies GET_GROUP1 response returns group addresses
 
         // Setup
-        DEVICE_ADDRESS.set(0x1234);
-        let mut group_address = GROUP_ADDRESS.lock();
-        group_address[0] = 0x11;
-        group_address[1] = 0x22;
-        group_address[2] = 0x33;
-        for i in 3..MAX_GROUP_COUNT as usize {
-            group_address[i] = 0;
-        }
-        drop(group_address);
+        set_device_address(0x1234);
+        let mut group_addresses_seed = [0u16; MAX_GROUP_COUNT as usize];
+        group_addresses_seed[0] = 0x11;
+        group_addresses_seed[1] = 0x22;
+        group_addresses_seed[2] = 0x33;
+        set_group_addresses(group_addresses_seed);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1266,14 +1246,11 @@ mod tests {
         // This test verifies GET_GROUP2 response returns group addresses (2-byte format)
 
         // Setup
-        DEVICE_ADDRESS.set(0x1234);
-        let mut group_address = GROUP_ADDRESS.lock();
-        group_address[0] = 0xAABB;
-        group_address[1] = 0xCCDD;
-        for i in 2..MAX_GROUP_COUNT as usize {
-            group_address[i] = 0;
-        }
-        drop(group_address);
+        set_device_address(0x1234);
+        let mut group_addresses_seed = [0u16; MAX_GROUP_COUNT as usize];
+        group_addresses_seed[0] = 0xAABB;
+        group_addresses_seed[1] = 0xCCDD;
+        set_group_addresses(group_addresses_seed);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1301,17 +1278,11 @@ mod tests {
         // This test verifies GET_GROUP3 response returns group addresses (last 4 groups)
 
         // Setup
-        DEVICE_ADDRESS.set(0x1234);
-        let mut group_address = GROUP_ADDRESS.lock();
-        for i in 0..4 {
-            group_address[i] = 0;
-        }
-        group_address[4] = 0x1122;
-        group_address[5] = 0x3344;
-        for i in 6..MAX_GROUP_COUNT as usize {
-            group_address[i] = 0;
-        }
-        drop(group_address);
+        set_device_address(0x1234);
+        let mut group_addresses_seed = [0u16; MAX_GROUP_COUNT as usize];
+        group_addresses_seed[4] = 0x1122;
+        group_addresses_seed[5] = 0x3344;
+        set_group_addresses(group_addresses_seed);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1337,9 +1308,9 @@ mod tests {
         // This test verifies GET_DEV_ADDR response
 
         // Setup: the answer carries this node's MAC, so seed it.
-        DEVICE_ADDRESS.set(0x1234);
+        set_device_address(0x1234);
         let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        MAC_ID.lock().copy_from_slice(&mac);
+        set_mac_id(mac);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1368,7 +1339,7 @@ mod tests {
         // This test verifies GET_USER_NOTIFY response
 
         // Setup
-        DEVICE_ADDRESS.set(0xABCD);
+        set_device_address(0xABCD);
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1398,7 +1369,7 @@ mod tests {
         // This test verifies CMD_START_OTA response
 
         // Setup
-        DEVICE_ADDRESS.set(0x1234);
+        set_device_address(0x1234);
         crate::ota::reset_for_test();
 
         let mut request = create_test_packet_att_value();
@@ -1434,7 +1405,7 @@ mod tests {
         // Setup
         mock_rf_mesh_data_ota(Any, Any).returns(0x1234u16);
 
-        DEVICE_ADDRESS.set(0x5678);
+        set_device_address(0x5678);
 
         let mut request = create_test_packet_att_value();
         request.src = [0xAA, 0xBB];
@@ -1464,7 +1435,7 @@ mod tests {
         // Setup
         mock_rf_mesh_data_ota(Any, Any).returns(0xABCDu16);
 
-        DEVICE_ADDRESS.set(0x5678);
+        set_device_address(0x5678);
 
         let mut request = create_test_packet_att_value();
         request.src = [0xCC, 0xDD];
@@ -1491,7 +1462,7 @@ mod tests {
         // This test verifies that invalid commands return false
 
         // Setup
-        DEVICE_ADDRESS.set(0x1234);
+        set_device_address(0x1234);
 
         let request = create_test_packet_att_value();
 
@@ -1845,20 +1816,30 @@ mod tests {
     fn test_rf_link_data_callback_kick_out_out_of_mesh_writes_credentials() {
         // Moved from `sdk/factory_reset.rs::tests`: the credential writes now
         // live in this module, so the assertion follows them.
+        // Install the factory radio configuration first: the kick-out writer
+        // reads the credential buffers `set_radio_config` seeds, not the
+        // crate-root constants directly.
+        reset_radio_state_for_test();
         let expected_ltk = [0xAAu8; 16];
-        {
-            let mut ltk = PAIR_CONFIG_MESH_LTK.lock();
-            *ltk = expected_ltk;
-        }
+        // Only the LTK is read by the kick-out writer; the name and password
+        // buffers are re-seeded with the factory defaults so the global
+        // credential state is left the way `seed_pair_config` installed it.
+        let mut default_name = [0u8; 16];
+        default_name[..OUT_OF_MESH.len()].copy_from_slice(OUT_OF_MESH.as_bytes());
+        let mut default_pwd = [0u8; 16];
+        default_pwd[..MESH_PWD.len()].copy_from_slice(MESH_PWD.as_bytes());
+        set_pair_config_mesh_credentials(default_name, default_pwd, expected_ltk);
 
-        MESH_PAIR_ENABLE.set(true);
-        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+        set_mesh_pair_enabled(true);
+        set_dev_addr_validation_pending(false);
 
         let encoded_password = {
             // Compute the expected ciphertext with the real AES path: the same
             // key and password buffer the kick-out path feeds to
             // `encode_password`.
-            let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+            let mut key = [0u8; 16];
+            let sk_len = MESH_PWD_ENCODE_SK.len().min(key.len());
+            key[..sk_len].copy_from_slice(&MESH_PWD_ENCODE_SK.as_bytes()[..sk_len]);
             let mut password = [0u8; 16];
             let len = MESH_PWD.len().min(password.len());
             password[..len].copy_from_slice(&MESH_PWD.as_bytes()[..len]);
@@ -1919,7 +1900,7 @@ mod tests {
         FakeFlash::read_slice(FLASH_ADR_PAIRING + 48, &mut got);
         assert_eq!(got, expected_ltk, "mesh LTK must be written");
 
-        assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get());
+        assert!(dev_addr_validation_pending());
         assert_eq!(
             fake_clock::sleeps(),
             vec![1000 * 1000u32; 6],
@@ -1933,8 +1914,8 @@ mod tests {
         );
 
         // Restore mesh pairing flags for other tests.
-        MESH_PAIR_ENABLE.set(false);
-        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+        set_mesh_pair_enabled(false);
+        set_dev_addr_validation_pending(false);
     }
 
     /// Any other reason only erases: no pairing data is written.
@@ -1986,8 +1967,8 @@ mod tests {
     #[test]
     #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_kick_out_unknown_reason_falls_back() {
-        MESH_PAIR_ENABLE.set(false);
-        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+        set_mesh_pair_enabled(false);
+        set_dev_addr_validation_pending(false);
         reset_fakes();
         crate::factory_reset::reset_for_test();
 
@@ -2015,7 +1996,7 @@ mod tests {
             "an unknown reason must fall back to the out-of-mesh credentials"
         );
         assert!(
-            !MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(),
+            !dev_addr_validation_pending(),
             "mesh pairing is disabled, so the rejoin flag stays clear"
         );
     }
@@ -2228,13 +2209,6 @@ mod tests {
 
         mock_mesh_pair_init().returns(());
 
-        // Setup initial state - simulate ADV_DATA with some length
-        let mut adv_data = ADV_DATA.lock();
-        adv_data[0] = 2;
-        adv_data[1] = 1;
-        adv_data[2] = 5; // Default values
-        drop(adv_data);
-
         // Execute
         light_init_default();
 
@@ -2260,24 +2234,8 @@ mod tests {
         // Verify: mesh_pair_init was called
         mock_mesh_pair_init().assert_called(1);
 
-        // Verify static state changes
-        assert_eq!(MAX_MESH_NAME_LEN, MAX_MESH_NAME_LEN);
-
-        // Verify mesh name was copied (first few bytes)
-        let mesh_name = PAIR_CONFIG_MESH_NAME.lock();
-        assert_eq!(mesh_name[0], MESH_NAME.as_bytes()[0]);
-        assert_eq!(mesh_name[1], MESH_NAME.as_bytes()[1]);
-
-        // Verify mesh password was copied
-        let mesh_pwd = PAIR_CONFIG_MESH_PWD.lock();
-        assert_eq!(mesh_pwd[0], MESH_PWD.as_bytes()[0]);
-        assert_eq!(mesh_pwd[1], MESH_PWD.as_bytes()[1]);
-        assert_eq!(mesh_pwd[2], MESH_PWD.as_bytes()[2]);
-
-        // Verify mesh LTK was copied
-        let mesh_ltk = PAIR_CONFIG_MESH_LTK.lock();
-        assert_eq!(mesh_ltk[0], MESH_LTK[0]);
-        assert_eq!(mesh_ltk[1], MESH_LTK[1]);
+        // The mesh credentials are no longer seeded here: `set_radio_config`
+        // owns them now, and `config.rs` asserts the seeding directly.
     }
 
     // --- Tests for user_init ---
@@ -2340,8 +2298,8 @@ mod tests {
         FakeMmio::set_reg8(REG_GPIO_PC_FUNC, 0xff);
         // The advertisement payload is built from these two, so seed both.
         let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        MAC_ID.lock().copy_from_slice(&mac);
-        DEVICE_ADDRESS.set(0x1234);
+        set_mac_id(mac);
+        set_device_address(0x1234);
 
         run_user_init_with_mocks();
 
@@ -2388,12 +2346,9 @@ mod tests {
         // The boot path must consult the reset policy exactly once.
         mock_handle_boot_sequence().assert_called(1);
         // The light subsystem built both payloads from the loaded MAC and this
-        // node's address, and handed the primary one's bytes to the RF driver.
-        let (pri, rsp) = {
-            let pri = *ADV_PRI_DATA.lock();
-            let rsp = *ADV_RSP_PRI_DATA.lock();
-            (pri, rsp)
-        };
+        // node's address, and the facade installed them together with the
+        // primary payload's manufacturer bytes.
+        let (pri, rsp) = adv_private_data();
         let (pri_manufacture, pri_uuid, pri_mac) =
             (pri.manufacture_id, pri.mesh_product_uuid, pri.mac_address);
         let (rsp_uuid, rsp_status, rsp_addr, rsp_rsv) =
@@ -2409,7 +2364,7 @@ mod tests {
         assert_eq!(rsp_status, 0x01, "status 0x01 = advertising");
         assert_eq!(
             rsp_addr,
-            DEVICE_ADDRESS.get(),
+            device_address(),
             "the scan response carries this node's address"
         );
         for i in 0..16 {
@@ -2615,7 +2570,8 @@ mod tests {
     }
 
     /// Regression test verifying the full response path:
-    /// rf_link_response_callback(GET_STATUS) -> rf_link_slave_add_status -> BUFF_RESPONSE
+    /// rf_link_response_callback(GET_STATUS) -> rf_link_slave_add_status -> the
+    /// shared staged-response buffer
     /// produces exact unshifted VENDOR_ID at dat[8..10] and CW/WW/Brightness at dat[10..16].
     ///
     /// This lives in the application layer because the callback reads the light
@@ -2628,11 +2584,11 @@ mod tests {
         // Reset only the globals this path reads: the request and response
         // packets are built locally below.
         crate::light::reset_for_test();
-        DEVICE_ADDRESS.set(0x001F);
+        set_device_address(0x001F);
         DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
         DEVICE_STATUS_RECORD_INDEX.set(0);
-        SLAVE_READ_STATUS_BUSY.set(LGT_CMD_LIGHT_STATUS);
+        set_slave_read_status_busy(LGT_CMD_LIGHT_STATUS);
 
         reset_fakes();
         fake_clock::set_ticks(1);
@@ -2668,8 +2624,8 @@ mod tests {
         rf_link_slave_add_status(&pkt_light_status);
 
         assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 1);
-        let buf = BUFF_RESPONSE.lock();
-        let dat = &buf[0].att_data().dat;
+        let response = buffered_response(0);
+        let dat = &response.att_data().dat;
 
         assert_eq!(&dat[0..3], &[0xA2, 0x5F, 0xE3], "sno mismatch");
         assert_eq!(&dat[3..5], &[0x1F, 0x00], "dst/src addr mismatch");
@@ -2696,7 +2652,6 @@ mod tests {
             "Brightness bytes must align at dat[14..16]"
         );
         assert_eq!(&dat[16..18], &[0x00, 0x00], "trailing params zero");
-        drop(buf);
 
         // This test runs (alphabetically) before the SDK suites, which assume an
         // empty shared status buffer. Leave the pointers where they were.

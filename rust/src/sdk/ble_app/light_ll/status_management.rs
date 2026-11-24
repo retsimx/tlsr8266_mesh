@@ -101,7 +101,11 @@ pub(crate) static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_
 
 /// Status indicating slave is busy reading mesh node states.
 /// Prevents concurrent status reading operations.
-pub(crate) static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
+///
+/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the only
+/// entry point from outside `sdk/`, and `crate::sdk` is the extraction boundary
+/// for C-10 (`crates/tlsr8266-radio`).
+pub(in crate::sdk) static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
 
 /// Write pointer for the device status buffer circular queue.
 /// Points to the next position for storing incoming status data.

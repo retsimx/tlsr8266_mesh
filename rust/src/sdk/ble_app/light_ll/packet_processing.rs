@@ -78,7 +78,6 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use bytemuck;
 
-use crate::config::VENDOR_ID;
 use crate::sdk::ble_app::ble_ll_attribute::l2cap_att_handler;
 use crate::sdk::ble_app::ble_ll_channel_selection::SLAVE_CHN_MAP;
 use crate::sdk::ble_app::ble_ll_pair::pair_enc_packet;
@@ -92,6 +91,7 @@ use crate::sdk::ble_app::light_ll::connection_management::{
     BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
     BUFF_RESPONSE, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_WINDOW_SIZE_UPDATE,
 };
+use crate::sdk::ble_app::radio_config;
 use crate::sdk::ble_app::rf_drv_8266::*;
 use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
 use crate::sdk::light::*;
@@ -856,9 +856,10 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
                     ((DEVICE_ADDRESS.get() >> 8) & 0xff) as u8;
 
                 // Set ACK packet header with vendor identification
+                let vendor_id = radio_config().vendor_id;
                 pkt_light_status.att_cmd_mut().value.val[0] = LGT_CMD_LIGHT_ACK | 0xc0; // ACK opcode with flags
-                pkt_light_status.att_cmd_mut().value.val[1] = (VENDOR_ID & 0xFF) as u8; // Vendor ID low byte
-                pkt_light_status.att_cmd_mut().value.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8; // Vendor ID high byte
+                pkt_light_status.att_cmd_mut().value.val[1] = (vendor_id & 0xFF) as u8; // Vendor ID low byte
+                pkt_light_status.att_cmd_mut().value.val[2] = ((vendor_id >> 8) & 0xff) as u8; // Vendor ID high byte
 
                 // Clear parameter area and set ACK-specific data
                 pkt_light_status.att_cmd_mut().value.val[3..10 + 3].fill(0);
@@ -1617,7 +1618,7 @@ mod tests {
                 src_adr,
                 dst_adr,
                 op: opcode,
-                vendor_id: VENDOR_ID,
+                vendor_id: radio_config().vendor_id,
                 par: [0; 10],
                 internal_par1: [0; 5],
                 ttl: 0,
@@ -2189,7 +2190,7 @@ mod tests {
         {
             let val = &mut packet.att_cmd_mut().value.val;
             val[0] = LGT_CMD_LIGHT_STATUS | 0xc0;
-            val[1..3].copy_from_slice(&VENDOR_ID.to_le_bytes());
+            val[1..3].copy_from_slice(&radio_config().vendor_id.to_le_bytes());
             val[3] = 0x11; // par[0] = CW lo
             val[4] = 0x22; // par[1] = CW hi
             val[5] = 0x33; // par[2] = WW lo
@@ -2231,12 +2232,12 @@ mod tests {
         // dat[8..10] = vendor_id (little-endian)
         assert_eq!(
             st.att_data().dat[8],
-            (VENDOR_ID & 0xFF) as u8,
+            (radio_config().vendor_id & 0xFF) as u8,
             "vendor_id lo"
         );
         assert_eq!(
             st.att_data().dat[9],
-            ((VENDOR_ID >> 8) & 0xFF) as u8,
+            ((radio_config().vendor_id >> 8) & 0xFF) as u8,
             "vendor_id hi"
         );
         // dat[10..16] = unshifted CW / WW / Brightness bytes
@@ -2372,8 +2373,8 @@ mod tests {
                     val: {
                         let mut val = [0u8; 23];
                         val[0] = 0x30; // Single-byte opcode (0x30 & 0x80 == 0)
-                        val[1] = (VENDOR_ID & 0xFF) as u8;
-                        val[2] = ((VENDOR_ID >> 8) & 0xFF) as u8;
+                        val[1] = (radio_config().vendor_id & 0xFF) as u8;
+                        val[2] = ((radio_config().vendor_id >> 8) & 0xFF) as u8;
                         // Add some test parameters
                         val[3..12]
                             .iter_mut()
@@ -2422,7 +2423,7 @@ mod tests {
                         let mut val = [0u8; 23];
                         val[0] = 0x80; // Two-byte opcode format (0x80 & 0x80 != 0, 0x80 & 0x40 == 0)
                         val[1] = 0x45; // Second opcode byte
-                        val[2] = (VENDOR_ID & 0xFF) as u8;
+                        val[2] = (radio_config().vendor_id & 0xFF) as u8;
                         val
                     },
                 },

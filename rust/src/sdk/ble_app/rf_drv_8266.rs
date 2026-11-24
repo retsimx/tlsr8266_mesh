@@ -20,11 +20,9 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize};
 
-use crate::config::{
-    FLASH_ADR_MAC, FLASH_ADR_PAIRING, MESH_PWD, OUT_OF_MESH, PAIR_VALID_FLAG, VENDOR_ID,
-};
 use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
 use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response};
+use crate::sdk::ble_app::config::radio_config;
 use crate::sdk::ble_app::flash_config::{
     dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address,
 };
@@ -55,7 +53,6 @@ use crate::sdk::light::{
     MAX_GROUP_COUNT, PKT_VAL_MAC_APP_HOP_COUNT, PKT_VAL_MAC_APP_LINK_INTERVAL,
     PKT_VAL_MAC_APP_RESPONSE_TYPE, PKT_VAL_MAC_APP_TTC,
 };
-use crate::version::BUILD_VERSION;
 use crate::BIT;
 use mesh_protocol::const_assert;
 use mesh_protocol::crc::crc16;
@@ -94,26 +91,50 @@ const RF_TRX_OFF: u8 = 0x45;
 /// Private advertising data structure used in BLE advertisements.
 /// Contains manufacturer ID, mesh product UUID, and MAC address for device identification.
 /// Broadcast during BLE advertising to allow discovery by mesh controllers.
-pub(crate) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
+///
+/// The vendor id starts at the factory value and is overwritten by
+/// [`apply_vendor_id`] when the injected configuration is installed.
+///
+/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the
+/// only entry point from outside `sdk/`, and `crate::sdk` is the extraction
+/// boundary for C-10 (`crates/tlsr8266-radio`).
+pub(in crate::sdk) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
     CriticalSectionMutex::new(AdvPrivate {
-        manufacture_id: VENDOR_ID,
-        mesh_product_uuid: VENDOR_ID,
+        manufacture_id: 0x0211,
+        mesh_product_uuid: 0x0211,
         mac_address: 0,
     });
 
 /// Private advertising response data sent in response to scan requests.
 /// Extended version of advertising data including device status, product UUID,
 /// device address, and additional reserved fields for future use.
-pub(crate) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
+pub(in crate::sdk) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
     CriticalSectionMutex::new(AdvRspPrivate {
-        manufacture_id: VENDOR_ID,
-        mesh_product_uuid: VENDOR_ID,
+        manufacture_id: 0x0211,
+        mesh_product_uuid: 0x0211,
         mac_address: 0,
         product_uuid: 0x1234,
         status: 0x01,
         device_address: 0,
         rsv: [0; 16],
     });
+
+/// Propagate the configured vendor id into both private advertising payloads.
+///
+/// Called by `set_radio_config`; both the manufacturer id and the mesh product
+/// UUID must carry the vendor id.
+pub(in crate::sdk::ble_app) fn apply_vendor_id(vendor_id: u16) {
+    {
+        let mut adv = ADV_PRI_DATA.lock();
+        adv.manufacture_id = vendor_id;
+        adv.mesh_product_uuid = vendor_id;
+    }
+    {
+        let mut adv = ADV_RSP_PRI_DATA.lock();
+        adv.manufacture_id = vendor_id;
+        adv.mesh_product_uuid = vendor_id;
+    }
+}
 
 /// Current RF operation state indicating which mode is active.
 /// Tracks whether the device is in advertising, connected, receiving, mesh listening, or idle state.
@@ -122,12 +143,12 @@ pub(crate) static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> =
 
 /// Group addresses that this device belongs to (up to 8 groups).
 /// Used for group-based lighting control where multiple devices respond to the same command.
-pub(crate) static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
+pub(in crate::sdk) static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
     CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
 
 /// Device MAC address used for network identification.
 /// 6-byte IEEE MAC address uniquely identifying this device in the mesh network.
-pub(crate) static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
+pub(in crate::sdk) static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
 
 /// BLE advertising data payload.
 /// Contains flags and service information broadcast during BLE advertising.
@@ -243,7 +264,7 @@ pub(crate) static LIGHT_RX_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(
 
 /// Unique 16-bit address assigned to this device within the mesh network.
 /// Used for addressing and routing messages to/from this specific device.
-pub(crate) static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
+pub(in crate::sdk) static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
 
 /// RF transmit power base setting controlling signal strength.
 /// Hardware register value determining the baseline transmission power level.
@@ -276,7 +297,8 @@ pub const MAX_MESH_NAME_LEN: usize = if 31 - ADV_PRIVATE_SIZE - 2 < 16 {
 /// When true: Device address configuration requires MAC address validation before completion.
 /// When false: MAC address validation completed successfully, device address is configured.
 /// Used during mesh pairing to track the device address configuration state.
-pub(crate) static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool = AtomicBool::new(false);
+pub(in crate::sdk) static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool =
+    AtomicBool::new(false);
 
 /// Next position index for device group address allocation.
 /// Points to the next available slot in the group address table.
@@ -284,7 +306,7 @@ pub(crate) static MESH_GROUP_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0
 
 /// Flash configuration index for persistent storage operations.
 /// Current position in flash memory for configuration data.
-pub(crate) static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
+pub(in crate::sdk) static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
 
 /// Next position for device address allocation in mesh network.
 /// Used for assigning unique addresses to new mesh devices.
@@ -342,6 +364,8 @@ fn rf_init_table(is_16mhz: bool) -> &'static [TBLCMDSET] {
 #[coverage(off)]
 pub fn rf_drv_init(enable: bool) -> u8 {
     let result = analog_read(rega_deepsleep_flag) & 0x40;
+    // Snapshot the configuration before entering the critical section.
+    let cfg = radio_config();
 
     critical_section::with(|_| {
         if enable {
@@ -359,9 +383,9 @@ pub fn rf_drv_init(enable: bool) -> u8 {
             // Check if custom RF power settings are stored at specific flash memory offsets
             // These calibration values adjust the transmission power parameters
             let mut power_settings = [0u8; 0x13];
-            // FLASH_ADR_MAC is guaranteed to be aligned to FLASH_SECTOR_SIZE
+            // The MAC sector is guaranteed to be aligned to FLASH_SECTOR_SIZE
             flash_read_page(
-                FLASH_ADR_MAC,
+                cfg.flash_adr_mac,
                 power_settings.len() as u32,
                 power_settings.as_mut_ptr(),
             );
@@ -921,6 +945,10 @@ fn rf_link_slave_set_adv(adv_data_ptr: &[u8]) {
  */
 #[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_init(interval: u32) {
+    // One snapshot for the whole init path; the struct is `Copy`, so no
+    // configuration lock is held while the radio is set up.
+    let cfg = radio_config();
+
     // SAFETY: (2) startup RF-init boundary; no unsafe operation remains. Every
     // callee is a safe `fn` (register accessors, `flash_read_page`, `pair_load_key`)
     // and the raw pointers they take come from live locals/statics. Retained because
@@ -946,15 +974,15 @@ pub fn rf_link_slave_init(interval: u32) {
 
         // Generate a MAC address if one doesn't exist in flash
         let mut mac_check: [u32; 1] = [0];
-        flash_read_page(FLASH_ADR_MAC, 4, mac_check.as_mut_ptr() as *mut u8);
+        flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8);
         if mac_check[0] == u32::MAX {
             // Generate random MAC address values
             let mac: [u16; 2] = [rand(), rand()];
-            flash_write_page(FLASH_ADR_MAC, 4, mac.as_ptr() as *const u8);
+            flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
         }
 
         // Read the MAC address from flash
-        flash_read_page(FLASH_ADR_MAC, 6, MAC_ID.lock().as_mut_ptr());
+        flash_read_page(cfg.flash_adr_mac, 6, MAC_ID.lock().as_mut_ptr());
 
         // Set the MAC address in the advertisement packet
         PKT_ADV.lock().adv_ind_module_mut().adv_a = *MAC_ID.lock();
@@ -988,17 +1016,18 @@ pub fn rf_link_slave_init(interval: u32) {
         // This includes MAC address, firmware version, and data integrity check
         let mac_id = MAC_ID.lock();
         let mac_as_u32 = u32::from_le_bytes([mac_id[0], mac_id[1], mac_id[2], mac_id[3]]);
+        let build_version = cfg.build_version;
         write_reg32(0x808004, mac_as_u32);
-        write_reg32(0x808008, BUILD_VERSION);
+        write_reg32(0x808008, build_version);
         let crc_data = [
             (mac_as_u32 & 0xFF) as u8,
             ((mac_as_u32 >> 8) & 0xFF) as u8,
             ((mac_as_u32 >> 16) & 0xFF) as u8,
             ((mac_as_u32 >> 24) & 0xFF) as u8,
-            (BUILD_VERSION & 0xFF) as u8,
-            ((BUILD_VERSION >> 8) & 0xFF) as u8,
-            ((BUILD_VERSION >> 16) & 0xFF) as u8,
-            ((BUILD_VERSION >> 24) & 0xFF) as u8,
+            (build_version & 0xFF) as u8,
+            ((build_version >> 8) & 0xFF) as u8,
+            ((build_version >> 16) & 0xFF) as u8,
+            ((build_version >> 24) & 0xFF) as u8,
         ];
         write_reg16(0x80800c, crc16(&crc_data));
     }
@@ -1345,6 +1374,7 @@ mod tests {
         mock_pair_dec_packet, MESH_PAIR_ENABLE, SECURITY_ENABLE,
     };
     use crate::sdk::ble_app::callbacks::{mock_on_light_data, mock_on_light_response};
+    use crate::sdk::ble_app::config::set_radio_config;
     use crate::sdk::ble_app::flash_config::mock_retrieve_dev_grp_address;
     use crate::sdk::ble_app::flash_config::{mock_dev_addr_with_mac_flag, mock_pair_load_key};
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
@@ -2186,6 +2216,7 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_power_settings() {
         reset_host_fakes();
+        let cfg = radio_config();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
@@ -2196,7 +2227,7 @@ mod tests {
 
         // Seed custom power calibration values at offsets 0x11 and 0x12 of the
         // MAC sector.
-        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x25, 0x10]);
+        FakeFlash::write_slice(cfg.flash_adr_mac + 0x11, &[0x25, 0x10]);
 
         // Reset the global variables to ensure they're modified by the function
         RF_TP_BASE.set(0);
@@ -2251,13 +2282,14 @@ mod tests {
     #[test]
     fn test_rf_drv_init_disabled() {
         reset_host_fakes();
+        let cfg = radio_config();
         // Seed the deepsleep flag and the SAR ADC power register
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
         FakeAnalog::set(6, ANA_UNWRITTEN);
 
         // Seed valid calibration values: if the disabled path read flash they
         // would be applied, so unchanged globals prove the read never happened.
-        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x30, 0x05]);
+        FakeFlash::write_slice(cfg.flash_adr_mac + 0x11, &[0x30, 0x05]);
         let initial_base = 0x22;
         let initial_gain = 0x33;
         RF_TP_BASE.set(initial_base);
@@ -2281,6 +2313,7 @@ mod tests {
     #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_partial_power_settings() {
         reset_host_fakes();
+        let cfg = radio_config();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
 
@@ -2290,7 +2323,7 @@ mod tests {
         }
 
         // Only the first calibration byte is set; the second stays 0xFF.
-        FakeFlash::write_slice(FLASH_ADR_MAC + 0x11, &[0x29]);
+        FakeFlash::write_slice(cfg.flash_adr_mac + 0x11, &[0x29]);
 
         // Reset the global variables to ensure they're modified by the function
         RF_TP_BASE.set(0);
@@ -3793,6 +3826,7 @@ mod tests {
     )]
     fn test_rf_link_slave_init_mac_not_set() {
         reset_host_fakes();
+        let cfg = radio_config();
 
         // Arrange - MAC address not set (u32::MAX); a blank device reads 0xFFFFFFFF.
         let test_interval = 1000;
@@ -3842,7 +3876,7 @@ mod tests {
             (expected_rand >> 8) as u8,
         ];
         let mut written_mac = [0u8; 4];
-        FakeFlash::read_slice(FLASH_ADR_MAC, &mut written_mac);
+        FakeFlash::read_slice(cfg.flash_adr_mac, &mut written_mac);
         assert_eq!(
             written_mac, expected_mac_bytes,
             "both rand() calls must feed the generated MAC"
@@ -3870,14 +3904,14 @@ mod tests {
             ((expected_mac_u32 >> 8) & 0xFF) as u8,
             ((expected_mac_u32 >> 16) & 0xFF) as u8,
             ((expected_mac_u32 >> 24) & 0xFF) as u8,
-            (BUILD_VERSION & 0xFF) as u8,
-            ((BUILD_VERSION >> 8) & 0xFF) as u8,
-            ((BUILD_VERSION >> 16) & 0xFF) as u8,
-            ((BUILD_VERSION >> 24) & 0xFF) as u8,
+            (cfg.build_version & 0xFF) as u8,
+            ((cfg.build_version >> 8) & 0xFF) as u8,
+            ((cfg.build_version >> 16) & 0xFF) as u8,
+            ((cfg.build_version >> 24) & 0xFF) as u8,
         ];
         let expected_crc = crc16(&crc_data);
         mock_write_reg32(0x808004, expected_mac_u32).assert_called(1); // MAC ID write
-        mock_write_reg32(0x808008, BUILD_VERSION).assert_called(1); // BUILD_VERSION write
+        mock_write_reg32(0x808008, cfg.build_version).assert_called(1); // cfg.build_version write
         mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write
         mock_rf_link_slave_set_adv(Any).assert_called(1);
         mock_retrieve_dev_grp_address().assert_called(1);
@@ -3900,6 +3934,7 @@ mod tests {
     )]
     fn test_rf_link_slave_init_normal_initialization() {
         reset_host_fakes();
+        let cfg = radio_config();
 
         // Arrange - MAC set, pairing already configured
         let test_interval = 2000;
@@ -3907,7 +3942,7 @@ mod tests {
         // Seed a real MAC in flash so the check reads a non-MAX word and the
         // 6-byte read returns the stored address.
         let stored_mac = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66];
-        FakeFlash::write_slice(FLASH_ADR_MAC, &stored_mac);
+        FakeFlash::write_slice(cfg.flash_adr_mac, &stored_mac);
 
         // Set MAC_ID to known value for testing
         {
@@ -3926,17 +3961,17 @@ mod tests {
         // Register writes for device identification
         let expected_mac_u32 = 0x44332211u32; // From MAC_ID [0x11, 0x22, 0x33, 0x44]
         mock_write_reg32(0x808004, expected_mac_u32).returns(());
-        mock_write_reg32(0x808008, BUILD_VERSION).returns(());
-        // CRC of the 8 bytes: [0x11, 0x22, 0x33, 0x44, BUILD_VERSION bytes...]
+        mock_write_reg32(0x808008, cfg.build_version).returns(());
+        // CRC of the 8 bytes: [0x11, 0x22, 0x33, 0x44, cfg.build_version bytes...]
         let crc_data = [
             0x11,
             0x22,
             0x33,
             0x44,
-            (BUILD_VERSION & 0xFF) as u8,
-            ((BUILD_VERSION >> 8) & 0xFF) as u8,
-            ((BUILD_VERSION >> 16) & 0xFF) as u8,
-            ((BUILD_VERSION >> 24) & 0xFF) as u8,
+            (cfg.build_version & 0xFF) as u8,
+            ((cfg.build_version >> 8) & 0xFF) as u8,
+            ((cfg.build_version >> 16) & 0xFF) as u8,
+            ((cfg.build_version >> 24) & 0xFF) as u8,
         ];
         let expected_crc = crc16(&crc_data);
         mock_write_reg16(0x80800c, expected_crc).returns(());
@@ -3963,7 +3998,7 @@ mod tests {
         mock_blc_ll_init_basic_mcu().assert_called(1);
         // The stored MAC was not replaced.
         let mut written_mac = [0u8; 6];
-        FakeFlash::read_slice(FLASH_ADR_MAC, &mut written_mac);
+        FakeFlash::read_slice(cfg.flash_adr_mac, &mut written_mac);
         assert_eq!(
             written_mac, stored_mac,
             "an existing MAC must not be rewritten"
@@ -3975,11 +4010,63 @@ mod tests {
         mock_retrieve_dev_grp_address().assert_called(1);
         mock_mesh_node_table_init().assert_called(1);
         mock_write_reg32(0x808004, expected_mac_u32).assert_called(1); // MAC ID write
-        mock_write_reg32(0x808008, BUILD_VERSION).assert_called(1); // BUILD_VERSION write
+        mock_write_reg32(0x808008, cfg.build_version).assert_called(1); // cfg.build_version write
         mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write
 
         // Verify advertising is enabled
         assert_eq!(BLE_PERIPHERAL_ADVERTISING_ENABLED.get(), true);
+    }
+
+    /// The version word at `0x808008` and the CRC over it must come from the
+    /// injected `RadioConfig`, not from a compile-time constant.
+    #[test]
+    #[mry::lock(
+        blc_ll_init_basic_mcu,
+        rf_link_slave_set_adv,
+        rf_set_ble_access_code,
+        pair_load_key,
+        retrieve_dev_grp_address,
+        mesh_node_table_init,
+        read_reg_system_tick,
+        write_reg_system_tick_irq,
+        write_reg8,
+        write_reg32,
+        write_reg16
+    )]
+    fn test_rf_link_slave_init_uses_injected_build_version() {
+        reset_host_fakes();
+
+        let original = radio_config();
+        let mut injected = original;
+        injected.build_version = 0x1234_5678;
+        set_radio_config(injected);
+
+        // A stored MAC keeps the driver on the read-only flash path.
+        let stored_mac = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66];
+        FakeFlash::write_slice(injected.flash_adr_mac, &stored_mac);
+
+        mock_blc_ll_init_basic_mcu().returns(());
+        mock_read_reg_system_tick().returns(0xAABBCCDD);
+        mock_write_reg_system_tick_irq(Any).returns(());
+        mock_write_reg8(Any, Any).returns(());
+        mock_write_reg32(Any, Any).returns(());
+        mock_write_reg16(Any, Any).returns(());
+        mock_rf_link_slave_set_adv(Any).returns(());
+        mock_rf_set_ble_access_code(Any).returns(());
+        mock_pair_load_key().returns(());
+        mock_retrieve_dev_grp_address().returns(());
+        mock_mesh_node_table_init().returns(());
+
+        rf_link_slave_init(2000);
+
+        // Restore before asserting so a failure cannot leak the injected value
+        // into the next test of this single-threaded suite.
+        set_radio_config(original);
+
+        let expected_crc = crc16(&[0x11, 0x22, 0x33, 0x44, 0x78, 0x56, 0x34, 0x12]);
+        mock_write_reg32(0x808004, 0x44332211).assert_called(1);
+        mock_write_reg32(0x808008, 0x1234_5678).assert_called(1);
+        mock_write_reg16(0x80800c, expected_crc).assert_called(1);
     }
 
     // Proof slice for the RF RX ack helper: no mry lock attribute, so the real

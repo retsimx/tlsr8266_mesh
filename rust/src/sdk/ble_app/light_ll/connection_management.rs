@@ -66,24 +66,29 @@ use tlsr8266_pac::*;
 /// Response buffer for storing packets that need to be sent back to the BLE host.
 /// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
 /// Protected by critical section mutex for thread-safe access in interrupt contexts.
-pub(crate) static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> =
-    CriticalSectionMutex::new(
-        [Packet {
-            att_data: PacketAttData {
-                head: PacketL2capHead {
-                    dma_len: 0,
-                    _type: 0,
-                    rf_len: 0,
-                    l2cap_len: 0,
-                    chan_id: 0,
-                },
-                att: 0,
-                hl: 0,
-                hh: 0,
-                dat: [0; 23],
+///
+/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the only
+/// entry point from outside `sdk/`, and `crate::sdk` is the extraction boundary
+/// for C-10 (`crates/tlsr8266-radio`).
+pub(in crate::sdk) static BUFF_RESPONSE: CriticalSectionMutex<
+    [Packet; BUFF_RESPONSE_PACKET_COUNT],
+> = CriticalSectionMutex::new(
+    [Packet {
+        att_data: PacketAttData {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 0,
+                chan_id: 0,
             },
-        }; BUFF_RESPONSE_PACKET_COUNT],
-    );
+            att: 0,
+            hl: 0,
+            hh: 0,
+            dat: [0; 23],
+        },
+    }; BUFF_RESPONSE_PACKET_COUNT],
+);
 
 /// `OtaRadioOps::stage_packet`: copy one OTA packet into the shared response
 /// buffer.
@@ -131,7 +136,7 @@ pub(crate) static SLAVE_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating whether a BLE slave connection is currently active.
 /// Set to true when connected to a central device, false when disconnected.
-pub(crate) static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub(in crate::sdk) static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// BLE connection interval in microseconds for slave connections.
 /// Determines how frequently connection events occur between central and peripheral.
@@ -199,7 +204,7 @@ pub(crate) static BLE_CONN_OFFSET: AtomicU32 = AtomicU32::new(0);
 
 /// Timestamp of the first successful slave connection.
 /// Used for connection establishment timing and statistics.
-pub(crate) static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+pub(in crate::sdk) static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating connection parameters need to be updated.
 /// Set when BLE connection parameters require modification.

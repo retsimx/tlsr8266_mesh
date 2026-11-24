@@ -8,7 +8,7 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::config::FLASH_ADR_DEV_GRP_ADR;
+use crate::sdk::ble_app::radio_config;
 use crate::sdk::ble_app::rf_drv_8266::{
     DEVICE_ADDRESS, GROUP_ADDRESS, MESH_DEVICE_ADDRESS_NEXT_POSITION,
     MESH_GROUP_ADDRESS_NEXT_POSITION, PKT_ADV, SET_UUID_FLAG,
@@ -186,12 +186,13 @@ fn clear_specific_group_from_memory(group_id: u16) -> Result<(), ()> {
 
 /// Helper function to delete groups from flash storage
 fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
+    let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
     let initial_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
     let mut found_any = false;
     let mut groups_deleted = 0;
 
     for pos in (0..initial_pos).step_by(2).rev() {
-        let flash_addr = FLASH_ADR_DEV_GRP_ADR + pos as u32;
+        let flash_addr = flash_adr_dev_grp_adr + pos as u32;
         let group_address = read_group_address(flash_addr);
 
         if !is_group_address(group_address) {
@@ -459,16 +460,18 @@ const EVENT_DEVICE_ADDR_CHANGED: u8 = 0xC6; // Event code for address changed ev
 /// [Group Addresses: 16 bytes][Device Address: 2 bytes][Free Space...]
 /// ```
 pub fn compact_flash_storage() {
+    let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
+
     // Check if either address pointer has reached maximum allowed value
     if MAX_FLASH_ADDR_OFFSET < MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize
         || MAX_FLASH_ADDR_OFFSET < MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as usize
     {
         // Erase the entire flash sector
-        flash_erase_sector(FLASH_ADR_DEV_GRP_ADR);
+        flash_erase_sector(flash_adr_dev_grp_adr);
 
         // Write current group addresses to flash
         flash_write_page(
-            FLASH_ADR_DEV_GRP_ADR,
+            flash_adr_dev_grp_adr,
             GROUP_ADDR_STORAGE_SIZE,
             GROUP_ADDRESS.lock().as_ptr() as *const u8,
         );
@@ -476,7 +479,7 @@ pub fn compact_flash_storage() {
         // Write current device address to flash
         let device_address = DEVICE_ADDRESS.get();
         flash_write_page(
-            FLASH_ADR_DEV_GRP_ADR + GROUP_ADDR_STORAGE_SIZE,
+            flash_adr_dev_grp_adr + GROUP_ADDR_STORAGE_SIZE,
             DEVICE_ADDR_SIZE,
             addr_of!(device_address) as *const u8,
         );
@@ -506,6 +509,8 @@ pub fn compact_flash_storage() {
 /// - Address must differ from current device address
 #[cfg_attr(test, mry::mry)]
 pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
+    let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
+
     // Validate the device ID
     let mut success = false;
 
@@ -522,7 +527,7 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
             // Write zero to previous address location
             let zero_data = 0u16;
             flash_write_page(
-                FLASH_ADR_DEV_GRP_ADR - 2 + MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as u32,
+                flash_adr_dev_grp_adr - 2 + MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as u32,
                 DEVICE_ADDR_SIZE,
                 addr_of!(zero_data) as *const u8,
             );
@@ -531,7 +536,7 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
         // Update the device address in memory and in flash
         DEVICE_ADDRESS.set(dev_id);
         flash_write_page(
-            flash_pos as u32 + FLASH_ADR_DEV_GRP_ADR,
+            flash_pos as u32 + flash_adr_dev_grp_adr,
             DEVICE_ADDR_SIZE,
             addr_of!(dev_id) as *const u8,
         );
@@ -633,6 +638,7 @@ pub fn remove_group(group_id: u16) -> Result<(), ()> {
 pub fn add_group(group_id: u16) -> Result<(), ()> {
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
+    let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
 
     // Validate group ID: must be in valid group address range (MSB set, but not delete-all value)
     if group_id >= 0x8000 && group_id != GROUP_DELETE_ALL {
@@ -656,7 +662,7 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
 
                     // Write to flash
                     flash_write_page(
-                        MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + FLASH_ADR_DEV_GRP_ADR,
+                        MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + flash_adr_dev_grp_adr,
                         DEVICE_ADDR_SIZE,
                         addr_of!(group_id) as *const u8,
                     );
@@ -699,7 +705,7 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
 
         // Write group address to flash
         flash_write_page(
-            MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + FLASH_ADR_DEV_GRP_ADR,
+            MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + flash_adr_dev_grp_adr,
             DEVICE_ADDR_SIZE,
             addr_of!(group_id) as *const u8,
         );
@@ -720,6 +726,11 @@ mod tests {
     use super::mock_remove_group;
     use super::*;
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, SECTOR_SIZE_BYTES};
+
+    /// Group/device address sector base, taken from the factory default config
+    /// so the tests track the shipped layout without importing the crate-root
+    /// `config` module.
+    const FLASH_ADR_DEV_GRP_ADR: u32 = crate::sdk::ble_app::config::DEFAULT.flash_adr_dev_grp_adr;
 
     /// Helper function to reset global state for clean test environment
     fn reset_test_state() {

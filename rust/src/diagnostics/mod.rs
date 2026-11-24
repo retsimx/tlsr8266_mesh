@@ -184,9 +184,12 @@ fn clip_to_uart_budget(msg: &str) -> &str {
 
 /// Reads the stored panic message into `out`, returning its length.
 ///
-/// `None` means the sector holds no complete record (blank flag, or a length
-/// word that does not fit `out`). The sector is left untouched so
-/// [`clear_panic_report`] stays the only eraser.
+/// `None` means the sector holds no complete record: either the flag is blank,
+/// or the length word is zero / larger than `out`. A blank flag leaves the sector
+/// untouched (nothing was ever written), while a corrupt record erases it — such
+/// a record can never be delivered, so erasing it stops it being re-examined on
+/// every boot. That makes [`clear_panic_report`] the normal eraser rather than
+/// the only one.
 pub fn read_panic_report(out: &mut [u8; 256]) -> Option<usize> {
     let mut flag: u8 = 0;
     flash_read_page(FLASH_ADR_PANIC_INFO, 1, addr_of_mut!(flag));
@@ -200,9 +203,13 @@ pub fn read_panic_report(out: &mut [u8; 256]) -> Option<usize> {
     flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, len_bytes.as_mut_ptr());
     let length = u16::from_le_bytes(len_bytes) as usize;
 
-    // A length beyond the sector record cannot be a record this build wrote, so
-    // it is rejected rather than read past `out`.
-    if length > out.len() {
+    // A zero length or a length beyond the sector record cannot be a record this
+    // build wrote, so it is rejected rather than read past `out`; the corrupt
+    // record is erased so it is not retried on every boot.
+    if length == 0 || length > out.len() {
+        // The corrupt record is erased so it is not retried on every boot; a
+        // failed erase still leaves the same reject path, so it is discarded.
+        let _ = flash_erase_sector(FLASH_ADR_PANIC_INFO);
         return None;
     }
 
@@ -213,7 +220,9 @@ pub fn read_panic_report(out: &mut [u8; 256]) -> Option<usize> {
 
 /// Erases the panic sector once its report has been delivered.
 pub fn clear_panic_report() {
-    flash_erase_sector(FLASH_ADR_PANIC_INFO);
+    // A failure here only means the report may be delivered again after the
+    // next reset, which is the pre-existing behaviour on a bad bus.
+    let _ = flash_erase_sector(FLASH_ADR_PANIC_INFO);
 }
 
 /// Persists the panic message for the next boot.
@@ -228,8 +237,10 @@ pub fn clear_panic_report() {
 pub fn write_panic_bytes(bytes: &[u8]) {
     let panic_addr = FLASH_ADR_PANIC_INFO;
 
-    // Clear the panic info sector for writing just in case
-    flash_erase_sector(panic_addr);
+    // Clear the panic info sector for writing just in case. This runs in the
+    // panic handler: with `panic = "abort"` a hardware failure here is already
+    // fatal, and the valid flag below is never written on a partial record.
+    let _ = flash_erase_sector(panic_addr);
 
     // Panic section looks as follows
     // valid_flag: u8   + 0
@@ -238,14 +249,14 @@ pub fn write_panic_bytes(bytes: &[u8]) {
 
     // Write the length first
     let length = bytes.len() as u16;
-    flash_write_page(panic_addr + 1, 2, addr_of!(length) as *const u8);
+    let _ = flash_write_page(panic_addr + 1, 2, addr_of!(length) as *const u8);
 
     // Then write the panic message
-    flash_write_page(panic_addr + 3, length as u32, bytes.as_ptr());
+    let _ = flash_write_page(panic_addr + 3, length as u32, bytes.as_ptr());
 
     // Finally write the panic valid flag last
     let flag = PANIC_VALID_FLAG;
-    flash_write_page(panic_addr, 1, addr_of!(flag));
+    let _ = flash_write_page(panic_addr, 1, addr_of!(flag));
 }
 
 /// Marks the retained sentinel and breadcrumb as "this boot panicked".
@@ -575,7 +586,7 @@ mod tests {
     }
 
     /// A length word beyond the 256-byte record is rejected instead of reading
-    /// past `out`.
+    /// past `out`, and the corrupt record is erased.
     #[test]
     fn test_read_panic_report_length_over_limit() {
         FakeFlash::reset();
@@ -585,6 +596,50 @@ mod tests {
         let mut buf = [0u8; 256];
         assert_eq!(read_panic_report(&mut buf), None);
         assert_eq!(buf, [0u8; 256]);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            1,
+            "a corrupt length word must erase the panic sector so it is not retried"
+        );
+    }
+
+    /// A zero length word is not a record any writer produces: reject and erase,
+    /// without touching the caller's buffer.
+    #[test]
+    fn test_read_panic_report_zero_length() {
+        FakeFlash::reset();
+
+        seed_panic_info(b"ignored body", 0);
+
+        let mut buf = [0xAAu8; 256];
+        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(buf, [0xAAu8; 256], "the caller's buffer is left untouched");
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            1,
+            "a zero length word must erase the panic sector"
+        );
+    }
+
+    /// The all-ones length word of a half-erased sector is rejected with a single
+    /// erase and no body read into `out`.
+    #[test]
+    fn test_read_panic_report_length_max_u16() {
+        FakeFlash::reset();
+
+        seed_panic_info(b"stale tail", 0xFFFF);
+
+        let mut buf = [0x55u8; 256];
+        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(
+            buf, [0x55u8; 256],
+            "a rejected length must not overwrite the 256-byte buffer"
+        );
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            1,
+            "the oversized length word must erase the panic sector once"
+        );
     }
 
     #[test]

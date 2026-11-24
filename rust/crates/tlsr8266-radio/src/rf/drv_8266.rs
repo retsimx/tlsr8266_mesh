@@ -965,9 +965,10 @@ pub fn rf_link_slave_init(interval: u32) {
         let mut mac_check: [u32; 1] = [0];
         flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8);
         if mac_check[0] == u32::MAX {
-            // Generate random MAC address values
+            // Generate random MAC address values. A failed program leaves the
+            // flash erased, so the next boot takes this same branch again.
             let mac: [u16; 2] = [rand(), rand()];
-            flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
+            let _ = flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
         }
 
         // Read the MAC address from flash

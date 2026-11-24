@@ -59,6 +59,9 @@ pub fn mspi_write(c: u8) {
     write_reg_master_spi_data(c);
 }
 
+/// Maximum number of busy-flag polls [`mspi_wait`] performs before giving up.
+pub const MSPI_WAIT_MAX_ITERS: u32 = 10_000;
+
 /// Waits until the SPI peripheral completes the current operation.
 ///
 /// This function implements a busy-waiting loop that continuously polls the SPI control
@@ -72,15 +75,27 @@ pub fn mspi_write(c: u8) {
 /// 3. If the result is non-zero (BUSY flag set), continues looping
 /// 4. Once the BUSY flag is clear, returns to the caller
 ///
+/// # Returns
+///
+/// * `true` if the BUSY flag cleared within [`MSPI_WAIT_MAX_ITERS`] polls
+/// * `false` if the poll budget ran out, i.e. the SPI peripheral is stuck
+///
 /// # Notes
 ///
-/// * This is a blocking function that will not return until the SPI operation completes.
+/// * This is a blocking function that will not return until the SPI operation
+///   completes or the budget is exhausted.
 /// * In time-critical applications, consider the execution time impact of this busy-wait.
 /// * The function is inlined to minimize function call overhead in timing-sensitive operations.
-/// * No timeout mechanism is implemented - in case of hardware failure, this could deadlock.
+/// * The budget bounds the spin: a stuck peripheral costs at most the poll budget
+///   instead of deadlocking.
 #[inline(always)]
-pub fn mspi_wait() {
-    while read_reg_master_spi_ctrl() & (FLD_MASTER_SPI::BUSY.bits()) != 0 {}
+pub fn mspi_wait() -> bool {
+    for _ in 0..MSPI_WAIT_MAX_ITERS {
+        if read_reg_master_spi_ctrl() & (FLD_MASTER_SPI::BUSY.bits()) == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Directly writes a value to the SPI control register.
@@ -268,7 +283,7 @@ mod tests {
         FakeMmio::on_read8(REG_MASTER_SPI_CTRL, busy_then_idle);
 
         // Execute function under test
-        mspi_wait();
+        assert!(mspi_wait(), "a clearing BUSY flag must report completion");
 
         // Two BUSY polls then one idle poll: the loop observed the flag and only
         // returned once it cleared.
@@ -276,6 +291,30 @@ mod tests {
             CTRL_POLLS.load(Ordering::Relaxed),
             3,
             "mspi_wait must poll the BUSY flag until it clears"
+        );
+    }
+
+    /// Reports a stuck SPI peripheral: the BUSY flag is set on every poll.
+    fn always_busy_spi(_call_idx: usize) -> u8 {
+        CTRL_POLLS.fetch_add(1, Ordering::Relaxed);
+        FLD_MASTER_SPI::BUSY.bits()
+    }
+
+    /// A BUSY bit that never clears exhausts the poll budget instead of hanging.
+    #[test]
+    fn test_mspi_wait_times_out() {
+        reset_fakes();
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, always_busy_spi);
+
+        assert!(
+            !mspi_wait(),
+            "a BUSY flag that never clears must report a timeout"
+        );
+        assert_eq!(
+            CTRL_POLLS.load(Ordering::Relaxed),
+            MSPI_WAIT_MAX_ITERS as usize,
+            "the busy wait must stop after MSPI_WAIT_MAX_ITERS polls"
         );
     }
 

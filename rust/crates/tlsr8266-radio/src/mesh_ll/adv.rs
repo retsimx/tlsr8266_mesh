@@ -243,7 +243,10 @@ fn write_group_address(flash_addr: u32, value: u16) {
     // `value.to_le_bytes()` array and `DEVICE_ADDR_SIZE` is 2, so the driver reads
     // exactly that buffer. No unsafe operation remains; see the read path above.
     unsafe {
-        flash_write_page(flash_addr, DEVICE_ADDR_SIZE, bytes.as_ptr());
+        // The in-RAM group table is authoritative. A lost program leaves the
+        // slot's old value behind: a lost delete resurrects that group on the
+        // next boot scan, and a lost add leaves an 0xFFFF hole that ends it.
+        let _ = flash_write_page(flash_addr, DEVICE_ADDR_SIZE, bytes.as_ptr());
     }
 }
 
@@ -465,11 +468,15 @@ pub fn compact_flash_storage() {
     if MAX_FLASH_ADDR_OFFSET < MESH_GROUP_ADDRESS_NEXT_POSITION.get() as usize
         || MAX_FLASH_ADDR_OFFSET < MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as usize
     {
-        // Erase the entire flash sector
-        flash_erase_sector(flash_adr_dev_grp_adr);
+        // Erase the entire flash sector, then rewrite the live tables from RAM.
+        // A failed erase leaves stale records that the boot scan re-reads; a
+        // write skipped after a landed erase leaves an 0xFFFF hole that ends
+        // that scan early, so the sector is only whole again after the next
+        // successful compaction.
+        let _ = flash_erase_sector(flash_adr_dev_grp_adr);
 
         // Write current group addresses to flash
-        flash_write_page(
+        let _ = flash_write_page(
             flash_adr_dev_grp_adr,
             GROUP_ADDR_STORAGE_SIZE,
             GROUP_ADDRESS.lock().as_ptr() as *const u8,
@@ -477,7 +484,7 @@ pub fn compact_flash_storage() {
 
         // Write current device address to flash
         let device_address = DEVICE_ADDRESS.get();
-        flash_write_page(
+        let _ = flash_write_page(
             flash_adr_dev_grp_adr + GROUP_ADDR_STORAGE_SIZE,
             DEVICE_ADDR_SIZE,
             addr_of!(device_address) as *const u8,
@@ -524,7 +531,9 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
         if flash_pos != 0 && MESH_DEVICE_ADDRESS_NEXT_POSITION.get() != 0 {
             // Write zero to previous address location
             let zero_data = 0u16;
-            flash_write_page(
+            // The slot is retired in RAM regardless; a failed program leaves the
+            // old address readable, which the scan treats as a stale record.
+            let _ = flash_write_page(
                 flash_adr_dev_grp_adr - 2 + MESH_DEVICE_ADDRESS_NEXT_POSITION.get() as u32,
                 DEVICE_ADDR_SIZE,
                 addr_of!(zero_data) as *const u8,
@@ -533,7 +542,7 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
 
         // Update the device address in memory and in flash
         DEVICE_ADDRESS.set(dev_id);
-        flash_write_page(
+        let _ = flash_write_page(
             flash_pos as u32 + flash_adr_dev_grp_adr,
             DEVICE_ADDR_SIZE,
             addr_of!(dev_id) as *const u8,
@@ -657,7 +666,10 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
                     GROUP_ADDRESS.lock()[index] = group_id;
 
                     // Write to flash
-                    flash_write_page(
+                    // The group is already in the RAM table and the cursor
+                    // advances either way; a lost program is repaired by the next
+                    // `compact_flash_storage` rewrite.
+                    let _ = flash_write_page(
                         MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + flash_adr_dev_grp_adr,
                         DEVICE_ADDR_SIZE,
                         addr_of!(group_id) as *const u8,
@@ -700,7 +712,8 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
         }
 
         // Write group address to flash
-        flash_write_page(
+        // Same best-effort persistence as the empty-slot path above.
+        let _ = flash_write_page(
             MESH_GROUP_ADDRESS_NEXT_POSITION.get() as u32 + flash_adr_dev_grp_adr,
             DEVICE_ADDR_SIZE,
             addr_of!(group_id) as *const u8,

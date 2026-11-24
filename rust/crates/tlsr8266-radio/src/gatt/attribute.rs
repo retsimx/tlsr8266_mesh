@@ -154,7 +154,14 @@ pub fn l2cap_att_search(
     uuid: &[u8],
 ) -> Option<(&[AttributeT], usize)> {
     // The first attribute in the table contains the total number of attributes
-    let att_num = get_gAttributes()[0].att_num as usize;
+    let table = get_gAttributes();
+    let att_num = table[0].att_num as usize;
+
+    // Handle 0 is the count entry: its `uuid` is null, so there is nothing to
+    // compare, and an empty table has no attributes to search at all.
+    if handle_start == 0 || att_num == 0 {
+        return None;
+    }
 
     // If handle_start equals att_num, we've reached the end of the attribute table
     if att_num != handle_start {
@@ -163,33 +170,39 @@ pub fn l2cap_att_search(
 
         // Iterate through each handle in the specified range
         for current_handle in handle_start..=end {
-            let current_attr = &get_gAttributes()[current_handle];
+            let current_attr = &table[current_handle];
+
+            // Value-less entries (the count entry above all) carry a null UUID
+            // pointer; skipping them keeps every `from_raw_parts` below backed
+            // by a real static.
+            if current_attr.uuid.is_null() {
+                continue;
+            }
 
             // Check if the attribute has a 16-bit UUID (2 bytes)
             if current_attr.uuid_len == 2 {
-                // SAFETY: (4) audited GATT-table view. A 2-byte UUID length is
-                // exactly what `attrdef!`/`attrdefu!` pair with an `addr_of!` of
-                // a `static u16`, so the pointer is non-null and 2 bytes are in
-                // bounds for the whole program.
+                // SAFETY: (4) audited GATT-table view. The null check above
+                // guarantees a real static, and a 2-byte UUID length is exactly
+                // what `attrdef!`/`attrdefu!` pair with an `addr_of!` of a
+                // `static u16`, so 2 bytes are in bounds for the whole program.
                 let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 2) };
                 if uuid == attr_uuid {
                     // Return this attribute and the next one, along with the handle position
                     return Some((
-                        &get_gAttributes()[current_handle..current_handle + 2],
+                        &table[current_handle..(current_handle + 2).min(table.len())],
                         current_handle,
                     ));
                 }
             } else {
-                // SAFETY: (4) audited GATT-table view. 128-bit-UUID entries store
+                // SAFETY: (4) audited GATT-table view. The null check above
+                // guarantees a real static, and 128-bit-UUID entries store
                 // `uuid` as `addr_of!` of a 16-byte `[u8; 16]` static, so 0x10
-                // bytes are in bounds. Handle 0 (the count entry, `uuid == null`)
-                // is a pre-existing reachability gap in find-by-type/read-by-type;
-                // flagged in the batch report, not changed here.
+                // bytes are in bounds.
                 let attr_uuid = unsafe { slice::from_raw_parts(current_attr.uuid, 0x10) };
                 if uuid == attr_uuid {
                     // Return this attribute and the next one, along with the handle position
                     return Some((
-                        &get_gAttributes()[current_handle..current_handle + 2],
+                        &table[current_handle..(current_handle + 2).min(table.len())],
                         current_handle,
                     ));
                 }
@@ -635,33 +648,43 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
         let attr = &found_attr[0];
 
         // Check if attribute value matches the requested value
-        let attr_value_matches =
-            // SAFETY: (4) `attr_len == 2` gates the read, and the table's 2-byte
-            // service values are `static u16`s (`GAP_SERVICE_UUID`, `DEV_INFO_UUID`),
-            // so 2 aligned bytes are in bounds. `STATUS_CCC` is also 2 bytes but a
-            // `[u8; 2]`; a 0x2902 lookup here would read it unaligned — pre-existing,
-            // reported, not changed.
-            attr.attr_len == 2 && unsafe { *(attr.p_attr_value as *const u16) } == target_value;
+        let attr_value_matches = attr.attr_len == 2
+            && !attr.p_attr_value.is_null()
+            // SAFETY: (4) `attr_len == 2` and the non-null check gate the read.
+            // The table's 2-byte service values are `static u16`s, but a CCC
+            // lookup reaches `STATUS_CCC`, a `[u8; 2]` with alignment 1, so the
+            // read must be unaligned. Two bytes are in bounds either way.
+            && unsafe { read_unaligned(attr.p_attr_value as *const u16) } == target_value;
 
         if attr_value_matches {
             // Calculate base offset for this handle pair in response buffer
             // Each pair consists of 4 bytes: start handle (2) + end handle (2)
             let offset = handle_pairs_count * 4;
 
+            // A handle pair needs 4 bytes. Stop before writing past the value
+            // field instead of trusting the loop counter to stay in bounds.
+            if offset + 4 > response.att_read_rsp_mut().value.len() {
+                break;
+            }
+
             // Add attribute handle to response (start handle)
             response.att_read_rsp_mut().value[offset] = (found_handle & 0xff) as u8;
             response.att_read_rsp_mut().value[offset + 1] = (found_handle >> 8) as u8;
 
-            // Calculate end handle based on attribute's att_num field
-            let group_end_handle = found_attr[0].att_num as usize + (found_handle - 1);
+            // Calculate end handle based on attribute's att_num field. A
+            // zero-span entry (the CCC records `att_num == 0`) still spans its
+            // own handle, so the reported group ends at `found_handle` rather
+            // than at a handle below the start of the group.
+            let group_end_handle = found_attr[0].att_num.max(1) as usize + (found_handle - 1);
 
             // Add end handle to response
             response.att_read_rsp_mut().value[offset + 2] = (group_end_handle & 0xff) as u8;
             response.att_read_rsp_mut().value[offset + 3] = (group_end_handle >> 8) as u8;
 
-            // Update counter and move to next search position
+            // Update counter and move to next search position. Advance by at
+            // least one handle so a zero-span match cannot be rediscovered.
             handle_pairs_count += 1;
-            current_handle = found_handle + attr.att_num as usize;
+            current_handle = found_handle + (attr.att_num as usize).max(1);
         } else {
             // Move to next attribute if current one doesn't match
             current_handle = found_handle + 1;
@@ -952,6 +975,12 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
         return None;
     }
 
+    // Handle 0 is the table's count entry: no UUID, no value. Reject it instead
+    // of serving a zero-length read built from its null value pointer.
+    if att_num == 0 {
+        return None;
+    }
+
     // Validate handle doesn't exceed total attribute count
     if get_gAttributes()[0].att_num < att_num as u8 {
         return None;
@@ -965,12 +994,11 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
         // Config-driven values serve a runtime length, so `attr_len` is only the
         // buffer maximum for those handles.
         let value_len = attr_effective_len(att_num, current_attr);
-        // SAFETY: (4) `att_num` was bounded by `get_gAttributes()[0].att_num`
-        // above, so both table reads are in bounds; `p_attr_value` is that
-        // entry's static value of `value_len` effective bytes (the largest is the
-        // 19-byte device name) and the destination is this local packet's
-        // 22-byte `value` array. Handle 0 (null pointer, `value_len` 0) is a
-        // pre-existing zero-length-from-null edge, reported and not changed.
+        // SAFETY: (4) `att_num` is nonzero and was bounded by
+        // `get_gAttributes()[0].att_num` above, so both table reads are in
+        // bounds; `p_attr_value` is that entry's static value of `value_len`
+        // effective bytes (the largest is the 19-byte device name) and the
+        // destination is this local packet's 22-byte `value` array.
         unsafe {
             slice::from_raw_parts_mut(
                 addr_of_mut!(rf_packet_att_rsp.att_read_rsp_mut().value[0]),
@@ -1232,6 +1260,11 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
     // --- Extract attribute handle from request ---
     let att_handle = packet.l2cap_data().value[4] as usize;
 
+    // --- Reject the count entry: handle 0 has no UUID and no writable value ---
+    if att_handle == 0 {
+        return None;
+    }
+
     // --- Validate handle: check high byte and total attribute count ---
     let high_byte_is_zero = packet.l2cap_data().value[5] == 0;
     let handle_in_range = get_gAttributes()[0].att_num >= att_handle as u8;
@@ -1349,7 +1382,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 mod tests {
     use super::*;
     use crate::gatt::service_table::{
-        get_gAttributes, GATT_UUID_CHARACTER, GATT_UUID_PRIMARY_SERVICE,
+        get_gAttributes, GATT_UUID_CHARACTER, GATT_UUID_CHAR_USER_DESC, GATT_UUID_PRIMARY_SERVICE,
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
     };
     use core::ptr::null_mut;
@@ -3775,6 +3808,176 @@ mod tests {
             // Write to restricted handles should return None (blocked)
             assert!(response.is_none());
         }
+    }
+
+    #[test]
+    fn test_handle_write_request_or_command_rejects_handle_zero() {
+        seed_system_tick();
+
+        // Handle 0 is the table's count entry: it has a null UUID and no value,
+        // so a write must be rejected before any table lookup.
+        for opcode in [GattOp::AttOpWriteReq, GattOp::AttOpWriteCmd] {
+            let mut data = [0; 8];
+            data[0] = opcode as u8;
+            data[1] = 0; // Handle 0
+            data[2] = 0;
+            data[3] = 0xAA;
+
+            let packet = create_att_packet(0, &data);
+
+            assert!(handle_write_request_or_command(&packet).is_none());
+            assert!(l2cap_att_handler(&packet).is_none());
+        }
+    }
+
+    #[test]
+    fn test_handle_read_request_rejects_handle_zero() {
+        seed_system_tick();
+
+        // Handle 0 is the table's count entry (null value pointer, zero length).
+        let mut data = [0; 6];
+        data[0] = GattOp::AttOpReadReq as u8;
+        data[1] = 0; // Handle 0
+        data[2] = 0;
+
+        let packet = create_att_packet(0, &data);
+
+        assert!(handle_read_request(&packet).is_none());
+        assert!(l2cap_att_handler(&packet).is_none());
+    }
+
+    #[test]
+    fn test_l2cap_att_search_rejects_handle_zero() {
+        // The count entry at handle 0 carries a null UUID pointer; a search
+        // starting there must return None instead of dereferencing it.
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
+        assert!(l2cap_att_search(0, 28, &uuid_bytes).is_none());
+    }
+
+    #[test]
+    fn test_l2cap_att_search_last_handle_returns_clamped_slice() {
+        let uuid_bytes = uuid16_to_bytes(GATT_UUID_CHAR_USER_DESC);
+
+        // Handle 28 is the last entry (SPP_PAIRNAME, UUID 0x2901) and cannot be
+        // the start of a search (a start equal to the table count means "end"),
+        // so search the two entries before it. Returning `[28..30]` would index
+        // past the 29-entry table and panic; the result must be clamped to a
+        // single element.
+        let (found, handle) = l2cap_att_search(26, 28, &uuid_bytes).unwrap();
+        assert_eq!(handle, 28);
+        assert_eq!(found.len(), 1);
+
+        // From handle 1 the first 0x2901 entry is reached instead (handle 4,
+        // SPP_DEVICENAME); the two-element view is the normal case and must not
+        // be widened past the table by the clamp.
+        let (found, handle) = l2cap_att_search(1, 28, &uuid_bytes).unwrap();
+        assert_eq!(handle, 4);
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn test_find_by_type_value_reads_ccc_value_unaligned() {
+        seed_system_tick();
+
+        // Find By Type Value for type 0x2902 (CCC) with value [0x01, 0x00],
+        // which is exactly what `STATUS_CCC` holds at handle 19. `STATUS_CCC` is
+        // a `[u8; 2]` (alignment 1), so the value comparison must go through
+        // `read_unaligned`.
+        //
+        // Scope of this assertion: x86 tolerates unaligned loads, so restoring
+        // an aligned `*(ptr as *const u16)` dereference would still pass here.
+        // The guarantee this test provides is static — the comparison is
+        // *written* as `read_unaligned` — not runtime-detected. Only a
+        // Miri/UB-sanitizer run can enforce the alignment itself.
+        let mut data = [0; 12];
+        data[0] = GattOp::AttOpFindByTypeValueReq as u8;
+        data[1] = 1; // Starting Handle (little endian)
+        data[2] = 0;
+        data[3] = 19; // Ending Handle: stop at the CCC
+        data[4] = 0;
+        data[5] = 0x02; // Type: Client Characteristic Configuration (0x2902)
+        data[6] = 0x29;
+        data[7] = 0x01; // Value: 0x0001 (notifications enabled)
+        data[8] = 0x00;
+
+        // The CCC entry is declared with `att_num == 0`. The table must be left
+        // exactly as declared; the handler has to cope with a zero group span.
+        assert_eq!(get_gAttributes()[19].att_num, 0);
+
+        let packet = create_att_packet(0, &data);
+        let response = handle_find_by_type_value_request(&packet).unwrap();
+
+        // The unaligned 2-byte compare matched the CCC at handle 19.
+        assert_eq!(
+            response.att_read_rsp().opcode,
+            GattOp::AttOpFindByTypeValueRsp as u8
+        );
+        assert_eq!(response.att_read_rsp().value[0], 19);
+        assert_eq!(response.att_read_rsp().value[1], 0);
+
+        // A zero-span attribute reports itself as its own group end.
+        assert_eq!(response.att_read_rsp().value[2], 19);
+        assert_eq!(response.att_read_rsp().value[3], 0);
+
+        // The response advertises exactly one pair, and its byte counts fit in
+        // the 22-byte value field.
+        let l2cap_len = response.head().l2cap_len;
+        let rf_len = response.head().rf_len;
+        assert_eq!(l2cap_len, 5); // 4 payload bytes + opcode
+        assert_eq!(rf_len, 9); // opcode + 4 payload bytes + 4 header bytes
+        assert!((l2cap_len as usize - 1) <= response.att_read_rsp().value.len());
+
+        // The table was not mutated by the call.
+        assert_eq!(get_gAttributes()[19].att_num, 0);
+    }
+
+    #[test]
+    fn test_find_by_type_value_ccc_zero_span_terminates() {
+        seed_system_tick();
+
+        // Regression for a peer-triggerable out-of-bounds write: the CCC at
+        // handle 19 is declared with a zero group span (`att_num == 0`), and
+        // its value `[0x01, 0x00]` is fixed and publicly known. Before the fix
+        // the match branch advanced by `att_num`, rediscovered handle 19 on
+        // every iteration, and wrote `value[24..40]` into the 22-byte value
+        // field of the 48-byte stack `Packet` — debug panic
+        // (`index out of bounds: the len is 22 but the index is 22`), release
+        // OOB write.
+        let mut data = [0; 12];
+        data[0] = GattOp::AttOpFindByTypeValueReq as u8;
+        data[1] = 1; // Starting Handle
+        data[2] = 0;
+        data[3] = 28; // Ending Handle: the rest of the table
+        data[4] = 0;
+        data[5] = 0x02; // Type: 0x2902 (CCC)
+        data[6] = 0x29;
+        data[7] = 0x01; // Value: 0x0001
+        data[8] = 0x00;
+
+        let packet = create_att_packet(0, &data);
+        let response = handle_find_by_type_value_request(&packet).unwrap();
+
+        // The search terminated with a single, well-formed pair.
+        assert_eq!(
+            response.att_read_rsp().opcode,
+            GattOp::AttOpFindByTypeValueRsp as u8
+        );
+        let value = response.att_read_rsp().value;
+        assert_eq!(&value[0..4], &[19, 0, 19, 0]);
+
+        // Nothing past the single pair was written.
+        assert!(value[4..].iter().all(|byte| *byte == 0));
+
+        // The header agrees with the reported pair count, so no caller can be
+        // told to read past the value field.
+        let total_bytes = 4usize;
+        let l2cap_len = response.head().l2cap_len;
+        let rf_len = response.head().rf_len;
+        let dma_len = response.head().dma_len;
+        assert_eq!(l2cap_len, total_bytes as u16 + 1);
+        assert_eq!(rf_len, total_bytes as u8 + 5);
+        assert_eq!(dma_len, total_bytes as u32 + 7);
+        assert!(total_bytes <= value.len());
     }
 
     #[test]

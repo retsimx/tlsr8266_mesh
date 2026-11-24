@@ -231,6 +231,11 @@ pub fn switch_to_default_mesh_credentials() {
 ///
 /// Four 16-byte blocks, in the slot layout the pairing code reads: flags at
 /// `+0`, network name at `+16`, encoded password at `+32`, LTK at `+48`.
+///
+/// The commit is all-or-nothing: the flags block is programmed last and only
+/// when all three payload blocks landed, so a partial write is never a record
+/// that discovery accepts. The callers erase the pairing sector first, which is
+/// what leaves a withheld flag readable as "no record".
 pub fn write_out_of_mesh_credentials() {
     let cfg = crate::config::radio_config();
     let mut flags: [u8; 16] = [0; 16];
@@ -257,10 +262,17 @@ pub fn write_out_of_mesh_credentials() {
     }
 
     let mut ltk: [u8; 16] = *PAIR_CONFIG_MESH_LTK.lock();
-    flash_write_page(cfg.flash_adr_pairing + 48, 16, ltk.as_mut_ptr());
-    flash_write_page(cfg.flash_adr_pairing + 32, 16, encoded_password.as_ptr());
-    flash_write_page(cfg.flash_adr_pairing + 16, 16, name.as_ptr());
-    flash_write_page(cfg.flash_adr_pairing, 16, flags.as_ptr());
+    // Commit the three payload blocks first and the flag block last, and only
+    // when all three payloads were programmed: discovery validates nothing but
+    // the flag byte (`pair_flash_config_init`), so a withheld flag leaves this
+    // slot at 0xFF — the record is reported absent instead of valid-but-stale.
+    let ltk_written = flash_write_page(cfg.flash_adr_pairing + 48, 16, ltk.as_mut_ptr()).is_ok();
+    let pwd_written =
+        flash_write_page(cfg.flash_adr_pairing + 32, 16, encoded_password.as_ptr()).is_ok();
+    let name_written = flash_write_page(cfg.flash_adr_pairing + 16, 16, name.as_ptr()).is_ok();
+    if ltk_written && pwd_written && name_written {
+        let _ = flash_write_page(cfg.flash_adr_pairing, 16, flags.as_ptr());
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -436,6 +448,166 @@ mod tests {
         DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
         DEVICE_STATUS_READ_UNICAST_MODE,
     };
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
+    use tlsr8266_hal::mcu::crypto::fake_crypto;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// Datasheet offsets of the two SPI registers the flash driver drives.
+    const REG_MASTER_SPI_DATA: u32 = 0x0c;
+    const REG_MASTER_SPI_CTRL: u32 = 0x0d;
+    /// Command bytes at the head of every page program: enable, then write.
+    const WRITE_ENABLE: u8 = 0x06;
+    const WRITE: u8 = 0x02;
+    /// Status-register read and the dummy byte that clocks it in.
+    const READ_STATUS: u8 = 0x05;
+
+    /// Address whose page program `fail_one_page_program` must fail. A `fn` hook
+    /// cannot capture state, so the address is published here.
+    static FAILED_WRITE_ADDR: AtomicU32 = AtomicU32::new(0);
+
+    /// Holds the SPI BUSY flag set once the write command and its 24-bit address
+    /// for [`FAILED_WRITE_ADDR`] are on the wire, so exactly one page program
+    /// fails and every other transaction completes.
+    fn fail_one_page_program(_poll: usize) -> u8 {
+        let target = FAILED_WRITE_ADDR.load(Ordering::Relaxed);
+        let bytes = data_register_writes();
+        let fails = bytes
+            .len()
+            .checked_sub(5)
+            .map(|start| &bytes[start..])
+            .is_some_and(|tail| {
+                tail[0] == WRITE_ENABLE
+                    && tail[1] == WRITE
+                    && u32::from_be_bytes([0, tail[2], tail[3], tail[4]]) == target
+            });
+        if fails {
+            tlsr8266_pac::FLD_MASTER_SPI::BUSY.bits()
+        } else {
+            0
+        }
+    }
+
+    /// Every byte clocked onto the SPI data register, oldest first.
+    fn data_register_writes() -> Vec<u8> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == REG_MASTER_SPI_DATA | tlsr8266_pac::REG_BASE_ADDR)
+            .map(|write| write.value as u8)
+            .collect()
+    }
+
+    /// The five-byte head of a page program: write-enable, write, 24-bit address.
+    fn write_frame(addr: u32) -> [u8; 5] {
+        [
+            WRITE_ENABLE,
+            WRITE,
+            (addr >> 16) as u8,
+            (addr >> 8) as u8,
+            addr as u8,
+        ]
+    }
+
+    /// Restore the default in-memory NOR device even when a test panics: the
+    /// mode is process-wide and the suite runs single-threaded.
+    struct RestoreInMemoryFlash;
+
+    impl Drop for RestoreInMemoryFlash {
+        fn drop(&mut self) {
+            FakeFlash::set_mode(FakeFlashMode::InMemory);
+        }
+    }
+
+    /// The radio statics and the PAC/HAL host seams are process-wide, so every
+    /// test here starts from the factory configuration, a blank NOR device, an
+    /// idle register bank and the software AES path.
+    fn reset_host_fakes() {
+        reset_radio_state_for_test();
+        FakeMmio::reset();
+        fake_crypto::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        FakeFlash::reset();
+    }
+
+    /// The encoded password `write_out_of_mesh_credentials` derives from the
+    /// active configuration, computed with the same real AES path.
+    fn expected_encoded_password(cfg: &RadioConfig) -> [u8; 16] {
+        let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
+        let mut password = [0u8; 16];
+        let len = min(cfg.default_mesh_pwd.len(), password.len());
+        password[..len].copy_from_slice(&cfg.default_mesh_pwd.as_bytes()[..len]);
+        encode_password(&key, &password)
+    }
+
+    /// All four blocks land in the documented layout once every program
+    /// succeeds — the control for the fail-closed test below.
+    #[test]
+    fn write_out_of_mesh_credentials_writes_all_four_blocks() {
+        reset_host_fakes();
+        let cfg = radio_config();
+        let slot = cfg.flash_adr_pairing;
+
+        let mut expected_name = [0u8; 16];
+        let len = min(cfg.out_of_mesh_name.len(), expected_name.len());
+        expected_name[..len].copy_from_slice(&cfg.out_of_mesh_name.as_bytes()[..len]);
+        let mut expected_flags = [0u8; 16];
+        expected_flags[0] = cfg.pair_valid_flag;
+        expected_flags[15] = cfg.pair_valid_flag;
+
+        write_out_of_mesh_credentials();
+
+        let mut block = [0u8; 16];
+        FakeFlash::read_slice(slot, &mut block);
+        assert_eq!(block, expected_flags, "the flag block commits the record");
+        FakeFlash::read_slice(slot + 16, &mut block);
+        assert_eq!(block, expected_name, "network name block");
+        FakeFlash::read_slice(slot + 32, &mut block);
+        assert_eq!(
+            block,
+            expected_encoded_password(&cfg),
+            "encoded password block"
+        );
+        FakeFlash::read_slice(slot + 48, &mut block);
+        assert_eq!(block, *PAIR_CONFIG_MESH_LTK.lock(), "mesh LTK block");
+    }
+
+    /// F10: a payload block that fails to program must withhold the flag block.
+    /// Discovery validates only that byte, so committing it over stale content
+    /// would publish a valid-looking record with the wrong credentials.
+    #[test]
+    fn write_out_of_mesh_credentials_withholds_the_flag_when_a_payload_write_fails() {
+        reset_host_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreInMemoryFlash;
+
+        let cfg = radio_config();
+        let slot = cfg.flash_adr_pairing;
+
+        // The name block (+16) is the last payload block: let the LTK and the
+        // password programs complete, then stall the bus on the name program.
+        FAILED_WRITE_ADDR.store(slot + 16, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, fail_one_page_program);
+
+        // Expected wire image: two complete page programs, then the third one
+        // aborted at its address phase, and nothing after it. A fourth frame
+        // for the flag block at `slot` would mean the record was committed.
+        let mut expected = Vec::new();
+        expected.extend(write_frame(slot + 48));
+        expected.extend(*PAIR_CONFIG_MESH_LTK.lock());
+        expected.extend([READ_STATUS, 0x00]);
+        expected.extend(write_frame(slot + 32));
+        expected.extend(expected_encoded_password(&cfg));
+        expected.extend([READ_STATUS, 0x00]);
+        expected.extend(write_frame(slot + 16));
+
+        write_out_of_mesh_credentials();
+
+        assert_eq!(
+            data_register_writes(),
+            expected,
+            "a failed payload program must leave the flag block unwritten"
+        );
+    }
 
     /// The storage layer keeps "no pairing record" as `-1`; the facade owns the
     /// mapping to `None`, so it needs a test of its own.

@@ -500,7 +500,9 @@ impl LightFlashStore {
     //erase flash
     fn light_lum_erase(&mut self) {
         self.light_lum_addr = FLASH_ADR_LUM;
-        flash_erase_sector(FLASH_ADR_LUM);
+        // The cursor is reset regardless; a failed erase just means the next
+        // save lands on non-erased bytes, the pre-existing wear-levelling risk.
+        let _ = flash_erase_sector(FLASH_ADR_LUM);
     }
 
     //save cur lum value, if disconnected for a while
@@ -529,7 +531,10 @@ impl LightFlashStore {
             ww,
         };
 
-        flash_write_page(
+        // Best-effort persistence: the in-RAM value is authoritative. The cursor
+        // advances below regardless, so a lost program loses this sample for
+        // good; the next save writes the next slot.
+        let _ = flash_write_page(
             self.light_lum_addr,
             size_of::<LumSaveT>() as u32,
             addr_of!(lum_save) as *const u8,

@@ -1,6 +1,34 @@
-use core::convert::{TryFrom, TryInto};
+//! # UART bridge: hardware, tasks and seams
+//!
+//! The TLSR8266 built-in UART carries a 44-byte framed bridge between the
+//! firmware and the host tooling (`utilities/meshutils`). This module owns the
+//! peripheral and the two async tasks that move frames; the frame layout itself
+//! lives in [`protocol`], which is pure and hardware-free.
+//!
+//! ## Why the application edges are seams
+//!
+//! A UART frame can ask the device to do three things the transport must not
+//! implement itself — send a mesh command, enable status reporting, or announce
+//! that a host has attached — and the transport has to hand received frames
+//! back out to the same layers. Naming `mesh`, `light` or the SDK here would
+//! make the transport depend on its own consumers, so [`UartTxOps`],
+//! [`set_command_handler`] and [`on_mesh_rx_packet`] are the only edges out:
+//! `app::main_task` installs them once, right after [`init`] and before the
+//! first log line.
+//!
+//! ## Key Responsibilities
+//!
+//! - [`UART_HW`]: the one owner of the UART peripheral registers
+//! - [`take_rx_and_ack_tx_irq`]: the interrupt body, which only moves DMA bytes
+//!   and bumps a counter — never validates, logs or touches the mesh
+//! - `uart_sender` / `uart_receiver`: the async retry/ack and validate/handle
+//!   paths, both in task context
+//! - [`send_message`] / [`send_sync_panic`]: the async and panic-path sinks
+//! - [`on_mesh_rx_packet`]: relay of a received mesh packet to the host
+
+mod protocol;
+
 use core::mem::size_of;
-use core::ops::Range;
 use core::ptr::addr_of;
 use core::slice;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -18,44 +46,35 @@ use heapless::Deque;
 // a short interrupt-masked sequence.
 use portable_atomic::AtomicBool;
 
-use crate::mesh;
-use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable;
-use crate::sdk::ble_app::queues::{self, UART_TX_CHANNEL, UART_TX_QUEUE_CAPACITY};
 use crate::uprintln;
-use heapless::Vec;
 use mesh_protocol::packet_types::{AppCmdValue, Packet};
 #[cfg(test)]
-use mesh_protocol::uart::UART_CRC_OFFSET;
-use mesh_protocol::uart::{compute_crc, verify_crc, UartData, UartMsg, UART_DATA_LEN};
+use mesh_protocol::uart::compute_crc;
+use mesh_protocol::uart::{verify_crc, UartData, UartMsg, UART_DATA_LEN};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
-use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::uart::{UartDriver, UartIrqMask};
 
-pub(crate) const MSG_TYPE_INDEX: usize = 2;
-const CTRL_DESTINATION_RANGE: Range<usize> = 3..5;
-const CTRL_PAYLOAD_RANGE: Range<usize> = 5..18;
-const CTRL_FINGERPRINT_RANGE: Range<usize> = 3..18;
-const CTRL_RETRANSMIT_INDEX: usize = 18;
-const CTRL_ACK_FLAG_INDEX: usize = 19;
-const OUTGOING_FINGERPRINT_RANGE: Range<usize> = 7..22;
-/// Byte span the UART CRC-16 covers. Production delegates the check to
-/// `mesh_protocol::uart::verify_crc`/`compute_crc`; the frame-building tests
-/// below still need the span itself, and deriving it from the crate's trailer
-/// offset keeps the two from drifting apart.
+pub use protocol::UartCommand;
+use protocol::{
+    ack_retry_frame, build_ack, decode_command, fingerprint, outgoing_fingerprint, Fingerprint,
+    MSG_TYPE_INDEX,
+};
 #[cfg(test)]
-pub(crate) const CRC_RANGE: Range<usize> = 0..UART_CRC_OFFSET;
+use protocol::{
+    CRC_RANGE, CTRL_ACK_FLAG_INDEX, CTRL_DESTINATION_RANGE, CTRL_PAYLOAD_RANGE,
+    CTRL_RETRANSMIT_INDEX, OUTGOING_FINGERPRINT_RANGE, SNO_RANGE,
+};
 
-pub(crate) const SNO_RANGE: Range<usize> = 2..5;
-const CTRL_PAYLOAD_LEN: usize = CTRL_PAYLOAD_RANGE.end - CTRL_PAYLOAD_RANGE.start;
-const CTRL_FINGERPRINT_LEN: usize = CTRL_FINGERPRINT_RANGE.end - CTRL_FINGERPRINT_RANGE.start;
-
-type Fingerprint = [u8; CTRL_FINGERPRINT_LEN];
+/// UART frames the sender task can hold.
+///
+/// The task takes the channel as an argument, so this has to equal the
+/// application queue's capacity for `app.rs` to pass it in; the argument type is
+/// the check.
+const UART_TX_QUEUE_CAPACITY: usize = 12;
 
 /// Raw mutex backing the UART channels/signals: masks interrupts for the
 /// (short, allocation-free) critical sections inside `embassy-sync`.
 type CsRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
-use crate::sdk::ble_app::rf_drv_8266::DEVICE_ADDRESS;
 
 /// The UART peripheral, owned by this module.
 ///
@@ -103,24 +122,165 @@ static UART_ACK_SIGNAL: Signal<CsRawMutex, u8> = Signal::new();
 /// Most recent ack counter received from the host.
 static UART_LAST_ACK: AtomicU8 = AtomicU8::new(0);
 
-// AppCmdValueT
+/// TX-side operations the application owns: queueing a frame and reading the
+/// dropped-frame counter.
+///
+/// `#[derive(Copy, Clone)]` so the struct can be copied out of the critical
+/// section — the lock is never held across a sink. `app::main_task` registers
+/// this once, right after [`init`], because the SDK queue it wraps sits above
+/// this module in the layering graph.
+#[derive(Copy, Clone)]
+pub struct UartTxOps {
+    /// Queue one frame; `true` only when it was queued.
+    pub enqueue_tx: fn(&UartData) -> bool,
+    /// How many frames the transport has dropped because the queue was full.
+    pub dropped_tx: fn() -> u32,
+}
+
+/// Test-only stand-in for the ops `app::main_task` registers.
+///
+/// Before this module dropped its SDK import every frame went straight to the
+/// queue, and host tests in other modules still expect their frames to land
+/// there. These adapters keep that behaviour for test builds only; in
+/// production the static starts empty until `main_task` registers, so a frame
+/// produced before registration is reported as dropped rather than routed to a
+/// transport nobody installed.
+#[cfg(test)]
+mod test_ops {
+    use super::UartData;
+
+    pub(super) fn enqueue_tx(msg: &UartData) -> bool {
+        crate::sdk::ble_app::queues::enqueue_uart_tx(msg)
+    }
+
+    pub(super) fn dropped_tx() -> u32 {
+        crate::sdk::ble_app::queues::dropped_uart_tx()
+    }
+}
+
+#[cfg(test)]
+const TEST_TX_OPS: UartTxOps = UartTxOps {
+    enqueue_tx: test_ops::enqueue_tx,
+    dropped_tx: test_ops::dropped_tx,
+};
+
+#[cfg(not(test))]
+static UART_TX_OPS: CriticalSectionMutex<Option<UartTxOps>> = CriticalSectionMutex::new(None);
+
+#[cfg(test)]
+static UART_TX_OPS: CriticalSectionMutex<Option<UartTxOps>> =
+    CriticalSectionMutex::new(Some(TEST_TX_OPS));
+
+/// Signature of the application's UART command handler.
+///
+/// A plain `fn` pointer, never a closure: a closure would mangle to
+/// `main_task::{{closure}}`, which `sdk/stack_analysis.py` rejects.
+pub type UartCommandHandler = fn(UartCommand) -> [u8; 3];
+
+/// The application's command handler, installed by `app::main_task`.
+static UART_COMMAND_HANDLER: CriticalSectionMutex<Option<UartCommandHandler>> =
+    CriticalSectionMutex::new(None);
+
+/// Registers the TX-side operations.
+///
+/// Called once from `app::main_task` immediately after [`init`], so every log
+/// line from the boot banner onwards has a transport. `#[inline(never)]` keeps
+/// the one-off registration out of `main_task`'s future.
+#[inline(never)]
+pub fn set_tx_ops(ops: UartTxOps) {
+    *UART_TX_OPS.lock() = Some(ops);
+}
+
+/// Copies the registered operations out, if any.
+fn tx_ops() -> Option<UartTxOps> {
+    *UART_TX_OPS.lock()
+}
+
+/// Enqueues one frame through the registered ops.
+///
+/// `#[inline(never)]` is load-bearing: `sdk/stack_analysis.py`'s indirect-edge
+/// table (`INDIRECT_EDGES` key `uart_tx_ops_push`) binds this symbol to
+/// `app::enqueue_uart_tx_hook`, and the optimiser would otherwise fold this
+/// one-call shim into its caller and erase the dispatcher from the ELF. No
+/// closure is used anywhere in this seam for the same reason.
+#[inline(never)]
+fn uart_tx_ops_push(msg: &UartData) -> bool {
+    match tx_ops() {
+        Some(ops) => (ops.enqueue_tx)(msg),
+        None => false,
+    }
+}
+
+/// Reads the transport's dropped-frame counter through the registered ops.
+///
+/// `#[inline(never)]` for the same reason as [`uart_tx_ops_push`]; it is the
+/// `INDIRECT_EDGES` key `uart_tx_ops_dropped`.
+#[inline(never)]
+fn uart_tx_ops_dropped() -> u32 {
+    match tx_ops() {
+        Some(ops) => (ops.dropped_tx)(),
+        None => 0,
+    }
+}
+
+/// Registers the handler that executes host commands.
+///
+/// `app::main_task` installs `app::uart_command_hook` once, immediately after
+/// [`init`]. With no handler installed every command is acknowledged with a
+/// zero mesh sequence number and nothing else happens.
+#[inline(never)]
+pub fn set_command_handler(handler: UartCommandHandler) {
+    *UART_COMMAND_HANDLER.lock() = Some(handler);
+}
+
+/// Copies the registered command handler out, if any.
+fn command_handler() -> Option<UartCommandHandler> {
+    *UART_COMMAND_HANDLER.lock()
+}
+
+/// Hands one decoded command to the application and returns the 3-byte mesh
+/// sequence number its ACK frame must carry.
+///
+/// `#[inline(never)]` is load-bearing: `sdk/stack_analysis.py`'s indirect-edge
+/// table (`INDIRECT_EDGES` key `dispatch_uart_cmd`) binds this symbol to
+/// `app::uart_command_hook`, and inlining it into `handle_received_frame` would
+/// erase the dispatcher from the ELF and fail the table closed. No closure is
+/// used anywhere in this seam for the same reason.
+#[inline(never)]
+fn dispatch_uart_cmd(cmd: UartCommand) -> [u8; 3] {
+    match command_handler() {
+        Some(handler) => handler(cmd),
+        None => [0; 3],
+    }
+}
+
+/// Forwards one received mesh packet to the host.
+///
+/// The SDK's UART bridge and the mesh TX path both reach this through
+/// `app::uart_mesh_rx_hook`, so the transport stays free of both. `own_dev_addr`
+/// is the mesh address of this device, passed in by the caller rather than read
+/// from the SDK here.
+///
+/// Packets this device sent are skipped (the host already knows about them) and
+/// so are frames already forwarded, keyed on the `dst`..`par` fingerprint.
 #[cfg_attr(test, mry::mry)]
-pub fn light_mesh_rx_cb(data: &Packet) {
+pub fn on_mesh_rx_packet(pkt: &Packet, own_dev_addr: u16) {
     // Don't report messages that we sent
     if !started()
-        || (data.ll_app().value.src == DEVICE_ADDRESS.get()
-            && data.ll_app().value.dst != DEVICE_ADDRESS.get())
+        || (pkt.ll_app().value.src == own_dev_addr && pkt.ll_app().value.dst != own_dev_addr)
     {
         return;
     }
 
-    let data = addr_of!(data.ll_app().value) as *const u8;
+    let data = addr_of!(pkt.ll_app().value) as *const u8;
     // Compute the CRC of important bits. This is from start of AppCmdValueT.dst (5) to end of AppCmdValueT.par (20)
     // SAFETY: (4) audited packed-wire view. `data` points at the live packet's
-    // `AppCmdValue` field (21 bytes), and the 15-byte view is the `dst`..`par`
+    // `AppCmdValue` field (20 bytes), and the 15-byte view is the `dst`..`par`
     // span of that wire layout (offsets 5..20), so it stays inside the
-    // caller-owned packet.
-    let msg = unsafe { slice::from_raw_parts((data as u32 + 5) as *const u8, 20 - 5) };
+    // caller-owned packet. The offset is applied with `add`, not by casting the
+    // address to an integer: a `u32` cast truncates the pointer on a 64-bit host
+    // and reads through an address that is no longer inside the packet.
+    let msg = unsafe { slice::from_raw_parts(data.add(5), 20 - 5) };
 
     // Check if this message is one we sent
     if UART_SENT_DEDUP.lock().iter().any(|c| c == msg) {
@@ -133,9 +293,9 @@ pub fn light_mesh_rx_cb(data: &Packet) {
         data: [0; UART_DATA_LEN],
     };
 
-    msg.data[2] = u8::from(UartMsg::MeshMessage);
+    msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::MeshMessage);
     for i in 0..size_of::<AppCmdValue>() {
-        // SAFETY: (4) audited packed-wire copy. `i < size_of::<AppCmdValue>()` (21) and
+        // SAFETY: (4) audited packed-wire copy. `i < size_of::<AppCmdValue>()` (20) and
         // the destination offset `3 + i` stays below `UART_DATA_LEN` (44), so both the
         // `msg.data` store and the `data` load stay in bounds of their buffers.
         unsafe { *msg.data.as_mut_ptr().offset(3 + i as isize) = *data.add(i) };
@@ -146,7 +306,9 @@ pub fn light_mesh_rx_cb(data: &Packet) {
 
 #[coverage(off)]
 #[embassy_executor::task]
-pub async fn uart_sender() {
+pub async fn uart_sender(
+    tx_channel: &'static Channel<CsRawMutex, UartData, UART_TX_QUEUE_CAPACITY>,
+) {
     // Stay parked until a host actually speaks on UART, so boot banners
     // queued into the UART TX channel cost nothing on a headless light.
     UART_STARTED_SIGNAL.wait().await;
@@ -156,9 +318,9 @@ pub async fn uart_sender() {
     let mut dropped_uart_tx_seen: u32 = 0;
 
     loop {
-        report_queue_drops(&mut dropped_uart_tx_seen);
+        report_queue_drops(&mut dropped_uart_tx_seen, tx_channel);
 
-        let mut msg = wait_for_outgoing_message().await;
+        let mut msg = wait_for_outgoing_message(tx_channel).await;
         prepare_outgoing_message(&mut msg, &mut ack_counter);
         send_with_retry(&msg, ack_counter).await;
     }
@@ -174,7 +336,7 @@ pub async fn uart_receiver() {
         report_rx_drops(&mut last_reported_rx_drops);
 
         if let Some(sno) = handle_received_frame(&msg) {
-            ack_msg(&msg, &Vec::from_slice(&sno).unwrap()).await;
+            ack_msg(&msg, &sno).await;
         }
     }
 }
@@ -182,10 +344,6 @@ pub async fn uart_receiver() {
 /// Whether the UART bridge has been started by an incoming frame.
 pub fn started() -> bool {
     UART_SENDER_STARTED.load(Ordering::Relaxed)
-}
-
-pub fn enable_uart_status_reporting() {
-    queues::set_uart_status_reporting_enabled(true);
 }
 
 /// Configure the UART peripheral (GPIO, DMA buffers, 115200 baud).
@@ -205,11 +363,12 @@ pub fn clear_error() {
 
 /// Queue a UART frame for the [`uart_sender`] task.
 ///
-/// Returns `Err(())` when the queue is full (the frame was dropped and
-/// counted).
+/// Returns `Err(())` when the transport rejected the frame: the queue was full
+/// (and the registered ops counted the drop), or no ops have been registered yet
+/// (nothing is counted — there is no transport to count against).
 #[cfg_attr(test, mry::mry)]
 pub fn send_message(msg: &UartData) -> Result<(), ()> {
-    if queues::enqueue_uart_tx(msg) {
+    if uart_tx_ops_push(msg) {
         Ok(())
     } else {
         Err(())
@@ -265,8 +424,23 @@ pub fn take_rx_and_ack_tx_irq() {
 #[inline(never)]
 fn queue_rx_frame(frame: UartData) {
     if UART_RX_CHANNEL.try_send(frame).is_err() {
-        queues::count_drop(&UART_RX_DROPPED);
+        count_rx_drop();
     }
+}
+
+/// Bumps [`UART_RX_DROPPED`] from interrupt context.
+///
+/// `fetch_add` needs a 32-bit atomic read-modify-write, which `thumbv6m`
+/// (Cortex-M0) cannot do in hardware, so the load/modify/store runs masked.
+/// `sdk::ble_app::queues::count_drop` does the same thing for the shared
+/// queues, but it belongs to the SDK, which this module may not name.
+fn count_rx_drop() {
+    critical_section::with(|_| {
+        UART_RX_DROPPED.store(
+            UART_RX_DROPPED.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
+    });
 }
 
 /// Send a frame on the async path, waiting for the previous transfer to finish.
@@ -367,7 +541,7 @@ async fn wait_tx_done(_deadline: Instant) -> Result<(), ()> {
     UART_TX_DONE.try_take().ok_or(())
 }
 
-async fn ack_msg(msg: &UartData, sno: &Vec<u8, 3>) {
+async fn ack_msg(msg: &UartData, sno: &[u8; 3]) {
     // If data[1] is 0xff, it means this message is an ack from the client
     if msg.data[1] == u8::from(UartMsg::Ack) {
         UART_LAST_ACK.store(msg.data[0], Ordering::Relaxed);
@@ -375,22 +549,7 @@ async fn ack_msg(msg: &UartData, sno: &Vec<u8, 3>) {
         return;
     }
 
-    let mut result = UartData {
-        len: UART_DATA_LEN as u32,
-        data: [0; UART_DATA_LEN],
-    };
-
-    // Set the counter
-    result.data[0] = msg.data[0];
-
-    // Ack the counter
-    result.data[1] = 0xff;
-
-    // Set the sno
-    result.data[SNO_RANGE].copy_from_slice(sno.as_slice());
-
-    // Set the crc16
-    compute_crc(&mut result);
+    let result = build_ack(msg, *sno);
 
     // Send the ack
     uart_send_async(&result).await;
@@ -399,20 +558,24 @@ async fn ack_msg(msg: &UartData, sno: &Vec<u8, 3>) {
 /// Surface UART TX queue overflow, one log line per change.
 ///
 /// The SDK cannot log — it must not reach the application's UART sink — so it
-/// only counts drops. Turning a counter delta into a line here keeps a
-/// sustained overload visible from the host without a write per iteration.
+/// only counts drops, and the counter is read back through [`UartTxOps`].
+/// Turning the delta into a line here keeps a sustained overload visible from
+/// the host without a write per iteration.
 ///
 /// Only reported once the backlog has drained past the halfway mark: a log
 /// frame pushed into the very queue that overflowed can itself be dropped,
 /// which would bump the counter and produce another line — a report storm that
 /// keeps the queue saturated. Waiting for headroom means the line fits and the
 /// diagnostic cannot amplify the condition it reports.
-fn report_queue_drops(dropped_uart_tx_seen: &mut u32) {
-    let total = queues::dropped_uart_tx();
+fn report_queue_drops(
+    dropped_uart_tx_seen: &mut u32,
+    tx_channel: &Channel<CsRawMutex, UartData, UART_TX_QUEUE_CAPACITY>,
+) {
+    let total = uart_tx_ops_dropped();
     if total == *dropped_uart_tx_seen {
         return;
     }
-    if UART_TX_CHANNEL.len() > UART_TX_QUEUE_CAPACITY / 2 {
+    if tx_channel.len() > tx_channel.capacity() / 2 {
         return;
     }
 
@@ -427,7 +590,7 @@ fn report_queue_drops(dropped_uart_tx_seen: &mut u32) {
 /// Surface UART RX channel overflow, one log line per change (task context only).
 ///
 /// Mirrors [`report_queue_drops`], minus its headroom guard: the line goes to
-/// `UART_TX_CHANNEL`, which is not the queue that overflowed, so it cannot
+/// the sender's queue, which is not the queue that overflowed, so it cannot
 /// amplify its own condition.
 fn report_rx_drops(last_reported_rx_drops: &mut u32) {
     let total = UART_RX_DROPPED.load(Ordering::Relaxed);
@@ -454,26 +617,35 @@ fn handle_received_frame(msg: &UartData) -> Option<[u8; 3]> {
     }
 
     // The first valid frame is what starts the bridge: wake the parked
-    // `uart_sender` and enable the status reporting the host expects.
+    // `uart_sender` and let the application enable the status reporting the
+    // host expects (before the initial dump that enabling performs).
     if !UART_SENDER_STARTED.swap(true, Ordering::Relaxed) {
         UART_STARTED_SIGNAL.signal(());
-
-        // Enable status reporting before calling mesh_report_status_enable so
-        // that the initial dump fired inside that function can actually reach
-        // the UART send path.
-        enable_uart_status_reporting();
-        mesh_report_status_enable(true);
+        dispatch_uart_cmd(UartCommand::HostAttached);
     }
 
-    Some(process_received_message(msg))
+    match decode_command(msg) {
+        Some(cmd) => {
+            // Record what we are about to relay before the mesh can echo it
+            // back through `on_mesh_rx_packet`.
+            if let UartCommand::LightCtrl { .. } = cmd {
+                record_sent_fingerprint(fingerprint(msg));
+            }
+            Some(dispatch_uart_cmd(cmd))
+        }
+        // Nothing to execute, but the frame was valid and is still acknowledged.
+        None => Some([0; 3]),
+    }
 }
 
 async fn wait_for_received_message() -> UartData {
     UART_RX_CHANNEL.receive().await
 }
 
-async fn wait_for_outgoing_message() -> UartData {
-    UART_TX_CHANNEL.receive().await
+async fn wait_for_outgoing_message(
+    tx_channel: &Channel<CsRawMutex, UartData, UART_TX_QUEUE_CAPACITY>,
+) -> UartData {
+    tx_channel.receive().await
 }
 
 fn record_sent_fingerprint(fingerprint: Fingerprint) {
@@ -487,54 +659,11 @@ fn record_sent_fingerprint(fingerprint: Fingerprint) {
     let _ = push_result;
 }
 
-fn process_received_message(msg: &UartData) -> [u8; 3] {
-    match UartMsg::try_from(msg.data[MSG_TYPE_INDEX]) {
-        Ok(UartMsg::LightCtrl) => handle_light_ctrl(msg),
-        Ok(UartMsg::LightStatus) => {
-            handle_light_status();
-            [0; 3]
-        }
-        _ => [0; 3],
-    }
-}
-
-fn handle_light_ctrl(msg: &UartData) -> [u8; 3] {
-    let destination = u16::from_le_bytes(
-        msg.data[CTRL_DESTINATION_RANGE]
-            .try_into()
-            .expect("destination bytes"),
-    );
-
-    let mut data = [0u8; CTRL_PAYLOAD_LEN];
-    data.copy_from_slice(&msg.data[CTRL_PAYLOAD_RANGE]);
-
-    let fingerprint: Fingerprint = msg.data[CTRL_FINGERPRINT_RANGE]
-        .try_into()
-        .expect("fingerprint slice");
-    record_sent_fingerprint(fingerprint);
-
-    mesh::send_mesh_message(
-        &Vec::from_slice(&data).unwrap(),
-        destination,
-        msg.data[CTRL_RETRANSMIT_INDEX],
-        msg.data[CTRL_ACK_FLAG_INDEX] != 0,
-    )
-}
-
-fn handle_light_status() {
-    mesh_report_status_enable(true);
-    enable_uart_status_reporting();
-}
-
 fn prepare_outgoing_message(msg: &mut UartData, ack_counter: &mut u8) {
-    let fingerprint: Fingerprint = msg.data[OUTGOING_FINGERPRINT_RANGE]
-        .try_into()
-        .expect("outgoing fingerprint slice");
-    record_sent_fingerprint(fingerprint);
+    record_sent_fingerprint(outgoing_fingerprint(msg));
 
     *ack_counter = ack_counter.wrapping_add(1);
-    msg.data[0] = *ack_counter;
-    compute_crc(msg);
+    *msg = ack_retry_frame(msg, *ack_counter);
 }
 
 async fn send_with_retry(msg: &UartData, ack_counter: u8) {
@@ -579,6 +708,8 @@ async fn send_with_retry(msg: &UartData, ack_counter: u8) {
 /// share one process, so `App::default()` can no longer hand out a fresh
 /// manager. `UART_TX_LOCK` needs no reset — it is only held inside an
 /// `.await`-free critical window and is always released by dropping a guard.
+/// The registered command handler is cleared, so a test that needs one
+/// registers its own; the test-only TX ops are restored.
 #[cfg(test)]
 pub fn reset_for_test() {
     *UART_HW.lock() = UartDriver::default_const();
@@ -590,21 +721,23 @@ pub fn reset_for_test() {
     UART_ACK_SIGNAL.reset();
     UART_TX_DONE.reset();
     while UART_RX_CHANNEL.try_receive().is_ok() {}
-    queues::reset_for_test();
+    set_tx_ops(TEST_TX_OPS);
+    *UART_COMMAND_HANDLER.lock() = None;
+    crate::sdk::ble_app::queues::reset_for_test();
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::mesh::{mock_send_mesh_message, send_mesh_message};
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_report_status_enable;
+    use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
     use core::future::Future;
     use futures::executor::block_on;
     use futures::task::noop_waker;
     use mesh_protocol::crc::crc16;
     use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
     use mry::Any;
+    use std::sync::Mutex as StdMutex;
     use std::task::{Context, Poll};
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -678,6 +811,21 @@ mod tests {
         msg
     }
 
+    /// A light-control frame with a valid CRC and every field distinct, so a
+    /// decode that reads the wrong offset cannot pass.
+    fn light_ctrl_frame() -> UartData {
+        let mut msg = empty_frame();
+        msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::LightCtrl);
+        msg.data[CTRL_DESTINATION_RANGE].copy_from_slice(&u16::to_le_bytes(0x1234));
+        for (idx, byte) in msg.data[CTRL_PAYLOAD_RANGE].iter_mut().enumerate() {
+            *byte = (idx as u8) + 1;
+        }
+        msg.data[CTRL_RETRANSMIT_INDEX] = 2;
+        msg.data[CTRL_ACK_FLAG_INDEX] = 1;
+        compute_crc(&mut msg);
+        msg
+    }
+
     fn empty_frame() -> UartData {
         UartData {
             len: UART_DATA_LEN as u32,
@@ -685,23 +833,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_uart_msg_try_from() {
-        let cases = [
-            (UartMsg::LightCtrl, 0x02),
-            (UartMsg::LightStatus, 0x03),
-            (UartMsg::MeshMessage, 0x04),
-            (UartMsg::PanicMessage, 0x05),
-            (UartMsg::PrintMessage, 0x06),
-            (UartMsg::Ack, 0xff),
-        ];
+    /// Commands handed to the test handler, in dispatch order.
+    static DISPATCHED: StdMutex<heapless::Vec<UartCommand, 8>> =
+        StdMutex::new(heapless::Vec::new());
 
-        for (variant, byte) in cases.iter() {
-            assert_eq!(u8::from(*variant), *byte);
-            assert_eq!(UartMsg::try_from(*byte).unwrap(), *variant);
+    /// Test handler: records the command and answers with the contract `app::
+    /// uart_command_hook` implements — a real sno for `LightCtrl`, zeros else.
+    fn recording_handler(cmd: UartCommand) -> [u8; 3] {
+        let _ = DISPATCHED.lock().unwrap().push(cmd);
+        match cmd {
+            UartCommand::LightCtrl { .. } => [4, 5, 6],
+            _ => [0; 3],
         }
+    }
 
-        assert!(UartMsg::try_from(0x11).is_err());
+    fn dispatched() -> heapless::Vec<UartCommand, 8> {
+        DISPATCHED.lock().unwrap().clone()
+    }
+
+    fn reset_recorder() {
+        DISPATCHED.lock().unwrap().clear();
+    }
+
+    /// Marks the bridge as started, so the next frame is not the one that
+    /// dispatches `HostAttached`.
+    fn start_bridge() {
+        UART_SENDER_STARTED.store(true, Ordering::Relaxed);
     }
 
     #[test]
@@ -735,7 +892,7 @@ mod tests {
         let expected_data = msg.data;
         UART_TX_CHANNEL.try_send(msg).unwrap();
 
-        let result = block_on(wait_for_outgoing_message());
+        let result = block_on(wait_for_outgoing_message(&UART_TX_CHANNEL));
 
         assert_eq!(result.len, expected_len);
         assert_eq!(result.data, expected_data);
@@ -744,7 +901,7 @@ mod tests {
     #[test]
     fn test_wait_for_outgoing_message_waits_until_message_available() {
         reset_for_test();
-        let future = wait_for_outgoing_message();
+        let future = wait_for_outgoing_message(&UART_TX_CHANNEL);
         futures::pin_mut!(future);
 
         let waker = noop_waker();
@@ -770,70 +927,78 @@ mod tests {
         assert_eq!(result.data[0], 0xEF);
     }
 
+    /// A light-control frame is dispatched to the registered handler and its
+    /// `dst`..`par` fingerprint is recorded before the mesh can echo it back.
     #[test]
-    #[mry::lock(send_mesh_message)]
-    fn test_process_received_message_light_ctrl_records_message_and_calls_mesh() {
+    fn test_handle_received_frame_dispatches_light_ctrl_and_records_fingerprint() {
         reset_for_test();
+        reset_recorder();
+        set_command_handler(recording_handler);
+        start_bridge();
 
-        let mut msg = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
-        };
+        let msg = light_ctrl_frame();
 
-        msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::LightCtrl);
-        let destination = u16::to_le_bytes(0x1234);
-        msg.data[CTRL_DESTINATION_RANGE].copy_from_slice(&destination);
-        msg.data[CTRL_RETRANSMIT_INDEX] = 2; // retransmit count
-        msg.data[CTRL_ACK_FLAG_INDEX] = 1; // send ack
-        for (idx, byte) in msg.data[CTRL_PAYLOAD_RANGE].iter_mut().enumerate() {
-            *byte = (idx as u8) + 1;
-        }
-        mock_send_mesh_message(Any, Any, Any, Any).returns([1, 2, 3]);
+        let sno = handle_received_frame(&msg);
 
-        let sno = process_received_message(&msg);
+        assert_eq!(sno, Some([4, 5, 6]));
+        assert_eq!(
+            dispatched().as_slice(),
+            &[UartCommand::LightCtrl {
+                dst: 0x1234,
+                payload: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+                retransmit: 2,
+                ack: true,
+            }]
+        );
 
-        assert_eq!(sno, [1, 2, 3]);
-        mock_send_mesh_message(Any, Any, Any, Any).assert_called(1);
-
-        let expected_fingerprint: Fingerprint = msg.data[CTRL_FINGERPRINT_RANGE]
-            .try_into()
-            .expect("fingerprint slice");
+        let expected_fingerprint = fingerprint(&msg);
         let sent = UART_SENT_DEDUP.lock();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent.front().unwrap(), &expected_fingerprint);
     }
 
+    /// A frame whose command byte is not dispatched is still acknowledged, but
+    /// nothing is executed and nothing is recorded.
     #[test]
-    fn test_process_received_message_unknown_type_returns_zero() {
+    fn test_handle_received_frame_unknown_type_returns_zero_and_dispatches_nothing() {
         reset_for_test();
-        let msg = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0x99; UART_DATA_LEN],
-        };
-
-        let sno = process_received_message(&msg);
-
-        assert_eq!(sno, [0; 3]);
-        assert!(UART_SENT_DEDUP.lock().is_empty());
-    }
-
-    #[test]
-    #[mry::lock(mesh_report_status_enable)]
-    fn test_process_received_message_light_status_enables_reporting() {
-        reset_for_test();
+        reset_recorder();
+        set_command_handler(recording_handler);
+        start_bridge();
 
         let mut msg = UartData {
             len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
+            data: [0x99; UART_DATA_LEN],
         };
+        compute_crc(&mut msg);
+
+        let sno = handle_received_frame(&msg);
+
+        assert_eq!(sno, Some([0; 3]));
+        assert!(dispatched().is_empty());
+        assert!(UART_SENT_DEDUP.lock().is_empty());
+    }
+
+    /// A light-status request is dispatched as `EnableStatusReporting`, which is
+    /// the command that re-runs the node-status dump.
+    #[test]
+    fn test_handle_received_frame_light_status_requests_reporting() {
+        reset_for_test();
+        reset_recorder();
+        set_command_handler(recording_handler);
+        start_bridge();
+
+        let mut msg = empty_frame();
         msg.data[MSG_TYPE_INDEX] = u8::from(UartMsg::LightStatus);
+        compute_crc(&mut msg);
 
-        mock_mesh_report_status_enable(true).returns(());
+        let sno = handle_received_frame(&msg);
 
-        let sno = process_received_message(&msg);
-
-        assert_eq!(sno, [0, 0, 0]);
-        mock_mesh_report_status_enable(true).assert_called(1);
+        assert_eq!(sno, Some([0; 3]));
+        assert_eq!(
+            dispatched().as_slice(),
+            &[UartCommand::EnableStatusReporting]
+        );
     }
 
     #[test]
@@ -855,9 +1020,7 @@ mod tests {
         assert_eq!(msg.data[42], (expected_crc & 0xff) as u8);
         assert_eq!(msg.data[43], ((expected_crc >> 8) & 0xff) as u8);
 
-        let expected_fingerprint: Fingerprint = msg.data[OUTGOING_FINGERPRINT_RANGE]
-            .try_into()
-            .expect("fingerprint slice");
+        let expected_fingerprint = outgoing_fingerprint(&msg);
         let sent = UART_SENT_DEDUP.lock();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent.front().unwrap(), &expected_fingerprint);
@@ -932,9 +1095,8 @@ mod tests {
         let mut ack = empty_frame();
         ack.data[0] = expected;
         ack.data[1] = u8::from(UartMsg::Ack);
-        let sno = Vec::from_slice(&[0u8, 0, 0]).unwrap();
 
-        block_on(ack_msg(&ack, &sno));
+        block_on(ack_msg(&ack, &[0, 0, 0]));
 
         let poll_result = future.as_mut().poll(&mut cx);
         assert!(
@@ -955,17 +1117,17 @@ mod tests {
         {
             let mut sent = UART_SENT_DEDUP.lock();
             for value in 0..12u8 {
-                sent.push_back([value; CTRL_FINGERPRINT_LEN]).unwrap();
+                sent.push_back([value; 15]).unwrap();
             }
         }
 
-        let new_fingerprint = [0xAA; CTRL_FINGERPRINT_LEN];
+        let new_fingerprint = [0xAA; 15];
 
         record_sent_fingerprint(new_fingerprint);
 
         let sent = UART_SENT_DEDUP.lock();
         assert_eq!(sent.len(), 12);
-        assert_eq!(sent.front().unwrap(), &[1u8; CTRL_FINGERPRINT_LEN]);
+        assert_eq!(sent.front().unwrap(), &[1u8; 15]);
         assert_eq!(sent.back().unwrap(), &new_fingerprint);
     }
 
@@ -1021,33 +1183,16 @@ mod tests {
         assert_eq!(UART_TX_CHANNEL.len(), capacity);
     }
 
-    /// Tests the compute_crc function.
-    ///
-    /// This test verifies that compute_crc correctly calculates and sets the
-    /// CRC in the specified message.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Create a test message with known data
-    /// 2. Call compute_crc on the message
-    /// 3. Manually compute the expected CRC
-    /// 4. Verify the CRC in the message matches the expected value
+    /// An unregistered transport drops the frame instead of routing it: the
+    /// production static starts empty, so nothing is silently written.
     #[test]
-    fn test_compute_crc() {
-        let mut msg = empty_frame();
+    fn test_send_message_without_registered_ops_is_dropped() {
+        reset_for_test();
+        *UART_TX_OPS.lock() = None;
 
-        for i in 0..42 {
-            msg.data[i] = i as u8;
-        }
-
-        compute_crc(&mut msg);
-
-        let expected_crc = crc16(&msg.data[0..42]);
-        let expected_crc_low = (expected_crc & 0xff) as u8;
-        let expected_crc_high = ((expected_crc >> 8) & 0xff) as u8;
-
-        assert_eq!(msg.data[42], expected_crc_low);
-        assert_eq!(msg.data[43], expected_crc_high);
+        assert_eq!(send_message(&empty_frame()), Err(()));
+        assert_eq!(uart_tx_ops_dropped(), 0);
+        assert_eq!(UART_TX_CHANNEL.len(), 0);
     }
 
     /// Tests that an invalid-CRC frame is rejected in task context.
@@ -1057,11 +1202,12 @@ mod tests {
     /// 1. Reset the module state (sender not started)
     /// 2. Build a frame whose CRC trailer does not match its payload
     /// 3. Call `handle_received_frame`
-    /// 4. Verify it returns `None`, signals nothing and reports no status
+    /// 4. Verify it returns `None`, signals nothing and dispatches nothing
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
     fn test_handle_received_frame_invalid_crc_returns_none() {
         reset_for_test();
+        reset_recorder();
+        set_command_handler(recording_handler);
 
         let mut msg = frame_with_valid_crc();
         msg.data[42] ^= 0xff;
@@ -1071,40 +1217,65 @@ mod tests {
         assert!(sno.is_none());
         assert!(!UART_STARTED_SIGNAL.signaled());
         assert!(!started());
-        mock_mesh_report_status_enable(true).assert_called(0);
+        assert!(dispatched().is_empty());
     }
 
     /// Tests that the first valid frame starts the bridge exactly once, and that
-    /// it enables UART status reporting *before* the initial status dump.
+    /// it dispatches `HostAttached` *before* the frame's own command so the
+    /// application can enable status reporting before the initial node dump.
     ///
     /// # Algorithm
     ///
-    /// 1. Reset the module state and stub `mesh_report_status_enable` with a body
-    ///    that asserts reporting is already enabled when the dump fires
-    /// 2. Handle one valid frame: `Some(sno)`, start signal latched, started
-    /// 3. Handle a second valid frame: bridge start-up must not run again
+    /// 1. Reset the module state and register the recording handler
+    /// 2. Handle one valid frame: `Some(sno)`, start signal latched, started,
+    ///    and the handler saw `HostAttached` then `LightCtrl`
+    /// 3. Handle a second valid frame: the bridge start-up must not run again
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
     fn test_handle_received_frame_first_valid_starts_bridge_once() {
         reset_for_test();
-        mock_mesh_report_status_enable(true).returns_with(|_enable| {
-            assert!(
-                queues::uart_status_reporting_enabled(),
-                "status reporting must be enabled before the initial node-status dump"
-            );
-        });
+        reset_recorder();
+        set_command_handler(recording_handler);
 
-        let first = frame_with_valid_crc();
+        let first = light_ctrl_frame();
         assert!(handle_received_frame(&first).is_some());
 
         assert!(UART_STARTED_SIGNAL.signaled());
         assert!(started());
-        mock_mesh_report_status_enable(true).assert_called(1);
 
-        let second = frame_with_valid_crc();
+        let seq = dispatched();
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[0], UartCommand::HostAttached);
+        assert!(matches!(seq[1], UartCommand::LightCtrl { .. }));
+
+        let second = light_ctrl_frame();
         assert!(handle_received_frame(&second).is_some());
 
-        mock_mesh_report_status_enable(true).assert_called(1);
+        let seq = dispatched();
+        assert_eq!(seq.len(), 3, "the bridge must start exactly once");
+        assert!(matches!(seq[2], UartCommand::LightCtrl { .. }));
+    }
+
+    /// The ACK frame sent for a command carries the mesh sequence number the
+    /// registered handler returned, at `SNO_RANGE` (`2..5`) — not zeros.
+    #[test]
+    fn test_ack_frame_carries_the_handler_sno_at_sno_range() {
+        reset_for_test();
+        reset_recorder();
+        set_command_handler(recording_handler);
+        start_bridge();
+
+        let msg = light_ctrl_frame();
+
+        let sno = handle_received_frame(&msg).expect("a valid frame is acknowledged");
+        assert_eq!(sno, [4, 5, 6], "the handler's sno must be the ACK payload");
+
+        let ack = build_ack(&msg, sno);
+
+        assert_eq!(ack.data[SNO_RANGE], [4, 5, 6]);
+        assert_eq!(ack.data[2], 4);
+        assert_eq!(ack.data[4], 6);
+        assert_eq!(ack.data[1], u8::from(UartMsg::Ack));
+        assert!(verify_crc(&ack), "the ack must carry a valid CRC");
     }
 
     /// Tests that a fresh module state has not signalled the started signal.
@@ -1171,10 +1342,7 @@ mod tests {
         reset_for_test();
 
         // Dirty every static a test can reach.
-        UART_SENT_DEDUP
-            .lock()
-            .push_back([1u8; CTRL_FINGERPRINT_LEN])
-            .unwrap();
+        UART_SENT_DEDUP.lock().push_back([1u8; 15]).unwrap();
         UART_SENDER_STARTED.store(true, Ordering::Relaxed);
         UART_LAST_ACK.store(7, Ordering::Relaxed);
         UART_RX_DROPPED.store(3, Ordering::Relaxed);
@@ -1183,6 +1351,7 @@ mod tests {
         UART_TX_DONE.signal(());
         UART_RX_CHANNEL.try_send(empty_frame()).unwrap();
         send_message(&empty_frame()).unwrap();
+        set_command_handler(recording_handler);
 
         reset_for_test();
 
@@ -1196,59 +1365,57 @@ mod tests {
         assert!(UART_SENT_DEDUP.lock().is_empty());
         assert_eq!(UART_TX_CHANNEL.len(), 0);
         assert!(!UART_HW.lock().is_tx_busy());
+        assert_eq!(
+            dispatch_uart_cmd(UartCommand::HostAttached),
+            [0; 3],
+            "the registered command handler must be cleared"
+        );
     }
 
-    /// Tests the light_mesh_rx_cb function when UART is not started.
+    /// Tests the on_mesh_rx_packet function when UART is not started.
     ///
     /// # Algorithm
     ///
     /// 1. Reset the module state
     /// 2. Create a test packet
     /// 3. Ensure UART is not started
-    /// 4. Call light_mesh_rx_cb with the test packet
+    /// 4. Call on_mesh_rx_packet with the test packet
     /// 5. Verify no message was sent to UART
     #[test]
-    fn test_light_mesh_rx_cb_not_started() {
+    fn test_on_mesh_rx_packet_not_started() {
         reset_for_test();
 
         let packet = create_test_packet([1, 2, 3], 0x1234, 0x5678, 0x01, 0xABCD, [0; 10]);
 
-        light_mesh_rx_cb(&packet);
+        on_mesh_rx_packet(&packet, 0);
 
         assert_eq!(UART_TX_CHANNEL.len(), 0);
     }
 
-    /// Tests the light_mesh_rx_cb function when message is from our device.
+    /// Tests the on_mesh_rx_packet function when message is from our device.
     ///
     /// # Algorithm
     ///
     /// 1. Reset the module state
     /// 2. Create a test packet with our device address as source
     /// 3. Start the bridge
-    /// 4. Call light_mesh_rx_cb with the test packet
+    /// 4. Call on_mesh_rx_packet with the test packet
     /// 5. Verify no message was sent to UART
     #[test]
-    fn test_light_mesh_rx_cb_from_our_device() {
+    fn test_on_mesh_rx_packet_from_our_device() {
         reset_for_test();
-        DEVICE_ADDRESS.set(0x1234);
+        let own_dev_addr = 0x1234;
 
-        let packet = create_test_packet(
-            [1, 2, 3],
-            DEVICE_ADDRESS.get(),
-            0x5678,
-            0x01,
-            0xABCD,
-            [0; 10],
-        );
+        let packet = create_test_packet([1, 2, 3], own_dev_addr, 0x5678, 0x01, 0xABCD, [0; 10]);
 
-        UART_SENDER_STARTED.store(true, Ordering::Relaxed);
+        start_bridge();
 
-        light_mesh_rx_cb(&packet);
+        on_mesh_rx_packet(&packet, own_dev_addr);
 
         assert_eq!(UART_TX_CHANNEL.len(), 0);
     }
 
-    /// Tests the light_mesh_rx_cb function when message is a duplicate.
+    /// Tests the on_mesh_rx_packet function when message is a duplicate.
     ///
     /// # Algorithm
     ///
@@ -1256,41 +1423,44 @@ mod tests {
     /// 2. Create a test packet
     /// 3. Start the bridge
     /// 4. Add the message to the sent deque
-    /// 5. Call light_mesh_rx_cb with the test packet
+    /// 5. Call on_mesh_rx_packet with the test packet
     /// 6. Verify no message was sent to UART
     #[test]
-    fn test_light_mesh_rx_cb_duplicate_message() {
+    fn test_on_mesh_rx_packet_duplicate_message() {
         reset_for_test();
-        DEVICE_ADDRESS.set(0);
 
         let packet = create_test_packet([1, 2, 3], 0x1234, 0x5678, 0x01, 0xABCD, [0; 10]);
 
-        UART_SENDER_STARTED.store(true, Ordering::Relaxed);
+        start_bridge();
 
         // Add the message to the sent deque (simulating we sent this message)
-        // The light_mesh_rx_cb function extracts data from offset 5 (dst) for 15 bytes
+        // The on_mesh_rx_packet function extracts data from offset 5 (dst) for 15 bytes
         // This corresponds to: dst(2) + op(1) + vendor_id(2) + par(10) = 15 bytes
         let msg_data = [0x78, 0x56, 0x01, 0xCD, 0xAB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         UART_SENT_DEDUP.lock().push_back(msg_data).unwrap();
 
-        light_mesh_rx_cb(&packet);
+        on_mesh_rx_packet(&packet, 0);
 
         assert_eq!(UART_TX_CHANNEL.len(), 0);
     }
 
-    /// Tests the light_mesh_rx_cb function with a valid new message.
+    /// Tests the on_mesh_rx_packet function with a valid new message.
+    ///
+    /// This is also the 64-bit regression: the `AppCmdValue` view is taken with
+    /// pointer arithmetic (`data.add(5)`), never by truncating the address to
+    /// 32 bits, so every byte of the 20-byte wire struct arrives intact on a
+    /// host whose pointers are wider than the target's.
     ///
     /// # Algorithm
     ///
     /// 1. Reset the module state
     /// 2. Create a test packet with valid data
     /// 3. Start the bridge
-    /// 4. Call light_mesh_rx_cb with the test packet
+    /// 4. Call on_mesh_rx_packet with the test packet
     /// 5. Verify a message was sent to UART with correct format
     #[test]
-    fn test_light_mesh_rx_cb_valid_message() {
+    fn test_on_mesh_rx_packet_valid_message() {
         reset_for_test();
-        DEVICE_ADDRESS.set(0);
 
         let packet = create_test_packet(
             [1, 2, 3],
@@ -1301,9 +1471,9 @@ mod tests {
             [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0, 0, 0, 0, 0],
         );
 
-        UART_SENDER_STARTED.store(true, Ordering::Relaxed);
+        start_bridge();
 
-        light_mesh_rx_cb(&packet);
+        on_mesh_rx_packet(&packet, 0);
 
         assert_eq!(UART_TX_CHANNEL.len(), 1);
 
@@ -1347,21 +1517,65 @@ mod tests {
         assert_eq!(sent_msg.data[22], 0);
     }
 
-    /// Tests the light_mesh_rx_cb function with different message types.
+    /// The dedupe key is the `AppCmdValue` `dst`..`par` span (offsets 5..20 of
+    /// the wire struct), so a command recorded from the host suppresses exactly
+    /// that echo and nothing else.
+    #[test]
+    fn test_on_mesh_rx_packet_dedupes_on_the_dst_to_par_span() {
+        reset_for_test();
+        start_bridge();
+
+        let packet = create_test_packet(
+            [9, 8, 7],
+            0x0102,
+            0x0304,
+            0x05,
+            0x0607,
+            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19],
+        );
+        let value = packet.ll_app().value;
+        let expected = [
+            value.dst as u8,
+            (value.dst >> 8) as u8,
+            value.op,
+            value.vendor_id as u8,
+            (value.vendor_id >> 8) as u8,
+            0x10,
+            0x11,
+            0x12,
+            0x13,
+            0x14,
+            0x15,
+            0x16,
+            0x17,
+            0x18,
+            0x19,
+        ];
+        UART_SENT_DEDUP.lock().push_back(expected).unwrap();
+
+        on_mesh_rx_packet(&packet, 0);
+
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            0,
+            "the recorded dst..par span must suppress the echo"
+        );
+    }
+
+    /// Tests the on_mesh_rx_packet function with different message types.
     ///
     /// # Algorithm
     ///
     /// 1. Reset the module state
     /// 2. Create test packets with different op codes and parameters
     /// 3. Start the bridge
-    /// 4. Call light_mesh_rx_cb with each test packet
+    /// 4. Call on_mesh_rx_packet with each test packet
     /// 5. Verify messages were sent to UART with correct data
     #[test]
-    fn test_light_mesh_rx_cb_different_message_types() {
+    fn test_on_mesh_rx_packet_different_message_types() {
         reset_for_test();
-        DEVICE_ADDRESS.set(0);
 
-        UART_SENDER_STARTED.store(true, Ordering::Relaxed);
+        start_bridge();
 
         // Test case 1: Light control message
         let packet1 = create_test_packet(
@@ -1373,7 +1587,7 @@ mod tests {
             [0x01, 0x02, 0x03, 0x04, 0x05, 0, 0, 0, 0, 0],
         );
 
-        light_mesh_rx_cb(&packet1);
+        on_mesh_rx_packet(&packet1, 0);
 
         // Test case 2: Status request message
         let packet2 = create_test_packet(
@@ -1385,7 +1599,7 @@ mod tests {
             [0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0, 0, 0, 0, 0],
         );
 
-        light_mesh_rx_cb(&packet2);
+        on_mesh_rx_packet(&packet2, 0);
 
         assert_eq!(UART_TX_CHANNEL.len(), 2);
 
@@ -1471,19 +1685,20 @@ mod tests {
     }
 
     /// An RX-complete interrupt queues the **raw** frame: no CRC check, no
-    /// bridge start-up and no status dump happen on the interrupt stack.
+    /// bridge start-up and no command dispatch happen on the interrupt stack.
     ///
     /// # Algorithm
     ///
     /// 1. Reset; put a frame with a deliberately invalid CRC in the DMA buffer
     /// 2. Raise the RX flag and call `take_rx_and_ack_tx_irq`
     /// 3. The frame is in `UART_RX_CHANNEL` byte for byte, the bridge is still
-    ///    unstarted and `mesh_report_status_enable` was never called
+    ///    unstarted and no command reached the handler
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
-    fn test_take_rx_and_ack_tx_irq_pushes_raw_frame_without_crc_or_status_enable() {
+    fn test_take_rx_and_ack_tx_irq_pushes_raw_frame_without_crc_or_dispatch() {
         reset_for_test();
         reset_fakes();
+        reset_recorder();
+        set_command_handler(recording_handler);
         let mut frame = frame_with_valid_crc();
         frame.data[42] ^= 0xff;
         UART_HW.lock().rx_data_buf = frame;
@@ -1508,7 +1723,7 @@ mod tests {
             1,
             "the RX flag must be cleared exactly once"
         );
-        mock_mesh_report_status_enable(true).assert_called(0);
+        assert!(dispatched().is_empty());
     }
 
     /// A full RX channel costs a counter bump in the ISR, not a log line.
@@ -1519,7 +1734,7 @@ mod tests {
     /// 2. Raise the RX flag with a frame in the DMA buffer and call the ISR body
     /// 3. `UART_RX_DROPPED` is 1, the channel still holds 12 frames, and
     ///    `UART_TX_CHANNEL` is untouched: the drop line belongs to the receive
-    ///    task, so no `uprintln!`/`enqueue_uart_tx` is reachable from the IRQ
+    ///    task, so no `uprintln!` is reachable from the IRQ
     #[test]
     fn test_take_rx_and_ack_tx_irq_counts_drop_when_channel_full() {
         reset_for_test();

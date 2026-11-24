@@ -469,7 +469,7 @@ From cold boot to BLE operational. Entry point: `main_entrypoint()` in `lib.rs`.
    2. Write `setting2` register (drive strength, GPIO/peripheral function select).
    3. Write analog registers 0x0A–0x14 for pull-up/pull-down configuration (2 bits per pin via `analog_write()`).
 8. **IRQ init** — `irq_init()`: write `0x2002` (`TMR1_EN | ZB_RT_EN`) to `reg_irq_mask` (0x640).
-9. **UART init** — `self.uart_manager.init()`.
+9. **UART init** — `uart::init()`.
 10. **RF driver init** — `rf_drv_init(true)`:
     1. Read deep-sleep flag from analog register 0x3F, mask with 0x40.
     2. Load all 61 entries from `TBL_RF_INI` — each entry is an `(address, data, command)` tuple written to the appropriate register or analog address (command 0xC3 = digital register write, command 0xC8 = analog register write).
@@ -904,7 +904,7 @@ irq_handler()
     │   ├── Clear: write 0x02 to reg_tmr_sta (0x623)
     │   └── Call light::transition_step()
     └── UART IRQ:
-        └── Call uart_manager.take_rx_and_ack_tx_irq()
+        └── Call uart::take_rx_and_ack_tx_irq()
             (frame queued for uart_receiver; CRC, bridge start and
              status-report enabling run in that task)
 ```
@@ -1853,8 +1853,8 @@ All mesh nodes are peers. There is no designated coordinator, router, or gateway
 | `MESH_LISTEN_INTERVAL_US` | `100_000` (100 ms) | `status_management.rs` | Duration of one listen cycle |
 | `BRIDGE_MAX_CNT` | `8` | `sdk/light.rs` | Maximum relay hops per packet |
 | `ONLINE_STATUS_TIMEOUT` | `3000` ms | `sdk/light.rs` | **Floor** for the cadence-derived offline deadline; the deadline is `max(floor, ceil((M-1)/5) × 250 ms × 4)` (`mesh_status_timeout_ms`, e.g. 8 s at M=40, 13 s at M=64) |
-| `MESH_PAIR_CMD_INTERVAL` | `500` ms | `mesh.rs` | Interval between mesh-pair credential frames |
-| `MESH_PAIR_TIMEOUT` | `10` s | `mesh.rs` | Total time allowed to complete re-pairing |
+| `MESH_PAIR_CMD_INTERVAL` | `500` ms | `mesh/fsm.rs` | Interval between mesh-pair credential frames |
+| `MESH_PAIR_TIMEOUT` | `10` s | `mesh/fsm.rs` | Total time allowed to complete re-pairing |
 | `MESH_NODE_MAX_NUM` | (compile-time) | `rust/src/sdk/ble_app/light_ll/mesh_management.rs` | Maximum nodes tracked in status table |
 
 ### 19.3 Channel Strategy
@@ -1899,7 +1899,7 @@ The channel index (`MESH_LISTEN_CYCLE_COUNT`) advances by 1 each listen cycle, c
 
 ### 20.2 Mesh TX Configuration
 
-`send_mesh_msg_iteration()` (`mesh.rs`) — called from the async mesh TX task:
+`send_mesh_msg_iteration()` (`mesh/mod.rs`) — called from the async mesh TX task:
 
 ```
 // Pick a random starting channel (XOR of system tick and hardware RNG)

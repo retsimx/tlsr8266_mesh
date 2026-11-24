@@ -84,6 +84,16 @@ def _text(*blocks: str) -> str:
 # radio providers 8 B / 16 B. ``callbacks21dispatch_ota_write`` is a *direct*
 # callee of the GATT write entry, because that is the real firmware shape; every
 # other OTA dispatcher stays a leaf, so the maxima do not move.
+#
+# The C-8 seams are the same shape and use the real symbol namespaces: `mesh`'s
+# three ``MeshEventHooks`` dispatchers (``mesh25dispatch_mesh_light_event``,
+# ``mesh20publish_light_status`` — renamed from ``dispatch_device_status_update``
+# so the caller pattern is not a substring of its callee — and
+# ``mesh21dispatch_uart_mesh_rx``), `logging`'s async sink, and `uart`'s command
+# handler plus its two ``UartTxOps`` slots. Every one is a leaf dispatcher whose
+# callee is an `app` hook, except ``light20device_status_update``, which the
+# fixture already carries as a direct callee above so the two light-event call
+# sites converge on one subtree.
 FIRMWARE_SHAPED = _text(
     _fn(
         "main_entrypoint",
@@ -130,7 +140,7 @@ FIRMWARE_SHAPED = _text(
     _fn("callbacks17on_light_response", 24, indirect=True),
     _fn("app25rf_link_response_callback", 96),
     _fn("callbacks15on_uart_mesh_rx", 24, indirect=True),
-    _fn("uart_manager16light_mesh_rx_cb", 72),
+    _fn("app17uart_mesh_rx_hook", 72),
     # OtaHooks: the four dispatchers in sdk/ble_app/callbacks.rs.
     _fn("callbacks21dispatch_ota_write", 24, indirect=True),
     _fn("ota21on_gatt_ota_packet", 40),
@@ -149,6 +159,21 @@ FIRMWARE_SHAPED = _text(
     _fn("app24ota_send_terminate_hook", 16),
     _fn("ota22radio_begin_gatt_ota", 8, indirect=True),
     _fn("app21ota_begin_gatt_hook", 16),
+    # C-8: mesh's three MeshEventHooks dispatchers. The light-event slot reaches
+    # the same app callback the SDK's emit seam does.
+    _fn("mesh25dispatch_mesh_light_event", 24, indirect=True),
+    _fn("mesh20publish_light_status", 24, indirect=True),
+    _fn("mesh21dispatch_uart_mesh_rx", 24, indirect=True),
+    # C-8: uart's command handler and its two UartTxOps slots.
+    _fn("uart17dispatch_uart_cmd", 24, indirect=True),
+    _fn("app17uart_command_hook", 24),
+    _fn("uart16uart_tx_ops_push", 8, indirect=True),
+    _fn("app20enqueue_uart_tx_hook", 8),
+    _fn("uart19uart_tx_ops_dropped", 8, indirect=True),
+    _fn("app20dropped_uart_tx_hook", 8),
+    # C-8: logging's async sink.
+    _fn("logging18dispatch_log_async", 24, indirect=True),
+    _fn("app17log_async_tx_hook", 8),
     _fn("irq_handler", 24, (("handle_system_interrupts", False),)),
     _fn(
         "handle_system_interrupts",
@@ -232,7 +257,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
                     "callbacks17on_light_response",
                     "app25rf_link_response_callback",
                 ),
-                ("callbacks15on_uart_mesh_rx", "uart_manager16light_mesh_rx_cb"),
+                ("callbacks15on_uart_mesh_rx", "app17uart_mesh_rx_hook"),
                 (
                     "light20notify_status_update",
                     "mesh_management23ll_device_status_update",
@@ -256,6 +281,20 @@ class TestApplyIndirectEdges(unittest.TestCase):
                 ("ota16radio_read_pkt", "light_ll27read_staged_ota_packet"),
                 ("ota19radio_terminate_tx", "app24ota_send_terminate_hook"),
                 ("ota22radio_begin_gatt_ota", "app21ota_begin_gatt_hook"),
+                # ...then the C-8 subsystem seams.
+                (
+                    "mesh25dispatch_mesh_light_event",
+                    "app28rf_link_light_event_callback",
+                ),
+                (
+                    "mesh20publish_light_status",
+                    "light20device_status_update",
+                ),
+                ("mesh21dispatch_uart_mesh_rx", "app17uart_mesh_rx_hook"),
+                ("uart17dispatch_uart_cmd", "app17uart_command_hook"),
+                ("uart16uart_tx_ops_push", "app20enqueue_uart_tx_hook"),
+                ("uart19uart_tx_ops_dropped", "app20dropped_uart_tx_hook"),
+                ("logging18dispatch_log_async", "app17log_async_tx_hook"),
             ],
         )
         # The hook is the intermediate frame; the manager method keeps its own
@@ -265,6 +304,18 @@ class TestApplyIndirectEdges(unittest.TestCase):
             [("MeshManager14mesh_pair_proc", False)],
         )
         self.assertEqual(funcs["MeshManager14mesh_pair_proc"].calls, [])
+        # Two callee patterns are deliberately shared by two call sites: the
+        # app light-event callback (SDK emit + mesh dispatch) and the UART relay
+        # hook (SDK bridge + mesh relay). Each pair still resolves to one symbol.
+        callees = [
+            callee
+            for _caller, callees in stack_analysis.INDIRECT_EDGES.items()
+            for callee in callees
+        ]
+        self.assertEqual(
+            sorted({c for c in callees if callees.count(c) > 1}),
+            ["rf_link_light_event_callback", "uart_mesh_rx_hook"],
+        )
 
     def test_caller_with_zero_matches_is_rejected(self) -> None:
         funcs = _parse()
@@ -324,20 +375,27 @@ class TestApplyIndirectEdges(unittest.TestCase):
         self.assertEqual(
             sorted(stack_analysis.INDIRECT_EDGES),
             [
+                "dispatch_log_async",
+                "dispatch_mesh_light_event",
                 "dispatch_ota_snapshot",
                 "dispatch_ota_terminate",
                 "dispatch_ota_tick",
                 "dispatch_ota_write",
+                "dispatch_uart_cmd",
+                "dispatch_uart_mesh_rx",
                 "emit_light_event",
                 "notify_status_update",
                 "on_light_data",
                 "on_light_response",
                 "on_mesh_pair_proc",
                 "on_uart_mesh_rx",
+                "publish_light_status",
                 "radio_begin_gatt_ota",
                 "radio_read_pkt",
                 "radio_stage_pkt",
                 "radio_terminate_tx",
+                "uart_tx_ops_dropped",
+                "uart_tx_ops_push",
             ],
         )
         for caller, callees in stack_analysis.INDIRECT_EDGES.items():
@@ -350,15 +408,24 @@ class TestApplyIndirectEdges(unittest.TestCase):
         symbol table: if one pattern were contained in another, whichever
         symbol matched both would resolve as ambiguous and the gate would fail
         on a correct image.  `stage_ota_packet` vs `read_staged_ota_packet` is
-        the pair this guards — the extra `d` is what keeps them distinct.
+        the pair this guards — the extra `d` is what keeps them distinct — and
+        `publish_light_status` vs `light20device_status_update` is the C-8 pair:
+        the dispatcher was renamed precisely so its own name is not a substring
+        of its callee's.
         """
         patterns = list(stack_analysis.INDIRECT_EDGES)
         for callees in stack_analysis.INDIRECT_EDGES.values():
             patterns.extend(callees)
-        self.assertEqual(len(patterns), 28)
-        self.assertEqual(len(set(patterns)), 28, "a pattern is listed twice")
-        for pattern in patterns:
-            for other in patterns:
+        self.assertEqual(len(patterns), 42)
+        # Caller patterns name distinct dispatchers, so they must be unique; a
+        # *callee* pattern may legitimately be shared by two call sites, and the
+        # pair test below is over the distinct set.
+        self.assertEqual(
+            len(set(stack_analysis.INDIRECT_EDGES)),
+            len(stack_analysis.INDIRECT_EDGES),
+        )
+        for pattern in set(patterns):
+            for other in set(patterns):
                 if pattern == other:
                     continue
                 self.assertNotIn(
@@ -368,6 +435,32 @@ class TestApplyIndirectEdges(unittest.TestCase):
                     "would be ambiguous",
                 )
         self.assertNotIn("stage_ota_packet", "read_staged_ota_packet")
+        self.assertNotIn(
+            "publish_light_status", "light20device_status_update"
+        )
+        # The plain name would be ambiguous (see the next test), so the table
+        # must not carry it.
+        self.assertNotIn("device_status_update", patterns)
+
+    def test_plain_device_status_update_is_ambiguous(self) -> None:
+        """Why the mesh row names its callee `light20device_status_update`.
+
+        `device_status_update` alone matches three symbols on the real image:
+        the mesh dispatcher (renamed away), the lamp's own publisher and the
+        SDK's node-table writer one layer below. `_resolve_one` must reject it
+        rather than pick one.
+        """
+        funcs = _parse()
+        with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
+            stack_analysis.apply_indirect_edges(
+                funcs, {"publish_light_status": ("device_status_update",)}
+            )
+        message = str(ctx.exception)
+        self.assertIn("ambiguous", message)
+        self.assertIn("light20device_status_update", message)
+        self.assertIn(
+            "mesh_management23ll_device_status_update", message
+        )
 
 
 class TestIndirectEdgesFeedDepth(unittest.TestCase):
@@ -419,6 +512,9 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         roots = set(stack_analysis.all_roots(funcs))
         self.assertIn("app21rf_link_data_callback", roots)
         self.assertIn("app28rf_link_light_event_callback", roots)
+        self.assertIn("app17uart_mesh_rx_hook", roots)
+        self.assertIn("app17uart_command_hook", roots)
+        self.assertIn("app17log_async_tx_hook", roots)
         # The OTA callees are roots only because nothing `bl`s them yet.
         self.assertIn("ota21on_gatt_ota_packet", roots)
         self.assertIn("app24ota_send_terminate_hook", roots)
@@ -427,6 +523,11 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertNotIn("app21rf_link_data_callback", roots)
         self.assertNotIn("app28rf_link_light_event_callback", roots)
         self.assertNotIn("app19mesh_pair_proc_hook", roots)
+        self.assertNotIn("app17uart_mesh_rx_hook", roots)
+        self.assertNotIn("app17uart_command_hook", roots)
+        self.assertNotIn("app20enqueue_uart_tx_hook", roots)
+        self.assertNotIn("app20dropped_uart_tx_hook", roots)
+        self.assertNotIn("app17log_async_tx_hook", roots)
         self.assertNotIn("ota21on_gatt_ota_packet", roots)
         self.assertNotIn("app24ota_send_terminate_hook", roots)
         self.assertIn("main_entrypoint", roots)
@@ -454,19 +555,30 @@ class TestMain(unittest.TestCase):
     def test_pass_reports_resolved_edges_and_margins(self) -> None:
         code, out = _run_main(FIRMWARE_SHAPED)
         self.assertEqual(code, 0, out)
-        self.assertIn("indirect dispatch edges (14):", out)
+        self.assertIn("indirect dispatch edges (21):", out)
         self.assertIn(
             "light20notify_status_update -> mesh_management23ll_device_status_update",
             out,
         )
         self.assertIn(
-            "callbacks15on_uart_mesh_rx -> uart_manager16light_mesh_rx_cb", out
+            "callbacks15on_uart_mesh_rx -> app17uart_mesh_rx_hook", out
         )
         # The OTA seam must be reported, not silently resolved.
         self.assertIn(
             "callbacks21dispatch_ota_write -> ota21on_gatt_ota_packet", out
         )
         self.assertIn("ota17radio_stage_pkt -> light_ll22stage_ota_packet", out)
+        # So must every C-8 seam, including the renamed status dispatcher.
+        self.assertIn(
+            "mesh20publish_light_status -> light20device_status_update", out
+        )
+        self.assertIn("uart17dispatch_uart_cmd -> app17uart_command_hook", out)
+        self.assertIn(
+            "uart16uart_tx_ops_push -> app20enqueue_uart_tx_hook", out
+        )
+        self.assertIn(
+            "logging18dispatch_log_async -> app17log_async_tx_hook", out
+        )
         self.assertIn("main: free 4096 B - max 656 B = margin 3440 B", out)
         self.assertIn("irq:  size 1792 B - max 604 B = margin 1188 B", out)
         self.assertIn("PASS", out)

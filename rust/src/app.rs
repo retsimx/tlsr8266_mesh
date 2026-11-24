@@ -10,7 +10,8 @@ use embassy_time::{Duration, Timer};
 
 use crate::config::*;
 use crate::diagnostics::{
-    boot_init, check_panic_info, record_breadcrumb, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP,
+    boot_init, clear_panic_report, read_panic_preview, read_panic_report, record_breadcrumb,
+    BootResetReason, CRUMB_INIT_DONE, CRUMB_MAIN_LOOP,
 };
 use crate::factory_reset::{self, KickoutAction, KickoutReason, ResetAction};
 use crate::light::effects::{
@@ -23,7 +24,7 @@ use crate::light::{
 };
 use crate::mesh::{
     mesh_device_address_validation_completed, mesh_pair_cb, mesh_pair_init, mesh_pair_proc_effect,
-    mesh_security_enable,
+    mesh_security_enable, set_mesh_event_hooks, MeshEventHooks,
 };
 use crate::ota::{check_ota_area_startup, rf_mesh_data_ota, set_ota_radio_ops, OtaRadioOps};
 use crate::sdk::ble_app::ble_ll_pair::{
@@ -45,12 +46,13 @@ use crate::sdk::ble_app::rf_drv_8266::{
 };
 use crate::sdk::light::*;
 use crate::sdk::rf_drv::*;
-use crate::uart_manager::{uart_receiver, uart_sender};
+use crate::uart::{self, uart_receiver, uart_sender, UartCommand, UartTxOps};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
 use heapless::Vec;
 use mesh_protocol::mesh_types::{LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP};
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
+use mesh_protocol::uart::UartData;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_write_page};
 use tlsr8266_hal::drivers::pwm::{pwm_set_duty, pwm_start};
@@ -80,10 +82,29 @@ pub async fn main_task(spawner: Spawner) {
     irq_init();
 
     // Get uart ready to go early
-    crate::uart_manager::init();
+    uart::init();
+
+    // Wire the transport's outbound edges to the SDK queue and the command
+    // handler before any traffic (or log line) can occur. `uart` sits below the
+    // SDK, so these adapters — not a compiled-in import — are the only edge from
+    // a frame to a queue slot or a mesh send.
+    uart::set_tx_ops(UartTxOps {
+        enqueue_tx: enqueue_uart_tx_hook,
+        dropped_tx: dropped_uart_tx_hook,
+    });
+    uart::set_command_handler(uart_command_hook);
+
+    // Point the log sink at the UART transport before the first line. `logging`
+    // sits below `uart`, so these adapters — not a compiled-in import — are the
+    // only edge from a log line to the wire.
+    crate::logging::set_log_sinks(crate::logging::LogSinks {
+        async_tx: log_async_tx_hook,
+        blocking_tx: log_blocking_tx_hook,
+    });
 
     // Report why the previous boot ended and mark this one as running
-    boot_init();
+    let reason = boot_init();
+    log_boot_reset_reason(reason);
 
     uprintln!(
         "Booting FW version {}, xtal: {}MHz",
@@ -111,7 +132,16 @@ pub async fn main_task(spawner: Spawner) {
         on_mesh_pair_proc: mesh_pair_proc_hook,
         on_light_data: rf_link_data_callback,
         on_light_response: rf_link_response_callback,
-        on_uart_mesh_rx: crate::uart_manager::light_mesh_rx_cb,
+        on_uart_mesh_rx: uart_mesh_rx_hook,
+    });
+    // The mesh subsystem owns the radio and the pairing state machine but not
+    // the light, the LED or the UART bridge: those arrive as hooks, so `mesh`
+    // never compiles in a dependency on a sibling. Registered before any mesh
+    // traffic exists.
+    set_mesh_event_hooks(MeshEventHooks {
+        on_light_event: rf_link_light_event_callback,
+        on_device_status_update: device_status_update,
+        on_uart_mesh_rx: uart_mesh_rx_hook,
     });
     // The light subsystem owns the lamp but not the mesh node table: publish its
     // on/off state through this pointer instead of letting `light` depend on
@@ -138,7 +168,7 @@ pub async fn main_task(spawner: Spawner) {
     // first valid host frame arrives, so a headless light never retries DMA TX
     // for the boot banners.
     spawner.spawn(uart_receiver().unwrap());
-    spawner.spawn(uart_sender().unwrap());
+    spawner.spawn(uart_sender(&crate::sdk::ble_app::queues::UART_TX_CHANNEL).unwrap());
 
     // Start the light command consumer
     spawner.spawn(light_manager().unwrap());
@@ -169,8 +199,129 @@ pub async fn main_task(spawner: Spawner) {
         main_loop(&mut flash_store).await;
 
         // Clear any uart errors if they've occurred
-        crate::uart_manager::clear_error();
+        uart::clear_error();
     }
+}
+
+/// Marker appended to a panic body that was clipped to fit the UART stream.
+const PANIC_LOG_TRUNCATED: &str = "...";
+
+/// Prints why the previous boot ended.
+///
+/// `#[inline(never)]`: the panic preview buffer and the formatting would
+/// otherwise be carried in `main_task`'s future for the whole of boot.
+#[inline(never)]
+fn log_boot_reset_reason(reason: BootResetReason) {
+    match reason {
+        // No retained sentinel: the previous boot ended normally.
+        BootResetReason::Clean => {}
+        BootResetReason::Watchdog { breadcrumb } => {
+            uprintln!("[WD_RESET] sentinel=0xa5 breadcrumb={}", breadcrumb);
+        }
+        BootResetReason::Panic { breadcrumb } => {
+            // A record that is not trusted at all is reported as nothing rather
+            // than as an empty message.
+            let Some(preview) = read_panic_preview() else {
+                return;
+            };
+
+            let body = core::str::from_utf8(&preview.buf[..preview.len]).unwrap_or("");
+            let ellipsis = if preview.truncated {
+                PANIC_LOG_TRUNCATED
+            } else {
+                ""
+            };
+
+            uprintln!(
+                "[PANIC] sentinel=0xe1 breadcrumb={} msg={}{}",
+                breadcrumb,
+                body,
+                ellipsis
+            );
+        }
+    }
+}
+
+/// `logging::LogSinks::async_tx`: queue one log frame on the UART transport.
+///
+/// `#[inline(never)]` and no closure on purpose: `sdk/stack_analysis.py`'s
+/// indirect-edge table binds `dispatch_log_async` to this symbol, and a closure
+/// would mangle to `main_task::{{closure}}` and be rejected.
+#[inline(never)]
+fn log_async_tx_hook(msg: &UartData) -> bool {
+    crate::uart::send_message(msg).is_ok()
+}
+
+/// `logging::LogSinks::blocking_tx`: write one log frame straight to the UART
+/// (panic path).
+#[inline(never)]
+fn log_blocking_tx_hook(msg: &UartData) {
+    crate::uart::send_sync_panic(msg)
+}
+
+/// `uart::UartTxOps::enqueue_tx`: one queue slot on the SDK's UART TX channel.
+///
+/// `#[inline(never)]` and no closure: `sdk/stack_analysis.py`'s indirect-edge
+/// table binds `uart_tx_ops_push` to this symbol.
+#[inline(never)]
+fn enqueue_uart_tx_hook(msg: &UartData) -> bool {
+    crate::sdk::ble_app::queues::enqueue_uart_tx(msg)
+}
+
+/// `uart::UartTxOps::dropped_tx`: how many frames the queue has dropped.
+///
+/// `#[inline(never)]`: the `INDIRECT_EDGES` key for `uart_tx_ops_dropped`.
+#[inline(never)]
+fn dropped_uart_tx_hook() -> u32 {
+    crate::sdk::ble_app::queues::dropped_uart_tx()
+}
+
+/// `uart::set_command_handler`: execute one host command and return the mesh
+/// sequence number its UART ACK frame must carry.
+///
+/// Every arm returns `[0; 3]` except a light command, whose ACK carries the
+/// real mesh `sno` so the host can correlate the ack with the traffic it
+/// caused. `HostAttached` enables status reporting *before* the initial node
+/// dump that enabling performs, or that first dump is filtered out.
+///
+/// `#[inline(never)]` and no closure on purpose: `sdk/stack_analysis.py`'s
+/// indirect-edge table binds `dispatch_uart_cmd` to this symbol.
+#[inline(never)]
+fn uart_command_hook(cmd: UartCommand) -> [u8; 3] {
+    match cmd {
+        UartCommand::LightCtrl {
+            dst,
+            payload,
+            retransmit,
+            ack,
+        } => crate::mesh::send_mesh_message(
+            &Vec::from_slice(&payload).unwrap(),
+            dst,
+            retransmit,
+            ack,
+        ),
+        UartCommand::EnableStatusReporting => {
+            crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable(true);
+            crate::sdk::ble_app::queues::set_uart_status_reporting_enabled(true);
+            [0; 3]
+        }
+        UartCommand::HostAttached => {
+            crate::sdk::ble_app::queues::set_uart_status_reporting_enabled(true);
+            crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable(true);
+            [0; 3]
+        }
+    }
+}
+
+/// `BleAppHooks::on_uart_mesh_rx` / `mesh`'s relay path: hand one received mesh
+/// packet to the UART bridge with this device's address.
+///
+/// `#[inline(never)]`: the `INDIRECT_EDGES` key for the SDK's `on_uart_mesh_rx`
+/// dispatcher. The address is read here, in the composition root, so `uart`
+/// never imports the SDK.
+#[inline(never)]
+pub fn uart_mesh_rx_hook(pkt: &Packet) {
+    crate::uart::on_mesh_rx_packet(pkt, DEVICE_ADDRESS.get());
 }
 
 #[cfg_attr(test, mry::mry)]
@@ -522,7 +673,48 @@ async fn light_manager() {
 /// Task wrapper for the one-shot panic-info report.
 #[embassy_executor::task]
 async fn panic_check() {
-    check_panic_info().await;
+    report_panic_info().await;
+}
+
+/// Sends any stored panic message to the mesh, then clears the sector.
+///
+/// Chunked into 10-byte `LGT_PANIC_MSG` payloads with a 100 ms gap so the radio
+/// keeps up, an empty `LGT_PANIC_MSG` terminates the report, and only then is
+/// the sector erased. A plain `async fn` so the chunking stays testable without
+/// an executor, exactly as `light_manager` above does.
+async fn report_panic_info() {
+    let mut buf = [0u8; 256];
+
+    // If the panic info flag isn't set, there's nothing to do.
+    let Some(len) = read_panic_report(&mut buf) else {
+        return;
+    };
+
+    // There is panic info, send it in to the mesh.
+    for chunk in buf[..len].chunks(10) {
+        // Wait a moment to send the next message
+        #[cfg(not(test))]
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+
+        let mut data = [0u8; 13];
+        data[0] = LGT_PANIC_MSG;
+        data[3..3 + chunk.len()].copy_from_slice(chunk);
+
+        crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+    }
+
+    // Wait a moment to send the next message
+    #[cfg(not(test))]
+    embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+
+    // Send an empty panic message to indicate the end of the message
+    let mut data = [0u8; 13];
+    data[0] = LGT_PANIC_MSG;
+
+    crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+
+    // Finally clear the panic info
+    clear_panic_report();
 }
 
 /// Adapter that gives the mesh pairing seam its own symbol in the linked ELF.
@@ -570,6 +762,7 @@ fn ota_send_terminate_hook() -> bool {
 #[coverage(off)]
 mod tests {
     use super::*;
+    use crate::diagnostics::{CRUMB_PANIC, PANIC_LOG_BODY_MAX, PANIC_READ_MAX};
     use crate::factory_reset::{
         check_timing_step, handle_boot_sequence, mock_check_timing_step, mock_handle_boot_sequence,
         mock_plan_kick_out, plan_kick_out,
@@ -583,7 +776,8 @@ mod tests {
     };
     use crate::mesh::{
         mock_mesh_device_address_validation_completed, mock_mesh_pair_cb, mock_mesh_pair_init,
-        mock_mesh_pair_proc_effect, mock_mesh_security_enable,
+        mock_mesh_pair_proc_effect, mock_mesh_security_enable, mock_send_mesh_message,
+        send_mesh_message,
     };
     use crate::ota::{mock_check_ota_area_startup, mock_rf_mesh_data_ota};
     use crate::sdk::ble_app::flash_config::{
@@ -594,6 +788,9 @@ mod tests {
         mock_light_check_tick_per_us, mock_rf_link_slave_pairing_enable, mock_rf_link_slave_proc,
     };
     use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
+    use crate::sdk::ble_app::light_ll::mesh_management::{
+        mesh_report_status_enable, mock_mesh_report_status_enable,
+    };
     use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
     use crate::sdk::ble_app::light_ll::status_management::{
         DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
@@ -603,8 +800,12 @@ mod tests {
     use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
     use crate::sdk::ble_app::rf_drv_8266::ADV_DATA;
     use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;
+    use crate::uart::{
+        mock_on_mesh_rx_packet, mock_send_message, on_mesh_rx_packet, reset_for_test, send_message,
+    };
     use futures::executor::block_on;
     use mesh_protocol::packet_types::PacketL2capHead;
+    use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use mry::Any;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
@@ -703,18 +904,122 @@ mod tests {
         let status_hook = task_body
             .find("set_status_update_hook(")
             .expect("main_task must register the light status hook");
+        let mesh_hooks = task_body
+            .find("set_mesh_event_hooks(MeshEventHooks {")
+            .expect("main_task must register the mesh event hooks");
+        let uart_init = task_body
+            .find("uart::init()")
+            .expect("main_task must initialise the UART transport");
+        let uart_tx_ops = task_body
+            .find("uart::set_tx_ops(")
+            .expect("main_task must register the UART tx ops");
+        let uart_cmd = task_body
+            .find("uart::set_command_handler(")
+            .expect("main_task must register the UART command handler");
+        let log_sinks = task_body
+            .find("set_log_sinks(")
+            .expect("main_task must register the log sinks");
+        let banner = task_body
+            .find("Booting FW version")
+            .expect("main_task must print the boot banner");
         let rf_drv = task_body
             .find("rf_drv_init(true)")
             .expect("main_task must initialise the RF driver");
 
         assert!(
+            uart_init < uart_tx_ops && uart_tx_ops < log_sinks && uart_cmd < banner,
+            "UART must be initialised, its tx ops registered and its command \
+             handler installed before the first log line, or the banner is dropped"
+        );
+        assert!(
+            log_sinks < banner,
+            "the log sinks must be registered before the first log line, or the \
+             boot banner is dropped"
+        );
+        assert!(
             ota_ops < rf_drv
                 && ota_hooks < rf_drv
                 && light < rf_drv
                 && hooks < rf_drv
-                && status_hook < rf_drv,
+                && status_hook < rf_drv
+                && mesh_hooks < rf_drv,
             "every handler registration must precede rf_drv_init(true)"
         );
+    }
+
+    /// `uart_command_hook` executes a light command through the mesh and returns
+    /// the mesh sequence number the UART ACK frame carries.
+    #[test]
+    #[mry::lock(send_mesh_message, mesh_report_status_enable)]
+    fn test_uart_command_hook_light_ctrl_returns_the_mesh_sno() {
+        reset_for_test();
+        mock_send_mesh_message(Any, 0x1234, 3, true).returns([4, 5, 6]);
+        mock_mesh_report_status_enable(Any).returns(());
+
+        let sno = uart_command_hook(UartCommand::LightCtrl {
+            dst: 0x1234,
+            payload: [7; 13],
+            retransmit: 3,
+            ack: true,
+        });
+
+        assert_eq!(sno, [4, 5, 6]);
+        mock_send_mesh_message(Any, 0x1234, 3, true).assert_called(1);
+        mock_send_mesh_message(Any, Any, Any, Any).assert_called(1);
+        mock_mesh_report_status_enable(Any).assert_called(0);
+        assert!(
+            !crate::sdk::ble_app::queues::uart_status_reporting_enabled(),
+            "a light command must not touch status reporting"
+        );
+    }
+
+    /// The `HostAttached` arm enables status reporting *before* the node dump
+    /// that enabling performs, or the first dump is filtered out.
+    #[test]
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_uart_command_hook_host_attached_enables_reporting_before_the_dump() {
+        reset_for_test();
+        mock_mesh_report_status_enable(true).returns_with(|_enable| {
+            assert!(
+                crate::sdk::ble_app::queues::uart_status_reporting_enabled(),
+                "status reporting must be enabled before the initial node-status dump"
+            );
+        });
+
+        assert_eq!(uart_command_hook(UartCommand::HostAttached), [0; 3]);
+
+        mock_mesh_report_status_enable(true).assert_called(1);
+        assert!(crate::sdk::ble_app::queues::uart_status_reporting_enabled());
+    }
+
+    /// The status-refresh arm re-runs the dump and acknowledges with zeros.
+    #[test]
+    #[mry::lock(mesh_report_status_enable)]
+    fn test_uart_command_hook_enable_status_reporting_reruns_the_dump() {
+        reset_for_test();
+        mock_mesh_report_status_enable(true).returns(());
+
+        assert_eq!(
+            uart_command_hook(UartCommand::EnableStatusReporting),
+            [0; 3]
+        );
+
+        mock_mesh_report_status_enable(true).assert_called(1);
+        assert!(crate::sdk::ble_app::queues::uart_status_reporting_enabled());
+    }
+
+    /// `uart_mesh_rx_hook` hands the packet to the bridge with this device's
+    /// address, so the transport never reads the SDK itself.
+    #[test]
+    #[mry::lock(on_mesh_rx_packet)]
+    fn test_uart_mesh_rx_hook_passes_the_device_address() {
+        reset_for_test();
+        DEVICE_ADDRESS.set(0x1234);
+        mock_on_mesh_rx_packet(Any, 0x1234).returns(());
+
+        uart_mesh_rx_hook(&create_test_packet());
+
+        mock_on_mesh_rx_packet(Any, 0x1234).assert_called(1);
     }
 
     /// `ota_send_terminate_hook` must report `false` without a free packet slot
@@ -2398,5 +2703,298 @@ mod tests {
         DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
         DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
         DEVICE_STATUS_RECORD_INDEX.set(0);
+    }
+
+    // --- Boot report and panic-info delivery ---
+    //
+    // `log_boot_reset_reason` / `report_panic_info` are the `app` half of the
+    // old `diagnostics::check_panic_info`: `diagnostics` now reports values and
+    // this file decides how they reach the UART and the mesh.
+
+    /// Payload bytes per UART packet (`UART_PAYLOAD_MAX_SIZE` in
+    /// `mesh_protocol::uart`).
+    const PAYLOAD_CHUNK: usize = 39;
+
+    fn expected_print(bytes: &[u8]) -> UartData {
+        let mut message = UartData {
+            len: UART_DATA_LEN as u32,
+            data: [0; UART_DATA_LEN],
+        };
+
+        message.data[2] = UartMsg::PrintMessage as u8;
+        message.data[3..3 + bytes.len()].copy_from_slice(bytes);
+
+        message
+    }
+
+    /// Asserts the mocked UART queue received exactly `text`, chunked the way
+    /// `UartStream::send` packets it.
+    fn assert_uart_print(text: &[u8]) {
+        for chunk in text.chunks(PAYLOAD_CHUNK) {
+            mock_send_message(expected_print(chunk)).assert_called(1);
+        }
+
+        mock_send_message(Any).assert_called(text.len().div_ceil(PAYLOAD_CHUNK));
+    }
+
+    /// Clears the module statics and the HAL host seams, mocks the UART sink and
+    /// installs the test adapters as the log sinks, so a log line lands in the
+    /// mock instead of the real 12-slot channel. `FakeAnalog` is a process-wide
+    /// singleton, so every test here starts from a zeroed analog bank.
+    fn mock_uart_print() {
+        reset_for_test();
+        FakeMmio::reset();
+        FakeAnalog::reset();
+        FakeFlash::reset();
+        mock_send_message(Any).returns(Ok(()));
+        crate::logging::set_log_sinks(crate::logging::LogSinks {
+            async_tx: log_async_tx_hook,
+            blocking_tx: log_blocking_tx_hook,
+        });
+    }
+
+    /// Seed the panic-info sector with the layout `write_panic_bytes` produces:
+    /// valid flag at `+0`, `len` at `+1`, `body` at `+3`.
+    fn seed_panic_info(body: &[u8], len: u16) {
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG]);
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 1, &len.to_le_bytes());
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 3, body);
+    }
+
+    /// A clean previous boot prints nothing at all.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_clean() {
+        mock_uart_print();
+
+        log_boot_reset_reason(BootResetReason::Clean);
+
+        mock_send_message(Any).assert_called(0);
+    }
+
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_wd_reset() {
+        mock_uart_print();
+
+        log_boot_reset_reason(BootResetReason::Watchdog {
+            breadcrumb: CRUMB_MAIN_LOOP,
+        });
+
+        assert_uart_print(b"[WD_RESET] sentinel=0xa5 breadcrumb=3\n");
+    }
+
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_message() {
+        mock_uart_print();
+
+        let body = b"panic body";
+        seed_panic_info(body, body.len() as u16);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        assert_uart_print(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=panic body\n");
+        // `report_panic_info()` owns erasing the sector, not the boot report.
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
+            0,
+            "the boot report must leave the panic sector intact"
+        );
+    }
+
+    /// A panic body longer than the stream budget is clipped and marked, and the
+    /// whole line still fits the 128-byte `UartStream` used by `uprintln!`.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_message_truncated() {
+        mock_uart_print();
+
+        let body = [b'x'; 200];
+        seed_panic_info(&body, body.len() as u16);
+
+        // `std::vec::Vec` explicitly: `heapless::Vec` is the crate-wide import.
+        let mut expected = std::vec::Vec::new();
+        expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
+        expected.extend_from_slice(&body[..PANIC_LOG_BODY_MAX]);
+        expected.extend_from_slice(b"...\n");
+
+        // Worst case: crumb 255 and a full-length body. The stream is 128 bytes,
+        // and the fixed prefix alone spans more than one 39-byte payload, so the
+        // clipped line is packetised, never truncated by the stream itself.
+        assert_eq!(expected.len(), 117);
+        assert!(expected.len() <= 128);
+        assert_eq!(&expected[expected.len() - 4..], b"...\n");
+        assert_eq!(expected.len().div_ceil(PAYLOAD_CHUNK), 3);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        assert_uart_print(&expected);
+    }
+
+    /// A message longer than the flash read window is marked with `...` even
+    /// when the bytes that *were* read decode to exactly the 72-byte budget, so
+    /// a cut can never look complete.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_message_marks_short_body_cut_by_read() {
+        mock_uart_print();
+
+        // 72 printable bytes followed by a byte that is invalid UTF-8, then more
+        // data beyond the read window: the decoded prefix is exactly the budget.
+        let mut body = [b'a'; 200];
+        body[PANIC_LOG_BODY_MAX] = 0xFF;
+        seed_panic_info(&body, body.len() as u16);
+
+        let mut expected = std::vec::Vec::new();
+        expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
+        expected.extend_from_slice(&body[..PANIC_LOG_BODY_MAX]);
+        expected.extend_from_slice(b"...\n");
+
+        assert_eq!(expected.len(), 117);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        assert_uart_print(&expected);
+    }
+
+    /// A message that fits the flash read window exactly but not the 72-byte
+    /// stream budget is still marked, i.e. the clip alone can require `...`.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_message_marks_body_clipped_within_read() {
+        mock_uart_print();
+
+        let body = [b'w'; PANIC_READ_MAX];
+        seed_panic_info(&body, body.len() as u16);
+
+        let mut expected = std::vec::Vec::new();
+        expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
+        expected.extend_from_slice(&body[..PANIC_LOG_BODY_MAX]);
+        expected.extend_from_slice(b"...\n");
+
+        assert_eq!(expected.len(), 117);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        assert_uart_print(&expected);
+    }
+
+    /// AC4: an invalid panic flag means the sector is not trusted at all, so the
+    /// boot report stays silent.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_invalid_flag() {
+        mock_uart_print();
+
+        FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG ^ 0xFF]);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_MAIN_LOOP,
+        });
+
+        // No line at all: the invalid flag short-circuits before the length read.
+        mock_send_message(Any).assert_called(0);
+    }
+
+    /// AC4: a length beyond the 256-byte sector record is rejected before any
+    /// body bytes are read, and nothing is logged.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_length_over_limit() {
+        mock_uart_print();
+
+        let len: u16 = 257;
+        seed_panic_info(&[b'x'; 8], len);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_MAIN_LOOP,
+        });
+
+        mock_send_message(Any).assert_called(0);
+    }
+
+    /// AC4: the bounded read can end inside a multi-byte character. The partial
+    /// code point is dropped (`from_utf8` error clamp), never replaced and never
+    /// logged raw, and the clipped line is marked with `...`.
+    #[test]
+    #[mry::lock(send_message)]
+    fn test_log_boot_reset_reason_panic_truncated_utf8() {
+        mock_uart_print();
+
+        // 75 ASCII bytes, then the two bytes of `é` straddling the 76-byte read
+        // bound, then more data that is never read.
+        let mut body = [b'a'; 200];
+        body[PANIC_READ_MAX - 1] = 0xC3;
+        body[PANIC_READ_MAX] = 0xA9;
+        let len = body.len() as u16;
+
+        // The clamp decodes 75 ASCII bytes, then `clip_to_uart_budget` keeps the
+        // 72 the stream budget allows and the ellipsis marks the cut.
+        let mut expected = std::vec::Vec::new();
+        expected.extend_from_slice(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=");
+        expected.extend_from_slice(&body[..PANIC_LOG_BODY_MAX]);
+        expected.extend_from_slice(b"...\n");
+
+        assert_eq!(body[PANIC_READ_MAX - 1], 0xC3);
+        assert_eq!(expected.len(), 117);
+
+        seed_panic_info(&body, len);
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        // Byte-exact: no replacement character (0xEF 0xBF 0xBD) and no stray
+        // lead byte (0xC3) can appear in the logged line.
+        assert_uart_print(&expected);
+        assert!(!expected.windows(3).any(|w| w == [0xEF, 0xBF, 0xBD]));
+        assert!(!expected.contains(&0xC3));
+        assert_eq!(&expected[expected.len() - 5..], b"a...\n");
+    }
+
+    #[test]
+    fn test_report_panic_info_no_valid_flag() {
+        reset_for_test();
+        // A blank sector reads 0xFF, which is not a valid panic flag.
+        FakeFlash::reset();
+
+        // Run the report (should return early)
+        block_on(report_panic_info());
+
+        // Nothing was reported, so the sector must not be cleared.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 0);
+    }
+
+    #[test]
+    #[mry::lock(send_mesh_message)]
+    fn test_report_panic_info_with_valid_data() {
+        reset_for_test();
+
+        let test_message = b"Test panic message";
+        let message_len = test_message.len() as u16;
+        seed_panic_info(test_message, message_len);
+
+        // Mock the mesh send so the report never touches the radio
+        mock_send_mesh_message(Any, Any, Any, Any).returns([1, 2, 3]);
+
+        block_on(report_panic_info());
+
+        // Verify mesh messages were sent (3: two data chunks + one empty terminator)
+        mock_send_mesh_message(Any, Any, Any, Any).assert_called(3);
+
+        // The report ends by erasing the sector, so the flag is back to blank.
+        assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 1);
+        let mut flag = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_PANIC_INFO, &mut flag);
+        assert_eq!(flag[0], 0xFF, "the panic sector is cleared after reporting");
     }
 }

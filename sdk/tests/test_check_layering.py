@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import re
 import sys
 import tempfile
@@ -179,6 +180,63 @@ class TestRealSdkTree(unittest.TestCase):
         )
         self.assertEqual(violations, [])
 
+    def test_real_diagnostics_subtree_is_pure(self) -> None:
+        # C-8: `diagnostics` is the leaf of the application layer — the panic
+        # sector, the breadcrumbs and the RTT mirror, and nothing above it.
+        diagnostics_root = SRC_ROOT / "diagnostics"
+        paths = check_layering.rust_files(str(diagnostics_root))
+        self.assertGreaterEqual(len(paths), 2)  # mod.rs + rtt.rs
+        violations, _total = check_layering.audit_universal(
+            paths,
+            "rust/src/diagnostics",
+            enforce_budget=False,
+            subsystem_roots={"diagnostics": str(diagnostics_root)},
+        )
+        self.assertEqual(violations, [])
+
+    def test_real_logging_module_is_pure(self) -> None:
+        # C-8: `logging` is a single module file, so its row is matched by exact
+        # path. Its only legal `crate::` edges are `diagnostics::rtt` (the RTT
+        # mirror) and itself.
+        logging_file = SRC_ROOT / "logging.rs"
+        self.assertTrue(logging_file.is_file())
+        violations, _total = check_layering.audit_universal(
+            [str(logging_file)],
+            "rust/src/logging.rs",
+            enforce_budget=False,
+            subsystem_roots={"logging": str(logging_file)},
+        )
+        self.assertEqual(violations, [])
+
+    def test_real_uart_subtree_is_pure(self) -> None:
+        # C-8: the UART bridge owns framing, ACK/retry and its two tasks, and
+        # reaches `crate::logging` / the HAL; it names neither `mesh` nor `sdk`.
+        uart_root = SRC_ROOT / "uart"
+        paths = check_layering.rust_files(str(uart_root))
+        self.assertGreaterEqual(len(paths), 2)  # mod.rs + protocol.rs
+        violations, _total = check_layering.audit_universal(
+            paths,
+            "rust/src/uart",
+            enforce_budget=False,
+            subsystem_roots={"uart": str(uart_root)},
+        )
+        self.assertEqual(violations, [])
+
+    def test_real_mesh_subtree_is_pure(self) -> None:
+        # C-8: `mesh` owns the radio and the pairing state machine but may not
+        # name the UART bridge or the lamp; both arrive through hooks. `sdk` is
+        # legal here (the node table and the radio driver live there).
+        mesh_root = SRC_ROOT / "mesh"
+        paths = check_layering.rust_files(str(mesh_root))
+        self.assertGreaterEqual(len(paths), 2)  # mod.rs + fsm.rs
+        violations, _total = check_layering.audit_universal(
+            paths,
+            "rust/src/mesh",
+            enforce_budget=False,
+            subsystem_roots={"mesh": str(mesh_root)},
+        )
+        self.assertEqual(violations, [])
+
 
 class _TempSrcTree(unittest.TestCase):
     """A disposable ``rust/src``, SDK root and mesh-protocol root per test.
@@ -287,6 +345,7 @@ class TestGlobalBans(_TempTree):
             "main_light",
             "mesh",
             "light_manager",
+            "uart",
             "uart_manager",
             "ota",
             "diagnostics",
@@ -1150,10 +1209,20 @@ class TestLightPurityRule(_TempSrcTree):
 class TestSubsystemPurityTable(_TempSrcTree):
     """The per-directory purity table is the single source of every row."""
 
-    def test_table_has_the_three_subsystems(self) -> None:
+    def test_table_has_every_application_subsystem(self) -> None:
+        # C-6 shipped `ota`, C-7 added `factory_reset` and `light`, and C-8
+        # completed the application layer with these four.
         self.assertEqual(
             set(check_layering.SUBSYSTEM_PURITY),
-            {"ota", "factory_reset", "light"},
+            {
+                "ota",
+                "factory_reset",
+                "light",
+                "diagnostics",
+                "logging",
+                "uart",
+                "mesh",
+            },
         )
 
     def test_ota_row_still_matches_the_c6_constants(self) -> None:
@@ -1171,6 +1240,315 @@ class TestSubsystemPurityTable(_TempSrcTree):
             [(item.rule, item.violation) for item in violations],
             [("ota-upward-dep", "crate::sdk")],
         )
+
+    def test_no_row_forbids_its_own_name(self) -> None:
+        # A row lists siblings and layers *above* the subsystem. Adding the
+        # subsystem's own name would ban its own intra-module paths.
+        for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items():
+            with self.subTest(row=name):
+                self.assertNotIn(name, modules)
+
+    def test_uart_is_a_retired_name_fence_everywhere_but_its_own_row(self) -> None:
+        # C-8 renamed the bridge to `crate::uart`; the deleted spelling stays
+        # banned in every other row so it cannot come back by import. The bridge
+        # itself is the one row that omits it, because `uart` is its own name.
+        for name, (modules, _crates) in check_layering.SUBSYSTEM_PURITY.items():
+            if name == "uart":
+                continue
+            with self.subTest(row=name):
+                self.assertIn("uart_manager", modules)
+
+    def test_logging_row_resolves_to_the_module_file(self) -> None:
+        # `logging` is a single file, not a directory: the override keeps one
+        # table, and the match accepts an exact file path.
+        roots = check_layering.subsystem_roots("/src")
+        self.assertEqual(roots["logging"], os.path.join("/src", "logging.rs"))
+        self.assertEqual(roots["uart"], os.path.join("/src", "uart"))
+        self.assertEqual(roots["mesh"], os.path.join("/src", "mesh"))
+        self.assertEqual(
+            check_layering._subsystem_of("/src/logging.rs", roots), "logging"
+        )
+        self.assertEqual(
+            check_layering._subsystem_of("/src/uart/mod.rs", roots), "uart"
+        )
+        self.assertIsNone(check_layering._subsystem_of("/src/app.rs", roots))
+
+
+class TestDiagnosticsPurityRule(_TempSrcTree):
+    """`rust/src/diagnostics/**` production code may not name the layers above.
+
+    `diagnostics` is the leaf of the application layer, so the whole rest of the
+    application is forbidden — `logging` included, because the sink is what
+    writes a panic body and the direction is `logging -> diagnostics::rtt`.
+    """
+
+    def test_sibling_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "diagnostics/mod.rs", _lines("use crate::logging::UartStream;")
+        )
+        out = self.assert_violations("1: diagnostics-upward-dep: crate::logging")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: diagnostics-upward-dep: crate::logging"
+        )
+
+    def test_qualified_uart_path_is_rejected(self) -> None:
+        # A fully-qualified call is not an import, and must not dodge the rule.
+        self.write_src(
+            "diagnostics/rtt.rs",
+            _lines("pub fn f() { crate::uart::init(); }"),
+        )
+        self.assert_violations("1: diagnostics-upward-dep: crate::uart")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "diagnostics/rtt.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
+        )
+        self.assert_violations("1: diagnostics-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.DIAGNOSTICS_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "diagnostics" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_downward_and_internal_imports_are_accepted(self) -> None:
+        self.write_src(
+            "diagnostics/mod.rs",
+            _lines(
+                "use core::sync::atomic::Ordering;",
+                "use critical_section;",
+                "use tlsr8266_hal::drivers::flash::flash_read_page;",
+                "use crate::config::PANIC_LOG_BODY_MAX;",
+                "use super::rtt::rtt_write_bytes;",
+                "mod rtt;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
+        self.write_src(
+            "diagnostics/mod.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::mesh::reset_for_test;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
+
+
+class TestLoggingPurityRule(_TempSrcTree):
+    """`rust/src/logging.rs` production code may not name its siblings.
+
+    `logging` sits above `diagnostics` and below `uart`, so the transport and
+    every subsystem are forbidden while `crate::diagnostics` is legal. The row
+    is keyed on the module file itself, not a directory.
+    """
+
+    def test_uart_import_is_rejected(self) -> None:
+        path = self.write_src("logging.rs", _lines("use crate::uart::send_message;"))
+        out = self.assert_violations("1: logging-upward-dep: crate::uart")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: logging-upward-dep: crate::uart"
+        )
+
+    def test_diagnostics_import_is_accepted(self) -> None:
+        self.write_src(
+            "logging.rs",
+            _lines(
+                "use crate::diagnostics::rtt::rtt_write_bytes;",
+                "use mesh_protocol::uart::UartData;",
+                "use critical_section;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.LOGGING_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "logging.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+                out = self.assert_violations(f"logging-upward-dep: crate::{module}")
+                self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(len(banned), 7)
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "logging.rs", _lines("use tlsr8266_pac::write_reg8;")
+        )
+        self.assert_violations("1: logging-forbidden-crate: tlsr8266_pac")
+
+    def test_rule_does_not_apply_to_an_app_root_file(self) -> None:
+        # Control: the override is an exact path, not "every root-level file".
+        self.write_src(
+            "app.rs", _lines("use crate::uart::send_sync_panic;")
+        )
+        self.assert_clean()
+
+
+class TestUartPurityRule(_TempSrcTree):
+    """`rust/src/uart/**` production code may not name `mesh`, `sdk` or a peer.
+
+    The bridge owns framing, ACK/retry and the two embassy tasks, and reaches
+    `crate::logging` (for `uprintln!`) and the HAL. The mesh relay and the host
+    command execution arrive through `MeshEventHooks` / `UartCommandHandler`, so
+    `crate::mesh` and `crate::sdk` must stay out.
+    """
+
+    def test_mesh_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "uart/mod.rs", _lines("use crate::mesh::send_mesh_message;")
+        )
+        out = self.assert_violations("1: uart-upward-dep: crate::mesh")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: uart-upward-dep: crate::mesh"
+        )
+
+    def test_sdk_import_is_rejected(self) -> None:
+        self.write_src(
+            "uart/protocol.rs",
+            _lines("use crate::sdk::ble_app::queues::enqueue_uart_tx;"),
+        )
+        self.assert_violations("1: uart-upward-dep: crate::sdk")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "uart/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
+        )
+        self.assert_violations("1: uart-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.UART_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "uart" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_logging_and_the_hal_are_accepted(self) -> None:
+        # `uart` sits *above* `logging`, so naming it (for `uprintln!`) and the
+        # HAL it drives is the legal downward direction.
+        self.write_src(
+            "uart/mod.rs",
+            _lines(
+                "use core::fmt::Write;",
+                "use critical_section;",
+                "use mesh_protocol::uart::UartData;",
+                "use tlsr8266_hal::drivers::uart::UartDriver;",
+                "use crate::logging::UartStream;",
+                "use protocol::decode_command;",
+            ),
+        )
+        self.assert_clean()
+
+
+class TestMeshPurityRule(_TempSrcTree):
+    """`rust/src/mesh/**` production code may not name `uart`, the lamp or `light`.
+
+    `mesh` is the one subsystem allowed `crate::sdk` — it owns the radio, the
+    node table and `ble_app`'s queues — and `crate::config` / `crate::logging`
+    like everything else. `app` (the composition root) and `irq` (its ISR layer)
+    are forbidden as well, so the module doc's "it never names `app`" is a
+    checked claim. The four application edges go through `MeshEventHooks`, which
+    is what keeps this row possible.
+    """
+
+    def test_uart_import_is_rejected(self) -> None:
+        path = self.write_src(
+            "mesh/mod.rs", _lines("use crate::uart::on_mesh_rx_packet;")
+        )
+        out = self.assert_violations("1: mesh-upward-dep: crate::uart")
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: mesh-upward-dep: crate::uart"
+        )
+
+    def test_light_import_is_rejected(self) -> None:
+        self.write_src(
+            "mesh/fsm.rs", _lines("pub fn f() { crate::light::device_status_update(); }")
+        )
+        self.assert_violations("1: mesh-upward-dep: crate::light")
+
+    def test_tlsr8266_pac_import_is_rejected(self) -> None:
+        self.write_src(
+            "mesh/mod.rs", _lines("use tlsr8266_pac::fake_mmio::FakeMmio;")
+        )
+        self.assert_violations("1: mesh-forbidden-crate: tlsr8266_pac")
+
+    def test_every_forbidden_module_is_rejected(self) -> None:
+        banned = sorted(check_layering.MESH_FORBIDDEN_MODULES - {"state"})
+        for module in banned:
+            with self.subTest(module=module):
+                _write(
+                    self.src_root / "mesh" / f"{module}.rs",
+                    _lines(f"use crate::{module}::thing;"),
+                )
+        out = self.assert_violations(*[f"crate::{m}" for m in banned])
+        self.assertEqual(len(out.splitlines()), len(banned))
+
+    def test_composition_root_and_the_isr_layer_are_rejected(self) -> None:
+        # L5: the module doc claims `mesh` never names `app`, and `irq` sits
+        # above it. Both names must be in the row, or the claim is a comment
+        # that lets `mesh -> app` back in silently.
+        self.write_src(
+            "mesh/mod.rs",
+            _lines(
+                "pub fn f() { crate::app::rf_link_data_callback(); }",
+                "pub fn g() { crate::irq::handler(); }",
+            ),
+        )
+        self.assert_violations(
+            "1: mesh-upward-dep: crate::app", "2: mesh-upward-dep: crate::irq"
+        )
+        self.assertLessEqual(
+            {"app", "irq"}, set(check_layering.MESH_FORBIDDEN_MODULES)
+        )
+
+    def test_sdk_config_and_logging_are_accepted(self) -> None:
+        # The legal downward direction: the SDK (radio + node table), `config`,
+        # the HAL, the wire crate and `uprintln!`.
+        self.write_src(
+            "mesh/mod.rs",
+            _lines(
+                "use critical_section;",
+                "use mesh_protocol::packet_types::Packet;",
+                "use tlsr8266_hal::mcu::clock::clock_time;",
+                "use crate::config::VENDOR_ID;",
+                "use crate::sdk::ble_app::queues::enqueue_mesh_tx;",
+                "pub fn f() { uprintln!(\"mesh\"); }",
+            ),
+        )
+        self.assert_clean()
+
+    def test_forbidden_import_inside_cfg_test_is_accepted(self) -> None:
+        # The subsystem's own tests use the lamp and the PAC fakes as oracles.
+        self.write_src(
+            "mesh/mod.rs",
+            _lines(
+                "pub fn production() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::light::transitions::LIGHT_CMD_CHANNEL;",
+                "    use tlsr8266_pac::fake_mmio::FakeMmio;",
+                "}",
+            ),
+        )
+        self.assert_clean()
 
 
 class TestStateRemovedRule(_TempSrcTree):

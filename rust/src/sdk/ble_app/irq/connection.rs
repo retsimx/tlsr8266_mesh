@@ -707,7 +707,7 @@ mod tests {
         // Reset the UART statics, the echo-suppression deque and the shared
         // queues (this also drains MESH_TX_QUEUE and MESH_RX_CHANNEL) so each
         // test starts from a known-clean transport state.
-        crate::uart_manager::reset_for_test();
+        crate::uart::reset_for_test();
     }
 
     /// Tests that the connection event counter is incremented on every call.

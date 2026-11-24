@@ -10,8 +10,8 @@
 //! - RF interrupt handling (TX/RX complete)
 //! - BLE system timer state dispatch
 
-use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
-use crate::sdk::light::RfOperationState;
+use crate::rf::drv_8266::CURRENT_RF_STATE;
+use crate::types::RfOperationState;
 use tlsr8266_pac::*;
 
 use super::advertisement::handle_ble_advertisement_state;
@@ -35,7 +35,6 @@ use super::timing::configure_ble_receive_state;
 /// (no XIP flash jump during radio operations) and adds no extra interrupt
 /// stack frame.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn handle_rf_irq() {
     let irq = read_reg_rf_irq_status();
 
@@ -71,7 +70,6 @@ pub fn handle_rf_irq() {
 /// the interrupt composition root can own the `ota_manager` calls. Every other
 /// state reports [`BleConnectionEvent::None`].
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
     // Clear the interrupt source
     write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits());
@@ -101,19 +99,31 @@ pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
 mod tests {
     use super::*;
 
-    // Import mock functions from their original modules
-    use crate::sdk::ble_app::irq::advertisement::mock_handle_ble_advertisement_state;
-    use crate::sdk::ble_app::irq::connection::mock_handle_ble_connected_state;
-    use crate::sdk::ble_app::irq::mesh::mock_handle_mesh_listening_state;
-    use crate::sdk::ble_app::irq::packet_handling::{
-        mock_handle_rf_packet_reception, mock_handle_rf_transmission_complete,
+    use crate::ble::connection::{
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, BLE_PERIPHERAL_LINK_STATE, SLAVE_CONNECTED_TICK,
     };
-    use crate::sdk::ble_app::irq::timing::mock_configure_ble_receive_state;
+    use crate::mesh_ll::node_status::MESH_DEVICE_ONLINE_STATUS;
+    use crate::rf::drv_8266::{BLE_ADVERTISING_ENABLED, LIGHT_RX_BUFFER_WRITE_POINTER};
+    use crate::types::BlePeripheralLinkState;
+    use tlsr8266_hal::common::sync::SimplifyLS;
+    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use tlsr8266_pac::fake_mmio::FakeMmio;
 
     /// Datasheet offsets of the interrupt registers this module touches.
     const REG_RF_IRQ_STATUS: u32 = 0xf20;
+    const REG_RF_RX_STATUS: u32 = 0x443;
     const REG_IRQ_SRC: u32 = 0x648;
+
+    /// Every value written to `reg_rf_irq_status`, oldest first. The RF
+    /// handlers acknowledge their interrupt source with a write-1-to-clear, so
+    /// the logged values are the dispatch evidence.
+    fn rf_irq_ack_writes() -> Vec<u32> {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (REG_RF_IRQ_STATUS | tlsr8266_pac::REG_BASE_ADDR))
+            .map(|w| w.value)
+            .collect()
+    }
 
     /// Restores the process-wide RF operation state between tests, and clears
     /// the PAC/HAL host fakes so a test never inherits another test's register
@@ -123,6 +133,16 @@ mod tests {
         tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+        crate::queues::reset_for_test();
+        crate::callbacks::test_ota::reset_for_test();
+        BLE_ADVERTISING_ENABLED.set(false);
+        MESH_DEVICE_ONLINE_STATUS.set(false);
+        LIGHT_RX_BUFFER_WRITE_POINTER.set(0);
+        BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
+        // Keep the supervision timeout from interrupting the connected-state
+        // handler in tests that drive that arm.
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(10_000_000);
+        SLAVE_CONNECTED_TICK.set(0);
         *CURRENT_RF_STATE.lock() = RfOperationState::Idle;
     }
 
@@ -133,60 +153,67 @@ mod tests {
     /// Tests that an RF transmission complete interrupt dispatches to the
     /// transmission complete handler.
     #[test]
-    #[mry::lock(handle_rf_transmission_complete)]
     fn test_handle_rf_irq_transmission_complete() {
         reset_rf_state();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, FLD_RF_IRQ_MASK::IRQ_TX.bits());
-        mock_handle_rf_transmission_complete().returns(());
 
         handle_rf_irq();
 
-        mock_handle_rf_transmission_complete().assert_called(1);
+        assert_eq!(
+            rf_irq_ack_writes(),
+            vec![2],
+            "the TX handler must acknowledge bit 2 (RX stays untouched)"
+        );
     }
 
     /// Tests that an RF reception complete interrupt dispatches to the packet
     /// reception handler.
     #[test]
-    #[mry::lock(handle_rf_packet_reception)]
     fn test_handle_rf_irq_reception_complete() {
         reset_rf_state();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, FLD_RF_IRQ_MASK::IRQ_RX.bits());
-        mock_handle_rf_packet_reception().returns(());
+        // RX error status: the reception handler acknowledges and returns
+        // before it needs a real DMA frame in the buffer.
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x0b);
 
         handle_rf_irq();
 
-        mock_handle_rf_packet_reception().assert_called(1);
+        assert_eq!(
+            rf_irq_ack_writes(),
+            vec![1],
+            "the RX handler must acknowledge bit 1 (TX stays untouched)"
+        );
     }
 
     /// Tests that simultaneous TX and RX interrupts dispatch to both handlers.
     #[test]
-    #[mry::lock(handle_rf_transmission_complete, handle_rf_packet_reception)]
     fn test_handle_rf_irq_both_interrupts() {
         reset_rf_state();
         let both_interrupts = FLD_RF_IRQ_MASK::IRQ_TX.bits() | FLD_RF_IRQ_MASK::IRQ_RX.bits();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, both_interrupts);
-        mock_handle_rf_transmission_complete().returns(());
-        mock_handle_rf_packet_reception().returns(());
+        FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x0b);
 
         handle_rf_irq();
 
-        mock_handle_rf_transmission_complete().assert_called(1);
-        mock_handle_rf_packet_reception().assert_called(1);
+        assert_eq!(
+            rf_irq_ack_writes(),
+            vec![2, 1],
+            "TX then RX must each acknowledge their own bit"
+        );
     }
 
     /// Tests that no RF interrupt bits means no dispatch.
     #[test]
-    #[mry::lock(handle_rf_transmission_complete, handle_rf_packet_reception)]
     fn test_handle_rf_irq_no_interrupts() {
         reset_rf_state();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, 0);
-        mock_handle_rf_transmission_complete().returns(());
-        mock_handle_rf_packet_reception().returns(());
 
         handle_rf_irq();
 
-        mock_handle_rf_transmission_complete().assert_called(0);
-        mock_handle_rf_packet_reception().assert_called(0);
+        assert!(
+            rf_irq_ack_writes().is_empty(),
+            "no interrupt bit means neither handler may run"
+        );
     }
 
     // ================================================================================
@@ -196,12 +223,10 @@ mod tests {
     /// Tests that the system timer source is cleared before dispatching, and that
     /// the advertising state handler runs and reports nothing to the composition root.
     #[test]
-    #[mry::lock(handle_ble_advertisement_state)]
     fn test_handle_ble_system_timer_irq_clears_source_and_dispatches_advertising() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
-
-        mock_handle_ble_advertisement_state().returns(());
+        FakeMmio::set_reg32(0x740, 10_000);
 
         let event = handle_ble_system_timer_irq();
 
@@ -211,65 +236,94 @@ mod tests {
             FLD_IRQ::SYSTEM_TIMER.bits(),
             "the SYSTEM_TIMER source must be cleared before dispatch"
         );
-        mock_handle_ble_advertisement_state().assert_called(1);
+        // The advertising handler's completion branch: arm the listen timer
+        // (500µs, no online status queued) and return to mesh listening.
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            CLOCK_SYS_CLOCK_1US * 500 + 10_000,
+            "the advertising handler must arm the next state timer"
+        );
+        assert_eq!(
+            *CURRENT_RF_STATE.lock(),
+            RfOperationState::MeshListening,
+            "the advertising handler must hand over to mesh listening"
+        );
+        assert_eq!(
+            rf_irq_ack_writes(),
+            vec![1],
+            "the advertising handler acknowledges its RX interrupt"
+        );
     }
 
     /// Tests dispatch to the connected state handler and that its event is
     /// propagated unchanged to the caller.
     #[test]
-    #[mry::lock(handle_ble_connected_state)]
     fn test_handle_ble_system_timer_irq_dispatches_connected() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Connected;
 
-        mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaFinishCheckAndErrorReboot);
+        // The connected handler reports `OtaErrorReboot` when the supervision
+        // timeout expires while an OTA is in progress. Drive the real clock,
+        // timeout and OTA state through their seams instead of stubbing the
+        // handler.
+        FakeMmio::set_reg32(0x740, 100_000);
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(0);
+        SLAVE_CONNECTED_TICK.set(0);
+        crate::callbacks::test_ota::set_in_progress_for_test(true);
 
         let event = handle_ble_system_timer_irq();
 
         assert_eq!(
             event,
-            BleConnectionEvent::OtaFinishCheckAndErrorReboot,
+            BleConnectionEvent::OtaErrorReboot,
             "the Connected arm must propagate the connection event unchanged"
         );
-        mock_handle_ble_connected_state().assert_called(1);
+        // The handler body really ran: it configures the link for an active
+        // connection before it checks the timeout.
+        assert_eq!(
+            crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
+            BlePeripheralLinkState::Connected,
+            "the connected handler must configure the active link state"
+        );
+        assert_eq!(
+            *CURRENT_RF_STATE.lock(),
+            RfOperationState::Advertising,
+            "a timed-out connection must fall back to advertising"
+        );
     }
 
     /// Tests dispatch to the receiving and mesh-listening state handlers.
     /// Neither of them reports anything to the composition root.
     #[test]
-    #[mry::lock(configure_ble_receive_state, handle_mesh_listening_state)]
     fn test_handle_ble_system_timer_irq_dispatches_receiving_and_mesh_listening() {
         reset_rf_state();
-        mock_configure_ble_receive_state().returns(());
-        mock_handle_mesh_listening_state().returns(());
 
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
         let receiving_event = handle_ble_system_timer_irq();
-        mock_configure_ble_receive_state().assert_called(1);
         assert_eq!(receiving_event, BleConnectionEvent::None);
+        // The receive handler reconfigures the radio for the next connection
+        // event and hands over to the connected state.
+        assert_eq!(
+            *CURRENT_RF_STATE.lock(),
+            RfOperationState::Connected,
+            "the receive handler must hand over to the connected state"
+        );
 
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
         let mesh_event = handle_ble_system_timer_irq();
-        mock_handle_mesh_listening_state().assert_called(1);
         assert_eq!(mesh_event, BleConnectionEvent::None);
+        assert_eq!(
+            crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
+            BlePeripheralLinkState::Mesh,
+            "the mesh-listening handler must configure the mesh link state"
+        );
     }
 
     /// Tests that the idle state clears the source, runs no state handler and
     /// reports nothing to the composition root.
     #[test]
-    #[mry::lock(
-        handle_ble_advertisement_state,
-        handle_ble_connected_state,
-        configure_ble_receive_state,
-        handle_mesh_listening_state
-    )]
     fn test_handle_ble_system_timer_irq_idle_runs_no_state_handler() {
         reset_rf_state();
-
-        mock_handle_ble_advertisement_state().returns(());
-        mock_handle_ble_connected_state().returns(BleConnectionEvent::OtaErrorReboot);
-        mock_configure_ble_receive_state().returns(());
-        mock_handle_mesh_listening_state().returns(());
 
         let event = handle_ble_system_timer_irq();
 
@@ -279,9 +333,19 @@ mod tests {
             FLD_IRQ::SYSTEM_TIMER.bits(),
             "the SYSTEM_TIMER source must be cleared before dispatch"
         );
-        mock_handle_ble_advertisement_state().assert_called(0);
-        mock_handle_ble_connected_state().assert_called(0);
-        mock_configure_ble_receive_state().assert_called(0);
-        mock_handle_mesh_listening_state().assert_called(0);
+        assert_eq!(
+            crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
+            BlePeripheralLinkState::Disconnected,
+            "no state handler may reconfigure the link"
+        );
+        assert!(
+            rf_irq_ack_writes().is_empty(),
+            "no state handler may acknowledge an RF interrupt"
+        );
+        assert_eq!(
+            *CURRENT_RF_STATE.lock(),
+            RfOperationState::Idle,
+            "the idle arm must not schedule a state transition"
+        );
     }
 }

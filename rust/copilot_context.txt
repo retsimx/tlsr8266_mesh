@@ -1,12 +1,26 @@
 # TLSR8266 Mesh Light Project - Development Context
 
-> **Update (C-5, #67):** the peripheral drivers (`spi`, `flash`, `pwm`, `uart`) now live in
-> `crates/tlsr8266-hal/src/drivers/` and no longer use `mry`. Tests of code that calls them
-> must drive the real functions against the host fakes:
-> `tlsr8266_hal::drivers::flash::fake_flash::FakeFlash` (`InMemory` default — `reset`,
-> `write_slice` / `read_slice`, `erase_count`, `fail_verify_next_write`) and
-> `tlsr8266_pac::fake_mmio::FakeMmio`. The `mry` guidance below still applies to the modules
-> that retain mocks (`read_flash_byte`, `pair_*`, `rf_*`, `mesh_*`, and pac register accessors).
+## Crate Layout
+
+Dependencies point one way, and `sdk/check_layering.py` enforces it:
+
+    pac  ->  hal  ->  radio  ->  firmware
+
+| Crate | Path | Owns |
+|---|---|---|
+| `mesh-protocol` | `rust/crates/mesh-protocol/` | Pure `no_std` wire contracts: packet layouts, CRC, UART framing, mesh opcodes (`mesh_types::LGT_CMD_*`) |
+| `tlsr8266-pac` | `rust/crates/tlsr8266-pac/` | Register accessors (`regrw!`) and the host register bank (`fake_mmio`) |
+| `tlsr8266-hal` | `rust/crates/tlsr8266-hal/` | `mcu` (clock, crypto, analog, irq), `drivers` (spi, flash, pwm, uart), async runtime |
+| `tlsr8266-radio` | `rust/crates/tlsr8266-radio/` | BLE link layer, GATT server, AES pairing, RF driver and mesh link layer |
+| `tlsr8266_mesh` | `rust/src/` | Composition root (`app`, `irq`, `startup`, `config`, `version`) and the vertical subsystems (`light`, `mesh`, `ota`, `uart`, `factory_reset`, `diagnostics`, `logging`) |
+
+**`tlsr8266-radio` must never name the application layer** — no `crate::ota`,
+`crate::uart`, `crate::mesh`, `crate::light`, `crate::diagnostics`,
+`crate::logging`, in production or test code. Everything the radio needs from
+above arrives through the `callbacks` and `queues` seams, which `app.rs` installs
+once at boot. Adding an upward reference (even behind `cfg(test)`) is exactly
+what the extraction exists to prevent; if a radio test seems to need one, fake
+the input instead.
 
 ## Hardware Platform
 
@@ -41,97 +55,58 @@ mod tests {
 
     #[test]
     fn test_some_function() {
-        // Test implementation
         assert_eq!(some_function(1), expected_result);
     }
 }
 ```
 
-**Coverage Attributes** - All test modules should be marked with `#[coverage(off)]` to exclude them from code coverage analysis. This attribute should be placed immediately after `#[cfg(test)]`:
+**Coverage Attributes** - All test modules should be marked with `#[coverage(off)]`, immediately after `#[cfg(test)]`.
+
+**Test Isolation** - There is no call-graph mocking framework any more (the old `mry` crate was removed when the radio moved out of the binary crate). Hardware is faked instead, and every fake is a process-wide singleton (one register bank, one 512 KiB flash array, one clock, one AES mode per test binary). Two consequences:
+
+1. The suite runs with `--test-threads=1` (`rust/run_tests.sh` passes it for you).
+2. Every test that touches a fake resets it in its fixture, so no test inherits another's writes:
 
 ```rust
-#[cfg(test)]
-#[coverage(off)]
-mod tests {
-    // Test implementations
+use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+use tlsr8266_hal::mcu::clock::fake_clock;
+use tlsr8266_hal::mcu::crypto::fake_crypto;
+use tlsr8266_pac::fake_mmio::FakeMmio;
+
+fn reset_fakes() {
+    FakeMmio::reset();
+    FakeAnalog::reset();
+    fake_clock::reset();
+    fake_crypto::reset();
+    FakeFlash::reset();
 }
 ```
 
-**Test Isolation** - Tests should be isolated because mock return values cannot be changed once set. Use the `mry` crate's locking mechanism to ensure each test has its own mock setup:
+**Testing Async Functions** - Async functions are still tested from a synchronous `#[test]` by driving the future to completion:
 
 ```rust
 #[test]
-#[mry::lock(function1, function2)] // Lock the mocks for these functions
-fn test_isolated_function() {
-    // Setup mocks for this test only
-    mock_function1().returns(expected_value);
-    
-    // Test the function
-    let result = function_under_test();
-    
-    // Assertions
-    assert_eq!(result, expected_value);
-    
-    // Verify mock was called
-    mock_function1().assert_called(1);
-}
-```
-
-**Testing Async Functions** - When testing async functions, you must still use a synchronous test function (`#[test]`), but you can use the futures crate to execute the async function:
-
-```rust
-#[test]
-#[mry::lock(async_dependency1, async_dependency2)]
 fn test_async_function() {
-    // Setup mocks
-    mock_async_dependency1().returns(expected_value);
-    
-    // Execute the async function synchronously using block_on
     let result = futures::executor::block_on(async_function_under_test());
-    
-    // Assertions
     assert_eq!(result, expected_value);
-    
-    // Verify mocks were called
-    mock_async_dependency1().assert_called(1);
 }
 ```
 
-### Mocking the App Struct
+### Testing the Application Layers
 
-**App Struct Pattern** - The application uses a global App instance accessed via the `app()` function. When testing modules that use the App struct, we need to mock the App instance and its methods:
+There is no mockable global `App`: the managers own their own state, and tests
+drive the real functions. Reset through the module's own `reset_for_test()`
+helper (`crate::ota::reset_for_test`, `crate::uart::reset_for_test`,
+`crate::mesh::reset_for_test`, `crate::factory_reset::reset_for_test`,
+`crate::light::effects::reset_for_test`, `crate::light::transitions::reset_for_test`),
+plus `tlsr8266_radio::callbacks::reset_for_test()` and
+`tlsr8266_radio::queues::reset_for_test()` for the radio seams.
 
-```rust
-#[test]
-#[mry::lock(factory_reset, flash_write_page, app_mocker)]  // Include app_mocker in the lock
-fn test_function_that_uses_app() {
-    // Set up initial state with a mock App instance
-    let mut app = App::default();
-    mock_app_mocker().returns(&mut app);
-    
-    // Set up mocks for App struct methods (e.g., on ota_manager)
-    app.ota_manager.mock_rf_led_ota_ok().returns(());
-    
-    // Set up other mocks as needed
-    mock_factory_reset().returns(());
-    
-    // Call function under test
-    function_that_uses_app();
-    
-    // Verify App struct methods were called
-    app.ota_manager.mock_rf_led_ota_ok().assert_called(1);
-    
-    // Verify other mocks were called
-    mock_factory_reset().assert_called(1);
-}
-```
-
-**Key Points for App Struct Mocking:**
-- Always include `app_mocker` in the `mry::lock` attribute
-- Create an instance of App using `App::default()`
-- Configure the `app_mocker` to return your mock App instance
-- Mock methods on App components (like `ota_manager`) before calling the function under test
-- Verify that the expected App methods were called the correct number of times
+Prefer asserting observable behaviour — returned values, subsystem state, the
+`FakeMmio` write log, flash contents — over asserting that some internal helper
+was reached. A test whose only claim is "this function called that function" is
+a test of the implementation, not of the behaviour.
 
 ### Documentation Style
 
@@ -157,34 +132,21 @@ fn test_function_that_uses_app() {
 **Enums** - Comment each variant:
 ```rust
 enum GattOp {
-    AttOpErrorRsp = 0x01,     // Error Response op code
+    AttOpErrorRsp = 0x01,       // Error Response op code
     AttOpExchangeMtuReq = 0x02, // Exchange MTU Request op code
 }
 ```
 
 **In-Code Comments:**
-1. Section headers:
-   ```rust
-   // --- Major section of code ---
-   ```
+```rust
+// --- Major section of code ---
 
-2. Step-by-step annotations:
-   ```rust
-   // 1. First, retrieve the count
-   let count = get_count();
-   
-   // 2. Next, process each item
-   for item in items {
-       // ...
-   }
-   ```
+// 1. First, retrieve the count
+let count = get_count();
 
-3. Aligned comments for clarity:
-   ```rust
-   data[0] = CMD_READ;    // Command byte
-   data[1] = 0x01;        // Address (low byte)
-   data[2] = 0x00;        // Address (high byte)
-   ```
+data[0] = CMD_READ;    // Command byte
+data[1] = 0x01;        // Address (low byte)
+```
 
 ### Code Structure
 
@@ -192,24 +154,7 @@ enum GattOp {
 - Imports and extern declarations at the top
 - Constants and public enums next
 - Public functions, then private functions
-- Tests in a module at the end with `#[cfg(test)]`
-
-**Test Documentation:**
-```rust
-#[test]
-fn test_feature_x() {
-    // This test verifies that feature X works correctly under Y conditions
-    
-    // Setup test environment
-    let input = setup_test_data();
-    
-    // Execute function under test
-    let result = function_to_test(input);
-    
-    // Verify expected outcomes
-    assert_eq!(result, expected_value, "Function should produce expected output");
-}
-```
+- Tests in a module at the end with `#[cfg(test)]` and `#[coverage(off)]`
 
 ## BLE Implementation Notes
 
@@ -240,164 +185,122 @@ fn test_feature_x() {
 - Check buffer sizes before operations to prevent overflows
 - Restore original values after modifying attributes in tests
 - Use `addr_of_mut!` macro when working with raw pointers to maintain safety
+- Host-only helpers are gated on `cfg(not(target_os = "none"))`, never on
+  `cfg(test)`: a crate compiled as a *dependency* does not receive the
+  dependent crate's `cfg(test)`, so a `#[cfg(test)]` fake is invisible to the
+  firmware's own tests. The firmware image must not contain them.
 
-## Testing with Mry
+## Host Test Fakes and Seams
 
-### Mock Function Organization
+The same code that ships to the MCU runs on the host: each peripheral has a host
+implementation that the real accessors drive, so tests exercise production paths
+rather than stubs.
 
-**Importing mock functions:** When testing with Mry, always import mock functions from their original source modules rather than defining new mock functions in tests. The original module is responsible for applying the `mry::mry` attribute:
+### Registers — `FakeMmio`
 
-```rust
-// In the test module:
-use crate::sdk::drivers::spi::{
-    mock_mspi_ctrl_write, mock_mspi_get, mock_mspi_high, mock_mspi_low,
-    mock_mspi_read, mock_mspi_wait, mock_mspi_write,
-};
-use crate::sdk::mcu::clock::mock_sleep_us;
-use crate::sdk::mcu::irq_i::{mock_irq_disable, mock_irq_restore};
-```
+`tlsr8266_pac::fake_mmio::FakeMmio`. Every `read_reg8/16/32` and
+`write_reg8/16/32` off-target goes through this bank, so you seed inputs and
+assert on what the code wrote:
 
-**Locking original functions:** In the `mry::lock` attribute, always lock the original functions (not the mock_ versions). Then use the mock_ prefixed functions in your test code to configure and verify behaviors:
-
-```rust
-// CORRECT: Lock original functions, use mock_ versions in test
-#[test]
-#[mry::lock(mspi_read, mspi_write)]  // Lock original functions
-fn test_my_function() {
-    // Configure the mocks
-    mock_mspi_read().returns(0x42);  // Use mock_ prefixed versions to configure
-    
-    // Call the function under test
-    my_function();
-    
-    // Verify using the mock_ versions
-    mock_mspi_read().assert_called(1);
-}
-```
-
-**Only lock used functions:** Only lock functions that are actually used in each test. It is invalid to lock functions that aren't called during the test. Every locked function must have return values set up before use.
+- `set_reg8/set_reg16/set_reg32(addr, v)` — seed a value without logging a write.
+- `reg8/reg16/reg32(addr)` — inspect the bank without going through a read hook.
+- `on_read8/on_read16/on_read32(addr, hook)` — take over reads of one address; the
+  hook receives the per-address call index (0 on the first read), which models
+  polling loops.
+- `writes()` — the ordered `Vec<RegWrite { addr, width, value }>` of every accessor
+  write since the last reset; `clear_writes()` drops the log but keeps the bank.
 
 ```rust
-// INCORRECT - locking function that isn't used
-#[mry::lock(mspi_read, mspi_write, mspi_wait)]  // mspi_wait not used
-
-// CORRECT - only lock functions actually called
-#[mry::lock(mspi_read, mspi_write)]  // only lock what's needed
-```
-
-### Basic Mocking
-
-**Basic function mocking:**
-```rust
-#[cfg_attr(test, mry::mry)]  // Apply mry to function only in test mode
-pub fn some_function(arg1: u32) -> bool {
-    // Real implementation
-    some_other_function(arg1)
-}
+use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
 
 #[test]
-#[mry::lock(some_other_function)]  // Lock the function for mocking in this test
-fn test_with_mock() {
-    // Mock the function
-    mock_some_other_function(42).returns(true);
-    
-    // Call and verify
-    assert_eq!(some_function(42), true);
-    
-    // Verify call count
-    mock_some_other_function(42).assert_called(1);
+fn test_rf_set_ble_access_code_adv() {
+    FakeMmio::reset();
+
+    rf_set_ble_access_code_adv();
+
+    assert_eq!(
+        FakeMmio::writes(),
+        vec![RegWrite { addr: 0x408, width: 4, value: 0xd6be898e }],
+        "the advertising access code must reach reg_rf_access_code"
+    );
 }
 ```
 
-### Parameter Matching
+Addresses in the log are normalized (`addr | REG_BASE_ADDR`), so assert with the
+same constant the code writes, not a hand-computed absolute address.
 
-**Using exact values:**
+### Flash — `FakeFlash`
+
+`tlsr8266_hal::drivers::flash::fake_flash::FakeFlash`. A 512 KiB in-memory NOR
+device; `flash_read_page`, `flash_write_page` and `flash_erase_sector` drive it
+directly in the default `FakeFlashMode::InMemory` mode.
+
+- `read_slice(addr, &mut out)` / `write_slice(addr, &data)` — seed and inspect.
+- `erase_count(addr)` — how many times the sector was erased.
+- `fail_verify_next_write()` — force the next write/verify to fail, for recovery paths.
+- `set_mode(FakeFlashMode::SpiRegisters)` — opt in to driving the real `mspi_*`
+  transactions through `FakeMmio`, for tests whose subject *is* the SPI protocol.
+
+### Clock — `fake_clock`
+
+`tlsr8266_hal::mcu::clock::fake_clock` owns `reg_system_tick` and the `sleep_us` log:
+
+- `set_ticks(u64)`, `advance_ticks(delta)` (adds whole 32-bit wraps),
+  `set_xtal_16mhz(bool)`, `sleeps() -> Vec<u32>`.
+
+### AES — `fake_crypto` / `SoftwareAes`
+
+`tlsr8266_hal::mcu::crypto::fake_crypto`. The default mode is
+`FakeAesMode::SoftwareAes`: a real FIPS-197 AES-128 in pure Rust, with the chip's
+byte-reversal parity, so pairing and packet encryption behave exactly as on
+silicon. Use `FakeAesMode::MmioRegisters` only when the test's subject is the
+`0x540`/`0x548`/`0x550` write-poll-read sequence.
+
+### Radio → application seams
+
+`tlsr8266_radio::callbacks::{set_ble_app_hooks, set_ota_hooks, reset_for_test}`.
+The radio calls the application through `fn`-pointer structs; a test installs
+recording or scripted hooks and asserts on what the radio dispatched.
+
 ```rust
-// Mock with specific parameters
-mock_function(5, "test").returns(true);
+use tlsr8266_radio::callbacks::{set_ble_app_hooks, BleAppHooks};
 
-// Mock with Any to match any parameter
-mock_function(5, Any).returns(false);
+static LIGHT_DATA_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-// Call checking with specific parameters
-mock_function(5, "test").assert_called();
+fn record_light_data(_pkt: &Packet) {
+    LIGHT_DATA_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn install_recording_hooks() {
+    LIGHT_DATA_CALLS.store(0, Ordering::Relaxed);
+    set_ble_app_hooks(BleAppHooks {
+        on_mesh_pair_proc: || {},
+        on_light_data: record_light_data,
+        on_light_response: |_rsp, _src| Err(()),
+        on_uart_mesh_rx: |_pkt| {},
+    });
+}
 ```
 
-### Return Values
+`OtaHooks` follows the same shape (`on_gatt_ota_write`, `status_snapshot`,
+`request_termination`, `tick_timeout_1s`). On host builds both seams start
+populated with inert defaults, so a test that does not care about a seam needs no
+setup; `callbacks::reset_for_test()` restores those defaults and clears the OTA
+stand-in.
 
-**Simple return values:**
-```rust
-// Return void (no return value)
-mock_some_function().returns(())
+`tlsr8266_radio::queues::reset_for_test()` clears the mesh RX/TX and UART TX
+queues, the wake flag and the drop counters.
 
-// Return a basic type (must implement Clone)
-mock_get_count().returns(42);
+### Rules
 
-// Return once (consumes the value, no Clone requirement)
-mock_find_item(Any).returns_once(item);
-
-// Return Option types
-mock_find_item(Any).returns(Some(item));
-mock_find_item("missing").returns(None);
-
-// Return Result types
-mock_process_data(Any).returns(Ok(result));
-mock_process_data("error").returns(Err(MyError::NotFound));
-
-// Call real implementation
-mock_process_data(special_case).calls_real_impl();
-```
-
-### Using returns_with and Closures
-
-**Returns_with for dynamic responses:**
-```rust
-// Using returns_with with a closure that checks parameters
-mock_validate_input(Any).returns_with(|input: String| -> bool {
-    input.len() > 5
-});
-
-// Complex logic with multiple parameters
-mock_process_data(Any, Any).returns_with(|data: Vec<u8>, flag: bool| -> Result<u32, Error> {
-    if flag && data.len() > 10 {
-        Ok(data.len() as u32)
-    } else {
-        Err(Error::InvalidInput)
-    }
-});
-
-// Capturing variables in closure
-let expected_value = 42;
-mock_transform(Any).returns_with(move |input: u32| -> u32 {
-    input + expected_value
-});
-```
-
-### Verifying Calls
-
-**Call count assertions:**
-```rust
-// Assert called at least once
-mock_function(Any).assert_called();
-
-// Assert called exactly n times
-mock_function(Any).assert_called(3);
-```
-
-### Mocking Functions with Complex Arguments
-
-**Type conversions for Vec and arrays:**
-```rust
-// For vector/array parameters
-mock_process_bytes([0x01, 0x02, 0x03].to_vec()).returns(true);
-
-// For slices, convert to Vec for comparison
-mock_process_slice(expected_slice.to_vec()).returns(true);
-```
-
-**Struct parameters:**
-```rust
-// Create a struct to match against
-let expected_config = Config { id: 1, name: "test".to_string() };
-mock_apply_config(expected_config).returns(true);
-```
+1. Reset every fake you touch at the start of the test, and assume nothing about
+   the previous test.
+2. Assert behaviour, not call edges: returned values, subsystem state, the
+   `FakeMmio` write log, flash contents, queue contents.
+3. Never widen visibility to make a test reachable — drive the public entry point
+   or install a seam instead.
+4. Run the whole workspace after a change: `cd rust && ./run_tests.sh`. For a
+   fast 64-bit loop: `cargo test -p tlsr8266-radio -- --test-threads=1`.
+5. Host fakes are `std`-only and gated on `cfg(not(target_os = "none"))`; never
+   let one leak into the firmware image.

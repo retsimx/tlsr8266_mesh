@@ -94,7 +94,6 @@ pub fn config_led_event(e: u32) {
 ///
 /// Blinks the lamp itself (cool-white and/or warm-white, per the event's mask)
 /// and restores the lamp's on/off state when the last blink completes.
-#[cfg_attr(test, mry::mry)]
 pub fn led_indicate_step() {
     if LED_CONTROLLER.blink_count.get() == 0 && LED_CONTROLLER.event_pending.get() == 0 {
         return; //led flash finished
@@ -243,12 +242,41 @@ pub fn pending_event() -> u32 {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::light::transitions::{
-        mock_is_light_off, mock_light_adjust_cw, mock_light_adjust_ww, mock_light_onoff_hw,
-    };
+    use crate::config::{PWMID_B, PWMID_G};
+    use crate::light::transitions::{is_light_off, reset_for_test as reset_light};
+    use crate::light::PMW_MAX_TICK;
     use core::sync::atomic::Ordering;
-    use mry::Any;
     use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// `reg_pwm_cmp` base: `pwm_set_cmp(id, cmp)` writes a `u16` at `base + id*4`.
+    const PWM_CMP_BASE: u32 = 0x794;
+
+    /// The duty values written to PWM channel `id` during the test, in order.
+    ///
+    /// The lamp driver is the only observable of the indication step: it writes
+    /// the compare register directly, so "the channel was driven" and "at what
+    /// duty" are both visible in the write log.
+    fn pwm_writes(id: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == PWM_CMP_BASE + id * 4 | tlsr8266_pac::REG_BASE_ADDR)
+            .map(|w| w.value)
+            .collect()
+    }
+
+    /// A lit LED drives cool white at full scale and warm white at the inverse
+    /// end of its (inverted-polarity) range.
+    const LED_LIT_CW: u32 = PMW_MAX_TICK as u32;
+    const LED_LIT_WW: u32 = 0;
+
+    /// The HAL host seams are process-wide singletons, so every test that
+    /// observes them starts from a zeroed bank, clock and lamp state.
+    fn reset_fakes() {
+        FakeMmio::reset();
+        fake_clock::reset();
+        reset_light();
+    }
 
     // --- Tests for config_led_event ---
 
@@ -332,16 +360,9 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_toggles_led_state_on_timing() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(false);
+        reset_fakes();
 
         // Set up LED controller with an active blink
         LED_CONTROLLER.blink_count.set(2);
@@ -364,20 +385,25 @@ mod tests {
 
         // Verify: LED should turn on
         assert_eq!(LED_CONTROLLER.is_on.get(), 1, "LED should be on");
-        mock_light_adjust_cw(Any, Any).assert_called(1);
+        // The mask selects both lamp channels, and the indication value is the
+        // full-scale brightness, so each channel's compare register is driven
+        // exactly once to the lit duty.
+        assert_eq!(
+            pwm_writes(PWMID_G),
+            vec![LED_LIT_CW],
+            "cool white must be driven lit exactly once"
+        );
+        assert_eq!(
+            pwm_writes(PWMID_B),
+            vec![LED_LIT_WW],
+            "warm white must be driven lit exactly once"
+        );
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_continues_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(false);
+        reset_fakes();
 
         // Set up LED controller with a multi-blink sequence (blink_count = 3)
         // Pattern number starts at 0, so after increment it will be 1, which != 3
@@ -409,8 +435,13 @@ mod tests {
         );
 
         // Verify: Since pattern_number (1) != blink_count (3), it should fall through to line 180
-        // and perform LED adjustment
-        mock_light_adjust_cw(Any, Any).assert_called(1);
+        // and drive the lamp channels (the real driver's duty writes are the
+        // observable that replaces the mocked adjust calls).
+        assert_eq!(
+            pwm_writes(PWMID_G),
+            vec![LED_LIT_CW],
+            "cool white must be driven lit exactly once"
+        );
 
         // Verify: Blink sequence should continue (not complete)
         assert_eq!(
@@ -421,16 +452,9 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_completes_blink_sequence() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(true);
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
+        reset_fakes();
 
         // Set up for last blink transition
         LED_CONTROLLER.blink_count.set(1);
@@ -443,6 +467,10 @@ mod tests {
         LED_CONTROLLER.timing_tick.set(1000);
         LED_CONTROLLER.is_on.set(0);
         LED_CONTROLLER.pattern_number.set(0);
+
+        // The lamp starts off (the transition core's boot state), so the
+        // restore at the end of the sequence must keep it off.
+        assert!(is_light_off(), "precondition: the lamp starts off");
 
         // Simulate time passing
         let new_time = LED_CONTROLLER.timing_tick.get() + LED_CONTROLLER.off_duration_us.get() + 1;
@@ -458,20 +486,30 @@ mod tests {
             0,
             "Blink should be complete"
         );
-        mock_light_onoff_hw(false).assert_called(1);
+        // The completion route restores the lamp's on/off state through the real
+        // `light_onoff_hw(false)`: the brightness target stays zero, which the
+        // driver turns into a zero cool-white duty and the warm-white channel's
+        // inverted full duty.
+        assert!(
+            is_light_off(),
+            "the completed indication must leave the lamp off"
+        );
+        assert_eq!(
+            pwm_writes(PWMID_G).last().copied(),
+            Some(0),
+            "the restore must drive cool white to zero"
+        );
+        assert_eq!(
+            pwm_writes(PWMID_B).last().copied(),
+            Some(PMW_MAX_TICK as u32),
+            "the restore must return warm white to the inverted zero duty"
+        );
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_adjusts_ww_light() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(false);
+        reset_fakes();
 
         // Set up LED controller with BIT!(1) set (warm white)
         // Key: to reach the led_on branch, is_on must be 0, and on_duration_us must be non-zero
@@ -496,28 +534,27 @@ mod tests {
         // Execute
         led_indicate_step();
 
-        // Verify: light_adjust_ww should be called (covers line 188 with BIT!(1) check)
+        // Verify: the warm-white channel is driven lit (covers the BIT!(1)
+        // branch) and cool white is never touched.
         // This happens because led_on = true (is_on was 0 and on_duration_us != 0)
-        mock_light_adjust_ww(Any, Any).assert_called(1);
-
-        // Verify: light_adjust_cw should NOT be called since BIT!(0) is not set
-        mock_light_adjust_cw(Any, Any).assert_called(0);
+        assert_eq!(
+            pwm_writes(PWMID_B),
+            vec![LED_LIT_WW],
+            "warm white must be driven lit exactly once"
+        );
+        assert!(
+            pwm_writes(PWMID_G).is_empty(),
+            "cool white must not be touched when BIT!(0) is clear"
+        );
 
         // Cleanup
         reset_for_test();
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_adjusts_led_bit5() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(false);
+        reset_fakes();
 
         // Set up LED controller with BIT!(5) set (covers line 196)
         // Note: on_duration_us = 0 means led_on will be false and led_off will be true
@@ -543,29 +580,28 @@ mod tests {
         // Execute
         led_indicate_step();
 
-        // Verify: Neither light_adjust_cw nor light_adjust_ww should be called
-        // since only BIT!(5) is set (covers line 196 with the empty block)
+        // Verify: neither lamp channel may be driven, because the only selected
+        // bit (BIT!(5)) has no lamp of its own.
         // led_off will be true: (is_on != 0 || on_duration == 0) && off_duration != 0
         // = (1 || true) && true = true
         // So we enter the if led_off || led_on block, but only BIT!(5) is handled (empty)
-        mock_light_adjust_cw(Any, Any).assert_called(0);
-        mock_light_adjust_ww(Any, Any).assert_called(0);
+        assert!(
+            pwm_writes(PWMID_G).is_empty(),
+            "cool white must not be driven"
+        );
+        assert!(
+            pwm_writes(PWMID_B).is_empty(),
+            "warm white must not be driven"
+        );
 
         // Cleanup
         reset_for_test();
     }
 
     #[test]
-    #[mry::lock(light_adjust_cw, light_adjust_ww, light_onoff_hw, is_light_off)]
     fn test_proc_led_skips_adjustment_when_both_durations_zero() {
         // Reset LED_CONTROLLER to clean state
-        reset_for_test();
-
-        // Setup
-        mock_light_adjust_cw(Any, Any).returns(());
-        mock_light_adjust_ww(Any, Any).returns(());
-        mock_light_onoff_hw(Any).returns(());
-        mock_is_light_off().returns(false);
+        reset_fakes();
 
         // Set up LED controller where both on_duration and off_duration are 0
         // This makes both led_on and led_off false, so the if condition at line 182 is false
@@ -586,12 +622,18 @@ mod tests {
         // Execute
         led_indicate_step();
 
-        // Verify: No light adjustments should be called because:
+        // Verify: No lamp channel may be driven because:
         // led_on = (is_on == 0 && on_duration != 0) = (1 == 0 && 0 != 0) = false
         // led_off = ((is_on != 0 || on_duration == 0) && off_duration != 0) = ((1 || 1) && 0) = false
         // So the if (led_off || led_on) condition at line 182 is false, skipping all adjustments
-        mock_light_adjust_cw(Any, Any).assert_called(0);
-        mock_light_adjust_ww(Any, Any).assert_called(0);
+        assert!(
+            pwm_writes(PWMID_G).is_empty(),
+            "cool white must not be driven"
+        );
+        assert!(
+            pwm_writes(PWMID_B).is_empty(),
+            "warm white must not be driven"
+        );
     }
 
     #[test]

@@ -8,12 +8,12 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::sdk::ble_app::radio_config;
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::facade::radio_config;
+use crate::rf::drv_8266::{
     DEVICE_ADDRESS, GROUP_ADDRESS, MESH_DEVICE_ADDRESS_NEXT_POSITION,
     MESH_GROUP_ADDRESS_NEXT_POSITION, PKT_ADV, SET_UUID_FLAG,
 };
-use crate::sdk::light::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
+use crate::types::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 
@@ -29,8 +29,9 @@ pub fn set_light_event_handler(cb: fn(u8)) {
 
 /// Forwards a mesh light event code to the registered handler, if any.
 ///
-/// `#[inline(never)]` is required so `mry` can intercept the call in tests.
-#[cfg_attr(test, mry::mry)]
+/// `#[inline(never)]` is required so `sdk/stack_analysis.py` keeps
+/// `emit_light_event` in the ELF: its `INDIRECT_EDGES` entry matches the
+/// indirect call edge to the light-event callback on that symbol.
 #[inline(never)]
 pub fn emit_light_event(code: u8) {
     let cb = critical_section::with(|cs| LIGHT_EVENT_CB.borrow(cs).get());
@@ -229,7 +230,7 @@ fn read_group_address(flash_addr: u32) -> u16 {
     // SAFETY: (2) flash-driver raw-pointer handoff. `bytes` is a live 2-byte local
     // and `flash_read_page` is documented to write exactly `len` = 2 bytes into it.
     // No unsafe operation remains inside the block; the driver fn is safe, and the
-    // stale braces only survive because `sdk/mod.rs` sets `#![allow(warnings)]`.
+    // stale braces only survive because the crate root sets `#![allow(warnings)]`.
     unsafe {
         flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
     }
@@ -295,7 +296,6 @@ fn compact_adv_data_removing_invalid_manufacturer(
 /// - Finds existing mesh name field or allocates space for a new one
 /// - Updates packet length fields automatically
 /// - Preserves other advertisement data structures
-#[cfg_attr(test, mry::mry)]
 pub fn set_advertisement_mesh_name(name: &[u8]) {
     let mut pkt_adv = PKT_ADV.lock();
 
@@ -332,7 +332,6 @@ pub fn set_advertisement_mesh_name(name: &[u8]) {
 ///
 /// # BLE Format
 /// The data is formatted as: [Length][Type=0xFF][Data...]
-#[cfg_attr(test, mry::mry)]
 pub fn set_advertisement_manufacturer_data(data: &[u8]) {
     let mut pkt_adv = PKT_ADV.lock();
 
@@ -456,7 +455,7 @@ const EVENT_DEVICE_ADDR_CHANGED: u8 = 0xC6; // Event code for address changed ev
 /// - Resets storage pointers to the beginning
 ///
 /// # Flash Layout After Cleanup
-/// ```
+/// ```text
 /// [Group Addresses: 16 bytes][Device Address: 2 bytes][Free Space...]
 /// ```
 pub fn compact_flash_storage() {
@@ -507,7 +506,6 @@ pub fn compact_flash_storage() {
 /// - Address must be non-zero
 /// - Address must conform to `DEVICE_ADDR_MASK_DEFAULT`
 /// - Address must differ from current device address
-#[cfg_attr(test, mry::mry)]
 pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
     let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
 
@@ -579,7 +577,6 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
 /// - For specific group: removes first matching entry and returns
 /// - For delete-all: removes up to 8 group entries to prevent excessive flash wear
 /// - Only processes entries identified as group addresses (not device addresses)
-#[cfg_attr(test, mry::mry)]
 pub fn remove_group(group_id: u16) -> Result<(), ()> {
     let grp_next_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
 
@@ -634,7 +631,6 @@ pub fn remove_group(group_id: u16) -> Result<(), ()> {
 /// - Updates in-memory group table immediately
 /// - Appends to flash storage log for persistence
 /// - Triggers flash compaction if storage space is low
-#[cfg_attr(test, mry::mry)]
 pub fn add_group(group_id: u16) -> Result<(), ()> {
     // Track the oldest group position for rotation policy
     static OLDEST_POS: AtomicUsize = AtomicUsize::new(0xffffffff);
@@ -723,14 +719,13 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
-    use super::mock_remove_group;
     use super::*;
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, SECTOR_SIZE_BYTES};
 
     /// Group/device address sector base, taken from the factory default config
     /// so the tests track the shipped layout without importing the crate-root
     /// `config` module.
-    const FLASH_ADR_DEV_GRP_ADR: u32 = crate::sdk::ble_app::config::DEFAULT.flash_adr_dev_grp_adr;
+    const FLASH_ADR_DEV_GRP_ADR: u32 = crate::config::DEFAULT.flash_adr_dev_grp_adr;
 
     /// Helper function to reset global state for clean test environment
     fn reset_test_state() {
@@ -1209,12 +1204,9 @@ mod tests {
     /// Verifies that a valid device address is correctly added to both
     /// memory and flash storage.
     #[test]
-    #[mry::lock(emit_light_event)]
     fn test_add_dev_addr_valid() {
         reset_test_state();
-
-        // Mock flash operations
-        mock_emit_light_event(mry::Any).returns(());
+        let _events = LightEventRecorder::install();
 
         let dev_id = 0x1234;
         let result = add_device_address(dev_id);
@@ -1239,8 +1231,16 @@ mod tests {
         let mut got = [0u8; 2];
         FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR, &mut got);
         assert_eq!(got, dev_id.to_le_bytes());
-        // Verify callback was called
-        mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+        // Verify the light-event seam received exactly the address-changed code.
+        assert_eq!(
+            TEST_LIGHT_EVENT_CALLS.load(Ordering::SeqCst),
+            1,
+            "one light event expected"
+        );
+        assert_eq!(
+            TEST_LIGHT_EVENT_CODE.load(Ordering::SeqCst),
+            EVENT_DEVICE_ADDR_CHANGED as usize
+        );
     }
 
     /// Tests rf_link_add_dev_addr with invalid device ID (zero)
@@ -1298,12 +1298,9 @@ mod tests {
     /// Verifies that replacing an existing device address correctly
     /// clears the old address in flash.
     #[test]
-    #[mry::lock(emit_light_event)]
     fn test_add_dev_addr_replace_existing() {
         reset_test_state();
-
-        // Mock flash operations
-        mock_emit_light_event(mry::Any).returns(());
+        let _events = LightEventRecorder::install();
 
         // Set up existing address
         DEVICE_ADDRESS.set(0x1111);
@@ -1329,8 +1326,12 @@ mod tests {
         assert_eq!(got, [0x00, 0x00], "the previous slot must be cleared");
         FakeFlash::read_slice(FLASH_ADR_DEV_GRP_ADR + 10, &mut got);
         assert_eq!(got, new_dev_id.to_le_bytes());
-        // Verify callback was called
-        mock_emit_light_event(EVENT_DEVICE_ADDR_CHANGED).assert_called(1);
+        // Verify the light-event seam received exactly the address-changed code.
+        assert_eq!(TEST_LIGHT_EVENT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            TEST_LIGHT_EVENT_CODE.load(Ordering::SeqCst),
+            EVENT_DEVICE_ADDR_CHANGED as usize
+        );
     }
 
     /// Tests rf_link_del_group with no groups stored
@@ -1510,17 +1511,14 @@ mod tests {
     /// Tests rf_link_add_group with full group slots using rotation policy
     ///
     /// Verifies that when all group slots are full, the oldest group
-    /// is replaced using the rotation policy.
+    /// is replaced using the rotation policy. The real `remove_group` runs so
+    /// the test also proves the rotation actually evicts the oldest entry.
     #[test]
-    #[mry::lock(remove_group)]
     fn test_add_group_rotation_policy() {
         reset_test_state();
 
-        // Mock flash operations
-        mock_remove_group(mry::Any).returns(Ok(()));
-
         // Fill all group slots with valid group IDs
-        for i in 0..crate::sdk::light::MAX_GROUP_COUNT as u16 {
+        for i in 0..crate::types::MAX_GROUP_COUNT as u16 {
             critical_section::with(|_| {
                 GROUP_ADDRESS.lock()[i as usize] = 0x8001 + i; // Valid group IDs
             });
@@ -1679,6 +1677,27 @@ mod tests {
     /// `LIGHT_EVENT_CB` is process-wide, so every test clears it on entry and exit.
     fn clear_light_event_slot() {
         critical_section::with(|cs| LIGHT_EVENT_CB.borrow(cs).set(None));
+    }
+
+    /// Installs the recording light-event handler for one test and restores the
+    /// empty slot when it is dropped, so a test that panics cannot leak a
+    /// handler into the next test in the `--test-threads=1` run.
+    struct LightEventRecorder;
+
+    impl LightEventRecorder {
+        fn install() -> Self {
+            clear_light_event_slot();
+            TEST_LIGHT_EVENT_CODE.store(usize::MAX, Ordering::SeqCst);
+            TEST_LIGHT_EVENT_CALLS.store(0, Ordering::SeqCst);
+            set_light_event_handler(record_light_event);
+            Self
+        }
+    }
+
+    impl Drop for LightEventRecorder {
+        fn drop(&mut self) {
+            clear_light_event_slot();
+        }
     }
 
     #[test]

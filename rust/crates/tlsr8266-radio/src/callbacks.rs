@@ -26,8 +26,8 @@
 //! The host-test build is the one exception: its slots start populated (with
 //! `TEST_NOOP_HOOKS` and `TEST_OTA_HOOKS`) so that tests which do not care about
 //! a seam need no setup, and so an unregistered seam cannot turn an unrelated
-//! unit test into a panic. Tests that *do* care mock the dispatcher itself (see
-//! `#[cfg_attr(test, mry::mry)]` below).
+//! unit test into a panic. Tests that *do* care install their own hooks with
+//! `set_ble_app_hooks` / `set_ota_hooks` (see the tests at the bottom).
 
 use core::cell::Cell;
 
@@ -52,12 +52,17 @@ pub struct BleAppHooks {
     pub on_uart_mesh_rx: fn(&Packet),
 }
 
-#[cfg(not(test))]
-static BLE_APP_HOOKS: Mutex<Cell<Option<BleAppHooks>>> = Mutex::new(Cell::new(None));
-
-#[cfg(test)]
+/// Host builds start every seam installed and inert.
+///
+/// The gate is `target_os`, not `test`: the firmware crate compiles the radio as
+/// a *dependency*, which never carries the radio's own `cfg(test)`, and its test
+/// fixture needs the same populated slots this crate's unit tests get.
+#[cfg(not(target_os = "none"))]
 static BLE_APP_HOOKS: Mutex<Cell<Option<BleAppHooks>>> =
     Mutex::new(Cell::new(Some(TEST_NOOP_HOOKS)));
+
+#[cfg(target_os = "none")]
+static BLE_APP_HOOKS: Mutex<Cell<Option<BleAppHooks>>> = Mutex::new(Cell::new(None));
 
 /// Registers the application entry points.
 ///
@@ -90,7 +95,6 @@ fn hooks_or_panic() -> BleAppHooks {
 /// dispatcher into its caller and erase the symbol from the ELF, and
 /// `sdk/stack_analysis.py`'s `INDIRECT_EDGES` matches the call edge on that
 /// symbol.
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn on_mesh_pair_proc() {
     let hooks = hooks_or_panic();
@@ -100,7 +104,6 @@ pub fn on_mesh_pair_proc() {
 /// Delivers a received mesh packet to the application hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn on_light_data(pkt: &Packet) {
     let hooks = hooks_or_panic();
@@ -110,7 +113,6 @@ pub fn on_light_data(pkt: &Packet) {
 /// Fills an application response for a status request through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn on_light_response(rsp: &mut PacketAttValue, src: &PacketAttValue) -> Result<(), ()> {
     let hooks = hooks_or_panic();
@@ -120,32 +122,31 @@ pub fn on_light_response(rsp: &mut PacketAttValue, src: &PacketAttValue) -> Resu
 /// Forwards a received mesh packet to the host UART bridge through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn on_uart_mesh_rx(pkt: &Packet) {
     let hooks = hooks_or_panic();
     (hooks.on_uart_mesh_rx)(pkt);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 fn noop_mesh_pair_proc() {}
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 fn noop_light_data(_: &Packet) {}
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 fn noop_light_response(_: &mut PacketAttValue, _: &PacketAttValue) -> Result<(), ()> {
     // "No application response" is the only safe no-op: returning `Ok(())`
     // would make the SDK queue a response packet the application never built.
     Err(())
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 fn noop_uart_mesh_rx(_: &Packet) {}
 
-/// Host-test default: every seam is installed but does nothing.
-#[cfg(test)]
-const TEST_NOOP_HOOKS: BleAppHooks = BleAppHooks {
+/// Host-build default: every seam is installed but does nothing.
+#[cfg(not(target_os = "none"))]
+pub(crate) const TEST_NOOP_HOOKS: BleAppHooks = BleAppHooks {
     on_mesh_pair_proc: noop_mesh_pair_proc,
     on_light_data: noop_light_data,
     on_light_response: noop_light_response,
@@ -177,11 +178,14 @@ pub struct OtaHooks {
     pub tick_timeout_1s: fn() -> bool,
 }
 
-#[cfg(not(test))]
-static OTA_HOOKS: Mutex<Cell<Option<OtaHooks>>> = Mutex::new(Cell::new(None));
-
-#[cfg(test)]
+/// Host builds start every seam installed, wired to the in-crate OTA stand-in.
+///
+/// See [`BLE_APP_HOOKS`] for why the gate is `target_os`.
+#[cfg(not(target_os = "none"))]
 static OTA_HOOKS: Mutex<Cell<Option<OtaHooks>>> = Mutex::new(Cell::new(Some(TEST_OTA_HOOKS)));
+
+#[cfg(target_os = "none")]
+static OTA_HOOKS: Mutex<Cell<Option<OtaHooks>>> = Mutex::new(Cell::new(None));
 
 /// Registers the OTA entry points.
 ///
@@ -210,7 +214,6 @@ fn ota_hooks_or_panic() -> OtaHooks {
 /// Delivers one GATT OTA write through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn dispatch_ota_write(p: &Packet) {
     let hooks = ota_hooks_or_panic();
@@ -220,7 +223,6 @@ pub fn dispatch_ota_write(p: &Packet) {
 /// Reads the OTA flags through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn dispatch_ota_snapshot() -> OtaStatusSnapshot {
     let hooks = ota_hooks_or_panic();
@@ -230,7 +232,6 @@ pub fn dispatch_ota_snapshot() -> OtaStatusSnapshot {
 /// Asks the OTA finish path for its terminate notifications through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn dispatch_ota_terminate() {
     let hooks = ota_hooks_or_panic();
@@ -240,27 +241,174 @@ pub fn dispatch_ota_terminate() {
 /// Advances the OTA supervision timeout through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
-#[cfg_attr(test, mry::mry)]
 #[inline(never)]
 pub fn dispatch_ota_tick() -> bool {
     let hooks = ota_hooks_or_panic();
     (hooks.tick_timeout_1s)()
 }
 
-/// Host-test default: the **real** `ota` implementations.
+/// Host-build default: the crate's own OTA stand-in, [`test_ota`].
 ///
-/// About twenty existing ble_app tests flip the OTA flags and then assert
-/// OTA-gated branches. A no-op default would silently change what those tests
-/// verify, so the slot starts wired to the real subsystem instead. `ota` is
-/// below `sdk` in the layering graph, and this item is `#[cfg(test)]`, so the
-/// layering gate (which strips test code) still sees a clean SDK file.
-#[cfg(test)]
-pub(crate) const TEST_OTA_HOOKS: OtaHooks = OtaHooks {
-    on_gatt_ota_write: crate::ota::on_gatt_ota_packet,
-    status_snapshot: crate::ota::ota_status_snapshot_impl,
-    request_termination: crate::ota::ota_request_termination_impl,
-    tick_timeout_1s: crate::ota::ota_tick_timeout_1s_impl,
-};
+/// About thirty moved unit tests flip OTA flags and then assert OTA-gated
+/// branches, so the default has to answer the four hook contracts instead of
+/// being inert — an inert default would silently weaken what those tests
+/// verify (design 032 §6.2). It is nevertheless *neutral*: it lives in this
+/// crate, records nothing outside it, and never names the application's `ota`
+/// subsystem, which a dependency crate cannot do at all. The firmware's own
+/// tests install the real hooks with [`set_ota_hooks`] in their fixture.
+#[cfg(not(target_os = "none"))]
+pub(crate) const TEST_OTA_HOOKS: OtaHooks = test_ota::HOOKS;
+
+/// Restore both hook slots to their host-build defaults and clear the OTA
+/// stand-in.
+///
+/// Called by the fixtures so a test that installed recording hooks cannot leak
+/// them into the next one.
+#[cfg(not(target_os = "none"))]
+pub fn reset_for_test() {
+    test_ota::reset_for_test();
+    set_ble_app_hooks(TEST_NOOP_HOOKS);
+    set_ota_hooks(TEST_OTA_HOOKS);
+}
+
+/// The in-crate OTA stand-in behind [`TEST_OTA_HOOKS`] on host builds.
+///
+/// It owns exactly the flags the moved unit tests drive — in progress, the
+/// supervision countdown, the terminate request, the transfer-completion state
+/// and the GATT-begin gate — and nothing else: no staging buffer, no flash, no
+/// reboot. Tests reach it through the same `*_for_test` names the application's
+/// OTA module exposes, so the conversion of the old imports was a path
+/// substitution rather than a rewrite of what each test asserts.
+#[cfg(not(target_os = "none"))]
+pub mod test_ota {
+    use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
+
+    use mesh_protocol::mesh_types::{
+        OtaState, OtaStatusSnapshot, RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS,
+    };
+    use mesh_protocol::packet_types::Packet;
+
+    use super::OtaHooks;
+
+    static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+    static TIMEOUT_SECONDS: AtomicU16 = AtomicU16::new(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS);
+    static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+    static FINISHED_FLAG: AtomicU8 = AtomicU8::new(OtaState::Continue as u8);
+    /// Stands in for the firmware's "may a GATT OTA start?" gate.
+    static GATT_OTA_BEGIN: AtomicBool = AtomicBool::new(false);
+    /// Number of writes that reached the hook, so a test can prove the write
+    /// slot is wired without the staging machinery.
+    static WRITES: AtomicUsize = AtomicUsize::new(0);
+
+    /// The hook set that reads and writes this stand-in.
+    pub const HOOKS: OtaHooks = OtaHooks {
+        on_gatt_ota_write: write,
+        status_snapshot: snapshot,
+        request_termination: request_termination,
+        tick_timeout_1s: tick_timeout_1s,
+    };
+
+    fn finished_flag() -> OtaState {
+        match FINISHED_FLAG.load(Ordering::Relaxed) {
+            0 => OtaState::Continue,
+            1 => OtaState::Ok,
+            2 => OtaState::Error,
+            _ => OtaState::MasterOtaRebootOnly,
+        }
+    }
+
+    /// The projection the link layer reads.
+    pub fn snapshot() -> OtaStatusSnapshot {
+        OtaStatusSnapshot {
+            in_progress: IN_PROGRESS.load(Ordering::Relaxed),
+            finish_status: finished_flag(),
+            timeout_expired: TIMEOUT_SECONDS.load(Ordering::Relaxed) == 0,
+        }
+    }
+
+    /// One GATT OTA write.
+    ///
+    /// Mirrors the application handler's gates: nothing is accepted once the
+    /// transfer has left `Continue`, and a transfer starts only when the begin
+    /// gate allows it.
+    pub fn write(_: &Packet) {
+        WRITES.fetch_add(1, Ordering::Relaxed);
+        if finished_flag() != OtaState::Continue {
+            return;
+        }
+        if !IN_PROGRESS.load(Ordering::Relaxed) {
+            if !GATT_OTA_BEGIN.load(Ordering::Relaxed) {
+                return;
+            }
+            IN_PROGRESS.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Ask the finish path to notify the peer.
+    pub fn request_termination() {
+        TERMINATION_REQUESTED.store(true, Ordering::Relaxed);
+    }
+
+    /// One second of supervision timeout; `true` when the counter reads zero.
+    pub fn tick_timeout_1s() -> bool {
+        let seconds = TIMEOUT_SECONDS.load(Ordering::Relaxed);
+        if seconds != 0 {
+            TIMEOUT_SECONDS.store(seconds - 1, Ordering::Relaxed);
+        }
+        TIMEOUT_SECONDS.load(Ordering::Relaxed) == 0
+    }
+
+    /// How many writes the hook has seen.
+    pub fn write_count() -> usize {
+        WRITES.load(Ordering::Relaxed)
+    }
+
+    /// Restore every flag to its boot value and re-install [`HOOKS`].
+    pub fn reset_for_test() {
+        IN_PROGRESS.store(false, Ordering::Relaxed);
+        TIMEOUT_SECONDS.store(RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, Ordering::Relaxed);
+        TERMINATION_REQUESTED.store(false, Ordering::Relaxed);
+        FINISHED_FLAG.store(OtaState::Continue as u8, Ordering::Relaxed);
+        GATT_OTA_BEGIN.store(false, Ordering::Relaxed);
+        WRITES.store(0, Ordering::Relaxed);
+        super::set_ota_hooks(HOOKS);
+    }
+
+    /// Overwrite the transfer-completion flag.
+    pub fn set_finished_flag_for_test(state: OtaState) {
+        FINISHED_FLAG.store(state as u8, Ordering::Relaxed);
+    }
+
+    /// Overwrite the supervision timeout, in seconds.
+    pub fn set_timeout_for_test(seconds: u16) {
+        TIMEOUT_SECONDS.store(seconds, Ordering::Relaxed);
+    }
+
+    /// Read the supervision timeout back, in seconds.
+    pub fn timeout_seconds_for_test() -> u16 {
+        TIMEOUT_SECONDS.load(Ordering::Relaxed)
+    }
+
+    /// Overwrite the BLE-OTA in-progress flag.
+    pub fn set_in_progress_for_test(in_progress: bool) {
+        IN_PROGRESS.store(in_progress, Ordering::Relaxed);
+    }
+
+    /// Did the finish path get asked to notify the peer?
+    pub fn is_termination_requested() -> bool {
+        TERMINATION_REQUESTED.load(Ordering::Relaxed)
+    }
+
+    /// Overwrite the terminate-request flag.
+    pub fn set_termination_requested_for_test(requested: bool) {
+        TERMINATION_REQUESTED.store(requested, Ordering::Relaxed);
+    }
+
+    /// Allow (or forbid) a GATT OTA to begin.
+    pub fn set_gatt_ota_begin_for_test(ok: bool) {
+        GATT_OTA_BEGIN.store(ok, Ordering::Relaxed);
+    }
+}
 
 #[cfg(test)]
 #[coverage(off)]
@@ -502,30 +650,33 @@ mod tests {
     /// through the real handler.
     #[test]
     fn test_test_ota_hooks_default_reaches_ota() {
-        crate::ota::reset_for_test();
+        crate::callbacks::test_ota::reset_for_test();
         set_ota_hooks(TEST_OTA_HOOKS);
 
         // The terminate slot reaches `ota_request_termination_impl`.
-        assert_eq!(crate::ota::is_termination_requested(), false);
+        assert_eq!(
+            crate::callbacks::test_ota::is_termination_requested(),
+            false
+        );
         dispatch_ota_terminate();
-        assert_eq!(crate::ota::is_termination_requested(), true);
+        assert_eq!(crate::callbacks::test_ota::is_termination_requested(), true);
 
         // The tick slot reaches `ota_tick_timeout_1s_impl`: a zero counter is
         // already expired and must not underflow.
-        crate::ota::set_timeout_for_test(0);
+        crate::callbacks::test_ota::set_timeout_for_test(0);
         assert_eq!(dispatch_ota_tick(), true);
 
         // The snapshot slot reaches `ota_status_snapshot_impl`.
-        crate::ota::set_in_progress_for_test(true);
+        crate::callbacks::test_ota::set_in_progress_for_test(true);
         assert_eq!(dispatch_ota_snapshot().in_progress, true);
 
         // The write slot reaches `on_gatt_ota_packet`, which claims the OTA when
         // the begin gate allows it.
-        crate::ota::set_in_progress_for_test(false);
-        crate::ota::set_gatt_ota_begin_for_test(true);
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::callbacks::test_ota::set_gatt_ota_begin_for_test(true);
         dispatch_ota_write(&test_packet());
         assert_eq!(dispatch_ota_snapshot().in_progress, true);
 
-        crate::ota::reset_for_test();
+        crate::callbacks::test_ota::reset_for_test();
     }
 }

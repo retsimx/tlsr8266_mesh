@@ -88,7 +88,6 @@ pub(crate) fn clear_status_update_hook() {
 }
 
 /// Report the current on/off state to the mesh status buffer.
-#[cfg_attr(test, mry::mry)]
 pub fn device_status_update() {
     // Snapshot the on/off state under the lock; the mesh notification below
     // must not run inside the critical section.

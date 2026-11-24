@@ -11,15 +11,15 @@
 
 use core::ptr::addr_of;
 
-use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_select_next_data_channel;
-use crate::sdk::ble_app::callbacks::dispatch_ota_snapshot;
-use crate::sdk::ble_app::light_ll::connection_management::{
+use crate::ble::channel_selection::ble_ll_select_next_data_channel;
+use crate::ble::connection::{
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED,
     BRIDGE_RECEIVE_TIMING_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
 };
-use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::ble_app::rf_drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
-use crate::sdk::light::RfOperationState;
+use crate::callbacks::dispatch_ota_snapshot;
+use crate::rf::drv_8266::*;
+use crate::rf::drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
+use crate::types::RfOperationState;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_pac::*;
@@ -46,14 +46,13 @@ use tlsr8266_pac::*;
 /// ## Channel Hopping:
 /// - Selects next channel using BLE frequency hopping algorithm
 /// - Uses connection-specific channel map and hop increment
-#[cfg_attr(test, mry::mry)]
 pub fn configure_ble_receive_state() {
     // DMA3 (RF TX) mode byte (reg_dma3_ctrl[15:8]): bit7 is part of FIFO8 mode, exact role undocumented
     write_reg_dma3_mode(0x80);
     rf_stop_trx();
 
     // Set link state to BLE receive mode (state 7)
-    BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Receiving);
+    BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Receiving);
 
     // RF TX wait/settle timing: low byte of the 32-bit reg_rf_tx_wail_settle_time (0xf04).
     // 0x67 = 32/48 MHz SYSTEM CLOCK (not the crystal frequency).
@@ -122,28 +121,45 @@ pub fn configure_ble_receive_state() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_select_next_data_channel;
-    use crate::sdk::ble_app::irq::connection::{
-        handle_ble_connection_parameter_updates, mock_handle_ble_connection_parameter_updates,
-    };
-    use crate::sdk::ble_app::rf_drv_8266::{
-        mock_rf_set_ble_channel, mock_rf_start_brx, mock_rf_stop_trx,
-    };
-    use crate::sdk::light::{BlePeripheralLinkState, RfOperationState};
-    use mry::Any;
+    use crate::types::{BlePeripheralLinkState, RfOperationState};
     use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 
-    use tlsr8266_pac::{
-        mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
-        mock_write_reg_dma3_mode, mock_write_reg_rf_access_code, mock_write_reg_rf_crc,
-        mock_write_reg_rf_tx_wail_settle_time_lo, mock_write_reg_system_tick_irq,
-    };
+    use crate::ble::connection::BLE_PERIPHERAL_CONNECTION_INSTANT;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::{write_reg_system_tick, write_reg_system_tick_irq, REG_BASE_ADDR};
+
+    /// Datasheet offsets of the registers `configure_ble_receive_state` drives.
+    const REG_RF_ACCESS_CODE: u32 = 0x408;
+    const REG_RF_CHANNEL: u32 = 0x40d;
+    const REG_RF_CRC: u32 = 0x44c;
+    const REG_DMA3_MODE: u32 = 0x50f;
+    const REG_RF_MODE_CONTROL: u32 = 0xf00;
+    const REG_RF_TX_WAIL_SETTLE_TIME_LO: u32 = 0xf04;
+    const REG_SYSTEM_TICK_IRQ: u32 = 0x744;
+
+    /// Values written to `offset` since the last clear, oldest first.
+    fn writes_to(offset: u32) -> Vec<u32> {
+        let addr = offset | REG_BASE_ADDR;
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == addr)
+            .map(|w| w.value)
+            .collect()
+    }
+
+    /// Number of writes of exactly `value` to `offset`.
+    fn count_writes(offset: u32, value: u32) -> usize {
+        writes_to(offset)
+            .into_iter()
+            .filter(|written| *written == value)
+            .count()
+    }
 
     /// Reset the PAC/HAL host fakes so a test never inherits another test's
     /// register bank, analog bank, clock or AES transport (the suite runs
     /// `--test-threads=1`, so all of these are process-wide singletons).
     fn reset_host_fakes() {
-        tlsr8266_pac::fake_mmio::FakeMmio::reset();
+        FakeMmio::reset();
         tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
@@ -157,8 +173,9 @@ mod tests {
         SLAVE_WINDOW_SIZE.set(50000); // 50ms default
         SLAVE_NEXT_CONNECT_TICK.set(0);
         BRIDGE_RECEIVE_TIMING_TICK.set(0);
-        crate::ota::set_in_progress_for_test(false);
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
         BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(false);
+        BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
 
         // Reset PKT_INIT structure with mock values
@@ -167,29 +184,15 @@ mod tests {
         pkt_init.ll_init_mut().hop = 0x12; // Hop increment
         pkt_init.ll_init_mut().aa = [0xAA, 0xBB, 0xCC, 0xDD]; // Access address
         pkt_init.ll_init_mut().crcinit = [0x11, 0x22, 0x33]; // CRC init
-    }
+        drop(pkt_init);
 
-    /// Helper function to set up RF and register mocks for consistent testing.
-    fn setup_rf_and_register_mocks() {
-        // RF function mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_start_brx(Any, Any).returns(());
-
-        // Register operation mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg_dma3_mode(Any).returns(());
-        mock_write_reg_rf_access_code(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(100000);
-
-        // BLE LL function mocks
-        mock_ble_ll_select_next_data_channel(Any, Any).returns(12);
-
-        // Connection function mocks
-        mock_handle_ble_connection_parameter_updates().returns(());
+        // Arm the real clock registers the way the hardware would on entry to
+        // the receive state: tick 50000, compare register 100000.
+        write_reg_system_tick(50000);
+        write_reg_system_tick_irq(100000);
+        // Seeding is setup, not behaviour under test, so drop its log entries:
+        // the assertions below must only see writes made by the function.
+        FakeMmio::clear_writes();
     }
 
     // ================================================================================
@@ -204,24 +207,7 @@ mod tests {
     /// - Configures access code and CRC
     /// - Transitions to bridge state
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_start_brx)]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_rf_tx_wail_settle_time_lo)]
-    #[mry::lock(write_reg_dma3_mode)]
-    #[mry::lock(write_reg_rf_access_code)]
-    #[mry::lock(write_reg_rf_crc)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(ble_ll_select_next_data_channel)]
-    #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_basic() {
-        // Setup mocks
-        setup_rf_and_register_mocks();
-        mock_write_reg_rf_tx_wail_settle_time_lo(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
@@ -236,22 +222,54 @@ mod tests {
         );
 
         // Verify RF operations were called
-        mock_rf_stop_trx().assert_called(1);
-        mock_rf_set_ble_channel(Any).assert_called(1); // Channel selection is not mocked
+        assert_eq!(
+            count_writes(REG_RF_MODE_CONTROL, 0x80),
+            1,
+            "rf_stop_trx should run exactly once"
+        );
+        assert_eq!(
+            writes_to(REG_RF_CHANNEL).len(),
+            1,
+            "the hopper's channel selection should reach the radio exactly once"
+        );
 
         // Verify register operations
-        mock_write_reg_dma3_mode(0x80).assert_called(1); // DMA3 (RF TX) mode byte
-        mock_write_reg_rf_tx_wail_settle_time_lo(0x67).assert_called(1); // RF TX wait/settle time
+        assert_eq!(
+            FakeMmio::reg8(REG_DMA3_MODE | REG_BASE_ADDR),
+            0x80,
+            "DMA3 (RF TX) mode byte"
+        );
+        assert_eq!(
+            FakeMmio::reg8(REG_RF_TX_WAIL_SETTLE_TIME_LO | REG_BASE_ADDR),
+            0x67,
+            "RF TX wait/settle time"
+        );
 
         // Verify access code calculation: ((aa[2] << 8) | (aa[1] << 16) | aa[3] | (aa[0] << 24))
         // aa = [0xAA, 0xBB, 0xCC, 0xDD]
         // Expected: (0xCC << 8) | (0xBB << 16) | 0xDD | (0xAA << 24) = 0xAABBCCDD
-        mock_write_reg_rf_access_code(0xAABBCCDD).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg32(REG_RF_ACCESS_CODE | REG_BASE_ADDR),
+            0xAABBCCDD,
+            "access code assembled from aa"
+        );
 
         // Verify CRC calculation: ((crcinit[1] << 8) | (crcinit[2] << 16) | crcinit[0])
         // crcinit = [0x11, 0x22, 0x33]
         // Expected: (0x22 << 8) | (0x33 << 16) | 0x11 = 0x00332211
-        mock_write_reg_rf_crc(0x00332211).assert_called(1);
+        assert_eq!(
+            FakeMmio::reg32(REG_RF_CRC | REG_BASE_ADDR),
+            0x00332211,
+            "CRC init assembled from crcinit"
+        );
+
+        // Verify the real connection-parameter handler ran: it bumps the event
+        // counter on every call.
+        assert_eq!(
+            BLE_PERIPHERAL_CONNECTION_INSTANT.get(),
+            1,
+            "handle_ble_connection_parameter_updates should run once"
+        );
 
         // Verify state transition
         assert_eq!(
@@ -275,36 +293,25 @@ mod tests {
     /// - Uses minimum timing (0xed8 = ~3.8ms) if window size is too small
     /// - Calculates correct next connection event timing
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_start_brx)]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_dma3_mode)]
-    #[mry::lock(write_reg_rf_access_code)]
-    #[mry::lock(write_reg_rf_crc)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(ble_ll_select_next_data_channel)]
-    #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_normal_timing() {
-        // Setup mocks
-        setup_rf_and_register_mocks();
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: Normal operation, no OTA
-        crate::ota::set_in_progress_for_test(false);
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(150000); // 150ms, greater than minimum (121600)
 
         // Execute function
         configure_ble_receive_state();
 
         // Verify timing calculation: current_tick + window_size
-        // read_reg_system_tick() returns 50000, window_size is 150000
+        // read_reg_system_tick() reads 50000, window_size is 150000
         let expected_timing = 50000 + 150000;
-        mock_write_reg_system_tick_irq(expected_timing).assert_called(1);
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [expected_timing],
+            "the compare register should be armed once with tick + window size"
+        );
 
         // Verify next connection event timing
         // SLAVE_LINK_INTERVAL (100000) + read_reg_system_tick_irq() (100000) = 200000
@@ -321,27 +328,12 @@ mod tests {
     /// - Uses minimum timing (0xed8 = ~3.8ms)
     /// - Calculates timing based on CLOCK_SYS_CLOCK_1US
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_start_brx)]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_dma3_mode)]
-    #[mry::lock(write_reg_rf_access_code)]
-    #[mry::lock(write_reg_rf_crc)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(ble_ll_select_next_data_channel)]
-    #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_minimum_timing() {
-        // Setup mocks
-        setup_rf_and_register_mocks();
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: Window size too small (less than 0xed8 * CLOCK_SYS_CLOCK_1US)
-        crate::ota::set_in_progress_for_test(false);
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(1000); // Very small, should trigger minimum timing
 
         // Execute function
@@ -350,7 +342,11 @@ mod tests {
         // Verify minimum timing is used: 0xed8 * CLOCK_SYS_CLOCK_1US + current_tick
         // 0xed8 = 3800, CLOCK_SYS_CLOCK_1US = 32, current_tick = 50000
         let expected_min_timing = 3800 * 32 + 50000;
-        mock_write_reg_system_tick_irq(expected_min_timing).assert_called(1);
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [expected_min_timing],
+            "the compare register should be armed once with the minimum window"
+        );
     }
 
     /// Tests BLE receive state configuration during OTA update.
@@ -360,27 +356,12 @@ mod tests {
     /// - Ignores window size settings
     /// - Provides more time for OTA operations
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_start_brx)]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_dma3_mode)]
-    #[mry::lock(write_reg_rf_access_code)]
-    #[mry::lock(write_reg_rf_crc)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(ble_ll_select_next_data_channel)]
-    #[mry::lock(handle_ble_connection_parameter_updates)]
     fn test_configure_ble_receive_state_ota_timing() {
-        // Setup mocks
-        setup_rf_and_register_mocks();
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: OTA update in progress
-        crate::ota::set_in_progress_for_test(true);
+        crate::callbacks::test_ota::set_in_progress_for_test(true);
         SLAVE_WINDOW_SIZE.set(75000); // Should be ignored during OTA
 
         // Execute function
@@ -389,6 +370,10 @@ mod tests {
         // Verify OTA timing is used: 10000 * CLOCK_SYS_CLOCK_1US + current_tick
         // 10000 * 32 + 50000 = 370000
         let expected_ota_timing = 10000 * 32 + 50000;
-        mock_write_reg_system_tick_irq(expected_ota_timing).assert_called(1);
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [expected_ota_timing],
+            "the compare register should be armed once with the OTA timeout"
+        );
     }
 }

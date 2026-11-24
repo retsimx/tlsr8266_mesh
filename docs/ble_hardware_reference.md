@@ -862,8 +862,8 @@ LLVM fork).
 
 `irq_handler()` is placed in `.ram_code`. `irq_handler` itself lives in
 `rust/src/irq.rs` (the composition root) and delegates the RF path to
-`sdk/ble_app/irq::handle_rf_irq` and the BLE system-timer path to
-`sdk/ble_app/irq::handle_ble_system_timer_irq`; both are `#[inline(always)]`, so
+`tlsr8266_radio::irq::handle_rf_irq` and the BLE system-timer path to
+`tlsr8266_radio::irq::handle_ble_system_timer_irq`; both are `#[inline(always)]`, so
 the RF code stays inlined into `.ram_code`. Execution sequence:
 
 ```
@@ -1846,16 +1846,16 @@ All mesh nodes are peers. There is no designated coordinator, router, or gateway
 
 | Constant | Value | Location | Meaning |
 |----------|-------|----------|---------|
-| `SYS_CHN_LISTEN` | `[2, 12, 23, 34]` | `sdk/ble_app/flash_config.rs` | BLE data channels used for mesh RX/TX |
-| `SYS_CHN_ADV` | `[0x25, 0x26, 0x27]` | `sdk/ble_app/flash_config.rs` | BLE advertising channels (37, 38, 39) |
-| `ADV_INTERVAL2LISTEN_INTERVAL` | `4` | `sdk/light.rs` | Advertise every 4th listen cycle |
-| `ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL` | `8` | `sdk/light.rs` | Send online status every 8th cycle |
-| `MESH_LISTEN_INTERVAL_US` | `100_000` (100 ms) | `status_management.rs` | Duration of one listen cycle |
-| `BRIDGE_MAX_CNT` | `8` | `sdk/light.rs` | Maximum relay hops per packet |
-| `ONLINE_STATUS_TIMEOUT` | `3000` ms | `sdk/light.rs` | **Floor** for the cadence-derived offline deadline; the deadline is `max(floor, ceil((M-1)/5) × 250 ms × 4)` (`mesh_status_timeout_ms`, e.g. 8 s at M=40, 13 s at M=64) |
-| `MESH_PAIR_CMD_INTERVAL` | `500` ms | `mesh/fsm.rs` | Interval between mesh-pair credential frames |
-| `MESH_PAIR_TIMEOUT` | `10` s | `mesh/fsm.rs` | Total time allowed to complete re-pairing |
-| `MESH_NODE_MAX_NUM` | (compile-time) | `rust/src/sdk/ble_app/light_ll/mesh_management.rs` | Maximum nodes tracked in status table |
+| `SYS_CHN_LISTEN` | `[2, 12, 23, 34]` | `rust/crates/tlsr8266-radio/src/ble/flash_config.rs` | BLE data channels used for mesh RX/TX |
+| `SYS_CHN_ADV` | `[0x25, 0x26, 0x27]` | `rust/crates/tlsr8266-radio/src/ble/flash_config.rs` | BLE advertising channels (37, 38, 39) |
+| `ADV_INTERVAL2LISTEN_INTERVAL` | `4` | `rust/crates/tlsr8266-radio/src/types.rs` | Advertise every 4th listen cycle |
+| `ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL` | `8` | `rust/crates/tlsr8266-radio/src/types.rs` | Send online status every 8th cycle |
+| `MESH_LISTEN_INTERVAL_US` | `100_000` (100 ms) | `rust/crates/tlsr8266-radio/src/mesh_ll/node_status.rs` | Duration of one listen cycle |
+| `BRIDGE_MAX_CNT` | `8` | `rust/crates/tlsr8266-radio/src/types.rs` | Maximum relay hops per packet |
+| `ONLINE_STATUS_TIMEOUT` | `3000` ms | `rust/crates/mesh-protocol/src/mesh_types.rs` | **Floor** for the cadence-derived offline deadline; the deadline is `max(floor, ceil((M-1)/5) × 250 ms × 4)` (`mesh_status_timeout_ms`, e.g. 8 s at M=40, 13 s at M=64) |
+| `MESH_PAIR_CMD_INTERVAL` | `500` ms | `rust/src/mesh/fsm.rs` | Interval between mesh-pair credential frames |
+| `MESH_PAIR_TIMEOUT` | `10` s | `rust/src/mesh/fsm.rs` | Total time allowed to complete re-pairing |
+| `MESH_NODE_MAX_NUM` | `64` | `rust/crates/mesh-protocol/src/mesh_types.rs` (status table in `rust/crates/tlsr8266-radio/src/mesh_ll/node_status.rs`) | Maximum nodes tracked in status table |
 
 ### 19.3 Channel Strategy
 
@@ -2128,7 +2128,7 @@ There is no routing table. Every node that receives a packet and passes duplicat
 
 ## 23. Mesh Command Opcode Reference
 
-All mesh opcodes are defined in `rust/src/sdk/light.rs`. Commands are transmitted as `op | 0xC0` in the packet opcode byte to distinguish them from BLE ATT opcodes.
+All mesh opcodes are defined in `rust/crates/mesh-protocol/src/mesh_types.rs` (`mesh_protocol::mesh_types`) and re-exported to the firmware through `tlsr8266_radio::types`. Commands are transmitted as `op | 0xC0` in the packet opcode byte to distinguish them from BLE ATT opcodes.
 
 | Constant | Hex | Direction | Description |
 |----------|-----|-----------|-------------|

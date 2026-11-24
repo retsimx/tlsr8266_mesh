@@ -16,7 +16,6 @@ mod light;
 mod logging;
 mod mesh;
 mod ota;
-mod sdk;
 #[cfg(target_os = "none")]
 mod startup;
 mod uart;

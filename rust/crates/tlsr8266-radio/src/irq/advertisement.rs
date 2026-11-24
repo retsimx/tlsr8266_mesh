@@ -12,14 +12,12 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::sdk::ble_app::flash_config::SYS_CHN_ADV;
-use crate::sdk::ble_app::light_ll::connection_management::BLE_PERIPHERAL_LINK_STATE;
-use crate::sdk::ble_app::light_ll::mesh_management::{
-    mesh_send_online_status, MESH_DEVICE_ONLINE_STATUS,
-};
-use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE, PKT_ADV};
-use crate::sdk::light::RfOperationState;
+use crate::ble::connection::BLE_PERIPHERAL_LINK_STATE;
+use crate::ble::flash_config::SYS_CHN_ADV;
+use crate::mesh_ll::node_status::{mesh_send_online_status, MESH_DEVICE_ONLINE_STATUS};
+use crate::rf::drv_8266::*;
+use crate::rf::drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE, PKT_ADV};
+use crate::types::RfOperationState;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
@@ -63,7 +61,6 @@ pub fn get_ble_advertisement_channel_count() -> u32 {
 /// - Uses precise timing for advertisement intervals (1200µs = 0x4b0)
 /// - Short delays for status reporting (100µs) vs listening (500µs)
 /// - Enables STX2RX mode for potential scan response reception
-#[cfg_attr(test, mry::mry)]
 pub fn handle_ble_advertisement_state() {
     // Static counter to track which advertisement channel we're currently using
     static ST_PNO: AtomicU32 = AtomicU32::new(0);
@@ -73,7 +70,7 @@ pub fn handle_ble_advertisement_state() {
     rf_stop_trx();
 
     // Set link state to advertisement mode (state 1)
-    BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Advertising);
+    BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Advertising);
 
     // Check if advertisement sequence is complete or not requested
     if !BLE_ADVERTISING_ENABLED.get()
@@ -152,85 +149,60 @@ pub fn handle_ble_advertisement_state() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
 
-    // Import mock functions from their original modules
-    use crate::sdk::ble_app::rf_drv_8266::mock_rf_stop_trx;
+    use crate::ble::connection::BLE_PERIPHERAL_LINK_STATE;
+    use crate::types::BlePeripheralLinkState;
     use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use tlsr8266_pac::{
-        mock_read_reg_rf_mode, mock_read_reg_system_tick, mock_write_reg8,
-        mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_pll_rx_fine_div_tune,
-        mock_write_reg_rf_access_code, mock_write_reg_rf_channel, mock_write_reg_rf_crc,
-        mock_write_reg_rf_irq_status, mock_write_reg_rf_mode, mock_write_reg_rf_mode_control,
-        mock_write_reg_rf_rx_mode, mock_write_reg_rf_sched_tick, mock_write_reg_rf_txrx_state,
-        mock_write_reg_system_tick_irq,
-    };
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// Datasheet offset of the free-running system tick this module schedules from.
+    const REG_SYSTEM_TICK: u32 = 0x740;
 
     /// Reset the PAC/HAL host fakes so a test never inherits another test's
     /// register bank, analog bank, clock or AES transport (the suite runs
     /// `--test-threads=1`, so all of these are process-wide singletons).
     fn reset_host_fakes() {
-        tlsr8266_pac::fake_mmio::FakeMmio::reset();
+        FakeMmio::reset();
         tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+        crate::queues::reset_for_test();
     }
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
-    /// Note: Call reset_advertisement_internal_state() separately after setting up mocks.
+    /// Note: Call reset_advertisement_internal_state() separately, because the
+    /// channel counter lives inside `handle_ble_advertisement_state`.
     fn reset_global_state() {
         reset_host_fakes();
         BLE_ADVERTISING_ENABLED.set(false);
-        BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
+        BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         MESH_DEVICE_ONLINE_STATUS.set(false);
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
     }
 
     /// Helper function to reset the internal ST_PNO static counter in handle_ble_advertisement_state.
-    /// This should be called from within tests that have mocks set up.
+    /// The completion branch zeroes it, so drive that branch once and then
+    /// discard the register writes it produced.
     fn reset_advertisement_internal_state() {
         // Save current state
         let saved_adv_enabled = BLE_ADVERTISING_ENABLED.get();
         let saved_online_status = MESH_DEVICE_ONLINE_STATUS.get();
         let saved_handler_state = *CURRENT_RF_STATE.lock();
 
-        // Set state to trigger the completion path (line 76-81) which resets ST_PNO to 0
+        // Set state to trigger the completion path, which resets ST_PNO to 0
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
 
-        // This will trigger the completion path which resets ST_PNO to 0
         handle_ble_advertisement_state();
 
         // Restore original state
         BLE_ADVERTISING_ENABLED.set(saved_adv_enabled);
         MESH_DEVICE_ONLINE_STATUS.set(saved_online_status);
         *CURRENT_RF_STATE.lock() = saved_handler_state;
-    }
 
-    /// Helper function to set up all the mocks needed for RF BLE functions.
-    /// This mocks the internal register operations of rf_set_ble_access_code_adv,
-    /// rf_set_ble_crc_adv, rf_set_ble_channel, and rf_start_stx2rx.
-    fn setup_rf_ble_function_mocks() {
-        // Mock rf_set_ble_access_code_adv internals
-        mock_write_reg_rf_access_code(0xd6be898e).returns(());
-
-        // Mock rf_set_ble_crc_adv internals
-        mock_write_reg_rf_crc(0x555555).returns(());
-
-        // Mock rf_set_ble_channel internals (will be called with different channels)
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(0x29).returns(());
-        mock_write_reg_rf_rx_mode(0).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
-
-        // Mock rf_start_stx2rx internals
-        mock_read_reg_rf_mode().returns(0);
-        mock_write_reg_rf_sched_tick(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_mode_control(0x87).returns(());
-        mock_write_reg_dma3_addr(Any).returns(());
+        // The reset run's register writes are not part of the test's subject.
+        FakeMmio::clear_writes();
     }
 
     // ================================================================================
@@ -258,52 +230,40 @@ mod tests {
     ///
     /// Verifies that when advertisement is complete and online status is scheduled:
     /// - Advertisement flag is cleared and channel counter is reset
-    /// - Online status is sent via mesh_send_online_status (simulated)
     /// - Short delay (100µs) is scheduled before listening
     /// - Online status flag is cleared after handling
     /// - State transitions to Listen mode
     #[test]
-    #[mry::lock(
-        write_reg8,
-        write_reg_dma3_mode,
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_advertisement_completion_with_online_status() {
-        // Setup mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg_dma3_mode(Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(10000);
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Reset state for clean test
         reset_global_state();
-
-        // Reset internal static state (must be done after mocks are set up)
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 10_000);
         reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 10_000);
 
         // Setup: Advertisement disabled (sequence complete) with online status
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(true);
 
-        // Execute function
         handle_ble_advertisement_state();
 
         // Verify link state is set to advertising mode initially
         assert_eq!(
             BLE_PERIPHERAL_LINK_STATE.get(),
-            crate::sdk::light::BlePeripheralLinkState::Advertising,
+            BlePeripheralLinkState::Advertising,
             "Link state should be set to advertising mode"
         );
 
-        // Verify RF operations are stopped and the DMA3 (RF TX) mode byte is cleared
-        // Note: rf_stop_trx is called twice - once during reset and once during the actual test
-        mock_rf_stop_trx().assert_called(2);
-        mock_write_reg_dma3_mode(0).assert_called(2);
+        // Verify the radio was stopped and the DMA3 (RF TX) mode byte cleared.
+        assert_eq!(
+            read_reg_dma3_mode(),
+            0,
+            "the RF TX DMA mode byte must be cleared before stopping TRX"
+        );
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x80,
+            "rf_stop_trx must leave the radio in stop mode"
+        );
 
         // Verify advertisement flag remains cleared
         assert_eq!(
@@ -312,9 +272,13 @@ mod tests {
             "Advertisement flag should remain cleared after completion"
         );
 
-        // Verify short delay is scheduled (100µs) - called during both reset and test
-        let expected_tick = CLOCK_SYS_CLOCK_1US * 100 + 10000;
-        mock_write_reg_system_tick_irq(expected_tick).assert_called(1);
+        // Verify short delay is scheduled (100µs)
+        let expected_tick = CLOCK_SYS_CLOCK_1US * 100 + 10_000;
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            expected_tick,
+            "the 100µs completion delay must be armed"
+        );
 
         // Verify online status flag is cleared
         assert_eq!(
@@ -330,8 +294,12 @@ mod tests {
             "State should transition to Listen mode"
         );
 
-        // Verify RF interrupt status is cleared - called during both reset and test
-        mock_write_reg_rf_irq_status(1).assert_called(2);
+        // Verify RF interrupt status is cleared
+        assert_eq!(
+            read_reg_rf_irq_status(),
+            1,
+            "the RX interrupt must be acknowledged"
+        );
     }
 
     /// Tests advertisement sequence completion without online status reporting.
@@ -342,51 +310,44 @@ mod tests {
     /// - Longer delay (500µs) is scheduled before listening
     /// - State transitions to Listen mode
     #[test]
-    #[mry::lock(
-        write_reg8,
-        write_reg_dma3_mode,
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_advertisement_completion_without_online_status() {
-        // Setup mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg_dma3_mode(Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(15000);
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Reset state for clean test
         reset_global_state();
-
-        // Reset internal static state (must be done after mocks are set up)
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 15_000);
         reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 15_000);
 
         // Setup: Advertisement disabled (sequence complete) without online status
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
 
-        // Execute function
         handle_ble_advertisement_state();
 
         // Verify link state is set to advertising mode initially
         assert_eq!(
             BLE_PERIPHERAL_LINK_STATE.get(),
-            crate::sdk::light::BlePeripheralLinkState::Advertising,
+            BlePeripheralLinkState::Advertising,
             "Link state should be set to advertising mode"
         );
 
         // Verify RF operations are stopped
-        // Note: rf_stop_trx is called twice - once during reset and once during the actual test
-        mock_rf_stop_trx().assert_called(2);
-        mock_write_reg_dma3_mode(0).assert_called(2);
+        assert_eq!(
+            read_reg_dma3_mode(),
+            0,
+            "the RF TX DMA mode byte must be cleared before stopping TRX"
+        );
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x80,
+            "rf_stop_trx must leave the radio in stop mode"
+        );
 
-        // Verify longer delay is scheduled (500µs) - called during both reset and test
-        let expected_tick = CLOCK_SYS_CLOCK_1US * 500 + 15000;
-        mock_write_reg_system_tick_irq(expected_tick).assert_called(2);
+        // Verify longer delay is scheduled (500µs)
+        let expected_tick = CLOCK_SYS_CLOCK_1US * 500 + 15_000;
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            expected_tick,
+            "the 500µs completion delay must be armed"
+        );
 
         // Verify online status flag remains cleared
         assert_eq!(
@@ -416,76 +377,66 @@ mod tests {
     /// - STX2RX mode is started for scan response capability
     /// - State transitions to Listen mode for next iteration
     #[test]
-    #[mry::lock(
-        write_reg8,
-        write_reg_dma3_mode,
-        rf_stop_trx,
-        write_reg_rf_access_code,
-        write_reg_rf_crc,
-        write_reg_rf_channel,
-        write_reg_rf_mode,
-        write_reg_rf_rx_mode,
-        write_reg_rf_txrx_state,
-        write_reg_pll_rx_fine_div_tune,
-        read_reg_rf_mode,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_advertisement_continuation_first_channel() {
-        // Setup basic mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg_dma3_mode(Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(20000);
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Setup RF BLE function mocks
-        setup_rf_ble_function_mocks();
-
-        // Reset state for clean test
         reset_global_state();
-
-        // Reset internal static state (must be done after mocks are set up)
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 20_000);
         reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 20_000);
 
         // Setup: Advertisement enabled, first channel
         BLE_ADVERTISING_ENABLED.set(true);
 
-        // Execute function
         handle_ble_advertisement_state();
 
         // Verify link state is set to advertising mode
         assert_eq!(
             BLE_PERIPHERAL_LINK_STATE.get(),
-            crate::sdk::light::BlePeripheralLinkState::Advertising,
+            BlePeripheralLinkState::Advertising,
             "Link state should be set to advertising mode"
         );
 
         // Verify RF operations are stopped initially
-        // Note: rf_stop_trx is called twice - once during reset and once during the actual test
-        mock_rf_stop_trx().assert_called(2);
-        mock_write_reg_dma3_mode(0).assert_called(2);
+        assert_eq!(
+            read_reg_dma3_mode(),
+            0,
+            "the RF TX DMA mode byte must be cleared before stopping TRX"
+        );
 
         // Verify BLE advertisement access code is set
-        mock_write_reg_rf_access_code(0xd6be898e).assert_called(1);
+        assert_eq!(
+            read_reg_rf_access_code(),
+            0xd6be898e,
+            "the BLE advertisement access code must be programmed"
+        );
 
         // Verify BLE advertisement CRC is set
-        mock_write_reg_rf_crc(0x555555).assert_called(1);
+        assert_eq!(
+            read_reg_rf_crc(),
+            0x555555,
+            "the BLE advertisement CRC init must be programmed"
+        );
 
         // Verify correct advertisement channel is set (first channel from SYS_CHN_ADV)
-        mock_write_reg_rf_channel(SYS_CHN_ADV[0]).assert_called(1);
+        assert_eq!(
+            read_reg_rf_channel(),
+            SYS_CHN_ADV[0],
+            "the first advertisement channel must be selected"
+        );
 
         // Verify advertisement interval timing is scheduled (1200µs = 0x4b0)
-        let expected_tick = CLOCK_SYS_CLOCK_1US * 0x4b0 + 20000;
-        mock_write_reg_system_tick_irq(expected_tick).assert_called(1);
+        let expected_tick = CLOCK_SYS_CLOCK_1US * 0x4b0 + 20_000;
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            expected_tick,
+            "the 1200µs advertisement interval must be armed"
+        );
 
         // Verify STX2RX mode is started (since we're not on last channel)
-        mock_write_reg_rf_mode_control(0x87).assert_called(1);
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x87,
+            "the radio must be scheduled for stx2rx"
+        );
 
         // Verify state transitions to Listen for next iteration
         assert_eq!(
@@ -494,79 +445,68 @@ mod tests {
             "State should transition to Listen mode"
         );
 
-        // Verify RF interrupt status is cleared - called during both reset and test
-        mock_write_reg_rf_irq_status(1).assert_called(2);
+        // Verify RF interrupt status is cleared
+        assert_eq!(
+            read_reg_rf_irq_status(),
+            1,
+            "the RX interrupt must be acknowledged"
+        );
     }
 
     /// Tests advertisement channel cycling through multiple calls.
     ///
-    /// This test verifies that each individual call to the advertisement function
-    /// works correctly for advertising state, since the internal static counter
-    /// persists between calls.
+    /// This test drives three consecutive calls: each one must select the next
+    /// primary advertisement channel, and the third must close the sequence.
     #[test]
-    #[mry::lock(
-        write_reg8,
-        rf_stop_trx,
-        write_reg_rf_access_code,
-        write_reg_rf_crc,
-        write_reg_rf_channel,
-        write_reg_rf_mode,
-        write_reg_rf_rx_mode,
-        write_reg_rf_txrx_state,
-        write_reg_pll_rx_fine_div_tune,
-        read_reg_rf_mode,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_advertisement_channel_cycling() {
-        // Setup basic mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(25000);
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Setup RF BLE function mocks
-        setup_rf_ble_function_mocks();
-
-        // Reset state for clean test
         reset_global_state();
-
-        // Reset internal static state (must be done after mocks are set up)
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 25_000);
         reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 25_000);
 
-        // Test first call - should use first channel
-        BLE_ADVERTISING_ENABLED.set(true);
-        handle_ble_advertisement_state();
+        for (cycle, expected_channel) in SYS_CHN_ADV.iter().enumerate() {
+            BLE_ADVERTISING_ENABLED.set(true);
 
-        // Verify first channel was set
-        mock_write_reg_rf_channel(SYS_CHN_ADV[0]).assert_called(1);
+            handle_ble_advertisement_state();
 
-        // Verify link state is correct
-        assert_eq!(
-            BLE_PERIPHERAL_LINK_STATE.get(),
-            crate::sdk::light::BlePeripheralLinkState::Advertising,
-            "Link state should be advertising"
-        );
+            assert_eq!(
+                read_reg_rf_channel(),
+                *expected_channel,
+                "cycle {} must advertise on channel {}",
+                cycle,
+                expected_channel
+            );
 
-        // Note: Advertisement flag remains true after the first call since we haven't completed all 3 channels yet
-        // The flag is only cleared when ST_PNO >= 3 (after incrementing to 1, 2, then 3)
-        assert_eq!(
-            BLE_ADVERTISING_ENABLED.get(),
-            true,
-            "Advertisement flag should remain true after processing first channel"
-        );
+            // Verify link state is correct
+            assert_eq!(
+                BLE_PERIPHERAL_LINK_STATE.get(),
+                BlePeripheralLinkState::Advertising,
+                "Link state should be advertising"
+            );
 
-        // Verify state transitions to Listen
-        assert_eq!(
-            *CURRENT_RF_STATE.lock(),
-            RfOperationState::MeshListening,
-            "State should be in Listen mode"
-        );
+            if cycle < SYS_CHN_ADV.len() - 1 {
+                // The flag stays set until the whole channel sequence is done.
+                assert_eq!(
+                    BLE_ADVERTISING_ENABLED.get(),
+                    true,
+                    "Advertisement flag should remain true after channel {}",
+                    cycle
+                );
+            } else {
+                assert_eq!(
+                    BLE_ADVERTISING_ENABLED.get(),
+                    false,
+                    "the last channel closes the advertisement sequence"
+                );
+            }
+
+            // Verify state transitions to Listen
+            assert_eq!(
+                *CURRENT_RF_STATE.lock(),
+                RfOperationState::MeshListening,
+                "State should be in Listen mode"
+            );
+        }
     }
 
     /// Tests timing calculations with different system tick values.
@@ -574,23 +514,11 @@ mod tests {
     /// Verifies that timing calculations work correctly with various system tick values
     /// and that the proper delays are applied for different scenarios.
     #[test]
-    #[mry::lock(
-        write_reg8,
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_timing_calculations() {
-        // Setup mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Reset state for test
         reset_global_state();
-        mock_read_reg_system_tick().returns(1000);
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 1000);
+        reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 1000);
 
         // Test with online status enabled
         BLE_ADVERTISING_ENABLED.set(false);
@@ -600,7 +528,11 @@ mod tests {
 
         // Verify correct timing calculation for online status (100µs delay)
         let expected_tick = CLOCK_SYS_CLOCK_1US * 100 + 1000;
-        mock_write_reg_system_tick_irq(expected_tick).assert_called(1);
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            expected_tick,
+            "the online-status completion delay must be 100µs"
+        );
 
         // Verify online status flag is cleared
         assert_eq!(
@@ -614,40 +546,11 @@ mod tests {
     ///
     /// This test verifies that the function handles rapid advertisement cycles gracefully.
     #[test]
-    #[mry::lock(
-        write_reg8,
-        rf_stop_trx,
-        write_reg_rf_access_code,
-        write_reg_rf_crc,
-        write_reg_rf_channel,
-        write_reg_rf_mode,
-        write_reg_rf_rx_mode,
-        write_reg_rf_txrx_state,
-        write_reg_pll_rx_fine_div_tune,
-        read_reg_rf_mode,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_rf_irq_status
-    )]
     fn test_rapid_advertisement_cycles() {
-        // Setup basic mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(30000);
-        mock_write_reg_rf_irq_status(Any).returns(());
-
-        // Setup RF BLE function mocks
-        setup_rf_ble_function_mocks();
-
-        // Reset state for clean test
         reset_global_state();
-
-        // Reset internal static state (must be done after mocks are set up)
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 30_000);
         reset_advertisement_internal_state();
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, 30_000);
 
         // Run multiple advertisement cycles rapidly
         for cycle in 0..3 {
@@ -657,7 +560,7 @@ mod tests {
             // Verify each cycle works correctly
             assert_eq!(
                 BLE_PERIPHERAL_LINK_STATE.get(),
-                crate::sdk::light::BlePeripheralLinkState::Advertising,
+                BlePeripheralLinkState::Advertising,
                 "Link state should be advertising in cycle {}",
                 cycle
             );

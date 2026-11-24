@@ -20,31 +20,29 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize};
 
-use crate::sdk::ble_app::ble_ll_pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
-use crate::sdk::ble_app::callbacks::{on_light_data, on_light_response};
-use crate::sdk::ble_app::config::radio_config;
-use crate::sdk::ble_app::flash_config::{
-    dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address,
-};
-use crate::sdk::ble_app::light_ll::connection_management::{
+use crate::ble::connection::{
     BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_LINK_STATE, BUFF_RESPONSE, SLAVE_CONNECTED_TICK,
     SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
 };
-use crate::sdk::ble_app::light_ll::mesh_management::{
-    mesh_node_table_init, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
-    MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA, PKT_LIGHT_STATUS, STATUS_MESSAGE_SEQUENCE_NUMBER,
-};
-use crate::sdk::ble_app::light_ll::packet_processing::{
-    parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_slave_add_status,
-};
-use crate::sdk::ble_app::light_ll::status_management::{
+use crate::ble::flash_config::{dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address};
+use crate::ble::pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
+use crate::ble::status::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
     DEVICE_STATUS_READ_BUSY_TIMESTAMP, DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX,
     DEVICE_STATUS_TICK_COUNTER, NOTIFICATION_REQUEST_MASK_INDEX, SLAVE_READ_STATUS_BUSY,
     SLAVE_STATUS_RECORD,
 };
-use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
-use crate::sdk::light::{
+use crate::callbacks::{on_light_data, on_light_response};
+use crate::config::radio_config;
+use crate::mesh_ll::node_status::{
+    mesh_node_table_init, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
+    MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA, PKT_LIGHT_STATUS, STATUS_MESSAGE_SEQUENCE_NUMBER,
+};
+use crate::mesh_ll::packet_processing::{
+    parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_slave_add_status,
+};
+use crate::rf::tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
+use crate::types::{
     LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
     GET_GROUP2, GET_GROUP3, GET_STATUS, GET_USER_NOTIFY, LGT_CMD_CONFIG_DEV_ADDR,
     LGT_CMD_DEV_ADDR_RSP, LGT_CMD_LIGHT_CONFIG_GRP, LGT_CMD_LIGHT_GRP_REQ, LGT_CMD_LIGHT_GRP_RSP1,
@@ -53,7 +51,6 @@ use crate::sdk::light::{
     MAX_GROUP_COUNT, PKT_VAL_MAC_APP_HOP_COUNT, PKT_VAL_MAC_APP_LINK_INTERVAL,
     PKT_VAL_MAC_APP_RESPONSE_TYPE, PKT_VAL_MAC_APP_TTC,
 };
-use crate::BIT;
 use mesh_protocol::const_assert;
 use mesh_protocol::crc::crc16;
 use mesh_protocol::mesh_types::{
@@ -71,6 +68,7 @@ use tlsr8266_hal::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
 use tlsr8266_hal::mcu::irq_i::irq_disable;
 use tlsr8266_hal::mcu::random::rand;
 use tlsr8266_hal::pm::light_sw_reboot;
+use tlsr8266_pac::BIT;
 use tlsr8266_pac::{
     read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode,
     write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl,
@@ -95,10 +93,9 @@ const RF_TRX_OFF: u8 = 0x45;
 /// The vendor id starts at the factory value and is overwritten by
 /// [`apply_vendor_id`] when the injected configuration is installed.
 ///
-/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the
-/// only entry point from outside `sdk/`, and `crate::sdk` is the extraction
-/// boundary for C-10 (`crates/tlsr8266-radio`).
-pub(in crate::sdk) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
+/// Visibility is `pub(crate)`: the facade module is the only entry point from
+/// outside this crate, and the crate boundary is the fence C-10 established.
+pub(crate) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
     CriticalSectionMutex::new(AdvPrivate {
         manufacture_id: 0x0211,
         mesh_product_uuid: 0x0211,
@@ -108,7 +105,7 @@ pub(in crate::sdk) static ADV_PRI_DATA: CriticalSectionMutex<AdvPrivate> =
 /// Private advertising response data sent in response to scan requests.
 /// Extended version of advertising data including device status, product UUID,
 /// device address, and additional reserved fields for future use.
-pub(in crate::sdk) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
+pub(crate) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> =
     CriticalSectionMutex::new(AdvRspPrivate {
         manufacture_id: 0x0211,
         mesh_product_uuid: 0x0211,
@@ -123,7 +120,7 @@ pub(in crate::sdk) static ADV_RSP_PRI_DATA: CriticalSectionMutex<AdvRspPrivate> 
 ///
 /// Called by `set_radio_config`; both the manufacturer id and the mesh product
 /// UUID must carry the vendor id.
-pub(in crate::sdk::ble_app) fn apply_vendor_id(vendor_id: u16) {
+pub(crate) fn apply_vendor_id(vendor_id: u16) {
     {
         let mut adv = ADV_PRI_DATA.lock();
         adv.manufacture_id = vendor_id;
@@ -138,17 +135,17 @@ pub(in crate::sdk::ble_app) fn apply_vendor_id(vendor_id: u16) {
 
 /// Current RF operation state indicating which mode is active.
 /// Tracks whether the device is in advertising, connected, receiving, mesh listening, or idle state.
-pub(crate) static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> =
+pub static CURRENT_RF_STATE: CriticalSectionMutex<RfOperationState> =
     CriticalSectionMutex::new(RfOperationState::Idle);
 
 /// Group addresses that this device belongs to (up to 8 groups).
 /// Used for group-based lighting control where multiple devices respond to the same command.
-pub(in crate::sdk) static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
+pub(crate) static GROUP_ADDRESS: CriticalSectionMutex<[u16; MAX_GROUP_COUNT as usize]> =
     CriticalSectionMutex::new([0; MAX_GROUP_COUNT as usize]);
 
 /// Device MAC address used for network identification.
 /// 6-byte IEEE MAC address uniquely identifying this device in the mesh network.
-pub(in crate::sdk) static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
+pub(crate) static MAC_ID: CriticalSectionMutex<[u8; 6]> = CriticalSectionMutex::new([0; 6]);
 
 /// BLE advertising data payload.
 /// Contains flags and service information broadcast during BLE advertising.
@@ -158,7 +155,7 @@ pub(crate) static ADV_DATA: CriticalSectionMutex<[u8; ADV_DATA_INIT.len()]> =
 /// Advertising packet structure used for BLE advertisements.
 /// Pre-configured packet with advertising data, device address, and payload.
 /// Transmitted during advertising intervals to announce device presence.
-pub(crate) static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+pub static PKT_ADV: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
     adv_ind_module: RfPacketAdvIndModuleT {
         dma_len: 0x27,
         _type: 0,
@@ -260,11 +257,11 @@ pub(crate) static PKT_ERR_RSP: Packet = Packet {
 
 /// Write pointer for the light receive buffer circular queue.
 /// Points to the next available slot for storing incoming light control packets.
-pub(crate) static LIGHT_RX_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
+pub static LIGHT_RX_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Unique 16-bit address assigned to this device within the mesh network.
 /// Used for addressing and routing messages to/from this specific device.
-pub(in crate::sdk) static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
+pub(crate) static DEVICE_ADDRESS: AtomicU16 = AtomicU16::new(0);
 
 /// RF transmit power base setting controlling signal strength.
 /// Hardware register value determining the baseline transmission power level.
@@ -276,7 +273,7 @@ static RF_TP_GAIN: AtomicU32 = AtomicU32::new(0xC);
 
 /// BLE scan response interval timing control.
 /// Determines the delay between receiving scan requests and sending responses.
-pub(crate) static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
+pub static BLE_SCAN_RESPONSE_INTERVAL_US: AtomicU32 = AtomicU32::new(0x92);
 
 /// Flag indicating UUID configuration has been set.
 /// Tracks whether device UUID has been properly configured.
@@ -297,8 +294,7 @@ pub const MAX_MESH_NAME_LEN: usize = if 31 - ADV_PRIVATE_SIZE - 2 < 16 {
 /// When true: Device address configuration requires MAC address validation before completion.
 /// When false: MAC address validation completed successfully, device address is configured.
 /// Used during mesh pairing to track the device address configuration state.
-pub(in crate::sdk) static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool =
-    AtomicBool::new(false);
+pub(crate) static MESH_DEVICE_ADDRESS_VALIDATION_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Next position index for device group address allocation.
 /// Points to the next available slot in the group address table.
@@ -306,7 +302,7 @@ pub(crate) static MESH_GROUP_ADDRESS_NEXT_POSITION: AtomicU16 = AtomicU16::new(0
 
 /// Flash configuration index for persistent storage operations.
 /// Current position in flash memory for configuration data.
-pub(in crate::sdk) static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
+pub(crate) static FLASH_CONFIGURATION_INDEX: AtomicI32 = AtomicI32::new(0);
 
 /// Next position for device address allocation in mesh network.
 /// Used for assigning unique addresses to new mesh devices.
@@ -318,7 +314,7 @@ pub(crate) static BLE_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Flag enabling BLE peripheral advertising functionality.
 /// Controls whether the peripheral device can advertise for BLE connections.
-pub(crate) static BLE_PERIPHERAL_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static BLE_PERIPHERAL_ADVERTISING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /**
  * Select the RF initialization table for the crystal detected at boot
@@ -329,9 +325,9 @@ pub(crate) static BLE_PERIPHERAL_ADVERTISING_ENABLED: AtomicBool = AtomicBool::n
  * enable, the gauss filter, the RX ADC clock and the DC modulator for a 16MHz
  * crystal; they are wrong values on a 12MHz part, so they stay unloaded there.
  *
- * The selection lives in this helper because `load_tbl_cmd_set` is declared
- * `#[cfg_attr(test, mry(skip_args(TBLCMDSET)))]`: its mock cannot observe which
- * slice it was handed, so the choice is only testable as a pure function.
+ * The selection lives in this helper so it is a pure function a test can
+ * assert on directly: `load_tbl_cmd_set` walks the table by writing registers,
+ * so its effect is observable but the slice it was handed never is.
  *
  * @param is_16mhz - Whether a 16MHz crystal was detected at boot
  * @return The RF initialization command table to load
@@ -434,7 +430,6 @@ pub fn rf_drv_init(enable: bool) -> u8 {
  * This function stops any ongoing RF operations by setting the RF mode control
  * register to the stop mode (0x80).
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_stop_trx() {
     write_reg_rf_mode_control(0x80); // stop
 }
@@ -446,7 +441,6 @@ pub fn rf_stop_trx() {
  * 1. Enabling the RF receiver in the RF_TRX_MODE register
  * 2. Setting the RF state machine to receive mode
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_rxmode() {
     write_reg_rf_rx_mode((FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits()); // rx enable
     write_reg_rf_txrx_state(RF_TRX_OFF | BIT!(5)); // RX enable
@@ -460,7 +454,6 @@ pub fn rf_set_rxmode() {
  * 2. Disabling the RF receiver
  * 3. Resetting the RF state machine
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_tx_rx_off() {
     // reg_rf_mode (0xf16): TX_EN_DLY_EN (bit0) | R_TX_EN_DLY=2 (bits7:4) | bit3 (0x08) undocumented
     write_reg_rf_mode(0x29);
@@ -480,7 +473,6 @@ pub fn rf_set_tx_rx_off() {
  * This is a fundamental initialization function that must be called during device startup
  * before any RF communication can occur.
  */
-#[cfg_attr(test, mry::mry)]
 pub fn blc_ll_init_basic_mcu() {
     // Configure system tick interval
     write_reg_rf_sys_timer_config(700);
@@ -653,7 +645,6 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet) {
  * @param data - The BLE mesh packet to process
  * @return true if packet was successfully processed or is a duplicate, false otherwise
  */
-#[cfg_attr(test, mry::mry)]
 fn rf_link_slave_data_write_no_dec(data: &Packet) {
     // Validate minimum packet size requirement
     // RF length must be at least 0x11 bytes for valid command packets
@@ -911,7 +902,6 @@ pub fn rf_link_slave_data_write(data: &Packet) {
  *
  * @param adv_data_ptr - Reference to the advertisement data to be included in the packet
  */
-#[cfg_attr(test, mry::mry)]
 fn rf_link_slave_set_adv(adv_data_ptr: &[u8]) {
     let mut pkt_adv = PKT_ADV.lock();
 
@@ -943,7 +933,6 @@ fn rf_link_slave_set_adv(adv_data_ptr: &[u8]) {
  *
  * @param interval - Base interval value for BLE timing operations
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_init(interval: u32) {
     // One snapshot for the whole init path; the struct is `Copy`, so no
     // configuration lock is held while the radio is set up.
@@ -952,7 +941,7 @@ pub fn rf_link_slave_init(interval: u32) {
     // SAFETY: (2) startup RF-init boundary; no unsafe operation remains. Every
     // callee is a safe `fn` (register accessors, `flash_read_page`, `pair_load_key`)
     // and the raw pointers they take come from live locals/statics. Retained because
-    // `sdk/mod.rs` sets `#![allow(warnings)]`, which hides the `unused_unsafe` this
+    // the crate root sets `#![allow(warnings)]`, which hides the `unused_unsafe` this
     // block would otherwise raise; removing it is a separate change.
     unsafe {
         // Initialize the basic MCU link layer functionality
@@ -962,7 +951,7 @@ pub fn rf_link_slave_init(interval: u32) {
         *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
 
         // Initialize link state and timing parameters
-        BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Disconnected);
+        BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Disconnected);
         MESH_LISTEN_INTERVAL_US.set(interval * CLOCK_SYS_CLOCK_1US);
 
         // Configure connection timer tick
@@ -1042,7 +1031,6 @@ pub fn rf_link_slave_init(interval: u32) {
  *
  * @param index - The power level index (0-11), where 0 is highest power
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_power_level_index(index: u32) {
     // Default to the lowest power setting (index 11) if out of range
     let tbl_index = if index < TBL_RF_POWER.len() as u32 {
@@ -1055,7 +1043,7 @@ pub fn rf_set_power_level_index(index: u32) {
     // SAFETY: (2) analog-register writes; no unsafe operation remains. `tbl_index`
     // is bounded by the `TBL_RF_POWER.len()` check above, so the table reads are in
     // bounds, and `analog_write` is a safe `fn`. Same retained no-op as in
-    // `rf_link_slave_init` (`sdk/mod.rs`'s `#![allow(warnings)]`).
+    // `rf_link_slave_init` (the crate root's `#![allow(warnings)]`).
     unsafe {
         analog_write(REGA_RF_PA_GAIN, TBL_RF_POWER[tbl_index].a); // PA gain control
         analog_write(REGA_RF_PA_BIAS, TBL_RF_POWER[tbl_index].b); // PA bias control
@@ -1105,7 +1093,6 @@ struct ChannelParams {
  *
  * @param chn - The BLE channel number to use (0-61)
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_channel(chn: u8) {
     // Set the RF channel control register
     write_reg_rf_channel(chn);
@@ -1260,7 +1247,6 @@ fn rf_set_tp_gain(gain: u8) {
  * @param addr - The address in memory of the packet to transmit
  * @param tick - The system tick time when the transition should occur
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_start_srx2tx(addr: u32, tick: u32) {
     write_reg_rf_sched_tick(tick); // Setting schedule trigger time
     write_reg_rf_mode(read_reg_rf_mode() | 0x04); // Enable cmd_schedule mode
@@ -1277,7 +1263,6 @@ pub fn rf_start_srx2tx(addr: u32, tick: u32) {
  * @param addr - The address in memory where received data should be stored
  * @param tick - The system tick time when the transition should occur
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_start_stx2rx(addr: u32, tick: u32) {
     write_reg_rf_sched_tick(tick); // Setting schedule trigger time
     write_reg_rf_mode(read_reg_rf_mode() | 0x04); // Enable cmd_schedule mode
@@ -1294,7 +1279,6 @@ pub fn rf_start_stx2rx(addr: u32, tick: u32) {
  * @param addr - The address in memory where received data should be stored
  * @param tick - The system tick time when the transition should occur
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_start_brx(addr: u32, tick: u32) {
     write_reg_rf_event_clear(0xffffffff); // Clear pending events
     write_reg_rf_sched_tick(tick); // Setting schedule trigger time
@@ -1312,7 +1296,6 @@ pub fn rf_start_brx(addr: u32, tick: u32) {
  *
  * The sequence number is used to identify and order packets in a transmission sequence.
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_reset_sn() {
     write_reg_rf_sn(0x3f); // Write specific reset value
     write_reg_rf_sn(0x00); // Initialize to zero
@@ -1337,7 +1320,6 @@ pub fn rf_set_ble_crc(crc: &[u8]) {
  * Configures the RF hardware with the standard CRC initialization value (0x555555)
  * that is used for BLE advertising packets according to the specification.
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_crc_adv() {
     write_reg_rf_crc(0x555555); // Standard BLE advertising CRC init value
 }
@@ -1351,7 +1333,6 @@ pub fn rf_set_ble_crc_adv() {
  *
  * @param ac - The 32-bit access code value
  */
-#[cfg_attr(test, mry::mry)]
 pub fn rf_set_ble_access_code(ac: u32) {
     write_reg_rf_access_code(ac.swap_bytes()); // Swap byte order for hardware compatibility
 }
@@ -1370,28 +1351,22 @@ pub fn rf_set_ble_access_code_adv() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_pair::{
-        mock_pair_dec_packet, MESH_PAIR_ENABLE, SECURITY_ENABLE,
+    use crate::ble::pair::{pair_init, PAIR_STATE};
+    use crate::ble::status::{
+        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
     };
-    use crate::sdk::ble_app::callbacks::{mock_on_light_data, mock_on_light_response};
-    use crate::sdk::ble_app::config::set_radio_config;
-    use crate::sdk::ble_app::flash_config::mock_retrieve_dev_grp_address;
-    use crate::sdk::ble_app::flash_config::{mock_dev_addr_with_mac_flag, mock_pair_load_key};
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_rf_link_match_group_mac;
-    use crate::sdk::ble_app::light_ll::packet_processing::{
-        mock_parse_ble_packet_op_params, mock_rf_link_is_notify_req, mock_rf_link_slave_add_status,
-    };
-    use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_par_init;
-    use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
-    use crate::sdk::ble_app::rf_drv_8266_tables::{TBL_AGC, TBL_RF_INI};
+    use crate::callbacks::{set_ble_app_hooks, BleAppHooks};
+    use crate::config::set_radio_config;
+    use crate::rf::tables::{TBL_AGC, TBL_RF_INI};
+    use core::sync::atomic::Ordering;
+    use mesh_protocol::mesh_types::DEV_ADDR_PAR_WITH_MAC;
     use mesh_protocol::packet_types::Packet;
     use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
-    use mry::Any;
     use tlsr8266_hal::common::sync::SimplifyLS;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
+    use tlsr8266_hal::mcu::crypto::aes_att_encryption_packet;
     use tlsr8266_pac::fake_mmio::{FakeMmio, RegWrite};
     use tlsr8266_pac::*;
 
@@ -1405,6 +1380,130 @@ mod tests {
         fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
         FakeFlash::reset();
+        install_noop_hooks();
+    }
+
+    /// Count of `on_light_data` dispatches recorded by the installed hook.
+    static RECORDED_LIGHT_DATA: AtomicUsize = AtomicUsize::new(0);
+    /// Count of `on_light_response` dispatches recorded by the installed hook.
+    static RECORDED_LIGHT_RESPONSE: AtomicUsize = AtomicUsize::new(0);
+
+    fn noop_mesh_pair_proc() {}
+    fn noop_light_data(_pkt: &Packet) {}
+    fn noop_light_response(_rsp: &mut PacketAttValue, _src: &PacketAttValue) -> Result<(), ()> {
+        Err(())
+    }
+    fn noop_uart_mesh_rx(_pkt: &Packet) {}
+
+    /// Records a `on_light_data` dispatch so a test can prove the SDK reached
+    /// the application seam.
+    fn record_light_data(_pkt: &Packet) {
+        RECORDED_LIGHT_DATA.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a `on_light_response` dispatch and answers `Ok(())`, which is the
+    /// application behaviour that makes the SDK queue a status packet.
+    fn record_light_response(_rsp: &mut PacketAttValue, _src: &PacketAttValue) -> Result<(), ()> {
+        RECORDED_LIGHT_RESPONSE.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Installs hooks that record the two seams these tests assert on.
+    fn install_recording_hooks() {
+        RECORDED_LIGHT_DATA.store(0, Ordering::Relaxed);
+        RECORDED_LIGHT_RESPONSE.store(0, Ordering::Relaxed);
+        set_ble_app_hooks(BleAppHooks {
+            on_mesh_pair_proc: noop_mesh_pair_proc,
+            on_light_data: record_light_data,
+            on_light_response: record_light_response,
+            on_uart_mesh_rx: noop_uart_mesh_rx,
+        });
+    }
+
+    /// Restores the neutral hook set the rest of the suite assumes.
+    fn install_noop_hooks() {
+        set_ble_app_hooks(BleAppHooks {
+            on_mesh_pair_proc: noop_mesh_pair_proc,
+            on_light_data: noop_light_data,
+            on_light_response: noop_light_response,
+            on_uart_mesh_rx: noop_uart_mesh_rx,
+        });
+    }
+
+    /// Sequence number the packet-handling fixture stores as "already seen".
+    const OLD_SNO: [u8; 3] = [1, 2, 2];
+    /// Sequence number the packets under test carry, so they are not duplicates.
+    const NEW_SNO: [u8; 3] = [1, 2, 3];
+
+    /// Builds an ATT-write packet the real `parse_ble_packet_op_params` decodes
+    /// as a 3-byte opcode followed by `params`.
+    ///
+    /// `rf_len` is the minimum the handler accepts and `l2cap_len` is exactly
+    /// header (10) + opcode (3) + parameters, so the parser reports
+    /// `op_cmd_len == 3` and `params_len == params.len()`.
+    fn decoded_packet(opcode: u8, params: &[u8]) -> Packet {
+        let mut packet = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    rf_len: 0x11,
+                    l2cap_len: (10 + 3 + params.len()) as u16,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        packet.att_write_mut().value.val[0] = 0x80 | 0x40 | (opcode & 0x3f);
+        packet.att_write_mut().value.val[1] = 0x02;
+        packet.att_write_mut().value.val[2] = 0x03;
+        packet.att_write_mut().value.val[3..3 + params.len()].copy_from_slice(params);
+        packet.att_write_mut().value.sno = NEW_SNO;
+        packet
+    }
+
+    /// Puts every radio/packet global reachable from `rf_link_slave_data_write`
+    /// in the state the retired mocks assumed: a stale sequence number, no group
+    /// membership, no address match, no in-flight status read.
+    fn reset_packet_state() -> RecordingHooksGuard {
+        reset_host_fakes();
+        crate::facade::reset_radio_state_for_test();
+        critical_section::with(|_| {
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = OLD_SNO;
+            *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0; 3];
+        });
+        BLE_PERIPHERAL_LINK_COMMAND.set(0xff);
+        SLAVE_DATA_VALID.set(0);
+        DEVICE_STATUS_RECORD_INDEX.set(0);
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        NOTIFICATION_REQUEST_MASK_INDEX.set(0);
+        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
+        write_reg_system_tick(0xaabbccdd);
+        install_recording_hooks();
+        RecordingHooksGuard
+    }
+
+    /// Restores the neutral hook set when a test that installed recording hooks
+    /// ends, including while unwinding from a failed assertion.
+    struct RecordingHooksGuard;
+
+    impl Drop for RecordingHooksGuard {
+        fn drop(&mut self) {
+            install_noop_hooks();
+        }
+    }
+
+    /// Asserts the status path queued exactly one responder record.
+    fn assert_status_recorded() {
+        assert_eq!(
+            DEVICE_STATUS_RECORD_INDEX.get(),
+            1,
+            "add_status must record one status responder"
+        );
+        assert_eq!(
+            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            1,
+            "add_status must advance the response buffer write pointer"
+        );
     }
 
     /// A value the analog bank never legitimately holds in these tests, seeded
@@ -1429,6 +1528,21 @@ mod tests {
             RF_INI_FIRST_VALUE,
             "rf_drv_init must load the RF init command table"
         );
+    }
+
+    /// Asserts every AGC stage register carries its `TBL_AGC` value.
+    ///
+    /// `write_reg_rf_rx_gain_agc(value, i)` writes `value` at `0x480 + i`, and
+    /// production shifts the index by two, so stage `i` lands at `0x480 + 4i`.
+    fn assert_agc_applied() {
+        for i in 0..6 {
+            assert_eq!(
+                FakeMmio::reg32(0x480 + ((i << 2) as u32)),
+                TBL_AGC[i],
+                "AGC stage {} must carry its table value",
+                i
+            );
+        }
     }
 
     #[test]
@@ -1520,129 +1634,193 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_access_code_adv() {
-        mock_write_reg32(0x408, 0xd6be898e).returns(());
+        reset_host_fakes();
 
         rf_set_ble_access_code_adv();
 
-        mock_write_reg32(0x408, 0xd6be898e).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0x408 | REG_BASE_ADDR,
+                width: 4,
+                value: 0xd6be898e,
+            }],
+            "the advertising access code must reach reg_rf_access_code"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_access_code() {
-        mock_write_reg32(0x408, Any).returns(());
+        reset_host_fakes();
 
         // Should swap the order of the bytes
         rf_set_ble_access_code(0x12345678);
-        mock_write_reg32(0x408, 0x78563412).assert_called(1);
+        assert_eq!(register_writes(0x408), vec![0x78563412]);
 
         rf_set_ble_access_code(0x78563412);
-        mock_write_reg32(0x408, 0x12345678).assert_called(1);
+        assert_eq!(register_writes(0x408), vec![0x78563412, 0x12345678]);
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_crc_adv() {
-        mock_write_reg32(0x44c, Any).returns(());
+        reset_host_fakes();
 
         rf_set_ble_crc_adv();
 
-        mock_write_reg32(0x44c, 0x555555).assert_called(1);
+        assert_eq!(register_writes(0x44c), vec![0x555555]);
     }
 
     #[test]
-    #[mry::lock(write_reg32)]
     fn test_rf_set_ble_crc() {
-        mock_write_reg32(0x44c, Any).returns(());
+        reset_host_fakes();
 
         rf_set_ble_crc(&[0x12, 0x34, 0x56]);
 
-        mock_write_reg32(0x44c, 0x563412).assert_called(1);
+        assert_eq!(
+            register_writes(0x44c),
+            vec![0x563412],
+            "the CRC init value is little-endian in the 24-bit register"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
     fn test_rf_reset_sn() {
-        mock_write_reg8(0xf01, Any).returns(());
+        reset_host_fakes();
 
         rf_reset_sn();
 
-        mock_write_reg8(0xf01, 0x3f).assert_called(1);
-        mock_write_reg8(0xf01, 0).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0xf01 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x3f,
+                },
+                RegWrite {
+                    addr: 0xf01 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0,
+                },
+            ],
+            "the sequence number is cleared after the 0x3f reset value"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_event_clear)]
-    #[mry::lock(write_reg_rf_sched_tick)]
-    #[mry::lock(read_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode_control)]
-    #[mry::lock(write_reg_dma3_addr)]
     fn test_rf_start_brx() {
-        mock_read_reg_rf_mode().returns(3);
-        mock_write_reg_rf_event_clear(Any).returns(());
-        mock_write_reg_rf_sched_tick(0x87654321).returns(());
-        mock_write_reg_rf_mode(4 | 3).returns(());
-        mock_write_reg_rf_mode_control(0x82).returns(());
-        mock_write_reg_dma3_addr(0x5678).returns(());
+        reset_host_fakes();
+        // Registers the scheduling bit must be OR-ed into.
+        write_reg_rf_mode(3);
+        FakeMmio::clear_writes();
 
         rf_start_brx(0x12345678, 0x87654321);
 
-        mock_write_reg_rf_event_clear(0xffffffff).assert_called(1);
-        mock_write_reg_rf_sched_tick(0x87654321).assert_called(1);
-        mock_write_reg_rf_mode(4 | 3).assert_called(1);
-        mock_write_reg_rf_mode_control(0x82).assert_called(1);
-        mock_write_reg_dma3_addr(0x5678).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0xf28 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0xffffffff,
+                },
+                RegWrite {
+                    addr: 0xf18 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0x87654321,
+                },
+                RegWrite {
+                    addr: 0xf16 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 4 | 3,
+                },
+                RegWrite {
+                    addr: 0xf00 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x82,
+                },
+                RegWrite {
+                    addr: 0x50c | REG_BASE_ADDR,
+                    width: 2,
+                    value: 0x5678,
+                },
+            ],
+            "brx clears events, schedules the tick, arms brx and points DMA3 at the buffer"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_sched_tick)]
-    #[mry::lock(read_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode_control)]
-    #[mry::lock(write_reg_dma3_addr)]
     fn test_rf_start_srx2tx() {
-        // Set up mocks
-        mock_read_reg_rf_mode().returns(0);
-        mock_write_reg_rf_sched_tick(0x87654321).returns(());
-        mock_write_reg_rf_mode(0x04).returns(());
-        mock_write_reg_rf_mode_control(0x85).returns(());
-        mock_write_reg_dma3_addr(0x5678).returns(());
+        reset_host_fakes();
+        // The scheduling bit is OR-ed into the current RF mode.
+        write_reg_rf_mode(0);
+        FakeMmio::clear_writes();
 
-        // Call the function under test
         rf_start_srx2tx(0x12345678, 0x87654321);
 
-        // Verify expectations
-        mock_write_reg_rf_sched_tick(0x87654321).assert_called(1);
-        mock_write_reg_rf_mode(0x04).assert_called(1);
-        mock_write_reg_rf_mode_control(0x85).assert_called(1);
-        mock_write_reg_dma3_addr(0x5678).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0xf18 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0x87654321,
+                },
+                RegWrite {
+                    addr: 0xf16 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x04,
+                },
+                RegWrite {
+                    addr: 0xf00 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x85,
+                },
+                RegWrite {
+                    addr: 0x50c | REG_BASE_ADDR,
+                    width: 2,
+                    value: 0x5678,
+                },
+            ],
+            "srx2tx must arm the srx2tx mode control value"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_sched_tick)]
-    #[mry::lock(read_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_mode_control)]
-    #[mry::lock(write_reg_dma3_addr)]
     fn test_rf_start_stx2rx() {
-        // Set up mocks
-        mock_read_reg_rf_mode().returns(0);
-        mock_write_reg_rf_sched_tick(0x87654321).returns(());
-        mock_write_reg_rf_mode(0x04).returns(());
-        mock_write_reg_rf_mode_control(0x87).returns(());
-        mock_write_reg_dma3_addr(0x5678).returns(());
+        reset_host_fakes();
+        write_reg_rf_mode(0);
+        FakeMmio::clear_writes();
 
-        // Call the function under test
         rf_start_stx2rx(0x12345678, 0x87654321);
 
-        // Verify expectations
-        mock_write_reg_rf_sched_tick(0x87654321).assert_called(1);
-        mock_write_reg_rf_mode(0x04).assert_called(1);
-        mock_write_reg_rf_mode_control(0x87).assert_called(1);
-        mock_write_reg_dma3_addr(0x5678).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: 0xf18 | REG_BASE_ADDR,
+                    width: 4,
+                    value: 0x87654321,
+                },
+                RegWrite {
+                    addr: 0xf16 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x04,
+                },
+                RegWrite {
+                    addr: 0xf00 | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x87,
+                },
+                RegWrite {
+                    addr: 0x50c | REG_BASE_ADDR,
+                    width: 2,
+                    value: 0x5678,
+                },
+            ],
+            "stx2rx must arm the stx2rx mode control value"
+        );
     }
 
     /// Seeds the four analog registers `rf_set_power_level_index` writes with a
@@ -1723,205 +1901,150 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_rf_channel)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
-    #[mry::lock(write_reg16)]
-    #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_data_channels() {
-        // Mock all register writes
-        mock_write_reg8(0x40d, Any).returns(());
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_rx_mode(Any).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg16(0x4d6, Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
+        reset_host_fakes();
+        FakeAnalog::set(REGA_SAR_ADC_PWR, ANA_UNWRITTEN);
 
         // Test data channel (0-10)
         rf_set_ble_channel(5);
-        mock_write_reg_rf_channel(5).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![5]);
         // Channel 5 should result in gain = (5+2)*2 = 14, intgn = 14+2400 = 2414
-        mock_write_reg_pll_rx_fine_div_tune(2414).assert_called(1);
+        assert_eq!(register_writes(0x4d6), vec![2414]);
         // SAR ADC should be powered off: seeded to a value the write must clear
         assert_eq!(
-            FakeAnalog::get(6),
+            FakeAnalog::get(REGA_SAR_ADC_PWR),
             0,
-            "reg 0x06 (SAR ADC power) must be written to 0"
+            "the SAR ADC power register must be written to 0"
         );
         // RF mode should be set to 0x29
-        mock_write_reg_rf_mode(0x29).assert_called(1);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
         // RX should be disabled
-        mock_write_reg_rf_rx_mode(0).assert_called(1);
+        assert_eq!(register_writes(0x428), vec![0]);
         // TX/RX state machine should be reset
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
 
         // Test data channel (11-36)
         rf_set_ble_channel(20);
-        mock_write_reg_rf_channel(20).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![5, 20]);
         // Channel 20 should result in gain = (20+3)*2 = 46, intgn = 46+2400 = 2446
-        mock_write_reg_pll_rx_fine_div_tune(2446).assert_called(1);
+        assert_eq!(register_writes(0x4d6), vec![2414, 2446]);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_channel)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
-    #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_adv_channels() {
-        // Mock all register writes
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_rx_mode(Any).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
+        reset_host_fakes();
 
         // Test advertising channels
         // Channel 37 (2402 MHz)
         rf_set_ble_channel(37);
-        mock_write_reg_rf_channel(37).assert_called(1);
-        mock_write_reg_pll_rx_fine_div_tune(2402).assert_called(1);
-        mock_write_reg_rf_mode(0x29).assert_called(1);
-        mock_write_reg_rf_rx_mode(0).assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![37]);
+        assert_eq!(register_writes(0x4d6), vec![2402]);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
+        assert_eq!(register_writes(0x428), vec![0]);
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
 
         // Channel 38 (2426 MHz)
         rf_set_ble_channel(38);
-        mock_write_reg_rf_channel(38).assert_called(1);
-        mock_write_reg_pll_rx_fine_div_tune(2426).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![37, 38]);
+        assert_eq!(register_writes(0x4d6), vec![2402, 2426]);
 
         // Channel 39 (2480 MHz)
         rf_set_ble_channel(39);
-        mock_write_reg_rf_channel(39).assert_called(1);
-        mock_write_reg_pll_rx_fine_div_tune(2480).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![37, 38, 39]);
+        assert_eq!(register_writes(0x4d6), vec![2402, 2426, 2480]);
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
-    #[mry::lock(write_reg16)]
-    #[mry::lock(write_reg_rf_channel)]
-    #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_extended_40_50() {
-        // Mock all register writes
-        mock_write_reg8(0x40d, Any).returns(());
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_rx_mode(Any).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg16(0x4d6, Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
+        reset_host_fakes();
 
         // Test extended channel (40-50)
         rf_set_ble_channel(45);
-        mock_write_reg_rf_channel(45).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![45]);
         // Channel 45 should result in gain = 45*2 = 90, intgn = 90+2400 = 2490
-        mock_write_reg_pll_rx_fine_div_tune(2490).assert_called(1);
-        mock_write_reg_rf_mode(0x29).assert_called(1);
-        mock_write_reg_rf_rx_mode(0).assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0x4d6), vec![2490]);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
+        assert_eq!(register_writes(0x428), vec![0]);
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_channel)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
-    #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_extended_51_61() {
-        // Mock all register writes
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_rx_mode(Any).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
+        reset_host_fakes();
 
         // Test extended channel (51-61) with our new calculation
         // For channel 55:
         // gain = (61-55)*2 = 12
         // intgn = 2408 - gain = 2408 - 12 = 2396
         rf_set_ble_channel(55);
-        mock_write_reg_rf_channel(55).assert_called(1);
-        mock_write_reg_pll_rx_fine_div_tune(2396).assert_called(1);
-        mock_write_reg_rf_mode(0x29).assert_called(1);
-        mock_write_reg_rf_rx_mode(0).assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![55]);
+        assert_eq!(register_writes(0x4d6), vec![2396]);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
+        assert_eq!(register_writes(0x428), vec![0]);
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_channel)]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
-    #[mry::lock(write_reg_pll_rx_fine_div_tune)]
     fn test_rf_set_ble_channel_out_of_range() {
-        // Mock all register writes
-        mock_write_reg_rf_channel(Any).returns(());
-        mock_write_reg_rf_mode(Any).returns(());
-        mock_write_reg_rf_rx_mode(Any).returns(());
-        mock_write_reg_rf_txrx_state(Any).returns(());
-        mock_write_reg_pll_rx_fine_div_tune(Any).returns(());
+        reset_host_fakes();
 
         // Test out of range channel (> 61)
         rf_set_ble_channel(62);
-        mock_write_reg_rf_channel(62).assert_called(1);
+        assert_eq!(register_writes(0x40d), vec![62]);
         // Out of range channel should default to 0x50 and 2480
-        mock_write_reg_pll_rx_fine_div_tune(2480).assert_called(1);
-        mock_write_reg_rf_mode(0x29).assert_called(1);
-        mock_write_reg_rf_rx_mode(0).assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0x4d6), vec![2480]);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
+        assert_eq!(register_writes(0x428), vec![0]);
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_mode_control)]
     fn test_rf_stop_trx() {
-        mock_write_reg_rf_mode_control(0x80).returns(());
+        reset_host_fakes();
 
         rf_stop_trx();
 
-        mock_write_reg_rf_mode_control(0x80).assert_called(1);
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![RegWrite {
+                addr: 0xf00 | REG_BASE_ADDR,
+                width: 1,
+                value: 0x80,
+            }],
+            "stop is the 0x80 mode-control value"
+        );
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
     fn test_rf_set_rxmode() {
-        mock_write_reg_rf_rx_mode((FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits())
-            .returns(());
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF | BIT!(5)).returns(());
+        reset_host_fakes();
 
         rf_set_rxmode();
 
-        mock_write_reg_rf_rx_mode((FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits())
-            .assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF | BIT!(5)).assert_called(1);
+        assert_eq!(
+            register_writes(0x428),
+            vec![(FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits() as u32]
+        );
+        assert_eq!(register_writes(0xf02), vec![(RF_TRX_OFF | BIT!(5)) as u32]);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_mode)]
-    #[mry::lock(write_reg_rf_rx_mode)]
-    #[mry::lock(write_reg_rf_txrx_state)]
     fn test_rf_set_tx_rx_off() {
-        mock_write_reg_rf_mode(0x29).returns(());
-        mock_write_reg_rf_rx_mode(FLD_RF_RX_MODE::LOW_PASS_FILTER.bits()).returns(());
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).returns(());
+        reset_host_fakes();
 
         rf_set_tx_rx_off();
 
-        mock_write_reg_rf_mode(0x29).assert_called(1);
-        mock_write_reg_rf_rx_mode(FLD_RF_RX_MODE::LOW_PASS_FILTER.bits()).assert_called(1);
-        mock_write_reg_rf_txrx_state(RF_TRX_OFF).assert_called(1);
+        assert_eq!(register_writes(0xf16), vec![0x29]);
+        assert_eq!(
+            register_writes(0x428),
+            vec![FLD_RF_RX_MODE::LOW_PASS_FILTER.bits() as u32]
+        );
+        assert_eq!(register_writes(0xf02), vec![RF_TRX_OFF as u32]);
     }
 
     #[test]
-    #[mry::lock(write_reg8)]
     fn test_rf_link_slave_set_adv() {
-        mock_write_reg8(Any, Any).returns(());
+        reset_host_fakes();
 
         // Setup a test advertisement data slice
         let test_adv_data = [0x02, 0x01, 0x06, 0x08, 0xFF, 0x12, 0x34];
@@ -2079,16 +2202,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_enable() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
-
-        // Expect calls to configure the Automatic Gain Control (AGC) settings
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
-        }
 
         // Blank flash: power settings read back as 0xFF (the default branch).
 
@@ -2105,9 +2222,7 @@ mod tests {
         assert_rf_init_table_applied();
 
         // Verify AGC settings were configured
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).assert_called(1);
-        }
+        assert_agc_applied();
 
         // With all 0xFF values in power_settings, RF_TP_BASE and RF_TP_GAIN should remain unchanged
         assert_eq!(RF_TP_BASE.get(), initial_base);
@@ -2119,22 +2234,15 @@ mod tests {
 
     /// Tests that rf_drv_init consults the crystal detected at boot.
     ///
-    /// `load_tbl_cmd_set` skips its argument when mocked, so the mock cannot see
-    /// which table it was handed (that choice is covered by the pure
-    /// `rf_init_table` tests). This test pins the other half of the contract:
-    /// `rf_drv_init` actually reads the detected flag, exactly once, and still
-    /// loads a table.
+    /// `rf_drv_init` selects the init table from `is_16mhz_xtal()`. This test
+    /// pins that contract: with a 16MHz crystal the four 16MHz-only commands
+    /// run, which is visible as the analog gauss-filter write at 0x99.
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_reads_detected_xtal_flag() {
         reset_host_fakes();
         // Deepsleep flag clear, and a 16MHz crystal detected at boot
         FakeAnalog::set(rega_deepsleep_flag, 0);
         fake_clock::set_xtal_16mhz(true);
-
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
-        }
 
         // Erased flash: no power calibration, so RF_TP_BASE / RF_TP_GAIN are
         // left alone.
@@ -2213,17 +2321,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_power_settings() {
         reset_host_fakes();
         let cfg = radio_config();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
-
-        // Expect calls to configure the Automatic Gain Control (AGC) settings
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
-        }
 
         // Seed custom power calibration values at offsets 0x11 and 0x12 of the
         // MAC sector.
@@ -2244,21 +2346,18 @@ mod tests {
         // ((0x25 - 0x10) << 8) / 80 = (0x1500 / 80) = 67
         assert_eq!(RF_TP_GAIN.get(), 67);
 
+        // The AGC bank is still configured on this branch.
+        assert_agc_applied();
+
         // Verify the function returns the deepsleep flag value
         assert_eq!(result, 0x40);
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_default_power_settings() {
         reset_host_fakes();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
-
-        // Expect calls to configure the Automatic Gain Control (AGC) settings
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
-        }
 
         // Blank flash: both calibration bytes read back as 0xFF.
 
@@ -2274,6 +2373,8 @@ mod tests {
         // When power_settings contains 0xFF (default), the values should remain unchanged
         assert_eq!(RF_TP_BASE.get(), initial_base);
         assert_eq!(RF_TP_GAIN.get(), initial_gain);
+
+        assert_agc_applied();
 
         // Verify the function returns the deepsleep flag value
         assert_eq!(result, 0x40);
@@ -2310,17 +2411,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(write_reg_rf_rx_gain_agc)]
     fn test_rf_drv_init_with_partial_power_settings() {
         reset_host_fakes();
         let cfg = radio_config();
         // Seed the deepsleep flag the driver reports back
         FakeAnalog::set(rega_deepsleep_flag, 0x40);
-
-        // Expect calls to configure the Automatic Gain Control (AGC) settings
-        for i in 0..6 {
-            mock_write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32).returns(());
-        }
 
         // Only the first calibration byte is set; the second stays 0xFF.
         FakeFlash::write_slice(cfg.flash_adr_mac + 0x11, &[0x29]);
@@ -2337,6 +2432,8 @@ mod tests {
 
         // RF_TP_GAIN is calculated as ((0x29 - 0x19) << 8) / 80 = (0x1000 / 80) = 51
         assert_eq!(RF_TP_GAIN.get(), 51);
+
+        assert_agc_applied();
 
         // Verify the function returns the deepsleep flag value
         assert_eq!(result, 0x40);
@@ -2452,14 +2549,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
     fn test_rf_link_slave_read_status_start() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0x12345678);
-
-        // Mock initialization function
-        mock_rf_link_slave_read_status_par_init().returns(());
+        reset_host_fakes();
+        // Seed the hardware tick the operation timestamps itself with
+        write_reg_system_tick(0x12345678);
 
         // Create test packet with specific values for testing
         let mut test_packet = Packet {
@@ -2475,6 +2568,11 @@ mod tests {
 
         // Set status tick to a known value
         DEVICE_STATUS_TICK_COUNTER.set(0x55);
+
+        // Dirty the state the parameter initialiser must reset
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(9);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(9);
+        *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [9, 9, 9];
 
         // Call the function under test
         rf_link_slave_read_status_start(&mut test_packet);
@@ -2508,8 +2606,10 @@ mod tests {
         assert_eq!(test_packet.att_cmd().value.val[11], 0);
         assert_eq!(test_packet.att_cmd().value.val[3], 0x55); // Should contain DEVICE_STATUS_TICK_COUNTER
 
-        // Verify initialization function was called
-        mock_rf_link_slave_read_status_par_init().assert_called(1);
+        // Verify the parameter initialiser reset the response buffer state
+        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
+        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0; 3]);
 
         // Verify status record variables were reset
         assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
@@ -2519,14 +2619,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
     fn test_rf_link_slave_read_status_start_broadcast() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0x87654321);
-
-        // Mock initialization function
-        mock_rf_link_slave_read_status_par_init().returns(());
+        reset_host_fakes();
+        // Seed the hardware tick the operation timestamps itself with
+        write_reg_system_tick(0x87654321);
 
         // Create test packet with specific values for testing
         let mut test_packet = Packet {
@@ -2539,6 +2635,11 @@ mod tests {
 
         // Set up broadcast address (bit 7 set in dst[1])
         test_packet.att_cmd_mut().value.dst[1] = 0x80; // Broadcast (MSB set)
+
+        // Dirty the state the parameter initialiser must reset
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(9);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(9);
+        *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [9, 9, 9];
 
         // Call the function under test
         rf_link_slave_read_status_start(&mut test_packet);
@@ -2556,8 +2657,10 @@ mod tests {
         // Broadcast packets don't have the destination fields cleared
         // and don't have special fields set
 
-        // Verify initialization function was called
-        mock_rf_link_slave_read_status_par_init().assert_called(1);
+        // Verify the parameter initialiser reset the response buffer state
+        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
+        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0; 3]);
 
         // Verify status record variables were reset
         assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
@@ -2567,14 +2670,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
     fn test_rf_link_slave_read_status_start_different_opcode() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock initialization function
-        mock_rf_link_slave_read_status_par_init().returns(());
+        reset_host_fakes();
+        // Seed the hardware tick the operation timestamps itself with
+        write_reg_system_tick(0xAABBCCDD);
 
         // Create test packet with specific values for testing
         let mut test_packet = Packet {
@@ -2621,8 +2720,8 @@ mod tests {
         // Verify unicast flag is copied to the packet at the right position
         assert_eq!(test_packet.att_cmd().value.val[12], 1);
 
-        // Verify initialization function was called
-        mock_rf_link_slave_read_status_par_init().assert_called(1);
+        // Verify the parameter initialiser ran (it zeroes the sequence number)
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0; 3]);
     }
 
     #[test]
@@ -2670,1200 +2769,476 @@ mod tests {
         // Duplicate packet should return true (successful but no processing)
     }
 
+    /// Response type the handler wrote into the outgoing light-data packet.
+    fn light_data_response_type() -> u8 {
+        critical_section::with(|_| {
+            PKT_LIGHT_DATA.lock().att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE]
+        })
+    }
+
+    /// Asserts the packet was dropped before the handler updated any state.
+    fn assert_packet_not_processed() {
+        assert_eq!(
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(),
+            OLD_SNO,
+            "a rejected packet must not become the last accepted sequence number"
+        );
+        assert_eq!(
+            BLE_PERIPHERAL_LINK_COMMAND.get(),
+            0xff,
+            "a rejected packet must not publish a command opcode"
+        );
+    }
+
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_non_notification_direct_match() {
-        // Reset global state
-        SLAVE_DATA_VALID.set(0);
+        let _hooks = reset_packet_state();
+        // dst == 0 is device-addressed and matches this device.
+        let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
 
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Reset SLAVE_DATA_VALID to ensure clean state
-        SLAVE_DATA_VALID.set(0);
-
-        // Mock op_cmd and params extraction
-        let op_cmd = [0x01, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (not a notification)
-        mock_rf_link_is_notify_req(Any).returns(false);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status stop if busy
-        mock_rf_link_slave_read_status_stop().returns(());
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify callback was called
-        mock_on_light_data(Any).assert_called(1);
-
-        // Verify sequence number was updated
-        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
-
-        // Verify command opcode was stored
-        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), op_cmd[0] & 0x3f);
-
-        // Verify data validity flag is 0 for direct match
-        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            1,
+            "a device-addressed packet must reach on_light_data"
+        );
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
+        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0x01);
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            0,
+            "a device match needs no bridge forwarding"
+        );
+        assert_eq!(
+            RECORDED_LIGHT_RESPONSE.get(),
+            0,
+            "a non-notification must not build a status response"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_non_notification_bridge() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
+        // Non-zero, in the device address space, but not this device.
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Set non-zero destination address for bridge forwarding
-        packet.att_write_mut().value.dst[0] = 0x34;
-        packet.att_write_mut().value.dst[1] = 0x12;
-
-        // Mock op_cmd and params extraction
-        let op_cmd = [0x01, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (not a notification)
-        mock_rf_link_is_notify_req(Any).returns(false);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status stop if busy
-        mock_rf_link_slave_read_status_stop().returns(());
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify callback was NOT called (no match)
-        mock_on_light_data(Any).assert_called(0);
-
-        // Verify sequence number was updated
-        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
-
-        // Verify command opcode was stored
-        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), op_cmd[0] & 0x3f);
-
-        // Verify data validity flag is set for bridge forwarding
-        assert_eq!(SLAVE_DATA_VALID.get(), (BRIDGE_MAX_CNT as u32) + 1);
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            0,
+            "a packet for another device must not reach on_light_data"
+        );
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
+        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0x01);
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            BRIDGE_MAX_CNT + 1,
+            "a foreign destination must be queued for bridge forwarding"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
     fn test_rf_link_slave_data_write_no_dec_invalid_op_cmd_len() {
-        // Create a packet with valid length
-        let packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        // A first opcode byte with 0x80 set and 0x40 clear is the unsupported
+        // 2-byte form, so the real parser reports `op_cmd_len == 0`.
+        let mut packet = decoded_packet(0, &[]);
+        packet.att_write_mut().value.val[0] = 0x80;
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            // packet.att_write_mut().value.sno = [1, 2, 3]; - this would require mut packet
-        });
-
-        // Mock op_cmd and params extraction with op_cmd_len != 3 (covers line 387)
-        let op_cmd = [0x01, 0x02, 0x00]; // 3 elements as required, but op_cmd_len = 2
-        let op_cmd_len = 2; // Not 3, so opcode will be set to 0 (line 387)
-        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true (doesn't fail, just uses default opcode 0)
-
-        // Verify opcode was set to 0 (default case on line 387)
-        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0);
+        assert_eq!(
+            BLE_PERIPHERAL_LINK_COMMAND.get(),
+            0,
+            "an opcode that does not come in three bytes is stored as 0"
+        );
+        assert_eq!(
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(),
+            NEW_SNO,
+            "the packet is still accepted enough to advance the sequence"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
     fn test_rf_link_slave_data_write_no_dec_device_addr_config_invalid_params() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(
+            LGT_CMD_CONFIG_DEV_ADDR,
+            &[0xFE, 0xFF, 0x12, 0x13], // params[0] != 0xFF is invalid for broadcast
+        );
+        packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
+        SLAVE_DATA_VALID.set(7);
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Set broadcast destination (high bit set) for device address config
-        packet.att_write_mut().value.dst[0] = 0x56;
-        packet.att_write_mut().value.dst[1] = 0x80 | 0x34; // High bit set for broadcast
-
-        // Mock op_cmd and params extraction
-        let op_cmd = [LGT_CMD_CONFIG_DEV_ADDR as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0xFE, 0xFF, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // params[0] != 0xFF (invalid, covers lines 399-403)
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return false due to invalid parameters for broadcast device config (lines 399-403)
+        assert_packet_not_processed();
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            0,
+            "an invalid broadcast device-address config is dropped before dispatch"
+        );
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            7,
+            "a rejected packet must leave the bridge flag untouched"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(dev_addr_with_mac_flag)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_device_addr_config_valid_broadcast() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(
+            LGT_CMD_CONFIG_DEV_ADDR,
+            &[0xFF, 0xFF, 0x12, 0x13], // params[0,1] == 0xFF is valid for broadcast
+        );
+        packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Set broadcast destination (high bit set) for device address config
-        packet.att_write_mut().value.dst[0] = 0x56;
-        packet.att_write_mut().value.dst[1] = 0x80 | 0x34; // High bit set for broadcast
-
-        // Mock op_cmd and params extraction with valid broadcast parameters
-        let op_cmd = [LGT_CMD_CONFIG_DEV_ADDR as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0xFF, 0xFF, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // params[0] == 0xFF && params[1] == 0xFF (valid, covers line 403)
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (LGT_CMD_CONFIG_DEV_ADDR is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock MAC flag check (not with MAC flag for this test)
-        mock_dev_addr_with_mac_flag(Any).returns(false);
-
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true and process the packet (line 403 is executed: dst_addr reassignment)
-
-        // Verify sequence number was updated
-        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            BRIDGE_MAX_CNT * 2 + 1,
+            "a broadcast address config without the MAC flag waits the maximum bridge delay"
+        );
+        assert_eq!(light_data_response_type(), GET_DEV_ADDR);
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            0,
+            "a broadcast config is not addressed to this device"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_stop)]
     fn test_rf_link_slave_data_write_no_dec_status_read_busy_stop() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction
-        let op_cmd = [0x01, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (device match)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (not a notification)
-        mock_rf_link_is_notify_req(Any).returns(false);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Set SLAVE_READ_STATUS_BUSY to non-zero (covers line 468)
+        let _hooks = reset_packet_state();
+        let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12]);
         SLAVE_READ_STATUS_BUSY.set(1);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
 
-        // Mock read status stop function
-        mock_rf_link_slave_read_status_stop().returns(());
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify read status stop was called (line 468)
-        mock_rf_link_slave_read_status_stop().assert_called(1);
-
-        // Verify callback was called
-        mock_on_light_data(Any).assert_called(1);
-
-        // Verify sequence number was updated
-        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
+        assert_eq!(
+            SLAVE_READ_STATUS_BUSY.get(),
+            0,
+            "a non-notification must stop an in-flight status read"
+        );
+        assert_eq!(
+            DEVICE_STATUS_READ_UNICAST_MODE.get(),
+            false,
+            "stopping the read must clear unicast mode"
+        );
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            1,
+            "the packet still reaches on_light_data"
+        );
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(dev_addr_with_mac_flag)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_grp_req() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(LGT_CMD_LIGHT_GRP_REQ, &[0x05, GET_GROUP2, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction for LGT_CMD_LIGHT_GRP_REQ
-        let op_cmd = [LGT_CMD_LIGHT_GRP_REQ as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [
-            0x05,
-            GET_GROUP2 as u8,
-            0x12,
-            0x13,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]; // param[0] = 5, param[1] = GET_GROUP2
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock MAC flag check (not with MAC flag, covers lines 525-528)
-        mock_dev_addr_with_mac_flag(Any).returns(false);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to params[0] * 2 + 1 = 5 * 2 + 1 = 11 (covers line 517)
-        assert_eq!(SLAVE_DATA_VALID.get(), 11);
-
-        // Verify response type is set to cmd_params[1] = GET_GROUP2 = 2 (covers set_response_type for LGT_CMD_LIGHT_GRP_REQ)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_GROUP2
-            );
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            11,
+            "a group request uses params[0] * 2 + 1 as its response slot"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_GROUP2,
+            "a group request answers with the requested group"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(dev_addr_with_mac_flag)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_config_dev_addr_with_mac_bridge() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(
+            LGT_CMD_CONFIG_DEV_ADDR,
+            &[0xFF, 0xFF, DEV_ADDR_PAR_WITH_MAC, 0x07],
+        );
+        packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Set broadcast destination for device address config
-        packet.att_write_mut().value.dst[0] = 0x56;
-        packet.att_write_mut().value.dst[1] = 0x80 | 0x34; // High bit set for broadcast
-
-        // Mock op_cmd and params extraction for LGT_CMD_CONFIG_DEV_ADDR
-        let op_cmd = [LGT_CMD_CONFIG_DEV_ADDR as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0xFF, 0xFF, 0x12, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // params[0,1] = 0xFF for valid broadcast, param[3] = 7
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock MAC flag check (with MAC flag for params[3] timing, covers line 523)
-        mock_dev_addr_with_mac_flag(Any).returns(true);
-
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to params[3] * 2 + 1 = 7 * 2 + 1 = 15 (covers line 523)
-        assert_eq!(SLAVE_DATA_VALID.get(), 15);
-
-        // Verify response type is set to GET_DEV_ADDR (covers device address config with MAC flag)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_DEV_ADDR
-            );
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            15,
+            "with the MAC flag the address config uses params[3] * 2 + 1"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_DEV_ADDR,
+            "a device address config answers with GET_DEV_ADDR"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_config_grp_bridge() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(LGT_CMD_LIGHT_CONFIG_GRP, &[0x05, 0x11, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction for LGT_CMD_LIGHT_CONFIG_GRP
-        let op_cmd = [LGT_CMD_LIGHT_CONFIG_GRP as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x05, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to BRIDGE_MAX_CNT * 2 + 1 (covers line 530)
-        assert_eq!(SLAVE_DATA_VALID.get(), (BRIDGE_MAX_CNT as u32) * 2 + 1);
-
-        // Verify response type is set to GET_GROUP1 (covers "all other non-direct commands")
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_GROUP1
-            );
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            (BRIDGE_MAX_CNT as u32) * 2 + 1,
+            "a bridged group config waits the maximum bridge delay"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_GROUP1,
+            "all other non-direct commands answer with GET_GROUP1"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_light_config_grp() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        crate::facade::set_device_address(0x1234);
+        let mut packet = decoded_packet(LGT_CMD_LIGHT_CONFIG_GRP, &[0x05, 0x11, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction for LGT_CMD_LIGHT_CONFIG_GRP
-        let op_cmd = [LGT_CMD_LIGHT_CONFIG_GRP as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x05, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (direct match to trigger set_response_type at line 540)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to 0 for direct device match (line 537)
-        assert_eq!(SLAVE_DATA_VALID.get(), 0);
-
-        // Verify response type is set to 1 (covers line 498: LGT_CMD_LIGHT_CONFIG_GRP in set_response_type)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_GROUP1
-            );
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            0,
+            "a direct device match answers immediately"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_GROUP1,
+            "a group config answers with GET_GROUP1"
+        );
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 1);
+        assert_eq!(RECORDED_LIGHT_RESPONSE.get(), 1);
+        assert_status_recorded();
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_user_notify_req() {
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        let mut packet = decoded_packet(LGT_CMD_USER_NOTIFY_REQ, &[0x05, 0x11, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction for LGT_CMD_USER_NOTIFY_REQ
-        let op_cmd = [LGT_CMD_USER_NOTIFY_REQ as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x05, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (no direct match)
-        mock_rf_link_match_group_mac(Any).returns((false, false));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify response type is set to 7 (covers line 500: LGT_CMD_USER_NOTIFY_REQ)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_USER_NOTIFY
-            );
-        });
+        assert_eq!(
+            light_data_response_type(),
+            GET_USER_NOTIFY,
+            "a user notification request answers with GET_USER_NOTIFY"
+        );
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(dev_addr_with_mac_flag)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
     fn test_rf_link_slave_data_write_no_dec_notification_config_dev_addr_device_match() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
+        let _hooks = reset_packet_state();
+        crate::facade::set_device_address(0x3456);
+        let mut packet = decoded_packet(
+            LGT_CMD_CONFIG_DEV_ADDR,
+            &[0x10, 0x11, 0x12, 0x07], // params[2] != DEV_ADDR_PAR_WITH_MAC
+        );
+        packet.att_write_mut().value.dst = 0x3456u16.to_le_bytes();
 
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Set non-zero destination address
-        packet.att_write_mut().value.dst[0] = 0x56;
-        packet.att_write_mut().value.dst[1] = 0x34;
-
-        // Mock op_cmd and params extraction for LGT_CMD_CONFIG_DEV_ADDR
-        let op_cmd = [LGT_CMD_CONFIG_DEV_ADDR as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x10, 0x11, 0x12, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // param[3] = 7
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (direct match to trigger set_response_type at line 540)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock MAC flag check (without MAC flag to ensure set_response_type path)
-        mock_dev_addr_with_mac_flag(Any).returns(false);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to 0 for direct device match (line 537)
-        assert_eq!(SLAVE_DATA_VALID.get(), 0);
-
-        // Verify response type is set to 4 (covers line 499: LGT_CMD_CONFIG_DEV_ADDR in set_response_type)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_DEV_ADDR
-            );
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            0,
+            "a direct device match answers immediately"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_DEV_ADDR,
+            "a device address config answers with GET_DEV_ADDR"
+        );
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 1);
+        assert_status_recorded();
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
-    #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_slave_data_write_no_dec_notification_device_match_new() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        let _hooks = reset_packet_state();
+        crate::facade::set_device_address(0x1234);
+        let mut packet = decoded_packet(LGT_CMD_LIGHT_READ_STATUS, &[0x08, 0x11, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction
-        let op_cmd = [LGT_CMD_LIGHT_READ_STATUS as u8, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x08, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (direct device match, covers lines 535-540)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (is a notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify SLAVE_DATA_VALID is set to 0 for direct device match (covers line 537)
-        assert_eq!(SLAVE_DATA_VALID.get(), 0);
-
-        // Verify response type is set based on command type (covers line 540 via set_response_type)
-        critical_section::with(|_| {
-            let pkt_light_data = PKT_LIGHT_DATA.lock();
-            assert_eq!(
-                pkt_light_data.att_cmd().value.val[PKT_VAL_MAC_APP_RESPONSE_TYPE],
-                GET_STATUS
-            ); // LGT_CMD_LIGHT_READ_STATUS -> GET_STATUS
-        });
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            0,
+            "a direct device match answers immediately"
+        );
+        assert_eq!(
+            light_data_response_type(),
+            GET_STATUS,
+            "a status read answers with GET_STATUS"
+        );
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 1);
+        assert_status_recorded();
     }
 
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
-    #[mry::lock(rf_link_match_group_mac)]
-    #[mry::lock(rf_link_is_notify_req)]
-    #[mry::lock(on_light_data)]
-    #[mry::lock(rf_link_slave_read_status_par_init)]
-    #[mry::lock(on_light_response)]
-    #[mry::lock(rf_link_slave_add_status)]
-    #[mry::lock(read_reg_system_tick)]
     fn test_rf_link_slave_data_write_no_dec_notification_device_match() {
-        // Mock system tick reading
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
+        let _hooks = reset_packet_state();
+        crate::facade::set_device_address(0x1234);
+        // A real notification opcode: the retired mock forced `is_notify_req`
+        // true for LGT_CMD_LIGHT_ONOFF, which production never treats as a
+        // notification. LGT_CMD_USER_NOTIFY_REQ reaches the same branch for real.
+        let mut packet = decoded_packet(LGT_CMD_USER_NOTIFY_REQ, &[0x05, 0x11, 0x12, 0x13]);
+        packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        // Create a packet with valid length
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Set sequence number different from GENERAL_MESSAGE_SEQUENCE_NUMBER
-        let sno = [1, 2, 3];
-        critical_section::with(|_| {
-            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 2];
-            packet.att_write_mut().value.sno = sno;
-        });
-
-        // Mock op_cmd and params extraction
-        // Using LGT_CMD_LIGHT_READ_STATUS opcode (0x10)
-        let op_cmd = [0x10, 0x02, 0x03];
-        let op_cmd_len = 3;
-        let params = [0x05, 0x11, 0x12, 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let params_len = 4;
-
-        mock_parse_ble_packet_op_params(Any, Any)
-            .returns((true, op_cmd, op_cmd_len, params, params_len));
-
-        // Mock group and device matching (device match)
-        mock_rf_link_match_group_mac(Any).returns((false, true));
-
-        // Mock notification detection (is notification)
-        mock_rf_link_is_notify_req(Any).returns(true);
-
-        // Mock data callback
-        mock_on_light_data(Any).returns(());
-
-        // Mock read status parameter initialization
-        mock_rf_link_slave_read_status_par_init().returns(());
-
-        // Mock response callback that returns true to add status
-        mock_on_light_response(Any, Any).returns(Ok(()));
-
-        // Mock add status function
-        mock_rf_link_slave_add_status(Any).returns(());
-
-        // Mock device address for packet response
-        DEVICE_ADDRESS.set(0x1234);
-
-        // Set link interval for status packet
-        SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
-
-        // Test the function
         rf_link_slave_data_write_no_dec(&packet);
 
-        // Should return true for successful processing
-
-        // Verify callback was called
-        mock_on_light_data(Any).assert_called(1);
-
-        // Verify sequence number was updated
-        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
-
-        // Verify DEVICE_STATUS_TICK_COUNTER is now stored in stat_sno
-        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), sno);
-
-        // Verify response callback and add status were called
-        mock_on_light_response(Any, Any).assert_called(1);
-        mock_rf_link_slave_add_status(Any).assert_called(1);
-
-        // Verify data validity flag is 0 for direct match
-        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            1,
+            "a device-matched packet reaches on_light_data"
+        );
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
+        assert_eq!(
+            *STATUS_MESSAGE_SEQUENCE_NUMBER.lock(),
+            NEW_SNO,
+            "the notification path records the sequence number for the status reply"
+        );
+        assert_eq!(
+            RECORDED_LIGHT_RESPONSE.get(),
+            1,
+            "the application response hook runs for a notification"
+        );
+        assert_status_recorded();
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            0,
+            "a direct device match answers immediately"
+        );
     }
 
     #[test]
-    #[mry::lock(pair_dec_packet, rf_link_slave_data_write_no_dec)]
     fn test_rf_link_slave_data_write_pair_login_false() {
-        // Arrange
-        PAIR_LOGIN_OK.set(false);
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        // Arrange: pairing not established, so no decryption is attempted.
+        let _hooks = reset_packet_state();
+        let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
 
         // Act
         rf_link_slave_data_write(&packet);
 
-        // Assert - should return false when pairing not OK, without calling decryption or processing
-        mock_pair_dec_packet(Any).assert_called(0);
-        mock_rf_link_slave_data_write_no_dec(Any).assert_called(0);
+        // Assert: neither decryption nor the handler ran.
+        assert_packet_not_processed();
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
     }
 
     #[test]
-    #[mry::lock(pair_dec_packet, rf_link_slave_data_write_no_dec)]
     fn test_rf_link_slave_data_write_decryption_fails() {
-        // Arrange
+        // Arrange: pairing is up and security is on, but the MIC is wrong.
+        let _hooks = reset_packet_state();
         PAIR_LOGIN_OK.set(true);
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-
-        // Mock pair_dec_packet to return false (decryption fails)
-        mock_pair_dec_packet(Any).returns(Err(()));
+        crate::facade::set_security_enabled(true);
+        let mut packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
+        // `src` is the expected MIC, and these bytes cannot be the AES tag for
+        // the all-zero session key.
+        packet.att_write_mut().value.src = [0xAA, 0xBB];
 
         // Act
         rf_link_slave_data_write(&packet);
 
-        // Assert - should return false when decryption fails, without calling processing
-        mock_pair_dec_packet(Any).assert_called(1);
-        mock_rf_link_slave_data_write_no_dec(Any).assert_called(0);
+        // Assert: a failed decryption drops the packet.
+        assert_packet_not_processed();
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
     }
 
     #[test]
-    #[mry::lock(pair_dec_packet, rf_link_slave_data_write_no_dec)]
     fn test_rf_link_slave_data_write_success() {
-        // Arrange
+        // Arrange: pair the device, then seal a packet with the same session
+        // key and IV that `pair_dec_packet` will use to open it.
+        let _hooks = reset_packet_state();
+        let key = [0x42u8; 16];
+        PAIR_STATE.lock().pair_sk = key;
+
+        crate::facade::set_mac_id([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        // `pair_init` seeds PAIR_IVM[0..4] from the MAC and `pair_dec_packet`
+        // overwrites [5..8] with the packet sequence number. Byte 4 production
+        // code never touches, so a sibling test may have left any value there;
+        // seal the same plaintext for each possibility and let the device pick
+        // the one whose IV it holds.
+        pair_init();
+
         PAIR_LOGIN_OK.set(true);
-        let mut packet = Packet {
-            att_write: PacketAttWrite {
-                head: PacketL2capHead {
-                    rf_len: 0x11,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
+        crate::facade::set_security_enabled(true);
 
-        // Mock successful decryption
-        mock_pair_dec_packet(Any).returns(Ok(()));
+        // Plaintext: dst 0 (device match) followed by a 3-byte opcode 0x02.
+        let plaintext = [0x00u8, 0x00, 0x80 | 0x40 | 0x02, 0x02, 0x03];
+        let mut accepted_iv_byte = None;
+        for iv_byte in 0u8..=0xff {
+            let ivm = [
+                0x11, 0x22, 0x33, 0x44, iv_byte, NEW_SNO[0], NEW_SNO[1], NEW_SNO[2],
+            ];
+            let mut wire = plaintext;
+            let mut mic = [0u8; 2];
+            aes_att_encryption_packet(&key, &ivm, &mut mic, &mut wire);
 
-        // Mock successful processing
-        mock_rf_link_slave_data_write_no_dec(Any).returns(());
+            let mut packet = decoded_packet(0x02, &[]);
+            packet.att_write_mut().value.sno = NEW_SNO;
+            packet.att_write_mut().value.src = mic;
+            packet.att_write_mut().value.dst = [wire[0], wire[1]];
+            packet.att_write_mut().value.val[0..3].copy_from_slice(&wire[2..5]);
 
-        // Act
-        rf_link_slave_data_write(&packet);
+            // Each attempt must start from "nothing processed yet".
+            *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = OLD_SNO;
+            BLE_PERIPHERAL_LINK_COMMAND.set(0xff);
 
-        // Assert - should return the result from rf_link_slave_data_write_no_dec
-        mock_pair_dec_packet(Any).assert_called(1);
-        mock_rf_link_slave_data_write_no_dec(Any).assert_called(1);
+            rf_link_slave_data_write(&packet);
+
+            if BLE_PERIPHERAL_LINK_COMMAND.get() == 0x02 {
+                accepted_iv_byte = Some(iv_byte);
+                break;
+            }
+        }
+
+        // Assert: decryption succeeded, so the plaintext reached the handler.
+        assert!(
+            accepted_iv_byte.is_some(),
+            "a packet sealed with the session key must decrypt and reach rf_link_slave_data_write_no_dec"
+        );
+        assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
+        assert_eq!(
+            RECORDED_LIGHT_DATA.get(),
+            1,
+            "the decrypted packet is device-addressed and reaches on_light_data"
+        );
     }
 
     #[test]
-    #[mry::lock(
-        blc_ll_init_basic_mcu,
-        rf_link_slave_set_adv,
-        pair_load_key,
-        retrieve_dev_grp_address,
-        mesh_node_table_init,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg8,
-        write_reg32,
-        write_reg16
-    )]
     fn test_rf_link_slave_init_mac_not_set() {
         reset_host_fakes();
+        crate::facade::reset_radio_state_for_test();
         let cfg = radio_config();
 
         // Arrange - MAC address not set (u32::MAX); a blank device reads 0xFFFFFFFF.
         let test_interval = 1000;
 
-        // Set MAC_ID to known value for testing
-        {
-            let mut mac_id = MAC_ID.lock();
-            mac_id.copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        }
+        crate::facade::set_mac_id([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
 
-        // Mock basic MCU init
-        mock_blc_ll_init_basic_mcu().returns(());
-
-        // Mock reading system tick
-        mock_read_reg_system_tick().returns(0x12345678);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
+        // The seed the driver reports and the clock `rand()` mixes in.
+        write_reg_system_tick(0x12345678);
 
         // The generated MAC is `[rand(), rand()]`, and `rand()` is
         // `clock_time() as u16 ^ read_reg_rnd_number()`; clock_time() is the
-        // mocked system tick, the RNG register is seeded here.
+        // seeded system tick, the RNG register is seeded here.
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x1234);
         let expected_rand = 0x1234u16 ^ (0x1234_5678u32 as u16);
-
-        // Mock advertisement setup
-        mock_rf_link_slave_set_adv(Any).returns(());
-
-        // Mock key loading
-        mock_pair_load_key().returns(());
-
-        // Mock device group address retrieval
-        mock_retrieve_dev_grp_address().returns(());
-
-        // Mock mesh node table initialization
-        mock_mesh_node_table_init().returns(());
 
         // Act
         rf_link_slave_init(test_interval);
@@ -3910,30 +3285,51 @@ mod tests {
             ((cfg.build_version >> 24) & 0xFF) as u8,
         ];
         let expected_crc = crc16(&crc_data);
-        mock_write_reg32(0x808004, expected_mac_u32).assert_called(1); // MAC ID write
-        mock_write_reg32(0x808008, cfg.build_version).assert_called(1); // cfg.build_version write
-        mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write
-        mock_rf_link_slave_set_adv(Any).assert_called(1);
-        mock_retrieve_dev_grp_address().assert_called(1);
-        mock_mesh_node_table_init().assert_called(1);
+        assert_eq!(register_writes(0x808004), vec![expected_mac_u32]);
+        assert_eq!(register_writes(0x808008), vec![cfg.build_version]);
+        assert_eq!(register_writes(0x80800c), vec![expected_crc as u32]);
+
+        // `rf_link_slave_set_adv` copied the advertising payload into PKT_ADV;
+        // pairing then appends the mesh name and manufacturer data after it.
+        assert_eq!(
+            PKT_ADV.lock().adv_ind_module().data[..ADV_DATA_INIT.len()],
+            ADV_DATA_INIT,
+            "the advertisement must start with ADV_DATA"
+        );
+        assert!(
+            PKT_ADV.lock().head().rf_len >= ADV_DATA_INIT.len() as u8 + 6,
+            "the advertisement must carry at least the ADV_DATA payload"
+        );
+
+        // `retrieve_dev_grp_address` derived the default address from the MAC.
+        assert_eq!(
+            DEVICE_ADDRESS.get(),
+            u16::from_le_bytes([expected_mac_bytes[0], expected_mac_bytes[1]]),
+            "the address table load must fall back to the MAC prefix"
+        );
+
+        // `mesh_node_table_init` registered exactly this device.
+        assert_eq!(
+            crate::mesh_ll::node_status::MESH_NODE_MAX.get(),
+            1,
+            "the mesh node table must be re-initialised with self only"
+        );
+
+        // `pair_load_key` regenerated the access code and the radio took it.
+        assert_eq!(
+            FakeMmio::reg32(0x408),
+            PAIR_AC.get().swap_bytes(),
+            "the access code must be the one pairing just derived"
+        );
+
+        // `blc_ll_init_basic_mcu` ran for real.
+        assert_eq!(FakeMmio::reg16(REG_RF_TIMING_CONFIG), 0xc00);
     }
 
     #[test]
-    #[mry::lock(
-        blc_ll_init_basic_mcu,
-        rf_link_slave_set_adv,
-        rf_set_ble_access_code,
-        pair_load_key,
-        retrieve_dev_grp_address,
-        mesh_node_table_init,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg8,
-        write_reg32,
-        write_reg16
-    )]
     fn test_rf_link_slave_init_normal_initialization() {
         reset_host_fakes();
+        crate::facade::reset_radio_state_for_test();
         let cfg = radio_config();
 
         // Arrange - MAC set, pairing already configured
@@ -3945,24 +3341,14 @@ mod tests {
         FakeFlash::write_slice(cfg.flash_adr_mac, &stored_mac);
 
         // Set MAC_ID to known value for testing
-        {
-            let mut mac_id = MAC_ID.lock();
-            mac_id.copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        }
+        crate::facade::set_mac_id(stored_mac);
 
-        // Mock basic MCU init and all its register calls
-        mock_blc_ll_init_basic_mcu().returns(());
-
-        // Mock reading system tick
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
+        // Seed the system tick the connection deadline is based on.
+        write_reg_system_tick(0xAABBCCDD);
 
         // Register writes for device identification
         let expected_mac_u32 = 0x44332211u32; // From MAC_ID [0x11, 0x22, 0x33, 0x44]
-        mock_write_reg32(0x808004, expected_mac_u32).returns(());
-        mock_write_reg32(0x808008, cfg.build_version).returns(());
-        // CRC of the 8 bytes: [0x11, 0x22, 0x33, 0x44, cfg.build_version bytes...]
+                                              // CRC of the 8 bytes: [0x11, 0x22, 0x33, 0x44, cfg.build_version bytes...]
         let crc_data = [
             0x11,
             0x22,
@@ -3974,28 +3360,11 @@ mod tests {
             ((cfg.build_version >> 24) & 0xFF) as u8,
         ];
         let expected_crc = crc16(&crc_data);
-        mock_write_reg16(0x80800c, expected_crc).returns(());
-
-        // Mock advertisement setup
-        mock_rf_link_slave_set_adv(Any).returns(());
-
-        // Mock access code configuration
-        mock_rf_set_ble_access_code(Any).returns(());
-
-        // Mock key loading
-        mock_pair_load_key().returns(());
-
-        // Mock device group address retrieval
-        mock_retrieve_dev_grp_address().returns(());
-
-        // Mock mesh node table initialization
-        mock_mesh_node_table_init().returns(());
 
         // Act
         rf_link_slave_init(test_interval);
 
         // Assert - normal initialization path
-        mock_blc_ll_init_basic_mcu().assert_called(1);
         // The stored MAC was not replaced.
         let mut written_mac = [0u8; 6];
         FakeFlash::read_slice(cfg.flash_adr_mac, &mut written_mac);
@@ -4004,14 +3373,33 @@ mod tests {
             "an existing MAC must not be rewritten"
         );
         assert_eq!(*MAC_ID.lock(), stored_mac);
-        mock_rf_link_slave_set_adv(Any).assert_called(1);
-        mock_rf_set_ble_access_code(Any).assert_called(1); // Access code set
-        mock_pair_load_key().assert_called(1);
-        mock_retrieve_dev_grp_address().assert_called(1);
-        mock_mesh_node_table_init().assert_called(1);
-        mock_write_reg32(0x808004, expected_mac_u32).assert_called(1); // MAC ID write
-        mock_write_reg32(0x808008, cfg.build_version).assert_called(1); // cfg.build_version write
-        mock_write_reg16(0x80800c, expected_crc).assert_called(1); // CRC write
+
+        // `blc_ll_init_basic_mcu` ran for real.
+        assert_eq!(FakeMmio::reg16(REG_RF_TIMING_CONFIG), 0xc00);
+
+        // The advertisement was rebuilt from ADV_DATA (pairing then appends the
+        // mesh name and manufacturer data, so only the prefix is pinned here).
+        assert_eq!(
+            PKT_ADV.lock().adv_ind_module().data[..ADV_DATA_INIT.len()],
+            ADV_DATA_INIT
+        );
+
+        // The access code comes from the pairing keys and reached the radio.
+        assert_eq!(
+            FakeMmio::reg32(0x408),
+            PAIR_AC.get().swap_bytes(),
+            "the access code must be the one pairing derived"
+        );
+
+        // `retrieve_dev_grp_address` used the MAC prefix when flash had none.
+        assert_eq!(DEVICE_ADDRESS.get(), 0x2211);
+
+        // `mesh_node_table_init` registered exactly this device.
+        assert_eq!(crate::mesh_ll::node_status::MESH_NODE_MAX.get(), 1);
+
+        assert_eq!(register_writes(0x808004), vec![expected_mac_u32]);
+        assert_eq!(register_writes(0x808008), vec![cfg.build_version]);
+        assert_eq!(register_writes(0x80800c), vec![expected_crc as u32]);
 
         // Verify advertising is enabled
         assert_eq!(BLE_PERIPHERAL_ADVERTISING_ENABLED.get(), true);
@@ -4020,21 +3408,9 @@ mod tests {
     /// The version word at `0x808008` and the CRC over it must come from the
     /// injected `RadioConfig`, not from a compile-time constant.
     #[test]
-    #[mry::lock(
-        blc_ll_init_basic_mcu,
-        rf_link_slave_set_adv,
-        rf_set_ble_access_code,
-        pair_load_key,
-        retrieve_dev_grp_address,
-        mesh_node_table_init,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg8,
-        write_reg32,
-        write_reg16
-    )]
     fn test_rf_link_slave_init_uses_injected_build_version() {
         reset_host_fakes();
+        crate::facade::reset_radio_state_for_test();
 
         let original = radio_config();
         let mut injected = original;
@@ -4044,18 +3420,8 @@ mod tests {
         // A stored MAC keeps the driver on the read-only flash path.
         let stored_mac = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66];
         FakeFlash::write_slice(injected.flash_adr_mac, &stored_mac);
-
-        mock_blc_ll_init_basic_mcu().returns(());
-        mock_read_reg_system_tick().returns(0xAABBCCDD);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_rf_link_slave_set_adv(Any).returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_pair_load_key().returns(());
-        mock_retrieve_dev_grp_address().returns(());
-        mock_mesh_node_table_init().returns(());
+        crate::facade::set_mac_id(stored_mac);
+        write_reg_system_tick(0xAABBCCDD);
 
         rf_link_slave_init(2000);
 
@@ -4064,13 +3430,13 @@ mod tests {
         set_radio_config(original);
 
         let expected_crc = crc16(&[0x11, 0x22, 0x33, 0x44, 0x78, 0x56, 0x34, 0x12]);
-        mock_write_reg32(0x808004, 0x44332211).assert_called(1);
-        mock_write_reg32(0x808008, 0x1234_5678).assert_called(1);
-        mock_write_reg16(0x80800c, expected_crc).assert_called(1);
+        assert_eq!(register_writes(0x808004), vec![0x44332211]);
+        assert_eq!(register_writes(0x808008), vec![0x1234_5678]);
+        assert_eq!(register_writes(0x80800c), vec![expected_crc as u32]);
     }
 
-    // Proof slice for the RF RX ack helper: no mry lock attribute, so the real
-    // accessor body runs and routes through the in-process `FakeMmio` bank.
+    // Proof slice for the RF RX ack helper: the real accessor body runs and
+    // routes through the in-process `FakeMmio` bank.
 
     /// Tests that rf_clear_rx_irq acknowledges only the RX status bit.
     ///

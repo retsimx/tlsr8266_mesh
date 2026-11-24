@@ -44,20 +44,18 @@ use core::ptr::addr_of;
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize};
 
-use crate::sdk::ble_app::ble_ll_channel_selection::ble_ll_build_available_channel_table;
-use crate::sdk::ble_app::ble_ll_pair::{pair_init, PAIR_AC, SECURITY_ENABLE};
-use crate::sdk::ble_app::callbacks;
-use crate::sdk::ble_app::flash_config::{
-    rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN,
-};
-use crate::sdk::ble_app::light_ll::mesh_management::{MESH_NODE_MASK, MESH_NODE_REPORT_ENABLE};
-use crate::sdk::ble_app::light_ll::status_management::DEVICE_STATUS_TICK_COUNTER;
-use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::ble::channel_selection::ble_ll_build_available_channel_table;
+use crate::ble::flash_config::{rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN};
+use crate::ble::pair::{pair_init, PAIR_AC, SECURITY_ENABLE};
+use crate::ble::status::DEVICE_STATUS_TICK_COUNTER;
+use crate::callbacks;
+use crate::mesh_ll::node_status::{MESH_NODE_MASK, MESH_NODE_REPORT_ENABLE};
+use crate::rf::drv_8266::*;
+use crate::rf::drv_8266::{
     BLE_PERIPHERAL_ADVERTISING_ENABLED, BLE_SCAN_RESPONSE_INTERVAL_US, CURRENT_RF_STATE, MAC_ID,
     PKT_INIT,
 };
-use crate::sdk::light::*;
+use crate::types::*;
 use mesh_protocol::packet_types::*;
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
@@ -67,28 +65,26 @@ use tlsr8266_pac::*;
 /// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
 /// Protected by critical section mutex for thread-safe access in interrupt contexts.
 ///
-/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the only
-/// entry point from outside `sdk/`, and `crate::sdk` is the extraction boundary
-/// for C-10 (`crates/tlsr8266-radio`).
-pub(in crate::sdk) static BUFF_RESPONSE: CriticalSectionMutex<
-    [Packet; BUFF_RESPONSE_PACKET_COUNT],
-> = CriticalSectionMutex::new(
-    [Packet {
-        att_data: PacketAttData {
-            head: PacketL2capHead {
-                dma_len: 0,
-                _type: 0,
-                rf_len: 0,
-                l2cap_len: 0,
-                chan_id: 0,
+/// Visibility is `pub(crate)`: the facade module is the only entry point from
+/// outside this crate, and the crate boundary is the fence C-10 established.
+pub(crate) static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> =
+    CriticalSectionMutex::new(
+        [Packet {
+            att_data: PacketAttData {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                att: 0,
+                hl: 0,
+                hh: 0,
+                dat: [0; 23],
             },
-            att: 0,
-            hl: 0,
-            hh: 0,
-            dat: [0; 23],
-        },
-    }; BUFF_RESPONSE_PACKET_COUNT],
-);
+        }; BUFF_RESPONSE_PACKET_COUNT],
+    );
 
 /// `OtaRadioOps::stage_packet`: copy one OTA packet into the shared response
 /// buffer.
@@ -100,7 +96,7 @@ pub(in crate::sdk) static BUFF_RESPONSE: CriticalSectionMutex<
 /// `#[inline(never)]`: `sdk/stack_analysis.py`'s indirect-edge table binds the
 /// `radio_stage_pkt` slot to this symbol.
 #[inline(never)]
-pub(crate) fn stage_ota_packet(idx: usize, pkt: &Packet) {
+pub fn stage_ota_packet(idx: usize, pkt: &Packet) {
     BUFF_RESPONSE.lock()[idx % 16] = *pkt;
 }
 
@@ -111,15 +107,15 @@ pub(crate) fn stage_ota_packet(idx: usize, pkt: &Packet) {
 ///
 /// `#[inline(never)]`: see [`stage_ota_packet`].
 #[inline(never)]
-pub(crate) fn read_staged_ota_packet(idx: usize) -> Packet {
+pub fn read_staged_ota_packet(idx: usize) -> Packet {
     BUFF_RESPONSE.lock()[idx]
 }
 
 /// Current state of the BLE connection as a peripheral device.
 /// Tracks connection status, advertising state, and link layer operations.
-pub(crate) static BLE_PERIPHERAL_LINK_STATE: crate::sdk::light::AtomicBlePeripheralLinkState =
-    crate::sdk::light::AtomicBlePeripheralLinkState::new(
-        crate::sdk::light::BlePeripheralLinkState::Disconnected,
+pub(crate) static BLE_PERIPHERAL_LINK_STATE: crate::types::AtomicBlePeripheralLinkState =
+    crate::types::AtomicBlePeripheralLinkState::new(
+        crate::types::BlePeripheralLinkState::Disconnected,
     );
 
 /// Timestamp of the last received packet for timeout detection.
@@ -132,11 +128,11 @@ pub(crate) static LIGHT_CONN_SN_MASTER: AtomicU16 = AtomicU16::new(0);
 
 /// Timestamp when the slave connection was established.
 /// Used for calculating connection duration and timeout detection.
-pub(crate) static SLAVE_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_CONNECTED_TICK: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating whether a BLE slave connection is currently active.
 /// Set to true when connected to a central device, false when disconnected.
-pub(in crate::sdk) static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub(crate) static BLE_PERIPHERAL_CONNECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// BLE connection interval in microseconds for slave connections.
 /// Determines how frequently connection events occur between central and peripheral.
@@ -152,7 +148,7 @@ pub(crate) static SLAVE_WINDOW_SIZE_UPDATE: AtomicU32 = AtomicU32::new(0);
 
 /// Scheduled timestamp for the next connection event.
 /// Used for precise timing of BLE connection intervals.
-pub(crate) static SLAVE_NEXT_CONNECT_TICK: AtomicU32 = AtomicU32::new(0);
+pub static SLAVE_NEXT_CONNECT_TICK: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating successful completion of connection parameter update.
 /// Set when BLE connection parameters have been successfully negotiated.
@@ -168,7 +164,7 @@ pub(crate) static GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP: AtomicU32 = AtomicU3
 
 /// BLE peripheral connection timeout value in microseconds.
 /// Maximum time to wait before considering the connection lost.
-pub(crate) static BLE_PERIPHERAL_CONNECTION_TIMEOUT_US: AtomicU32 = AtomicU32::new(0);
+pub static BLE_PERIPHERAL_CONNECTION_TIMEOUT_US: AtomicU32 = AtomicU32::new(0);
 
 /// Timestamp for BLE peripheral timing update procedures.
 /// Tracks when connection parameter updates were initiated.
@@ -204,7 +200,7 @@ pub(crate) static BLE_CONN_OFFSET: AtomicU32 = AtomicU32::new(0);
 
 /// Timestamp of the first successful slave connection.
 /// Used for connection establishment timing and statistics.
-pub(in crate::sdk) static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
+pub(crate) static BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating connection parameters need to be updated.
 /// Set when BLE connection parameters require modification.
@@ -394,16 +390,18 @@ fn check_par_con(packet: &Packet) -> bool {
 /// - Security and pairing state
 /// - Mesh network state
 /// - System interrupts and timers
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
     // Initialize connection update tracking variables
     CONN_UPDATE_SUCCESSED.set(false);
     CONN_UPDATE_CNT.set(0);
 
     // Pre-connection validation: check if connections are enabled and advertiser address matches our device
-    let our_mac = MAC_ID.lock();
+    // Read the MAC into a value first: the guard must not be held across the
+    // pairing bring-up below, which locks `MAC_ID` again (and no lock may span
+    // I/O).
+    let our_mac = *MAC_ID.lock();
     // Compare full 6-byte MAC address (adv_a is set to full MAC_ID in advertisements)
-    let adv_matches = packet.ll_init().adv_a == *our_mac;
+    let adv_matches = packet.ll_init().adv_a == our_mac;
 
     if BLE_PERIPHERAL_CONNECTION_ENABLED.get() && adv_matches {
         // Validate connection parameters
@@ -579,7 +577,6 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
 /// # Side Effects
 /// * Modifies `SLAVE_NEXT_CONNECT_TICK` to adjust future connection timing
 /// * Disables timing adjustment flag to prevent multiple corrections per event
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_timing_adjust(time: u32) {
     // Only perform adjustment if explicitly enabled (prevents multiple adjustments)
     if BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get() {
@@ -615,7 +612,6 @@ pub fn rf_link_timing_adjust(time: u32) {
 /// * Modifies global connection and advertising enable flags
 /// * Affects device discoverability in BLE scans
 /// * Controls whether new connection requests will be accepted
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_pairing_enable(enable: bool) {
     BLE_PERIPHERAL_CONNECTION_ENABLED.set(enable);
     BLE_PERIPHERAL_ADVERTISING_ENABLED.set(enable);
@@ -657,7 +653,6 @@ pub fn rf_link_slave_pairing_enable(enable: bool) {
 /// # Returns
 /// * Success code (0) if parameters are valid
 /// * Error code (0xfffffffd/0xfffffffe) if validation fails
-#[cfg_attr(test, mry::mry)]
 pub fn setup_ble_parameter_start(
     mut interval_min: u16,
     mut interval_max: u16,
@@ -753,7 +748,6 @@ fn update_connect_para() {
 /// # Call Frequency
 /// This function should be called regularly (typically from the main loop)
 /// to ensure timely processing of time-sensitive operations.
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_proc() {
     // Process mesh network pairing operations
     callbacks::on_mesh_pair_proc();
@@ -780,7 +774,6 @@ pub fn rf_link_slave_proc() {
 ///
 /// # Side Effects
 /// * Modifies `BLE_SCAN_RESPONSE_INTERVAL_US` for timing calibration
-#[cfg_attr(test, mry::mry)]
 pub fn light_check_tick_per_us(ticks: u32) {
     if ticks == 0x10 {
         // Clock frequency detected: set to minimal scan response interval
@@ -820,7 +813,6 @@ pub fn light_check_tick_per_us(ticks: u32) {
 /// * Modifies RF hardware registers for mesh operation
 /// * Changes radio from BLE to mesh protocol configuration
 /// * Enables receive mode for incoming mesh packets
-#[cfg_attr(test, mry::mry)]
 pub fn back_to_rxmode_bridge() {
     // Disable any active RF transmit/receive operations
     rf_set_tx_rx_off();
@@ -843,22 +835,36 @@ pub fn back_to_rxmode_bridge() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
-
-    // Import mock functions from their original modules
-    use crate::sdk::ble_app::ble_ll_channel_selection::mock_ble_ll_build_available_channel_table;
-    use crate::sdk::ble_app::ble_ll_pair::mock_pair_init;
-    use crate::sdk::ble_app::flash_config::mock_update_ble_parameter_cb;
-    use crate::sdk::ble_app::rf_drv_8266::{
-        mock_rf_reset_sn, mock_rf_set_ble_access_code, mock_rf_set_ble_channel,
-        mock_rf_set_ble_crc_adv, mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_stop_trx,
-    };
+    use crate::ble::pair::pair_iv_for_test;
     use mesh_protocol::packet_types::{Packet, PacketLlInit};
-    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
-    use tlsr8266_pac::{
-        mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
-        mock_write_reg_irq_src, mock_write_reg_rf_crc, mock_write_reg_system_tick_irq,
-    };
+    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// Datasheet offsets of the RF registers these tests inspect, as the PAC
+    /// accessors reach them.
+    const REG_RF_MODE_CONTROL: u32 = 0xf00;
+    const REG_RF_SN: u32 = 0xf01;
+    const REG_RF_CHANNEL: u32 = 0x40d;
+    const REG_RF_ACCESS_CODE: u32 = 0x408;
+    const REG_RF_CRC: u32 = 0x44c;
+    const REG_RF_TXRX_STATE: u32 = 0xf02;
+
+    /// The last value written to the register at `offset`, if any.
+    fn last_write(offset: u32) -> Option<u32> {
+        FakeMmio::writes()
+            .iter()
+            .rev()
+            .find(|w| w.addr == (offset | tlsr8266_pac::REG_BASE_ADDR))
+            .map(|w| w.value)
+    }
+
+    /// Number of writes logged for the register at `offset`.
+    fn write_count(offset: u32) -> usize {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (offset | tlsr8266_pac::REG_BASE_ADDR))
+            .count()
+    }
 
     /// Helper function to create a test packet with default valid parameters
     fn create_test_packet() -> Packet {
@@ -899,6 +905,11 @@ mod tests {
 
     /// Helper function to reset global state to known values for test isolation
     fn reset_global_state() {
+        // The PAC host fakes are process-wide: start every test from a clean
+        // register bank and a zeroed fake clock.
+        FakeMmio::reset();
+        fake_clock::reset();
+
         CONN_UPDATE_SUCCESSED.set(false);
         CONN_UPDATE_CNT.set(0);
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(false);
@@ -1117,18 +1128,7 @@ mod tests {
     /// When BLE_PERIPHERAL_CONNECTION_ENABLED is false, the function should
     /// reject the connection attempt immediately.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        read_reg_system_tick,
-        write_reg_system_tick_irq,
-        write_reg_irq_src
-    )]
     fn test_rf_link_slave_connect_disabled_peripheral() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg_irq_src(Any).returns(());
         reset_global_state();
 
         let packet = create_test_packet();
@@ -1142,36 +1142,17 @@ mod tests {
             !NEED_UPDATE_CONNECT_PARA.get(),
             "Connection should be rejected"
         );
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a rejected connection must not touch the radio"
+        );
     }
 
     /// Tests rf_link_slave_connect with mismatched addresses.
     ///
     /// Connection should be rejected if scan address doesn't match advertiser address.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        read_reg_system_tick,
-        read_reg_system_tick_irq,
-        write_reg_system_tick_irq,
-        write_reg_irq_src,
-        write_reg_rf_crc,
-        ble_ll_build_available_channel_table,
-        rf_reset_sn,
-        pair_init,
-        write_reg8
-    )]
     fn test_rf_link_slave_connect_address_mismatch() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg_irq_src(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
-        mock_rf_reset_sn().returns(());
-        mock_pair_init().returns(());
-        mock_write_reg8(Any, Any).returns(());
         reset_global_state();
 
         let mut packet = create_test_packet();
@@ -1179,12 +1160,18 @@ mod tests {
 
         // Enable peripheral connections but create address mismatch
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(true);
-        packet.ll_init.adv_a = [0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]; // Different from MAC_ID
+
+        // Different advertiser address than MAC_ID
+        packet.ll_init.adv_a = [0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
 
         rf_link_slave_connect(&packet, time);
         assert!(
             !NEED_UPDATE_CONNECT_PARA.get(),
             "Connection should be rejected"
+        );
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a rejected connection must not touch the radio"
         );
     }
 
@@ -1192,30 +1179,7 @@ mod tests {
     ///
     /// Connection should be rejected if check_par_con returns false.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        read_reg_system_tick,
-        read_reg_system_tick_irq,
-        write_reg_system_tick_irq,
-        write_reg_irq_src,
-        write_reg_rf_crc,
-        ble_ll_build_available_channel_table,
-        rf_reset_sn,
-        pair_init,
-        write_reg8
-    )]
     fn test_rf_link_slave_connect_invalid_parameters() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_write_reg_irq_src(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
-        mock_rf_reset_sn().returns(());
-        mock_pair_init().returns(());
-        mock_write_reg8(Any, Any).returns(());
         reset_global_state();
 
         let mut packet = create_test_packet();
@@ -1235,6 +1199,10 @@ mod tests {
             !NEED_UPDATE_CONNECT_PARA.get(),
             "Connection should be rejected"
         );
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a rejected connection must not touch the radio"
+        );
     }
 
     /// Tests successful rf_link_slave_connect with valid parameters.
@@ -1242,32 +1210,15 @@ mod tests {
     /// This comprehensive test verifies that all connection setup steps are
     /// performed correctly when given valid parameters.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_irq_src,
-        write_reg_rf_crc,
-        ble_ll_build_available_channel_table,
-        rf_reset_sn,
-        pair_init,
-        write_reg8,
-        read_reg_system_tick_irq
-    )]
     fn test_rf_link_slave_connect_successful() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_read_reg_system_tick_irq().returns(55000); // Return value > read_reg_system_tick for safety check
-        mock_write_reg_irq_src(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
-        mock_rf_reset_sn().returns(());
-        mock_pair_init().returns(());
-        mock_write_reg8(Any, Any).returns(());
-
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(50000);
+
+        // Use a MAC no other test leaves behind, so the IV assertion below cannot
+        // pass on state recorded by an earlier test.
+        let mac = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6];
+        *MAC_ID.lock() = mac;
 
         let mut packet = create_test_packet();
         let time = 10000;
@@ -1275,6 +1226,7 @@ mod tests {
         // Setup for successful connection
         BLE_PERIPHERAL_CONNECTION_ENABLED.set(true);
         unsafe {
+            packet.ll_init.adv_a = mac;
             packet.ll_init.scan_a = packet.ll_init.adv_a;
         } // Match addresses
 
@@ -1284,6 +1236,21 @@ mod tests {
         assert!(
             NEED_UPDATE_CONNECT_PARA.get(),
             "Connection should be established"
+        );
+
+        // The bring-up must run `pair_init`, which re-seeds both initialization
+        // vectors from the device address; nothing else in the connect path
+        // touches their first four bytes.
+        let (ivm, ivs) = pair_iv_for_test();
+        assert_eq!(
+            ivm[0..4],
+            mac[0..4],
+            "pair_init must seed the master IV from MAC_ID"
+        );
+        assert_eq!(
+            ivs[0..4],
+            mac[0..4],
+            "pair_init must seed the slave IV from MAC_ID"
         );
 
         // Verify connection state was initialized
@@ -1298,10 +1265,29 @@ mod tests {
             "Connection update count should be reset"
         );
 
-        // Verify RF operations were called
-        mock_rf_stop_trx().assert_called(1);
-        mock_pair_init().assert_called(1);
-        mock_rf_reset_sn().assert_called(1);
+        // Verify the RF bring-up ran through the real driver functions: the
+        // transceiver is stopped, the sequence number is reset (two writes,
+        // 0x3f then 0x00) and the CRC init comes from the request.
+        assert_eq!(
+            last_write(REG_RF_MODE_CONTROL),
+            Some(0x80),
+            "rf_stop_trx must stop the radio"
+        );
+        assert_eq!(
+            write_count(REG_RF_SN),
+            2,
+            "rf_reset_sn writes 0x3f then 0x00"
+        );
+        assert_eq!(
+            last_write(REG_RF_SN),
+            Some(0x00),
+            "sequence number resets to 0"
+        );
+        assert_eq!(
+            last_write(REG_RF_CRC),
+            Some(0x555555),
+            "CRC init from the request's crcinit"
+        );
 
         // Verify timing setup
         assert_ne!(
@@ -1333,32 +1319,10 @@ mod tests {
     /// Verifies that timing parameters are calculated correctly according
     /// to BLE specification formulas.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_irq_src,
-        write_reg_rf_crc,
-        ble_ll_build_available_channel_table,
-        rf_reset_sn,
-        pair_init,
-        write_reg8,
-        read_reg_system_tick_irq
-    )]
     fn test_rf_link_slave_connect_timing_calculations() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(100000);
-        mock_read_reg_system_tick_irq().returns(105000); // Return value > read_reg_system_tick for safety check
-        mock_write_reg_irq_src(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
-        mock_rf_reset_sn().returns(());
-        mock_pair_init().returns(());
-        mock_write_reg8(Any, Any).returns(());
-
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(100000);
 
         let mut packet = create_test_packet();
         let time = 50000;
@@ -1399,32 +1363,10 @@ mod tests {
     ///
     /// Verifies that security timestamps are recorded when security is enabled.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_system_tick_irq,
-        read_reg_system_tick,
-        write_reg_irq_src,
-        write_reg_rf_crc,
-        ble_ll_build_available_channel_table,
-        rf_reset_sn,
-        pair_init,
-        write_reg8,
-        read_reg_system_tick_irq
-    )]
     fn test_rf_link_slave_connect_security_setup() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick().returns(75000);
-        mock_read_reg_system_tick_irq().returns(80000); // Return value > read_reg_system_tick for safety check
-        mock_write_reg_irq_src(Any).returns(());
-        mock_write_reg_rf_crc(Any).returns(());
-        mock_ble_ll_build_available_channel_table(Any, Any).returns(());
-        mock_rf_reset_sn().returns(());
-        mock_pair_init().returns(());
-        mock_write_reg8(Any, Any).returns(());
-
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(75000);
 
         let mut packet = create_test_packet();
         let time = 25000;
@@ -2062,21 +2004,7 @@ mod tests {
     /// Verifies that all RF hardware configuration steps are performed correctly
     /// for mesh bridge mode operation.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_set_rxmode
-    )]
     fn test_back_to_rxmode_bridge_configuration() {
-        // Setup mocks
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         reset_global_state();
 
         // Set test values
@@ -2085,17 +2013,44 @@ mod tests {
 
         back_to_rxmode_bridge();
 
-        // Verify RF operations are called in correct order
-        mock_rf_set_tx_rx_off().assert_called(1);
-        mock_rf_set_ble_access_code(0x12345678).assert_called(1);
-        mock_rf_set_ble_crc_adv().assert_called(1);
-        mock_rf_set_rxmode().assert_called(1);
+        // The radio is switched off and then re-enabled for mesh reception.
+        // `rf_set_ble_channel` also resets the tx/rx state machine while tuning,
+        // so reg_rf_txrx_state (0xf02) is written three times, ending at
+        // RF_TRX_OFF|BIT!(5) = 0x65 (RF_TRX_OFF is private to the RF driver).
+        assert_eq!(
+            write_count(REG_RF_TXRX_STATE),
+            3,
+            "tx/rx off, channel-tune reset, then rx enable"
+        );
+        assert_eq!(
+            last_write(REG_RF_TXRX_STATE),
+            Some(0x45 | 0x20),
+            "the radio must be left in receive mode"
+        );
+
+        // The pairing access code is byte-swapped for the hardware.
+        assert_eq!(
+            last_write(REG_RF_ACCESS_CODE),
+            Some(0x12345678u32.swap_bytes()),
+            "the pairing access code must reach the radio byte-swapped"
+        );
+
+        // Advertising CRC init is restored for mesh packets.
+        assert_eq!(
+            last_write(REG_RF_CRC),
+            Some(0x555555),
+            "rf_set_ble_crc_adv must write the advertising CRC init"
+        );
 
         // Verify channel selection
         // channel_index = (5 % SYS_CHN_LISTEN.len()) >> 1
         let expected_channel_index = (5 % SYS_CHN_LISTEN.len()) >> 1;
         let expected_channel = SYS_CHN_LISTEN[expected_channel_index];
-        mock_rf_set_ble_channel(expected_channel).assert_called(1);
+        assert_eq!(
+            last_write(REG_RF_CHANNEL),
+            Some(expected_channel as u32),
+            "the channel from the round-robin index must reach the radio"
+        );
     }
 
     /// Tests back_to_rxmode_bridge channel hopping algorithm.
@@ -2103,21 +2058,7 @@ mod tests {
     /// Verifies that channel selection works correctly for different
     /// bridge sequence numbers.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_set_rxmode
-    )]
     fn test_back_to_rxmode_bridge_channel_hopping() {
-        // Setup mocks
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         reset_global_state();
         PAIR_AC.set(0x11111111);
 
@@ -2126,6 +2067,7 @@ mod tests {
 
         for (seq_num, expected_channel_index) in test_cases.iter() {
             BRIDGE_SEQUENCE_NUMBER.set(*seq_num);
+            FakeMmio::clear_writes();
 
             back_to_rxmode_bridge();
 
@@ -2136,32 +2078,23 @@ mod tests {
                 "Channel selection algorithm failed for seq_num {}",
                 seq_num
             );
-        }
 
-        // Verify all functions were called the right number of times (once per test case)
-        mock_rf_set_tx_rx_off().assert_called(test_cases.len());
-        mock_rf_set_ble_channel(Any).assert_called(test_cases.len());
+            // The channel that reached the radio must match the round-robin
+            // index for this sequence number.
+            assert_eq!(
+                last_write(REG_RF_CHANNEL),
+                Some(SYS_CHN_LISTEN[calculated_channel_index] as u32),
+                "the RF channel written for seq_num {} is wrong",
+                seq_num
+            );
+        }
     }
 
     /// Tests back_to_rxmode_bridge with different access codes.
     ///
     /// Verifies that the pairing access code is correctly passed to RF configuration.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_set_rxmode
-    )]
     fn test_back_to_rxmode_bridge_access_codes() {
-        // Setup mocks
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         reset_global_state();
         BRIDGE_SEQUENCE_NUMBER.set(0);
 
@@ -2170,42 +2103,30 @@ mod tests {
 
         for &access_code in test_access_codes.iter() {
             PAIR_AC.set(access_code);
+            FakeMmio::clear_writes();
 
             back_to_rxmode_bridge();
 
-            // The access code is set correctly (we can't easily verify the exact value
-            // with mry, but we can verify the function was called)
+            // `rf_set_ble_access_code` byte-swaps the code for the hardware.
+            assert_eq!(
+                last_write(REG_RF_ACCESS_CODE),
+                Some(access_code.swap_bytes()),
+                "access code 0x{access_code:08x} must reach the radio byte-swapped"
+            );
         }
-
-        // Verify all functions were called the right number of times
-        mock_rf_set_tx_rx_off().assert_called(test_access_codes.len());
-        mock_rf_set_ble_access_code(Any).assert_called(test_access_codes.len());
     }
 
     /// Tests back_to_rxmode_bridge boundary cases.
     ///
     /// Tests edge cases for channel selection algorithm.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_set_rxmode
-    )]
     fn test_back_to_rxmode_bridge_boundary_cases() {
-        // Setup mocks
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         reset_global_state();
         PAIR_AC.set(0x99999999);
 
         // Test with sequence number 0 (minimum)
         BRIDGE_SEQUENCE_NUMBER.set(0);
+        FakeMmio::clear_writes();
         back_to_rxmode_bridge();
 
         let channel_index_0 = (0 % SYS_CHN_LISTEN.len()) >> 1;
@@ -2213,10 +2134,16 @@ mod tests {
             channel_index_0, 0,
             "Minimum sequence should map to first channel"
         );
+        assert_eq!(
+            last_write(REG_RF_CHANNEL),
+            Some(SYS_CHN_LISTEN[0] as u32),
+            "minimum sequence must select the first channel"
+        );
 
         // Test with sequence number at array boundary
         let boundary_seq = SYS_CHN_LISTEN.len() as u32;
         BRIDGE_SEQUENCE_NUMBER.set(boundary_seq);
+        FakeMmio::clear_writes();
         back_to_rxmode_bridge();
 
         let channel_index_boundary = (boundary_seq as usize % SYS_CHN_LISTEN.len()) >> 1;
@@ -2224,18 +2151,23 @@ mod tests {
             channel_index_boundary, 0,
             "Boundary sequence should wrap around"
         );
-
-        // Verify functions were called twice (once per test)
-        mock_rf_set_tx_rx_off().assert_called(2);
-        mock_rf_set_ble_channel(Any).assert_called(2);
+        assert_eq!(
+            last_write(REG_RF_CHANNEL),
+            Some(SYS_CHN_LISTEN[0] as u32),
+            "the boundary sequence must wrap to the first channel"
+        );
 
         // Test with large sequence number (overflow handling)
         BRIDGE_SEQUENCE_NUMBER.set(0xffffffff);
+        FakeMmio::clear_writes();
         back_to_rxmode_bridge();
 
         let channel_index_max = (0xffffffff_usize % SYS_CHN_LISTEN.len()) >> 1;
-        let expected_channel_max = SYS_CHN_LISTEN[channel_index_max];
-        mock_rf_set_ble_channel(expected_channel_max).assert_called(1);
+        assert_eq!(
+            last_write(REG_RF_CHANNEL),
+            Some(SYS_CHN_LISTEN[channel_index_max] as u32),
+            "the maximum sequence number must wrap into the channel table"
+        );
     }
 
     // ================================================================================
@@ -2246,13 +2178,10 @@ mod tests {
     ///
     /// Verifies that nothing happens when NEED_UPDATE_CONNECT_PARA is false.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_not_needed() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(50000);
-        mock_update_ble_parameter_cb().returns(());
-
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(50000);
 
         // Ensure update is not needed
         NEED_UPDATE_CONNECT_PARA.set(false);
@@ -2260,21 +2189,18 @@ mod tests {
 
         update_connect_para();
 
-        // Verify callback was not called
-        mock_update_ble_parameter_cb().assert_called(0);
+        // The real callback bumps CONN_UPDATE_CNT when it runs.
+        assert_eq!(CONN_UPDATE_CNT.get(), 0, "callback must not be called");
     }
 
     /// Tests update_connect_para when timestamp is not set.
     ///
     /// Verifies that nothing happens when GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP is 0.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_no_timestamp() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(50000);
-        mock_update_ble_parameter_cb().returns(());
-
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(50000);
 
         // Set update needed but no timestamp
         NEED_UPDATE_CONNECT_PARA.set(true);
@@ -2282,24 +2208,22 @@ mod tests {
 
         update_connect_para();
 
-        // Verify callback was not called
-        mock_update_ble_parameter_cb().assert_called(0);
+        // The real callback bumps CONN_UPDATE_CNT when it runs.
+        assert_eq!(CONN_UPDATE_CNT.get(), 0, "callback must not be called");
     }
 
     /// Tests update_connect_para when delay has not elapsed.
     ///
     /// Verifies that parameter update is not triggered if insufficient time has passed.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_delay_not_elapsed() {
-        // Setup mocks
         let start_time = 10000;
         let current_time =
             start_time + (UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 / 2); // Half delay
-        mock_read_reg_system_tick().returns(current_time);
-        mock_update_ble_parameter_cb().returns(());
 
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(current_time as u64);
 
         // Set up conditions for update but insufficient delay
         NEED_UPDATE_CONNECT_PARA.set(true);
@@ -2307,8 +2231,12 @@ mod tests {
 
         update_connect_para();
 
-        // Verify callback was not called (delay not elapsed)
-        mock_update_ble_parameter_cb().assert_called(0);
+        // The real callback bumps CONN_UPDATE_CNT when it runs.
+        assert_eq!(
+            CONN_UPDATE_CNT.get(),
+            0,
+            "callback must not be called before the delay elapsed"
+        );
 
         // Verify flags remain set
         assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), true);
@@ -2319,16 +2247,14 @@ mod tests {
     ///
     /// Verifies that parameter update is triggered after sufficient delay.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_delay_elapsed() {
-        // Setup mocks
         let start_time = 10000;
         let current_time =
             start_time + (UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000) + 1000; // Delay + extra
-        mock_read_reg_system_tick().returns(current_time);
-        mock_update_ble_parameter_cb().returns(());
 
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(current_time as u64);
 
         // Set up conditions for update with sufficient delay
         NEED_UPDATE_CONNECT_PARA.set(true);
@@ -2336,8 +2262,8 @@ mod tests {
 
         update_connect_para();
 
-        // Verify callback was called
-        mock_update_ble_parameter_cb().assert_called(1);
+        // The real callback bumps CONN_UPDATE_CNT when it runs.
+        assert_eq!(CONN_UPDATE_CNT.get(), 1, "callback must be called once");
 
         // Verify flags were cleared
         assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), false);
@@ -2348,16 +2274,14 @@ mod tests {
     ///
     /// Verifies behavior when elapsed time exactly matches the required delay.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_exact_delay() {
-        // Setup mocks
         let start_time = 20000;
         let exact_delay = UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000;
         let current_time = start_time + exact_delay;
-        mock_read_reg_system_tick().returns(current_time);
-        mock_update_ble_parameter_cb().returns(());
 
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(current_time as u64);
 
         // Set up conditions for update with exact delay
         NEED_UPDATE_CONNECT_PARA.set(true);
@@ -2366,7 +2290,11 @@ mod tests {
         update_connect_para();
 
         // At exactly the delay time, should NOT trigger (condition is < not <=)
-        mock_update_ble_parameter_cb().assert_called(0);
+        assert_eq!(
+            CONN_UPDATE_CNT.get(),
+            0,
+            "callback must not be called at exactly the delay"
+        );
         assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), true);
     }
 
@@ -2428,16 +2356,14 @@ mod tests {
     ///
     /// Verifies that after successful update, subsequent calls don't trigger again.
     #[test]
-    #[mry::lock(read_reg_system_tick, update_ble_parameter_cb)]
     fn test_update_connect_para_multiple_calls() {
-        // Setup mocks
         let start_time = 30000;
         let current_time =
             start_time + (UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000) + 5000;
-        mock_read_reg_system_tick().returns(current_time);
-        mock_update_ble_parameter_cb().returns(());
 
         reset_global_state();
+        // `read_reg_system_tick()` reads the fake system tick register.
+        fake_clock::set_ticks(current_time as u64);
 
         // Set up conditions for update
         NEED_UPDATE_CONNECT_PARA.set(true);
@@ -2449,7 +2375,7 @@ mod tests {
         // Second call should not trigger (flags already cleared)
         update_connect_para();
 
-        // Verify callback was called only once
-        mock_update_ble_parameter_cb().assert_called(1);
+        // The real callback bumps CONN_UPDATE_CNT when it runs.
+        assert_eq!(CONN_UPDATE_CNT.get(), 1, "callback must be called once");
     }
 }

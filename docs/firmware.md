@@ -18,7 +18,7 @@ The firmware builds entirely with LLVM: a forked ARM backend lowers whole-progra
 
 `sdk/build_firmware.py` (invoked by `make`) orchestrates the whole-module LLVM IR pipeline:
 
-1. **Generate per-crate LLVM IR**: Cargo builds `rust/Cargo.toml` (a two-crate workspace, `cargo build --package tlsr8266_mesh --lib --release -Z build-std=core --target thumbv6m-none-eabi --message-format=json`) with `RUSTFLAGS="--emit=llvm-ir"`, emitting `.ll` IR files for `core`, dependencies, and the two workspace crates `tlsr8266_mesh` and `mesh_protocol`. `sdk/build_firmware.py` maps Cargo's JSON `compiler-artifact` records to their exact `.ll` modules and links both first-party modules.
+1. **Generate per-crate LLVM IR**: Cargo builds `rust/Cargo.toml` (a five-crate workspace: the `tlsr8266_mesh` binary crate plus `crates/mesh-protocol`, `crates/tlsr8266-pac`, `crates/tlsr8266-hal` and `crates/tlsr8266-radio`; `cargo build --package tlsr8266_mesh --lib --release -Z build-std=core --target thumbv6m-none-eabi --message-format=json`) with `RUSTFLAGS="--emit=llvm-ir"`, emitting `.ll` IR files for `core`, dependencies, and the first-party crates. `sdk/build_firmware.py` maps Cargo's JSON `compiler-artifact` records to their exact `.ll` modules and links all first-party modules.
 
 2. **Link and optimize whole-program IR**: `llvm-link` merges all selected `.ll` modules into a single bitcode module (`merged.bc`), and `opt` runs the project optimization pipeline (`OPT_PASSES`, inline threshold `50`) to produce `merged_opt.bc`.
 
@@ -68,27 +68,65 @@ The built firmware will be in the `_build` directory (`_build/lightblemesh` and 
 
 ## Testing
 
-> **Status:** Work in Progress
+Host tests run the firmware itself: the register file, flash controller, clock,
+analog front end and AES engine all have host implementations, so the code that
+ships on the MCU runs unmodified against faked hardware on the host. This works
+by remapping the register space of the MCU to a local byte array that is
+read/written instead and can be asserted on by tests.
 
-It's also possible to cross compile the test suite and run it locally on the host to validate the code. This works by remapping the register space of the MCU to a local u8 array which is read/written instead and can be confirmed to be correct by tests.
-
-To run the test suite, an x86 compatible machine is needed, and there is a helper script:
+To run the test suite, an x86 compatible machine is needed, and there is a helper script which runs the whole workspace (all five crates) in a single process against the 32-bit target that matches the MCU's pointer width:
 
 ```bash
 ./rust/run_tests.sh
 ```
 
-The `mesh-protocol` workspace crate is pure `no_std` protocol code, so it also runs natively on the host without the 32-bit target or register mocks:
+The pure `no_std` crates also run natively on x86_64, which needs neither the
+`i686` target nor a cross-compile step; the radio crate runs there against the
+same fakes:
 
 ```bash
 cd rust && cargo test -p mesh-protocol
+cd rust && cargo test -p tlsr8266-radio -- --test-threads=1
 ```
 
-`./run_tests.sh` already covers it via `--workspace`, so both suites run in CI. The 32-bit cross-compiled suite exercises the firmware crate and its `mry`-mocked hardware paths; the native crate suite exercises the wire types, CRC, UART framing and GATT constants.
+`./run_tests.sh` already covers every crate via `--workspace` (on the `i686`
+target), so the native runs above are the same tests without the cross-compile
+step; CI runs the `run_tests.sh` form.
+
+### Host hardware fakes
+
+There is no call-graph mocking framework in the workspace. Instead every
+peripheral the firmware touches has a host implementation, gated on
+`cfg(not(target_os = "none"))` — `target_os`, not `test`, because the firmware
+crate compiles the lower crates as *dependencies*, which never carry the
+firmware's `cfg(test)`, so a `#[cfg(test)]` fake would be invisible exactly where
+it is needed.
+
+| Fake | Path | Stands in for |
+|---|---|---|
+| `FakeMmio` | `tlsr8266_pac::fake_mmio::FakeMmio` | The register bank: seed with `set_reg8/16/32`, script read sequences with `on_read8/16/32`, inspect with `reg8/16/32`, and assert on the ordered `writes()` log after driving the real accessors. |
+| `FakeAnalog` | `tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog` | The 256-address analog register plane behind the `0xb8`/`0xb9`/`0xba` bus: an in-memory bank plus scripted read queues (PWM, PGA, ADC settings). |
+| `FakeFlash` | `tlsr8266_hal::drivers::flash::fake_flash::FakeFlash` | A 512 KiB in-memory NOR device that the real `flash_read_page`/`flash_write_page`/`flash_erase_sector` entry points drive: `read_slice`, `write_slice`, `erase_count`, and `fail_verify_next_write` for failure paths. |
+| `fake_clock` | `tlsr8266_hal::mcu::clock::fake_clock` | `reg_system_tick` and `sleep_us`: `set_ticks`, `advance_ticks` (including 32-bit wraparound), `set_xtal_16mhz`, `sleeps()`. |
+| `fake_crypto` | `tlsr8266_hal::mcu::crypto::fake_crypto` | AES transport: `FakeAesMode::SoftwareAes` (default; real FIPS-197 in pure Rust) or `MmioRegisters` for tests whose subject is the `0x540`/`0x548`/`0x550` write-poll-read sequence. |
+
+The radio crate sits below the application layer and therefore never calls into
+it directly: those edges are seams installed at boot, and host tests install
+their own implementations through the same functions.
+
+| Seam | Path | Purpose |
+|---|---|---|
+| `set_ble_app_hooks` / `set_ota_hooks` | `tlsr8266_radio::callbacks` | Replace the mesh/light and OTA entry points with recording or scripted hooks; `reset_for_test()` restores the host-build defaults. |
+| `reset_for_test` | `tlsr8266_radio::queues` | Clear the mesh RX/TX and UART TX queues, flags and drop counters. |
+
+All of these fakes are process-global singletons (one array or map per test
+binary), which is why the suite runs with `--test-threads=1`: each test resets
+the fakes it owns in its fixture (`FakeMmio::reset()`, `FakeFlash::reset()`,
+`fake_clock::reset()`, `fake_crypto::reset()`,
+`callbacks::reset_for_test()`, `queues::reset_for_test()`) instead of paying to
+rebuild the world per test.
 
 > **Coverage tool version:** `nightly-2026-11-20` (Cargo 1.100+ target layout) requires `cargo-llvm-cov >= 0.8.6`. If an older version is already installed locally, upgrade it with `cargo install cargo-llvm-cov --force`.
-
-**Todo:** Allow mocking complex processes such as flash operations which require sequences of responding to register changes.
 
 <a id="llvm"></a>
 ## LLVM Build Instructions

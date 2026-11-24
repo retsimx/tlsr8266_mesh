@@ -334,12 +334,11 @@ impl<const N: usize> Write for UartStream<N> {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
-    use crate::uart::{
-        mock_send_message, mock_send_sync_panic, reset_for_test, send_message, send_sync_panic,
-    };
+    use crate::uart::reset_for_test;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use mry::Any;
+    use std::sync::{Mutex as StdMutex, MutexGuard};
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_radio::queues::UART_TX_CHANNEL;
 
     /// The 44-byte frame `build_uart_frame` must produce for `payload`.
     ///
@@ -359,9 +358,76 @@ mod tests {
 
     /// Installs the test stand-ins for `app::main_task`'s hooks, so the
     /// assertions below observe the frames `logging` produced through the
-    /// mocked transport.
+    /// registered sinks.
     fn install_test_sinks() {
         set_log_sinks(TEST_LOG_SINKS);
+    }
+
+    /// Frames the recording sinks were handed, in call order.
+    ///
+    /// `LogSinks` is the module's documented hook seam: [`set_log_sinks`] is
+    /// what `app::main_task` calls in production, so a test that wants to see
+    /// the exact bytes `logging` produces installs a recorder and asserts on
+    /// the recording instead of mocking the transport one layer down.
+    static RECORDED_ASYNC: StdMutex<Vec<UartData>> = StdMutex::new(Vec::new());
+    static RECORDED_BLOCKING: StdMutex<Vec<UartData>> = StdMutex::new(Vec::new());
+
+    const RECORDING_SINKS: LogSinks = LogSinks {
+        async_tx: record_async,
+        blocking_tx: record_blocking,
+    };
+
+    fn record_async(msg: &UartData) -> bool {
+        recorded(&RECORDED_ASYNC).push(*msg);
+        true
+    }
+
+    fn record_blocking(msg: &UartData) {
+        recorded(&RECORDED_BLOCKING).push(*msg);
+    }
+
+    fn recorded(sink: &'static StdMutex<Vec<UartData>>) -> MutexGuard<'static, Vec<UartData>> {
+        sink.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn async_frames() -> Vec<UartData> {
+        recorded(&RECORDED_ASYNC).clone()
+    }
+
+    fn blocking_frames() -> Vec<UartData> {
+        recorded(&RECORDED_BLOCKING).clone()
+    }
+
+    /// Installs [`RECORDING_SINKS`] and restores the test default on drop.
+    ///
+    /// The sinks are process-wide, so an RAII guard keeps a failing assertion
+    /// from leaking the recorder into the next test.
+    struct RecordingSinks;
+
+    impl RecordingSinks {
+        fn install() -> Self {
+            recorded(&RECORDED_ASYNC).clear();
+            recorded(&RECORDED_BLOCKING).clear();
+            set_log_sinks(RECORDING_SINKS);
+            Self
+        }
+    }
+
+    impl Drop for RecordingSinks {
+        fn drop(&mut self) {
+            install_test_sinks();
+        }
+    }
+
+    /// `reg_dma_tx_rdy0`: the DMA1 transmit trigger `uart::send_sync_panic` arms.
+    const REG_DMA_TX_RDY0: u32 = 0x524;
+
+    /// Number of DMA1 transmit triggers recorded in the fake register bank.
+    fn dma1_arms() -> usize {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == REG_DMA_TX_RDY0 | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
     }
 
     /// Calls made to the direct sink in the `send_blocking_with` test.
@@ -372,11 +438,9 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(send_sync_panic)]
     fn test_uart_stream_send_synchronous() {
         reset_for_test();
-        install_test_sinks();
-        mock_send_sync_panic(Any).returns(());
+        let _sinks = RecordingSinks::install();
 
         let mut stream = UartStream::<128>::new();
         let test_data = b"Hello UART";
@@ -385,16 +449,21 @@ mod tests {
         // doasync = false routes to the blocking panic sink, never the queue.
         stream.send_blocking(false);
 
-        mock_send_sync_panic(expected_frame(test_data, UartMsg::PrintMessage)).assert_called(1);
-        mock_send_sync_panic(Any).assert_called(1);
+        assert_eq!(
+            blocking_frames(),
+            vec![expected_frame(test_data, UartMsg::PrintMessage)],
+            "the exact frame must reach the blocking sink, exactly once"
+        );
+        assert!(
+            async_frames().is_empty(),
+            "a blocking send must never reach the async sink"
+        );
     }
 
     #[test]
-    #[mry::lock(send_sync_panic)]
     fn test_uart_stream_send_panic_mode() {
         reset_for_test();
-        install_test_sinks();
-        mock_send_sync_panic(Any).returns(());
+        let _sinks = RecordingSinks::install();
 
         let mut stream = UartStream::<128>::new();
         let test_data = b"Panic message!";
@@ -403,16 +472,18 @@ mod tests {
         // is_panic = true flags the frame as a panic message.
         stream.send_blocking(true);
 
-        mock_send_sync_panic(expected_frame(test_data, UartMsg::PanicMessage)).assert_called(1);
-        mock_send_sync_panic(Any).assert_called(1);
+        assert_eq!(
+            blocking_frames(),
+            vec![expected_frame(test_data, UartMsg::PanicMessage)],
+            "the exact frame must reach the blocking sink, exactly once"
+        );
+        assert!(async_frames().is_empty());
     }
 
     #[test]
-    #[mry::lock(send_sync_panic)]
     fn test_print_to_uart_blocking_sink() {
         reset_for_test();
-        install_test_sinks();
-        mock_send_sync_panic(Any).returns(());
+        let _sinks = RecordingSinks::install();
 
         // A default stream is empty; this also covers the `Default` impl.
         assert_eq!(UartStream::<128>::default().as_bytes(), b"");
@@ -420,18 +491,17 @@ mod tests {
         // doasync = false routes straight to the panic sink instead of the queue.
         print_to_uart(false, |stream| write!(stream, "sync"));
 
-        mock_send_sync_panic(expected_frame(b"sync", UartMsg::PrintMessage)).assert_called(1);
-        mock_send_sync_panic(Any).assert_called(1);
+        assert_eq!(
+            blocking_frames(),
+            vec![expected_frame(b"sync", UartMsg::PrintMessage)]
+        );
+        assert!(async_frames().is_empty());
     }
 
     #[test]
-    #[mry::lock(send_message)]
     fn test_uart_stream_send_async_routes_through_queue() {
         reset_for_test();
         install_test_sinks();
-        // Keep the call observable but let it reach the real `enqueue_uart_tx`,
-        // so the assertion is on actual queue delivery, not on the mock.
-        mock_send_message(Any).calls_real_impl();
 
         let mut stream = UartStream::<128>::new();
         let test_data = b"Hello async";
@@ -446,7 +516,6 @@ mod tests {
             UART_TX_CHANNEL.try_receive().is_err(),
             "one chunk means exactly one frame"
         );
-        mock_send_message(Any).assert_called(1);
     }
 
     /// `send_blocking_with` must hand every chunk to the sink it was given and
@@ -454,14 +523,10 @@ mod tests {
     /// registered sinks nor routes the frames a second time, so a 100-byte line
     /// produces three frames, not six.
     #[test]
-    #[mry::lock(send_message)]
-    #[mry::lock(send_sync_panic)]
     fn test_send_blocking_with_hands_each_chunk_to_the_given_sink_once() {
         reset_for_test();
         // The registered sinks are installed and must stay untouched.
-        install_test_sinks();
-        mock_send_message(Any).returns(Ok(()));
-        mock_send_sync_panic(Any).returns(());
+        let _sinks = RecordingSinks::install();
         DIRECT_SINK_CALLS.store(0, Ordering::Relaxed);
 
         let mut stream = UartStream::<128>::new();
@@ -476,8 +541,10 @@ mod tests {
             3,
             "one call per chunk, and the mirror/registration paths add none"
         );
-        mock_send_sync_panic(Any).assert_called(0);
-        mock_send_message(Any).assert_called(0);
+        assert!(
+            blocking_frames().is_empty() && async_frames().is_empty(),
+            "the registered sinks must not see the frames of a direct send"
+        );
     }
 
     /// Before `app::main_task` registers the sinks, a log line must be dropped:
@@ -486,13 +553,10 @@ mod tests {
     /// This is the one test that clears the crate-wide test default, so it puts
     /// it back: other modules' tests log without registering (see `test_sinks`).
     #[test]
-    #[mry::lock(send_message)]
-    #[mry::lock(send_sync_panic)]
     fn test_unregistered_sinks_drop_log_lines() {
         reset_for_test();
+        FakeMmio::reset();
         reset_log_sinks_for_test();
-        mock_send_message(Any).returns(Ok(()));
-        mock_send_sync_panic(Any).returns(());
 
         let mut stream = UartStream::<128>::new();
         assert_eq!(stream.write_all(b"lost line"), Ok(()));
@@ -500,8 +564,15 @@ mod tests {
         stream.send_async(false);
         stream.send_blocking(false);
 
-        mock_send_message(Any).assert_called(0);
-        mock_send_sync_panic(Any).assert_called(0);
+        assert!(
+            UART_TX_CHANNEL.try_receive().is_err(),
+            "an unregistered sink must not reach the async transport"
+        );
+        assert_eq!(
+            dma1_arms(),
+            0,
+            "an unregistered sink must not arm the blocking transport"
+        );
 
         install_test_sinks();
     }

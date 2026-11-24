@@ -1,18 +1,15 @@
 use core::ptr::{addr_of, addr_of_mut, read_unaligned};
 use core::slice;
 
-use num_derive::FromPrimitive;
-use num_traits::FromPrimitive;
-
-use crate::sdk::app_att_light::{
+use crate::ble::connection::{
+    BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
+};
+use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate};
+use crate::gatt::service_table::{
     attr_effective_len, get_gAttributes, is_readonly_ram_attr, AttributeT,
     GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
 };
-use crate::sdk::ble_app::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate};
-use crate::sdk::ble_app::light_ll::connection_management::{
-    BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
-};
-use crate::sdk::ble_app::rf_drv_8266::PKT_ERR_RSP;
+use crate::rf::drv_8266::PKT_ERR_RSP;
 use mesh_protocol::mesh_types::OtaState;
 use mesh_protocol::packet_types::{
     Packet, PacketAttMtu, PacketAttReadRsp, PacketAttWriteRsp, PacketCtrlUnknown, PacketFeatureRsp,
@@ -21,15 +18,18 @@ use mesh_protocol::packet_types::{
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_pac::read_reg_system_tick;
 
-#[cfg(not(test))]
+// On target the linker script defines the symbol (`startup.rs`); on host builds a
+// zeroed *immutable* static stands in for it, so the ROM/RAM comparison the ATT
+// write path makes can be exercised at all. Immutable on purpose: nothing writes
+// it, and `static mut` here would trip the layering rule for no gain.
+#[cfg(target_os = "none")]
 extern "C" {
     pub static __RAM_START_ADDR: u32;
 }
 
-#[cfg(test)]
-pub static mut __RAM_START_ADDR: u32 = 0;
+#[cfg(not(target_os = "none"))]
+pub static __RAM_START_ADDR: u32 = 0;
 
-#[derive(FromPrimitive)]
 pub enum GattOp {
     AttOpErrorRsp = 0x01,
     // Error Response op code
@@ -84,6 +84,43 @@ pub enum GattOp {
     AttOpHandleValueCfm = 0x1e,
     // Handle Value Confirmation op code
     AttOpWriteCmd = 0x52, // ATT Write Command
+}
+
+impl TryFrom<u8> for GattOp {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(GattOp::AttOpErrorRsp),
+            0x02 => Ok(GattOp::AttOpExchangeMtuReq),
+            0x03 => Ok(GattOp::AttOpExchangeMtuRsp),
+            0x04 => Ok(GattOp::AttOpFindInfoReq),
+            0x05 => Ok(GattOp::AttOpFindInfoRsp),
+            0x06 => Ok(GattOp::AttOpFindByTypeValueReq),
+            0x07 => Ok(GattOp::AttOpFindByTypeValueRsp),
+            0x08 => Ok(GattOp::AttOpReadByTypeReq),
+            0x09 => Ok(GattOp::AttOpReadByTypeRsp),
+            0x0a => Ok(GattOp::AttOpReadReq),
+            0x0b => Ok(GattOp::AttOpReadRsp),
+            0x0c => Ok(GattOp::AttOpReadBlobReq),
+            0x0d => Ok(GattOp::AttOpReadBlobRsp),
+            0x0e => Ok(GattOp::AttOpReadMultiReq),
+            0x0f => Ok(GattOp::AttOpReadMultiRsp),
+            0x10 => Ok(GattOp::AttOpReadByGroupTypeReq),
+            0x11 => Ok(GattOp::AttOpReadByGroupTypeRsp),
+            0x12 => Ok(GattOp::AttOpWriteReq),
+            0x13 => Ok(GattOp::AttOpWriteRsp),
+            0x16 => Ok(GattOp::AttOpPrepareWriteReq),
+            0x17 => Ok(GattOp::AttOpPrepareWriteRsp),
+            0x18 => Ok(GattOp::AttOpExecuteWriteReq),
+            0x19 => Ok(GattOp::AttOpExecuteWriteRsp),
+            0x1b => Ok(GattOp::AttOpHandleValueNoti),
+            0x1d => Ok(GattOp::AttOpHandleValueInd),
+            0x1e => Ok(GattOp::AttOpHandleValueCfm),
+            0x52 => Ok(GattOp::AttOpWriteCmd),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Searches for an attribute with the specified UUID within a range of handle values.
@@ -222,7 +259,7 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
 
     // Process different ATT operations based on the opcode in byte 3
     // Each operation is handled by a separate function for clarity and maintainability
-    return match FromPrimitive::from_u8(packet.l2cap_data().value[3]) {
+    return match GattOp::try_from(packet.l2cap_data().value[3]).ok() {
         Some(GattOp::AttOpExchangeMtuReq) => handle_exchange_mtu_request(),
         Some(GattOp::AttOpFindInfoReq) => handle_find_info_request(packet),
         Some(GattOp::AttOpFindByTypeValueReq) => handle_find_by_type_value_request(packet),
@@ -283,7 +320,7 @@ fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
                 rf_len: 6,
                 opcode: 0x0c,
                 main_ver: 0x08,
-                vendor: crate::sdk::ble_app::radio_config().vendor_id,
+                vendor: crate::facade::radio_config().vendor_id,
                 sub_ver: 0x08,
             },
         });
@@ -1263,9 +1300,10 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
             return response;
         }
 
-        // Check if attribute value is stored in RAM (not ROM)
-        let ram_start_addr = addr_of!(__RAM_START_ADDR) as u32;
-        let attr_addr = current_attr.p_attr_value as u32;
+        // Check if attribute value is stored in RAM (not ROM). Compare as
+        // `usize` so the comparison is correct on 64-bit hosts as well as TC32.
+        let ram_start_addr = addr_of!(__RAM_START_ADDR) as usize;
+        let attr_addr = current_attr.p_attr_value as usize;
 
         if attr_addr <= ram_start_addr || is_readonly_ram_attr(att_handle) {
             return response;
@@ -1310,13 +1348,13 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::app_att_light::{
+    use crate::gatt::service_table::{
         get_gAttributes, GATT_UUID_CHARACTER, GATT_UUID_PRIMARY_SERVICE,
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
     };
     use core::ptr::null_mut;
     use mesh_protocol::packet_types::{PacketAttData, PacketL2capData};
-    use tlsr8266_pac::mock_read_reg_system_tick;
+    use tlsr8266_pac::write_reg_system_tick;
 
     // Helper function to create UUID16 as a byte slice
     fn uuid16_to_bytes(uuid: u16) -> [u8; 2] {
@@ -1330,9 +1368,11 @@ mod tests {
         uuid
     }
 
-    // Helper function to set up mocks for operations that use GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP
-    fn setup_system_tick_mock() {
-        mock_read_reg_system_tick().returns(0x12345678);
+    // Seeds the system-tick register that `GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP`
+    // is derived from. The PAC accessors route through the host `FakeMmio` bank,
+    // so the seeded value is what every `read_reg_system_tick` in the test sees.
+    fn seed_system_tick() {
+        write_reg_system_tick(0x12345678);
     }
 
     // Helper function to create a test packet with specified handle
@@ -1351,13 +1391,12 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_mtu_exchange_response() {
         // Test all MTU exchange response handle cases in a single test
 
         // --- Test handle 0xC case (version indication) ---
         {
-            setup_system_tick_mock();
+            seed_system_tick();
             GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
             let packet = create_test_packet_with_handle(0x0C);
             let response = handle_mtu_exchange_response(&packet).unwrap();
@@ -1374,14 +1413,14 @@ mod tests {
             let vendor = version_ind.vendor;
             let sub_ver = version_ind.sub_ver;
             assert_eq!(dma_len, 8);
-            assert_eq!(vendor, crate::sdk::ble_app::radio_config().vendor_id);
+            assert_eq!(vendor, crate::facade::radio_config().vendor_id);
             assert_eq!(version_ind.main_ver, 0x08);
             assert_eq!(sub_ver, 0x08);
         }
 
         // --- Test handle 8 case (feature response) ---
         {
-            setup_system_tick_mock();
+            seed_system_tick();
             GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
             let packet = create_test_packet_with_handle(8);
             let response = handle_mtu_exchange_response(&packet).unwrap();
@@ -1463,9 +1502,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_exchange_mtu_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test Exchange MTU Request
         let packet = create_att_packet(0, &[GattOp::AttOpExchangeMtuReq as u8, 0x17, 0x00]); // MTU size 23
@@ -1478,9 +1516,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_exchange_mtu_rsp() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Exchange MTU Response packet with handle=0xC (special handling case)
         let mut packet = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
@@ -1492,13 +1529,12 @@ mod tests {
         let version_ind = response.version_ind();
         assert_eq!(version_ind.opcode, 0x0C);
         let vendor = version_ind.vendor;
-        assert_eq!(vendor, crate::sdk::ble_app::radio_config().vendor_id);
+        assert_eq!(vendor, crate::facade::radio_config().vendor_id);
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_info_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Find Information Request for a range that includes uuid16 attributes
         let mut data = [0; 6];
@@ -1522,9 +1558,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_by_type_value_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Find By Type Value Request for Primary Service UUID
         let mut data = [0; 12];
@@ -1565,9 +1600,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_type_req_16bit_uuid() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Type Request for Characteristic UUID
         let mut data = [0; 10];
@@ -1602,9 +1636,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_type_req_128bit_uuid() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Type Request for a 128-bit UUID
         let mut data = [0; 24];
@@ -1639,9 +1672,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read Request for an attribute
         let mut data = [0; 6];
@@ -1664,9 +1696,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_group_type_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Group Type Request for Primary Service UUID
         let mut data = [0; 10];
@@ -1701,9 +1732,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_write_req() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Write Request for an attribute
         let mut data = [0; 23];
@@ -1726,9 +1756,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_write_cmd() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Write Command for an attribute
         let mut data = [0; 23];
@@ -1777,9 +1806,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_exchange_mtu_rsp_handle_2() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test case: handle == 2 should set BLE_PERIPHERAL_CONNECTION_TIMEOUT_US and return None
         let mut packet = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
@@ -1798,9 +1826,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_exchange_mtu_rsp_handle_other() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test case: handle != 8 && handle != 2 should return PacketCtrlUnknown
         let mut packet = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
@@ -1819,9 +1846,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_exchange_mtu_rsp_handle_8() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Reset GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP
         GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
@@ -1853,9 +1879,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_info_req_end_handle_adjustment() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Get the total number of attributes
         let total_attrs = get_gAttributes()[0].att_num;
@@ -1910,9 +1935,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_info_req_128bit_uuid() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test verifies the code block that handles 128-bit UUIDs in Find Info Request:
 
@@ -1979,9 +2003,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_write_permission_checks() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test 1: Return None when uuid != 0x2902 and att_num < 2
         {
@@ -2251,9 +2274,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_type_req_128bit_uuid_response_preparation() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test specifically focuses on the code block that prepares
         // the Read By Type Response packet when a 128-bit UUID attribute is found
@@ -2336,9 +2358,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_type_req_uuid_not_found() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test checks the error response when no matching attribute is found
 
@@ -2559,22 +2580,25 @@ mod tests {
         data[1] = temp_attr_idx as u8;
 
         // Test case 1: OTA state is Continue - flag should not be set
-        crate::ota::set_finished_flag_for_test(OtaState::Continue);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Continue);
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
 
         // Verify flag was not set
-        assert_eq!(crate::ota::is_termination_requested(), false);
+        assert_eq!(
+            crate::callbacks::test_ota::is_termination_requested(),
+            false
+        );
 
         // Test case 2: OTA state is not Continue - flag should be set
-        crate::ota::set_finished_flag_for_test(OtaState::Ok);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Ok);
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
 
         // Verify flag was set
-        assert_eq!(crate::ota::is_termination_requested(), true);
+        assert_eq!(crate::callbacks::test_ota::is_termination_requested(), true);
 
         // Restore original attribute properties
         unsafe {
@@ -2582,8 +2606,8 @@ mod tests {
         }
 
         // Reset flags
-        crate::ota::set_termination_requested_for_test(false);
-        crate::ota::set_finished_flag_for_test(OtaState::Continue);
+        crate::callbacks::test_ota::set_termination_requested_for_test(false);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Continue);
     }
 
     #[test]
@@ -2620,8 +2644,8 @@ mod tests {
         data[3] = 0;
 
         // Set initial state of flags
-        crate::ota::set_termination_requested_for_test(false);
-        crate::ota::set_finished_flag_for_test(OtaState::Ok); // Not Continue
+        crate::callbacks::test_ota::set_termination_requested_for_test(false);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Ok); // Not Continue
 
         let packet = create_att_packet(0, &data);
         let _ = l2cap_att_handler(&packet);
@@ -2633,7 +2657,10 @@ mod tests {
 
         // Verify OTA terminate flag was NOT set despite the OTA state condition being true
         // because the SEND_TO_MASTER condition should take precedence
-        assert_eq!(crate::ota::is_termination_requested(), false);
+        assert_eq!(
+            crate::callbacks::test_ota::is_termination_requested(),
+            false
+        );
 
         // Restore original attribute properties
         unsafe {
@@ -2645,8 +2672,8 @@ mod tests {
         }
 
         // Reset flags
-        crate::ota::set_termination_requested_for_test(false);
-        crate::ota::set_finished_flag_for_test(OtaState::Continue);
+        crate::callbacks::test_ota::set_termination_requested_for_test(false);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Continue);
     }
 
     #[test]
@@ -2703,9 +2730,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_group_type_req_loop_break_on_none() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test verifies that the loop in l2cap_att_handler breaks correctly
         // when l2cap_att_search returns None for a ReadByGroupTypeReq operation
@@ -2744,9 +2770,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_read_by_group_type_req_loop_break_on_buffer_overflow() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test verifies another case where the loop in ReadByGroupTypeReq breaks:
         // when the entry would not fit the response's 22-byte value array
@@ -2802,9 +2827,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_write_request_return_paths() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test 1: Result should contain a write response when opcode is 0x12 (Write Request)
         {
@@ -3162,9 +3186,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_by_type_value_req_handle_exceeds_range() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Find By Type Value Request with a narrow handle range
         let mut data = [0; 12];
@@ -3201,9 +3224,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_l2cap_att_handler_find_by_type_value_no_matches() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Find By Type Value Request with UUID and value that won't match anything
         let mut data = [0; 12];
@@ -3239,9 +3261,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_type_request_no_match() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create a Read By Type Request packet with a non-existent UUID
         let mut data = [0; 10];
@@ -3271,9 +3292,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_type_request_uuid128_no_match() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create a Read By Type Request for a non-existent 128-bit UUID
         let mut data = [0; 24];
@@ -3304,9 +3324,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_type_request_16bit_uuid_success_path() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // This test specifically focuses on the code block that handles
         // successful 16-bit UUID lookup in handle_read_by_type_request
@@ -3414,9 +3433,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_by_type_request_loop_break_triggers() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Type Request for Characteristic UUID (0x2803)
         let mut data = [0; 10];
@@ -3508,9 +3526,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_by_type_request_none_break_condition() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Find a characteristic in the attribute table
         let char_uuid = uuid16_to_bytes(GATT_UUID_CHARACTER);
@@ -3572,9 +3589,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_by_type_request_error_condition() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Type Request with handle range that will trigger a "None" return
         // We'll use a characteristic UUID (0x2803) but with a handle range that doesn't contain
@@ -3604,9 +3620,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_group_type_request_zero_start_handle() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Group Type Request with start_handle = 0 (invalid)
         let mut data = [0; 10];
@@ -3648,9 +3663,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_group_type_request_start_handle_greater_than_end_handle() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Group Type Request with start_handle > end_handle (invalid)
         let mut data = [0; 10];
@@ -3692,9 +3706,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_read_by_group_type_request_valid_range() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Create Read By Group Type Request with a valid handle range
         // We need to ensure this handle range contains at least one primary service
@@ -3741,9 +3754,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_handle_write_request_or_command_restricted_handles() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // Test write attempts to the restricted handles (0 and 1)
         for handle in 0..2 {
@@ -3908,16 +3920,15 @@ mod tests {
     /// Inject a config with a 19-byte device name and an 11-byte mesh name and
     /// assert that both read paths serve exactly those lengths.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_paths_serve_injected_gatt_value_lengths() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
-        let factory = crate::sdk::ble_app::radio_config();
+        let factory = crate::facade::radio_config();
         let mut cfg = factory;
         cfg.device_name = b"0123456789ABCDEFGHI";
         cfg.default_mesh_name = "out_of_mesh";
-        crate::sdk::ble_app::set_radio_config(cfg);
-        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        crate::facade::set_radio_config(cfg);
+        crate::gatt::service_table::init_gatt_profile(&cfg);
 
         // ---- ReadRequest, handle 3 (device name): exactly 19 bytes ----
         let mut data = [0u8; 6];
@@ -3983,8 +3994,8 @@ mod tests {
         assert_eq!(&response.att_read_rsp().value[3..14], b"out_of_mesh");
 
         // Leave the process-wide configuration as it was found.
-        crate::sdk::ble_app::set_radio_config(factory);
-        crate::sdk::app_att_light::init_gatt_profile(&factory);
+        crate::facade::set_radio_config(factory);
+        crate::gatt::service_table::init_gatt_profile(&factory);
         let restored = handle_read_request(&create_att_packet(0, &{
             let mut d = [0u8; 6];
             d[0] = GattOp::AttOpReadReq as u8;
@@ -4019,17 +4030,16 @@ mod tests {
     /// `value[5..24]` and panicked. It must serve `attr_effective_len` instead,
     /// bounded by the real destination.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_by_group_type_serves_effective_value_lengths() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
         // A nonzero revision proves handle 9 serves the injected word, not a
         // fixed constant.
-        let factory = crate::sdk::ble_app::radio_config();
+        let factory = crate::facade::radio_config();
         let mut cfg = factory;
         cfg.build_version = 0xA1B2_C3D4;
-        crate::sdk::ble_app::set_radio_config(cfg);
-        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        crate::facade::set_radio_config(cfg);
+        crate::gatt::service_table::init_gatt_profile(&cfg);
 
         // `ReadByGroupType` replaces `attr_len` with the effective length, so the
         // response's format byte (value length + two handles) is what the client
@@ -4100,8 +4110,8 @@ mod tests {
         assert_eq!(l2cap_len, 17, "opcode + format + two handles + 11 bytes");
 
         // Leave the process-wide configuration as it was found.
-        crate::sdk::ble_app::set_radio_config(factory);
-        crate::sdk::app_att_light::init_gatt_profile(&factory);
+        crate::facade::set_radio_config(factory);
+        crate::gatt::service_table::init_gatt_profile(&factory);
     }
 
     /// The largest injectable device name (19 bytes) does not fit a
@@ -4109,15 +4119,14 @@ mod tests {
     /// bytes. The handler must answer with the error response it already uses
     /// when an entry cannot be added, never index past `value`.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_read_by_group_type_rejects_value_too_long_for_the_response() {
-        setup_system_tick_mock();
+        seed_system_tick();
 
-        let factory = crate::sdk::ble_app::radio_config();
+        let factory = crate::facade::radio_config();
         let mut cfg = factory;
         cfg.device_name = b"0123456789ABCDEFGHI"; // 19 bytes, the buffer maximum
-        crate::sdk::ble_app::set_radio_config(cfg);
-        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        crate::facade::set_radio_config(cfg);
+        crate::gatt::service_table::init_gatt_profile(&cfg);
         assert_eq!(
             attr_effective_len(3, &get_gAttributes()[3]),
             19,
@@ -4137,8 +4146,8 @@ mod tests {
         // A value that does fit (the 16-byte mesh name) still succeeds at the
         // maximum: two handles plus 16 bytes is 21 of the 22 value bytes.
         cfg.default_mesh_name = "0123456789ABCDEF"; // exactly 16 bytes
-        crate::sdk::ble_app::set_radio_config(cfg);
-        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        crate::facade::set_radio_config(cfg);
+        crate::gatt::service_table::init_gatt_profile(&cfg);
         let response =
             handle_read_by_group_type_request(&read_by_group_type_packet(1, 29, 0x2A29)).unwrap();
         let format_length = response.att_read_rsp().value[0];
@@ -4146,7 +4155,7 @@ mod tests {
         assert_eq!(&response.att_read_rsp().value[5..21], b"0123456789ABCDEF");
 
         // Leave the process-wide configuration as it was found.
-        crate::sdk::ble_app::set_radio_config(factory);
-        crate::sdk::app_att_light::init_gatt_profile(&factory);
+        crate::facade::set_radio_config(factory);
+        crate::gatt::service_table::init_gatt_profile(&factory);
     }
 }

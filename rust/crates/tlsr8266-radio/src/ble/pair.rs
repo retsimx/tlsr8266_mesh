@@ -3,15 +3,13 @@ use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
-use crate::sdk::ble_app::config::RadioConfig;
-use crate::sdk::ble_app::flash_config::{
-    pair_flash_clean, pair_load_key, pair_update_key, save_pair_info,
-};
-use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair;
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::ble::flash_config::{pair_flash_clean, pair_load_key, pair_update_key, save_pair_info};
+use crate::ble::pairing::rf_link_delete_pair;
+use crate::config::RadioConfig;
+use crate::rf::drv_8266::{
     FLASH_CONFIGURATION_INDEX, MAC_ID, MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
 };
-use crate::sdk::light::*;
+use crate::types::*;
 use mesh_protocol::mesh_types::{
     PairState, PAIR_OP_DELETE_PAIRING, PAIR_OP_EXCHANGE_RANDOM, PAIR_OP_GET_MESH_LTK,
     PAIR_OP_RESET_MESH, PAIR_OP_SET_MESH_LTK, PAIR_OP_SET_MESH_NAME, PAIR_OP_SET_MESH_PASSWORD,
@@ -63,31 +61,30 @@ use tlsr8266_pac::read_reg_system_tick;
 //
 // These statics and types are owned by the pairing module (design 019 §1, batch
 // 5). Readers outside this file import them by name from
-// `crate::sdk::ble_app::ble_ll_pair`.
+// `crate::ble::pair`.
 //------------------------------------------------------------------------------
 
 /// Mesh network name used for pairing and access control.
 /// 16-byte string identifier that devices must match to join the mesh network.
 ///
-/// Visibility is `pub(in crate::sdk)`: the facade in `ble_app/mod.rs` is the
-/// only entry point from outside `sdk/`, and `crate::sdk` is the extraction
-/// boundary for C-10 (`crates/tlsr8266-radio`).
-pub(in crate::sdk) static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
+/// Visibility is `pub(crate)`: the facade module is the only entry point from
+/// outside this crate, and the crate boundary is the fence C-10 established.
+pub(crate) static PAIR_CONFIG_MESH_NAME: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Mesh network password used for authentication during pairing.
 /// 16-byte password that must be provided to join the mesh network.
-pub(in crate::sdk) static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
+pub(crate) static PAIR_CONFIG_MESH_PWD: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Long-Term Key (LTK) for mesh network encryption.
 /// 16-byte cryptographic key used to encrypt/decrypt mesh communications.
-pub(in crate::sdk) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
+pub(crate) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Current state of the mesh pairing process.
 /// Tracks progress through pairing sequence: idle, setting, transmitting, receiving, etc.
-pub(in crate::sdk) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
+pub(crate) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
     CriticalSectionMutex::new(ePairState::PairSetted);
 
 /// Initialization Vector for Master (IVM) used in mesh encryption.
@@ -97,7 +94,7 @@ static PAIR_IVM: CriticalSectionMutex<[u8; 8]> =
 
 /// Session key derived from mesh password for secure pairing.
 /// 16-byte key used during the pairing process to encrypt configuration data.
-pub(in crate::sdk) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
+pub(crate) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 16]> =
     CriticalSectionMutex::new([0; 16]);
 
 /// Seed the pairing configuration buffers from an injected [`RadioConfig`].
@@ -105,7 +102,7 @@ pub(in crate::sdk) static PAIR_CONFIG_PWD_ENCODE_SK: CriticalSectionMutex<[u8; 1
 /// Each 16-byte buffer is rebuilt from zero, so a short configured value leaves
 /// trailing NULs and a value longer than the buffer is clamped with `min`,
 /// never overflowing it.
-pub(in crate::sdk::ble_app) fn seed_pair_config(cfg: &RadioConfig) {
+pub(crate) fn seed_pair_config(cfg: &RadioConfig) {
     let mut encode_sk = [0u8; 16];
     let len = min(cfg.default_mesh_pwd_encode_sk.len(), encode_sk.len());
     encode_sk[..len].copy_from_slice(&cfg.default_mesh_pwd_encode_sk.as_bytes()[..len]);
@@ -142,7 +139,7 @@ pub struct PairStateData {
 
 /// Power-on pairing state, shared by the static initialiser and the test reset
 /// so a reset cannot drift from a fresh boot.
-pub(in crate::sdk::ble_app) const DEFAULT_PAIR_STATE: PairStateData = PairStateData {
+pub(crate) const DEFAULT_PAIR_STATE: PairStateData = PairStateData {
     pair_ltk: [0; 16],
     pair_sk: [0; 16],
     pair_work: [0; 16],
@@ -157,12 +154,12 @@ pub(in crate::sdk::ble_app) const DEFAULT_PAIR_STATE: PairStateData = PairStateD
 /// Comprehensive pairing state data containing all cryptographic material.
 /// Stores LTK, session keys, work buffers, network names, passwords, and random values
 /// used during the mesh pairing and authentication process.
-pub(in crate::sdk) static PAIR_STATE: CriticalSectionMutex<PairStateData> =
+pub(crate) static PAIR_STATE: CriticalSectionMutex<PairStateData> =
     CriticalSectionMutex::new(DEFAULT_PAIR_STATE);
 
 /// Global flag indicating whether mesh pairing mode is currently active.
 /// When true, the device accepts pairing commands and can join new mesh networks.
-pub(in crate::sdk) static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
+pub(crate) static MESH_PAIR_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Current state of the BLE pairing finite state machine.
 /// Tracks progress through pairing steps: idle, random exchange, key exchange, etc.
@@ -170,7 +167,7 @@ static BLE_PAIR_ST: AtomicPairState = AtomicPairState::new(PairState::Idle);
 
 /// Flag indicating successful completion of pairing login process.
 /// Set to true when device has been authenticated and can access mesh functions.
-pub(in crate::sdk) static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
+pub(crate) static PAIR_LOGIN_OK: AtomicBool = AtomicBool::new(false);
 
 /// Flag indicating whether mesh encryption is currently enabled.
 /// When true, all mesh communications are encrypted using the configured LTK.
@@ -178,7 +175,7 @@ static PAIR_ENC_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Access code derived from mesh name and password for RF communication.
 /// 32-bit value used to identify and filter mesh network traffic.
-pub(in crate::sdk) static PAIR_AC: AtomicU32 = AtomicU32::new(0);
+pub(crate) static PAIR_AC: AtomicU32 = AtomicU32::new(0);
 
 /// Flag indicating a pairing read operation is waiting for response.
 /// Used to track pending configuration read requests during pairing.
@@ -186,7 +183,7 @@ static PAIR_READ_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Global security enable flag for mesh communications.
 /// When true, all mesh packets are encrypted before transmission.
-pub(in crate::sdk) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SECURITY_ENABLE: AtomicBool = AtomicBool::new(false);
 
 // Replace the raw atomic with an atomic PairState wrapper
 pub(crate) struct AtomicPairState(AtomicU8);
@@ -234,7 +231,6 @@ const LGT_CMD_PAIR_OK: u8 = 0xc5; // Pairing successful
 ///
 /// @param ps The packet to decrypt
 /// @return true if decryption was successful, false otherwise
-#[cfg_attr(test, mry::mry)]
 pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
     // Early return if security is not enabled
     if !SECURITY_ENABLE.get() {
@@ -375,7 +371,6 @@ pub fn pair_enc_packet(ps: &mut Packet) {
 ///
 /// @param ps The mesh packet to decrypt
 /// @return true if decryption was successful, false otherwise
-#[cfg_attr(test, mry::mry)]
 pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
     // Early return if security is disabled - we treat packets as already decrypted
     if !SECURITY_ENABLE.get() {
@@ -442,12 +437,15 @@ pub fn pair_dec_packet_mesh(ps: &mut Packet) -> Result<(), ()> {
             // i.e. packet offset `rf_len + 2`. Above, `payload_len = rf_len - 0x12`
             // is rejected when it exceeds 0x13, so `rf_len <= 0x25` and
             // `[rf_len + 2, rf_len + 6)` ends at most at 43, inside the 48-byte
-            // `Packet`. TC32 and the i686 test host both have 32-bit pointers, so
-            // the `as u32` round-trip is lossless. The range is only read and does
-            // not overlap the IV or the data block.
+            // `Packet`. Provenance is preserved by `addr_of!().cast::<u8>().add(n)`
+            // and `rf_len - 0xb <= 0x1a`, so the result stays inside the 48-byte
+            // `Packet`. The range is only read and does not overlap the IV or the
+            // data block.
             unsafe {
                 slice::from_raw_parts(
-                    (addr_of!(ps.mesh().sno) as u32 + (rf_len as u32 - 0xb)) as *const u8,
+                    addr_of!(ps.mesh().sno)
+                        .cast::<u8>()
+                        .add(rf_len as usize - 0xb),
                     4,
                 )
             }, // Expected MIC
@@ -522,10 +520,13 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
             // SAFETY: pointer arithmetic only, no dereference: `sno` is packet
             // offset 13 and `rf_len - 0xb` is at most 0x1a, so the result is at
             // most offset 39 inside the 48-byte `Packet` (never past
-            // one-past-the-end). The `as u32` round-trip is lossless on TC32 and on
-            // the i686 test host, both of which have 32-bit pointers.
+            // one-past-the-end). Provenance is preserved by
+            // `addr_of_mut!().cast::<u8>().add(n)`, which also keeps the mutable
+            // borrow that the later write requires.
             let dst_ptr = unsafe {
-                (addr_of!(ps.mesh().sno) as u32 + (ps.head().rf_len as u32 - 0xb)) as *mut u8
+                addr_of_mut!(ps.mesh_mut().sno)
+                    .cast::<u8>()
+                    .add(ps.head().rf_len as usize - 0xb)
             };
             // SAFETY: the 4-byte MIC output starts at `rf_len + 2` and the
             // payload below ends there, so `[rf_len + 2, rf_len + 6)` is inside the
@@ -557,7 +558,6 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
 ///
 /// @param addr The offset within the pairing data structure
 /// @param data The data to save to flash
-#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
     // Flash storage offset constants
     const OFFSET_HEADER: u32 = 0x00; // Pairing header with validation flags
@@ -590,7 +590,6 @@ pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
 /// This function saves all the pairing information (mesh name, password, and
 /// long-term key) to persistent storage in flash memory. It also includes
 /// validation flags and mesh-specific configuration.
-#[cfg_attr(test, mry::mry)]
 pub fn pair_save_key() {
     // Flash storage offset constants
     const OFFSET_HEADER: u32 = 0x00; // Pairing header with validation flags
@@ -636,6 +635,13 @@ pub fn pair_save_key() {
     // Save long-term key
     pair_flash_save_config(OFFSET_LTK, &pair_state.pair_ltk);
 
+    // Release the pairing state before `pair_update_key` re-locks it. On the
+    // device a nested lock on the same mutex is allowed, but the host build's
+    // re-entrancy probe would otherwise abort the call. The window is
+    // deliberate: every ISR-context reader of `PAIR_STATE` is read-only, and a
+    // concurrent pairing command is superseded by this reset.
+    drop(pair_state);
+
     // Update runtime keys and access codes based on the new pairing data
     pair_update_key();
 }
@@ -645,7 +651,6 @@ pub fn pair_save_key() {
 /// This function resets the pairing state and prepares initialization vectors
 /// for a new BLE connection. It uses the device's MAC address as part of the
 /// initialization vectors for encryption.
-#[cfg_attr(test, mry::mry)]
 pub fn pair_init() {
     // Reset pairing state to initial value
     BLE_PAIR_ST.set(PairState::Idle);
@@ -657,11 +662,20 @@ pub fn pair_init() {
     PAIR_IVS.lock()[0..MAC_ID_SIZE].copy_from_slice(&MAC_ID.lock()[0..MAC_ID_SIZE]);
 }
 
+/// The two initialization vectors as `(master, slave)`, for host tests.
+///
+/// `pair_init` seeds both from `MAC_ID`, but the statics are private to this
+/// module. Callers outside it (the connection tests) read the result through
+/// here rather than widening the statics.
+#[cfg(not(target_os = "none"))]
+pub fn pair_iv_for_test() -> ([u8; 8], [u8; 8]) {
+    (*PAIR_IVM.lock(), *PAIR_IVS.lock())
+}
+
 /// Initialize pairing parameters from stored keys
 ///
 /// This function sets the pairing state to a special initialization value
 /// and loads previously stored keys from flash memory.
-#[cfg_attr(test, mry::mry)]
 pub fn pair_par_init() {
     // Set pairing state to the initialization state
     BLE_PAIR_ST.set(PairState::Init);
@@ -731,6 +745,9 @@ pub fn pair_proc() -> Option<Packet> {
         || BLE_PAIR_ST.get() == PairState::ReceivingMeshLtk;
 
     if security_check_needed && SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
+        // `pair_par_init` re-locks `PAIR_STATE` (through `pair_load_key`), so the
+        // guard must not be held across it.
+        drop(pair_state);
         pair_par_init();
         PAIR_ENC_ENABLE.set(false);
         return None;
@@ -888,9 +905,13 @@ pub fn pair_proc() -> Option<Packet> {
                 MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(true);
             }
 
+            // `rf_link_delete_pair` re-enters `PAIR_STATE` (pair_set_key /
+            // pair_save_key), so the guard must be released first.
+            drop(pair_state);
+
             // Delete pairing data and notify application
             rf_link_delete_pair();
-            crate::sdk::rf_drv::emit_light_event(LGT_CMD_DEL_PAIR);
+            crate::mesh_ll::adv::emit_light_event(LGT_CMD_DEL_PAIR);
         }
 
         PairState::Completed => {
@@ -922,7 +943,6 @@ pub fn pair_proc() -> Option<Packet> {
 ///
 /// @param key Buffer containing the mesh network name (16 bytes), password (16 bytes),
 ///            and long-term key (16 bytes)
-#[cfg_attr(test, mry::mry)]
 pub fn pair_set_key(key: &[u8]) {
     {
         let mut pair_state = PAIR_STATE.lock();
@@ -1022,6 +1042,8 @@ pub fn pair_write(data: &Packet) {
             }
 
             // Invalid mesh name or state - reset pairing
+            // `pair_par_init` re-locks `PAIR_STATE` through `pair_load_key`.
+            drop(pair_state);
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
             return;
@@ -1033,6 +1055,7 @@ pub fn pair_write(data: &Packet) {
             if SECURITY_ENABLE.get() {
                 // Secure mode: Must be in ReceivingMeshName state
                 if BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
+                    drop(pair_state);
                     pair_par_init();
                     PAIR_ENC_ENABLE.set(false);
                     return;
@@ -1045,6 +1068,7 @@ pub fn pair_write(data: &Packet) {
             } else {
                 // Simple mode: Must be logged in and in correct state
                 if !PAIR_LOGIN_OK.get() || BLE_PAIR_ST.get() != PairState::ReceivingMeshName {
+                    drop(pair_state);
                     pair_par_init();
                     PAIR_ENC_ENABLE.set(false);
                     return;
@@ -1063,6 +1087,7 @@ pub fn pair_write(data: &Packet) {
             }
 
             // Password identical to name - security violation
+            drop(pair_state);
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
             return;
@@ -1079,6 +1104,7 @@ pub fn pair_write(data: &Packet) {
             if SECURITY_ENABLE.get() {
                 // Must be in correct state
                 if BLE_PAIR_ST.get() != PairState::ReceivingMeshPassword {
+                    drop(pair_state);
                     pair_par_init();
                     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
                     PAIR_ENC_ENABLE.set(false);
@@ -1101,9 +1127,11 @@ pub fn pair_write(data: &Packet) {
                 // Regular mode: Decrypt standard LTK
                 pair_state.pair_ltk =
                     aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
+                // `pair_save_key` re-locks `PAIR_STATE`, so release it first.
+                drop(pair_state);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-                crate::sdk::rf_drv::emit_light_event(LGT_CMD_PAIR_OK);
+                crate::mesh_ll::adv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
             // Simple mode handling
@@ -1125,13 +1153,16 @@ pub fn pair_write(data: &Packet) {
 
                 // Regular mode: Store plaintext standard LTK
                 pair_state.pair_ltk.copy_from_slice(&src[0..KEY_SIZE]);
+                // `pair_save_key` re-locks `PAIR_STATE`, so release it first.
+                drop(pair_state);
                 pair_save_key();
                 *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-                crate::sdk::rf_drv::emit_light_event(LGT_CMD_PAIR_OK);
+                crate::mesh_ll::adv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
 
             // Invalid state - reset pairing
+            drop(pair_state);
             pair_par_init();
             *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
             PAIR_ENC_ENABLE.set(false);
@@ -1215,6 +1246,7 @@ pub fn pair_write(data: &Packet) {
             }
 
             // Reset pairing on verification failure or if we reach here
+            drop(pair_state);
             pair_par_init();
             return;
         }
@@ -1231,21 +1263,16 @@ pub fn pair_write(data: &Packet) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::flash_config::{
-        mock_pair_flash_clean, mock_pair_load_key, mock_pair_update_key, mock_save_pair_info,
-    }; // Ensure mock_pair_load_key is imported
-    use crate::sdk::ble_app::light_ll::pairing_management::mock_rf_link_delete_pair;
-    use crate::sdk::rf_drv::{emit_light_event, mock_emit_light_event}; // Added mock for callback
-    use core::mem::size_of;
+    use crate::ble::flash_config::access_code;
+    use core::sync::atomic::AtomicUsize;
     use mesh_protocol::packet_types::{
         MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
-    }; // Added PacketAttReadRsp
-    use mry::send_wrapper::SendWrapper;
-    use mry::{self, Any};
+    };
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::MicMismatch;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::mock_read_reg_system_tick; // Added mock for delete pair
+    use tlsr8266_pac::write_reg_system_tick;
 
     /// Session key installed by `setup_pair_state`.
     const TEST_SESSION_SK: [u8; 16] = [0xBB; 16];
@@ -1258,6 +1285,43 @@ mod tests {
         tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
         fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+        FakeFlash::reset();
+    }
+
+    /// Pairing sector base, taken from the factory default config so the tests
+    /// track the shipped layout without importing the crate-root `config`
+    /// module.
+    const FLASH_ADR_PAIRING: u32 = crate::config::DEFAULT.flash_adr_pairing;
+
+    /// The 64-byte pairing configuration slot at wear-levelling `index`, i.e.
+    /// what `save_pair_info` wrote for that slot of the fake NOR device.
+    fn pairing_slot(index: i32) -> [u8; 0x40] {
+        let mut slot = [0u8; 0x40];
+        FakeFlash::read_slice((FLASH_ADR_PAIRING as i32 + index) as u32, &mut slot);
+        slot
+    }
+
+    /// Last light-event code delivered to the recording handler.
+    static RECORDED_LIGHT_EVENT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// Number of light events delivered to the recording handler.
+    static RECORDED_LIGHT_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Recording handler for the `emit_light_event` seam.
+    fn record_light_event(code: u8) {
+        RECORDED_LIGHT_EVENT.store(code as usize, Ordering::SeqCst);
+        RECORDED_LIGHT_EVENTS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Install the recording light-event handler and clear its counters.
+    ///
+    /// `LIGHT_EVENT_CB` is a process-wide slot with no "unset" accessor, so every
+    /// test that cares installs this recorder on entry; the counters are cleared
+    /// here so a test never inherits another test's deliveries.
+    fn install_light_event_recorder() {
+        RECORDED_LIGHT_EVENT.store(usize::MAX, Ordering::SeqCst);
+        RECORDED_LIGHT_EVENTS.store(0, Ordering::SeqCst);
+        crate::mesh_ll::adv::set_light_event_handler(record_light_event);
     }
 
     /// The 48-byte wire image of a `Packet`, for before/after comparisons that
@@ -1527,16 +1591,17 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_pair_enc_packet_security_enabled() {
         // Arrange
         reset_host_fakes();
         setup_pair_state();
         let mut packet = create_test_ll_packet();
 
-        // Mock system tick to return a predictable value
+        // Seed the system-tick register instead of mocking the accessor: off
+        // target, `read_reg_system_tick` reads the FakeMmio bank, so the
+        // sequence number is derived from this value.
         let test_tick: u32 = 0x123456;
-        mock_read_reg_system_tick().returns(test_tick);
+        write_reg_system_tick(test_tick);
 
         // Act
         pair_enc_packet(&mut packet);
@@ -1563,16 +1628,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_pair_enc_packet_iv_updates() {
         // Arrange
         reset_host_fakes();
         setup_pair_state();
         let mut packet = create_test_ll_packet();
 
-        // Set a known system tick value
+        // Seed the system-tick register; the IV must carry this value.
         let test_tick: u32 = 0xABCDEF;
-        mock_read_reg_system_tick().returns(test_tick);
+        write_reg_system_tick(test_tick);
 
         // Fill PAIR_IVS with recognizable pattern for testing
         PAIR_IVS.lock().fill(0xAA);
@@ -1599,16 +1663,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_pair_enc_packet_parameter_passing() {
         // Arrange
         reset_host_fakes();
         setup_pair_state();
         let mut packet = create_test_ll_packet();
 
-        // Set a known system tick value
+        // Seed the system-tick register; the IV must carry this value.
         let test_tick: u32 = 0x123456;
-        mock_read_reg_system_tick().returns(test_tick);
+        write_reg_system_tick(test_tick);
 
         // Set recognizable session key pattern
         const PARAM_SK: [u8; 16] = [0xCC; 16];
@@ -2245,84 +2308,76 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_flash_clean, save_pair_info)]
     fn test_pair_flash_save_config_new_set() {
         // Arrange
         const OFFSET_HEADER: u32 = 0x00;
         const SECTOR_SIZE: i32 = 0x40;
+        reset_host_fakes();
         let initial_idx = 100; // Arbitrary initial index
         setup_flash_config_state(initial_idx);
         let test_addr = OFFSET_HEADER;
         let test_data = [1, 2, 3, 4];
 
-        // Mock expectations
-        mock_pair_flash_clean().returns(());
-        mock_save_pair_info(Any, Any).returns(());
-
         // Act
         pair_flash_save_config(test_addr, &test_data);
 
         // Assert
-        // Verify pair_flash_clean was called once
-        mock_pair_flash_clean().assert_called(1);
-
-        // Verify FLASH_CONFIGURATION_INDEX was incremented
+        // The header write advanced the wear-levelling index by one slot (and
+        // `pair_flash_clean` left it alone, being far from the wrap point)...
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx + SECTOR_SIZE);
 
-        // Verify save_pair_info was called with correct parameters
-        mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);
+        // ...and `save_pair_info` put the bytes in that slot of the NOR device.
+        let slot = pairing_slot(initial_idx + SECTOR_SIZE);
+        assert_eq!(
+            &slot[test_addr as usize..test_addr as usize + test_data.len()],
+            &test_data
+        );
     }
 
     #[test]
-    #[mry::lock(pair_flash_clean, save_pair_info)]
     fn test_pair_flash_save_config_existing_set() {
         // Arrange
         const OFFSET_NAME: u32 = 0x10; // Use a non-header offset
+        reset_host_fakes();
         let initial_idx = 200; // Arbitrary initial index
         setup_flash_config_state(initial_idx);
         let test_addr = OFFSET_NAME;
         let test_data = [5, 6, 7, 8];
 
-        // Mock expectations
-        mock_pair_flash_clean().returns(()); // Expect it NOT to be called
-        mock_save_pair_info(Any, Any).returns(());
+        // Act
+        pair_flash_save_config(test_addr, &test_data);
+
+        // Assert
+        // A non-header write neither rotates the slot nor rewrites the header...
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx);
+
+        // ...it only lands the bytes in the current slot.
+        let slot = pairing_slot(initial_idx);
+        assert_eq!(
+            &slot[test_addr as usize..test_addr as usize + test_data.len()],
+            &test_data
+        );
+    }
+
+    #[test]
+    fn test_pair_flash_save_config_data_passing() {
+        // Arrange
+        const OFFSET_PASSWORD: u32 = 0x20;
+        reset_host_fakes();
+        setup_flash_config_state(0); // Index doesn't matter here
+        let test_addr = OFFSET_PASSWORD;
+        let test_data = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
 
         // Act
         pair_flash_save_config(test_addr, &test_data);
 
         // Assert
-        // Verify pair_flash_clean was NOT called
-        mock_pair_flash_clean().assert_called(0);
-
-        // Verify FLASH_CONFIGURATION_INDEX remained unchanged
-        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx);
-
-        // Verify save_pair_info was called with correct parameters
-        mock_save_pair_info(test_addr, test_data.to_vec()).assert_called(1);
-    }
-
-    #[test]
-    #[mry::lock(save_pair_info)]
-    fn test_pair_flash_save_config_data_passing() {
-        // Arrange
-        const OFFSET_PASSWORD: u32 = 0x20;
-        setup_flash_config_state(0); // Index doesn't matter here
-        let test_addr = OFFSET_PASSWORD;
-        let test_data = vec![0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
-
-        // Mock expectations - focus on data passed to save_pair_info
-        mock_save_pair_info(Any, Any).returns_with(move |addr: u32, data: Vec<u8>| {
-            assert_eq!(addr, test_addr);
-            assert_eq!(data, test_data);
-        });
-
-        // Act
-        let data_slice = &[0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
-        pair_flash_save_config(test_addr, data_slice);
-
-        // Assert
-        // Verification happens within the mock closure
-        mock_save_pair_info(Any, Any).assert_called(1);
+        // The offset and the payload reach the NOR device unchanged.
+        let slot = pairing_slot(0);
+        assert_eq!(
+            &slot[test_addr as usize..test_addr as usize + test_data.len()],
+            &test_data
+        );
     }
 
     // Helper to set up global state for testing pair_save_key
@@ -2342,7 +2397,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_flash_save_config, pair_update_key)]
     fn test_pair_save_key_mesh_enabled_mac_enabled() {
         // Arrange
         const OFFSET_HEADER: u32 = 0x00;
@@ -2353,37 +2407,38 @@ mod tests {
         let test_pass = [0x22; 16];
         let test_ltk = [0x33; 16];
 
+        reset_host_fakes();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_save_key_state(true, true, test_nn, test_pass, test_ltk);
 
         // The password is stored encoded; the real AES-CCM block cipher with the
         // configured key produces the bytes that must reach flash.
         let encoded_pass = aes_att_encryption(&PAIR_CONFIG_PWD_ENCODE_SK.lock(), &test_pass);
 
-        // Mock expectations
-        mock_pair_flash_save_config(Any, Any).returns(()); // General mock for all calls
-        mock_pair_update_key().returns(());
-
         // Act
         pair_save_key();
 
         // Assert
+        // The first save starts a fresh slot at offset 0 and writes the header,
+        // name, encoded password and LTK into it.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
 
-        // Verify pair_flash_save_config calls
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
         expected_header[15] = PAIR_CONFIG_VALID_FLAG;
         expected_header[1] = 1; // MESH_PAIR_ENABLE=true, MESH_DEVICE_ADDRESS_VALIDATION_PENDING=true
-        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+        assert_eq!(&slot[OFFSET_HEADER as usize..][..16], &expected_header);
+        assert_eq!(&slot[OFFSET_NAME as usize..][..16], &test_nn);
+        assert_eq!(&slot[OFFSET_PASSWORD as usize..][..16], &encoded_pass);
+        assert_eq!(&slot[OFFSET_LTK as usize..][..16], &test_ltk);
 
-        // Verify pair_update_key call
-        mock_pair_update_key().assert_called(1);
+        // The save also refreshed the runtime keys: the access code is the real
+        // derivation over the credentials just written.
+        assert_eq!(PAIR_AC.get(), access_code(&test_nn, &test_pass));
     }
 
     #[test]
-    #[mry::lock(pair_flash_save_config, pair_update_key)]
     fn test_pair_save_key_mesh_enabled_mac_disabled() {
         // Arrange
         const OFFSET_HEADER: u32 = 0x00;
@@ -2394,34 +2449,33 @@ mod tests {
         let test_pass = [0xBB; 16];
         let test_ltk = [0xCC; 16];
 
+        reset_host_fakes();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_save_key_state(true, false, test_nn, test_pass, test_ltk);
 
         // Real AES with the configured encode key produces the stored bytes
         let encoded_pass = aes_att_encryption(&PAIR_CONFIG_PWD_ENCODE_SK.lock(), &test_pass);
 
-        // Mock expectations
-        mock_pair_flash_save_config(Any, Any).returns(());
-        mock_pair_update_key().returns(());
-
         // Act
         pair_save_key();
 
         // Assert
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
 
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
         expected_header[15] = PAIR_CONFIG_VALID_FLAG;
         expected_header[1] = 0; // MESH_PAIR_ENABLE=true, MESH_DEVICE_ADDRESS_VALIDATION_PENDING=false
-        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+        assert_eq!(&slot[OFFSET_HEADER as usize..][..16], &expected_header);
+        assert_eq!(&slot[OFFSET_NAME as usize..][..16], &test_nn);
+        assert_eq!(&slot[OFFSET_PASSWORD as usize..][..16], &encoded_pass);
+        assert_eq!(&slot[OFFSET_LTK as usize..][..16], &test_ltk);
 
-        mock_pair_update_key().assert_called(1);
+        assert_eq!(PAIR_AC.get(), access_code(&test_nn, &test_pass));
     }
 
     #[test]
-    #[mry::lock(pair_flash_save_config, pair_update_key)]
     fn test_pair_save_key_mesh_disabled() {
         // Arrange
         const OFFSET_HEADER: u32 = 0x00;
@@ -2432,30 +2486,30 @@ mod tests {
         let test_pass = [0x2B; 16];
         let test_ltk = [0x3C; 16];
 
+        reset_host_fakes();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_save_key_state(false, true, test_nn, test_pass, test_ltk); // MESH_DEVICE_ADDRESS_VALIDATION_PENDING doesn't matter if mesh is disabled
 
         // Real AES with the configured encode key produces the stored bytes
         let encoded_pass = aes_att_encryption(&PAIR_CONFIG_PWD_ENCODE_SK.lock(), &test_pass);
 
-        // Mock expectations
-        mock_pair_flash_save_config(Any, Any).returns(());
-        mock_pair_update_key().returns(());
-
         // Act
         pair_save_key();
 
         // Assert
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
 
         let mut expected_header = [0u8; 16];
         expected_header[0] = PAIR_CONFIG_VALID_FLAG;
         expected_header[15] = PAIR_CONFIG_VALID_FLAG;
         // expected_header[1] remains 0 as MESH_PAIR_ENABLE is false
-        mock_pair_flash_save_config(OFFSET_HEADER, expected_header.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_NAME, test_nn.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_PASSWORD, encoded_pass.to_vec()).assert_called(1);
-        mock_pair_flash_save_config(OFFSET_LTK, test_ltk.to_vec()).assert_called(1);
+        assert_eq!(&slot[OFFSET_HEADER as usize..][..16], &expected_header);
+        assert_eq!(&slot[OFFSET_NAME as usize..][..16], &test_nn);
+        assert_eq!(&slot[OFFSET_PASSWORD as usize..][..16], &encoded_pass);
+        assert_eq!(&slot[OFFSET_LTK as usize..][..16], &test_ltk);
 
-        mock_pair_update_key().assert_called(1);
+        assert_eq!(PAIR_AC.get(), access_code(&test_nn, &test_pass));
     }
 
     #[test]
@@ -2501,13 +2555,16 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_load_key)]
     fn test_pair_par_init() {
         // Arrange
+        reset_host_fakes();
         // Set initial state to something other than Init
         BLE_PAIR_ST.set(PairState::Idle);
-        // Mock pair_load_key to do nothing but allow verification
-        mock_pair_load_key().returns(());
+        // A known default credential set: with a blank pairing sector the real
+        // `pair_load_key` copies it into the runtime state, so seeing it there
+        // proves the load ran.
+        PAIR_CONFIG_MESH_NAME.lock().fill(0);
+        PAIR_CONFIG_MESH_NAME.lock()[0..11].copy_from_slice(b"out_of_mesh");
 
         // Act
         pair_par_init();
@@ -2515,8 +2572,9 @@ mod tests {
         // Assert
         // Check state is set to Init
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        // Verify pair_load_key was called
-        mock_pair_load_key().assert_called(1);
+        // The empty sector made `pair_load_key` publish the defaults.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), -1);
+        assert_eq!(&PAIR_STATE.lock().pair_nn[0..11], b"out_of_mesh");
     }
 
     // Helper to set up global state for pair_proc tests
@@ -2562,11 +2620,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_proc_awaiting_random_reset_needed() {
         // Arrange: Security disabled AND not logged in
+        reset_host_fakes();
         setup_proc_state(PairState::AwaitingRandom, true, false, false, false, false);
-        mock_pair_par_init().returns(()); // Expect reset
 
         // Act
         let result = pair_proc();
@@ -2575,7 +2632,10 @@ mod tests {
         assert!(result.is_none()); // Should return None after reset
         assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared
         assert_eq!(PAIR_ENC_ENABLE.get(), false); // Encryption should be disabled
-        mock_pair_par_init().assert_called(1); // Verify reset was called
+
+        // The reset really ran `pair_par_init`: the state machine moved from
+        // AwaitingRandom to the Init state it publishes.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
 
     #[test]
@@ -2614,9 +2674,9 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_proc_receiving_mesh_ltk_reset_needed() {
         // Arrange: Security disabled AND not logged in
+        reset_host_fakes();
         setup_proc_state(
             PairState::ReceivingMeshLtk,
             true,
@@ -2625,7 +2685,6 @@ mod tests {
             false,
             false,
         );
-        mock_pair_par_init().returns(()); // Expect reset
 
         // Act
         let result = pair_proc();
@@ -2634,7 +2693,8 @@ mod tests {
         assert!(result.is_none()); // Should return None after reset
         assert_eq!(PAIR_READ_PENDING.get(), false);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
-        mock_pair_par_init().assert_called(1);
+        // `pair_par_init` ran: ReceivingMeshLtk became Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
 
     #[test]
@@ -2779,9 +2839,9 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_pair_proc_session_key_exchange_secure() {
         // Arrange: Security enabled
+        reset_host_fakes();
         setup_proc_state(
             PairState::SessionKeyExchange,
             true,
@@ -2791,8 +2851,9 @@ mod tests {
             false,
         ); // Must be logged in
 
+        // Seed the system-tick register; the derived rands below use it.
         let test_tick: u32 = 0xABCDEF01;
-        mock_read_reg_system_tick().returns(test_tick);
+        write_reg_system_tick(test_tick);
 
         let (initial_nn, initial_pass, initial_randm) = {
             let state = PAIR_STATE.lock();
@@ -2809,16 +2870,16 @@ mod tests {
         // rands is generated inside the function using tick
         source_padded[0..4].copy_from_slice(&test_tick.to_le_bytes());
         source_padded[4..RANDOM_CHALLENGE_SIZE].fill(0xAA);
-        let mock_sk_intermediate = aes_att_encryption(&key_padded, &source_padded);
+        let sk_intermediate = aes_att_encryption(&key_padded, &source_padded);
 
         // 2. Second AES: Generate proof
         let mut expected_work_proof = [0u8; KEY_SIZE];
         for i in 0..KEY_SIZE {
             expected_work_proof[i] = initial_nn[i] ^ initial_pass[i];
         }
-        let mut expected_sk_for_proof = mock_sk_intermediate;
+        let mut expected_sk_for_proof = sk_intermediate;
         expected_sk_for_proof[RANDOM_CHALLENGE_SIZE..KEY_SIZE].fill(0); // Second half zeroed
-        let mock_encrypted_proof = aes_att_encryption(&expected_sk_for_proof, &expected_work_proof);
+        let encrypted_proof = aes_att_encryption(&expected_sk_for_proof, &expected_work_proof);
 
         // 3. Third AES: Generate final SK
         let mut expected_work_final = [0u8; KEY_SIZE];
@@ -2827,10 +2888,10 @@ mod tests {
         }
         let mut expected_sk_input_final = [0u8; KEY_SIZE];
         expected_sk_input_final[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&initial_randm);
-        // Use the derived rands (first half of mock_sk_intermediate)
+        // Use the derived rands (first half of sk_intermediate)
         expected_sk_input_final[RANDOM_CHALLENGE_SIZE..KEY_SIZE]
-            .copy_from_slice(&mock_sk_intermediate[0..RANDOM_CHALLENGE_SIZE]);
-        let mock_sk_final = aes_att_encryption(&expected_work_final, &expected_sk_input_final);
+            .copy_from_slice(&sk_intermediate[0..RANDOM_CHALLENGE_SIZE]);
+        let sk_final = aes_att_encryption(&expected_work_final, &expected_sk_input_final);
 
         // Act
         let result = pair_proc();
@@ -2838,7 +2899,6 @@ mod tests {
         // Assert
         assert!(result.is_some());
         let pkt = result.unwrap();
-        mock_read_reg_system_tick().assert_called(1);
 
         // Check packet header
         let l2cap_len = pkt.head().l2cap_len;
@@ -2849,8 +2909,8 @@ mod tests {
         assert_eq!(pkt.att_read_rsp().opcode, ATT_READ_RESPONSE_OPCODE);
 
         // Check packet value (new rands + encrypted proof)
-        let expected_rands_new = &mock_sk_intermediate[0..RANDOM_CHALLENGE_SIZE];
-        let expected_proof_part = &mock_encrypted_proof[0..RANDOM_CHALLENGE_SIZE];
+        let expected_rands_new = &sk_intermediate[0..RANDOM_CHALLENGE_SIZE];
+        let expected_proof_part = &encrypted_proof[0..RANDOM_CHALLENGE_SIZE];
         assert_eq!(
             pkt.att_read_rsp().value[0],
             PairState::SessionKeyExchange as u8
@@ -2870,7 +2930,7 @@ mod tests {
         assert_eq!(PAIR_READ_PENDING.get(), false);
 
         // Verify final session key was stored
-        assert_eq!(PAIR_STATE.lock().pair_sk, mock_sk_final);
+        assert_eq!(PAIR_STATE.lock().pair_sk, sk_final);
     }
 
     #[test]
@@ -2960,12 +3020,17 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_link_delete_pair, emit_light_event)]
     fn test_pair_proc_delete_pairing_mesh_disabled() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
         setup_proc_state(PairState::DeletePairing, true, true, true, false, false); // Mesh disabled
-        mock_rf_link_delete_pair().returns(());
-        mock_emit_light_event(LGT_CMD_DEL_PAIR).returns(());
+
+        // `rf_link_delete_pair` re-saves the configured credentials, so give the
+        // configuration buffers a known content.
+        *PAIR_CONFIG_MESH_NAME.lock() = *b"MeshName\0\0\0\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_PWD.lock() = *b"NetPassw\0\0\0\0\0\0\0\0";
+        FLASH_CONFIGURATION_INDEX.set(-1);
 
         // Act
         let result = pair_proc();
@@ -2973,8 +3038,18 @@ mod tests {
         // Assert
         assert!(result.is_some());
         let pkt = result.unwrap();
-        mock_rf_link_delete_pair().assert_called(1);
-        mock_emit_light_event(LGT_CMD_DEL_PAIR).assert_called(1);
+        // `rf_link_delete_pair` really ran: it revoked the login and persisted
+        // the configured credentials to the pairing sector.
+        assert_eq!(PAIR_LOGIN_OK.get(), false);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x10..0x18], b"MeshName");
+        // ...and the light event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_DEL_PAIR as usize
+        );
 
         // Check packet header (minimal response)
         let l2cap_len = pkt.head().l2cap_len;
@@ -2996,12 +3071,15 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(rf_link_delete_pair, emit_light_event)]
     fn test_pair_proc_delete_pairing_mesh_enabled() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
         setup_proc_state(PairState::DeletePairing, true, true, true, true, false); // Mesh enabled, MESH_DEVICE_ADDRESS_VALIDATION_PENDING initially false
-        mock_rf_link_delete_pair().returns(());
-        mock_emit_light_event(LGT_CMD_DEL_PAIR).returns(());
+
+        *PAIR_CONFIG_MESH_NAME.lock() = *b"MeshName\0\0\0\0\0\0\0\0";
+        *PAIR_CONFIG_MESH_PWD.lock() = *b"NetPassw\0\0\0\0\0\0\0\0";
+        FLASH_CONFIGURATION_INDEX.set(-1);
 
         // Act
         let result = pair_proc();
@@ -3009,8 +3087,18 @@ mod tests {
         // Assert
         assert!(result.is_some());
         let pkt = result.unwrap();
-        mock_rf_link_delete_pair().assert_called(1);
-        mock_emit_light_event(LGT_CMD_DEL_PAIR).assert_called(1);
+        // `rf_link_delete_pair` really ran: it revoked the login and persisted
+        // the configured credentials to the pairing sector.
+        assert_eq!(PAIR_LOGIN_OK.get(), false);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x10..0x18], b"MeshName");
+        // ...and the light event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_DEL_PAIR as usize
+        );
 
         // Check packet header (minimal response)
         let l2cap_len = pkt.head().l2cap_len;
@@ -3155,7 +3243,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pair_set_key() {
         // Arrange
         let mut key = [0u8; 48];
@@ -3166,8 +3253,7 @@ mod tests {
         // Set MAX_MESH_NAME_LEN for the test (assuming it's usually 16 or less)
         // Note: MAX_MESH_NAME_LEN is now a const, so no need to set it
 
-        // Mock pair_update_key
-        mock_pair_update_key().returns(());
+        reset_host_fakes();
 
         // Clear state before test
         {
@@ -3194,8 +3280,13 @@ mod tests {
             assert_eq!(pair_state.pair_ltk, &key[32..48]);
         }
 
-        // Verify pair_update_key was called
-        mock_pair_update_key().assert_called(1);
+        // `pair_set_key` refreshed the derived RF identity: the access code is
+        // the real derivation over the keys just stored.
+        assert_eq!(
+            PAIR_AC.get(),
+            access_code(&key[0..16], &key[16..32]),
+            "pair_update_key must derive the access code from the new keys"
+        );
     }
 
     #[test]
@@ -3333,7 +3424,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_name_security_disabled_not_logged_in() {
         // Arrange
         setup_proc_state(PairState::Completed, false, false, false, false, false);
@@ -3357,18 +3447,17 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_name.len()].copy_from_slice(plaintext_name);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_name_wrong_state() {
         // Arrange
         setup_proc_state(PairState::Idle, false, true, false, false, false);
@@ -3395,13 +3484,13 @@ mod tests {
         pkt.att_val_mut().value[1..1 + encrypted_name.len()].copy_from_slice(&encrypted_name);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
@@ -3457,7 +3546,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_password_security_enabled_wrong_state() {
         // Arrange - Not in ReceivingMeshName state
         setup_proc_state(PairState::Idle, false, true, false, false, false);
@@ -3484,13 +3572,13 @@ mod tests {
         pkt.att_val_mut().value[1..1 + encrypted_pass.len()].copy_from_slice(&encrypted_pass);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
@@ -3542,7 +3630,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_password_identical_to_name() {
         // Arrange
         setup_proc_state(
@@ -3579,20 +3666,22 @@ mod tests {
         }
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset due to security violation
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_enabled() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             false,
@@ -3629,10 +3718,6 @@ mod tests {
         pkt.att_val_mut().value[0] = PAIR_OP_SET_MESH_LTK;
         pkt.att_val_mut().value[1..1 + encrypted_ltk.len()].copy_from_slice(&encrypted_ltk);
 
-        // Mock save key and callback
-        mock_pair_save_key().returns(());
-        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
-
         // Act
         pair_write(&pkt);
 
@@ -3644,9 +3729,19 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk, decrypted_ltk);
 
-        // Verify callbacks
-        mock_pair_save_key().assert_called(1);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
+        // `pair_save_key` really ran: the header and the saved LTK are in the
+        // first pairing slot of the NOR device.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x30..0x40], &pair_state.pair_ltk);
+
+        // ...and the "pair OK" event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_PAIR_OK as usize
+        );
     }
 
     #[test]
@@ -3703,9 +3798,11 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             true,
@@ -3738,10 +3835,6 @@ mod tests {
         pkt.att_val_mut().value[0] = PAIR_OP_SET_MESH_LTK;
         pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
 
-        // Mock save key and callback
-        mock_pair_save_key().returns(());
-        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
-
         // Act
         pair_write(&pkt);
 
@@ -3753,13 +3846,22 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk, plaintext_ltk);
 
-        // Verify callbacks
-        mock_pair_save_key().assert_called(1);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
+        // `pair_save_key` really ran: the header and the saved LTK are in the
+        // first pairing slot of the NOR device.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x30..0x40], &pair_state.pair_ltk);
+
+        // ...and the "pair OK" event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_PAIR_OK as usize
+        );
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_ltk_wrong_state() {
         // Arrange - Wrong state
         setup_proc_state(PairState::Idle, false, true, false, false, false);
@@ -3791,19 +3893,18 @@ mod tests {
         pkt.att_val_mut().value[1..1 + encrypted_ltk.len()].copy_from_slice(&encrypted_ltk);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Should be set to PairSetted upon failure
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_ltk_simple_mode_fallthrough_not_logged_in() {
         // Arrange - Simple mode but not logged in (fallthrough to line 890)
         setup_proc_state(
@@ -3839,13 +3940,13 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert - Verify fallthrough path (lines 890-892)
-        mock_pair_par_init().assert_called(1); // Line 890: pair_par_init() called
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
         assert_eq!(PAIR_ENC_ENABLE.get(), false); // Line 892: PAIR_ENC_ENABLE cleared
     }
@@ -3880,10 +3981,10 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_reset_mesh() {
         // Arrange
         setup_proc_state(PairState::Completed, false, true, true, false, false);
+        PAIR_ENC_ENABLE.set(true);
 
         // Create a packet with RESET_MESH opcode
         let mut pkt = Packet {
@@ -3901,15 +4002,14 @@ mod tests {
         const PAIR_OP_RESET_MESH: u8 = 0x0A;
         pkt.att_val_mut().value[0] = PAIR_OP_RESET_MESH;
 
-        // Mock pair_par_init in case it's called
-        mock_pair_par_init().returns(());
-
         // Act
         pair_write(&pkt);
 
         // Assert
-        // RESET_MESH doesn't call pair_par_init currently, so we don't assert it was called
-        // Currently the function doesn't change the state for this opcode
+        // RESET_MESH currently has no arm action: pairing state and the
+        // encryption flag stay exactly as they were.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
+        assert_eq!(PAIR_ENC_ENABLE.get(), true);
     }
 
     #[test]
@@ -4027,7 +4127,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_verify_credentials_failure() {
         // Arrange
         setup_proc_state(PairState::Idle, false, true, false, false, false);
@@ -4065,14 +4164,15 @@ mod tests {
         // produce for these credentials, so verification must fail.
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
         assert_eq!(PAIR_LOGIN_OK.get(), false); // Login should fail
-        mock_pair_par_init().assert_called(1); // Check that pairing was reset
+
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
 
     #[test]
@@ -4131,7 +4231,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_get_mesh_ltk_verification_failed() {
         // Arrange - Verification will fail
         setup_proc_state(PairState::Idle, true, false, true, false, false);
@@ -4169,13 +4268,13 @@ mod tests {
         }
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Verify reset was called
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
 
     #[test]
@@ -4243,7 +4342,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_get_mesh_ltk_fallthrough_verification_failed_not_logged_in() {
         // Arrange - Test fallthrough when verification fails and not logged in (lines 964-968)
         setup_proc_state(PairState::Idle, false, false, false, false, false); // Not logged in
@@ -4279,7 +4377,6 @@ mod tests {
         pkt.att_val_mut().value[9..9 + incorrect_proof.len()].copy_from_slice(&incorrect_proof);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
@@ -4288,7 +4385,8 @@ mod tests {
         // Since we're not logged in and this is GET_MESH_LTK (not verify),
         // the condition at line 950 (is_verify || PAIR_LOGIN_OK.get()) fails
         // So we skip the block and fall through to pair_par_init() at line 964
-        mock_pair_par_init().assert_called(1); // Line 964: pair_par_init() called
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
 
     #[test]
@@ -4382,7 +4480,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_password_security_disabled_not_logged_in() {
         // Arrange
         setup_proc_state(
@@ -4413,18 +4510,17 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_pass.len()].copy_from_slice(plaintext_pass);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Verify pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
     #[test]
-    #[mry::lock(pair_par_init)]
     fn test_pair_write_set_mesh_password_security_disabled_wrong_state() {
         // Arrange
         setup_proc_state(PairState::Idle, false, false, true, false, false); // Security disabled, logged in, but WRONG STATE
@@ -4448,20 +4544,22 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_pass.len()].copy_from_slice(plaintext_pass);
 
         // Mock pair_par_init for the reset
-        mock_pair_par_init().returns(());
 
         // Act
         pair_write(&pkt);
 
         // Assert
-        mock_pair_par_init().assert_called(1); // Verify pairing was reset
+        // `pair_par_init` really ran: the pairing state machine was reset to Init.
+        assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_flag_0x80() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             true,
@@ -4508,15 +4606,18 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk_mesh, plaintext_mesh_ltk);
 
-        // Verify callbacks were NOT called for this path
-        mock_pair_save_key().assert_called(0);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(0);
+        // Neither the save nor the event ran on this path: the pairing sector
+        // is untouched and no event was delivered.
+        assert_eq!(pairing_slot(0)[0], 0xFF);
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_flag_other_bits() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             true,
@@ -4551,10 +4652,6 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
         pkt.att_val_mut().value[MESH_FLAG_OFFSET] = 0x7F; // Set all bits except the high bit
 
-        // Mock save key
-        mock_pair_save_key().returns(());
-        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
-
         // Act
         pair_write(&pkt);
 
@@ -4568,15 +4665,27 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk, plaintext_ltk);
 
-        // Verify normal path was called
-        mock_pair_save_key().assert_called(1);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
+        // `pair_save_key` really ran: the header and the saved LTK are in the
+        // first pairing slot of the NOR device.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x30..0x40], &pair_state.pair_ltk);
+
+        // ...and the "pair OK" event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_PAIR_OK as usize
+        );
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_mesh_disabled() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             true,
@@ -4611,10 +4720,6 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
         pkt.att_val_mut().value[MESH_FLAG_OFFSET] = 0x80; // Set the high bit for mesh flag
 
-        // Mock save key
-        mock_pair_save_key().returns(());
-        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
-
         // Act
         pair_write(&pkt);
 
@@ -4628,15 +4733,27 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk, plaintext_ltk);
 
-        // Verify normal path was called
-        mock_pair_save_key().assert_called(1);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
+        // `pair_save_key` really ran: the header and the saved LTK are in the
+        // first pairing slot of the NOR device.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x30..0x40], &pair_state.pair_ltk);
+
+        // ...and the "pair OK" event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_PAIR_OK as usize
+        );
     }
 
     #[test]
-    #[mry::lock(pair_save_key, emit_light_event)]
     fn test_pair_write_set_mesh_ltk_security_disabled_packet_too_short() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             true,
@@ -4673,10 +4790,6 @@ mod tests {
         pkt.att_val_mut().value[1..1 + plaintext_ltk.len()].copy_from_slice(plaintext_ltk);
         pkt.att_val_mut().value[MESH_FLAG_OFFSET] = 0x80; // Set the high bit, but packet length will cause this to be ignored
 
-        // Mock save key
-        mock_pair_save_key().returns(());
-        mock_emit_light_event(LGT_CMD_PAIR_OK).returns(());
-
         // Act
         pair_write(&pkt);
 
@@ -4690,15 +4803,27 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk, plaintext_ltk);
 
-        // Verify normal path was called
-        mock_pair_save_key().assert_called(1);
-        mock_emit_light_event(LGT_CMD_PAIR_OK).assert_called(1);
+        // `pair_save_key` really ran: the header and the saved LTK are in the
+        // first pairing slot of the NOR device.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
+        let slot = pairing_slot(0);
+        assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(&slot[0x30..0x40], &pair_state.pair_ltk);
+
+        // ...and the "pair OK" event reached the registered handler.
+        assert_eq!(RECORDED_LIGHT_EVENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RECORDED_LIGHT_EVENT.load(Ordering::SeqCst),
+            LGT_CMD_PAIR_OK as usize
+        );
     }
 
     #[test]
-    #[mry::lock(pair_save_key)]
     fn test_pair_write_set_mesh_ltk_security_enabled_mesh_flag_0x80() {
         // Arrange
+        reset_host_fakes();
+        install_light_event_recorder();
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
         setup_proc_state(
             PairState::ReceivingMeshPassword,
             false,
@@ -4749,8 +4874,8 @@ mod tests {
         let pair_state = PAIR_STATE.lock();
         assert_eq!(&pair_state.pair_ltk_mesh, decrypted_mesh_ltk);
 
-        // Verify pair_save_key was NOT called for this path
-        mock_pair_save_key().assert_called(0);
+        // The save did not run on this path: the pairing sector is untouched.
+        assert_eq!(pairing_slot(0)[0], 0xFF);
     }
 
     #[test]

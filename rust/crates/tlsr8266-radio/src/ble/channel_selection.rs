@@ -9,7 +9,7 @@ static BLE_LL_CHANNEL_TABLE: CriticalSectionMutex<[u8; 40]> = CriticalSectionMut
 
 /// Channel map for slave device indicating which of the 37 BLE data channels are usable.
 /// Each bit represents one channel; used for adaptive frequency hopping.
-pub(super) static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::new([0; 5]);
+pub(crate) static SLAVE_CHN_MAP: CriticalSectionMutex<[u8; 5]> = CriticalSectionMutex::new([0; 5]);
 
 /// Current BLE Link Layer channel number for communication.
 /// Tracks which of the 37 BLE channels is currently in use.
@@ -37,7 +37,6 @@ static BLE_LL_LAST_UNMAPPED_CH: AtomicUsize = AtomicUsize::new(0);
 /// In BLE, there are 40 channels (0-39), with channels 37, 38, and 39 reserved for advertising.
 /// This function handles data channels (0-36) which are used for communication after connection
 /// establishment.
-#[cfg_attr(test, mry::mry)]
 pub fn ble_ll_build_available_channel_table(channel: &[u8], reset: bool) {
     // Reset the channel counter
     BLE_LL_CHANNEL_NUM.set(0);
@@ -87,7 +86,6 @@ pub fn ble_ll_build_available_channel_table(channel: &[u8], reset: bool) {
 /// This implements a modified version of the "Channel Selection Algorithm #1" from the BLE spec.
 /// The algorithm ensures that if a channel is masked out in the channel_map, it gets remapped
 /// to a valid channel from the channel table.
-#[cfg_attr(test, mry::mry)]
 pub fn ble_ll_select_next_data_channel(channel_map: &[u8], hop: u8) -> u32 {
     // Calculate the next unmapped channel index
     // 0x25 = 37, so we're ensuring the result is within data channels (0-36)
@@ -118,7 +116,6 @@ pub fn ble_ll_select_next_data_channel(channel_map: &[u8], hop: u8) -> u32 {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
 
     #[test]
     fn test_ble_ll_build_available_channel_table_all_channels() {

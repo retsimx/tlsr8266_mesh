@@ -316,7 +316,6 @@ fn light_adjust_rgb_hw_unlocked(val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
 }
 
 /// Step every active transition and push the result to the PWM hardware.
-#[cfg_attr(test, mry::mry)]
 pub fn transition_step() {
     LIGHT_HW.lock().transition_step_inner();
 }
@@ -332,7 +331,6 @@ pub fn begin_transition(cw: u16, ww: u16, brightness: u16) {
 
 /// Set the cool-white PWM duty. Locks [`LIGHT_HW`] once so the paired CW/WW
 /// writes cannot interleave with a TMR1 transition step.
-#[cfg_attr(test, mry::mry)]
 pub fn light_adjust_cw(val: I16F16, lum: I16F16) {
     let _guard = LIGHT_HW.lock();
     light_adjust_cw_unlocked(val, lum);
@@ -340,7 +338,6 @@ pub fn light_adjust_cw(val: I16F16, lum: I16F16) {
 
 /// Set the warm-white PWM duty. Locks [`LIGHT_HW`] once so the paired CW/WW
 /// writes cannot interleave with a TMR1 transition step.
-#[cfg_attr(test, mry::mry)]
 pub fn light_adjust_ww(val: I16F16, lum: I16F16) {
     let _guard = LIGHT_HW.lock();
     light_adjust_ww_unlocked(val, lum);
@@ -357,7 +354,6 @@ pub fn light_adjust_rgb_hw(val_cw: I16F16, val_ww: I16F16, lum: I16F16) {
 }
 
 /// Turn the lamp hardware on or off (no mesh status report).
-#[cfg_attr(test, mry::mry)]
 pub fn light_onoff_hw(on: bool) {
     LIGHT_HW.lock().light_onoff_inner(on);
 }
@@ -369,7 +365,6 @@ pub fn light_onoff(on: bool) {
 }
 
 /// Whether the lamp is off, taking the pending transition target into account.
-#[cfg_attr(test, mry::mry)]
 pub fn is_light_off() -> bool {
     LIGHT_HW.lock().is_light_off()
 }

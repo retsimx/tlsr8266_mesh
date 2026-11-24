@@ -3,13 +3,11 @@ use core::ptr::{addr_of, null, null_mut};
 use core::slice;
 use core::sync::atomic::AtomicU8;
 
-use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write, PAIR_LOGIN_OK};
-use crate::sdk::ble_app::light_ll::mesh_management::{
-    mesh_report_status_enable, mesh_report_status_enable_mask,
-};
-use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
-use crate::sdk::ble_app::RadioConfig;
-use crate::sdk::light::*;
+use crate::ble::pair::{pair_read, pair_write, PAIR_LOGIN_OK};
+use crate::facade::RadioConfig;
+use crate::mesh_ll::node_status::{mesh_report_status_enable, mesh_report_status_enable_mask};
+use crate::rf::drv_8266::rf_link_slave_data_write;
+use crate::types::*;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use mesh_protocol::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
@@ -469,7 +467,7 @@ const GATT_TABLE: GAttributesType = GAttributesType([
         16,
         TELINK_SPP_DATA_OTA_UUID,
         SPP_DATA_OTA_DATA,
-        Some(crate::sdk::ble_app::callbacks::dispatch_ota_write),
+        Some(crate::callbacks::dispatch_ota_write),
         None
     ), //value
     attrdef!(
@@ -501,29 +499,33 @@ const GATT_TABLE: GAttributesType = GAttributesType([
     ),
 ]);
 
-#[cfg(not(test))]
+// The table is immutable on target and a `UnsafeCell` on host builds, so tests in
+// this crate *and* in the firmware crate can patch an entry temporarily. The gate
+// is `target_os`, not `test`: the firmware compiles this crate as a dependency and
+// never carries its `cfg(test)`.
+#[cfg(target_os = "none")]
 static G_ATTRIBUTES: GAttributesType = GATT_TABLE;
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 struct TestGAttributes(core::cell::UnsafeCell<GAttributesType>);
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 // SAFETY: host tests are the only writers and they serialise through the
 // single `&mut` handed out by `get_gAttributes()`; production has no access to
 // this type at all.
 unsafe impl Sync for TestGAttributes {}
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 static G_ATTRIBUTES: TestGAttributes = TestGAttributes(core::cell::UnsafeCell::new(GATT_TABLE));
 
 /// The GATT attribute table.
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 pub fn get_gAttributes() -> &'static [AttributeT; GATT_ATT_COUNT] {
     &G_ATTRIBUTES.0
 }
 
 /// The GATT attribute table, writable for tests that temporarily patch entries.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn get_gAttributes() -> &'static mut [AttributeT; GATT_ATT_COUNT] {
     // SAFETY: the cell is a `static`, so the pointer is non-null and aligned;
     // the returned lifetime is unconstrained because tests own the table for the
@@ -585,16 +587,54 @@ pub fn is_readonly_ram_attr(handle: usize) -> bool {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::light_ll::mesh_management::{
-        mock_mesh_report_status_enable, mock_mesh_report_status_enable_mask,
+    use crate::mesh_ll::node_status::{
+        MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
     };
     use mesh_protocol::packet_types::PacketL2capHead;
 
+    /// Seeds the module-level reporting statics so the two report paths are
+    /// distinguishable by their real effects: `mesh_report_status_enable(true)`
+    /// marks every known node in bulk (bits `0..MESH_NODE_MAX`), whereas
+    /// `mesh_report_status_enable_mask(..)` marks only the addresses it lists.
+    ///
+    /// `node_addr_1` is the address of the second known node. Leave both
+    /// addresses at 0 on the bulk-enable path so no UART status dump is queued.
+    fn seed_reporting_state(node_addr_0: u8, node_addr_1: u8) {
+        MESH_NODE_MAX.set(2);
+        MESH_NODE_REPORT_ENABLE.set(false);
+        for word in MESH_NODE_MASK.lock().iter_mut() {
+            *word = 0;
+        }
+        let mut node_st = MESH_NODE_ST.lock();
+        node_st[0].val.dev_adr = node_addr_0;
+        node_st[1].val.dev_adr = node_addr_1;
+    }
+
+    /// Restores the reporting statics every test above perturbs, so the next
+    /// test in the process starts from the boot-time state.
+    fn reset_reporting_state() {
+        MESH_NODE_MAX.set(0);
+        MESH_NODE_REPORT_ENABLE.set(false);
+        for word in MESH_NODE_MASK.lock().iter_mut() {
+            *word = 0;
+        }
+        let mut node_st = MESH_NODE_ST.lock();
+        node_st[0].val.dev_adr = 0;
+        node_st[1].val.dev_adr = 0;
+    }
+
+    /// First reporting-mask word, i.e. the bits for nodes 0..31.
+    fn mask_word0() -> u32 {
+        MESH_NODE_MASK.lock()[0]
+    }
+
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_not_logged_in() {
-        // Arrange - User not logged in
+        // Arrange - User not logged in. The packet would enable reporting and
+        // mark node 0 (address 0x02) if either reporting path ran.
         PAIR_LOGIN_OK.set(false);
+        seed_reporting_state(0x02, 0x00);
+        SPP_DATA_SERVER2CLIENT_DATA.lock().copy_from_slice(&[0; 4]);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -612,24 +652,30 @@ mod tests {
         pkt.att_val_mut().value[2] = 0x03;
         pkt.att_val_mut().value[3] = 0x04;
 
-        // Mock both functions - use specific values even though they won't be called
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert - Should return true immediately without processing
-        // Verify neither function was called since not logged in
-        mock_mesh_report_status_enable(true).assert_called(0);
-        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04][..]).assert_called(0);
+        // Assert - Should return immediately without processing: no reporting
+        // flag, no marked node, and no SPP mirror write.
+        assert!(
+            !MESH_NODE_REPORT_ENABLE.get(),
+            "the enable flag must not be touched without a login"
+        );
+        assert_eq!(mask_word0(), 0, "no node may be marked as reporting");
+        assert_eq!(
+            *SPP_DATA_SERVER2CLIENT_DATA.lock(),
+            [0; 4],
+            "the SPP mirror must not be written without a login"
+        );
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_logged_in_short_packet() {
         // Arrange - User logged in, short packet (l2cap_len <= 4)
         PAIR_LOGIN_OK.set(true);
+        seed_reporting_state(0x00, 0x00);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -647,24 +693,28 @@ mod tests {
         pkt.att_val_mut().value[2] = 0xBB;
         pkt.att_val_mut().value[3] = 0xCC;
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&[0x01][..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert
-        // Verify mesh_report_status_enable was called with true (pktdata[0] != 0) and mask was not
-        mock_mesh_report_status_enable(true).assert_called(1);
-        mock_mesh_report_status_enable_mask(&[0x01][..]).assert_called(0);
+        // Assert - the bulk-enable path ran (pktdata[0] != 0): reporting is on and
+        // both known nodes are marked. The selective path would have marked none,
+        // because the packet carries no address list.
+        assert!(MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b11, "all known nodes are enabled");
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_logged_in_short_packet_disable() {
         // Arrange - User logged in, short packet with disable flag
         PAIR_LOGIN_OK.set(true);
+        seed_reporting_state(0x00, 0x00);
+        {
+            let mut node_mask = MESH_NODE_MASK.lock();
+            node_mask[0] = 0b11;
+        }
+        MESH_NODE_REPORT_ENABLE.set(true);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -682,25 +732,24 @@ mod tests {
         pkt.att_val_mut().value[2] = 0x22;
         pkt.att_val_mut().value[3] = 0x33;
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(false).returns(());
-        mock_mesh_report_status_enable_mask(&[0x00][..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert
-        // Verify mesh_report_status_enable was called with false (pktdata[0] == 0) and mask was not
-        mock_mesh_report_status_enable(false).assert_called(1);
-        mock_mesh_report_status_enable_mask(&[0x00][..]).assert_called(0);
+        // Assert - pktdata[0] == 0 turns reporting off and leaves the node mask
+        // untouched (disabling never rewrites it; enabling does).
+        assert!(!MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b11, "disabling leaves the node mask alone");
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_logged_in_long_packet() {
         // Arrange - User logged in, long packet (l2cap_len > 4)
-        // This tests that when l2cap_len > 4, mesh_report_status_enable_mask is called
+        // This tests that when l2cap_len > 4, the selective mask path runs.
         PAIR_LOGIN_OK.set(true);
+        // Node 1 is address 0x05, which appears in the packet's address list.
+        seed_reporting_state(0x10, 0x05);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -721,31 +770,29 @@ mod tests {
         pkt.att_val_mut().value[5] = 0x06;
         pkt.att_val_mut().value[6] = 0x07;
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
-            .returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert - Should return true
-        // Verify mask was called with first 7 bytes and enable was not
-        mock_mesh_report_status_enable(true).assert_called(0);
-        mock_mesh_report_status_enable_mask(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07][..])
-            .assert_called(1);
+        // Assert - the selective path ran over the first 7 bytes: only the listed
+        // node (index 1) is marked. The bulk path would have set 0b11.
+        assert!(MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b10, "only the listed node is marked");
         // Verify the first 4 bytes were copied
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0x01);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x02);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x03);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x04);
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_logged_in_maximum_long_packet() {
         // Arrange - User logged in, maximum size packet with selective addresses
         PAIR_LOGIN_OK.set(true);
+        // Node 1 is address 0x0B, which appears in the packet's address list;
+        // node 0 is deliberately outside it.
+        seed_reporting_state(0x20, 0x0B);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -764,29 +811,27 @@ mod tests {
         ];
         pkt.att_val_mut().value[0..17].copy_from_slice(&test_data);
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&test_data[..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert - Should return true
-        // Verify mask was called with first 17 bytes and enable was not
-        mock_mesh_report_status_enable(true).assert_called(0);
-        mock_mesh_report_status_enable_mask(&test_data[..]).assert_called(1);
+        // Assert - the selective path ran over the first 17 bytes and marked only
+        // the listed node.
+        assert!(MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b10, "only the listed node is marked");
         // Verify the first 4 bytes were copied
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0xFF);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x01);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x02);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x03);
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_copies_first_four_bytes() {
         // Arrange - Verify that first 4 bytes are copied to SPP_DATA_SERVER2CLIENT_DATA
         PAIR_LOGIN_OK.set(true);
+        seed_reporting_state(0x00, 0x00);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -804,29 +849,28 @@ mod tests {
         pkt.att_val_mut().value[2] = 0x33;
         pkt.att_val_mut().value[3] = 0x44;
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&[0x11][..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert
-        // Verify enable was called with true (0x11 != 0) and mask was not
-        mock_mesh_report_status_enable(true).assert_called(1);
-        mock_mesh_report_status_enable_mask(&[0x11][..]).assert_called(0);
+        // Assert - 0x11 != 0 so the bulk-enable path ran, and every known node is
+        // marked.
+        assert!(MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b11, "all known nodes are enabled");
         // Verify the first 4 bytes were copied to SPP_DATA_SERVER2CLIENT_DATA
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0x11);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0x22);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0x33);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0x44);
+
+        reset_reporting_state();
     }
 
     #[test]
-    #[mry::lock(mesh_report_status_enable, mesh_report_status_enable_mask)]
     fn test_mesh_status_write_boundary_condition() {
         // Arrange - Test boundary case where l2cap_len = 5 (just over threshold of 4)
         PAIR_LOGIN_OK.set(true);
+        // Node 1 is address 0xBB, the single selective address in the packet.
+        seed_reporting_state(0x10, 0xBB);
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -843,22 +887,20 @@ mod tests {
         pkt.att_val_mut().value[2] = 0xCC;
         pkt.att_val_mut().value[3] = 0xDD;
 
-        // Mock both functions with expected values
-        mock_mesh_report_status_enable(true).returns(());
-        mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).returns(());
-
         // Act
         mesh_status_write(&pkt);
 
-        // Assert - Should return true and call mesh_report_status_enable_mask
-        // Verify mask was called with first 2 bytes (l2cap_len - 3) and enable was not
-        mock_mesh_report_status_enable(true).assert_called(0);
-        mock_mesh_report_status_enable_mask(&[0xAA, 0xBB][..]).assert_called(1);
+        // Assert - the selective path ran over the first 2 bytes (l2cap_len - 3)
+        // and marked only the listed node. The bulk path would have set 0b11.
+        assert!(MESH_NODE_REPORT_ENABLE.get());
+        assert_eq!(mask_word0(), 0b10, "only the listed node is marked");
         // Verify the first 4 bytes were copied
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[0], 0xAA);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[1], 0xBB);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[2], 0xCC);
         assert_eq!(SPP_DATA_SERVER2CLIENT_DATA.lock()[3], 0xDD);
+
+        reset_reporting_state();
     }
 
     // OTA write seam tests. The `OtaHooks` slot is process-wide, so these tests
@@ -866,9 +908,7 @@ mod tests {
     // default on exit.
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::sdk::ble_app::callbacks::{
-        dispatch_ota_write, set_ota_hooks, OtaHooks, TEST_OTA_HOOKS,
-    };
+    use crate::callbacks::{dispatch_ota_write, set_ota_hooks, OtaHooks, TEST_OTA_HOOKS};
 
     static OTA_WRITE_HITS: AtomicUsize = AtomicUsize::new(0);
     static OTA_WRITE_L2CAP_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -949,7 +989,7 @@ mod tests {
     #[test]
     fn test_ota_write_test_default_is_safe() {
         reset_ota_write_slot();
-        crate::ota::reset_for_test();
+        crate::callbacks::test_ota::reset_for_test();
 
         let mut pkt = Packet {
             head: PacketL2capHead {
@@ -967,20 +1007,20 @@ mod tests {
 
         // The mesh-blocked/finish-flag gates keep the real handler inert here.
         assert_eq!(
-            crate::ota::ota_status_snapshot_impl().in_progress,
+            crate::callbacks::test_ota::snapshot().in_progress,
             false,
             "a packet on an idle OTA must not claim the transfer"
         );
 
-        crate::ota::reset_for_test();
+        crate::callbacks::test_ota::reset_for_test();
         reset_ota_write_slot();
     }
 
     // ---- Config-driven GATT values -----------------------------------------
 
-    use crate::sdk::ble_app::ble_ll_attribute::{l2cap_att_handler, GattOp};
-    use crate::sdk::ble_app::config::DEFAULT;
-    use crate::sdk::ble_app::{radio_config, set_radio_config};
+    use crate::config::DEFAULT;
+    use crate::facade::{radio_config, set_radio_config};
+    use crate::gatt::attribute::{l2cap_att_handler, GattOp};
     use core::ptr::addr_of_mut;
     use mesh_protocol::packet_types::PacketL2capData;
 
@@ -1165,10 +1205,12 @@ mod tests {
 
     /// `STATUS_CCC` (handle 19) must stay writable: subscriptions depend on it.
     ///
-    /// `STATUS_CCC` itself sits below the host stand-in for `__RAM_START_ADDR`,
-    /// so the entry is pointed at a local value buffer; that exercises the same
-    /// handler decision (handle 19 is not in `is_readonly_ram_attr`, so the copy
-    /// proceeds) without depending on the host's static layout.
+    /// The host stand-in for `__RAM_START_ADDR` is `0`, so every host static —
+    /// `STATUS_CCC` included — sits *above* it and the ROM check lets the copy
+    /// proceed. The entry is still pointed at a local value buffer so the write
+    /// lands in test-owned memory; that exercises the same handler decision
+    /// (handle 19 is not in `is_readonly_ram_attr`, so the copy proceeds)
+    /// without depending on the host's static layout.
     #[test]
     fn test_status_ccc_remains_writable() {
         let original_ptr = get_gAttributes()[19].p_attr_value;

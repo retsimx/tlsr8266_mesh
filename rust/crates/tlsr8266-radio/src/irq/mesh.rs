@@ -12,20 +12,18 @@
 use core::ptr::addr_of;
 use core::slice;
 
-use crate::sdk::ble_app::ble_ll_pair::PAIR_AC;
-use crate::sdk::ble_app::flash_config::SYS_CHN_LISTEN;
-use crate::sdk::ble_app::light_ll::connection_management::{
-    back_to_rxmode_bridge, BLE_PERIPHERAL_LINK_STATE,
-};
-use crate::sdk::ble_app::light_ll::mesh_management::{
+use crate::ble::connection::{back_to_rxmode_bridge, BLE_PERIPHERAL_LINK_STATE};
+use crate::ble::flash_config::SYS_CHN_LISTEN;
+use crate::ble::pair::PAIR_AC;
+use crate::ble::status::{app_bridge_cmd_handle, tx_packet_bridge};
+use crate::mesh_ll::node_status::{
     mesh_node_flush_status, mesh_report_status_enable_mask, mesh_send_online_status,
     MESH_DEVICE_ONLINE_STATUS, MESH_LISTEN_CYCLE_COUNT, MESH_LISTEN_INTERVAL_US, MESH_NODE_MASK,
     MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
 };
-use crate::sdk::ble_app::light_ll::status_management::{app_bridge_cmd_handle, tx_packet_bridge};
-use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::ble_app::rf_drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE};
-use crate::sdk::light::{
+use crate::rf::drv_8266::*;
+use crate::rf::drv_8266::{BLE_ADVERTISING_ENABLED, CURRENT_RF_STATE};
+use crate::types::{
     RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
 };
 use mesh_protocol::mesh_types::{is_online, MESH_NODE_ST_VAL_LEN};
@@ -33,7 +31,6 @@ use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
 
-#[cfg_attr(test, mry::mry)]
 /// Reports mesh node status information for transmission to the BLE master.
 ///
 /// This function collects status information from mesh nodes that have pending updates
@@ -128,7 +125,7 @@ pub fn configure_rf_for_mesh_listening() {
 
     // Set the link state to indicate we're in mesh listening mode
     // State 4 = mesh listening state
-    BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Mesh);
+    BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Mesh);
 }
 
 /// Handles the mesh listening state interrupt.
@@ -151,10 +148,9 @@ pub fn configure_rf_for_mesh_listening() {
 /// - Processes bridge commands that may have been received
 /// - Rotates through listening channels for comprehensive coverage
 /// - Handles periodic online status broadcasts
-#[cfg_attr(test, mry::mry)]
 pub fn handle_mesh_listening_state() {
     // Set the link state to listening mode (state 4)
-    BLE_PERIPHERAL_LINK_STATE.set(crate::sdk::light::BlePeripheralLinkState::Mesh);
+    BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Mesh);
 
     // Stop any ongoing radio operations
     rf_stop_trx();
@@ -220,34 +216,123 @@ pub fn handle_mesh_listening_state() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::flash_config::SYS_CHN_LISTEN;
-    use crate::sdk::light::{
+    use crate::ble::flash_config::SYS_CHN_LISTEN;
+    use crate::types::{
         BlePeripheralLinkState, RfOperationState, ADV_INTERVAL2LISTEN_INTERVAL,
         ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL,
     };
     use mesh_protocol::mesh_types::{
         MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
     };
-    use mry::Any;
     use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 
-    // Import mock functions for RF operations
-    use crate::sdk::ble_app::rf_drv_8266::{
-        mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
-        mock_rf_set_rxmode, mock_rf_stop_trx,
-    };
-
-    // Import mock functions for register operations
+    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{
-        mock_read_reg_rnd_number, mock_read_reg_system_tick, mock_write_reg_system_tick_irq,
+        write_reg_rnd_number, write_reg_system_tick, write_reg_system_tick_irq, REG_BASE_ADDR,
     };
 
-    // Import mock functions for app operations
-    use crate::sdk::ble_app::light_ll::status_management::mock_app_bridge_cmd_handle;
+    use crate::ble::connection::SLAVE_DATA_VALID;
+    use crate::ble::status::SLAVE_READ_STATUS_BUSY;
+
+    /// Datasheet offsets of the registers this module drives.
+    const REG_RF_ACCESS_CODE: u32 = 0x408;
+    const REG_RF_CHANNEL: u32 = 0x40d;
+    const REG_RF_RX_MODE: u32 = 0x428;
+    const REG_RF_CRC: u32 = 0x44c;
+    const REG_RF_MODE_CONTROL: u32 = 0xf00;
+    const REG_SYSTEM_TICK_IRQ: u32 = 0x744;
+
+    /// Values written to `offset` since the last clear, oldest first.
+    fn writes_to(offset: u32) -> Vec<u32> {
+        let addr = offset | REG_BASE_ADDR;
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == addr)
+            .map(|w| w.value)
+            .collect()
+    }
+
+    /// Number of writes of exactly `value` to `offset`.
+    fn count_writes(offset: u32, value: u32) -> usize {
+        writes_to(offset)
+            .into_iter()
+            .filter(|written| *written == value)
+            .count()
+    }
+
+    /// Seed the free-running tick, the compare register and the random register
+    /// the way the radio hardware would present them, then drop the seeding
+    /// entries from the write log so the assertions only see writes made by the
+    /// code under test.
+    fn seed_registers(tick: u32, tick_irq: u32, rnd: u16) {
+        write_reg_system_tick(tick);
+        write_reg_system_tick_irq(tick_irq);
+        write_reg_rnd_number(rnd);
+        FakeMmio::clear_writes();
+    }
+
+    /// Arm one pending bridge command so the real `app_bridge_cmd_handle` has
+    /// work to do. The status reader is busy, so the single countdown step the
+    /// handler takes queues nothing.
+    fn arm_bridge_command_countdown() {
+        SLAVE_DATA_VALID.set(2);
+        SLAVE_READ_STATUS_BUSY.set(1);
+    }
+
+    /// Assert the real bridge-command handler consumed exactly one countdown
+    /// step. Two calls would have taken the count to zero.
+    fn assert_bridge_command_handled_once() {
+        assert_eq!(
+            SLAVE_DATA_VALID.get(),
+            1,
+            "app_bridge_cmd_handle should step the countdown exactly once"
+        );
+    }
+
+    /// Assert the RF setup `configure_rf_for_mesh_listening` performs.
+    ///
+    /// `stop_calls` is the number of `rf_stop_trx` runs the caller expects: the
+    /// listening-state handler stops the radio itself before configuring it.
+    fn assert_mesh_listen_rf_setup(stop_calls: usize, access_code: u32) {
+        assert_eq!(
+            count_writes(REG_RF_MODE_CONTROL, 0x80),
+            stop_calls,
+            "rf_stop_trx should run {stop_calls} time(s)"
+        );
+        assert_eq!(
+            count_writes(REG_RF_ACCESS_CODE, access_code.swap_bytes()),
+            1,
+            "the pairing access code should reach the radio once, byte-swapped"
+        );
+        assert_eq!(
+            writes_to(REG_RF_CRC),
+            [0x555555],
+            "the advertisement CRC should be written once"
+        );
+        assert_eq!(
+            writes_to(REG_RF_CHANNEL).len(),
+            1,
+            "one listen channel should be selected per configure"
+        );
+        assert_eq!(
+            count_writes(
+                REG_RF_RX_MODE,
+                (FLD_RF_RX_MODE::LOW_PASS_FILTER | FLD_RF_RX_MODE::EN).bits() as u32
+            ),
+            1,
+            "the receiver should be enabled once"
+        );
+    }
 
     /// Helper function to reset global state to known values for test isolation.
     /// This ensures each test starts with a clean state.
     fn reset_global_state() {
+        // The suite runs `--test-threads=1`, so the register bank and the
+        // analog bank are process-wide singletons shared with every other test.
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+
         BLE_ADVERTISING_ENABLED.set(false);
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         MESH_DEVICE_ONLINE_STATUS.set(false);
@@ -255,6 +340,9 @@ mod tests {
         MESH_LISTEN_CYCLE_COUNT.set(0);
         MESH_LISTEN_INTERVAL_US.set(100000); // 100ms default
         PAIR_AC.set(0x12345678);
+        // No bridge command may be pending: `app_bridge_cmd_handle` runs for
+        // real here and its own behaviour is covered in status_management.
+        SLAVE_DATA_VALID.set(0);
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
 
         // Reset mesh node structures
@@ -276,14 +364,8 @@ mod tests {
         }
     }
 
-    /// Helper function to set up a mock mesh node with status data
-    fn setup_mock_mesh_node(
-        idx: usize,
-        dev_adr: u8,
-        sn: u8,
-        miss: u8,
-        par: [u8; MESH_NODE_ST_PAR_LEN],
-    ) {
+    /// Helper function to set up a mesh node with status data
+    fn setup_mesh_node(idx: usize, dev_adr: u8, sn: u8, miss: u8, par: [u8; MESH_NODE_ST_PAR_LEN]) {
         let mut mesh_node_mask = MESH_NODE_MASK.lock();
         let mut mesh_node_st = MESH_NODE_ST.lock();
 
@@ -318,8 +400,8 @@ mod tests {
         MESH_NODE_REPORT_ENABLE.set(false);
 
         // Setup some mock nodes that would normally be reported
-        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
+        setup_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
 
         // Prepare output buffer
         let mut params = [0xFF; 20]; // Initialize with non-zero to verify no changes
@@ -384,7 +466,7 @@ mod tests {
 
         // Setup: Reporting enabled with one online node
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]); // miss > 0 = online
+        setup_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]); // miss > 0 = online
 
         // Prepare output buffer
         let mut params = [0xFF; 20];
@@ -423,7 +505,7 @@ mod tests {
 
         // Setup: Reporting enabled with one offline node
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(2, 0x03, 0x30, 0, [0xCC, 0xDD]); // miss == 0 = offline
+        setup_mesh_node(2, 0x03, 0x30, 0, [0xCC, 0xDD]); // miss == 0 = offline
 
         // Prepare output buffer
         let mut params = [0xFF; 20];
@@ -466,9 +548,9 @@ mod tests {
 
         // Setup: Reporting enabled with multiple nodes
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
-        setup_mock_mesh_node(3, 0x04, 0x40, 0, [0xEE, 0xFF]); // offline node
+        setup_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
+        setup_mesh_node(3, 0x04, 0x40, 0, [0xEE, 0xFF]); // offline node
 
         // Prepare output buffer
         let mut params = [0x00; 20];
@@ -522,9 +604,9 @@ mod tests {
 
         // Setup: Reporting enabled with more nodes than buffer can hold
         MESH_NODE_REPORT_ENABLE.set(true);
-        setup_mock_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
-        setup_mock_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
-        setup_mock_mesh_node(2, 0x03, 0x30, 1, [0xEE, 0xFF]);
+        setup_mesh_node(0, 0x01, 0x10, 1, [0xAA, 0xBB]);
+        setup_mesh_node(1, 0x02, 0x20, 1, [0xCC, 0xDD]);
+        setup_mesh_node(2, 0x03, 0x30, 1, [0xEE, 0xFF]);
 
         // Prepare small output buffer (only room for 2 nodes)
         let mut params = [0x00; 8]; // 2 nodes * 4 bytes each
@@ -567,19 +649,7 @@ mod tests {
     /// - Receive mode is enabled
     /// - Link state is set to mesh mode
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
     fn test_configure_rf_for_mesh_listening() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         // Reset state for clean test
         reset_global_state();
 
@@ -590,12 +660,15 @@ mod tests {
         // Execute function
         configure_rf_for_mesh_listening();
 
-        // Verify RF operations were called in correct sequence
-        mock_rf_stop_trx().assert_called(1);
-        mock_rf_set_ble_access_code(0x12345678).assert_called(1);
-        mock_rf_set_ble_crc_adv().assert_called(1);
-        mock_rf_set_ble_channel(SYS_CHN_LISTEN[1]).assert_called(1);
-        mock_rf_set_rxmode().assert_called(1);
+        // Verify the RF hardware was configured in the documented order: the
+        // radio stopped, the access code/CRC applied, the round-robin channel
+        // selected, then the receiver enabled.
+        assert_mesh_listen_rf_setup(1, 0x12345678);
+        assert_eq!(
+            writes_to(REG_RF_CHANNEL),
+            [SYS_CHN_LISTEN[1] as u32],
+            "cycle count 1 should select SYS_CHN_LISTEN[1]"
+        );
 
         // Verify link state was set to mesh mode
         assert_eq!(
@@ -611,19 +684,7 @@ mod tests {
     /// - Channel selection is based on cycle count modulo array length
     /// - All channels in SYS_CHN_LISTEN are used in rotation
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
     fn test_configure_rf_for_mesh_listening_channel_cycling() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-
         // Reset state for clean test
         reset_global_state();
 
@@ -634,10 +695,21 @@ mod tests {
             let expected_channel = SYS_CHN_LISTEN[i % SYS_CHN_LISTEN.len()];
 
             configure_rf_for_mesh_listening();
+
+            assert_eq!(
+                FakeMmio::reg8(REG_RF_CHANNEL | REG_BASE_ADDR),
+                expected_channel,
+                "cycle count {i} should select channel {expected_channel}"
+            );
         }
 
-        // Verify that rf_set_ble_channel was called 8 times total (4 channels * 2 cycles)
-        mock_rf_set_ble_channel(Any).assert_called(8);
+        // Verify that the channel register was written 8 times total
+        // (4 channels * 2 cycles)
+        assert_eq!(
+            writes_to(REG_RF_CHANNEL).len(),
+            8,
+            "every configure should select one channel"
+        );
     }
 
     // ================================================================================
@@ -655,29 +727,13 @@ mod tests {
     /// - Advertising takes priority with 7ms timing
     /// - State transitions to advertisement
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_immediate_advertising() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(10000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
-        // Setup: Advertising enabled
+        // Setup: Advertising enabled, entered at tick 10000
+        seed_registers(10000, 100000, 0);
+        arm_bridge_command_countdown();
         BLE_ADVERTISING_ENABLED.set(true);
         MESH_LISTEN_INTERVAL_US.set(50000); // 50ms
 
@@ -690,21 +746,20 @@ mod tests {
             BlePeripheralLinkState::Mesh,
             "Link state should be set to mesh mode"
         );
-        mock_rf_stop_trx().assert_called(2); // Called once in handle function, once in configure
-        mock_app_bridge_cmd_handle(10000).assert_called(1);
+        assert_bridge_command_handled_once();
 
-        // Verify RF was configured for mesh listening
-        mock_rf_set_ble_access_code(Any).assert_called(1);
-        mock_rf_set_ble_crc_adv().assert_called(1);
-        mock_rf_set_ble_channel(Any).assert_called(1);
-        mock_rf_set_rxmode().assert_called(1);
+        // Verify RF was configured for mesh listening; the handler stops the
+        // radio itself before configuring it, so rf_stop_trx runs twice.
+        assert_mesh_listen_rf_setup(2, 0x12345678);
 
-        // Verify listen interval was scheduled
-        mock_write_reg_system_tick_irq(10000 + 50000).assert_called(1);
-
-        // Verify advertising timing (7ms) was scheduled
+        // Verify the listen interval was scheduled and then superseded by the
+        // 7ms advertising deadline.
         let expected_adv_time = CLOCK_SYS_CLOCK_1US * 7000 + 10000;
-        mock_write_reg_system_tick_irq(expected_adv_time).assert_called(1);
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [10000 + 50000, expected_adv_time],
+            "listen interval then advertising deadline"
+        );
 
         // Verify state transitioned to advertisement
         assert_eq!(
@@ -723,37 +778,25 @@ mod tests {
     /// - Random timing is applied to prevent collisions
     /// - State transitions to advertisement when scheduled
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_rnd_number)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_periodic_advertising() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(20000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_rnd_number().returns(0x1234);
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: No immediate advertising, but conditions for periodic advertising
+        seed_registers(20000, 100000, 0x1234);
+        arm_bridge_command_countdown();
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
         MESH_LISTEN_CYCLE_COUNT.set(ADV_INTERVAL2LISTEN_INTERVAL as u32 - 1); // Should trigger advertising
 
         // Execute function
         handle_mesh_listening_state();
+
+        // Verify the bridge-command handler ran for this path
+        assert_bridge_command_handled_once();
+
+        // Verify RF setup still happened for this path
+        assert_mesh_listen_rf_setup(2, 0x12345678);
 
         // Verify listen cycle count was incremented
         assert_eq!(
@@ -785,39 +828,25 @@ mod tests {
     /// - State remains in listen mode
     /// - Function returns early without state change
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(read_reg_rnd_number)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_continue_listening() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(30000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_read_reg_rnd_number().returns(0x1234);
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: Conditions for continuing to listen
+        seed_registers(30000, 50000, 0x1234);
+        arm_bridge_command_countdown();
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
         MESH_LISTEN_CYCLE_COUNT.set(1); // Will not trigger advertising or online status
 
         // Execute function
         handle_mesh_listening_state();
+
+        // Verify the bridge-command handler ran for this path
+        assert_bridge_command_handled_once();
+
+        // Verify RF setup ran for this path
+        assert_mesh_listen_rf_setup(2, 0x12345678);
 
         // Verify listen cycle count was incremented
         assert_eq!(
@@ -864,33 +893,13 @@ mod tests {
     /// - Advertisement timing (7ms)
     /// - Random offset calculations for collision avoidance
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(read_reg_rnd_number)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_timing_calculations() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(15000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(60000);
-        mock_read_reg_rnd_number().returns(0x5678);
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
-        // Setup: Custom listen interval
+        // Setup: Custom listen interval, entered at tick 15000
+        seed_registers(15000, 60000, 0x5678);
+        arm_bridge_command_countdown();
         MESH_LISTEN_INTERVAL_US.set(75000); // 75ms
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
@@ -899,13 +908,25 @@ mod tests {
         // Execute function
         handle_mesh_listening_state();
 
-        // Since advertising should be enabled after incrementing, verify random timing
-        if BLE_ADVERTISING_ENABLED.get() {
-            // Random offset calculation: ((tick ^ rnd) & 0x7fff) * CLOCK_SYS_CLOCK_1US + tick_irq
-            let random_offset = ((15000 ^ 0x5678) & 0x7fff) * CLOCK_SYS_CLOCK_1US;
-            let expected_random_time = random_offset + 60000; // 60000 is the mock value for read_reg_system_tick_irq
-            mock_write_reg_system_tick_irq(expected_random_time).assert_called(1);
-        }
+        // Verify the bridge-command handler ran for this path
+        assert_bridge_command_handled_once();
+
+        // The listen interval is scheduled first, so by the time the random
+        // offset is applied the compare register already holds that deadline.
+        let listen_deadline = 15000 + 75000;
+        let random_offset = ((15000 ^ 0x5678) & 0x7fff) * CLOCK_SYS_CLOCK_1US;
+        let expected_random_time = random_offset + listen_deadline;
+
+        assert!(
+            BLE_ADVERTISING_ENABLED.get(),
+            "cycle count {ADV_INTERVAL2LISTEN_INTERVAL} should schedule advertising"
+        );
+        // Random offset calculation: ((tick ^ rnd) & 0x7fff) * CLOCK_SYS_CLOCK_1US + tick_irq
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [listen_deadline, expected_random_time],
+            "listen interval then randomised advertising deadline"
+        );
     }
 
     /// Tests the "continue listening" logic when no action is needed.
@@ -916,29 +937,7 @@ mod tests {
     /// - The cycle count is still incremented
     /// - No state transitions occur
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(read_reg_rnd_number)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_continue_listening_no_action_needed() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(40000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(70000);
-        mock_read_reg_rnd_number().returns(0x9abc);
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
@@ -946,12 +945,17 @@ mod tests {
         // Use cycle count that won't trigger advertising or online status
         // ADV_INTERVAL2LISTEN_INTERVAL = 4, ONLINE_STATUS_INTERVAL2LISTEN_INTERVAL = 8
         // So cycle count 7 will not trigger either (7 % 4 != 0, 7 % 8 != 0)
+        seed_registers(40000, 70000, 0x9abc);
+        arm_bridge_command_countdown();
         MESH_LISTEN_CYCLE_COUNT.set(7);
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
 
         // Execute function
         handle_mesh_listening_state();
+
+        // Verify the bridge-command handler ran for this path
+        assert_bridge_command_handled_once();
 
         // Verify listen cycle count was incremented
         assert_eq!(
@@ -984,11 +988,7 @@ mod tests {
 
         // Verify that RF operations were called for setup, even when continuing to listen
         // rf_stop_trx is called twice: once in handle_mesh_listening_state and once in configure_rf_for_mesh_listening
-        mock_rf_stop_trx().assert_called(2);
-        mock_rf_set_ble_access_code(Any).assert_called(1);
-        mock_rf_set_ble_crc_adv().assert_called(1);
-        mock_rf_set_ble_channel(Any).assert_called(1);
-        mock_rf_set_rxmode().assert_called(1);
+        assert_mesh_listen_rf_setup(2, 0x12345678);
     }
 
     /// Tests the flow when online status is already scheduled (line 203 if statement is false).
@@ -1000,40 +1000,23 @@ mod tests {
     /// - The function goes directly to the default transition to advertisement state
     /// - State transitions to RfOperationState::Advertising
     #[test]
-    #[mry::lock(rf_stop_trx)]
-    #[mry::lock(rf_set_ble_access_code)]
-    #[mry::lock(rf_set_ble_crc_adv)]
-    #[mry::lock(rf_set_ble_channel)]
-    #[mry::lock(rf_set_rxmode)]
-    #[mry::lock(read_reg_system_tick)]
-    #[mry::lock(write_reg_system_tick_irq)]
-    #[mry::lock(read_reg_system_tick_irq)]
-    #[mry::lock(read_reg_rnd_number)]
-    #[mry::lock(app_bridge_cmd_handle)]
     fn test_handle_mesh_listening_state_online_status_already_scheduled() {
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_set_rxmode().returns(());
-        mock_read_reg_system_tick().returns(45000);
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(80000);
-        mock_read_reg_rnd_number().returns(0xdef0);
-        mock_app_bridge_cmd_handle(Any).returns(());
-
         // Reset state for clean test
         reset_global_state();
 
         // Setup: Online status is already scheduled (this is the key difference)
         // This will cause the if statement at line 203 to be false
+        seed_registers(45000, 80000, 0xdef0);
+        arm_bridge_command_countdown();
         MESH_DEVICE_ONLINE_STATUS.set(true);
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_LISTEN_CYCLE_COUNT.set(5); // Arbitrary value
 
         // Execute function
         handle_mesh_listening_state();
+
+        // Verify the bridge-command handler ran for this path
+        assert_bridge_command_handled_once();
 
         // Verify that the cycle count was NOT incremented since the if statement was skipped
         assert_eq!(
@@ -1064,13 +1047,14 @@ mod tests {
         );
 
         // Verify that RF operations were still called for setup
-        mock_rf_stop_trx().assert_called(2);
-        mock_rf_set_ble_access_code(Any).assert_called(1);
-        mock_rf_set_ble_crc_adv().assert_called(1);
-        mock_rf_set_ble_channel(Any).assert_called(1);
-        mock_rf_set_rxmode().assert_called(1);
+        assert_mesh_listen_rf_setup(2, 0x12345678);
 
-        // Verify that the listen interval was scheduled (this always happens)
-        mock_write_reg_system_tick_irq(45000 + 100000).assert_called(1); // 100000 is default from reset_global_state
+        // Verify that the listen interval was scheduled and nothing else
+        // (this always happens, and the online-status branch was skipped)
+        assert_eq!(
+            writes_to(REG_SYSTEM_TICK_IRQ),
+            [45000 + 100000], // 100000 is default from reset_global_state
+            "only the listen interval should be armed"
+        );
     }
 }

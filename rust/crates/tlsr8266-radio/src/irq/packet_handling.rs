@@ -13,24 +13,24 @@
 use core::ptr::addr_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::sdk::ble_app::ble_ll_pair::pair_dec_packet_mesh;
-use crate::sdk::ble_app::callbacks::dispatch_ota_snapshot;
-use crate::sdk::ble_app::light_ll::connection_management::{
+use crate::ble::connection::{
     rf_link_slave_connect, rf_link_timing_adjust, BLE_PERIPHERAL_CONNECTION_ACTIVE,
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG,
     BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME, LAST_PACKET_RECEIVED_TIMESTAMP,
     LIGHT_CONN_SN_MASTER, SLAVE_CONNECTED_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK,
     SLAVE_WINDOW_SIZE, SLAVE_WINDOW_SIZE_UPDATE,
 };
-use crate::sdk::ble_app::light_ll::packet_processing::{
+use crate::ble::pair::pair_dec_packet_mesh;
+use crate::callbacks::dispatch_ota_snapshot;
+use crate::mesh_ll::packet_processing::{
     is_exist_in_rc_pkt_buf, parse_ble_packet_op_params, rf_link_slave_data,
 };
-use crate::sdk::ble_app::rf_drv_8266::*;
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::rf::drv_8266::*;
+use crate::rf::drv_8266::{
     ADV_RSP_PRI_DATA, BLE_SCAN_RESPONSE_INTERVAL_US, DEVICE_ADDRESS, LIGHT_RX_BUFF,
     LIGHT_RX_BUFFER_WRITE_POINTER, MAC_ID, PKT_EMPTY,
 };
-use crate::sdk::light::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
+use crate::types::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
 use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
@@ -45,7 +45,6 @@ use tlsr8266_pac::*;
 /// - Clears bit 2 of RF interrupt status (TX complete)
 /// - Allows the system to proceed with next operations
 /// - Minimal processing to maintain real-time performance
-#[cfg_attr(test, mry::mry)]
 pub fn handle_rf_transmission_complete() {
     // Clear RF interrupt status bit 2 (transmission complete)
     write_reg_rf_irq_status(2);
@@ -73,7 +72,6 @@ pub fn handle_rf_transmission_complete() {
 /// - Minimal processing in fast path
 /// - Delegates complex processing to separate function
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn handle_rf_packet_reception() {
     // Static variable to track last received packet time (duplicate detection)
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
@@ -162,7 +160,8 @@ fn process_received_packet_slow_path(
         // SAFETY: (4) audited RF-DMA view. `entry` is one `LightRxBuff` slot of the
         // contiguous RX DMA buffer; the radio appends the status byte three bytes past
         // the `dma_len` frame it just wrote, so the read stays inside that DMA region.
-        && unsafe { *((addr_of!(*entry) as u32 + dma_len as u32 + 3) as *const u8) } & 0x51 == 0x40
+        // Provenance is preserved by `addr_of!().cast::<u8>().add(dma_len + 3)`.
+        && unsafe { *addr_of!(*entry).cast::<u8>().add(dma_len as usize + 3) } & 0x51 == 0x40
     {
         // Cast receive buffer to packet structure for processing
         // SAFETY: (4) audited `Packet`-union view. `entry.rx_time` is the start of the
@@ -179,8 +178,7 @@ fn process_received_packet_slow_path(
         LAST_PACKET_RECEIVED_TIMESTAMP.set(rx_time);
 
         // Handle packets when in advertisement state
-        if BLE_PERIPHERAL_LINK_STATE.get() == crate::sdk::light::BlePeripheralLinkState::Advertising
-        {
+        if BLE_PERIPHERAL_LINK_STATE.get() == crate::types::BlePeripheralLinkState::Advertising {
             // Command 3: BLE Scan Request - Generate and send scan response
             if cmd == 3 {
                 handle_scan_request(entry, rx_time);
@@ -196,8 +194,7 @@ fn process_received_packet_slow_path(
 
         // Process mesh network packets (when not in OTA mode and not in active BLE RX state)
         if !dispatch_ota_snapshot().in_progress
-            && BLE_PERIPHERAL_LINK_STATE.get()
-                != crate::sdk::light::BlePeripheralLinkState::Receiving
+            && BLE_PERIPHERAL_LINK_STATE.get() != crate::types::BlePeripheralLinkState::Receiving
         {
             handle_mesh_packet(packet, rx_time);
             return;
@@ -209,7 +206,7 @@ fn process_received_packet_slow_path(
     }
 
     // Handle cleanup when in BLE receive state but packet was invalid
-    if BLE_PERIPHERAL_LINK_STATE.get() == crate::sdk::light::BlePeripheralLinkState::Receiving {
+    if BLE_PERIPHERAL_LINK_STATE.get() == crate::types::BlePeripheralLinkState::Receiving {
         // Clear DMA3 (RF TX) mode byte before stopping TRX
         // This handles the case where we were expecting a BLE packet but received invalid data
         write_reg_dma3_mode(0);
@@ -221,7 +218,6 @@ fn process_received_packet_slow_path(
 ///
 /// This function processes scan requests addressed to this device and generates
 /// appropriate scan response packets containing device information.
-#[cfg_attr(test, mry::mry)]
 fn handle_scan_request(entry: &LightRxBuff, rx_time: u32) {
     // Verify the scan request is addressed to this device by checking MAC address
     if entry.mac == MAC_ID.lock()[0..4] {
@@ -266,7 +262,6 @@ fn handle_scan_request(entry: &LightRxBuff, rx_time: u32) {
 ///
 /// This function processes connection requests addressed to this device and
 /// initiates the BLE connection establishment procedure.
-#[cfg_attr(test, mry::mry)]
 fn handle_connection_request(entry: &LightRxBuff, packet: &Packet, rx_time: u32) {
     // Verify the connection request is addressed to this device
     if entry.mac == MAC_ID.lock()[0..4] {
@@ -280,7 +275,6 @@ fn handle_connection_request(entry: &LightRxBuff, packet: &Packet, rx_time: u32)
 ///
 /// This function validates and processes mesh network packets, including
 /// decryption, duplicate detection, and forwarding to the mesh manager.
-#[cfg_attr(test, mry::mry)]
 fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
     // Create a mutable copy of the packet for decryption and processing
     let mut packet = *packet;
@@ -352,7 +346,7 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
 
     // If packet validation passes, hand it to the mesh RX queue for processing
     if pkt_valid() {
-        crate::sdk::ble_app::queues::enqueue_mesh_rx(&packet);
+        crate::queues::enqueue_mesh_rx(&packet);
     }
 }
 
@@ -360,7 +354,6 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
 ///
 /// This function processes data packets received during an active BLE connection,
 /// including timing adjustment and connection state management.
-#[cfg_attr(test, mry::mry)]
 fn handle_ble_connection_data(entry: &LightRxBuff, packet: &Packet, rx_time: u32) {
     // Extract master sequence number from packet header for connection tracking
     let master_sn = ((entry.sno[2] as u16) * 0x100) | ((entry.sno[0] >> 3) & 1) as u16;
@@ -421,31 +414,26 @@ fn handle_ble_connection_data(entry: &LightRxBuff, packet: &Packet, rx_time: u32
 mod tests {
     use super::*;
     use core::ptr::addr_of;
-    use mry::Any;
 
-    // Import mock functions from their original modules
-    use crate::sdk::ble_app::ble_ll_pair::mock_pair_dec_packet_mesh;
-    use crate::sdk::ble_app::light_ll::connection_management::{
-        mock_rf_link_slave_connect, mock_rf_link_timing_adjust,
+    use crate::ble::connection::{
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME, BRIDGE_RECEIVE_TIMING_TICK,
+        CONN_UPDATE_CNT,
     };
-    use crate::sdk::ble_app::light_ll::packet_processing::{
-        mock_is_exist_in_rc_pkt_buf, mock_parse_ble_packet_op_params, mock_rf_link_slave_data,
-    };
-    use crate::sdk::ble_app::rf_drv_8266::{mock_rf_start_stx2rx, mock_rf_stop_trx};
-    use crate::sdk::light::{BlePeripheralLinkState, LightRxBuff, LIGHT_RX_BUFF_COUNT};
-    use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
+    use crate::ble::pair::SECURITY_ENABLE;
+    use crate::mesh_ll::node_status::RC_PKT_BUF;
+    use crate::queues::MESH_RX_CHANNEL;
+    use crate::types::BlePeripheralLinkState;
+    use mesh_protocol::packet_types::PktBuf;
     use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{
-        mock_read_reg_system_tick, mock_read_reg_system_tick_irq, mock_write_reg8,
-        mock_write_reg_dma3_addr, mock_write_reg_dma3_mode, mock_write_reg_rf_mode_control,
-        mock_write_reg_rf_sched_tick, mock_write_reg_system_tick_irq,
-    };
 
-    /// Datasheet offsets of the RF receive / DMA registers this module touches.
+    /// Datasheet offsets of the RF receive / DMA / timer registers this module touches.
     const REG_RF_RX_STATUS: u32 = 0x443;
     const REG_RF_IRQ_STATUS: u32 = 0xf20;
     const REG_DMA2_ADDR: u32 = 0x508;
+    const REG_SYSTEM_TICK: u32 = 0x740;
+    const REG_SYSTEM_TICK_IRQ: u32 = 0x744;
 
     /// Number of `write_reg_dma2_addr` (0x508) writes the run performed.
     fn dma2_addr_writes() -> usize {
@@ -453,6 +441,12 @@ mod tests {
             .iter()
             .filter(|w| w.addr == (REG_DMA2_ADDR | tlsr8266_pac::REG_BASE_ADDR))
             .count()
+    }
+
+    /// Seed the free-running system tick and its interrupt compare value.
+    fn seed_system_ticks(tick: u32, irq_tick: u32) {
+        FakeMmio::set_reg32(REG_SYSTEM_TICK, tick);
+        FakeMmio::set_reg32(REG_SYSTEM_TICK_IRQ, irq_tick);
     }
 
     /// Helper function to reset global state to known values for test isolation.
@@ -466,13 +460,18 @@ mod tests {
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
 
-        // Global queues outlive every test in this process: clear them.
-        crate::sdk::ble_app::queues::reset_for_test();
+        // Global queues and the duplicate-detection cache outlive every test in
+        // this process: clear them.
+        crate::queues::reset_for_test();
+        RC_PKT_BUF.lock().clear();
 
         LIGHT_RX_BUFFER_WRITE_POINTER.set(0);
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
-        crate::ota::set_in_progress_for_test(false);
+        crate::ble::connection::rf_link_slave_pairing_enable(false);
+        crate::callbacks::test_ota::reset_for_test();
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        SECURITY_ENABLE.set(false);
         LAST_PACKET_RECEIVED_TIMESTAMP.set(0);
         LIGHT_CONN_SN_MASTER.set(0);
         SLAVE_CONNECTED_TICK.set(0);
@@ -480,6 +479,10 @@ mod tests {
         SLAVE_LINK_INTERVAL.set(0x9c400); // Default value
         SLAVE_NEXT_CONNECT_TICK.set(0);
         BLE_SCAN_RESPONSE_INTERVAL_US.set(150); // Default BLE scan response interval
+        BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(false);
+        BRIDGE_RECEIVE_TIMING_TICK.set(0);
+        CONN_UPDATE_CNT.set(0);
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(false);
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.set(0);
         SLAVE_WINDOW_SIZE_UPDATE.set(0);
@@ -499,7 +502,7 @@ mod tests {
     }
 
     /// Helper function to create a mock LightRxBuff with valid packet data.
-    fn create_mock_rx_buffer_entry(
+    fn create_rx_buffer_entry(
         rx_time: u32,
         dma_len: u8,
         mac: [u8; 4],
@@ -519,7 +522,7 @@ mod tests {
     }
 
     /// Helper function to create a valid BLE packet structure.
-    fn create_mock_packet() -> Packet {
+    fn create_ble_packet() -> Packet {
         use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
         Packet {
             att_cmd: PacketAttCmd {
@@ -543,8 +546,40 @@ mod tests {
         }
     }
 
+    /// A connection-data packet that reaches `rf_link_slave_data`'s channel-map
+    /// branch: `type & 3 == 3` and `l2cap_len == 1`. That branch records
+    /// `BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP = 1`, which is the observable
+    /// that proves the payload really was handed to the BLE data path.
+    fn create_channel_map_update_packet() -> Packet {
+        use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
+        Packet {
+            att_cmd: PacketAttCmd {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 3,
+                    rf_len: 0x25,
+                    l2cap_len: 1,
+                    chan_id: 0x0004,
+                },
+                opcode: 0,
+                handle: 0,
+                handle1: 0,
+                value: PacketAttValue {
+                    sno: [0; 3],
+                    src: [0; 2],
+                    dst: [0; 2],
+                    val: [0; 23],
+                },
+            },
+        }
+    }
+
     /// Helper function to create a valid mesh packet structure.
-    fn create_mock_mesh_packet() -> Packet {
+    ///
+    /// `val[0]` carries a 3-byte opcode (`0xc0` has both opcode-length bits
+    /// set), which is what `parse_ble_packet_op_params` needs to accept a
+    /// 0x21-byte L2CAP payload.
+    fn create_mesh_packet() -> Packet {
         use mesh_protocol::packet_types::{PacketAttCmd, PacketAttValue, PacketL2capHead};
         Packet {
             att_cmd: PacketAttCmd {
@@ -562,7 +597,11 @@ mod tests {
                     sno: [0; 3],
                     src: [0; 2],
                     dst: [0; 2],
-                    val: [0; 23],
+                    // Bits 7 and 6 set = 3-byte opcode, which is what the real
+                    // parser needs for a 0x21-byte L2CAP payload to fit.
+                    val: [
+                        0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ],
                 },
             },
         }
@@ -632,53 +671,68 @@ mod tests {
 
     /// Tests RF packet reception with invalid packet (dma_len == 1).
     ///
-    /// When a packet has dma_len == 1 (marked as processed), the function should:
-    /// - Set up DMA for next reception
-    /// - Clear RF interrupt status
-    /// - Check for duplicate packets using timestamp
-    /// - Return early without further processing
+    /// The second reception of the same timestamp is the duplicate case: the
+    /// handler must stop the radio and restart a scheduled STX2RX instead of
+    /// processing the frame again.
     #[test]
-    #[mry::lock(rf_stop_trx, rf_start_stx2rx, read_reg_system_tick)]
     fn test_handle_rf_packet_reception_invalid_packet_duplicate() {
         reset_global_state();
 
         // Valid RF status
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
-        mock_rf_stop_trx().returns(());
-        mock_rf_start_stx2rx(Any, Any).returns(());
-        mock_read_reg_system_tick().returns(10000);
+        seed_system_ticks(10_000, 0);
 
-        // Create buffer with invalid packet (dma_len == 1) that matches last timestamp
         let test_timestamp = 5000u32;
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
-        light_rx_buff[0] = create_mock_rx_buffer_entry(test_timestamp, 1, [0; 4], [0; 3]);
 
-        // Setup state for duplicate detection
-        LIGHT_RX_BUFFER_WRITE_POINTER.set(1); // Will use index 0 for reception
-
-        // Mock the buffer access by simulating the duplicate timestamp scenario
-        // We need to manually trigger the duplicate detection logic
+        // First reception: a frame the fast path accepts as new (dma_len != 1),
+        // which records the timestamp used by duplicate detection. Its header
+        // fails the slow-path length self-check, so no handler runs.
         {
             let mut buff = LIGHT_RX_BUFF.lock();
-            *buff = light_rx_buff;
+            *buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+            // The handler processes the slot the write pointer names (1), and
+            // advances it afterwards.
+            buff[1] = create_rx_buffer_entry(test_timestamp, 25, [0; 4], [0x05, 0x00, 0x00]);
         }
-
-        // Execute function - this will advance write pointer to 1, then process index 0
+        LIGHT_RX_BUFFER_WRITE_POINTER.set(1);
         handle_rf_packet_reception();
 
-        // Verify DMA setup for next reception
-        assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
+        // The duplicate-detection writes are the subject of the second round.
+        FakeMmio::clear_writes();
 
-        // Verify RF interrupt is cleared
+        // Second reception: the same timestamp again, and the entry is now
+        // marked processed, which is exactly the duplicate signature.
+        LIGHT_RX_BUFFER_WRITE_POINTER.set(1);
+        handle_rf_packet_reception();
+
+        // Verify the radio was restarted for another receive attempt.
+        assert_eq!(
+            read_reg_rf_sched_tick(),
+            CLOCK_SYS_CLOCK_1US * 10 + 10_000,
+            "the restart must be scheduled 10µs after the system tick"
+        );
+        assert_eq!(
+            read_reg_rf_mode() & 0x04,
+            0x04,
+            "the restart must enable cmd_schedule mode"
+        );
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x87,
+            "the restart must switch the radio to stx2rx"
+        );
+        assert_ne!(
+            read_reg_dma3_addr(),
+            0,
+            "the restart must point the TX DMA at the empty packet"
+        );
+
+        // Verify the interrupt is acknowledged.
         assert_eq!(
             FakeMmio::reg16(REG_RF_IRQ_STATUS),
             1,
             "bit 1 of reg_rf_irq_status must be acknowledged"
         );
-
-        // Note: Duplicate detection would require the T_RX_LAST static to match
-        // the packet timestamp, which is complex to test with the static variable
     }
 
     /// Tests RF packet reception with invalid packet (dma_len == 1) but no duplicate.
@@ -693,9 +747,8 @@ mod tests {
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
 
         // Create buffer with invalid packet (dma_len == 1) with unique timestamp
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
-        light_rx_buff[0] = create_mock_rx_buffer_entry(9999, 1, [0; 4], [0; 3]);
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        light_rx_buff[0] = create_rx_buffer_entry(9999, 1, [0; 4], [0; 3]);
 
         LIGHT_RX_BUFFER_WRITE_POINTER.set(1); // Will use index 0
 
@@ -714,6 +767,11 @@ mod tests {
             "bit 1 of reg_rf_irq_status must be acknowledged"
         );
         assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0,
+            "an invalid non-duplicate frame must not restart the radio"
+        );
     }
 
     // ================================================================================
@@ -728,23 +786,17 @@ mod tests {
     /// - Update last received timestamp
     /// - Call slow path processing function
     #[test]
-    #[mry::lock(rf_stop_trx, write_reg8, read_reg_system_tick, rf_start_stx2rx)]
     fn test_handle_rf_packet_reception_valid_packet() {
         reset_global_state();
 
         // Valid RF status
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
-        mock_rf_stop_trx().returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_rf_start_stx2rx(Any, Any).returns(());
 
         // Create buffer with valid packet
         let test_timestamp = 7500u32;
         let test_dma_len = 25u8;
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
-        light_rx_buff[0] = create_mock_rx_buffer_entry(
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        light_rx_buff[0] = create_rx_buffer_entry(
             test_timestamp,
             test_dma_len,
             [0x11, 0x22, 0x33, 0x44],
@@ -761,19 +813,21 @@ mod tests {
         // Execute function
         handle_rf_packet_reception();
 
-        // Verify buffer operations - Note: This is complex to test because the function
-        // modifies the buffer inside a lock, and the slow path processing may have
-        // additional dependencies that are hard to mock comprehensively.
-        // For now, we verify the function completes without crashing.
+        // The fast path marks the processed slot before delegating. The write
+        // pointer names slot 1, so that is the slot it consumes.
         {
             let buff = LIGHT_RX_BUFF.lock();
-            // In a more comprehensive test, we'd verify the buffer state
-            // but this requires mocking the entire slow path processing chain
-            assert!(
-                buff[0].dma_len >= 1,
-                "Buffer should be processed or marked for processing"
+            assert_eq!(
+                buff[1].dma_len, 1,
+                "the received slot must be marked processed"
             );
+            assert_eq!(buff[0].dma_len, test_dma_len, "other slots stay untouched");
         }
+        assert_eq!(
+            LAST_PACKET_RECEIVED_TIMESTAMP.get(),
+            0,
+            "a frame failing the length self-check must not be timestamped"
+        );
 
         // Verify DMA setup and interrupt clearing
         assert_eq!(
@@ -782,9 +836,6 @@ mod tests {
             "bit 1 of reg_rf_irq_status must be acknowledged"
         );
         assert_eq!(dma2_addr_writes(), 1, "one DMA2 re-arm expected");
-
-        // Note: Testing the slow path function would require extensive mocking
-        // as it calls many external functions with complex logic
     }
 
     /// Tests buffer wraparound behavior in packet reception.
@@ -792,16 +843,11 @@ mod tests {
     /// Verifies that the circular buffer write pointer wraps around correctly
     /// when it reaches the buffer size limit.
     #[test]
-    #[mry::lock(rf_stop_trx, write_reg8, read_reg_system_tick, rf_start_stx2rx)]
     fn test_handle_rf_packet_reception_buffer_wraparound() {
         reset_global_state();
 
         // Valid RF status
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x00);
-        mock_rf_stop_trx().returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_read_reg_system_tick().returns(50000);
-        mock_rf_start_stx2rx(Any, Any).returns(());
 
         // Setup initial state at buffer boundary
         let initial_ptr = LIGHT_RX_BUFF_COUNT - 1; // Last valid index
@@ -831,24 +877,10 @@ mod tests {
     /// - Set up DMA for scan response packet
     /// - Schedule next interrupt
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick_irq
-    )]
     fn test_handle_scan_request_matching_mac() {
         reset_global_state();
 
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_rf_sched_tick(Any).returns(());
-        mock_write_reg_rf_mode_control(Any).returns(());
-        mock_write_reg_dma3_addr(Any).returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(20000);
+        seed_system_ticks(0, 20_000);
 
         // Setup matching MAC address
         let device_mac = [0x11, 0x22, 0x33, 0x44];
@@ -859,28 +891,53 @@ mod tests {
 
         // Create scan request entry with matching MAC
         let rx_time = 15000u32;
-        let entry = create_mock_rx_buffer_entry(rx_time, 20, device_mac, [0x03, 0x15, 0x10]);
+        let entry = create_rx_buffer_entry(rx_time, 20, device_mac, [0x03, 0x15, 0x10]);
 
         // Execute function
         handle_scan_request(&entry, rx_time);
 
-        // Verify RF operations
-        mock_rf_stop_trx().assert_called(1);
-
         // Verify scan response timing (rx_time + scan_interval * clock)
         let expected_sched_time =
             rx_time + BLE_SCAN_RESPONSE_INTERVAL_US.get() * CLOCK_SYS_CLOCK_1US;
-        mock_write_reg_rf_sched_tick(expected_sched_time).assert_called(1);
+        assert_eq!(
+            read_reg_rf_sched_tick(),
+            expected_sched_time,
+            "the scan response must be scheduled one scan interval after reception"
+        );
 
         // Verify RF mode configuration for single transmission
-        mock_write_reg_rf_mode_control(0x85).assert_called(1);
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x85,
+            "the radio must be switched to single-transmission mode"
+        );
 
         // Verify DMA setup for scan response packet
-        mock_write_reg_dma3_addr(Any).assert_called(1);
+        assert_ne!(
+            read_reg_dma3_addr(),
+            0,
+            "the scan response packet must be handed to the TX DMA"
+        );
 
         // Verify next interrupt scheduling
-        let expected_irq_time = CLOCK_SYS_CLOCK_1US * 1000 + 20000;
-        mock_write_reg_system_tick_irq(expected_irq_time).assert_called(1);
+        let expected_irq_time = CLOCK_SYS_CLOCK_1US * 1000 + 20_000;
+        assert_eq!(
+            read_reg_system_tick_irq(),
+            expected_irq_time,
+            "the next state tick must be armed 1ms later"
+        );
+
+        // The radio is stopped before the response is scheduled.
+        let mode_control_writes: std::vec::Vec<u32> = FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (0xf00 | tlsr8266_pac::REG_BASE_ADDR))
+            .map(|w| w.value)
+            .collect();
+        assert_eq!(
+            mode_control_writes.as_slice(),
+            [0x80, 0x85],
+            "the radio must be stopped, then armed for the response"
+        );
     }
 
     /// Tests scan request handling with non-matching MAC address.
@@ -888,12 +945,8 @@ mod tests {
     /// When a scan request is not addressed to this device (MAC doesn't match),
     /// the function should do nothing and return early.
     #[test]
-    #[mry::lock(rf_stop_trx)]
     fn test_handle_scan_request_non_matching_mac() {
         reset_global_state();
-
-        // Setup mock
-        mock_rf_stop_trx().returns(());
 
         // Setup non-matching MAC addresses
         {
@@ -902,14 +955,16 @@ mod tests {
         }
 
         // Create scan request with different MAC
-        let entry =
-            create_mock_rx_buffer_entry(15000, 20, [0xAA, 0xBB, 0xCC, 0xDD], [0x03, 0x15, 0x10]);
+        let entry = create_rx_buffer_entry(15000, 20, [0xAA, 0xBB, 0xCC, 0xDD], [0x03, 0x15, 0x10]);
 
         // Execute function
         handle_scan_request(&entry, 15000);
 
-        // Verify no RF operations are performed
-        mock_rf_stop_trx().assert_called(0);
+        // Verify no RF operation is performed at all.
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a scan request for another address must not touch the radio"
+        );
     }
 
     // ================================================================================
@@ -919,14 +974,12 @@ mod tests {
     /// Tests connection request handling with matching MAC address.
     ///
     /// When a connection request is addressed to this device, should call
-    /// rf_link_slave_connect to establish the BLE connection.
+    /// rf_link_slave_connect to establish the BLE connection. The callee always
+    /// resets its connection-update bookkeeping on entry, which is the
+    /// observable that proves the call happened.
     #[test]
-    #[mry::lock(rf_link_slave_connect)]
     fn test_handle_connection_request_matching_mac() {
         reset_global_state();
-
-        // Setup mock
-        mock_rf_link_slave_connect(Any, Any).returns(());
 
         // Setup matching MAC address
         let device_mac = [0x11, 0x22, 0x33, 0x44];
@@ -937,14 +990,20 @@ mod tests {
 
         // Create connection request entry and packet
         let rx_time = 25000u32;
-        let entry = create_mock_rx_buffer_entry(rx_time, 30, device_mac, [0x05, 0x20, 0x15]);
-        let packet = create_mock_packet();
+        let entry = create_rx_buffer_entry(rx_time, 30, device_mac, [0x05, 0x20, 0x15]);
+        let packet = create_ble_packet();
+
+        CONN_UPDATE_CNT.set(7);
 
         // Execute function
         handle_connection_request(&entry, &packet, rx_time);
 
         // Verify connection establishment is initiated
-        mock_rf_link_slave_connect(Any, Any).assert_called(1);
+        assert_eq!(
+            CONN_UPDATE_CNT.get(),
+            0,
+            "rf_link_slave_connect must have run its entry bookkeeping"
+        );
     }
 
     /// Tests connection request handling with non-matching MAC address.
@@ -952,12 +1011,8 @@ mod tests {
     /// When a connection request is not addressed to this device,
     /// the function should do nothing.
     #[test]
-    #[mry::lock(rf_link_slave_connect)]
     fn test_handle_connection_request_non_matching_mac() {
         reset_global_state();
-
-        // Setup mock
-        mock_rf_link_slave_connect(Any, Any).returns(());
 
         // Setup non-matching MAC addresses
         {
@@ -966,15 +1021,20 @@ mod tests {
         }
 
         // Create connection request with different MAC
-        let entry =
-            create_mock_rx_buffer_entry(25000, 30, [0xAA, 0xBB, 0xCC, 0xDD], [0x05, 0x20, 0x15]);
-        let packet = create_mock_packet();
+        let entry = create_rx_buffer_entry(25000, 30, [0xAA, 0xBB, 0xCC, 0xDD], [0x05, 0x20, 0x15]);
+        let packet = create_ble_packet();
+
+        CONN_UPDATE_CNT.set(7);
 
         // Execute function
         handle_connection_request(&entry, &packet, 25000);
 
         // Verify no connection operations are performed
-        mock_rf_link_slave_connect(Any, Any).assert_called(0);
+        assert_eq!(
+            CONN_UPDATE_CNT.get(),
+            7,
+            "a connection request for another address must not touch connection state"
+        );
     }
 
     // ================================================================================
@@ -983,56 +1043,29 @@ mod tests {
 
     /// Tests mesh packet handling with valid packet that passes all checks.
     ///
-    /// When a mesh packet is valid and passes decryption/validation, it should
-    /// be forwarded to the mesh manager for processing.
+    /// When a mesh packet is valid and passes validation, it should be handed to
+    /// the mesh RX queue.
     #[test]
-    #[mry::lock(
-        read_reg_system_tick_irq,
-        read_reg_system_tick,
-        pair_dec_packet_mesh,
-        parse_ble_packet_op_params,
-        is_exist_in_rc_pkt_buf
-    )]
     fn test_handle_mesh_packet_valid_packet() {
         reset_global_state();
 
-        // Setup mocks for successful packet validation
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(Ok(())); // Packet decryption succeeds
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            true,
-            [0x01, 0x02, 0x03],
-            3,
-            [
-                0x04, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00,
-            ],
-            2,
-        ));
-        mock_is_exist_in_rc_pkt_buf(Any, Any).returns(false); // Not a duplicate
-
-        // Setup connection state for timing validation
+        // Connected device, with the interrupt time inside the connection window
+        // so the timing gate admits the packet.
+        seed_system_ticks(30_000, 50_000);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
 
         // Create a valid mesh packet
-        let packet = create_mock_mesh_packet();
+        let packet = create_mesh_packet();
 
         // Execute function
         handle_mesh_packet(&packet, 35000);
 
-        // Verify mesh packet decryption was attempted
-        mock_pair_dec_packet_mesh(Any).assert_called(1);
-
-        // Verify packet parsing was attempted
-        mock_parse_ble_packet_op_params(Any, true).assert_called(1);
-
-        // Verify duplicate check was performed
-        mock_is_exist_in_rc_pkt_buf(Any, Any).assert_called(1);
-
-        // Note: the valid-packet branch now pushes onto the module-level mesh
-        // RX queue; asserting that is covered by
-        // `test_handle_mesh_packet_node_status_advertisement_line_285`.
+        // The valid packet reaches the mesh RX queue.
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            1,
+            "a valid mesh packet must be queued for the mesh task"
+        );
     }
 
     /// Tests mesh packet handling with timing validation failure.
@@ -1040,106 +1073,81 @@ mod tests {
     /// When the connection is active but timing is invalid (too far in future),
     /// the packet should be rejected without further processing.
     #[test]
-    #[mry::lock(read_reg_system_tick_irq, read_reg_system_tick, pair_dec_packet_mesh)]
     fn test_handle_mesh_packet_timing_validation_failure() {
         reset_global_state();
 
-        // Setup mocks for timing failure
         // Need: 0x3fffffffi32 < (irq_tick - sys_tick) - (1000 * clock)
         // 0x3fffffffi32 = 1073741823
         // With CLOCK_SYS_CLOCK_1US = 32: need (irq_tick - sys_tick) - 32000 > 1073741823
         // So need: irq_tick - sys_tick > 1073741823 + 32000 = 1073773823
-        mock_read_reg_system_tick_irq().returns(1073774000u32); // Large IRQ time
-        mock_read_reg_system_tick().returns(100); // Small system time
-                                                  // Difference: 1073774000 - 100 - 32000 = 1073741900 > 1073741823 ✓
-        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
+        seed_system_ticks(100, 1_073_774_000);
 
         // Setup connection state for timing validation
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
 
         // Create packet
-        let packet = create_mock_mesh_packet();
+        let packet = create_mesh_packet();
 
         // Execute function
         handle_mesh_packet(&packet, 35000);
 
-        // Verify timing validation occurred
-        mock_read_reg_system_tick_irq().assert_called(1);
-        mock_read_reg_system_tick().assert_called(1);
-
-        // Verify packet decryption was not attempted due to timing failure
-        mock_pair_dec_packet_mesh(Any).assert_called(0);
+        // The timing gate rejects the packet before it can reach the queue.
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "a packet outside the connection window must not be queued"
+        );
     }
 
     /// Tests mesh packet handling with decryption failure.
     ///
     /// When packet decryption fails, the packet should be rejected.
     #[test]
-    #[mry::lock(pair_dec_packet_mesh, parse_ble_packet_op_params)]
     fn test_handle_mesh_packet_decryption_failure() {
         reset_global_state();
 
-        // Setup mocks
-        mock_pair_dec_packet_mesh(Any).returns(Err(())); // Decryption fails
-        mock_parse_ble_packet_op_params(Any, Any).returns((true, [0; 3], 0, [0; 16], 0));
-
-        // Setup for no connection (skip timing validation)
-        BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
-
-        // Create packet
-        let packet = create_mock_mesh_packet();
+        // Enable security and leave the encrypted flag clear: the real
+        // decryption path rejects the frame.
+        SECURITY_ENABLE.set(true);
+        let packet = create_mesh_packet();
 
         // Execute function
         handle_mesh_packet(&packet, 35000);
 
-        // Verify decryption was attempted
-        mock_pair_dec_packet_mesh(Any).assert_called(1);
-
-        // Verify parsing was not attempted due to decryption failure
-        mock_parse_ble_packet_op_params(Any, Any).assert_called(0);
+        // Verify the packet was rejected
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "an undecryptable packet must not be queued"
+        );
     }
 
     /// Tests mesh packet handling with duplicate packet detection.
     ///
     /// When a packet is detected as duplicate, it should be rejected.
     #[test]
-    #[mry::lock(
-        pair_dec_packet_mesh,
-        parse_ble_packet_op_params,
-        is_exist_in_rc_pkt_buf
-    )]
     fn test_handle_mesh_packet_duplicate_detection() {
         reset_global_state();
 
-        // Setup mocks for duplicate detection
-        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            true,
-            [0x01, 0x02, 0x03],
-            3,
-            [
-                0x04, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00,
-            ],
-            2,
-        ));
-        mock_is_exist_in_rc_pkt_buf(Any, Any).returns(true); // Duplicate detected
+        let packet = create_mesh_packet();
 
-        // Setup for no connection
-        BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
-
-        // Create packet
-        let packet = create_mock_mesh_packet();
+        // Opcode 0 (`0xc0 & 0x3f`) with the packet's sequence number is already
+        // in the duplicate-detection cache.
+        RC_PKT_BUF.lock().push_front(PktBuf {
+            op: 0,
+            sno: [0; 3],
+            notify_ok_flag: false,
+        });
 
         // Execute function
         handle_mesh_packet(&packet, 35000);
 
-        // Verify all validation steps occurred
-        mock_pair_dec_packet_mesh(Any).assert_called(1);
-        mock_parse_ble_packet_op_params(Any, true).assert_called(1);
-        mock_is_exist_in_rc_pkt_buf(Any, Any).assert_called(1);
-
-        // Note: Packet should be rejected due to duplicate detection
+        // Verify the duplicate was rejected
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "a duplicate mesh packet must not be queued"
+        );
     }
 
     // ================================================================================
@@ -1151,13 +1159,10 @@ mod tests {
     /// When receiving data from a new master (different sequence number),
     /// should update connection tracking and process the data.
     #[test]
-    #[mry::lock(rf_link_slave_data, read_reg_system_tick)]
     fn test_handle_ble_connection_data_new_session() {
         reset_global_state();
 
-        // Setup mocks
-        mock_rf_link_slave_data(Any, Any).returns(());
-        mock_read_reg_system_tick().returns(45000);
+        seed_system_ticks(45_000, 0);
 
         // Setup initial state
         LIGHT_CONN_SN_MASTER.set(100); // Different from what we'll receive
@@ -1165,9 +1170,8 @@ mod tests {
         // Create connection data entry with new master sequence number
         // Master SN = (sno[2] * 256) | ((sno[0] >> 3) & 1)
         // For sno = [0x10, 0x20, 0x01]: SN = (1 * 256) | ((0x10 >> 3) & 1) = 256 | (2 & 1) = 256 | 0 = 256
-        let entry =
-            create_mock_rx_buffer_entry(40000, 25, [0x11, 0x22, 0x33, 0x44], [0x10, 0x20, 0x01]);
-        let packet = create_mock_packet();
+        let entry = create_rx_buffer_entry(40000, 25, [0x11, 0x22, 0x33, 0x44], [0x10, 0x20, 0x01]);
+        let packet = create_channel_map_update_packet();
         let rx_time = 40000u32;
 
         // Execute function
@@ -1190,8 +1194,13 @@ mod tests {
             "Connection should be marked active"
         );
 
-        // Verify data processing
-        mock_rf_link_slave_data(Any, Any).assert_called(1);
+        // Verify the payload was handed to the BLE data processor: the channel
+        // map update branch is observable through its timing marker.
+        assert_eq!(
+            BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.get(),
+            1,
+            "the channel-map payload must reach rf_link_slave_data"
+        );
     }
 
     /// Tests BLE connection data handling with existing connection session.
@@ -1199,36 +1208,36 @@ mod tests {
     /// When receiving data from the current master (same sequence number),
     /// should only adjust timing without updating connection tracking.
     #[test]
-    #[mry::lock(rf_link_timing_adjust)]
     fn test_handle_ble_connection_data_existing_session() {
         reset_global_state();
 
-        // Setup mock
-        mock_rf_link_timing_adjust(Any).returns(());
-
         // Setup state for existing connection
-        let master_sn = 150u16;
-        LIGHT_CONN_SN_MASTER.set(master_sn);
-
-        // Create entry that produces the same master sequence number
-        // Need sno values such that: (sno[2] * 256) | ((sno[0] >> 3) & 1) = 150
-        // 150 = 0 * 256 + 150, so sno[2] = 0 and ((sno[0] >> 3) & 1) = 150
-        // But 150 > 1, so this won't work. Let's use: 150 = 0 * 256 + some_value
-        // Actually, we need to be more careful. If master_sn = 150:
-        // For a match: (sno[2] * 256) | ((sno[0] >> 3) & 1) = 150
-        // Since the & 1 operation only gives 0 or 1, we need sno[2] * 256 to be 149 or 150
-        // Let's use a simpler case: master_sn = 1, so sno[2] = 0 and sno[0] has bit 3 set
         LIGHT_CONN_SN_MASTER.set(1);
-        let entry =
-            create_mock_rx_buffer_entry(42000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]); // sno[0] = 0x08 (bit 3 set)
-        let packet = create_mock_packet();
+        // Master SN = 1: sno[2] = 0 and sno[0] bit 3 set.
+        let entry = create_rx_buffer_entry(42000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]);
+        let packet = create_ble_packet();
         let rx_time = 42000u32;
+
+        // Enable the timing adjuster and make the packet arrive early, so the
+        // real `rf_link_timing_adjust` advances the next connection tick.
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(true);
+        BRIDGE_RECEIVE_TIMING_TICK.set(rx_time - CLOCK_SYS_CLOCK_1US * 100);
+        SLAVE_NEXT_CONNECT_TICK.set(500_000);
 
         // Execute function
         handle_ble_connection_data(&entry, &packet, rx_time);
 
         // Verify timing adjustment for existing session
-        mock_rf_link_timing_adjust(Any).assert_called(1);
+        assert_eq!(
+            SLAVE_NEXT_CONNECT_TICK.get(),
+            500_000 - CLOCK_SYS_CLOCK_1US * 200,
+            "an early packet must advance the next connection tick"
+        );
+        assert_eq!(
+            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
+            false,
+            "one adjustment per connection event only"
+        );
 
         // Verify master SN remains unchanged
         assert_eq!(
@@ -1243,31 +1252,27 @@ mod tests {
     /// When a window size is set and various timing conditions are met,
     /// should manage connection windows and timing updates correctly.
     #[test]
-    #[mry::lock(rf_link_timing_adjust, read_reg_system_tick)]
     fn test_handle_ble_connection_data_window_management() {
         reset_global_state();
 
-        // Setup mocks
-        mock_rf_link_timing_adjust(Any).returns(());
-        mock_read_reg_system_tick().returns(50000);
+        seed_system_ticks(50_000, 0);
 
         // Setup state for window management
         LIGHT_CONN_SN_MASTER.set(1);
         SLAVE_WINDOW_SIZE.set(5000); // Non-zero window size
         SLAVE_LINK_INTERVAL.set(10000);
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(false);
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(true);
+        BRIDGE_RECEIVE_TIMING_TICK.set(48_000 - CLOCK_SYS_CLOCK_1US * 100);
+        SLAVE_NEXT_CONNECT_TICK.set(500_000);
 
         // Create entry for existing session
-        let entry =
-            create_mock_rx_buffer_entry(48000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]);
-        let packet = create_mock_packet();
+        let entry = create_rx_buffer_entry(48000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]);
+        let packet = create_ble_packet();
         let rx_time = 48000u32;
 
         // Execute function
         handle_ble_connection_data(&entry, &packet, rx_time);
-
-        // Verify timing adjustment
-        mock_rf_link_timing_adjust(Any).assert_called(1);
 
         // Verify window management
         assert_eq!(
@@ -1276,7 +1281,9 @@ mod tests {
             "Window size should be reset to 0"
         );
 
-        // Verify next connection timing calculation
+        // Verify next connection timing calculation. The timing adjust ran
+        // first, so this also proves the window block recomputes the tick after
+        // it.
         let expected_next_tick = rx_time + SLAVE_LINK_INTERVAL.get() - CLOCK_SYS_CLOCK_1US * 1250;
         assert_eq!(
             SLAVE_NEXT_CONNECT_TICK.get(),
@@ -1290,31 +1297,34 @@ mod tests {
     /// When a timing update is in progress and conditions are met,
     /// should properly handle the timing update completion.
     #[test]
-    #[mry::lock(rf_link_timing_adjust, read_reg_system_tick)]
     fn test_handle_ble_connection_data_timing_update_in_progress() {
         reset_global_state();
 
-        // Setup mocks
-        mock_rf_link_timing_adjust(Any).returns(());
-        mock_read_reg_system_tick().returns(55000);
+        seed_system_ticks(55_000, 0);
 
         // Setup state for timing update scenario
         LIGHT_CONN_SN_MASTER.set(1);
         SLAVE_WINDOW_SIZE.set(3000);
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.set(true);
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME.set(60000); // Future time
+        BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(true);
+        BRIDGE_RECEIVE_TIMING_TICK.set(54_000 - CLOCK_SYS_CLOCK_1US * 100);
+        SLAVE_NEXT_CONNECT_TICK.set(600_000);
 
         // Create entry for existing session
-        let entry =
-            create_mock_rx_buffer_entry(54000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]);
-        let packet = create_mock_packet();
+        let entry = create_rx_buffer_entry(54000, 25, [0x11, 0x22, 0x33, 0x44], [0x08, 0x20, 0x00]);
+        let packet = create_ble_packet();
         let rx_time = 54000u32;
 
         // Execute function
         handle_ble_connection_data(&entry, &packet, rx_time);
 
-        // Verify timing adjustment
-        mock_rf_link_timing_adjust(Any).assert_called(1);
+        // The timing adjust ran for the existing session.
+        assert_eq!(
+            SLAVE_NEXT_CONNECT_TICK.get(),
+            600_000 - CLOCK_SYS_CLOCK_1US * 200,
+            "an early packet must advance the next connection tick"
+        );
 
         // In this case, since the condition 0x40000001 > (ok_time - sys_tick) evaluates true,
         // the function should return early, so window size should remain unchanged
@@ -1334,31 +1344,32 @@ mod tests {
     /// This test focuses on the packet validation logic and state transitions
     /// in the slow path processing function.
     #[test]
-    #[mry::lock(write_reg8, write_reg_dma3_mode, rf_stop_trx)]
     fn test_process_received_packet_slow_path_invalid_packet_cleanup() {
         reset_global_state();
-
-        // Setup mocks
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg_dma3_mode(Any).returns(());
-        mock_rf_stop_trx().returns(());
 
         // Setup state for BLE receiving mode (triggers cleanup on invalid packet)
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Receiving);
 
         // Create an invalid packet that will fail validation
         // Validation requires: dma_len > 0xe AND dma_len == (sno[1] & 0x3f) + 0x11 AND status check
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] =
-            create_mock_rx_buffer_entry(60000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]); // dma_len=10 < 0xe
+            create_rx_buffer_entry(60000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]); // dma_len=10 < 0xe
 
         // Call the slow path function directly (normally called from handle_rf_packet_reception)
         process_received_packet_slow_path(0, 10, &mut light_rx_buff);
 
         // Verify cleanup operations for invalid packet in receiving state
-        mock_write_reg_dma3_mode(0).assert_called(1);
-        mock_rf_stop_trx().assert_called(1);
+        assert_eq!(
+            read_reg_dma3_mode(),
+            0,
+            "the RF TX DMA mode byte must be cleared"
+        );
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x80,
+            "the radio must be stopped after a failed reception"
+        );
     }
 
     /// Tests scan request detection in advertisement state.
@@ -1376,22 +1387,25 @@ mod tests {
         // Need: dma_len > 0xe, dma_len == (sno[1] & 0x3f) + 0x11, and status check
         // Let's use dma_len=32, so need sno[1] & 0x3f = 32 - 0x11 = 15 (0x0f)
         // For cmd=3, need sno[0] & 0xf = 3
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] =
-            create_mock_rx_buffer_entry(65000, 32, [0x11, 0x22, 0x33, 0x44], [0x03, 0x0f, 0x10]);
+            create_rx_buffer_entry(65000, 32, [0x11, 0x22, 0x33, 0x44], [0x03, 0x0f, 0x10]);
 
-        // Note: This test is limited because it would need to mock the status byte validation
-        // and the actual scan request handler. The status validation requires setting up
-        // memory at a specific calculated address, which is complex in a unit test.
-
-        // For now, we can test that the function recognizes the advertisement state
-        // The actual packet validation and handler calls would require more extensive mocking
-
-        // Execute the function - this will likely fail validation due to status check
+        // Execute the function. The synthetic buffer has no RF status byte after
+        // the frame (`unk4` is zero), so validation fails and no handler runs.
         process_received_packet_slow_path(0, 32, &mut light_rx_buff);
 
-        // The test demonstrates the structure but full validation requires memory layout mocking
+        // The failed validation is visible in the untouched reception timestamp
+        // and in a radio that was not reconfigured.
+        assert_eq!(
+            LAST_PACKET_RECEIVED_TIMESTAMP.get(),
+            0,
+            "a frame failing validation must not be timestamped"
+        );
+        assert!(
+            FakeMmio::writes().is_empty(),
+            "a frame failing validation must not touch the radio"
+        );
     }
 
     // ================================================================================
@@ -1429,13 +1443,12 @@ mod tests {
 
     /// Tests state consistency during various link states.
     ///
-    /// Verifies that packet processing behaves correctly across different
-    /// BLE peripheral link states.
+    /// No link state may make the slow path accept a frame that fails
+    /// validation, so the mesh queue stays empty and the radio is untouched.
     #[test]
     fn test_link_state_consistency() {
         reset_global_state();
 
-        // Test each link state
         let states = [
             BlePeripheralLinkState::Disconnected,
             BlePeripheralLinkState::Advertising,
@@ -1444,22 +1457,36 @@ mod tests {
         ];
 
         for state in states.iter() {
+            reset_global_state();
             BLE_PERIPHERAL_LINK_STATE.set(*state);
 
-            // Create a simple packet for testing
-            let entry = create_mock_rx_buffer_entry(
-                70000,
-                20,
-                [0x11, 0x22, 0x33, 0x44],
-                [0x05, 0x15, 0x10],
+            let mut light_rx_buff =
+                [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+            light_rx_buff[0] =
+                create_rx_buffer_entry(70000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]);
+
+            process_received_packet_slow_path(0, 10, &mut light_rx_buff);
+
+            assert_eq!(
+                MESH_RX_CHANNEL.len(),
+                0,
+                "no link state may queue an invalid frame"
             );
-
-            // This test verifies that the function doesn't panic or cause
-            // undefined behavior with different link states
-            // Full testing would require extensive mocking of all the handlers
-
-            // Note: The actual behavior testing for each state would require
-            // mocking the respective handler functions (scan, connection, mesh, etc.)
+            // Only the Receiving state performs radio cleanup; the others leave
+            // the radio untouched.
+            if *state == BlePeripheralLinkState::Receiving {
+                assert_eq!(
+                    read_reg_rf_mode_control(),
+                    0x80,
+                    "a failed reception must stop the radio in Receiving state"
+                );
+            } else {
+                assert!(
+                    FakeMmio::writes().is_empty(),
+                    "a failed reception must not touch the radio in {:?}",
+                    state
+                );
+            }
         }
     }
 
@@ -1476,9 +1503,8 @@ mod tests {
 
         // Test with timestamp near overflow boundary
         let near_overflow_time = 0xFFFFFFF0u32;
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
-        light_rx_buff[0] = create_mock_rx_buffer_entry(
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        light_rx_buff[0] = create_rx_buffer_entry(
             near_overflow_time,
             25,
             [0x11, 0x22, 0x33, 0x44],
@@ -1504,7 +1530,7 @@ mod tests {
 
         // Test with zero timestamp
         light_rx_buff[1] =
-            create_mock_rx_buffer_entry(0, 25, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]);
+            create_rx_buffer_entry(0, 25, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]);
         LIGHT_RX_BUFFER_WRITE_POINTER.set(2);
 
         {
@@ -1523,35 +1549,22 @@ mod tests {
         );
     }
 
+    /// Number of writes of `value` to `reg_rf_mode_control` in the run log.
+    fn rf_mode_control_writes(value: u8) -> usize {
+        FakeMmio::writes()
+            .iter()
+            .filter(|w| w.addr == (0xf00 | tlsr8266_pac::REG_BASE_ADDR) && w.value == value as u32)
+            .count()
+    }
+
     /// Tests MAC address edge cases.
     ///
     /// Verifies that MAC address comparisons handle various edge cases
     /// including all zeros, all ones, and partial matches.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick_irq,
-        write_reg8,
-        write_reg16,
-        write_reg32
-    )]
     fn test_mac_address_edge_cases() {
         reset_global_state();
-
-        // Setup mocks
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_rf_sched_tick(Any).returns(());
-        mock_write_reg_rf_mode_control(Any).returns(());
-        mock_write_reg_dma3_addr(Any).returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
+        seed_system_ticks(0, 50_000);
 
         // Test with all-zero MAC
         {
@@ -1560,9 +1573,9 @@ mod tests {
         }
 
         let entry_zero =
-            create_mock_rx_buffer_entry(75000, 20, [0x00, 0x00, 0x00, 0x00], [0x03, 0x15, 0x10]);
+            create_rx_buffer_entry(75000, 20, [0x00, 0x00, 0x00, 0x00], [0x03, 0x15, 0x10]);
         handle_scan_request(&entry_zero, 75000);
-        mock_rf_stop_trx().assert_called(1); // Should match
+        assert_eq!(rf_mode_control_writes(0x85), 1, "an all-zero MAC matches");
 
         // Test with all-ones MAC
         {
@@ -1571,15 +1584,19 @@ mod tests {
         }
 
         let entry_ones =
-            create_mock_rx_buffer_entry(76000, 20, [0xFF, 0xFF, 0xFF, 0xFF], [0x03, 0x15, 0x10]);
+            create_rx_buffer_entry(76000, 20, [0xFF, 0xFF, 0xFF, 0xFF], [0x03, 0x15, 0x10]);
         handle_scan_request(&entry_ones, 76000);
-        mock_rf_stop_trx().assert_called(2); // Should match
+        assert_eq!(rf_mode_control_writes(0x85), 2, "an all-ones MAC matches");
 
         // Test with partial match (should not match)
         let entry_partial =
-            create_mock_rx_buffer_entry(77000, 20, [0xFF, 0xFF, 0xFF, 0xFE], [0x03, 0x15, 0x10]);
+            create_rx_buffer_entry(77000, 20, [0xFF, 0xFF, 0xFF, 0xFE], [0x03, 0x15, 0x10]);
         handle_scan_request(&entry_partial, 77000);
-        mock_rf_stop_trx().assert_called(2); // Should not increment (no match)
+        assert_eq!(
+            rf_mode_control_writes(0x85),
+            2,
+            "a partial MAC match must not start a response"
+        );
     }
 
     /// Tests the valid packet processing logic at line 145+ in process_received_packet_slow_path.
@@ -1587,32 +1604,11 @@ mod tests {
     /// This tests the actual logic inside the validation condition by creating a buffer
     /// structure that satisfies the validation requirements.
     #[test]
-    #[mry::lock(
-        rf_stop_trx,
-        write_reg_rf_sched_tick,
-        write_reg_rf_mode_control,
-        write_reg_dma3_addr,
-        write_reg_system_tick_irq,
-        read_reg_system_tick_irq,
-        write_reg8,
-        write_reg16,
-        write_reg32
-    )]
     fn test_process_received_packet_slow_path_valid_packet_logic() {
         reset_global_state();
+        seed_system_ticks(0, 50_000);
 
-        // Setup mocks for scan request handling
-        mock_rf_stop_trx().returns(());
-        mock_write_reg_rf_sched_tick(Any).returns(());
-        mock_write_reg_rf_mode_control(Any).returns(());
-        mock_write_reg_dma3_addr(Any).returns(());
-        mock_write_reg_system_tick_irq(Any).returns(());
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
-        // Set state to advertising to trigger scan request path (lines 155-159)
+        // Set state to advertising to trigger scan request path
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
 
         // Set up MAC to match for scan request handling
@@ -1654,55 +1650,46 @@ mod tests {
         }
 
         // Create light_rx_buff array with our constructed entry
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
-
-        // Store initial timestamp state to verify it gets updated (line 152)
-        let initial_timestamp = LAST_PACKET_RECEIVED_TIMESTAMP.get();
 
         // Execute the function with our carefully constructed buffer
         process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
 
-        // Verify the logic executed:
-
-        // 1. Check that timestamp was stored (line 152: LAST_PACKET_RECEIVED_TIMESTAMP.set(rx_time))
+        // 1. Check that timestamp was stored
         assert_eq!(
             LAST_PACKET_RECEIVED_TIMESTAMP.get(),
             rx_time,
             "Timestamp should be updated when validation passes"
         );
-        assert_ne!(
-            initial_timestamp, rx_time,
-            "Timestamp should have changed from initial value"
+
+        // 2. Since we're in advertising state with cmd=3, the scan request
+        // handler must have armed a response.
+        assert_eq!(
+            read_reg_rf_sched_tick(),
+            rx_time + BLE_SCAN_RESPONSE_INTERVAL_US.get() * CLOCK_SYS_CLOCK_1US,
+            "the scan response must be scheduled after the received frame"
         );
-
-        // 2. Since we're in advertising state with cmd=3, handle_scan_request should be called
-        // This is verified by the scan request handler mocks being called
-        mock_rf_stop_trx().assert_called(1);
-        mock_write_reg_rf_sched_tick(Any).assert_called(1);
-
-        // This test proves we can exercise the actual logic at line 145+ by:
-        // - Setting up proper validation conditions
-        // - Controlling the memory layout to pass the status check
-        // - Verifying the expected behavior (timestamp update, function calls)
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0x85,
+            "the radio must be switched to single-transmission mode"
+        );
+        assert_ne!(
+            read_reg_dma3_addr(),
+            0,
+            "the scan response must be handed to the TX DMA"
+        );
     }
 
     /// Tests the connection request path (line 165) in process_received_packet_slow_path.
     ///
     /// This tests the early return on line 165 when cmd=5 (connection request) in advertising state.
     #[test]
-    #[mry::lock(handle_connection_request, write_reg8, write_reg16, write_reg32)]
     fn test_process_received_packet_slow_path_connection_request_path() {
         reset_global_state();
 
-        // Setup mocks for connection request handling
-        mock_handle_connection_request(Any, Any, Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
-        // Set state to advertising to trigger connection request path (lines 163-166)
+        // Set state to advertising to trigger connection request path
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
 
         // Create a buffer structure for connection request (cmd=5)
@@ -1732,48 +1719,52 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
-        // Store initial timestamp
-        let initial_timestamp = LAST_PACKET_RECEIVED_TIMESTAMP.get();
+        CONN_UPDATE_CNT.set(9);
 
         // Execute the function
         process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
 
-        // Verify line 152: timestamp was stored
+        // Verify timestamp was stored
         assert_eq!(
             LAST_PACKET_RECEIVED_TIMESTAMP.get(),
             rx_time,
             "Timestamp should be updated when validation passes"
         );
 
-        // Verify line 165: connection request handler was called and returned early
-        mock_handle_connection_request(Any, Any, Any).assert_called(1);
+        // Verify the connection request handler ran and returned early: the
+        // connect routine resets its update counter before any validation, so
+        // the mesh and BLE data paths were never reached.
+        assert_eq!(
+            CONN_UPDATE_CNT.get(),
+            0,
+            "the connection request must reach rf_link_slave_connect"
+        );
+        assert_eq!(
+            LIGHT_CONN_SN_MASTER.get(),
+            0,
+            "the BLE data path must not run for a connection request"
+        );
     }
 
     /// Tests the mesh packet path (line 172) in process_received_packet_slow_path.
     ///
     /// This tests the early return on line 172 when processing mesh packets.
     #[test]
-    #[mry::lock(handle_mesh_packet, write_reg8, write_reg16, write_reg32)]
     fn test_process_received_packet_slow_path_mesh_packet_path() {
         reset_global_state();
 
-        // Setup mocks for mesh packet handling
-        mock_handle_mesh_packet(Any, Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
-        // Set state to NOT advertising and NOT in OTA to trigger mesh path (lines 170-173)
+        // Set state to NOT advertising and NOT in OTA to trigger mesh path
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected); // Not advertising
-        crate::ota::set_in_progress_for_test(false); // Not in OTA
+        crate::callbacks::test_ota::set_in_progress_for_test(false); // Not in OTA
 
-        // Create a buffer structure for mesh packet (cmd != 3 and != 5)
-        let test_dma_len = 25u8;
-        let sno1_for_dma = test_dma_len - 0x11; // 25 - 17 = 8 (0x08)
+        // Create a buffer structure for mesh packet (cmd != 3 and != 5).
+        // The length self-check is `dma_len == (rf_len & 0x3f) + 0x11`, and a
+        // mesh frame carries rf_len = 0x25, so the DMA length must be 0x36.
+        let test_dma_len = 0x36u8;
+        let sno1_for_dma = 0x25u8; // mesh rf_len
         let rx_time = 90000u32;
 
         let mut extended_buffer = [0u8; 128];
@@ -1792,51 +1783,65 @@ mod tests {
             };
         }
 
-        // Set status byte to pass validation
+        // The bytes the radio wrote are the packet the mesh path inspects: make
+        // them a well-formed, parseable mesh frame so acceptance is visible.
+        // The `Packet` view starts at `rx_time`, so the frame's DMA-length word
+        // is the reception timestamp of this synthetic entry.
+        unsafe {
+            let packet_ptr = addr_of!((*entry_ptr).rx_time) as *mut u8;
+            let mut mesh = create_mesh_packet();
+            mesh.head_mut().dma_len = rx_time;
+            core::ptr::copy_nonoverlapping(
+                addr_of!(mesh) as *const u8,
+                packet_ptr,
+                core::mem::size_of::<Packet>(),
+            );
+        }
+
+        // Set status byte to pass validation (after the packet copy, which
+        // overwrites the same stretch of the buffer).
         let status_offset = test_dma_len as usize + 3;
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
-
-        // Store initial timestamp
-        let initial_timestamp = LAST_PACKET_RECEIVED_TIMESTAMP.get();
-
         // Execute the function
         process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
 
-        // Verify line 152: timestamp was stored
+        // Verify timestamp was stored
         assert_eq!(
             LAST_PACKET_RECEIVED_TIMESTAMP.get(),
             rx_time,
             "Timestamp should be updated when validation passes"
         );
 
-        // Verify line 172: mesh packet handler was called and returned early
-        mock_handle_mesh_packet(Any, Any).assert_called(1);
+        // Verify the mesh packet handler accepted and queued the frame, and that
+        // the BLE data path was not reached.
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            1,
+            "the mesh path must queue the accepted frame"
+        );
+        assert_eq!(
+            LIGHT_CONN_SN_MASTER.get(),
+            0,
+            "the BLE data path must not run for a mesh packet"
+        );
     }
 
     /// Tests the BLE connection data path (line 177) in process_received_packet_slow_path.
     ///
     /// This tests the fallthrough to line 176-177 for BLE connection data handling.
     #[test]
-    #[mry::lock(handle_ble_connection_data, write_reg8, write_reg16, write_reg32)]
     fn test_process_received_packet_slow_path_ble_connection_data_path() {
         reset_global_state();
-
-        // Setup mocks for BLE connection data handling
-        mock_handle_ble_connection_data(Any, Any, Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
 
         // Set state to trigger BLE connection data path (line 176)
         // This happens when: NOT in advertising, AND (in OTA OR in Receiving state)
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Receiving); // In receiving state
-        crate::ota::set_in_progress_for_test(false);
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
 
         // Create a buffer structure for BLE connection data
         let test_dma_len = 25u8;
@@ -1865,169 +1870,111 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
-
-        // Store initial timestamp
-        let initial_timestamp = LAST_PACKET_RECEIVED_TIMESTAMP.get();
 
         // Execute the function
         process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
 
-        // Verify line 152: timestamp was stored
+        // Verify timestamp was stored
         assert_eq!(
             LAST_PACKET_RECEIVED_TIMESTAMP.get(),
             rx_time,
             "Timestamp should be updated when validation passes"
         );
 
-        // Verify line 176: BLE connection data handler was called
-        // Note: This tests the fallthrough path that doesn't have an early return
-        // The function should reach handle_ble_connection_data and then return
-        mock_handle_ble_connection_data(Any, Any, Any).assert_called(1);
+        // Verify the BLE connection data handler ran: it adopts the new master
+        // sequence number and marks the link active.
+        assert_eq!(
+            LIGHT_CONN_SN_MASTER.get(),
+            ((0x10u16) * 0x100) | (((0x08u16 >> 3) & 1) as u16),
+            "the BLE data handler must adopt the master sequence number"
+        );
+        assert_eq!(
+            BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
+            true,
+            "the BLE data handler must mark the connection active"
+        );
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "a BLE data packet must not be queued for the mesh task"
+        );
     }
 
     /// Tests the node status advertisement special case (line 285) in handle_mesh_packet.
     ///
     /// This tests the early return when channel ID is 0xffff (node status packets).
     #[test]
-    #[mry::lock(
-        read_reg_system_tick_irq,
-        read_reg_system_tick,
-        pair_dec_packet_mesh,
-        write_reg8,
-        write_reg16,
-        write_reg32
-    )]
     fn test_handle_mesh_packet_node_status_advertisement_line_285() {
         reset_global_state();
 
-        // Setup mocks for mesh packet validation
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
-
-        // A valid packet is handed to the module-level mesh RX queue, so no
-        // application singleton is touched on this path.
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
         // Set connection state for timing validation
+        seed_system_ticks(30_000, 50_000);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
 
         // Create a mesh packet with channel ID 0xffff (node status)
-        let mut packet = create_mock_mesh_packet();
+        let mut packet = create_mesh_packet();
         unsafe {
             packet.head_mut().chan_id = 0xffff; // Special node status channel
         }
 
         let rx_time = 75000u32;
 
-        // Execute the function - should hit line 285 and return true for node status
+        // Execute the function - should hit the node-status early accept
         handle_mesh_packet(&packet, rx_time);
 
-        // Verify that decryption was called (packet validation passed up to line 285)
-        mock_pair_dec_packet_mesh(Any).assert_called(1);
-
-        // For node status packets (0xffff), pkt_valid() returns true at line 285
-        // and the packet is queued for the mesh RX task
-        assert_eq!(crate::sdk::ble_app::queues::MESH_RX_CHANNEL.len(), 1);
+        // For node status packets (0xffff) the packet is queued for the mesh RX
+        // task without opcode parsing.
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 1);
     }
 
     /// Tests the parse failure case (line 291) in handle_mesh_packet.
     ///
     /// This tests the early return when parse_ble_packet_op_params fails.
     #[test]
-    #[mry::lock(
-        read_reg_system_tick_irq,
-        read_reg_system_tick,
-        pair_dec_packet_mesh,
-        parse_ble_packet_op_params,
-        write_reg8,
-        write_reg16,
-        write_reg32
-    )]
     fn test_handle_mesh_packet_parse_failure_line_291() {
         reset_global_state();
 
-        // Setup mocks for mesh packet validation
-        mock_read_reg_system_tick_irq().returns(50000);
-        mock_read_reg_system_tick().returns(30000);
-        mock_pair_dec_packet_mesh(Any).returns(Ok(()));
-        // Make parse_ble_packet_op_params fail to trigger line 291
-        mock_parse_ble_packet_op_params(Any, Any).returns((false, [0; 3], 0, [0; 16], 0));
-
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
         // Set connection state for timing validation
+        seed_system_ticks(30_000, 50_000);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
 
-        // Create a mesh packet with normal channel ID (not 0xffff)
-        let packet = create_mock_mesh_packet(); // Uses default channel ID 0x0004
+        // A 2-byte opcode (MSB set, 0x40 clear) is unsupported, so the real
+        // parser rejects the frame.
+        let mut packet = create_mesh_packet();
+        unsafe {
+            packet.att_write_mut().value.val[0] = 0x80;
+        }
 
         let rx_time = 80000u32;
 
-        // Execute the function - should hit line 291 and return false due to parse failure
+        // Execute the function
         handle_mesh_packet(&packet, rx_time);
 
-        // Verify that decryption was called
-        mock_pair_dec_packet_mesh(Any).assert_called(1);
-
-        // Verify that parsing was attempted and failed (triggering line 291)
-        mock_parse_ble_packet_op_params(Any, Any).assert_called(1);
-
-        // Since pkt_valid() returns false at line 291, no application callback
-        // is reached; there is nothing to assert beyond the early return.
+        // Since validation returns false at the parse step, nothing is queued.
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "an unparseable mesh packet must not be queued"
+        );
     }
 
     /// Tests the fallthrough to handle_ble_connection_data (line 193) in process_received_packet_slow_path.
     ///
     /// This tests the case where:
-    /// - We pass packet validation (lines 152-156)
-    /// - We enter the Advertising state check (line 168)
-    /// - We DON'T take the scan request branch (cmd != 3, line 171)
-    /// - We DON'T take the connection request branch (cmd != 5, line 177)
-    /// - We DON'T take the mesh packet branch (line 184) because we're in Receiving state
-    /// - We fall through to handle_ble_connection_data (line 193)
+    /// - We pass packet validation
+    /// - We enter the Advertising state check
+    /// - We DON'T take the scan request branch (cmd != 3)
+    /// - We DON'T take the connection request branch (cmd != 5)
+    /// - We DON'T take the mesh packet branch because an OTA is in progress
+    /// - We fall through to handle_ble_connection_data
     #[test]
-    #[mry::lock(
-        handle_scan_request,
-        handle_connection_request,
-        handle_mesh_packet,
-        handle_ble_connection_data,
-        write_reg8,
-        write_reg16,
-        write_reg32
-    )]
     fn test_process_received_packet_slow_path_fallthrough_line_180() {
         reset_global_state();
 
-        // Setup mocks for all potential handlers
-        mock_handle_scan_request(Any, Any).returns(());
-        mock_handle_connection_request(Any, Any, Any).returns(());
-        mock_handle_mesh_packet(Any, Any).returns(());
-        mock_handle_ble_connection_data(Any, Any, Any).returns(());
-        mock_write_reg8(Any, Any).returns(());
-        mock_write_reg16(Any, Any).returns(());
-        mock_write_reg32(Any, Any).returns(());
-
-        // Set state:
-        // - Advertising check at line 168: we need to be in ANY state to reach this check
-        // - cmd != 3 and cmd != 5: so we don't return from the Advertising block
-        // - At line 184: NOT OTA AND NOT Receiving must be FALSE to skip mesh handler
-        // - We can achieve this by setting Receiving state, which makes (!OTA && != Receiving) = false
-        // - But wait, we also need to reach the Advertising check. So we need:
-        //   - We enter the Advertising check (doesn't matter what state for the check itself, it just evaluates)
-        //   - cmd != 3 and cmd != 5 (so we don't return from lines 172-180)
-        //   - Then at line 184: (!OTA && != Receiving) must be false
-        // - We can be in OTA mode, which makes (!OTA && != Receiving) = false regardless of Receiving state
-        // Let's use OTA mode:
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
-        crate::ota::set_in_progress_for_test(true); // In OTA mode to skip mesh handler
+        crate::callbacks::test_ota::set_in_progress_for_test(true); // In OTA mode to skip mesh handler
 
         // Create a buffer structure with cmd that is neither 3 nor 5
         let test_dma_len = 25u8;
@@ -2056,18 +2003,28 @@ mod tests {
             extended_buffer[status_offset] = 0x40;
         }
 
-        let mut light_rx_buff =
-            [create_mock_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
+        let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Execute the function
         process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
 
-        // Verify that ONLY handle_ble_connection_data was called (line 193)
-        // The other handlers should have 0 calls since we skipped their branches
-        mock_handle_scan_request(Any, Any).assert_called(0);
-        mock_handle_connection_request(Any, Any, Any).assert_called(0);
-        mock_handle_mesh_packet(Any, Any).assert_called(0);
-        mock_handle_ble_connection_data(Any, Any, Any).assert_called(1);
+        // Only the BLE connection data handler ran: the other branches would
+        // have queued a mesh packet or armed a response.
+        assert_eq!(
+            MESH_RX_CHANNEL.len(),
+            0,
+            "the mesh path must be skipped during OTA"
+        );
+        assert_eq!(
+            read_reg_rf_mode_control(),
+            0,
+            "no scan/connection response may be armed"
+        );
+        assert_eq!(
+            BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
+            true,
+            "the BLE data path must adopt the new session"
+        );
     }
 }

@@ -15,7 +15,6 @@
 //! back to slot 0 after a sector erase; see [`pair_flash_clean`] and
 //! [`pair_flash_config_init`].
 
-use crate::config::*;
 use crate::sdk::ble_app::ble_ll_pair::{
     MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
     PAIR_CONFIG_PWD_ENCODE_SK, PAIR_STATE,
@@ -23,6 +22,7 @@ use crate::sdk::ble_app::ble_ll_pair::{
 use crate::sdk::ble_app::light_ll::connection_management::{
     setup_ble_parameter_start, CONN_UPDATE_CNT, CONN_UPDATE_SUCCESSED,
 };
+use crate::sdk::ble_app::radio_config;
 use crate::sdk::ble_app::rf_drv_8266::{
     ADV_PRI_DATA, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, GROUP_ADDRESS, MAC_ID,
     MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_NEXT_POSITION, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
@@ -165,8 +165,9 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 /// Final address = `FLASH_ADR_PAIRING + FLASH_CONFIGURATION_INDEX + adr`
 #[cfg_attr(test, mry::mry)]
 pub fn save_pair_info(adr: u32, p: &[u8]) {
+    let flash_adr_pairing = radio_config().flash_adr_pairing;
     flash_write_page(
-        (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get() + adr as i32) as u32,
+        (flash_adr_pairing as i32 + FLASH_CONFIGURATION_INDEX.get() + adr as i32) as u32,
         p.len() as u32,
         p.as_ptr(),
     );
@@ -351,7 +352,7 @@ pub fn retrieve_dev_grp_address() {
     let mut device_addr_next_pos = MESH_DEVICE_ADDRESS_NEXT_POSITION.get();
     let mut group_addr_next_pos = 0;
     let mut group_addr_index = 0;
-    let mut flash_offset = FLASH_ADR_DEV_GRP_ADR;
+    let mut flash_offset = radio_config().flash_adr_dev_grp_adr;
 
     // SEQUENTIAL FLASH SCAN: Read addresses until end marker or size limit
     // The 0x1000 byte limit prevents reading beyond the allocated flash region
@@ -472,6 +473,7 @@ pub fn retrieve_dev_grp_address() {
 pub fn pair_flash_clean() {
     const CONFIG_SIZE: usize = 64;
     const WRAP_THRESHOLD: i32 = 0xfc0; // Last 64-byte slot before 4KB sector end
+    let flash_adr_pairing = radio_config().flash_adr_pairing;
 
     // WRAP DETECTION: Check if we've gone past the last configuration slot
     // At 0xFC0 (4032 bytes), we're at the last 64-byte boundary in a 4KB sector
@@ -479,15 +481,15 @@ pub fn pair_flash_clean() {
     if FLASH_CONFIGURATION_INDEX.get() > WRAP_THRESHOLD {
         let mut config_backup = [0u8; CONFIG_SIZE];
         // Read from the previous slot (current index - 64) since we just incremented past the boundary
-        let src_addr = (FLASH_ADR_PAIRING as i32 + FLASH_CONFIGURATION_INDEX.get() - 64) as u32;
+        let src_addr = (flash_adr_pairing as i32 + FLASH_CONFIGURATION_INDEX.get() - 64) as u32;
 
         // Read current configuration from previous slot into backup buffer
         flash_read_page(src_addr, CONFIG_SIZE as u32, config_backup.as_mut_ptr());
 
         // Erase sector and write configuration to the beginning
-        flash_erase_sector(FLASH_ADR_PAIRING);
+        flash_erase_sector(flash_adr_pairing);
         flash_write_page(
-            FLASH_ADR_PAIRING,
+            flash_adr_pairing,
             CONFIG_SIZE as u32,
             config_backup.as_ptr(),
         );
@@ -539,8 +541,9 @@ pub fn pair_flash_clean() {
 #[cfg_attr(test, mry::mry)]
 pub fn pair_flash_config_init() {
     // STEP 1: Check if any configuration exists
+    let flash_adr_pairing = radio_config().flash_adr_pairing;
     let mut first_buffer = [0u8; 0x40];
-    flash_read_page(FLASH_ADR_PAIRING, 0x40, first_buffer.as_mut_ptr());
+    flash_read_page(flash_adr_pairing, 0x40, first_buffer.as_mut_ptr());
 
     if first_buffer[0] != PAIR_CONFIG_VALID_FLAG {
         // No configuration has ever been written
@@ -555,7 +558,7 @@ pub fn pair_flash_config_init() {
     let mut buffer = [0u8; 0x40];
 
     for offset in (0x40..=0xfc0).step_by(0x40) {
-        flash_read_page(FLASH_ADR_PAIRING + offset as u32, 0x40, buffer.as_mut_ptr());
+        flash_read_page(flash_adr_pairing + offset as u32, 0x40, buffer.as_mut_ptr());
 
         if buffer[0] != PAIR_CONFIG_VALID_FLAG {
             // Found boundary between used and unused slots
@@ -912,7 +915,7 @@ pub fn pair_load_key() {
     }
 
     // Calculate absolute flash address by adding config index to base address
-    let pairing_addr = (FLASH_ADR_PAIRING as i32 + config_index) as u32;
+    let pairing_addr = (radio_config().flash_adr_pairing as i32 + config_index) as u32;
 
     {
         let mut pair_state = PAIR_STATE.lock();
@@ -987,6 +990,11 @@ mod tests {
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::crypto::fake_crypto::{self, FakeAesMode};
     use tlsr8266_pac::fake_mmio::FakeMmio;
+
+    /// Pairing sector base, taken from the factory default config so the tests
+    /// track the shipped layout without importing the crate-root `config`
+    /// module.
+    const FLASH_ADR_PAIRING: u32 = crate::sdk::ble_app::config::DEFAULT.flash_adr_pairing;
 
     /// Reset the PAC/HAL host fakes so a test never inherits another test's
     /// register bank, analog bank, clock or AES transport (the suite runs

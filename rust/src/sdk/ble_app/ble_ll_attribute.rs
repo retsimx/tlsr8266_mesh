@@ -1,12 +1,12 @@
 use core::ptr::{addr_of, addr_of_mut, read_unaligned};
 use core::slice;
 
-use crate::config::VENDOR_ID;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 
 use crate::sdk::app_att_light::{
-    get_gAttributes, AttributeT, GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
+    attr_effective_len, get_gAttributes, is_readonly_ram_attr, AttributeT,
+    GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
 };
 use crate::sdk::ble_app::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate};
 use crate::sdk::ble_app::light_ll::connection_management::{
@@ -283,7 +283,7 @@ fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
                 rf_len: 6,
                 opcode: 0x0c,
                 main_ver: 0x08,
-                vendor: VENDOR_ID,
+                vendor: crate::sdk::ble_app::radio_config().vendor_id,
                 sub_ver: 0x08,
             },
         });
@@ -721,9 +721,10 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
             }
             Some((found_attrs, handle)) => {
                 let found_attr = &found_attrs[0];
+                let value_len = attr_effective_len(handle, found_attr);
 
                 // Set bytes_read to attribute length + 2 (for handle)
-                bytes_read = found_attr.attr_len + 2;
+                bytes_read = value_len + 2;
 
                 // Format response: handle (2 bytes) + attribute value
                 rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
@@ -731,12 +732,13 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                 rf_packet_att_rsp.att_read_rsp_mut().value[2] = (handle >> 8) as u8;
 
                 // Copy attribute value to response
-                rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + value_len as usize]
                     // SAFETY: (4) `found_attr` comes from `l2cap_att_search`, so
-                    // `p_attr_value` is the entry's static value and `attr_len`
-                    // bytes are in bounds (table max is 16, inside this buffer).
+                    // `p_attr_value` is the entry's static value and `value_len`
+                    // effective bytes are in bounds (at most 19, inside this
+                    // value slot).
                     .copy_from_slice(unsafe {
-                        slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
+                        slice::from_raw_parts(found_attr.p_attr_value, value_len as usize)
                     });
             }
         }
@@ -822,24 +824,23 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                 }
                 Some((found_attrs, handle)) => {
                     let found_attr = &found_attrs[0];
+                    let value_len = attr_effective_len(handle, found_attr);
 
                     // Format response: handle (2 bytes) + attribute value
-                    bytes_read = found_attr.attr_len + 2;
+                    bytes_read = value_len + 2;
 
                     rf_packet_att_rsp.att_read_rsp_mut().value[0] = bytes_read;
                     rf_packet_att_rsp.att_read_rsp_mut().value[1] = handle as u8;
                     rf_packet_att_rsp.att_read_rsp_mut().value[2] = (handle >> 8) as u8;
 
                     // Copy attribute value to response
-                    rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + found_attr.attr_len as usize]
+                    rf_packet_att_rsp.att_read_rsp_mut().value[3..3 + value_len as usize]
                         // SAFETY: (4) as above: `found_attr` comes from
                         // `l2cap_att_search`, so `p_attr_value` is the entry's
-                        // static value and `attr_len` bytes are in bounds.
+                        // static value and `value_len` effective bytes are in
+                        // bounds (at most 19, inside this value slot).
                         .copy_from_slice(unsafe {
-                            slice::from_raw_parts(
-                                found_attr.p_attr_value,
-                                found_attr.attr_len as usize,
-                            )
+                            slice::from_raw_parts(found_attr.p_attr_value, value_len as usize)
                         });
                 }
             }
@@ -923,25 +924,29 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
     if get_gAttributes()[att_num].r.is_none() {
         // No read callback - directly return the attribute's value
         let mut rf_packet_att_rsp = create_att_response_template();
+        let current_attr = &get_gAttributes()[att_num];
+        // Config-driven values serve a runtime length, so `attr_len` is only the
+        // buffer maximum for those handles.
+        let value_len = attr_effective_len(att_num, current_attr);
         // SAFETY: (4) `att_num` was bounded by `get_gAttributes()[0].att_num`
         // above, so both table reads are in bounds; `p_attr_value` is that
-        // entry's static value of `attr_len` bytes (table max 16) and the
-        // destination is this local packet's 22-byte `value` array. Handle 0
-        // (null pointer, `attr_len` 0) is a pre-existing zero-length-from-null
-        // edge, reported and not changed.
+        // entry's static value of `value_len` effective bytes (the largest is the
+        // 19-byte device name) and the destination is this local packet's
+        // 22-byte `value` array. Handle 0 (null pointer, `value_len` 0) is a
+        // pre-existing zero-length-from-null edge, reported and not changed.
         unsafe {
             slice::from_raw_parts_mut(
                 addr_of_mut!(rf_packet_att_rsp.att_read_rsp_mut().value[0]),
-                get_gAttributes()[att_num].attr_len as usize,
+                value_len as usize,
             )
             .copy_from_slice(slice::from_raw_parts(
-                get_gAttributes()[att_num].p_attr_value,
-                get_gAttributes()[att_num].attr_len as usize,
+                current_attr.p_attr_value,
+                value_len as usize,
             ));
         }
 
         // Special case: handle SEND_TO_MASTER flag
-        if get_gAttributes()[att_num].p_attr_value == SEND_TO_MASTER.as_ptr() as *mut u8 {
+        if current_attr.p_attr_value == SEND_TO_MASTER.as_ptr() as *mut u8 {
             // Clear the SEND_TO_MASTER array after reading
             SEND_TO_MASTER.lock().fill(0);
         }
@@ -951,19 +956,15 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
             dispatch_ota_terminate();
         }
 
-        // Prepare and return the response packet
-        let current_attr = &get_gAttributes()[att_num];
-        let attr_len = current_attr.attr_len;
-
         // Set packet header fields according to the ATT protocol requirements
         // L2CAP header: rf_len = value_len + 5 bytes overhead
-        rf_packet_att_rsp.head_mut().rf_len = attr_len + 5;
+        rf_packet_att_rsp.head_mut().rf_len = value_len + 5;
         // DMA length includes 2 additional bytes for radio hardware
-        rf_packet_att_rsp.head_mut().dma_len = (attr_len as u32) + 7;
+        rf_packet_att_rsp.head_mut().dma_len = (value_len as u32) + 7;
         // Packet type 2 = data packet
         rf_packet_att_rsp.head_mut()._type = 2;
         // L2CAP length = value_len + 1 byte opcode
-        rf_packet_att_rsp.head_mut().l2cap_len = (attr_len as u16) + 1;
+        rf_packet_att_rsp.head_mut().l2cap_len = (value_len as u16) + 1;
         // ATT channel ID = 4
         rf_packet_att_rsp.head_mut().chan_id = 4;
         // 0x0B = Read Response opcode
@@ -1012,6 +1013,8 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
 ///
 /// * All entries in the response must have the same format and value length
 /// * The first byte of the response value indicates the length of each tuple (start handle + end handle + value)
+/// * Handles 3 and 11 carry a runtime value length, so the length served is
+///   `attr_effective_len`, never the table's buffer maximum
 /// * Response size is limited to avoid packet fragmentation
 /// * Primarily used during service discovery to locate service declarations
 fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
@@ -1033,14 +1036,11 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     }
 
     // Tracking variables for response construction
-    let mut dest_ptr = 0; // Position in the response buffer
+    let mut written = 0; // Bytes stored in `value` after the format byte
     let mut format_length = 0; // Expected size of each entry (for consistency checking)
 
     // Buffer for accumulating response data during search loop
     let mut response = create_att_response_template();
-
-    // Maximum buffer size to prevent overflow in response
-    const MAX_BUFFER_SIZE: usize = 0x13;
 
     // Search for matching group declarations within handle range
     while handle_start <= handle_end {
@@ -1050,15 +1050,23 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
 
             Some((found_attrs, current_handle)) => {
                 let found_attr = &found_attrs[0];
-                let attr_len = found_attr.attr_len as usize;
+                // Handles 3 and 11 serve a runtime value length, so their
+                // `attr_len` is only the buffer maximum (19 and 16 bytes).
+                let attr_len = attr_effective_len(current_handle, found_attr) as usize;
 
                 // Format consistency check - all entries must have same size
                 if format_length != 0 && attr_len != format_length {
                     break; // Inconsistent attribute sizes, can't include in same response
                 }
 
-                // Check for buffer overflow - ensure we have enough space
-                if MAX_BUFFER_SIZE < attr_len + dest_ptr * 2 {
+                // Overflow check against the real destination. `value` holds a
+                // format byte followed by (start handle, end handle, value) per
+                // entry, so this entry starts at `value[1 + written]` and needs
+                // `4 + attr_len` bytes. Comparing the last index it touches with
+                // the array length keeps the handle writes, the value copy and
+                // the final flush inside `value` whatever the effective length.
+                let entry_start = 1 + written;
+                if entry_start + 4 + attr_len > response.att_read_rsp().value.len() {
                     break; // Not enough buffer space for this entry
                 }
 
@@ -1067,37 +1075,33 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
                     format_length = attr_len;
                 }
 
-                // Calculate handle positions for response construction
-                let next_ptr = dest_ptr + 1;
-                let value_ptr = next_ptr + 1;
-
                 // Calculate end handle based on attribute's att_num field
                 let group_end_handle = ((current_handle - 1) + found_attr.att_num as usize) as u16;
 
                 // Add start handle to response (2 bytes)
-                response.att_read_rsp_mut().value[dest_ptr * 2 + 1] = (current_handle & 0xff) as u8;
-                response.att_read_rsp_mut().value[dest_ptr * 2 + 2] = (current_handle >> 8) as u8;
+                response.att_read_rsp_mut().value[entry_start] = (current_handle & 0xff) as u8;
+                response.att_read_rsp_mut().value[entry_start + 1] = (current_handle >> 8) as u8;
 
                 // Add end handle to response (2 bytes)
-                response.att_read_rsp_mut().value[next_ptr * 2 + 1] =
+                response.att_read_rsp_mut().value[entry_start + 2] =
                     (group_end_handle & 0xff) as u8;
-                response.att_read_rsp_mut().value[next_ptr * 2 + 2] = (group_end_handle >> 8) as u8;
-
-                // Get attribute value as a slice for easier handling
-                // SAFETY: (4) `found_attr` comes from `l2cap_att_search`, so
-                // `p_attr_value` is the entry's static service value and
-                // `attr_len` bytes are in bounds.
-                let value_slice = unsafe {
-                    slice::from_raw_parts(found_attr.p_attr_value, found_attr.attr_len as usize)
-                };
+                response.att_read_rsp_mut().value[entry_start + 3] = (group_end_handle >> 8) as u8;
 
                 // Add attribute value (service UUID) to response
-                response.att_read_rsp_mut().value
-                    [value_ptr * 2 + 1..value_ptr * 2 + value_slice.len() + 1]
-                    .copy_from_slice(value_slice);
+                response.att_read_rsp_mut().value[entry_start + 4..entry_start + 4 + attr_len]
+                    // SAFETY: (4) `found_attr` comes from `l2cap_att_search`, so
+                    // `p_attr_value` is the entry's static value and `attr_len`
+                    // — the effective length, never the buffer maximum — is
+                    // inside that value.
+                    .copy_from_slice(unsafe {
+                        slice::from_raw_parts(found_attr.p_attr_value, attr_len)
+                    });
 
-                // Update pointers and counters for next iteration
-                dest_ptr = value_ptr + (found_attr.attr_len as usize / 2);
+                // Update counters for next iteration. A byte count is used rather
+                // than a half-word position because an odd effective length (the
+                // 13-byte default device name, the 11-byte manufacturer name)
+                // cannot be expressed in 16-bit units.
+                written += 4 + attr_len;
 
                 // Move start handle beyond current group to search for next group
                 handle_start = current_handle + found_attr.att_num as usize;
@@ -1111,7 +1115,7 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     }
 
     // If no matching attributes were found, return error response
-    if dest_ptr == 0 {
+    if written == 0 {
         return prepare_error_response(GattOp::AttOpReadByGroupTypeReq as u8, start_handle as u16);
     }
 
@@ -1123,26 +1127,24 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
     response_packet.head_mut()._type = 2; // Type 2 = data packet
 
     // Calculate packet lengths based on data size
-    // Each handle pair is: 4 bytes (start handle + end handle) + format_length
-    // The packet needs:
-    //   - dma_len: (dest_ptr as u32 + 4) * 2
+    // The L2CAP payload is the opcode, the format byte and `written` bytes of
+    // entries, i.e. `written + 2`:
+    //   - dma_len: l2cap_len + 6 (4-byte L2CAP header + 2 RF bytes)
     //   - rf_len: dma_len - 2
-    //   - l2cap_len: dma_len - 6
-    let dma_len = (dest_ptr as u32 + 4) * 2;
-    response_packet.head_mut().dma_len = dma_len;
-    response_packet.head_mut().rf_len = dma_len as u8 - 2;
-    response_packet.head_mut().l2cap_len = dma_len as u16 - 6;
+    let l2cap_len = written + 2;
+    response_packet.head_mut().dma_len = l2cap_len as u32 + 6;
+    response_packet.head_mut().rf_len = l2cap_len as u8 + 4;
+    response_packet.head_mut().l2cap_len = l2cap_len as u16;
 
     // Set response opcode and format byte
     // format byte = attribute value length + 4 (for start and end handles)
     response_packet.att_read_rsp_mut().opcode = GattOp::AttOpReadByGroupTypeRsp as u8;
     response_packet.att_read_rsp_mut().value[0] = format_length as u8 + 4;
 
-    // Copy accumulated response data
-    if dest_ptr > 0 {
-        response_packet.att_read_rsp_mut().value[1..dest_ptr * 2 + 1]
-            .copy_from_slice(&response.att_read_rsp().value[1..dest_ptr * 2 + 1]);
-    }
+    // Copy accumulated response data (the loop bound above keeps this inside
+    // `value`).
+    response_packet.att_read_rsp_mut().value[1..1 + written]
+        .copy_from_slice(&response.att_read_rsp().value[1..1 + written]);
 
     Some(response_packet)
 }
@@ -1265,24 +1267,26 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         let ram_start_addr = addr_of!(__RAM_START_ADDR) as u32;
         let attr_addr = current_attr.p_attr_value as u32;
 
-        if attr_addr <= ram_start_addr {
+        if attr_addr <= ram_start_addr || is_readonly_ram_attr(att_handle) {
             return response;
         }
 
         // Get mutable slice of attribute value and incoming data
-        // SAFETY: (4) the handle was range-checked against the table count and
-        // `attr_addr > ram_start_addr` gates out ROM-resident values, so
-        // `p_attr_value` is a RAM-backed static of `attr_len` bytes. Today every
-        // RAM-backed value entry carries a write callback, so this raw path only
-        // sees read-only entries and the gate rejects them; the bounds argument
-        // holds either way.
+        // SAFETY: (4) the handle was range-checked against the table count,
+        // `attr_addr > ram_start_addr` gates out ROM-resident values, and
+        // `is_readonly_ram_attr` excludes the config-driven SRAM values
+        // (device name, firmware revision, manufacturer name), so
+        // `p_attr_value` is a RAM-backed static of `attr_len` bytes that this
+        // path is allowed to overwrite.
         let attr_value_slice = unsafe {
             slice::from_raw_parts_mut(current_attr.p_attr_value, current_attr.attr_len as usize)
         };
 
         // SAFETY: (4) audited `Packet`-union view. The source is `value[6]` of
-        // the packet the RF/DMA layer filled; `attr_len` is at most 16 in the
-        // table, so `value[6..6 + attr_len]` stays inside the 30-byte field.
+        // the packet the RF/DMA layer filled; `attr_len` is at most 19 in the
+        // table, and the only 19-byte entry (handle 3) is excluded by
+        // `is_readonly_ram_attr` above, so the largest reachable copy is 16
+        // bytes and `value[6..6 + attr_len]` stays inside the 30-byte field.
         let incoming_value_slice = unsafe {
             slice::from_raw_parts(
                 addr_of!(packet.l2cap_data().value[6]),
@@ -1370,7 +1374,7 @@ mod tests {
             let vendor = version_ind.vendor;
             let sub_ver = version_ind.sub_ver;
             assert_eq!(dma_len, 8);
-            assert_eq!(vendor, VENDOR_ID);
+            assert_eq!(vendor, crate::sdk::ble_app::radio_config().vendor_id);
             assert_eq!(version_ind.main_ver, 0x08);
             assert_eq!(sub_ver, 0x08);
         }
@@ -1488,7 +1492,7 @@ mod tests {
         let version_ind = response.version_ind();
         assert_eq!(version_ind.opcode, 0x0C);
         let vendor = version_ind.vendor;
-        assert_eq!(vendor, VENDOR_ID);
+        assert_eq!(vendor, crate::sdk::ble_app::radio_config().vendor_id);
     }
 
     #[test]
@@ -2741,11 +2745,12 @@ mod tests {
 
     #[test]
     #[mry::lock(read_reg_system_tick)]
-    fn test_l2cap_att_handler_read_by_group_type_req_loop_break_on_dest_ptr_overflow() {
+    fn test_l2cap_att_handler_read_by_group_type_req_loop_break_on_buffer_overflow() {
         setup_system_tick_mock();
 
         // This test verifies another case where the loop in ReadByGroupTypeReq breaks:
-        // when the destination buffer would overflow (dest_ptr * 2 + attr_len > 0x13)
+        // when the entry would not fit the response's 22-byte value array
+        // (format byte + 2-byte handles + the value)
 
         // Find a valid attribute with a large attr_len
         let attr_to_modify = 1; // Use the first service definition
@@ -2753,8 +2758,8 @@ mod tests {
 
         // Temporarily increase the attribute length to trigger the buffer overflow check
         unsafe {
+            // Two handles plus 20 bytes cannot fit the 22-byte value array.
             (*(addr_of_mut!(get_gAttributes()[attr_to_modify]) as *mut AttributeT)).attr_len = 20;
-            // Large enough to exceed the 0x13 limit
         }
 
         // Create a valid UUID for primary service that exists
@@ -3898,5 +3903,250 @@ mod tests {
             let result = l2cap_att_search(att_num, att_num + 5, &uuid_bytes);
             assert!(result.is_none());
         }
+    }
+
+    /// Inject a config with a 19-byte device name and an 11-byte mesh name and
+    /// assert that both read paths serve exactly those lengths.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_paths_serve_injected_gatt_value_lengths() {
+        setup_system_tick_mock();
+
+        let factory = crate::sdk::ble_app::radio_config();
+        let mut cfg = factory;
+        cfg.device_name = b"0123456789ABCDEFGHI";
+        cfg.default_mesh_name = "out_of_mesh";
+        crate::sdk::ble_app::set_radio_config(cfg);
+        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+
+        // ---- ReadRequest, handle 3 (device name): exactly 19 bytes ----
+        let mut data = [0u8; 6];
+        data[0] = GattOp::AttOpReadReq as u8;
+        data[1] = 3;
+        let response = handle_read_request(&create_att_packet(0, &data)).unwrap();
+        let opcode = response.att_read_rsp().opcode;
+        let rf_len = response.head().rf_len;
+        let l2cap_len = response.head().l2cap_len;
+        let dma_len = response.head().dma_len;
+        assert_eq!(opcode, GattOp::AttOpReadRsp as u8);
+        assert_eq!(rf_len, 19 + 5, "19-byte value + L2CAP/ATT overhead");
+        assert_eq!(l2cap_len, 19 + 1);
+        assert_eq!(dma_len, 19 + 7);
+        assert_eq!(
+            &response.att_read_rsp().value[..19],
+            b"0123456789ABCDEFGHI",
+            "the whole 19-byte device name is served"
+        );
+
+        // ---- ReadRequest, handle 11 (manufacturer name): exactly 11 bytes ----
+        data[1] = 11;
+        let response = handle_read_request(&create_att_packet(0, &data)).unwrap();
+        let rf_len = response.head().rf_len;
+        assert_eq!(
+            rf_len,
+            11 + 5,
+            "only the mesh name is served, not the buffer"
+        );
+        assert_eq!(&response.att_read_rsp().value[..11], b"out_of_mesh");
+        assert_eq!(
+            &response.att_read_rsp().value[11..],
+            &[0u8; 11][..],
+            "no trailing bytes are written past the effective length"
+        );
+
+        // ---- ReadByTypeRequest, UUID 0x2A00 (device name) ----
+        let mut data = [0u8; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8;
+        data[1] = 1; // Starting Handle
+        data[3] = 20; // Ending Handle
+        data[5..7].copy_from_slice(&0x2A00u16.to_le_bytes());
+        let response = handle_read_by_type_request(&create_att_packet(0, &data)).unwrap();
+        let opcode = response.att_read_rsp().opcode;
+        let pair_len = response.att_read_rsp().value[0];
+        let returned_handle = response.att_read_rsp().value[1];
+        assert_eq!(opcode, GattOp::AttOpReadByTypeRsp as u8);
+        assert_eq!(pair_len, 19 + 2, "value length + handle");
+        assert_eq!(returned_handle, 3);
+        assert_eq!(
+            &response.att_read_rsp().value[3..22],
+            b"0123456789ABCDEFGHI",
+            "the 19-byte value fills the response's value slot exactly"
+        );
+
+        // ---- ReadByTypeRequest, UUID 0x2A29 (manufacturer name) ----
+        data[1] = 7;
+        data[3] = 15;
+        data[5..7].copy_from_slice(&0x2A29u16.to_le_bytes());
+        let response = handle_read_by_type_request(&create_att_packet(0, &data)).unwrap();
+        let pair_len = response.att_read_rsp().value[0];
+        assert_eq!(pair_len, 11 + 2, "value length + handle");
+        assert_eq!(&response.att_read_rsp().value[3..14], b"out_of_mesh");
+
+        // Leave the process-wide configuration as it was found.
+        crate::sdk::ble_app::set_radio_config(factory);
+        crate::sdk::app_att_light::init_gatt_profile(&factory);
+        let restored = handle_read_request(&create_att_packet(0, &{
+            let mut d = [0u8; 6];
+            d[0] = GattOp::AttOpReadReq as u8;
+            d[1] = 3;
+            d
+        }))
+        .unwrap();
+        assert_eq!(
+            restored.head().rf_len,
+            13 + 5,
+            "factory name length restored"
+        );
+    }
+
+    /// Build a `ReadByGroupType` request for `uuid` over
+    /// `start_handle..=end_handle`, in the byte layout the ATT opcode expects.
+    fn read_by_group_type_packet(start_handle: u8, end_handle: u8, uuid: u16) -> Packet {
+        let mut data = [0u8; 10];
+        data[0] = GattOp::AttOpReadByGroupTypeReq as u8;
+        data[1] = start_handle;
+        data[3] = end_handle;
+        data[5..7].copy_from_slice(&uuid.to_le_bytes());
+        create_att_packet(0, &data)
+    }
+
+    /// Regression (HIGH-1): the third ATT read path, `ReadByGroupType`, served
+    /// the table's raw `attr_len` — the buffer *maximum* once the config-driven
+    /// values moved into `CriticalSectionMutex` buffers — and bounded the copy
+    /// with `MAX_BUFFER_SIZE` (0x13), which assumes the value starts at offset 3
+    /// of the 22-byte `value` array. In this response the first value starts at
+    /// offset 5, so a UUID `0x2A00` request copied 19 bytes into
+    /// `value[5..24]` and panicked. It must serve `attr_effective_len` instead,
+    /// bounded by the real destination.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_by_group_type_serves_effective_value_lengths() {
+        setup_system_tick_mock();
+
+        // A nonzero revision proves handle 9 serves the injected word, not a
+        // fixed constant.
+        let factory = crate::sdk::ble_app::radio_config();
+        let mut cfg = factory;
+        cfg.build_version = 0xA1B2_C3D4;
+        crate::sdk::ble_app::set_radio_config(cfg);
+        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+
+        // `ReadByGroupType` replaces `attr_len` with the effective length, so the
+        // response's format byte (value length + two handles) is what the client
+        // sees. `response.att_read_rsp().value.len()` is the slot the copy must
+        // stay inside.
+        let value_capacity = 22 - 5; // first value starts after the format byte + two handles
+
+        // ---- UUID 0x2A00 (handle 3, device name): 13 factory bytes ----
+        // Through `l2cap_att_handler`, not the handler directly: dispatch has no
+        // pairing or login gate, so the untrusted-packet leg is the way the old
+        // panic was remotely reachable and is what this regression must lock.
+        let response = l2cap_att_handler(&read_by_group_type_packet(1, 29, 0x2A00)).unwrap();
+        let opcode = response.att_read_rsp().opcode;
+        let format_length = response.att_read_rsp().value[0];
+        assert_eq!(opcode, GattOp::AttOpReadByGroupTypeRsp as u8);
+        assert_eq!(format_length, 13 + 4, "13 name bytes + two 2-byte handles");
+        assert_eq!(
+            format_length - 4,
+            attr_effective_len(3, &get_gAttributes()[3]),
+            "served length is the effective length, not the buffer maximum"
+        );
+        assert!(format_length - 4 <= value_capacity);
+        assert_eq!(&response.att_read_rsp().value[1..3], &[3u8, 0][..]);
+        assert_eq!(&response.att_read_rsp().value[5..18], b"Telink tLight");
+        assert_eq!(
+            &response.att_read_rsp().value[18..],
+            &[0u8; 4][..],
+            "no bytes are written past the served value"
+        );
+        // The L2CAP length must match the bytes actually served: opcode +
+        // format byte + two 2-byte handles + 13 name bytes. The half-word
+        // accounting this replaced declared 18 here and dropped the last byte.
+        let l2cap_len = response.head().l2cap_len;
+        let rf_len = response.head().rf_len;
+        let dma_len = response.head().dma_len;
+        assert_eq!(l2cap_len, 19);
+        assert_eq!(rf_len, 23);
+        assert_eq!(dma_len, 25);
+
+        // ---- UUID 0x2A26 (handle 9, firmware revision): 4 bytes ----
+        let response =
+            handle_read_by_group_type_request(&read_by_group_type_packet(1, 29, 0x2A26)).unwrap();
+        let format_length = response.att_read_rsp().value[0];
+        assert_eq!(format_length, 4 + 4, "4 revision bytes + two handles");
+        assert_eq!(
+            format_length - 4,
+            attr_effective_len(9, &get_gAttributes()[9])
+        );
+        assert!(format_length - 4 <= value_capacity);
+        assert_eq!(
+            &response.att_read_rsp().value[5..9],
+            0xA1B2_C3D4u32.to_le_bytes().as_slice()
+        );
+
+        // ---- UUID 0x2A29 (handle 11, manufacturer name): 11 bytes ----
+        let response =
+            handle_read_by_group_type_request(&read_by_group_type_packet(1, 29, 0x2A29)).unwrap();
+        let format_length = response.att_read_rsp().value[0];
+        assert_eq!(format_length, 11 + 4, "11 name bytes + two handles");
+        assert_eq!(
+            format_length - 4,
+            attr_effective_len(11, &get_gAttributes()[11])
+        );
+        assert!(format_length - 4 <= value_capacity);
+        assert_eq!(&response.att_read_rsp().value[5..16], b"out_of_mesh");
+        assert_eq!(&response.att_read_rsp().value[16..], &[0u8; 6][..]);
+        let l2cap_len = response.head().l2cap_len;
+        assert_eq!(l2cap_len, 17, "opcode + format + two handles + 11 bytes");
+
+        // Leave the process-wide configuration as it was found.
+        crate::sdk::ble_app::set_radio_config(factory);
+        crate::sdk::app_att_light::init_gatt_profile(&factory);
+    }
+
+    /// The largest injectable device name (19 bytes) does not fit a
+    /// `ReadByGroupType` entry: two handles plus 19 bytes is 23 of the 22 value
+    /// bytes. The handler must answer with the error response it already uses
+    /// when an entry cannot be added, never index past `value`.
+    #[test]
+    #[mry::lock(read_reg_system_tick)]
+    fn test_read_by_group_type_rejects_value_too_long_for_the_response() {
+        setup_system_tick_mock();
+
+        let factory = crate::sdk::ble_app::radio_config();
+        let mut cfg = factory;
+        cfg.device_name = b"0123456789ABCDEFGHI"; // 19 bytes, the buffer maximum
+        crate::sdk::ble_app::set_radio_config(cfg);
+        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        assert_eq!(
+            attr_effective_len(3, &get_gAttributes()[3]),
+            19,
+            "the injected 19-byte name is live"
+        );
+
+        // The unbounded path a central reaches with no login, so the rejection
+        // is asserted through the dispatcher that has no gate.
+        let response = l2cap_att_handler(&read_by_group_type_packet(1, 29, 0x2A00)).unwrap();
+        let opcode = response.att_err_rsp().opcode;
+        let err_opcode = response.att_err_rsp().err_opcode;
+        let err_handle = response.att_err_rsp().err_handle;
+        assert_eq!(opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(err_opcode, GattOp::AttOpReadByGroupTypeReq as u8);
+        assert_eq!(err_handle, 1, "rejected at the requested start handle");
+
+        // A value that does fit (the 16-byte mesh name) still succeeds at the
+        // maximum: two handles plus 16 bytes is 21 of the 22 value bytes.
+        cfg.default_mesh_name = "0123456789ABCDEF"; // exactly 16 bytes
+        crate::sdk::ble_app::set_radio_config(cfg);
+        crate::sdk::app_att_light::init_gatt_profile(&cfg);
+        let response =
+            handle_read_by_group_type_request(&read_by_group_type_packet(1, 29, 0x2A29)).unwrap();
+        let format_length = response.att_read_rsp().value[0];
+        assert_eq!(format_length, 16 + 4, "16 name bytes + two handles");
+        assert_eq!(&response.att_read_rsp().value[5..21], b"0123456789ABCDEF");
+
+        // Leave the process-wide configuration as it was found.
+        crate::sdk::ble_app::set_radio_config(factory);
+        crate::sdk::app_att_light::init_gatt_profile(&factory);
     }
 }

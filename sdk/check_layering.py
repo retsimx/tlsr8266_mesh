@@ -11,6 +11,20 @@ strips *test-only* code from every ``.rs`` file and then audits what is left:
 
 * every ``.rs`` file may not reference the application layer at all, and may
   not call the application logging macros ``uprintln!`` / ``uprint!``;
+* ``sdk-root-dep`` — production code may not name ``crate::config`` or
+  ``crate::version`` (``SDK_FORBIDDEN_ROOTS``).  ``crate::config`` *was* the
+  legitimate root constant module, and that is exactly why it has to be banned:
+  the SDK read board/product configuration straight out of the application
+  root, so the radio layer could not be lifted out.  C-9 (#71) replaced those
+  reads with an injected ``RadioConfig`` (``sdk/ble_app/config.rs``), and this
+  rule is what keeps the seam honest — it is the difference between an
+  extractable ``rust/src/sdk/`` and one that silently re-acquires an upward
+  dependency before C-10 (#72) moves it into ``crates/tlsr8266-radio``.  The
+  rule reads ``production_code()``, so a ``#[cfg(test)]`` import is exempt;
+  the issue's literal ``rg 'crate::(config|version)' rust/src/sdk/`` criterion
+  is what covers tests, and the two are meant to be satisfied together.
+  ``crate::config`` stays legal everywhere else in ``rust/src/``: the ban is
+  scoped to the subtree being extracted;
 * ``use crate as <ident>;`` and ``extern crate self as <ident>;`` are rejected:
   renaming the crate root would defeat every ``crate::`` rule below;
 * a ``super::`` chain deeper than the file's directory depth is rejected: it
@@ -85,8 +99,10 @@ One path-scoped family of rules rides in the same pass:
   ``SUBSYSTEM_PURITY``) own their domain, so production code there may not name
   the ``crate::`` modules in that row nor import the external crates in it, and
   ``crate::config``, ``mesh_protocol``, ``tlsr8266_hal``, ``critical_section``
-  and the subsystem's own ``fsm`` stay legal.  Two rule names are reported per
-  row: ``<name>-upward-dep`` (a forbidden ``crate::`` module) and
+  and the subsystem's own ``fsm`` stay legal (a subsystem sits in
+  ``rust/src/<name>/``, below the application layer and outside ``rust/src/sdk/``,
+  so the SDK-only ``sdk-root-dep`` ban does not reach it).  Two rule names are
+  reported per row: ``<name>-upward-dep`` (a forbidden ``crate::`` module) and
   ``<name>-forbidden-crate`` (a forbidden external crate).  The rules read
   ``production_code()`` only: a subsystem's own tests use
   ``tlsr8266_pac::fake_mmio::FakeMmio`` and must not be flagged, which is why a
@@ -209,12 +225,17 @@ DEFAULT_CRATE_ROOTS = (
 # `chunks(10)`, so both documented sites leave the firmware tree: 62 - 2 = 60.
 MAX_PRODUCTION_UNSAFE = 60
 
-# Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
-# is deliberately absent: it is the legitimate root-level constant module.
-# `crate::state` is absent here too, but it is *not* legal: the universal
-# `state-removed` rule bans it outright, tests included.  C-7 (#69) added
-# `factory_reset` and `light`, which moved out of `sdk/` (and out of the old
-# `light_manager` module) into app-root subsystems.  `light_manager` and
+# Application-layer modules `rust/src/sdk/` must never name.  `crate::config` is
+# deliberately absent from this set, but it is *not* legal either: C-9 (#71)
+# banned `crate::config` and `crate::version` with `SDK_FORBIDDEN_ROOTS` below,
+# because both were the application root leaking into the layer that C-10 (#72)
+# extracts as `crates/tlsr8266-radio`.  It stays out of this set because
+# `upward-dep` and `sdk-root-dep` report different reasons (a layer inversion
+# versus a root constant dependency) and the diagnostics should stay distinct.
+# `crate::state` is absent here too, but it is likewise *not* legal: the
+# universal `state-removed` rule bans it outright, tests included.  C-7 (#69)
+# added `factory_reset` and `light`, which moved out of `sdk/` (and out of the
+# old `light_manager` module) into app-root subsystems.  `light_manager` and
 # `main_light` stay listed as retired-name fences: nothing may name them again.
 # C-8 (#70) added `uart`: the UART bridge is now `rust/src/uart/`, and
 # `uart_manager` stays in the set as the fence for its deleted spelling.
@@ -236,6 +257,18 @@ UPWARD_MODULES = frozenset(
         "embassy",
     }
 )
+
+# Crate-root modules `rust/src/sdk/` production code must never name.  These are
+# not *above* the SDK the way `UPWARD_MODULES` are — they are the shared
+# root-level constant modules, and `crate::config` was the legitimate way for a
+# module to read the board/product constants.  That legitimacy is the problem:
+# the radio layer read `crate::config::*` and `crate::version::BUILD_VERSION`
+# directly, so it could not be extracted into its own crate.  C-9 (#71) replaced
+# those reads with the injected `RadioConfig` in `sdk/ble_app/config.rs`, and
+# this ban is what keeps the seam from regressing one import at a time.  The
+# scope is the pass this rule runs in — SDK files only — so `crate::config`
+# stays legal everywhere else in `rust/src/` by construction.
+SDK_FORBIDDEN_ROOTS = frozenset({"config", "version"})
 
 # Modules `rust/src/ota/**` production code must never name.  `ota` is the OTA
 # subsystem and owns all OTA state and logic, so it may reach downward only:
@@ -1071,6 +1104,8 @@ def audit_source(
         module = head[0]
         if module in UPWARD_MODULES:
             collector.add(index, "upward-dep", f"crate::{module}")
+        if module in SDK_FORBIDDEN_ROOTS:
+            collector.add(index, "sdk-root-dep", f"crate::{module}")
         if layer is not None:
             if module == "sdk":
                 allowed = len(head) > 1 and head[1] in LAYER_SDK_IMPORTS[layer]

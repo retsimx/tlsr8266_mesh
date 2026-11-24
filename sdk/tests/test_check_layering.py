@@ -130,6 +130,17 @@ class TestRealSdkTree(unittest.TestCase):
         )
         self.assertEqual(violations, [])
 
+    def test_no_sdk_file_names_a_root_constant_module(self) -> None:
+        # C-9 (#71): the `sdk-root-dep` rule only sees production code, but the
+        # issue's acceptance criterion is this literal grep, which also covers
+        # `#[cfg(test)]`.  The rule is the seam; this is the criterion.
+        for path in check_layering.rust_files(str(SDK_ROOT)):
+            text = Path(path).read_text(encoding="utf-8")
+            self.assertIsNone(
+                re.search(r"crate::(?:config|version)\b", text),
+                f"{path} names a crate root constant module",
+            )
+
     def test_production_unsafe_ceiling_equals_the_measured_count(self) -> None:
         # The ratchet may be lowered, never raised: raising it without removing
         # `unsafe` sites leaves the measured count below the ceiling and fails
@@ -337,9 +348,14 @@ class TestGlobalBans(_TempTree):
         self.assert_violations("1: upward-dep: crate::app")
 
     def test_every_banned_module_is_rejected(self) -> None:
+        # `UPWARD_MODULES` (reported as `upward-dep`) plus the two crate-root
+        # constant modules C-9 banned (reported as `sdk-root-dep`).  Both sets
+        # are exercised in one loop because the assertion is on the reported
+        # `crate::<module>`, which is what a reviewer reads either way.
         banned = [
             "app",
             "common",
+            "config",
             "factory_reset",
             "light",
             "main_light",
@@ -352,6 +368,7 @@ class TestGlobalBans(_TempTree):
             "logging",
             "irq",
             "embassy",
+            "version",
         ]
         for module in banned:
             with self.subTest(module=module):
@@ -359,15 +376,56 @@ class TestGlobalBans(_TempTree):
         out = self.assert_violations(*[f"crate::{m}" for m in banned])
         self.assertEqual(len(out.splitlines()), len(banned))
 
-    def test_config_and_sdk_imports_are_legal(self) -> None:
-        # `crate::state` used to be legal here; the universal `state-removed`
-        # rule now bans it outright (see TestStateRemovedRule).
+    def test_sdk_and_root_macro_imports_are_legal(self) -> None:
+        # `crate::sdk` siblings and the root macros stay legal; only the
+        # application layer and the root constant modules are banned.
         self.write(
             "x.rs",
             _lines(
-                "use crate::config::VENDOR_ID;",
                 "use crate::sdk::common::sync::CriticalSectionMutex;",
                 "use crate::BIT;",
+            ),
+        )
+        self.assert_clean()
+
+    def test_config_root_import_is_rejected(self) -> None:
+        # C-9 (#71): `crate::config` was the legitimate root constant module and
+        # is now the one upward dependency that keeps `sdk/` from being
+        # extracted, so the gate rejects it inside the SDK tree.
+        path = self.write(
+            "x.rs",
+            _lines("pub fn f() -> u16 {", "    crate::config::VENDOR_ID", "}"),
+        )
+        out = self.assert_violations("sdk-root-dep: crate::config")
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:2: sdk-root-dep: crate::config"
+        )
+
+    def test_version_root_import_is_rejected(self) -> None:
+        # `crate::version::BUILD_VERSION` is the other half of the same ban: the
+        # extracted radio crate receives the version word through `RadioConfig`.
+        path = self.write("x.rs", _lines("use crate::version::BUILD_VERSION;"))
+        out = self.assert_violations("sdk-root-dep: crate::version")
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(
+            out.splitlines()[0], f"{path}:1: sdk-root-dep: crate::version"
+        )
+
+    def test_root_import_inside_cfg_test_is_exempt(self) -> None:
+        # The rule reads `production_code()`, so a test-only import is not
+        # flagged here.  The issue's criterion is a literal grep, which is
+        # stricter and covers tests too: both are enforced, at different scopes.
+        self.write(
+            "x.rs",
+            _lines(
+                "pub fn f() {}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use crate::config::VENDOR_ID;",
+                "    use crate::version::BUILD_VERSION;",
+                "}",
             ),
         )
         self.assert_clean()
@@ -386,6 +444,52 @@ class TestGlobalBans(_TempTree):
             ),
         )
         self.assert_clean()
+
+
+class TestSdkRootBanScope(_TempSrcTree):
+    """`sdk-root-dep` is scoped to the extracted subtree, not the whole tree.
+
+    The rule lives in the layering pass, which only ever reads ``--root``
+    (``rust/src/sdk``).  `crate::config` is the legitimate root constant module
+    for the application, so a non-SDK file that names it must stay clean —
+    otherwise the ban would be an app-wide refactor instead of a seam.
+    """
+
+    def test_crate_config_is_legal_outside_the_sdk_tree(self) -> None:
+        self.write_src("app.rs", _lines("use crate::config::VENDOR_ID;"))
+        self.write("ble_app/clean.rs", _lines("pub fn f() {}"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--src-root",
+                    str(self.src_root),
+                    "--crate-root",
+                    str(self.crate_root),
+                ]
+            )
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertNotIn("sdk-root-dep", out.getvalue())
+
+    def test_the_same_import_inside_the_sdk_tree_is_rejected(self) -> None:
+        # Same file content, SDK path: the only difference is the subtree.
+        path = self.write_src("sdk/ble_app/config_user.rs", _lines("use crate::config::VENDOR_ID;"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_layering.main(
+                [
+                    "--root",
+                    str(self.root),
+                    "--src-root",
+                    str(self.src_root),
+                    "--crate-root",
+                    str(self.crate_root),
+                ]
+            )
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn(f"{path}:1: sdk-root-dep: crate::config", out.getvalue())
 
 
 class TestLayerRules(_TempTree):
@@ -815,6 +919,20 @@ class TestHistoricalTrapFiles(_TempTree):
         )
         self.assert_violations(f"{line}: upward-dep: crate::uart_manager")
 
+    def test_config_root_import_is_rejected_in_a_real_sdk_file(self) -> None:
+        # C-9 (#71): the ten real import sites this rule replaces were spread
+        # across eight SDK files, so the trap is re-injected into one of them
+        # rather than a synthetic stub — that also proves the rule still fires
+        # on a file that legitimately names a dozen other `crate::` paths.
+        relative = "ble_app/ble_ll_attribute.rs"
+        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
+        self.write(relative, source)
+        self.assert_clean()
+
+        anchor = "use tlsr8266_pac::read_reg_system_tick;"
+        _, line = self._copy_and_inject(relative, anchor, "\nuse crate::config::VENDOR_ID;")
+        self.assert_violations(f"{line}: sdk-root-dep: crate::config")
+
 
 class TestPathBypasses(_TempTree):
     """Relative and aliased paths must not be able to dodge the crate:: rules."""
@@ -927,7 +1045,7 @@ class TestCli(_TempTree):
 
     def test_stray_non_rust_files_are_ignored(self) -> None:
         self.write("notes.txt", "use crate::app::App;\n")
-        self.write("clean.rs", _lines("use crate::config::VENDOR_ID;"))
+        self.write("clean.rs", _lines("use crate::sdk::light::RecoverStatus;"))
         self.assert_clean()
 
     def test_explicit_root_skips_the_universal_pass(self) -> None:

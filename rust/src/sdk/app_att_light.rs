@@ -1,15 +1,15 @@
 use core::cell::UnsafeCell;
 use core::ptr::{addr_of, null, null_mut};
 use core::slice;
+use core::sync::atomic::AtomicU8;
 
-use crate::config::{DEVICE_NAME, MESH_NAME};
 use crate::sdk::ble_app::ble_ll_pair::{pair_read, pair_write, PAIR_LOGIN_OK};
 use crate::sdk::ble_app::light_ll::mesh_management::{
     mesh_report_status_enable, mesh_report_status_enable_mask,
 };
 use crate::sdk::ble_app::rf_drv_8266::rf_link_slave_data_write;
+use crate::sdk::ble_app::RadioConfig;
 use crate::sdk::light::*;
-use crate::version::BUILD_VERSION;
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use mesh_protocol::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
@@ -114,15 +114,8 @@ static APPEARANCE: u16 = GAP_APPEARE_UNKNOWN;
 static PERI_CONN_PARAM_CHAR: u8 = CHAR_PROP_READ;
 
 static FW_REVISION_CHAR: u8 = CHAR_PROP_READ;
-static FW_REVISION_VALUE: [u8; 4] = [
-    (BUILD_VERSION & 0xff) as u8,
-    ((BUILD_VERSION >> 8) & 0xff) as u8,
-    ((BUILD_VERSION >> 16) & 0xff) as u8,
-    ((BUILD_VERSION >> 24) & 0xff) as u8,
-];
 
 static MANU_NAME_STRING_CHAR: u8 = CHAR_PROP_READ;
-static MANU_NAME_STRING_VALUE: &[u8] = MESH_NAME.as_bytes();
 
 static MODEL_ID_CHAR: u8 = CHAR_PROP_READ;
 static MODEL_ID_VALUE: &[u8] = b"model id 123";
@@ -149,8 +142,33 @@ const PERI_CONN_PARAMETERS: GapPeriConnectParamsT = GapPeriConnectParamsT {
     timeout: 1000,
 };
 
-// note !!!DEVICE_NAME max 13 bytes
-static BLE_G_DEV_NAME: &'static [u8] = DEVICE_NAME;
+// ---- Config-driven GATT values --------------------------------------------
+// The 29-entry table below stays immutable in `.rodata`, so the three values
+// that `RadioConfig` drives live in these SRAM buffers instead of in the table
+// itself. `init_gatt_profile` fills them and `attr_effective_len` is the only
+// way the read paths learn how many bytes to serve.
+
+/// Maximum device-name value: the ReadByType response value slot starts at
+/// offset 3 of a 22-byte array, so 19 bytes is the largest that always fits.
+const DEV_NAME_MAX: u8 = 19;
+/// Firmware revision value: the little-endian build-version word.
+const FW_REVISION_MAX: u8 = 4;
+/// Maximum manufacturer-name value (the mesh network name is 16 bytes).
+const MANU_NAME_MAX: u8 = 16;
+
+/// Device-name value (GATT handle 3). Written only by `init_gatt_profile`.
+static DEV_NAME_BUF: CriticalSectionMutex<[u8; DEV_NAME_MAX as usize]> =
+    CriticalSectionMutex::new(*b"Telink tLight\0\0\0\0\0\0");
+static DEV_NAME_LEN: AtomicU8 = AtomicU8::new(13);
+
+/// Manufacturer-name value (GATT handle 11), i.e. the mesh network name.
+static MANU_NAME_BUF: CriticalSectionMutex<[u8; MANU_NAME_MAX as usize]> =
+    CriticalSectionMutex::new(*b"out_of_mesh\0\0\0\0\0");
+static MANU_NAME_LEN: AtomicU8 = AtomicU8::new(11);
+
+/// Firmware-revision value (GATT handle 9), the build-version word.
+static FW_REVISION_BUF: CriticalSectionMutex<[u8; FW_REVISION_MAX as usize]> =
+    CriticalSectionMutex::new([0; 4]);
 
 //////////////////////// SPP /////////////////////////////////////////////////////
 pub static TELINK_SPP_SERVICE_UUID: [u8; 16] = TELINK_SPP_UUID_SERVICE;
@@ -325,10 +343,12 @@ struct GAttributesType([AttributeT; GATT_ATT_COUNT]);
 
 // SAFETY: (4) audited `Sync` wrapper — the table itself is never mutated in
 // production. Each entry points at immutable statics, at the
-// `SPP_DATA_SERVER2CLIENT_DATA` / `SEND_TO_MASTER` `CriticalSectionMutex` cells
-// (written only through their locks), or at the pair/OTA scratch arrays written
-// only from the ATT handler. Under `cfg(test)` the table lives in a
-// `TestGAttributes` cell and the host test harness is its only writer.
+// `SPP_DATA_SERVER2CLIENT_DATA` / `SEND_TO_MASTER` / `DEV_NAME_BUF` /
+// `MANU_NAME_BUF` / `FW_REVISION_BUF` `CriticalSectionMutex` cells (written only
+// through their locks, or by `init_gatt_profile` before the radio starts), or at
+// the pair/OTA scratch arrays written only from the ATT handler. Under
+// `cfg(test)` the table lives in a `TestGAttributes` cell and the host test
+// harness is its only writer.
 unsafe impl Sync for GAttributesType {}
 
 /// Single definition of the table, shared by the production and test statics so
@@ -341,10 +361,10 @@ const GATT_TABLE: GAttributesType = GAttributesType([
     attrdef!(
         0,
         2,
-        BLE_G_DEV_NAME.len(),
-        BLE_G_DEV_NAME.len(),
+        DEV_NAME_MAX,
+        DEV_NAME_MAX,
         DEV_NAME_UUID,
-        BLE_G_DEV_NAME
+        DEV_NAME_BUF
     ),
     attrdef!(
         0,
@@ -366,15 +386,22 @@ const GATT_TABLE: GAttributesType = GAttributesType([
     // device info
     attrdefu!(9, 2, 2, 2, PRIMARY_SERVICE_UUID, DEV_INFO_UUID),
     attrdefu!(0, 2, 1, 1, CHARACTER_UUID, FW_REVISION_CHAR),
-    attrdef!(0, 2, 4, 4, FW_REVISION_CHAR_UUID, FW_REVISION_VALUE),
+    attrdef!(
+        0,
+        2,
+        FW_REVISION_MAX,
+        FW_REVISION_MAX,
+        FW_REVISION_CHAR_UUID,
+        FW_REVISION_BUF
+    ),
     attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MANU_NAME_STRING_CHAR),
     attrdef!(
         0,
         2,
-        MANU_NAME_STRING_VALUE.len(),
-        MANU_NAME_STRING_VALUE.len(),
+        MANU_NAME_MAX,
+        MANU_NAME_MAX,
         MANU_NAME_STRING_CHAR_UUID,
-        MANU_NAME_STRING_VALUE
+        MANU_NAME_BUF
     ),
     attrdefu!(0, 2, 1, 1, CHARACTER_UUID, MODEL_ID_CHAR),
     attrdef!(
@@ -503,6 +530,55 @@ pub fn get_gAttributes() -> &'static mut [AttributeT; GATT_ATT_COUNT] {
     // whole process and each call re-borrows the same cell without keeping the
     // previous borrow alive.
     unsafe { &mut (*G_ATTRIBUTES.0.get()).0 }
+}
+
+/// Copies the configuration-driven GATT values into their SRAM buffers.
+///
+/// Strings are clamped to the buffer size and zero-padded, so the served length
+/// and the buffer contents can never disagree. Each lock is held for exactly
+/// one copy, so no interrupt-masking lock outlives this call.
+pub fn init_gatt_profile(cfg: &RadioConfig) {
+    let device_name = &cfg.device_name[..cfg.device_name.len().min(DEV_NAME_MAX as usize)];
+    {
+        let mut buf = DEV_NAME_BUF.lock();
+        buf.fill(0);
+        buf[..device_name.len()].copy_from_slice(device_name);
+    }
+    DEV_NAME_LEN.set(device_name.len() as u8);
+
+    let mesh_name_bytes = cfg.default_mesh_name.as_bytes();
+    let mesh_name = &mesh_name_bytes[..mesh_name_bytes.len().min(MANU_NAME_MAX as usize)];
+    {
+        let mut buf = MANU_NAME_BUF.lock();
+        buf.fill(0);
+        buf[..mesh_name.len()].copy_from_slice(mesh_name);
+    }
+    MANU_NAME_LEN.set(mesh_name.len() as u8);
+
+    FW_REVISION_BUF
+        .lock()
+        .copy_from_slice(&cfg.build_version.to_le_bytes());
+}
+
+/// Length of `attr`'s value as it must be served over ATT.
+///
+/// Handles 3 (device name) and 11 (manufacturer name) carry a runtime length, so
+/// their `attr_len` is only the buffer maximum; every other entry serves its
+/// fixed `attr_len`.
+pub fn attr_effective_len(handle: usize, attr: &AttributeT) -> u8 {
+    match handle {
+        3 => DEV_NAME_LEN.get().min(DEV_NAME_MAX),
+        11 => MANU_NAME_LEN.get().min(MANU_NAME_MAX),
+        _ => attr.attr_len,
+    }
+}
+
+/// True for the SRAM-backed GATT values, which are read-only on the wire.
+///
+/// They live above `__RAM_START_ADDR`, so the ATT write path's ROM check does not
+/// reject them; it consults this instead.
+pub fn is_readonly_ram_attr(handle: usize) -> bool {
+    matches!(handle, 3 | 9 | 11)
 }
 
 #[cfg(test)]
@@ -898,5 +974,232 @@ mod tests {
 
         crate::ota::reset_for_test();
         reset_ota_write_slot();
+    }
+
+    // ---- Config-driven GATT values -----------------------------------------
+
+    use crate::sdk::ble_app::ble_ll_attribute::{l2cap_att_handler, GattOp};
+    use crate::sdk::ble_app::config::DEFAULT;
+    use crate::sdk::ble_app::{radio_config, set_radio_config};
+    use core::ptr::addr_of_mut;
+    use mesh_protocol::packet_types::PacketL2capData;
+
+    /// Restore the factory profile. The suite runs with `--test-threads=1`, and
+    /// every test below leaves the process-wide configuration as it found it.
+    fn restore_default_profile() {
+        set_radio_config(DEFAULT);
+        init_gatt_profile(&DEFAULT);
+    }
+
+    /// The three SRAM-backed GATT values, for byte-for-byte comparison.
+    fn sram_values() -> ([u8; 19], [u8; 4], [u8; 16]) {
+        (
+            *DEV_NAME_BUF.lock(),
+            *FW_REVISION_BUF.lock(),
+            *MANU_NAME_BUF.lock(),
+        )
+    }
+
+    /// Build an ATT write packet: `value[3]` is the opcode, `value[4..6]` the
+    /// little-endian handle and `value[6..]` the value, matching the layout
+    /// `l2cap_att_handler` reads out of the packed union. `handle1` is the byte
+    /// the write path reads as its `>= 3` "handle" gate.
+    fn write_packet(opcode: u8, handle: u16, payload: &[u8]) -> Packet {
+        let mut packet = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: payload.len() as u16 + 3,
+                chan_id: 4,
+                opcode: 0,
+                handle: 4,
+                handle1: handle as u8,
+                value: [0; 30],
+            },
+        };
+        packet.l2cap_data_mut().value[1] = 4;
+        packet.l2cap_data_mut().value[3] = opcode;
+        packet.l2cap_data_mut().value[4] = handle as u8;
+        packet.l2cap_data_mut().value[5] = (handle >> 8) as u8;
+        packet.l2cap_data_mut().value[6..6 + payload.len()].copy_from_slice(payload);
+        packet
+    }
+
+    /// A 19-byte name, a distinct mesh name, a distinct build version and a
+    /// shorter name: every config-driven GATT value follows `RadioConfig`.
+    #[test]
+    fn test_init_gatt_profile_serves_injected_config() {
+        const NAME_19: &[u8] = b"0123456789ABCDEFGHI";
+        const NAME_20: &[u8] = b"0123456789ABCDEFGHIJ";
+
+        let mut cfg = radio_config();
+        cfg.device_name = NAME_19;
+        cfg.default_mesh_name = "mesh-42";
+        cfg.build_version = 0xA1B2_C3D4;
+        set_radio_config(cfg);
+        init_gatt_profile(&cfg);
+
+        let device = *DEV_NAME_BUF.lock();
+        let manu = *MANU_NAME_BUF.lock();
+        assert_eq!(DEV_NAME_LEN.get(), 19, "a 19-byte name is kept whole");
+        assert_eq!(&device[..], NAME_19);
+        assert_eq!(MANU_NAME_LEN.get(), 7);
+        assert_eq!(&manu[..7], b"mesh-42");
+        assert_eq!(&manu[7..], &[0u8; 9][..], "the tail is zeroed");
+        assert_eq!(*FW_REVISION_BUF.lock(), 0xA1B2_C3D4u32.to_le_bytes());
+
+        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 19);
+        assert_eq!(
+            attr_effective_len(9, &get_gAttributes()[9]),
+            4,
+            "the version word is fixed"
+        );
+        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 7);
+        assert_eq!(
+            attr_effective_len(4, &get_gAttributes()[4]),
+            7,
+            "other handles keep attr_len"
+        );
+
+        // A shorter name is zero-padded and served at its own length.
+        let mut short = cfg;
+        short.device_name = b"ab";
+        short.default_mesh_name = "m";
+        init_gatt_profile(&short);
+        let device = *DEV_NAME_BUF.lock();
+        assert_eq!(DEV_NAME_LEN.get(), 2);
+        assert_eq!(&device[..2], b"ab");
+        assert_eq!(&device[2..], &[0u8; 17][..]);
+        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 2);
+        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 1);
+
+        // An over-long name is clamped to the buffer size.
+        let mut long = cfg;
+        long.device_name = NAME_20;
+        init_gatt_profile(&long);
+        assert_eq!(DEV_NAME_LEN.get(), 19);
+        assert_eq!(&DEV_NAME_BUF.lock()[..], NAME_19);
+
+        restore_default_profile();
+        assert_eq!(DEV_NAME_LEN.get(), 13);
+        assert_eq!(MANU_NAME_LEN.get(), 11);
+        assert_eq!(*FW_REVISION_BUF.lock(), [0; 4]);
+        assert_eq!(&DEV_NAME_BUF.lock()[..13], b"Telink tLight");
+        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 13);
+        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 11);
+    }
+
+    /// `AttOpWriteReq` and `AttOpWriteCmd` to handles 3, 9 and 11 must not change
+    /// the config-driven values.
+    #[test]
+    fn test_write_requests_cannot_mutate_config_driven_gatt_values() {
+        restore_default_profile();
+        let before = sram_values();
+        let payload = [0xEE; 16];
+
+        for handle in [3u16, 9, 11] {
+            for opcode in [GattOp::AttOpWriteReq as u8, GattOp::AttOpWriteCmd as u8] {
+                let response = l2cap_att_handler(&write_packet(opcode, handle, &payload));
+                assert!(
+                    response.is_none(),
+                    "handle {handle} rejects writes: its declaration is read-only"
+                );
+                assert_eq!(
+                    sram_values(),
+                    before,
+                    "handle {handle} must keep its config-driven value"
+                );
+            }
+        }
+    }
+
+    /// With the declaration's write bits patched on, `is_readonly_ram_attr` is
+    /// the only gate left rejecting the write, so this reaches that branch.
+    #[test]
+    fn test_readonly_ram_guard_rejects_write_when_permission_is_patched() {
+        restore_default_profile();
+        let before = sram_values();
+        let payload = [0xEE; 16];
+        // Characteristic declarations sit at `handle - 1`; give them write bits.
+        let mut writable_props: u8 = CHAR_PROP_READ | CHAR_PROP_WRITE;
+
+        for handle in [3usize, 9, 11] {
+            let declaration = handle - 1;
+            let original_props = get_gAttributes()[declaration].p_attr_value;
+            // SAFETY: (4) test-only patch of the table's own declaration entry;
+            // the original pointer is restored before `writable_props` (a local)
+            // goes out of scope.
+            unsafe {
+                (*(addr_of_mut!(get_gAttributes()[declaration]) as *mut AttributeT)).p_attr_value =
+                    addr_of_mut!(writable_props);
+            }
+
+            let write_req = l2cap_att_handler(&write_packet(
+                GattOp::AttOpWriteReq as u8,
+                handle as u16,
+                &payload,
+            ));
+            let write_cmd = l2cap_att_handler(&write_packet(
+                GattOp::AttOpWriteCmd as u8,
+                handle as u16,
+                &payload,
+            ));
+
+            // SAFETY: (4) restore the declaration value pointer patched above.
+            unsafe {
+                (*(addr_of_mut!(get_gAttributes()[declaration]) as *mut AttributeT)).p_attr_value =
+                    original_props;
+            }
+
+            assert_eq!(
+                write_req.map(|p| p.att_write_rsp().opcode),
+                Some(GattOp::AttOpWriteRsp as u8),
+                "handle {handle} gets a write response, so the RAM guard is what rejected it"
+            );
+            assert!(write_cmd.is_none(), "a write command has no response");
+            assert_eq!(
+                sram_values(),
+                before,
+                "handle {handle} must keep its config-driven value"
+            );
+        }
+    }
+
+    /// `STATUS_CCC` (handle 19) must stay writable: subscriptions depend on it.
+    ///
+    /// `STATUS_CCC` itself sits below the host stand-in for `__RAM_START_ADDR`,
+    /// so the entry is pointed at a local value buffer; that exercises the same
+    /// handler decision (handle 19 is not in `is_readonly_ram_attr`, so the copy
+    /// proceeds) without depending on the host's static layout.
+    #[test]
+    fn test_status_ccc_remains_writable() {
+        let original_ptr = get_gAttributes()[19].p_attr_value;
+        let mut ccc = STATUS_CCC;
+        // SAFETY: (4) test-only patch of the table's own CCC entry; the pointer is
+        // restored before the local buffer `ccc` goes out of scope.
+        unsafe {
+            (*(addr_of_mut!(get_gAttributes()[19]) as *mut AttributeT)).p_attr_value =
+                addr_of_mut!(ccc) as *mut u8;
+        }
+
+        let response = l2cap_att_handler(&write_packet(
+            GattOp::AttOpWriteReq as u8,
+            19,
+            &[0x02, 0x00],
+        ));
+
+        // SAFETY: (4) restore the CCC value pointer patched above.
+        unsafe {
+            (*(addr_of_mut!(get_gAttributes()[19]) as *mut AttributeT)).p_attr_value = original_ptr;
+        }
+
+        assert_eq!(
+            response.map(|p| p.att_write_rsp().opcode),
+            Some(GattOp::AttOpWriteRsp as u8)
+        );
+        assert_eq!(ccc, [0x02, 0x00], "handle 19 must accept the write");
+        assert!(
+            !is_readonly_ram_attr(19),
+            "the CCC handle must not be treated as read-only RAM"
+        );
+        assert_eq!(STATUS_CCC, [0x01, 0x00], "the CCC static is left alone");
     }
 }

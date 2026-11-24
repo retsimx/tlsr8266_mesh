@@ -401,8 +401,8 @@ fn handle_bridge_operations() {
 /// - Generating and sending mesh status reports via BLE and UART
 #[cfg_attr(test, mry::mry)]
 fn process_mesh_operations() {
-    use crate::config::VENDOR_ID;
     use crate::sdk::ble_app::ble_ll_pair::pair_proc;
+    use crate::sdk::ble_app::radio_config;
     use mesh_protocol::mesh_types::MESH_NODE_ST_VAL_LEN;
     use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 
@@ -434,6 +434,7 @@ fn process_mesh_operations() {
     if count != 0 {
         // BLE path: send status notification to the connected central.
         if is_add_packet_buf_ready() {
+            let vendor_id = radio_config().vendor_id;
             // Create BLE ATT packet for mesh status reporting
             let mut pkt = Packet {
                 att_cmd: PacketAttCmd {
@@ -454,8 +455,8 @@ fn process_mesh_operations() {
                         // Initialize with mesh status header: [0xdc, vendor_id_low, vendor_id_high, ...]
                         val: [
                             0xdc,
-                            VENDOR_ID as u8,
-                            (VENDOR_ID >> 8) as u8,
+                            vendor_id as u8,
+                            (vendor_id >> 8) as u8,
                             0x00,
                             0x00,
                             0x00,

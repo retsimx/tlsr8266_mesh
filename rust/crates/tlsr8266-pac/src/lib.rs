@@ -105,7 +105,6 @@ pub const REG_BASE_ADDR: u32 = 0x800000;
 /// write_reg8(0x40d, 5);
 /// ```
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg8(addr: u32, v: u8) {
     #[cfg(not(target_os = "none"))]
     {
@@ -126,7 +125,6 @@ pub fn write_reg8(addr: u32, v: u8) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 16-bit value to write
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg16(addr: u32, v: u16) {
     #[cfg(not(target_os = "none"))]
     {
@@ -147,7 +145,6 @@ pub fn write_reg16(addr: u32, v: u16) {
 /// * `addr` - Register address (without base address)
 /// * `v` - 32-bit value to write
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn write_reg32(addr: u32, v: u32) {
     #[cfg(not(target_os = "none"))]
     {
@@ -178,7 +175,6 @@ pub fn write_reg32(addr: u32, v: u32) {
 /// let channel = read_reg8(0x40d);
 /// ```
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg8(addr: u32) -> u8 {
     #[cfg(not(target_os = "none"))]
     {
@@ -201,7 +197,6 @@ pub fn read_reg8(addr: u32) -> u8 {
 /// # Returns
 /// The 16-bit value read from the register
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg16(addr: u32) -> u16 {
     #[cfg(not(target_os = "none"))]
     {
@@ -224,7 +219,6 @@ pub fn read_reg16(addr: u32) -> u16 {
 /// # Returns
 /// The 32-bit value read from the register
 #[coverage(off)]
-#[cfg_attr(feature = "mry-compat", mry::mry)]
 pub fn read_reg32(addr: u32) -> u32 {
     #[cfg(not(target_os = "none"))]
     {
@@ -247,13 +241,11 @@ macro_rules! regrw_idx {
     ( $x:ident, $a:expr, $s:literal ) => {
         paste::paste! {
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>](i: u32) -> [<u $s>] {
                 [<read_reg $s>]($a + i)
             }
 
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>], i: u32) {
                 [<write_reg $s>]($a + i, value);
             }
@@ -265,13 +257,11 @@ macro_rules! regrw {
     ( $x:ident, $a:expr, $s:expr ) => {
         paste::paste! {
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>]() -> [<u $s>] {
                 [<read_reg $s>]($a)
             }
 
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $s>]) {
                 [<write_reg $s>]($a, value);
             }
@@ -283,13 +273,11 @@ macro_rules! regrw_copy {
     ( $x:ident, $y:ident, $t:expr ) => {
         paste::paste! {
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<read_ $x>]() -> [<u $t>] {
                 [<read_ $y>]()
             }
 
             #[coverage(off)]
-            #[cfg_attr(feature = "mry-compat", mry::mry)]
             pub fn [<write_ $x>](value: [<u $t>]) {
                 [<write_ $y>](value)
             }

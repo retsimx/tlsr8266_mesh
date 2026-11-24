@@ -1,48 +1,59 @@
 #!/usr/bin/env python3
-"""Layering and ``unsafe`` gates for ``rust/src/``.
+"""Layering and ``unsafe`` gates for the firmware tree and its workspace crates.
 
 The script runs two independent passes.
 
-**Pass 1 — SDK layering** over ``--root`` (default ``rust/src/sdk``).
+**Pass 1 — subtree layering**, only when ``--root`` is passed explicitly.
 
-The SDK is a from-scratch vendor layer: it must not reach up into the
-application modules (``app``, ``mesh``, ``light_manager``, ...).  This gate
-strips *test-only* code from every ``.rs`` file and then audits what is left:
+C-10 (#72) deleted ``rust/src/sdk/``: its files now live in
+``rust/crates/tlsr8266-radio/``, which the universal pass audits like every
+other workspace crate.  The layering pass therefore has no default root and
+never runs in the no-argument (CI) form — the hermetic temp-tree tests are what
+exercise it — and a directory that is merely absent can no longer produce
+exit 2.
+
+The layer it was written for was a from-scratch vendor layer: it must not reach
+up into the application modules (``app``, ``mesh``, ``light_manager``, ...).
+This gate strips *test-only* code from every ``.rs`` file and then audits what
+is left:
 
 * every ``.rs`` file may not reference the application layer at all, and may
   not call the application logging macros ``uprintln!`` / ``uprint!``;
 * ``sdk-root-dep`` — production code may not name ``crate::config`` or
   ``crate::version`` (``SDK_FORBIDDEN_ROOTS``).  ``crate::config`` *was* the
-  legitimate root constant module, and that is exactly why it has to be banned:
-  the SDK read board/product configuration straight out of the application
-  root, so the radio layer could not be lifted out.  C-9 (#71) replaced those
-  reads with an injected ``RadioConfig`` (``sdk/ble_app/config.rs``), and this
-  rule is what keeps the seam honest — it is the difference between an
-  extractable ``rust/src/sdk/`` and one that silently re-acquires an upward
-  dependency before C-10 (#72) moves it into ``crates/tlsr8266-radio``.  The
-  rule reads ``production_code()``, so a ``#[cfg(test)]`` import is exempt;
-  the issue's literal ``rg 'crate::(config|version)' rust/src/sdk/`` criterion
-  is what covers tests, and the two are meant to be satisfied together.
-  ``crate::config`` stays legal everywhere else in ``rust/src/``: the ban is
-  scoped to the subtree being extracted;
+  legitimate root constant module, and that is exactly why it had to be banned:
+  the layer read board/product configuration straight out of the application
+  root, so the radio could not be lifted out.  C-9 (#71) replaced those reads
+  with an injected ``RadioConfig`` (``sdk/ble_app/config.rs``, now
+  ``rust/crates/tlsr8266-radio/src/config.rs``), and this rule is what kept the
+  seam honest until C-10 (#72) deleted ``rust/src/sdk/``: it was the difference
+  between an extractable subtree and one that silently re-acquired an upward
+  dependency before the move.  The rule reads ``production_code()``, so a
+  ``#[cfg(test)]`` import is exempt; the issue's literal
+  ``rg 'crate::(config|version)' rust/src/sdk/`` criterion — the tree C-10
+  (#72) deleted — is what covered tests, and the two are meant to be satisfied
+  together.  ``crate::config`` stays legal everywhere else in ``rust/src/``:
+  the ban is scoped to the subtree handed to ``--root``;
 * ``use crate as <ident>;`` and ``extern crate self as <ident>;`` are rejected:
   renaming the crate root would defeat every ``crate::`` rule below;
 * a ``super::`` chain deeper than the file's directory depth is rejected: it
-  leaves ``rust/src/sdk/`` and lands in ``rust/src/``, which is the inversion
-  this gate exists to catch;
+  leaves the audited root and lands in the tree above, which is the inversion
+  this gate exists to catch (the ``rust/src/sdk/`` tree it was written for was
+  deleted by C-10 (#72); the temp-tree fixtures still pin the rule);
 * ``sdk/common/`` may only import ``crate::sdk::common``, root macros, and a
   small set of external crates;
 * ``sdk/mcu/`` additionally may import ``crate::sdk::mcu``;
 * no other ``crate::sdk`` sibling is nameable from either layer.  Before C-5
   there was a third layer directory, ``sdk/drivers/``, allowed ``common``,
   ``mcu`` and ``drivers``; the peripheral drivers (``flash``, ``pwm``, ``spi``,
-  ``uart``) now live in ``tlsr8266-hal``, so no layer directory remains under
-  ``rust/src/sdk/`` besides ``ble_app``, which is not one.  The two layer rules
-  stay armed for any future ``rust/src/sdk/<layer>`` path;
-* ``sdk/pm.rs`` is a leaf even though it sits at the SDK root, so it obeys the
-  ``mcu`` rule set: ``crate::sdk::common`` plus ``crate::sdk::mcu``, root macros
-  and the ``mcu`` external crates, and nothing else.  It is the module the HAL
-  extraction moves into ``tlsr8266-hal`` (C-4), so it must not reach upward into
+  ``uart``) now live in ``tlsr8266-hal``.  C-4 and C-5 left only ``ble_app``
+  under that root, which never was a layer, and C-10 (#72) then deleted
+  ``rust/src/sdk/`` outright, so no layer directory ships today.  The two layer
+  rules stay armed for any future subtree handed to ``--root``;
+* ``sdk/pm.rs`` is a leaf even though it sits at that subtree's root, so it
+  obeys the ``mcu`` rule set: ``crate::sdk::common`` plus ``crate::sdk::mcu``,
+  root macros and the ``mcu`` external crates, and nothing else.  It is the
+  module C-4 moved into ``tlsr8266-hal``, so it must not reach upward into
   ``sdk/ble_app`` or ``sdk/light``; the rule makes that mechanically enforced
   instead of review-enforced.
 
@@ -54,14 +65,16 @@ listed in ``LAYER_EXTERNAL_CRATES`` next to ``core`` and ``critical_section``.
 crate — register definitions and bit macros — but only ``mcu`` may name it:
 ``sdk/common`` sits below the MCU and has no register access.
 
-**Pass 2 — universal rules** over the firmware root and every workspace crate
-root: ``--src-root`` (default ``rust/src``, the firmware) and the repeatable
-``--crate-root`` (default ``rust/crates/mesh-protocol/src``,
-``rust/crates/tlsr8266-pac/src`` and ``rust/crates/tlsr8266-hal/src``).  All of
-them are audited for zero production ``static mut`` and full ``// SAFETY:``
-coverage; the ``unsafe`` budget ratchet below is measured over the firmware
-root alone, so adding crate ``unsafe`` sites can neither hide behind nor widen
-the firmware ceiling.
+**Pass 2 — universal rules** over the composition root and every workspace
+crate root: ``--src-root`` (default ``rust/src``, the firmware) and the
+repeatable ``--crate-root`` (default ``rust/crates/mesh-protocol/src``,
+``rust/crates/tlsr8266-pac/src``, ``rust/crates/tlsr8266-hal/src`` and
+``rust/crates/tlsr8266-radio/src``).  All of them are audited for zero
+production ``static mut`` and full ``// SAFETY:`` coverage; the ``unsafe``
+budget ratchet below is measured over the firmware root alone, so adding crate
+``unsafe`` sites can neither hide behind nor widen the firmware ceiling.  That
+is exactly why C-10 (#72) could move 44 documented radio sites into the new
+crate without re-cutting the ratchet around them.
 
 Four permanent rules, one per line of defence won by R-9 (#45):
 
@@ -100,8 +113,9 @@ One path-scoped family of rules rides in the same pass:
   the ``crate::`` modules in that row nor import the external crates in it, and
   ``crate::config``, ``mesh_protocol``, ``tlsr8266_hal``, ``critical_section``
   and the subsystem's own ``fsm`` stay legal (a subsystem sits in
-  ``rust/src/<name>/``, below the application layer and outside ``rust/src/sdk/``,
-  so the SDK-only ``sdk-root-dep`` ban does not reach it).  Two rule names are
+  ``rust/src/<name>/``, below the application layer and outside the deleted
+  ``rust/src/sdk/`` subtree, so the SDK-only ``sdk-root-dep`` ban does not
+  reach it).  Two rule names are
   reported per row: ``<name>-upward-dep`` (a forbidden ``crate::`` module) and
   ``<name>-forbidden-crate`` (a forbidden external crate).  The rules read
   ``production_code()`` only: a subsystem's own tests use
@@ -136,18 +150,21 @@ rule violations but are not budgeted.
 
 Usage::
 
-    python3 sdk/check_layering.py [--root rust/src/sdk] [--src-root rust/src]
-                                  [--crate-root PATH ...]
+    python3 sdk/check_layering.py [--src-root rust/src] [--crate-root PATH ...]
+    python3 sdk/check_layering.py --root PATH [--src-root rust/src]
 
 ``--crate-root`` is repeatable.  When it is omitted every workspace crate root
 is audited; when it is given, exactly the named paths are, so a caller never
-gets an implicit extra tree.  Passing ``--root`` explicitly without
-``--src-root`` or ``--crate-root`` runs only the layering pass, and
-``--crate-root`` alone runs only those crate audits: that is what keeps the
-temp-tree unit tests hermetic.  The no-argument form (CI) runs every pass.
+gets an implicit extra tree.  ``--root`` is never defaulted: passing it runs the
+layering pass (the temp-tree unit tests do), and passing it without
+``--src-root`` or ``--crate-root`` runs only that pass.  ``--crate-root`` alone
+runs only those crate audits.  The no-argument form (CI) audits the composition
+root plus all four workspace crates and no layering pass.
 
 Exit codes: ``0`` clean, ``1`` one or more violations in either pass, ``2``
-usage/IO error.  Violations are printed one per line as
+usage/IO error or a root that was *explicitly* named but cannot be used.  A
+default root that is absent cannot reach exit 2: the no-argument run has no
+layering root to resolve.  Violations are printed one per line as
 ``file:line: rule: violation``.
 
 The test stripper removes only ``#[cfg(test)]`` items and ``#[cfg(test)] mod
@@ -169,7 +186,6 @@ from typing import Iterator, NamedTuple
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
-DEFAULT_ROOT = os.path.join(REPO_ROOT, "rust", "src", "sdk")
 DEFAULT_SRC_ROOT = os.path.join(REPO_ROOT, "rust", "src")
 DEFAULT_CRATE_ROOT = os.path.join(REPO_ROOT, "rust", "crates", "mesh-protocol", "src")
 # Every workspace crate audited by the universal pass when `--crate-root` is
@@ -178,6 +194,9 @@ DEFAULT_CRATE_ROOTS = (
     DEFAULT_CRATE_ROOT,
     os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-pac", "src"),
     os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-hal", "src"),
+    # C-10 (#72): the radio layer, extracted from the `rust/src/sdk/` tree that
+    # C-10 then deleted.
+    os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-radio", "src"),
 )
 
 # One-way ratchet: lower this when `unsafe` sites disappear, never raise it.
@@ -223,15 +242,27 @@ DEFAULT_CRATE_ROOTS = (
 # C-8 (#70) moved `diagnostics::check_panic_info` to `app.rs` and replaced its
 # two `slice::from_raw_parts` views of the panic report buffer with safe
 # `chunks(10)`, so both documented sites leave the firmware tree: 62 - 2 = 60.
-MAX_PRODUCTION_UNSAFE = 60
+#
+# C-10 (#72) moved the radio layer out of the firmware tree into
+# `rust/crates/tlsr8266-radio/`: 44 RF/BLE sites (`gatt` 18 + `ble` 17 +
+# `mesh_ll` 5 + `irq` 2 + `rf` 2) go with it, and the crate is audited for rule
+# violations but not budgeted, exactly like `mesh-protocol`.  The ceiling
+# follows them down: 60 - 44 = 16.  The remaining 16 are `startup` 4,
+# `logging` 5, `diagnostics` 3, `ota` 2 and `uart` 2, measured with the command
+# above after the deletion.
+MAX_PRODUCTION_UNSAFE = 16
 
-# Application-layer modules `rust/src/sdk/` must never name.  `crate::config` is
-# deliberately absent from this set, but it is *not* legal either: C-9 (#71)
-# banned `crate::config` and `crate::version` with `SDK_FORBIDDEN_ROOTS` below,
-# because both were the application root leaking into the layer that C-10 (#72)
-# extracts as `crates/tlsr8266-radio`.  It stays out of this set because
-# `upward-dep` and `sdk-root-dep` report different reasons (a layer inversion
-# versus a root constant dependency) and the diagnostics should stay distinct.
+# Application-layer modules the extracted subtree must never name.  That subtree
+# was `rust/src/sdk/` until C-10 (#72) deleted it — its files now live in
+# `rust/crates/tlsr8266-radio/` — but the set stays armed for the layering pass,
+# which is the regression cover the temp-tree tests still exercise.
+# `crate::config` is deliberately absent from this set, but it is *not* legal
+# either: C-9 (#71) banned `crate::config` and `crate::version` with
+# `SDK_FORBIDDEN_ROOTS` below, because both were the application root leaking
+# into the layer C-10 (#72) extracted as `crates/tlsr8266-radio`.  It stays out
+# of this set because `upward-dep` and `sdk-root-dep` report different reasons
+# (a layer inversion versus a root constant dependency) and the diagnostics
+# should stay distinct.
 # `crate::state` is absent here too, but it is likewise *not* legal: the
 # universal `state-removed` rule bans it outright, tests included.  C-7 (#69)
 # added `factory_reset` and `light`, which moved out of `sdk/` (and out of the
@@ -258,16 +289,17 @@ UPWARD_MODULES = frozenset(
     }
 )
 
-# Crate-root modules `rust/src/sdk/` production code must never name.  These are
-# not *above* the SDK the way `UPWARD_MODULES` are — they are the shared
+# Crate-root modules the extracted subtree's production code must never name.
+# That subtree was `rust/src/sdk/` until C-10 (#72) deleted it.  These are not
+# *above* the subtree the way `UPWARD_MODULES` are — they are the shared
 # root-level constant modules, and `crate::config` was the legitimate way for a
-# module to read the board/product constants.  That legitimacy is the problem:
+# module to read the board/product constants.  That legitimacy was the problem:
 # the radio layer read `crate::config::*` and `crate::version::BUILD_VERSION`
 # directly, so it could not be extracted into its own crate.  C-9 (#71) replaced
 # those reads with the injected `RadioConfig` in `sdk/ble_app/config.rs`, and
-# this ban is what keeps the seam from regressing one import at a time.  The
-# scope is the pass this rule runs in — SDK files only — so `crate::config`
-# stays legal everywhere else in `rust/src/` by construction.
+# this ban kept the seam from regressing one import at a time until the move
+# landed.  The scope is the pass this rule runs in — files under `--root` only —
+# so `crate::config` stays legal everywhere else in `rust/src/` by construction.
 SDK_FORBIDDEN_ROOTS = frozenset({"config", "version"})
 
 # Modules `rust/src/ota/**` production code must never name.  `ota` is the OTA
@@ -483,9 +515,9 @@ ROOT_MACROS = frozenset(
 # The `crate::sdk::<layer>` each layer may import.  Every layer may import the
 # layers below it; nothing may import a layer above it.  `common` and `mcu` are
 # the only layer directories the gate knows: C-4 moved them, and C-5 moved
-# `drivers`, into `tlsr8266-hal`, so nothing under `rust/src/sdk/` is a layer
-# now besides `ble_app` (which never was one).  The table stays armed for any
-# future `rust/src/sdk/<layer>` path.
+# `drivers`, into `tlsr8266-hal`, and C-10 (#72) then deleted the `rust/src/sdk/`
+# tree they came from, so no layer directory ships today.  The table stays armed
+# for any future subtree handed to `--root`.
 LAYER_SDK_IMPORTS = {
     "common": frozenset({"common"}),
     "mcu": frozenset({"common", "mcu"}),
@@ -1062,9 +1094,9 @@ def audit_source(
     """Audit one Rust source file.
 
     ``layer`` is ``common``/``mcu``, or ``None`` outside a layer directory.
-    ``depth`` is how many directories the file sits below the SDK root (``0``
-    for ``rust/src/sdk/`` itself), which bounds how far a ``super::`` chain may
-    climb before it leaves the SDK subtree.  ``None`` skips that bound.
+    ``depth`` is how many directories the file sits below the audited root
+    (``0`` for the root itself), which bounds how far a ``super::`` chain may
+    climb before it leaves that subtree.  ``None`` skips that bound.
     """
     code = production_code(text)
     collector = _Collector(path, text)
@@ -1088,8 +1120,8 @@ def audit_source(
         )
 
     # `super::` climbs the module tree.  The gate works on file paths, so a
-    # chain deeper than the file's directory depth must cross `rust/src/sdk/`
-    # and land in `rust/src/` — exactly the inversion this gate exists to stop.
+    # chain deeper than the file's directory depth must cross the audited root
+    # and land above it — exactly the inversion this gate exists to stop.
     if depth is not None:
         for match in _SUPER_CHAIN_RE.finditer(code):
             climbs = _super_chain_hops(code, match)
@@ -1097,7 +1129,8 @@ def audit_source(
                 collector.add(
                     match.start(),
                     "super-escape",
-                    f"super::{climbs - depth} past rust/src/sdk (chain of {climbs}, depth {depth})",
+                    f"super::{climbs - depth} past the audited root "
+                    f"(chain of {climbs}, depth {depth})",
                 )
 
     for index, head in iter_crate_references(code):
@@ -1371,10 +1404,11 @@ def _layer_of(path: str, root: str) -> str | None:
     """The layer directory of ``path``: ``common``, ``mcu``, or ``None``.
 
     Only those two directory names are layers.  ``drivers`` was the third until
-    C-5 moved the peripheral drivers into ``tlsr8266-hal``; after C-4 and C-5 no
-    layer directory remains under ``rust/src/sdk/`` besides ``ble_app``, which
-    is not one.  The lookup stays for any future ``rust/src/sdk/<layer>`` path.
-    ``pm.rs`` alone sits at the SDK root and is a leaf held to the ``mcu`` rules.
+    C-5 moved the peripheral drivers into ``tlsr8266-hal``; C-4 and C-5 left
+    only ``ble_app`` under the tree this gate used to default to, which never
+    was a layer, and C-10 (#72) deleted that tree (``rust/src/sdk/``) outright.
+    The lookup stays for any future subtree handed to ``--root``.  ``pm.rs``
+    alone sits at that root and is a leaf held to the ``mcu`` rules.
     """
     parts = os.path.relpath(path, root).split(os.sep)
     if parts == ["pm.rs"]:
@@ -1420,16 +1454,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser = argparse.ArgumentParser(
         description=(
-            "Audit rust/src/ for layering invariants and rust/src/ plus every "
-            "rust/crates/*/src/ workspace crate for `unsafe` invariants."
+            "Audit an explicitly named subtree for layering invariants, and "
+            "rust/src/ plus every rust/crates/*/src/ workspace crate for "
+            "`unsafe` invariants."
         )
     )
     parser.add_argument(
         "--root",
         default=None,
         help=(
-            "SDK source root for the layering pass "
-            f"(default: {os.path.relpath(DEFAULT_ROOT, REPO_ROOT)})"
+            "subtree source root for the layering pass; never defaulted, so the "
+            "pass runs only when this flag is given (the hermetic temp-tree "
+            "tests pass it)"
         ),
     )
     parser.add_argument(
@@ -1454,8 +1490,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve(value: str | None, default: str, flag: str) -> str | None:
-    root = os.path.abspath(os.path.expanduser(value if value is not None else default))
+def _resolve(value: str, flag: str) -> str | None:
+    root = os.path.abspath(os.path.expanduser(value))
     if not os.path.isdir(root):
         print(f"error: {flag} {root} is not a directory", file=sys.stderr)
         return None
@@ -1471,21 +1507,29 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     root_given = args.root is not None
     crate_roots_given = args.crate_root is not None
+    # The layering pass runs only for an explicitly named `--root`: its default
+    # root (`rust/src/sdk/`) was deleted by C-10 (#72), so a no-argument run must
+    # never resolve it.  Resolving only what was asked for is what keeps an
+    # absent directory from exiting 2, and it keeps the temp-tree unit tests
+    # hermetic.
+    #
     # An explicit `--crate-root` names exactly the trees to audit: the default
     # list is a convenience for the no-argument run, never an implicit extra
     # root, and the firmware pass then runs only when `--src-root` asks for it.
-    # An explicit `--root` on its own keeps the temp-tree unit tests hermetic:
-    # they exercise the layering pass only.
     run_src = args.src_root is not None or (not root_given and not crate_roots_given)
     run_universal = run_src or crate_roots_given or not root_given
 
-    root = _resolve(args.root, DEFAULT_ROOT, "--root")
-    if root is None:
-        return 2
-    paths = rust_files(root)
-    if not paths:
-        print(f"error: no .rs files under {root}", file=sys.stderr)
-        return 2
+    paths: list[str] = []
+    root = ""
+    if root_given:
+        resolved_root = _resolve(args.root, "--root")
+        if resolved_root is None:
+            return 2
+        root = resolved_root
+        paths = rust_files(root)
+        if not paths:
+            print(f"error: no .rs files under {root}", file=sys.stderr)
+            return 2
 
     src_root = ""
     src_paths: list[str] = []
@@ -1493,7 +1537,10 @@ def main(argv: list[str] | None = None) -> int:
     crate_audits: list[tuple[str, str, list[str]]] = []
     if run_universal:
         if run_src:
-            resolved_src = _resolve(args.src_root, DEFAULT_SRC_ROOT, "--src-root")
+            resolved_src = _resolve(
+                args.src_root if args.src_root is not None else DEFAULT_SRC_ROOT,
+                "--src-root",
+            )
             if resolved_src is None:
                 return 2
             src_root = resolved_src
@@ -1506,7 +1553,7 @@ def main(argv: list[str] | None = None) -> int:
             args.crate_root if crate_roots_given else list(DEFAULT_CRATE_ROOTS)
         )
         for value in crate_values:
-            resolved_crate = _resolve(value, value, "--crate-root")
+            resolved_crate = _resolve(value, "--crate-root")
             if resolved_crate is None:
                 return 2
             crate_paths = rust_files(resolved_crate)
@@ -1545,7 +1592,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not violations and not universal and not crate_universal:
-        print(f"sdk layering OK: {len(paths)} files scanned, 0 violations")
+        if root_given:
+            print(f"sdk layering OK: {len(paths)} files scanned, 0 violations")
         if run_universal:
             if run_src:
                 print(

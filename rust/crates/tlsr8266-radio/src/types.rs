@@ -3,7 +3,7 @@ pub const CFG_ADR_MAC_512K_FLASH: u32 = 0x76000;
 
 // Wire constants shared with the mesh protocol crate. They live in
 // `mesh_protocol::mesh_types`; this is the explicit list of what `sdk::light`
-// re-exports so the existing `use crate::sdk::light::*;` sites keep resolving.
+// re-exports so the existing `use crate::types::*;` sites keep resolving.
 pub use mesh_protocol::mesh_types::{
     is_unicast_addr, mesh_status_offline_sweeps, mesh_status_timeout_ms, CMD_END_OTA,
     CMD_NOTIFY_MESH_PAIR_END, CMD_OTA_DATA, CMD_START_OTA, DEVICE_ADDR_MASK_DEFAULT,
@@ -23,8 +23,8 @@ pub use mesh_protocol::mesh_types::{
 pub const PAIR_CONFIG_VALID_FLAG: u8 = 0xFA;
 pub const LOOP_INTERVAL_US: u64 = 10000;
 
-// The PWM tick constants live in `crate::light`, which owns the lamp: the
-// subsystem may not be reached from here (it sits above the SDK).
+// The PWM tick constants live in the firmware's `light` module, which owns the
+// lamp: that subsystem may not be reached from here (it sits above the radio).
 
 pub const BRIDGE_MAX_CNT: u32 = 8;
 pub const IRQ_TIMER1_ENABLE: bool = true;

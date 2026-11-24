@@ -21,7 +21,7 @@ use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 /// The pairing flag is a plain SDK enum with no hardware behind it, so the
 /// machine mirrors that type directly instead of inventing a second one plus
 /// two conversions. `mod.rs` keeps the SDK static in sync with it.
-pub use crate::sdk::light::ePairState as PairSetState;
+pub use tlsr8266_radio::types::ePairState as PairSetState;
 
 /// How often the re-pairing machine broadcasts one chunk, in milliseconds.
 pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;

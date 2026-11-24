@@ -45,10 +45,9 @@ use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use crate::sdk::ble_app::queues;
-use crate::sdk::ble_app::rf_drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS};
-use crate::sdk::light::*;
-use crate::BIT;
+use crate::queues;
+use crate::rf::drv_8266::{DEVICE_ADDRESS, GROUP_ADDRESS};
+use crate::types::*;
 use embassy_time::{Duration, Instant};
 use heapless::Deque;
 use mesh_protocol::mesh_types::{
@@ -60,11 +59,12 @@ use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed};
+use tlsr8266_pac::BIT;
 
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
 /// Used to track online status, last communication timestamp, and node-specific data.
-pub(crate) static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> =
+pub static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX_NUM]> =
     CriticalSectionMutex::new(
         [MeshNodeStT {
             miss: 0,
@@ -78,7 +78,7 @@ pub(crate) static MESH_NODE_ST: CriticalSectionMutex<[MeshNodeStT; MESH_NODE_MAX
 
 /// Remote control packet buffer storing received commands for processing.
 /// Queue of up to 20 packet buffers containing operation codes and sequence numbers.
-pub(crate) static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> =
+pub static RC_PKT_BUF: CriticalSectionMutex<Deque<PktBuf, 20>> =
     CriticalSectionMutex::new(Deque::new());
 
 /// Sequence number for device status messages.
@@ -152,11 +152,11 @@ pub(crate) static MESH_LISTEN_CYCLE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Current maximum number of active nodes in the mesh network.
 /// Dynamically tracks the highest node count for optimization.
-pub(crate) static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
+pub static MESH_NODE_MAX: AtomicU8 = AtomicU8::new(0);
 
 /// Flag enabling automatic mesh node status reporting.
 /// When true, device periodically reports status to mesh network.
-pub(crate) static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
+pub static MESH_NODE_REPORT_ENABLE: AtomicBool = AtomicBool::new(false);
 
 /// Device node sequence number for mesh communication.
 /// Incremental counter used for message sequencing and duplicate detection.
@@ -309,7 +309,6 @@ fn send_uart_node_changes(entries: &[(u8, u8, u8)]) {
 /// # Algorithm Complexity
 /// * Time: O(n*m) where n=nodes in packet, m=nodes in table
 /// * Space: O(1) additional space beyond existing node table
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
     // Half the derived deadline, in sweeps. A large, implausible sn jump is only
     // trusted once the node has been quiet at least this many sweeps: a
@@ -442,7 +441,6 @@ pub fn mesh_node_update_status(pkt: &[MeshNodeStValT]) -> u32 {
 /// * Ages and resets node sweep counters to mark offline nodes
 /// * Modifies mesh node mask to trigger status reporting
 /// * May cause network-wide status updates as topology changes propagate
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_flush_status() {
     // Rate limiting: one sweep per MESH_STATUS_SWEEP_MS. Read/update the shared
     // timestamp under a short lock only; never hold a lock across the table work.
@@ -648,7 +646,6 @@ fn mesh_node_keep_alive() {
 /// * Calls `mesh_node_keep_alive()` to refresh local status
 /// * Modifies output buffer content
 /// * Advances advertisement rotation for next call
-#[cfg_attr(test, mry::mry)]
 fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
     // Initialize output buffer to clean state.
     p_data.fill(0);
@@ -719,7 +716,7 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
 ///
 /// Status advertisement packets use a specialized format:
 ///
-/// ```
+/// ```text
 /// Status Advertisement Packet (39 bytes):
 /// ┌─────────────┬─────────────┬─────────────┬─────────────┐
 /// │ L2CAP Header│ Status Data │ Sequence #  │ Signature   │
@@ -789,7 +786,6 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
 /// * Queues packet for mesh network transmission  
 /// * Updates network-wide topology knowledge
 /// * May trigger retransmissions by other nodes
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_send_online_status() {
     static ADV_ST_SN: AtomicU32 = AtomicU32::new(0);
     static LAST_STATUS_TIME: AtomicU32 = AtomicU32::new(0);
@@ -866,7 +862,7 @@ pub fn mesh_send_online_status() {
 /// # Mesh Packet Structure
 ///
 /// The constructed packet follows the mesh protocol format:
-/// ```
+/// ```text
 /// [L2CAP Header][Mesh Header][Payload][Internal Parameters]
 /// ```
 ///
@@ -1031,7 +1027,6 @@ pub fn mesh_construct_packet(
 /// * Modifies global mesh node reporting mask
 /// * Affects subsequent status advertisement inclusion
 /// * Enables/disables network-wide status propagation
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_report_status_enable(enable: bool) {
     {
         let mut mesh_node_mask = MESH_NODE_MASK.lock();
@@ -1119,7 +1114,7 @@ pub fn mesh_report_status_enable(enable: bool) {
 /// # Data Format
 ///
 /// The input data follows this structure:
-/// ```
+/// ```text
 /// data[0]: Global enable flag (0 = disable all, non-zero = enable selective)
 /// data[1..n]: Device addresses to enable for reporting
 /// ```
@@ -1146,7 +1141,6 @@ pub fn mesh_report_status_enable(enable: bool) {
 /// * Updates global mesh reporting enable flag
 /// * Modifies selective reporting bitmask
 /// * Affects which nodes appear in subsequent status reports
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_report_status_enable_mask(data: &[u8]) {
     let mut mesh_node_mask = MESH_NODE_MASK.lock();
     let mut mesh_node_st = MESH_NODE_ST.lock();
@@ -1230,7 +1224,6 @@ pub fn mesh_report_status_enable_mask(data: &[u8]) {
 /// - Device address check uses simple comparison (O(1))
 /// - Group lookup uses early termination on first match
 /// - Global broadcast check avoids table lookup
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool) {
     let mut group_match = false;
     let mut device_match = false;
@@ -1291,7 +1284,6 @@ pub fn rf_link_match_group_mac(pkt: &Packet) -> (bool, bool) {
 /// `LightManager::device_status_update()` afterwards; it is deliberately not
 /// triggered here so the report carries the freshly registered address rather
 /// than a zeroed one.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_node_table_init() {
     let mut mesh_node_st = MESH_NODE_ST.lock();
 
@@ -1363,7 +1355,6 @@ pub fn mesh_node_table_init() {
 /// * Resets the local online age to prevent timeout
 /// * Triggers status change notification for network propagation
 /// * Affects subsequent mesh status advertisements
-#[cfg_attr(test, mry::mry)]
 pub fn ll_device_status_update(val_par: &[u8]) {
     let val;
     {
@@ -1389,17 +1380,12 @@ pub fn ll_device_status_update(val_par: &[u8]) {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
-
-    // Import mock functions from their original modules
-    use super::{mock_mesh_node_adv_status, mock_mesh_node_flush_status};
-    use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
-    use crate::sdk::light::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
+    use crate::queues::UART_TX_CHANNEL;
+    use crate::types::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{mock_read_reg_system_tick, read_reg_system_tick};
 
     /// Helper function to reset global mesh state for tests
     fn reset_mesh_state() {
@@ -1471,11 +1457,7 @@ mod tests {
     ///
     /// Verifies that empty packets are handled gracefully.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_empty_packet() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         let empty_packet: Vec<MeshNodeStValT> = vec![];
@@ -1490,11 +1472,7 @@ mod tests {
     /// Verifies that the function can process new node packets without crashing.
     /// Note: Simplified test due to complex node allocation logic.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_new_node() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         // Create test node with different address than device address (0x10)
@@ -1511,11 +1489,7 @@ mod tests {
     ///
     /// Verifies that packets with our own device address are ignored.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_own_address() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         // Create test node with same address as device address (0x10)
@@ -1536,11 +1510,7 @@ mod tests {
     ///
     /// Verifies that address 1 is filtered out as per FIXME comment.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_address_1_filtering() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         // Create test node with address 1 (should be filtered)
@@ -1561,11 +1531,7 @@ mod tests {
     ///
     /// Verifies that nodes are updated when newer sequence numbers are received.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_sequence_update() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         // First, add a node with sequence number 50
@@ -1599,11 +1565,7 @@ mod tests {
     ///
     /// Verifies that updates with older sequence numbers are ignored.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_old_sequence() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         // First, add a node with sequence number 51
@@ -1638,11 +1600,8 @@ mod tests {
     /// visible via mesh_node_report_status — the exact path that was broken when
     /// node_report_task was removed.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_status_pipeline_update_then_report() {
-        use crate::sdk::ble_app::irq::mesh_node_report_status;
-
-        mock_read_reg_system_tick().returns(0x12345678);
+        use crate::irq::mesh_node_report_status;
 
         // Start with a clean state, MESH_NODE_MAX=1 (only own node at index 0)
         DEVICE_ADDRESS.set(0x1F); // Address 31, our device
@@ -2193,14 +2152,14 @@ mod tests {
         // already rate limited with 0 stored; either way it holds 0 afterwards.
         fake_clock::set_ticks(0);
         mesh_send_online_status();
-        let queued = crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len();
+        let queued = crate::queues::MESH_TX_QUEUE.lock().len();
 
         // Same tick again: clock_time_exceed(0, interval) is 0 > interval, i.e.
         // false, so the call must return before queueing anything.
         mesh_send_online_status();
 
         assert_eq!(
-            crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(),
+            crate::queues::MESH_TX_QUEUE.lock().len(),
             queued,
             "a second status request inside the interval must not be queued"
         );
@@ -2208,16 +2167,11 @@ mod tests {
 
     /// Tests mesh_send_online_status when not rate limited.
     ///
-    /// Verifies that the function calls expected mocked functions in sequence
-    /// and queues the resulting status advertisement on the module-level mesh
-    /// TX queue.
+    /// Verifies the real flush + advertisement sequence: an expired remote is
+    /// aged out by the sweep, and the built status advertisement (self record,
+    /// advertising header, signature) lands on the module-level mesh TX queue.
     #[test]
-    #[mry::lock(mesh_node_flush_status, mesh_node_adv_status)]
     fn test_mesh_send_online_status_function_sequence() {
-        // Setup mocks
-        mock_mesh_node_flush_status().returns(()); // Mock flush status
-        mock_mesh_node_adv_status(Any).returns(0); // Mock advertisement status
-
         reset_mesh_state();
 
         // Drive the interval: tick 0 normalises LAST_STATUS_TIME to 0, then a
@@ -2225,17 +2179,68 @@ mod tests {
         // interval so the send path runs.
         fake_clock::set_ticks(0);
         mesh_send_online_status();
-        crate::sdk::ble_app::queues::reset_for_test();
+        crate::queues::reset_for_test();
         fake_clock::set_ticks(u32::MAX as u64);
 
-        // Call should proceed through all mocked steps
+        // One remote sitting exactly at the flush deadline: the real sweep must
+        // mark it offline, and the advertisement must then skip it.
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[0].val.sn = DEVICE_NODE_SN.get() as u8;
+            st[1].miss = 1;
+            st[1].val = MeshNodeStValT {
+                dev_adr: 0x20,
+                sn: 7,
+                par: [0x11, 0x22],
+            };
+        }
+        MESH_NODE_MAX.set(2);
+        let deadline = mesh_status_offline_sweeps(MESH_NODE_MAX.get() as u32);
+        {
+            let mut st = MESH_NODE_ST.lock();
+            st[1].miss = deadline;
+        }
+        *LAST_SWEEP.lock() = Instant::from_ticks(0);
+        let self_sn = DEVICE_NODE_SN.get();
+
+        // Call should proceed through the real flush + advertisement steps.
         mesh_send_online_status();
 
-        // Verify the flush + advertisement steps ran, and the built packet was
-        // queued for transmission (no application singleton involved any more).
-        mock_mesh_node_flush_status().assert_called(1);
-        mock_mesh_node_adv_status(Any).assert_called(1);
-        assert_eq!(crate::sdk::ble_app::queues::MESH_TX_QUEUE.lock().len(), 1);
+        // The flush step ran for real: the expired remote is offline now.
+        {
+            let st = MESH_NODE_ST.lock();
+            assert_eq!(st[1].miss, 0, "flush ages the expired remote offline");
+        }
+
+        // The advertisement step ran for real and queued exactly one packet.
+        let queue = crate::queues::MESH_TX_QUEUE.lock();
+        assert_eq!(queue.len(), 1);
+        let adv = &queue[0].pkt;
+        let adv_type = adv.head()._type;
+        let adv_chan = adv.head().chan_id;
+        assert_eq!(adv_type, 2, "status advertisement packet type");
+        assert_eq!(adv_chan, 0xffff, "status advertisement channel");
+
+        // Self record is copied first (pre keep-alive refresh): addr, sn, par.
+        let adv_sno = adv.att_write().value.sno;
+        let adv_src = adv.att_write().value.src;
+        let adv_dst = adv.att_write().value.dst;
+        let adv_val = adv.att_write().value.val;
+        assert_eq!(adv_sno[0], DEVICE_ADDRESS.get() as u8);
+        assert_eq!(adv_sno[1], self_sn as u8, "self sn as last advertised");
+        assert_eq!(adv_sno[2], 0, "self par[0]");
+        assert_eq!(adv_src[0], 0, "self par[1]");
+        // The offline remote is skipped, leaving its slot (bytes 4..8) empty.
+        assert_eq!(
+            [adv_src[1], adv_dst[0], adv_dst[1], adv_val[0]],
+            [0, 0, 0, 0],
+            "offline remote must not be advertised"
+        );
+        drop(queue);
+
+        // keep_alive advanced the local sequence number from inside the
+        // advertisement step (the record above was copied before the refresh).
+        assert_eq!(DEVICE_NODE_SN.get(), self_sn.wrapping_add(1));
     }
 
     // ================================================================================
@@ -2698,11 +2703,7 @@ mod tests {
     ///
     /// Verifies that device status is updated correctly.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_ll_device_status_update_valid() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         let test_data = [0x01, 0x02]; // Must be exactly MESH_NODE_ST_PAR_LEN (2) bytes
@@ -2722,11 +2723,7 @@ mod tests {
     ///
     /// Verifies that empty data updates are handled correctly.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_ll_device_status_update_empty() {
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
-
         reset_mesh_state();
 
         let minimal_data = [0x00, 0x00]; // Must be exactly MESH_NODE_ST_PAR_LEN (2) bytes
@@ -2749,15 +2746,11 @@ mod tests {
     /// The test creates a realistic status packet with known node status data and verifies
     /// that the correct device addresses and status information are parsed.
     #[test]
-    #[mry::lock(read_reg_system_tick, mesh_node_update_status)]
     fn test_status_packet_parsing_integration() {
-        use crate::sdk::ble_app::light_ll::packet_processing::rf_link_rc_data;
+        use crate::mesh_ll::packet_processing::rf_link_rc_data;
         use mesh_protocol::packet_types::{
             Packet, PacketAttValue, PacketAttWrite, PacketL2capHead,
         };
-
-        // Setup mocks
-        mock_read_reg_system_tick().returns(0x12345678);
 
         reset_mesh_state();
         DEVICE_ADDRESS.set(0x42); // Our device address
@@ -2820,84 +2813,42 @@ mod tests {
             },
         };
 
-        // Use a static variable to capture data from the mock
-        static CAPTURED_DATA: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
-
-        // Clear any previous capture
-        *CAPTURED_DATA.lock().unwrap() = None;
-
-        // Set up mock with a side effect that captures the data
-        mock_mesh_node_update_status(Any).returns_with(|pkt: Vec<MeshNodeStValT>| {
-            // Capture the raw bytes to see what device addresses are being parsed
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    pkt.as_ptr() as *const u8,
-                    pkt.len() * core::mem::size_of::<MeshNodeStValT>(),
-                )
-            };
-            *CAPTURED_DATA.lock().unwrap() = Some(bytes.to_vec());
-            1u32
-        });
-
-        // Process the packet
+        // Process the packet through the real receive path: the parser feeds
+        // the six decoded records straight into the node table.
         rf_link_rc_data(&mut packet);
 
-        // Verify mesh_node_update_status was called
-        mock_mesh_node_update_status(Any).assert_called(1);
-
-        // Now check what was captured - should be the actual node status data
-        let captured = CAPTURED_DATA.lock().unwrap();
-        let data = captured
-            .as_ref()
-            .expect("mesh_node_update_status should have been called");
-
         // With MESH_NODE_ST_VAL_LEN = 4, each entry is [dev_adr, sn, par[0], par[1]]
-        // The data should come from PacketAttValue bytes 0-23:
+        // and the records come from PacketAttValue bytes 0-23:
         //   Entry 0: [0x10, 0x01, 0x11, 0x22] - from sno[0-2] + src[0]
         //   Entry 1: [0x20, 0x02, 0x33, 0x44] - from src[1] + dst[0-1] + val[0]
         //   Entry 2: [0x30, 0x03, 0x55, 0x66] - from val[1-4]
         //   Entry 3: [0x01, 0x04, 0x77, 0x88] - from val[5-8] (address 1!)
         //   Entry 4: [0x50, 0x05, 0x99, 0xAA] - from val[9-12]
         //   Entry 5: [0x60, 0x06, 0xBB, 0xCC] - from val[13-16]
+        const EXPECTED: [(u8, u8, [u8; MESH_NODE_ST_PAR_LEN]); 6] = [
+            (0x10, 0x01, [0x11, 0x22]),
+            (0x20, 0x02, [0x33, 0x44]),
+            (0x30, 0x03, [0x55, 0x66]),
+            (0x01, 0x04, [0x77, 0x88]),
+            (0x50, 0x05, [0x99, 0xAA]),
+            (0x60, 0x06, [0xBB, 0xCC]),
+        ];
 
-        // Verify we have 24 bytes (6 entries * 4 bytes each)
-        assert_eq!(data.len(), 24, "Should have 24 bytes of status data");
-
-        // Verify each entry is parsed correctly
-        assert_eq!(data[0], 0x10, "Entry 0 dev_adr should be 0x10");
-        assert_eq!(data[1], 0x01, "Entry 0 sn should be 0x01");
-        assert_eq!(data[2], 0x11, "Entry 0 par[0] should be 0x11");
-        assert_eq!(data[3], 0x22, "Entry 0 par[1] should be 0x22");
-
-        assert_eq!(data[4], 0x20, "Entry 1 dev_adr should be 0x20");
-        assert_eq!(data[5], 0x02, "Entry 1 sn should be 0x02");
-
-        assert_eq!(data[6], 0x33, "Entry 1 par[0] should be 0x33");
-        assert_eq!(data[7], 0x44, "Entry 1 par[1] should be 0x44");
-
-        assert_eq!(data[8], 0x30, "Entry 2 dev_adr should be 0x30");
-        assert_eq!(data[9], 0x03, "Entry 2 sn should be 0x03");
-        assert_eq!(data[10], 0x55, "Entry 2 par[0] should be 0x55");
-        assert_eq!(data[11], 0x66, "Entry 2 par[1] should be 0x66");
-
-        // Most importantly - verify that device address 1 is correctly parsed
+        // All six records were accepted into the table, starting at the first
+        // free slot (MESH_NODE_MAX before the packet arrived).
         assert_eq!(
-            data[12], 0x01,
-            "Entry 3 dev_adr should be 0x01 (address 1 should work!)"
+            MESH_NODE_MAX.get(),
+            10 + EXPECTED.len() as u8,
+            "all six parsed records must enter the node table"
         );
-        assert_eq!(data[13], 0x04, "Entry 3 sn should be 0x04");
-        assert_eq!(data[14], 0x77, "Entry 3 par[0] should be 0x77");
-        assert_eq!(data[15], 0x88, "Entry 3 par[1] should be 0x88");
-
-        assert_eq!(data[16], 0x50, "Entry 4 dev_adr should be 0x50");
-        assert_eq!(data[17], 0x05, "Entry 4 sn should be 0x05");
-        assert_eq!(data[18], 0x99, "Entry 4 par[0] should be 0x99");
-        assert_eq!(data[19], 0xAA, "Entry 4 par[1] should be 0xAA");
-
-        assert_eq!(data[20], 0x60, "Entry 5 dev_adr should be 0x60");
-        assert_eq!(data[21], 0x06, "Entry 5 sn should be 0x06");
-        assert_eq!(data[22], 0xBB, "Entry 5 par[0] should be 0xBB");
-        assert_eq!(data[23], 0xCC, "Entry 5 par[1] should be 0xCC");
+        let st = MESH_NODE_ST.lock();
+        for (i, (addr, sn, par)) in EXPECTED.iter().enumerate() {
+            let node = &st[10 + i];
+            assert_eq!(node.val.dev_adr, *addr, "Entry {i} dev_adr");
+            assert_eq!(node.val.sn, *sn, "Entry {i} sn");
+            assert_eq!(node.val.par, *par, "Entry {i} par");
+            assert_eq!(node.miss, 1, "Entry {i} observed online");
+        }
     }
 
     // ================================================================================
@@ -3001,9 +2952,7 @@ mod tests {
 
     /// Tests that a newly discovered node triggers a UART status send.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_new_node_sends_uart() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         queues::set_uart_status_reporting_enabled(true);
@@ -3016,9 +2965,7 @@ mod tests {
 
     /// Tests that a par change on an existing online node triggers a UART status send.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_par_change_sends_uart() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         // Pre-populate the table with an existing online node at index MESH_NODE_MAX (=10)
@@ -3046,9 +2993,7 @@ mod tests {
 
     /// Tests that a sn-only advance (par unchanged, node online) does NOT trigger UART.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_sn_only_change_no_uart() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         // Pre-populate existing online node at index 10
@@ -3076,9 +3021,7 @@ mod tests {
 
     /// Tests that when UART reporting is disabled, a new node does not trigger a UART send.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_update_status_uart_disabled_no_send() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         queues::set_uart_status_reporting_enabled(false);
@@ -3542,7 +3485,7 @@ mod tests {
     /// deadline, then report; report must surface the node with sn forced to 0.
     #[test]
     fn test_status_pipeline_update_timeout_then_report_offline() {
-        use crate::sdk::ble_app::irq::mesh_node_report_status;
+        use crate::irq::mesh_node_report_status;
 
         reset_mesh_state();
         DEVICE_ADDRESS.set(0x01);
@@ -3585,9 +3528,7 @@ mod tests {
     /// Air status advertisement payload keeps the exact 4-byte record layout
     /// `[dev_adr, sn, par0, par1]` with self first, and skips offline remotes.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_mesh_node_adv_status_wire_layout_unchanged() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
         DEVICE_ADDRESS.set(0x01);
 
@@ -3637,9 +3578,7 @@ mod tests {
     // ================================================================================
     /// Tests that ll_device_status_update sends own device status via UART when enabled.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_ll_device_status_update_sends_uart() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         queues::set_uart_status_reporting_enabled(true);
@@ -3766,9 +3705,7 @@ mod tests {
 
     /// Tests that ll_device_status_update does not send UART when reporting is disabled.
     #[test]
-    #[mry::lock(read_reg_system_tick)]
     fn test_ll_device_status_update_uart_disabled_no_send() {
-        mock_read_reg_system_tick().returns(0x12345678);
         reset_mesh_state();
 
         queues::set_uart_status_reporting_enabled(false);

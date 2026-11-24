@@ -192,8 +192,11 @@ pub fn set_uart_status_reporting_enabled(enabled: bool) {
 ///
 /// Host tests run in one process, so global queues would otherwise leak state
 /// from one test into the next. Every manager `default()` constructor calls
-/// this under `cfg(test)`; there is no production cost.
-#[cfg(test)]
+/// this on host builds; there is no production cost.
+///
+/// Gated on `target_os`, not `test`: the firmware crate compiles this crate as a
+/// dependency and its fixture needs the same reset.
+#[cfg(not(target_os = "none"))]
 pub fn reset_for_test() {
     while MESH_RX_CHANNEL.try_receive().is_ok() {}
     while UART_TX_CHANNEL.try_receive().is_ok() {}

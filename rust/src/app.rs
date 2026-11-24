@@ -26,25 +26,11 @@ use crate::mesh::{
     mesh_security_enable, set_mesh_event_hooks, MeshEventHooks,
 };
 use crate::ota::{check_ota_area_startup, rf_mesh_data_ota, set_ota_radio_ops, OtaRadioOps};
-use crate::sdk::ble_app::callbacks::{set_ble_app_hooks, set_ota_hooks, BleAppHooks, OtaHooks};
-use crate::sdk::ble_app::flash_config::{dev_addr_with_mac_flag, dev_addr_with_mac_match};
-use crate::sdk::ble_app::light_ll::connection_management::{
-    light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
-};
-use crate::sdk::ble_app::light_ll::mesh_management::mesh_node_table_init;
-use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
-use crate::sdk::ble_app::rf_drv_8266::{rf_drv_init, rf_link_slave_init, rf_set_power_level_index};
-use crate::sdk::ble_app::{
-    check_auth_timeout, device_address, group_addresses, is_paired_login, mac_id, radio_config,
-    set_adv_private_data, stop_slave_read_status_if_busy, try_send_terminate_packet,
-    write_out_of_mesh_credentials,
-};
-use crate::sdk::light::*;
-use crate::sdk::rf_drv::*;
 use crate::uart::{self, uart_receiver, uart_sender, UartCommand, UartTxOps};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
 use heapless::Vec;
+use mesh_protocol::mesh_types::*;
 use mesh_protocol::mesh_types::{LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP};
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use mesh_protocol::uart::UartData;
@@ -58,6 +44,21 @@ use tlsr8266_hal::mcu::gpio::{gpio_init, gpio_set_func, AS_GPIO};
 use tlsr8266_hal::mcu::irq_i::{irq_disable, irq_enable, irq_init};
 use tlsr8266_hal::mcu::watchdog::wd_clear;
 use tlsr8266_hal::pm::{blink_ota_led_ok, light_sw_reboot, usb_dp_pullup_en};
+use tlsr8266_radio::ble::connection::{
+    light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
+};
+use tlsr8266_radio::ble::flash_config::{dev_addr_with_mac_flag, dev_addr_with_mac_match};
+use tlsr8266_radio::callbacks::{set_ble_app_hooks, set_ota_hooks, BleAppHooks, OtaHooks};
+use tlsr8266_radio::mesh_ll::adv::*;
+use tlsr8266_radio::mesh_ll::node_status::mesh_node_table_init;
+use tlsr8266_radio::mesh_ll::packet_processing::parse_ble_packet_op_params;
+use tlsr8266_radio::rf::drv_8266::{rf_drv_init, rf_link_slave_init, rf_set_power_level_index};
+use tlsr8266_radio::types::*;
+use tlsr8266_radio::{
+    check_auth_timeout, device_address, group_addresses, is_paired_login, mac_id, radio_config,
+    set_adv_private_data, stop_slave_read_status_if_busy, try_send_terminate_packet,
+    write_out_of_mesh_credentials,
+};
 
 /// The board configuration the radio layer runs with.
 ///
@@ -65,21 +66,20 @@ use tlsr8266_hal::pm::{blink_ota_led_ok, light_sw_reboot, usb_dp_pullup_en};
 /// this composition root is the single place the two meet: `main_task` installs
 /// the struct before the radio starts, and the default is only the host-test
 /// fallback.
-pub(crate) const RADIO_CONFIG: crate::sdk::ble_app::RadioConfig =
-    crate::sdk::ble_app::RadioConfig {
-        vendor_id: crate::config::VENDOR_ID,
-        build_version: crate::version::BUILD_VERSION,
-        device_name: crate::config::DEVICE_NAME,
-        default_mesh_name: crate::config::MESH_NAME,
-        default_mesh_pwd: crate::config::MESH_PWD,
-        default_mesh_pwd_encode_sk: crate::config::MESH_PWD_ENCODE_SK,
-        default_mesh_ltk: crate::config::MESH_LTK,
-        out_of_mesh_name: crate::config::OUT_OF_MESH,
-        pair_valid_flag: crate::config::PAIR_VALID_FLAG,
-        flash_adr_mac: crate::config::FLASH_ADR_MAC,
-        flash_adr_pairing: crate::config::FLASH_ADR_PAIRING,
-        flash_adr_dev_grp_adr: crate::config::FLASH_ADR_DEV_GRP_ADR,
-    };
+pub(crate) const RADIO_CONFIG: tlsr8266_radio::RadioConfig = tlsr8266_radio::RadioConfig {
+    vendor_id: crate::config::VENDOR_ID,
+    build_version: crate::version::BUILD_VERSION,
+    device_name: crate::config::DEVICE_NAME,
+    default_mesh_name: crate::config::MESH_NAME,
+    default_mesh_pwd: crate::config::MESH_PWD,
+    default_mesh_pwd_encode_sk: crate::config::MESH_PWD_ENCODE_SK,
+    default_mesh_ltk: crate::config::MESH_LTK,
+    out_of_mesh_name: crate::config::OUT_OF_MESH,
+    pair_valid_flag: crate::config::PAIR_VALID_FLAG,
+    flash_adr_mac: crate::config::FLASH_ADR_MAC,
+    flash_adr_pairing: crate::config::FLASH_ADR_PAIRING,
+    flash_adr_dev_grp_adr: crate::config::FLASH_ADR_DEV_GRP_ADR,
+};
 
 /// The application's single root task.
 ///
@@ -131,9 +131,8 @@ pub async fn main_task(spawner: Spawner) {
     // path can run, so neither slot is ever observed empty.
     set_ota_radio_ops(OtaRadioOps {
         try_begin_gatt_ota: ota_begin_gatt_hook,
-        stage_packet: crate::sdk::ble_app::light_ll::connection_management::stage_ota_packet,
-        read_staged_packet:
-            crate::sdk::ble_app::light_ll::connection_management::read_staged_ota_packet,
+        stage_packet: tlsr8266_radio::ble::connection::stage_ota_packet,
+        read_staged_packet: tlsr8266_radio::ble::connection::read_staged_ota_packet,
         try_send_terminate_packet: ota_send_terminate_hook,
     });
     set_ota_hooks(OtaHooks {
@@ -142,7 +141,7 @@ pub async fn main_task(spawner: Spawner) {
         request_termination: crate::ota::ota_request_termination_impl,
         tick_timeout_1s: crate::ota::ota_tick_timeout_1s_impl,
     });
-    crate::sdk::rf_drv::set_light_event_handler(rf_link_light_event_callback);
+    tlsr8266_radio::mesh_ll::adv::set_light_event_handler(rf_link_light_event_callback);
     set_ble_app_hooks(BleAppHooks {
         on_mesh_pair_proc: mesh_pair_proc_hook,
         on_light_data: rf_link_data_callback,
@@ -162,14 +161,14 @@ pub async fn main_task(spawner: Spawner) {
     // on/off state through this pointer instead of letting `light` depend on
     // the SDK. Registered here, before any mesh traffic exists.
     crate::light::set_status_update_hook(
-        crate::sdk::ble_app::light_ll::mesh_management::ll_device_status_update,
+        tlsr8266_radio::mesh_ll::node_status::ll_device_status_update,
     );
 
     // Install the board configuration and the GATT values it drives before the
     // radio starts: the first advertisement must already carry the vendor id and
     // the first GATT read the configured names and version.
-    crate::sdk::ble_app::set_radio_config(RADIO_CONFIG);
-    crate::sdk::app_att_light::init_gatt_profile(&RADIO_CONFIG);
+    tlsr8266_radio::set_radio_config(RADIO_CONFIG);
+    tlsr8266_radio::gatt::service_table::init_gatt_profile(&RADIO_CONFIG);
 
     rf_drv_init(true);
 
@@ -185,7 +184,7 @@ pub async fn main_task(spawner: Spawner) {
     // first valid host frame arrives, so a headless light never retries DMA TX
     // for the boot banners.
     spawner.spawn(uart_receiver().unwrap());
-    spawner.spawn(uart_sender(&crate::sdk::ble_app::queues::UART_TX_CHANNEL).unwrap());
+    spawner.spawn(uart_sender(&tlsr8266_radio::queues::UART_TX_CHANNEL).unwrap());
 
     // Start the light command consumer
     spawner.spawn(light_manager().unwrap());
@@ -282,7 +281,7 @@ fn log_blocking_tx_hook(msg: &UartData) {
 /// table binds `uart_tx_ops_push` to this symbol.
 #[inline(never)]
 fn enqueue_uart_tx_hook(msg: &UartData) -> bool {
-    crate::sdk::ble_app::queues::enqueue_uart_tx(msg)
+    tlsr8266_radio::queues::enqueue_uart_tx(msg)
 }
 
 /// `uart::UartTxOps::dropped_tx`: how many frames the queue has dropped.
@@ -290,7 +289,7 @@ fn enqueue_uart_tx_hook(msg: &UartData) -> bool {
 /// `#[inline(never)]`: the `INDIRECT_EDGES` key for `uart_tx_ops_dropped`.
 #[inline(never)]
 fn dropped_uart_tx_hook() -> u32 {
-    crate::sdk::ble_app::queues::dropped_uart_tx()
+    tlsr8266_radio::queues::dropped_uart_tx()
 }
 
 /// `uart::set_command_handler`: execute one host command and return the mesh
@@ -318,13 +317,13 @@ fn uart_command_hook(cmd: UartCommand) -> [u8; 3] {
             ack,
         ),
         UartCommand::EnableStatusReporting => {
-            crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable(true);
-            crate::sdk::ble_app::queues::set_uart_status_reporting_enabled(true);
+            tlsr8266_radio::mesh_ll::node_status::mesh_report_status_enable(true);
+            tlsr8266_radio::queues::set_uart_status_reporting_enabled(true);
             [0; 3]
         }
         UartCommand::HostAttached => {
-            crate::sdk::ble_app::queues::set_uart_status_reporting_enabled(true);
-            crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable(true);
+            tlsr8266_radio::queues::set_uart_status_reporting_enabled(true);
+            tlsr8266_radio::mesh_ll::node_status::mesh_report_status_enable(true);
             [0; 3]
         }
     }
@@ -341,7 +340,6 @@ pub fn uart_mesh_rx_hook(pkt: &Packet) {
     crate::uart::on_mesh_rx_packet(pkt, device_address());
 }
 
-#[cfg_attr(test, mry::mry)]
 pub fn light_hw_timer_config() {
     // Enable timer1 interrupts for controlling light transitions
     tlsr8266_hal::mcu::irq_i::irq_enable_tmr1();
@@ -352,7 +350,6 @@ pub fn light_hw_timer_config() {
     tlsr8266_hal::mcu::timer::tmr0_configure_and_enable(CLOCK_SYS_CLOCK_1S);
 }
 
-#[cfg_attr(test, mry::mry)]
 fn light_init_default() {
     light_check_tick_per_us(CLOCK_SYS_CLOCK_1US);
 
@@ -432,9 +429,9 @@ fn light_auth_check() {
 
 /// One main-loop tick's worth of light work.
 ///
-/// Deliberately not `mry`-mockable: `mry` requires every argument type to be
-/// `Clone`, and handing the flash store over as `&mut` is the whole point of
-/// the ownership split. Tests drive the real function and assert its
+/// Takes the flash store by `&mut`: handing it over by mutable reference, rather
+/// than sharing a `Clone`, is the whole point of the ownership split between
+/// `main_task` and the loop body. Tests drive the real function and assert its
 /// observable effects (`clock_time_exceed`, `flash_write_page`).
 fn light_user_func(flash_store: &mut LightFlashStore) {
     flash_store.check_light_state_save();
@@ -460,7 +457,6 @@ pub async fn main_loop(flash_store: &mut LightFlashStore) {
 Called to handle messages that require a response to be returned
 */
 #[inline(never)]
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_response_callback(
     ppp: &mut PacketAttValue,
     p_req: &PacketAttValue,
@@ -528,7 +524,6 @@ pub fn rf_link_response_callback(
 Called to handle messages sent to us that don't require a response
 */
 #[inline(never)]
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_data_callback(p: &Packet) {
     // p start from l2cap_len of RfPacketAttCmdT
     // Use the updated function to extract operation parameters
@@ -602,7 +597,6 @@ pub fn rf_link_data_callback(p: &Packet) {
 }
 
 #[inline(never)]
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_light_event_callback(status: u8) {
     match status {
         LGT_CMD_SET_MESH_INFO => {
@@ -715,62 +709,39 @@ fn ota_send_terminate_hook() -> bool {
 mod tests {
     use super::*;
     use crate::diagnostics::{CRUMB_PANIC, PANIC_LOG_BODY_MAX, PANIC_READ_MAX};
-    use crate::factory_reset::{
-        check_timing_step, handle_boot_sequence, mock_check_timing_step, mock_handle_boot_sequence,
-        mock_plan_kick_out, plan_kick_out,
-    };
-    use crate::light::effects::{
-        mock_led_indicate_step, pending_event, reset_for_test as reset_led_controller,
-    };
-    use crate::light::mock_device_status_update;
-    use crate::light::transitions::{
-        begin_transition, light_onoff_hw, mock_light_onoff_hw, LIGHT_CMD_CHANNEL,
-    };
-    use crate::mesh::{
-        mock_mesh_device_address_validation_completed, mock_mesh_pair_cb, mock_mesh_pair_init,
-        mock_mesh_pair_proc_effect, mock_mesh_security_enable, mock_send_mesh_message,
-        send_mesh_message,
-    };
-    use crate::ota::{mock_check_ota_area_startup, mock_rf_mesh_data_ota};
-    use crate::sdk::ble_app::flash_config::{
-        mock_dev_addr_with_mac_flag, mock_dev_addr_with_mac_match,
-    };
-    use crate::sdk::ble_app::light_ll::connection_management::{
-        mock_light_check_tick_per_us, mock_rf_link_slave_pairing_enable, mock_rf_link_slave_proc,
-    };
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
-    use crate::sdk::ble_app::light_ll::mesh_management::{
-        mesh_report_status_enable, mock_mesh_report_status_enable,
-    };
-    use crate::sdk::ble_app::light_ll::packet_processing::mock_parse_ble_packet_op_params;
-    use crate::sdk::ble_app::light_ll::status_management::{
-        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-        DEVICE_STATUS_RECORD_INDEX,
-    };
-    use crate::sdk::ble_app::rf_drv_8266::mock_rf_link_slave_init;
-    use crate::sdk::ble_app::rf_drv_8266::mock_rf_set_power_level_index;
-    use crate::sdk::ble_app::{
-        adv_private_data, buffered_response, dev_addr_validation_pending,
-        first_connection_timestamp, reset_radio_state_for_test, set_dev_addr_validation_pending,
-        set_device_address, set_first_connection_timestamp, set_group_addresses, set_mac_id,
-        set_mesh_pair_enabled, set_pair_config_mesh_credentials, set_paired_login,
-        set_security_enabled, set_slave_read_status_busy,
-    };
-    use crate::sdk::rf_drv::mock_set_advertisement_manufacturer_data;
-    use crate::uart::{
-        mock_on_mesh_rx_packet, mock_send_message, on_mesh_rx_packet, reset_for_test, send_message,
-    };
+    use crate::light::effects::{pending_event, reset_for_test as reset_led_controller};
+    use crate::light::status_probe;
+    use crate::light::transitions::{begin_transition, LIGHT_CMD_CHANNEL};
+    use crate::ota::reset_for_test as reset_ota;
+    use crate::uart::reset_for_test;
     use futures::executor::block_on;
     use mesh_protocol::packet_types::PacketL2capHead;
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
-    use mry::Any;
     use tlsr8266_hal::common::sync::SimplifyLS;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
-    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
+    use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::{encode_password, fake_crypto};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{FLD_IRQ, FLD_TMR};
+    use tlsr8266_radio::ble::status::{
+        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
+        DEVICE_STATUS_RECORD_INDEX,
+    };
+    use tlsr8266_radio::mesh_ll::node_status::{
+        MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
+    };
+    use tlsr8266_radio::queues::{self, UART_TX_CHANNEL};
+    use tlsr8266_radio::rf::drv_8266::BLE_PERIPHERAL_ADVERTISING_ENABLED;
+    use tlsr8266_radio::rf::drv_8266::{BLE_SCAN_RESPONSE_INTERVAL_US, PKT_ADV};
+    use tlsr8266_radio::{
+        adv_private_data, buffered_response, dev_addr_validation_pending,
+        first_connection_timestamp, flash_config_index, is_mesh_pair_enabled, is_security_enabled,
+        reset_radio_state_for_test, set_dev_addr_validation_pending, set_device_address,
+        set_first_connection_timestamp, set_flash_config_index, set_group_addresses, set_mac_id,
+        set_mesh_pair_enabled, set_pair_config_mesh_credentials, set_paired_login,
+        set_security_enabled, set_slave_read_status_busy,
+    };
 
     /// `reg_irq_en`: the global interrupt enable register.
     const REG_IRQ_EN: u32 = 0x643;
@@ -794,6 +765,76 @@ mod tests {
         let mut got = [0u8; 1];
         FakeFlash::read_slice(addr, &mut got);
         got[0]
+    }
+
+    /// Build the packet a data callback receives: the 3-byte opcode at
+    /// `val[0..3]` and up to ten parameter bytes at `val[3..13]`.
+    ///
+    /// `l2cap_len` is the length `mesh_construct_packet` stamps, so the real
+    /// parser derives exactly `params.len()` parameter bytes.
+    fn mesh_packet(op: u8, vendor: u16, params: &[u8]) -> Packet {
+        let mut pkt = create_test_packet();
+        let write = pkt.att_write_mut();
+        write.head.l2cap_len = 23 + params.len() as u16;
+        write.value.val[0] = op | 0xc0;
+        write.value.val[1] = (vendor & 0xff) as u8;
+        write.value.val[2] = (vendor >> 8) as u8;
+        write.value.val[3..3 + params.len()].copy_from_slice(params);
+        pkt
+    }
+
+    /// Frames the async log sink recorded, in order.
+    static LOG_FRAMES: std::sync::Mutex<std::vec::Vec<UartData>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+
+    /// Count of `BleAppHooks::on_mesh_pair_proc` dispatches.
+    static MESH_PAIR_PROC_CALLS: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+
+    fn record_log_frame(frame: &UartData) -> bool {
+        LOG_FRAMES.lock().unwrap().push(*frame);
+        true
+    }
+
+    fn record_log_blocking(frame: &UartData) {
+        LOG_FRAMES.lock().unwrap().push(*frame);
+    }
+
+    fn record_mesh_pair_proc() {
+        MESH_PAIR_PROC_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn noop_light_data(_: &Packet) {}
+
+    fn noop_light_response(_: &mut PacketAttValue, _: &PacketAttValue) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn noop_uart_mesh_rx(_: &Packet) {}
+
+    /// Install the recording log sinks and drop every frame captured so far.
+    fn install_log_recorder() {
+        LOG_FRAMES.lock().unwrap().clear();
+        crate::logging::set_log_sinks(crate::logging::LogSinks {
+            async_tx: record_log_frame,
+            blocking_tx: record_log_blocking,
+        });
+    }
+
+    /// Install the SDK hook set, with `on_mesh_pair_proc` counting.
+    ///
+    /// Starts from the radio's host-build defaults so a hook recorded by an
+    /// earlier test cannot leak into this one; the recording set is installed
+    /// immediately afterwards, so nothing here clobbers it.
+    fn install_recording_hooks() {
+        tlsr8266_radio::callbacks::reset_for_test();
+        MESH_PAIR_PROC_CALLS.store(0, core::sync::atomic::Ordering::Relaxed);
+        tlsr8266_radio::callbacks::set_ble_app_hooks(tlsr8266_radio::callbacks::BleAppHooks {
+            on_mesh_pair_proc: record_mesh_pair_proc,
+            on_light_data: noop_light_data,
+            on_light_response: noop_light_response,
+            on_uart_mesh_rx: noop_uart_mesh_rx,
+        });
     }
 
     // --- Helper Functions ---
@@ -823,10 +864,9 @@ mod tests {
     }
 
     /// `main_task` is the composition root for the SDK callback seams, but it
-    /// cannot be executed on the host: `rf_drv_init` and `user_init` are not
-    /// `mry`-mockable and both touch hardware registers, and the slots they fill
-    /// are private statics owned by `sdk::app_att_light`, `sdk::rf_drv` and
-    /// `sdk::ble_app::callbacks`.
+    /// cannot be executed on the host: `rf_drv_init` and `user_init` both touch
+    /// hardware registers, and the slots they fill are private statics owned by
+    /// `sdk::app_att_light`, `sdk::rf_drv` and `sdk::ble_app::callbacks`.
     ///
     /// What can be pinned here is the structural invariant that makes the wiring
     /// safe: every registration lives in `main_task`'s body and precedes
@@ -935,11 +975,10 @@ mod tests {
     /// `uart_command_hook` executes a light command through the mesh and returns
     /// the mesh sequence number the UART ACK frame carries.
     #[test]
-    #[mry::lock(send_mesh_message, mesh_report_status_enable)]
     fn test_uart_command_hook_light_ctrl_returns_the_mesh_sno() {
         reset_for_test();
-        mock_send_mesh_message(Any, 0x1234, 3, true).returns([4, 5, 6]);
-        mock_mesh_report_status_enable(Any).returns(());
+        set_device_address(0x1234);
+        fake_clock::set_ticks(0x5000);
 
         let sno = uart_command_hook(UartCommand::LightCtrl {
             dst: 0x1234,
@@ -948,63 +987,75 @@ mod tests {
             ack: true,
         });
 
-        assert_eq!(sno, [4, 5, 6]);
-        mock_send_mesh_message(Any, 0x1234, 3, true).assert_called(1);
-        mock_send_mesh_message(Any, Any, Any, Any).assert_called(1);
-        mock_mesh_report_status_enable(Any).assert_called(0);
+        // `send_mesh_message` returns the packet's sequence number, which
+        // `light_slave_tx_command` seeds with `clock_time() + device_address()`.
+        assert_eq!(sno, [0x34, 0x62, 0x00]);
+        let local = queues::MESH_RX_CHANNEL
+            .try_receive()
+            .expect("a device-addressed command is delivered locally");
+        let local_dst = local.ll_app().value.dst;
+        assert_eq!(local_dst, 0x1234);
+        assert_eq!(
+            queues::MESH_TX_QUEUE.lock().len(),
+            0,
+            "a device-addressed command has nowhere to be re-transmitted"
+        );
         assert!(
-            !crate::sdk::ble_app::queues::uart_status_reporting_enabled(),
+            !queues::uart_status_reporting_enabled(),
             "a light command must not touch status reporting"
+        );
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            0,
+            "a light command must not emit a status frame"
         );
     }
 
     /// The `HostAttached` arm enables status reporting *before* the node dump
     /// that enabling performs, or the first dump is filtered out.
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
     fn test_uart_command_hook_host_attached_enables_reporting_before_the_dump() {
         reset_for_test();
-        mock_mesh_report_status_enable(true).returns_with(|_enable| {
-            assert!(
-                crate::sdk::ble_app::queues::uart_status_reporting_enabled(),
-                "status reporting must be enabled before the initial node-status dump"
-            );
-        });
+        set_device_address(0x0034);
+        mesh_node_table_init();
+        // Start from "disabled", so the assertion below cannot be satisfied by
+        // state an earlier test left behind.
+        MESH_NODE_REPORT_ENABLE.store(false, Ordering::Relaxed);
 
         assert_eq!(uart_command_hook(UartCommand::HostAttached), [0; 3]);
 
-        mock_mesh_report_status_enable(true).assert_called(1);
-        assert!(crate::sdk::ble_app::queues::uart_status_reporting_enabled());
+        assert!(queues::uart_status_reporting_enabled());
+        assert!(
+            MESH_NODE_REPORT_ENABLE.load(core::sync::atomic::Ordering::Relaxed),
+            "the SDK's mesh reporting is enabled too"
+        );
+        // The initial dump only reaches the host because the flag was set first.
+        let frame = UART_TX_CHANNEL
+            .try_receive()
+            .expect("the node dump must reach the host");
+        assert_eq!(frame.data[2], UartMsg::NodeStatus as u8);
+        assert_eq!(frame.data[3], 0x34, "the dump reports this node");
+        assert_eq!(frame.data[4], 1, "this node is online");
     }
 
     /// The status-refresh arm re-runs the dump and acknowledges with zeros.
     #[test]
-    #[mry::lock(mesh_report_status_enable)]
     fn test_uart_command_hook_enable_status_reporting_reruns_the_dump() {
         reset_for_test();
-        mock_mesh_report_status_enable(true).returns(());
+        set_device_address(0x0034);
+        mesh_node_table_init();
+        MESH_NODE_REPORT_ENABLE.store(false, Ordering::Relaxed);
 
         assert_eq!(
             uart_command_hook(UartCommand::EnableStatusReporting),
             [0; 3]
         );
 
-        mock_mesh_report_status_enable(true).assert_called(1);
-        assert!(crate::sdk::ble_app::queues::uart_status_reporting_enabled());
-    }
-
-    /// `uart_mesh_rx_hook` hands the packet to the bridge with this device's
-    /// address, so the transport never reads the SDK itself.
-    #[test]
-    #[mry::lock(on_mesh_rx_packet)]
-    fn test_uart_mesh_rx_hook_passes_the_device_address() {
-        reset_for_test();
-        set_device_address(0x1234);
-        mock_on_mesh_rx_packet(Any, 0x1234).returns(());
-
-        uart_mesh_rx_hook(&create_test_packet());
-
-        mock_on_mesh_rx_packet(Any, 0x1234).assert_called(1);
+        assert!(queues::uart_status_reporting_enabled());
+        assert!(
+            MESH_NODE_REPORT_ENABLE.load(core::sync::atomic::Ordering::Relaxed),
+            "the SDK call ran and enabled mesh reporting"
+        );
     }
 
     /// `ota_send_terminate_hook` must report `false` without a free packet slot
@@ -1397,18 +1448,23 @@ mod tests {
         );
     }
 
+    /// The OTA data path runs for real: the index the response carries is the
+    /// one the staging code read out of the request, and the block is accepted
+    /// for staging.
     #[test]
-    #[mry::lock(rf_mesh_data_ota)]
     fn test_rf_link_response_callback_cmd_ota_data() {
-        // This test verifies CMD_OTA_DATA response
-
         // Setup
-        mock_rf_mesh_data_ota(Any, Any).returns(0x1234u16);
-
+        reset_ota();
+        FakeFlash::reset();
         set_device_address(0x5678);
+        crate::ota::start_mesh_ota();
 
         let mut request = create_test_packet_att_value();
         request.src = [0xAA, 0xBB];
+        // `rf_mesh_data_ota` reads the packet index from the first two params.
+        request.val[3] = 0x34;
+        request.val[4] = 0x12;
+        request.val[5] = 0xA5; // first payload byte
 
         let mut response = create_test_packet_att_value();
         response.val[15] = CMD_OTA_DATA;
@@ -1416,7 +1472,8 @@ mod tests {
         // Execute
         let result = rf_link_response_callback(&mut response, &request);
 
-        // Verify
+        // Verify: the response carries the parsed index, and the block was
+        // accepted (reporting still blocked, supervision timeout refreshed).
         assert!(
             result.is_ok(),
             "Callback should return Ok(()) for CMD_OTA_DATA"
@@ -1424,21 +1481,27 @@ mod tests {
         assert_eq!(response.val[0], LGT_CMD_OTA_DATA_RSP | 0xc0);
         assert_eq!(response.val[1], 0x34); // idx low byte
         assert_eq!(response.val[2], 0x12); // idx high byte
-        mock_rf_mesh_data_ota(Any, false).assert_called(1);
+        assert!(
+            crate::ota::is_mesh_ota_blocked(),
+            "the mesh OTA stays open while data arrives"
+        );
+        assert!(!crate::ota::is_timeout_expired());
     }
 
+    /// The end-of-transfer path runs for real: the response carries the index
+    /// the staging code parsed, and the staging area closes.
     #[test]
-    #[mry::lock(rf_mesh_data_ota)]
     fn test_rf_link_response_callback_cmd_end_ota() {
-        // This test verifies CMD_END_OTA response
-
         // Setup
-        mock_rf_mesh_data_ota(Any, Any).returns(0xABCDu16);
-
+        reset_ota();
+        FakeFlash::reset();
         set_device_address(0x5678);
+        crate::ota::start_mesh_ota();
 
         let mut request = create_test_packet_att_value();
         request.src = [0xCC, 0xDD];
+        request.val[3] = 0xCD;
+        request.val[4] = 0xAB;
 
         let mut response = create_test_packet_att_value();
         response.val[15] = CMD_END_OTA;
@@ -1454,7 +1517,6 @@ mod tests {
         assert_eq!(response.val[0], LGT_CMD_END_OTA_RSP | 0xc0);
         assert_eq!(response.val[1], 0xCD); // idx low byte
         assert_eq!(response.val[2], 0xAB); // idx high byte
-        mock_rf_mesh_data_ota(Any, true).assert_called(1);
     }
 
     #[test]
@@ -1481,92 +1543,50 @@ mod tests {
 
     // --- Tests for rf_link_data_callback ---
 
+    /// `LGT_CMD_LIGHT_ONOFF` is decoded from the real wire bytes and reaches the
+    /// light task with the parsed parameters.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_light_onoff() {
-        // This test verifies LGT_CMD_LIGHT_ONOFF is handled correctly
-
-        // Setup
         crate::light::reset_for_test();
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_LIGHT_ONOFF,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_LIGHT_ONOFF, VENDOR_ID, &params);
 
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify: exactly one command was queued for the light task, with the
-        // parsed parameters passed through unchanged.
         let msg = LIGHT_CMD_CHANNEL
             .try_receive()
             .expect("LGT_CMD_LIGHT_ONOFF must be queued");
         assert_eq!(msg.cmd, LGT_CMD_LIGHT_ONOFF);
-        assert_eq!(msg.params, params);
+        let mut expected = [0u8; 16];
+        expected[..params.len()].copy_from_slice(&params);
+        assert_eq!(msg.params, expected);
         assert!(
             LIGHT_CMD_CHANNEL.try_receive().is_err(),
             "exactly one command must be queued"
         );
     }
 
+    /// Group deletion removes the stored address and blinks the indicator.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, remove_group)]
     fn test_rf_link_data_callback_light_config_grp_delete() {
-        // This test verifies group deletion via LGT_CMD_LIGHT_CONFIG_GRP
-
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_LIGHT_CONFIG_GRP,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [
-            LIGHT_DEL_GRP_PARAM,
-            0x12,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-        mock_remove_group(Any).returns(Ok(()));
+        reset_radio_state_for_test();
+        reset_fakes();
         reset_led_controller();
 
-        // Execute
+        // Install the group first, so the delete has something to remove.
+        assert!(add_group(0x8012).is_ok());
+        assert!(group_addresses().contains(&0x8012));
+
+        let params = [LIGHT_DEL_GRP_PARAM, 0x12, 0x80, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_LIGHT_CONFIG_GRP, VENDOR_ID, &params);
+
         rf_link_data_callback(&packet);
 
-        // Verify
-        mock_remove_group(0x12).assert_called(1);
+        assert!(
+            !group_addresses().contains(&0x8012),
+            "the stored group is removed"
+        );
         assert_eq!(
             pending_event(),
             LED_EVENT_FLASH_1HZ_4S,
@@ -1574,105 +1594,40 @@ mod tests {
         );
     }
 
+    /// Deleting a group that was never stored changes nothing and does not blink.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, remove_group)]
     fn test_rf_link_data_callback_light_config_grp_delete_no_flash() {
-        // This test verifies group deletion that returns false doesn't trigger LED event
-
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_LIGHT_CONFIG_GRP,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [
-            LIGHT_DEL_GRP_PARAM,
-            0x12,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-        mock_remove_group(Any).returns(Err(()));
-
-        // Clear LED event before test
+        reset_radio_state_for_test();
+        reset_fakes();
         reset_led_controller();
 
-        // Execute
+        let params = [LIGHT_DEL_GRP_PARAM, 0x7E, 0x8F, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_LIGHT_CONFIG_GRP, VENDOR_ID, &params);
+
         rf_link_data_callback(&packet);
 
-        // Verify: No LED event should be set
-        assert_eq!(pending_event(), 0);
+        assert_eq!(pending_event(), 0, "a failed delete raises no event");
+        assert!(!group_addresses().contains(&0x8F7E));
 
-        // Cleanup
         reset_led_controller();
     }
 
+    /// Group addition stores the address in the table and the flash log.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, add_group)]
     fn test_rf_link_data_callback_light_config_grp_add() {
-        // This test verifies group addition via LGT_CMD_LIGHT_CONFIG_GRP
-
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_LIGHT_CONFIG_GRP,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [
-            LIGHT_ADD_GRP_PARAM,
-            0xCD,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-        mock_add_group(Any).returns(Ok(()));
+        reset_radio_state_for_test();
+        reset_fakes();
         reset_led_controller();
 
-        // Execute
+        let params = [LIGHT_ADD_GRP_PARAM, 0xCD, 0x80, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_LIGHT_CONFIG_GRP, VENDOR_ID, &params);
+
         rf_link_data_callback(&packet);
 
-        // Verify
-        mock_add_group(0xCD).assert_called(1);
+        assert!(
+            group_addresses().contains(&0x80CD),
+            "the new group is stored in the membership table"
+        );
         assert_eq!(
             pending_event(),
             LED_EVENT_FLASH_1HZ_4S,
@@ -1680,111 +1635,68 @@ mod tests {
         );
     }
 
+    /// Device address configuration accepts the new address, consumes the
+    /// validation flag and clears the stored header byte.
     #[test]
-    #[mry::lock(
-        parse_ble_packet_op_params,
-        add_device_address,
-        dev_addr_with_mac_flag,
-        dev_addr_with_mac_match,
-        mesh_device_address_validation_completed
-    )]
     fn test_rf_link_data_callback_config_dev_addr() {
-        // This test verifies device address configuration
+        reset_radio_state_for_test();
+        reset_fakes();
+        set_flash_config_index(0);
+        set_dev_addr_validation_pending(true);
+        set_mesh_pair_enabled(true);
 
-        // Setup
-        mock_mesh_device_address_validation_completed().returns(());
+        // `params[2] != DEV_ADDR_PAR_WITH_MAC`, so the MAC match is not required.
+        let params = [0x78, 0x56, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_CONFIG_DEV_ADDR, VENDOR_ID, &params);
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_CONFIG_DEV_ADDR,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [0x78, 0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-        mock_dev_addr_with_mac_flag(Any).returns(false);
-        mock_dev_addr_with_mac_match(Any).returns(true);
-        mock_add_device_address(Any).returns(Ok(()));
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify
-        mock_add_device_address(0x5678).assert_called(1);
-        mock_mesh_device_address_validation_completed().assert_called(1);
+        assert_eq!(device_address(), 0x5678, "the new address is adopted");
+        assert!(
+            !dev_addr_validation_pending(),
+            "the validation flag is consumed"
+        );
+        assert_eq!(
+            flash_byte(FLASH_ADR_PAIRING + 1),
+            0x00,
+            "byte [1] of the config header is programmed to zero"
+        );
+
+        set_mesh_pair_enabled(false);
     }
 
+    /// `LGT_CMD_SET_LIGHT` is queued with its parameters.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_set_light() {
-        // This test verifies LGT_CMD_SET_LIGHT is handled
-
-        // Setup
         crate::light::reset_for_test();
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_SET_LIGHT,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [0x10, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params = [0x10, 0x30, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_SET_LIGHT, VENDOR_ID, &params);
 
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify: exactly one command was queued, with the parsed parameters.
         let msg = LIGHT_CMD_CHANNEL
             .try_receive()
             .expect("LGT_CMD_SET_LIGHT must be queued");
         assert_eq!(msg.cmd, LGT_CMD_SET_LIGHT);
-        assert_eq!(msg.params, params);
+        let mut expected = [0u8; 16];
+        expected[..params.len()].copy_from_slice(&params);
+        assert_eq!(msg.params, expected);
         assert!(
             LIGHT_CMD_CHANNEL.try_receive().is_err(),
             "exactly one command must be queued"
         );
     }
 
+    /// MAC address configuration erases and reprograms the MAC sector, then
+    /// reboots.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_set_mac_addr() {
-        // This test verifies MAC address setting and reboot
-
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_SET_MAC_ADDR,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [0x11, 0x66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
+        let params = [0x11, 0x66, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_SET_MAC_ADDR, VENDOR_ID, &params);
 
         reset_fakes();
 
-        // Execute
         rf_link_data_callback(&packet);
 
         // Verify: the MAC is erased-then-programmed at its fixed flash address.
@@ -1812,7 +1724,6 @@ mod tests {
     /// `LGT_CMD_KICK_OUT` with the out-of-mesh reason: erase the configuration,
     /// then re-write the four pairing blocks, blink the OTA LED and reboot.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, plan_kick_out)]
     fn test_rf_link_data_callback_kick_out_out_of_mesh_writes_credentials() {
         // Moved from `sdk/factory_reset.rs::tests`: the credential writes now
         // live in this module, so the assertion follows them.
@@ -1861,27 +1772,11 @@ mod tests {
         expected_flags[15] = PAIR_VALID_FLAG;
         expected_flags[1] = 1; // Mesh pairing enabled flag
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_KICK_OUT,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-        // The callback must route the reason through the reset policy; the
-        // policy's own table is pinned in `factory_reset::tests`.
-        mock_plan_kick_out(KickoutReason::OutOfMesh).calls_real_impl();
+        // `KickoutReason::OutOfMesh` is wire value 0: erase, then rewrite.
+        let params = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_KICK_OUT, VENDOR_ID, &params);
 
         rf_link_data_callback(&packet);
-
-        mock_plan_kick_out(KickoutReason::OutOfMesh).assert_called(1);
 
         // The four 16-byte blocks must be present in flash, in the documented
         // slot layout: flags, name, encoded password, LTK.
@@ -1920,26 +1815,14 @@ mod tests {
 
     /// Any other reason only erases: no pairing data is written.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_kick_out_default_name_only_erases() {
         reset_fakes();
         crate::factory_reset::reset_for_test();
         FakeFlash::write_slice(FLASH_ADR_PAIRING, &[0xAA; 64]);
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_KICK_OUT,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // DefaultName
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
+        // `KickoutReason::DefaultName` is wire value 1.
+        let params = [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_KICK_OUT, VENDOR_ID, &params);
 
         rf_link_data_callback(&packet);
 
@@ -1965,27 +1848,15 @@ mod tests {
 
     /// An unknown wire value still falls back to a full out-of-mesh kick-out.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_kick_out_unknown_reason_falls_back() {
         set_mesh_pair_enabled(false);
         set_dev_addr_validation_pending(false);
         reset_fakes();
         crate::factory_reset::reset_for_test();
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_KICK_OUT,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [3u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Not a KickoutReason
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
+        // 3 is not a `KickoutReason`.
+        let params = [3u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_KICK_OUT, VENDOR_ID, &params);
 
         rf_link_data_callback(&packet);
 
@@ -2001,139 +1872,105 @@ mod tests {
         );
     }
 
+    /// Mesh pairing chunks reach the pairing state machine with their bytes.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params, mesh_pair_cb)]
     fn test_rf_link_data_callback_mesh_pair() {
-        // This test verifies mesh pair command handling
+        crate::mesh::reset_for_test();
 
-        // Setup
-        mock_mesh_pair_cb(Any).returns(());
+        // `MeshPairName1` (state byte 0) followed by the first eight name bytes.
+        let params = [0x00, 0x0A, 0x0B, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_MESH_PAIR, VENDOR_ID, &params);
 
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_MESH_PAIR,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [0x01, 0x0A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify
-        mock_mesh_pair_cb(Any).assert_called(1);
+        // The machine accumulates outside flash, so finish the sequence with the
+        // immediate-effect command and assert what it persisted.
+        let name = crate::mesh::pair_fsm_view().new_mesh_name;
+        assert_eq!(name[0], 0x0A, "the name chunk is accumulated");
+        assert_eq!(name[1], 0x0B);
     }
 
+    /// A packet from another vendor is ignored.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_wrong_vendor_id() {
-        // This test verifies that packets with wrong vendor ID are ignored
+        crate::light::reset_for_test();
 
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [LGT_CMD_LIGHT_ONOFF, 0xFF, 0xFF]; // Wrong vendor ID
-        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = mesh_packet(LGT_CMD_LIGHT_ONOFF, 0xFFFF, &params);
 
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType3 as u8,
-            params,
-            0,
-        ));
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify: No further processing occurs (test completes without errors)
+        assert!(
+            LIGHT_CMD_CHANNEL.try_receive().is_err(),
+            "a foreign vendor id must be dropped before dispatch"
+        );
     }
 
+    /// A 2-byte opcode is unsupported and the packet is ignored.
     #[test]
-    #[mry::lock(parse_ble_packet_op_params)]
     fn test_rf_link_data_callback_wrong_op_cmd_len() {
-        // This test verifies that packets with wrong op_cmd_len are ignored
+        crate::light::reset_for_test();
 
-        // Setup
-        let packet = create_test_packet();
-        let op_cmd = [
-            LGT_CMD_LIGHT_ONOFF,
-            (VENDOR_ID & 0xFF) as u8,
-            (VENDOR_ID >> 8) as u8,
-        ];
-        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let params = [LIGHT_ON_PARAM, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut packet = mesh_packet(LGT_CMD_LIGHT_ONOFF, VENDOR_ID, &params);
+        // Bit 7 set with bit 6 clear is the parser's "2-byte opcode" pattern,
+        // which it rejects outright.
+        packet.att_write_mut().value.val[0] = LGT_CMD_LIGHT_ONOFF | 0x80;
 
-        mock_parse_ble_packet_op_params(Any, Any).returns((
-            false,
-            op_cmd,
-            LightOpType::OpType2 as u8,
-            params,
-            0,
-        )); // Wrong length
-
-        // Execute
         rf_link_data_callback(&packet);
 
-        // Verify: No further processing occurs (test completes without errors)
+        assert!(
+            LIGHT_CMD_CHANNEL.try_receive().is_err(),
+            "an unsupported opcode length must be dropped"
+        );
     }
 
     // --- Tests for rf_link_light_event_callback ---
 
-    #[test]
-    #[mry::lock(mesh_node_table_init, device_status_update)]
-    fn test_rf_link_light_event_callback_set_mesh_info() {
-        // This test verifies LGT_CMD_SET_MESH_INFO event handling
-
-        // Setup
-        mock_device_status_update().returns(());
-
-        mock_mesh_node_table_init().returns(());
-
-        // Clear LED event before test
+    /// Rebuild the node table around this node and assert the callback did it.
+    ///
+    /// The node table is the SDK's real state, so a different device address
+    /// written by `mesh_node_table_init` proves the reset ran; the light
+    /// subsystem's status recorder proves the publish ran.
+    fn assert_node_table_and_status_rebuilt(cmd: u8) {
+        reset_radio_state_for_test();
+        set_device_address(0x0034);
+        // Leave the table describing a different node, so the rebuild shows.
+        MESH_NODE_ST.lock()[0].val.dev_adr = 0;
+        MESH_NODE_MAX.store(7, core::sync::atomic::Ordering::Relaxed);
+        status_probe::reset();
         reset_led_controller();
 
-        // Execute
-        rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO);
+        rf_link_light_event_callback(cmd);
 
-        // Verify
-        mock_mesh_node_table_init().assert_called(1);
-        mock_device_status_update().assert_called(1);
+        assert_eq!(
+            MESH_NODE_ST.lock()[0].val.dev_adr,
+            0x34,
+            "mesh_node_table_init re-registers this node"
+        );
+        assert_eq!(
+            MESH_NODE_MAX.load(core::sync::atomic::Ordering::Relaxed),
+            1,
+            "the rebuild leaves only this node known"
+        );
+        assert_eq!(
+            status_probe::calls(),
+            1,
+            "the lamp status is republished once"
+        );
         assert_eq!(pending_event(), LED_EVENT_FLASH_1HZ_4S);
 
-        // Cleanup
         reset_led_controller();
     }
 
     #[test]
-    #[mry::lock(mesh_node_table_init, device_status_update)]
+    fn test_rf_link_light_event_callback_set_mesh_info() {
+        assert_node_table_and_status_rebuilt(LGT_CMD_SET_MESH_INFO);
+    }
+
+    #[test]
     fn test_rf_link_light_event_callback_set_dev_addr() {
-        // This test verifies LGT_CMD_SET_DEV_ADDR event handling
-
-        // Setup
-        mock_device_status_update().returns(());
-
-        mock_mesh_node_table_init().returns(());
-
-        // Clear LED event before test
-        reset_led_controller();
-
-        // Execute
-        rf_link_light_event_callback(LGT_CMD_SET_DEV_ADDR);
-
-        // Verify
-        mock_mesh_node_table_init().assert_called(1);
-        mock_device_status_update().assert_called(1);
-        assert_eq!(pending_event(), LED_EVENT_FLASH_1HZ_4S);
-
-        // Cleanup
-        reset_led_controller();
+        assert_node_table_and_status_rebuilt(LGT_CMD_SET_DEV_ADDR);
     }
 
     #[test]
@@ -2187,134 +2024,117 @@ mod tests {
     // --- Tests for light_init_default ---
 
     #[test]
-    #[mry::lock(
-        light_check_tick_per_us,
-        rf_link_slave_pairing_enable,
-        rf_set_power_level_index,
-        light_hw_timer_config,
-        mesh_pair_init
-    )]
     fn test_light_init_default() {
-        // This test verifies that light_init_default properly initializes mesh configuration
-
-        // Setup mocks
+        // Setup: the HAL host seams are process-wide singletons.
         reset_fakes();
         // Seed the USB analog register with bit 4 set, so enabling the DP
         // pull-up is observable as a clear.
         FakeAnalog::set(0x00, 0xff);
-        mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).returns(());
-        mock_rf_link_slave_pairing_enable(Any).returns(());
-        mock_rf_set_power_level_index(Any).returns(());
-        mock_light_hw_timer_config().returns(());
-
-        mock_mesh_pair_init().returns(());
+        // A sentinel interval proves the real calibration ran.
+        BLE_SCAN_RESPONSE_INTERVAL_US.store(0x1234, Ordering::Relaxed);
 
         // Execute
         light_init_default();
 
-        // Verify: light_check_tick_per_us was called with CLOCK_SYS_CLOCK_1US
-        mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).assert_called(1);
-
-        // Verify: rf_link_slave_pairing_enable was called with true
-        mock_rf_link_slave_pairing_enable(true).assert_called(1);
-
-        // Verify: rf_set_power_level_index was called with RfPower::Power8dBm
-        mock_rf_set_power_level_index(RfPower::Power8dBm as u32).assert_called(1);
-
-        // Verify: usb_dp_pullup_en was called with true
+        // Verify: the scan-response interval was calibrated for a 32-tick/us clock.
+        assert_eq!(
+            BLE_SCAN_RESPONSE_INTERVAL_US.load(Ordering::Relaxed),
+            0x92,
+            "light_check_tick_per_us must calibrate the scan-response interval"
+        );
+        // Advertising/pairing was enabled.
+        assert!(
+            BLE_PERIPHERAL_ADVERTISING_ENABLED.load(Ordering::Relaxed),
+            "rf_link_slave_pairing_enable(true) must enable advertising"
+        );
+        // The RF power table row for `RfPower::Power8dBm` (index 0) reached the
+        // analog plane: a=0x25, b=0x7c, c=0x67, d=0x67.
+        assert_eq!(FakeAnalog::get(tlsr8266_pac::REGA_RF_PA_GAIN), 0x25);
+        assert_eq!(FakeAnalog::get(tlsr8266_pac::REGA_RF_PA_BIAS), 0x7c);
+        assert_eq!(FakeAnalog::get(tlsr8266_pac::REGA_RF_OUTPUT_MATCH), 0x67);
+        assert_eq!(FakeAnalog::get(tlsr8266_pac::REGA_RF_OUTPUT_POWER), 0x67);
+        // USB DP pull-up enabled.
         assert_eq!(
             FakeAnalog::get(0x00),
             0xef,
             "enabling the USB DP pull-up must clear bit 4 of the USB analog register"
         );
-
-        // Verify: light_hw_timer_config was called
-        mock_light_hw_timer_config().assert_called(1);
-
-        // Verify: mesh_pair_init was called
-        mock_mesh_pair_init().assert_called(1);
-
-        // The mesh credentials are no longer seeded here: `set_radio_config`
-        // owns them now, and `config.rs` asserts the seeding directly.
+        // Both timers configured: TMR1 capture ~120 Hz, TMR0 tick.
+        assert_eq!(FakeMmio::reg32(0x628), CLOCK_SYS_CLOCK_1S / 120);
+        assert_eq!(FakeMmio::reg32(0x624), CLOCK_SYS_CLOCK_1S);
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR0_EN.bits() as u8 != 0,
+            "TMR0 must be left running"
+        );
+        // Re-pairing armed with the machine's interval and timeout.
+        assert!(is_mesh_pair_enabled());
+        let view = crate::mesh::pair_fsm_view();
+        let (interval, timeout) = (view.mesh_pair_cmd_interval, view.mesh_pair_timeout);
+        assert_eq!(interval, crate::mesh::MESH_PAIR_CMD_INTERVAL);
+        assert_eq!(timeout, crate::mesh::MESH_PAIR_TIMEOUT);
     }
 
     // --- Tests for user_init ---
 
-    /// Drives `user_init` with every OTA / mesh / light / adv seam mocked, so
-    /// the factory-reset boot path runs for real against `FakeFlash`.
+    /// Run `user_init` and return the store it hands the main loop.
     ///
-    /// `handle_boot_sequence` is mocked *through its real body*: the mock exists
-    /// only so the caller can assert that `user_init` consults the reset policy,
-    /// while the sequence itself still runs on the `FakeFlash` bank.
-    fn run_user_init_with_mocks() {
-        mock_check_ota_area_startup().returns(());
-        mock_mesh_pair_init().returns(());
-        mock_mesh_security_enable(Any).returns(());
-        mock_device_status_update().returns(());
-        mock_handle_boot_sequence().calls_real_impl();
-
-        // `LightFlashStore::retrieve_from_flash` scans the blank flash (no saved
-        // entry) and then restores the persisted on/off state, which is observed
-        // through `light_onoff_hw`.
-        mock_light_onoff_hw(Any).returns(());
-
-        // Mock functions that light_init_default calls
-        mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).returns(());
-        mock_rf_link_slave_pairing_enable(true).returns(());
-        mock_rf_set_power_level_index(RfPower::Power8dBm as u32).returns(());
-        mock_light_hw_timer_config().returns(());
-
-        // Mock functions that user_init calls directly
-        mock_rf_link_slave_init(40000).returns(());
-        mock_set_advertisement_manufacturer_data(Any).returns(());
-
-        let _flash_store = user_init();
+    /// Every step runs for real against the HAL fakes, so the assertions live in
+    /// the tests rather than in a mock call log.
+    fn run_user_init() -> LightFlashStore {
+        user_init()
     }
 
-    #[mry::mry]
-    #[mry::lock(
-        light_check_tick_per_us,
-        rf_link_slave_pairing_enable,
-        rf_set_power_level_index,
-        light_hw_timer_config,
-        rf_link_slave_init,
-        set_advertisement_manufacturer_data,
-        check_ota_area_startup,
-        light_onoff_hw,
-        device_status_update,
-        mesh_pair_init,
-        mesh_security_enable,
-        handle_boot_sequence
-    )]
     #[test]
     fn test_user_init() {
-        // Mock the OTA / mesh / light entry points user_init drives directly.
+        // Reset the process-wide host seams and the reset subsystem.
         reset_fakes();
         crate::factory_reset::reset_for_test();
+        status_probe::reset();
         // Seed the USB analog register (bit 4 = pull-up disabled) and the port C
         // GPIO-function register, so the real `usb_dp_pullup_en` and
         // `gpio_set_func` calls below are observable.
         FakeAnalog::set(0x00, 0xff);
         FakeMmio::set_reg8(REG_GPIO_PC_FUNC, 0xff);
-        // The advertisement payload is built from these two, so seed both.
+        // The advertisement payload is built from these two, so seed both. The
+        // MAC lives in flash: `rf_link_slave_init` loads it from there (and would
+        // overwrite an in-RAM seed), so the NOR image is what matters.
         let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        FakeFlash::write_slice(FLASH_ADR_MAC, &mac);
         set_mac_id(mac);
         set_device_address(0x1234);
 
-        run_user_init_with_mocks();
+        // A fresh lamp state: the on/off restore starts a transition, and a
+        // stale one from an earlier test would underflow embassy's `Instant`.
+        crate::light::reset_for_test();
 
-        // Verify all mocks were called
-        mock_check_ota_area_startup().assert_called(1);
-        mock_light_check_tick_per_us(CLOCK_SYS_CLOCK_1US).assert_called(1);
-        mock_rf_link_slave_pairing_enable(true).assert_called(1);
-        mock_rf_set_power_level_index(RfPower::Power8dBm as u32).assert_called(1);
+        let _flash_store = run_user_init();
+
+        // 1. `check_ota_area_startup`: the blank staging area is already valid.
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_LIGHT_NEW_FW),
+            0,
+            "a blank OTA staging area is valid and must not be erased"
+        );
+        // 2. `light_init_default`.
+        assert_eq!(
+            BLE_SCAN_RESPONSE_INTERVAL_US.load(Ordering::Relaxed),
+            0x92,
+            "light_check_tick_per_us calibrated the scan-response interval"
+        );
+        assert!(BLE_PERIPHERAL_ADVERTISING_ENABLED.load(Ordering::Relaxed));
+        // `rf_set_power_level_index(Power8dBm)` reached the analog plane.
+        assert_eq!(FakeAnalog::get(tlsr8266_pac::REGA_RF_PA_GAIN), 0x25);
         assert_eq!(
             FakeAnalog::get(0x00),
             0xef,
             "user_init must enable the USB DP pull-up"
         );
-        mock_light_hw_timer_config().assert_called(1);
-        mock_mesh_pair_init().assert_called(1);
+        assert_eq!(
+            FakeMmio::reg32(0x628),
+            CLOCK_SYS_CLOCK_1S / 120,
+            "light_hw_timer_config programmed TMR1's capture"
+        );
+        assert!(is_mesh_pair_enabled(), "mesh_pair_init armed re-pairing");
         assert_eq!(
             FakeMmio::reg8(REG_GPIO_PC_FUNC),
             0xfa,
@@ -2339,16 +2159,43 @@ mod tests {
             "both PWM channels must be enabled"
         );
         // The blank flash has no saved luminance entry, so the retrieve path ran
-        // and the zeroed analog bank records the lamp as on.
-        mock_light_onoff_hw(true).assert_called(1);
-        mock_rf_link_slave_init(40000).assert_called(1);
-        mock_set_advertisement_manufacturer_data(Any).assert_called(1);
-        // The boot path must consult the reset policy exactly once.
-        mock_handle_boot_sequence().assert_called(1);
+        // and the zeroed analog bank records the lamp as on: restoring that state
+        // starts the colour timer.
+        assert!(
+            FakeMmio::reg8(0x620) & FLD_TMR::TMR1_EN.bits() as u8 != 0,
+            "restoring the lamp on must start the colour timer"
+        );
+        // `rf_link_slave_init` reloads the key, which recomputes and installs the
+        // access code.
+        assert!(
+            FakeMmio::writes()
+                .iter()
+                .any(|write| write.addr == 0x408 | tlsr8266_pac::REG_BASE_ADDR),
+            "rf_link_slave_init must install the mesh access code"
+        );
+        // The boot path consulted the reset policy: step 1 is now programmed.
+        assert_eq!(
+            flash_byte(FLASH_ADR_RESET_CNT),
+            0xFE,
+            "a blank sector must start the sequence at step 1"
+        );
         // The light subsystem built both payloads from the loaded MAC and this
         // node's address, and the facade installed them together with the
         // primary payload's manufacturer bytes.
         let (pri, rsp) = adv_private_data();
+        // The manufacturer block the radio facade installs is present in the
+        // advertisement's AD payload.
+        let adv_bytes = adv_private_to_bytes(&pri);
+        {
+            let pkt = PKT_ADV.lock();
+            assert!(
+                pkt.adv_ind_module()
+                    .data
+                    .windows(adv_bytes.len())
+                    .any(|window| window == adv_bytes),
+                "the manufacturer data must be installed into the advertisement"
+            );
+        }
         let (pri_manufacture, pri_uuid, pri_mac) =
             (pri.manufacture_id, pri.mesh_product_uuid, pri.mac_address);
         let (rsp_uuid, rsp_status, rsp_addr, rsp_rsv) =
@@ -2371,16 +2218,14 @@ mod tests {
             assert_eq!(rsp_rsv[i], i as u8, "rsv[{i}] must be {i}");
         }
         // Once from the on/off restore, once at the end of user_init.
-        mock_device_status_update().assert_called(2);
-        mock_mesh_security_enable(true).assert_called(1);
-
-        // The boot ran the real sequence on the blank sector: step 1 is now in
-        // the reset-count sector, and nothing was erased or rebooted.
         assert_eq!(
-            flash_byte(FLASH_ADR_RESET_CNT),
-            0xFE,
-            "a blank sector must start the sequence at step 1"
+            status_probe::calls(),
+            2,
+            "device_status_update runs from the restore and at the end of init"
         );
+        assert!(is_security_enabled(), "user_init enables mesh encryption");
+
+        // A normal boot must not have erased anything or rebooted.
         assert!(
             !FakeMmio::writes()
                 .iter()
@@ -2391,29 +2236,15 @@ mod tests {
 
     /// A boot that finds the factory-reset flag erases the configuration,
     /// blinks the OTA LED and reboots — the `FactoryResetAndReboot` arm.
-    #[mry::mry]
-    #[mry::lock(
-        light_check_tick_per_us,
-        rf_link_slave_pairing_enable,
-        rf_set_power_level_index,
-        light_hw_timer_config,
-        rf_link_slave_init,
-        set_advertisement_manufacturer_data,
-        check_ota_area_startup,
-        light_onoff_hw,
-        device_status_update,
-        mesh_pair_init,
-        mesh_security_enable,
-        handle_boot_sequence
-    )]
     #[test]
     fn test_user_init_factory_reset_erases_blinks_and_reboots() {
         reset_fakes();
         crate::factory_reset::reset_for_test();
         // The previous five power cycles left the flag in the first slot.
         FakeFlash::write_slice(FLASH_ADR_RESET_CNT, &[0x80]);
+        crate::light::reset_for_test();
 
-        run_user_init_with_mocks();
+        run_user_init();
 
         // The reset path disables interrupts before touching flash.
         assert!(
@@ -2455,17 +2286,32 @@ mod tests {
     // --- Tests for light_user_func ---
 
     #[test]
-    #[mry::lock(mesh_pair_proc_effect, check_timing_step)]
     fn test_light_user_func_structure() {
-        // `check_light_state_save` is an inherent method on the flash store and is
-        // deliberately not mockable, so this test drives the real function and
-        // asserts its observable effects: the 5 s save timer is polled, the save
-        // reaches flash, and the timer is cleared so a second tick does not save
-        // again.
+        // `check_light_state_save` is an inherent method on the flash store, so
+        // this test drives the real function and asserts its observable effects:
+        // the 5 s save timer is polled, the save reaches flash, and the timer is
+        // cleared so a second tick does not save again.
         reset_test_globals();
         crate::light::reset_for_test();
         crate::factory_reset::reset_for_test();
         reset_fakes();
+
+        // Put the factory-reset sequence in the middle of its five-step run: the
+        // only state in which `check_timing_step` has an observable effect. Step
+        // 3 is on the card (0xF8), so the public boot path advances it to step 4
+        // (0xF0) and arms step 4's 3 s minimum window
+        // (`POWER_CYCLE_TIMING[3].0`). Step 1 is not used instead because steps
+        // 1-3 have no timing bit and so no write to observe.
+        FakeFlash::write_slice(FLASH_ADR_RESET_CNT + 2, &[0xF8]);
+        assert_eq!(
+            crate::factory_reset::handle_boot_sequence(),
+            crate::factory_reset::ResetAction::None
+        );
+        assert_eq!(
+            flash_byte(FLASH_ADR_RESET_CNT + 2),
+            0xF0,
+            "the boot must advance the sequence to step 4"
+        );
 
         // Seed a pending luminance save: a colour transition stamps
         // `last_transition_time`.
@@ -2485,18 +2331,27 @@ mod tests {
 
         // 5 s (160_000_000 ticks) have elapsed since that transition.
         fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
-        mock_mesh_pair_proc_effect().returns(());
-        // The tick must poll the reset timing check; its own behaviour is pinned
-        // by the `factory_reset` tests.
-        mock_check_timing_step().returns(ResetAction::None);
+        // Arm the pairing state machine's immediate-effect path, so the real
+        // `mesh_pair_proc_effect` has flash state to change.
+        crate::mesh::set_pair_effect_new_mesh(1);
 
         // Execute - light_user_func calls:
         // 1. flash_store.check_light_state_save();
         // 2. light_auth_check(); (which checks global state)
-        // 3. factory_reset::check_timing_step();
+        // 3. factory_reset::check_timing_step(); — the seeded sequence above
+        //    makes it write the step-4 timing bit, asserted below;
         // 4. mesh_pair_proc_effect();
         let mut flash_store = LightFlashStore::default();
         light_user_func(&mut flash_store);
+
+        // The tick polled `factory_reset::check_timing_step`, whose 3 s minimum
+        // window has elapsed: the step-4 timing bit lands in flash (0xF0 ->
+        // 0xD0). Deleting step 3 of `light_user_func` leaves the byte at 0xF0.
+        assert_eq!(
+            flash_byte(FLASH_ADR_RESET_CNT + 2),
+            0xD0,
+            "the tick must run factory_reset::check_timing_step"
+        );
 
         // Verify the save path ran, and the other three steps of the tick ran.
         let mut saved = [0u8; 7];
@@ -2517,7 +2372,16 @@ mod tests {
             0,
             "the entry records the transition's current WW"
         );
-        mock_mesh_pair_proc_effect().assert_called(1);
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the tick ran mesh_pair_proc_effect, which persisted the credentials"
+        );
+        assert_eq!(
+            crate::mesh::pair_fsm_view().effect_new_mesh,
+            0,
+            "the effect flag was consumed by the tick"
+        );
 
         // A second tick must not save again: `check_light_state_save` cleared the
         // timer, so it never even asks whether 5 s elapsed. The clock still reads
@@ -2528,45 +2392,57 @@ mod tests {
         FakeFlash::read_slice(0, &mut after);
         assert_eq!(&after[..7], &saved, "the first entry is unchanged");
         assert_eq!(&after[7..], &[0xFF; 7], "no second entry was programmed");
-        mock_mesh_pair_proc_effect().assert_called(2);
-        // One reset-timing poll per tick: deleting the call site in `light_user_func`
-        // must fail here.
-        mock_check_timing_step().assert_called(2);
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the second tick must not save the pairing record again"
+        );
     }
 
     // --- Tests for main_loop ---
 
+    /// One `main_loop` tick drives each stage, observed through what the stages
+    /// actually change: the luminance save (the light tick), the SDK's pairing
+    /// callback (the radio service) and the LED controller (the blink stage).
     #[test]
-    #[mry::lock(
-        mesh_pair_proc_effect,
-        rf_link_slave_proc,
-        led_indicate_step,
-        check_timing_step
-    )]
     fn test_main_loop_structure() {
-        // This test verifies that main_loop drives one tick of each stage.
-        //
-        // `light_user_func` itself is not mockable (it takes `&mut LightFlashStore`),
-        // so its body runs for real and is observed through two of its own callees.
         reset_test_globals();
         crate::light::reset_for_test();
         crate::factory_reset::reset_for_test();
+        reset_fakes();
+        install_recording_hooks();
 
-        // Mock the callees of the light tick and the other two stages
-        mock_check_timing_step().returns(ResetAction::None);
-        mock_mesh_pair_proc_effect().returns(());
-        mock_rf_link_slave_proc().returns(());
-        mock_led_indicate_step().returns(());
+        // Seed a pending luminance save: a colour transition stamps
+        // `last_transition_time`.
+        fake_clock::set_ticks(1000);
+        begin_transition(500, 300, 800);
+        fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
+
+        // A pending blink the LED stage must consume.
+        crate::light::effects::config_led_event(LED_EVENT_FLASH_1HZ_4S);
+        assert_eq!(pending_event(), LED_EVENT_FLASH_1HZ_4S);
 
         // Execute main_loop
         let mut flash_store = LightFlashStore::default();
         block_on(main_loop(&mut flash_store));
 
-        // Verify the functions were called
-        mock_check_timing_step().assert_called(1);
-        mock_mesh_pair_proc_effect().assert_called(1);
-        mock_rf_link_slave_proc().assert_called(1);
-        mock_led_indicate_step().assert_called(1);
+        // The light tick saved the luminance entry.
+        let mut saved = [0u8; 7];
+        FakeFlash::read_slice(0, &mut saved);
+        assert_eq!(saved[0], 0xA5, "the tick's save path ran");
+        // The radio service reached the SDK's pairing callback.
+        assert_eq!(
+            MESH_PAIR_PROC_CALLS.load(Ordering::Relaxed),
+            1,
+            "rf_link_slave_proc must service the pairing seam once"
+        );
+        // The LED stage consumed the pending event.
+        assert_eq!(
+            pending_event(),
+            0,
+            "led_indicate_step must start the pending blink"
+        );
+        reset_led_controller();
     }
 
     /// Regression test verifying the full response path:
@@ -2579,7 +2455,7 @@ mod tests {
     /// application state object.
     #[test]
     fn test_rf_link_response_callback_to_slave_add_status_layout() {
-        use crate::sdk::ble_app::light_ll::packet_processing::rf_link_slave_add_status;
+        use tlsr8266_radio::mesh_ll::packet_processing::rf_link_slave_add_status;
 
         // Reset only the globals this path reads: the request and response
         // packets are built locally below.
@@ -2682,30 +2558,32 @@ mod tests {
         message
     }
 
-    /// Asserts the mocked UART queue received exactly `text`, chunked the way
+    /// Asserts the async log sink received exactly `text`, chunked the way
     /// `UartStream::send` packets it.
     fn assert_uart_print(text: &[u8]) {
-        for chunk in text.chunks(PAYLOAD_CHUNK) {
-            mock_send_message(expected_print(chunk)).assert_called(1);
+        let frames = LOG_FRAMES.lock().unwrap();
+        let expected: std::vec::Vec<UartData> =
+            text.chunks(PAYLOAD_CHUNK).map(expected_print).collect();
+        assert_eq!(
+            frames.len(),
+            expected.len(),
+            "one frame per {PAYLOAD_CHUNK}-byte chunk"
+        );
+        for (got, want) in frames.iter().zip(expected.iter()) {
+            assert_eq!(got, want);
         }
-
-        mock_send_message(Any).assert_called(text.len().div_ceil(PAYLOAD_CHUNK));
     }
 
-    /// Clears the module statics and the HAL host seams, mocks the UART sink and
-    /// installs the test adapters as the log sinks, so a log line lands in the
-    /// mock instead of the real 12-slot channel. `FakeAnalog` is a process-wide
-    /// singleton, so every test here starts from a zeroed analog bank.
-    fn mock_uart_print() {
+    /// Clears the module statics and the HAL host seams, then installs the
+    /// recording log sinks so a log line is captured instead of reaching the
+    /// real 12-slot UART channel. `FakeAnalog` is a process-wide singleton, so
+    /// every test here starts from a zeroed analog bank.
+    fn reset_log_capture() {
         reset_for_test();
         FakeMmio::reset();
         FakeAnalog::reset();
         FakeFlash::reset();
-        mock_send_message(Any).returns(Ok(()));
-        crate::logging::set_log_sinks(crate::logging::LogSinks {
-            async_tx: log_async_tx_hook,
-            blocking_tx: log_blocking_tx_hook,
-        });
+        install_log_recorder();
     }
 
     /// Seed the panic-info sector with the layout `write_panic_bytes` produces:
@@ -2718,19 +2596,20 @@ mod tests {
 
     /// A clean previous boot prints nothing at all.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_clean() {
-        mock_uart_print();
+        reset_log_capture();
 
         log_boot_reset_reason(BootResetReason::Clean);
 
-        mock_send_message(Any).assert_called(0);
+        assert!(
+            LOG_FRAMES.lock().unwrap().is_empty(),
+            "no line may be logged"
+        );
     }
 
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_wd_reset() {
-        mock_uart_print();
+        reset_log_capture();
 
         log_boot_reset_reason(BootResetReason::Watchdog {
             breadcrumb: CRUMB_MAIN_LOOP,
@@ -2740,9 +2619,8 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_message() {
-        mock_uart_print();
+        reset_log_capture();
 
         let body = b"panic body";
         seed_panic_info(body, body.len() as u16);
@@ -2763,9 +2641,8 @@ mod tests {
     /// A panic body longer than the stream budget is clipped and marked, and the
     /// whole line still fits the 128-byte `UartStream` used by `uprintln!`.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_message_truncated() {
-        mock_uart_print();
+        reset_log_capture();
 
         let body = [b'x'; 200];
         seed_panic_info(&body, body.len() as u16);
@@ -2795,9 +2672,8 @@ mod tests {
     /// when the bytes that *were* read decode to exactly the 72-byte budget, so
     /// a cut can never look complete.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_message_marks_short_body_cut_by_read() {
-        mock_uart_print();
+        reset_log_capture();
 
         // 72 printable bytes followed by a byte that is invalid UTF-8, then more
         // data beyond the read window: the decoded prefix is exactly the budget.
@@ -2822,9 +2698,8 @@ mod tests {
     /// A message that fits the flash read window exactly but not the 72-byte
     /// stream budget is still marked, i.e. the clip alone can require `...`.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_message_marks_body_clipped_within_read() {
-        mock_uart_print();
+        reset_log_capture();
 
         let body = [b'w'; PANIC_READ_MAX];
         seed_panic_info(&body, body.len() as u16);
@@ -2846,9 +2721,8 @@ mod tests {
     /// AC4: an invalid panic flag means the sector is not trusted at all, so the
     /// boot report stays silent.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_invalid_flag() {
-        mock_uart_print();
+        reset_log_capture();
 
         FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG ^ 0xFF]);
 
@@ -2857,15 +2731,17 @@ mod tests {
         });
 
         // No line at all: the invalid flag short-circuits before the length read.
-        mock_send_message(Any).assert_called(0);
+        assert!(
+            LOG_FRAMES.lock().unwrap().is_empty(),
+            "no line may be logged"
+        );
     }
 
     /// AC4: a length beyond the 256-byte sector record is rejected before any
     /// body bytes are read, and nothing is logged.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_length_over_limit() {
-        mock_uart_print();
+        reset_log_capture();
 
         let len: u16 = 257;
         seed_panic_info(&[b'x'; 8], len);
@@ -2874,16 +2750,18 @@ mod tests {
             breadcrumb: CRUMB_MAIN_LOOP,
         });
 
-        mock_send_message(Any).assert_called(0);
+        assert!(
+            LOG_FRAMES.lock().unwrap().is_empty(),
+            "no line may be logged"
+        );
     }
 
     /// AC4: the bounded read can end inside a multi-byte character. The partial
     /// code point is dropped (`from_utf8` error clamp), never replaced and never
     /// logged raw, and the clipped line is marked with `...`.
     #[test]
-    #[mry::lock(send_message)]
     fn test_log_boot_reset_reason_panic_truncated_utf8() {
-        mock_uart_print();
+        reset_log_capture();
 
         // 75 ASCII bytes, then the two bytes of `é` straddling the 76-byte read
         // bound, then more data that is never read.
@@ -2930,7 +2808,6 @@ mod tests {
     }
 
     #[test]
-    #[mry::lock(send_mesh_message)]
     fn test_report_panic_info_with_valid_data() {
         reset_for_test();
 
@@ -2938,13 +2815,24 @@ mod tests {
         let message_len = test_message.len() as u16;
         seed_panic_info(test_message, message_len);
 
-        // Mock the mesh send so the report never touches the radio
-        mock_send_mesh_message(Any, Any, Any, Any).returns([1, 2, 3]);
-
         block_on(report_panic_info());
 
-        // Verify mesh messages were sent (3: two data chunks + one empty terminator)
-        mock_send_mesh_message(Any, Any, Any, Any).assert_called(3);
+        // Three messages are queued for the mesh (two data chunks and one empty
+        // terminator), each carrying one 10-byte panic fragment.
+        let queued = queues::MESH_TX_QUEUE.lock();
+        assert_eq!(queued.len(), 3, "two data chunks plus the terminator");
+        let first = &queued[0].pkt.att_write().value.val;
+        assert_eq!(first[0] & 0x3f, LGT_PANIC_MSG);
+        assert_eq!(&first[3..13], &test_message[..10]);
+        let second = &queued[1].pkt.att_write().value.val;
+        assert_eq!(
+            &second[3..3 + (test_message.len() - 10)],
+            &test_message[10..]
+        );
+        let terminator = &queued[2].pkt.att_write().value.val;
+        assert_eq!(terminator[0] & 0x3f, LGT_PANIC_MSG);
+        assert_eq!(&terminator[3..13], &[0u8; 10]);
+        drop(queued);
 
         // The report ends by erasing the sector, so the flag is back to blank.
         assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 1);

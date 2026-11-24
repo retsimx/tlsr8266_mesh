@@ -25,11 +25,11 @@ sys.path.insert(0, str(REPO_ROOT / "sdk"))
 
 import check_layering  # noqa: E402  (sys.path set up above)
 
-SDK_ROOT = REPO_ROOT / "rust" / "src" / "sdk"
 SRC_ROOT = REPO_ROOT / "rust" / "src"
 CRATE_ROOT = REPO_ROOT / "rust" / "crates" / "mesh-protocol" / "src"
 PAC_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-pac" / "src"
 HAL_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-hal" / "src"
+RADIO_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-radio" / "src"
 
 
 def _write(path: Path, content: str) -> Path:
@@ -73,11 +73,14 @@ class _TempTree(unittest.TestCase):
         return out
 
 
-class TestRealSdkTree(unittest.TestCase):
-    """The refactor is complete: the shipped tree must pass."""
+class TestRealTrees(unittest.TestCase):
+    """The refactor is complete: every shipped tree must pass every pass.
 
-    def test_default_root_is_the_repo_sdk(self) -> None:
-        self.assertEqual(Path(check_layering.DEFAULT_ROOT).resolve(), SDK_ROOT.resolve())
+    C-10 (#72) deleted ``rust/src/sdk``, so the real-tree cover is now the
+    composition root plus all four workspace crates — the exact set the
+    no-argument (CI) run audits.  The layering pass has no shipped tree left to
+    read; the hermetic ``_TempTree`` / ``_TempSrcTree`` suites are its cover.
+    """
 
     def test_default_src_root_is_the_repo_src(self) -> None:
         self.assertEqual(
@@ -89,62 +92,92 @@ class TestRealSdkTree(unittest.TestCase):
             Path(check_layering.DEFAULT_CRATE_ROOT).resolve(), CRATE_ROOT.resolve()
         )
 
-    def test_default_crate_roots_include_the_hal_crate(self) -> None:
-        # C-4: the extracted HAL crate is audited by the no-argument (CI) run.
+    def test_default_crate_roots_cover_every_workspace_crate(self) -> None:
+        # C-4 added the HAL, and C-10 (#72) added the extracted radio crate: the
+        # no-argument run audits the composition root plus these four, and a new
+        # crate must be added here in the same change that creates it.
         roots = [Path(item).resolve() for item in check_layering.DEFAULT_CRATE_ROOTS]
-        self.assertIn(HAL_ROOT.resolve(), roots)
+        self.assertEqual(
+            roots,
+            [
+                CRATE_ROOT.resolve(),
+                PAC_ROOT.resolve(),
+                HAL_ROOT.resolve(),
+                RADIO_ROOT.resolve(),
+            ],
+        )
 
-    def test_real_sdk_tree_is_clean(self) -> None:
+    def test_real_trees_are_clean(self) -> None:
+        # The no-argument run is what CI executes: the composition root and all
+        # four workspace crates, zero violations.
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main([])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertIn("0 violations", out.getvalue())
-        # C-4 moved `common/`, `mcu/` and `pm.rs` into `tlsr8266-hal`, and C-5
-        # moved `drivers/`, so the shipped SDK tree is smaller (28 files); the
-        # floor only guards against the gate silently scanning an empty/wrong
-        # directory.
-        self.assertGreaterEqual(len(check_layering.rust_files(str(SDK_ROOT))), 25)
+        self.assertEqual(out.getvalue().count("0 violations"), 5)
+        self.assertEqual(err.getvalue(), "")
+        # Every tree is named in the summary, relative to the repo, so a root
+        # silently dropped from the default list fails here.
+        for root in (SRC_ROOT, CRATE_ROOT, PAC_ROOT, HAL_ROOT, RADIO_ROOT):
+            self.assertIn(str(root.relative_to(REPO_ROOT)), out.getvalue())
 
     def test_real_tree_reports_every_pass(self) -> None:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = check_layering.main([])
         self.assertEqual(code, 0, out.getvalue() + err.getvalue())
-        self.assertIn("sdk layering OK", out.getvalue())
         self.assertIn("rust src audit OK", out.getvalue())
         self.assertIn("mesh-protocol audit OK", out.getvalue())
         self.assertIn("tlsr8266-pac audit OK", out.getvalue())
         self.assertIn("tlsr8266-hal audit OK", out.getvalue())
-        # Every universal root is named in the summary, relative to the repo.
-        self.assertIn(str(SRC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
-        self.assertIn(str(CRATE_ROOT.relative_to(REPO_ROOT)), out.getvalue())
-        self.assertIn(str(PAC_ROOT.relative_to(REPO_ROOT)), out.getvalue())
-        self.assertIn(str(HAL_ROOT.relative_to(REPO_ROOT)), out.getvalue())
+        self.assertIn("tlsr8266-radio audit OK", out.getvalue())
+        # C-10 (#72) deleted the layering root, so the default run has no
+        # layering pass and must not pretend it ran one.
+        self.assertNotIn("sdk layering OK", out.getvalue())
+        self.assertEqual(len(out.getvalue().splitlines()), 5)
 
-    def test_real_crate_tree_is_clean(self) -> None:
-        paths = check_layering.rust_files(str(CRATE_ROOT))
-        self.assertGreaterEqual(len(paths), 5)
-        violations, _total = check_layering.audit_universal(
-            paths, str(CRATE_ROOT), enforce_budget=False
-        )
-        self.assertEqual(violations, [])
+    def test_every_real_tree_passes_the_universal_rules(self) -> None:
+        # Direct audit of each tree, independent of the CLI summary: the radio
+        # crate is audited exactly like the other three, only unbudgeted.
+        floors = {
+            SRC_ROOT: 15,
+            CRATE_ROOT: 5,
+            PAC_ROOT: 2,
+            HAL_ROOT: 20,
+            RADIO_ROOT: 20,
+        }
+        for root, floor in floors.items():
+            with self.subTest(root=str(root.relative_to(REPO_ROOT))):
+                paths = check_layering.rust_files(str(root))
+                self.assertGreaterEqual(len(paths), floor, f"{root} is too small")
+                violations, _total = check_layering.audit_universal(
+                    paths, str(root), enforce_budget=False
+                )
+                self.assertEqual(violations, [])
 
-    def test_no_sdk_file_names_a_root_constant_module(self) -> None:
-        # C-9 (#71): the `sdk-root-dep` rule only sees production code, but the
-        # issue's acceptance criterion is this literal grep, which also covers
-        # `#[cfg(test)]`.  The rule is the seam; this is the criterion.
-        for path in check_layering.rust_files(str(SDK_ROOT)):
+    def test_radio_crate_carries_the_injected_config_seam(self) -> None:
+        # C-9 (#71) replaced the radio layer's reads of the application's root
+        # `config`/`version` modules with an injected `RadioConfig`.  C-10 (#72)
+        # moves that seam with the code, and in a separate crate it is the only
+        # way to reach board constants at all: `crate::config` is the crate's
+        # own module, and the application's `crate::version` cannot resolve.
+        config = (RADIO_ROOT / "config.rs").read_text(encoding="utf-8")
+        self.assertIn("pub struct RadioConfig", config)
+        self.assertIn("pub fn set_radio_config", config)
+        for path in check_layering.rust_files(str(RADIO_ROOT)):
             text = Path(path).read_text(encoding="utf-8")
             self.assertIsNone(
-                re.search(r"crate::(?:config|version)\b", text),
-                f"{path} names a crate root constant module",
+                re.search(r"crate::version\b", text),
+                f"{path} still names the application's version module",
             )
 
     def test_production_unsafe_ceiling_equals_the_measured_count(self) -> None:
         # The ratchet may be lowered, never raised: raising it without removing
         # `unsafe` sites leaves the measured count below the ceiling and fails
         # this assertion, and so does lowering it without the removals.
+        # C-10 (#72) ratcheted 60 -> 16 when the 44 RF/BLE sites moved into
+        # `tlsr8266-radio`, which is audited but not budgeted.
+        self.assertEqual(check_layering.MAX_PRODUCTION_UNSAFE, 16)
         violations, total = check_layering.audit_universal(
             check_layering.rust_files(str(SRC_ROOT)), str(SRC_ROOT)
         )
@@ -449,10 +482,12 @@ class TestGlobalBans(_TempTree):
 class TestSdkRootBanScope(_TempSrcTree):
     """`sdk-root-dep` is scoped to the extracted subtree, not the whole tree.
 
-    The rule lives in the layering pass, which only ever reads ``--root``
-    (``rust/src/sdk``).  `crate::config` is the legitimate root constant module
-    for the application, so a non-SDK file that names it must stay clean —
-    otherwise the ban would be an app-wide refactor instead of a seam.
+    The rule lives in the layering pass, which only ever reads ``--root``; the
+    shipped subtree it was written for (``rust/src/sdk``) was deleted by C-10
+    (#72), so these fixtures are its only caller.  `crate::config` is the
+    legitimate root constant module for the application, so a non-SDK file that
+    names it must stay clean — otherwise the ban would be an app-wide refactor
+    instead of a seam.
     """
 
     def test_crate_config_is_legal_outside_the_sdk_tree(self) -> None:
@@ -866,72 +901,88 @@ class TestCommentAndStringPolicy(_TempTree):
 
 
 class TestHistoricalTrapFiles(_TempTree):
-    """Re-inject the historical violations into copies of the three trap files."""
+    """The historical trap *shapes*, inlined as synthetic fixtures.
 
-    def _copy_and_inject(self, relative: str, anchor: str, injected: str) -> tuple[str, int]:
-        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
-        self.assertIn(anchor, source, f"anchor drifted in {relative}")
-        text = source.replace(anchor, anchor + injected, 1)
-        # Keep the original path: the layering gate derives both the layer and
-        # the legal `super::` climb from the file's position in the tree.
-        self.write(relative, text)
-        injected_line = next(
-            number
-            for number, line in enumerate(text.splitlines(), start=1)
-            if injected.strip() in line
+    These used to read and inject into copies of
+    ``rust/src/sdk/ble_app/*.rs`` — a tree C-10 (#72) deleted.  Each test now
+    writes the same shape from scratch: a violation injected after the exact
+    construct that once defeated the mask, in a file whose directory depth and
+    layer are the same as the original's.
+    """
+
+    def test_cfg_test_static_mut_above_production_does_not_truncate(self) -> None:
+        # Shape of the deleted `ble_app/ble_ll_attribute.rs`: an inline
+        # `#[cfg(test)] pub static mut` sitting between production items.  The
+        # stripper used to run from that attribute to the next brace block and
+        # hide every production line that followed it.
+        path = self.write(
+            "ble_app/ble_ll_attribute.rs",
+            _lines(
+                "use tlsr8266_pac::read_reg_system_tick;",       # 1
+                "",                                               # 2
+                "#[cfg(test)]",                                   # 3
+                "pub static mut __RAM_START_ADDR: u32 = 0;",      # 4
+                "",                                               # 5
+                "pub fn production() {}",                         # 6
+                "",                                               # 7
+                "use crate::app::App;",                           # 8
+            ),
         )
-        return text, injected_line
+        out = self.assert_violations(f"{path}:8: upward-dep: crate::app")
+        self.assertEqual(len(out.splitlines()), 1)
 
-    def test_ble_ll_attribute_inline_cfg_test_static_does_not_truncate(self) -> None:
-        relative = "ble_app/ble_ll_attribute.rs"
-        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
-        self.write(relative, source)
-        self.assert_clean()  # the unmodified copy is clean too
-
-        anchor = "#[cfg(test)]\npub static mut __RAM_START_ADDR: u32 = 0;"
-        _, line = self._copy_and_inject(relative, anchor, "\n\nuse crate::app::App;")
-        self.assert_violations(f"{line}: upward-dep: crate::app")
-
-    def test_packet_processing_fn_local_import_is_production(self) -> None:
-        relative = "ble_app/light_ll/packet_processing.rs"
-        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
-        self.write(relative, source)
-        self.assert_clean()
-
-        anchor = (
-            "#[cfg_attr(test, mry::mry)]\n"
-            "pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {"
+    def test_fn_local_import_is_production(self) -> None:
+        # Shape of the deleted `ble_app/light_ll/packet_processing.rs`: the
+        # violation is a `use` *inside* a `#[cfg_attr(test, mry::mry)]`
+        # function, so a stripper that treated the attribute as test code lost
+        # the whole body.
+        path = self.write(
+            "ble_app/light_ll/packet_processing.rs",
+            _lines(
+                "#[cfg_attr(test, mry::mry)]",                        # 1
+                "pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {",  # 2
+                "    use crate::mesh::MESH_NODE_ST_VAL_LEN;",         # 3
+                "    let _ = packet;",                                # 4
+                "    Ok(())",                                         # 5
+                "}",                                                  # 6
+            ),
         )
-        _, line = self._copy_and_inject(
-            relative, anchor, "\n    use crate::mesh::MESH_NODE_ST_VAL_LEN;"
+        self.assert_violations(f"{path}:3: upward-dep: crate::mesh")
+
+    def test_irq_fn_local_import_is_production(self) -> None:
+        # Shape of the deleted `ble_app/irq/connection.rs`: a module-level
+        # `use` inside a fn body, two directories below the root.
+        path = self.write(
+            "ble_app/irq/connection.rs",
+            _lines(
+                "#[cfg_attr(test, mry::mry)]",                        # 1
+                "fn process_mesh_operations() {",                     # 2
+                "    use crate::uart_manager::UartMsg;",              # 3
+                "    let _ = core::mem::size_of::<UartMsg>();",       # 4
+                "}",                                                  # 5
+            ),
         )
-        self.assert_violations(f"{line}: upward-dep: crate::mesh")
+        self.assert_violations(f"{path}:3: upward-dep: crate::uart_manager")
 
-    def test_connection_fn_local_import_is_production(self) -> None:
-        relative = "ble_app/irq/connection.rs"
-        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
-        self.write(relative, source)
-        self.assert_clean()
-
-        anchor = "#[cfg_attr(test, mry::mry)]\nfn process_mesh_operations() {"
-        _, line = self._copy_and_inject(
-            relative, anchor, "\n    use crate::uart_manager::UartMsg;"
+    def test_config_root_import_is_rejected_next_to_a_real_pac_import(self) -> None:
+        # C-9 (#71): the ten real import sites were spread across eight files of
+        # the extracted subtree, so the trap sits in a file that legitimately
+        # names the PAC and keeps its own `#[cfg(test)]` copy of the same path.
+        path = self.write(
+            "ble_app/ble_ll_attribute.rs",
+            _lines(
+                "use tlsr8266_pac::read_reg_system_tick;",            # 1
+                "use crate::config::VENDOR_ID;",                      # 2
+                "",                                                   # 3
+                "#[cfg(test)]",                                       # 4
+                "mod tests {",                                        # 5
+                "    use crate::config::VENDOR_ID;",                  # 6
+                "}",                                                  # 7
+            ),
         )
-        self.assert_violations(f"{line}: upward-dep: crate::uart_manager")
-
-    def test_config_root_import_is_rejected_in_a_real_sdk_file(self) -> None:
-        # C-9 (#71): the ten real import sites this rule replaces were spread
-        # across eight SDK files, so the trap is re-injected into one of them
-        # rather than a synthetic stub — that also proves the rule still fires
-        # on a file that legitimately names a dozen other `crate::` paths.
-        relative = "ble_app/ble_ll_attribute.rs"
-        source = (SDK_ROOT / relative).read_text(encoding="utf-8")
-        self.write(relative, source)
-        self.assert_clean()
-
-        anchor = "use tlsr8266_pac::read_reg_system_tick;"
-        _, line = self._copy_and_inject(relative, anchor, "\nuse crate::config::VENDOR_ID;")
-        self.assert_violations(f"{line}: sdk-root-dep: crate::config")
+        out = self.assert_violations(f"{path}:2: sdk-root-dep: crate::config")
+        # The test-only copy is exempt: the rule reads production code only.
+        self.assertEqual(len(out.splitlines()), 1)
 
 
 class TestPathBypasses(_TempTree):
@@ -965,7 +1016,7 @@ class TestPathBypasses(_TempTree):
 
     def test_grouped_super_chain_that_escapes_is_rejected(self) -> None:
         self.write("x.rs", _lines("use super::{super::app::app};"))
-        self.assert_violations("super-escape: super::2 past rust/src/sdk (chain of 2, depth 0)")
+        self.assert_violations("super-escape: super::2 past the audited root (chain of 2, depth 0)")
 
     def test_crate_alias_is_rejected(self) -> None:
         self.write(
@@ -1578,9 +1629,12 @@ class TestUartPurityRule(_TempSrcTree):
 class TestMeshPurityRule(_TempSrcTree):
     """`rust/src/mesh/**` production code may not name `uart`, the lamp or `light`.
 
-    `mesh` is the one subsystem allowed `crate::sdk` — it owns the radio, the
-    node table and `ble_app`'s queues — and `crate::config` / `crate::logging`
-    like everything else. `app` (the composition root) and `irq` (its ISR layer)
+    In the synthetic tree this fixture builds, `mesh` is the one subsystem
+    allowed `crate::sdk` — it owns the radio, the node table and `ble_app`'s
+    queues — and `crate::config` / `crate::logging` like everything else. The
+    row stays armed for that fixture; the shipped tree names `tlsr8266_radio`
+    instead (C-10 (#72) deleted `rust/src/sdk/`, and `git grep crate::sdk --
+    rust/` is empty). `app` (the composition root) and `irq` (its ISR layer)
     are forbidden as well, so the module doc's "it never names `app`" is a
     checked claim. The four application edges go through `MeshEventHooks`, which
     is what keeps this row possible.

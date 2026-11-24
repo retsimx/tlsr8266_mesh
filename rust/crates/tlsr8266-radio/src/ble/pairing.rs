@@ -26,7 +26,7 @@
 //!
 //! ## Security Model
 //!
-//! ```
+//! ```text
 //! Device Authentication Flow:
 //! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 //! │  Unpaired   │───▶│  Pairing    │───▶│ Authenticated│
@@ -40,7 +40,7 @@
 //! ## Key Structure
 //!
 //! The authentication key is a 48-byte structure:
-//! ```
+//! ```text
 //! Key Layout (48 bytes total):
 //! ┌─────────────────┬─────────────────┬─────────────────┐
 //! │ Mesh Name       │ Mesh Password   │ Reserved        │
@@ -55,7 +55,7 @@
 //! - **Access Control**: Only authenticated devices can control mesh network functions
 //! - **Revocation**: Immediate credential deletion prevents further unauthorized access
 
-use crate::sdk::ble_app::ble_ll_pair::{
+use crate::ble::pair::{
     pair_save_key, pair_set_key, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD, PAIR_LOGIN_OK,
 };
 use tlsr8266_hal::common::sync::SimplifyLS;
@@ -125,7 +125,6 @@ use tlsr8266_hal::common::sync::SimplifyLS;
 /// This function provides immediate access revocation but does not perform
 /// cryptographic key erasure. For high-security applications, consider
 /// additional memory clearing procedures.
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_delete_pair() {
     // Allocate credential structure (48 bytes: name + password + reserved)
     let mut key = [0u8; 16 * 3];
@@ -151,27 +150,58 @@ pub fn rf_link_delete_pair() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_pair::{mock_pair_save_key, mock_pair_set_key};
-    use mry::Any;
+    use crate::ble::pair::PAIR_STATE;
+    use crate::config::radio_config;
+    use crate::rf::drv_8266::FLASH_CONFIGURATION_INDEX;
+    use crate::types::PAIR_CONFIG_VALID_FLAG;
+    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
 
     #[test]
-    #[mry::lock(pair_set_key, pair_save_key)]
     fn test_rf_link_delete_pair() {
+        // The PAC/HAL host fakes are process-wide singletons; clear them so this
+        // test never inherits another test's register bank, clock, AES transport
+        // or flash contents.
+        FakeMmio::reset();
+        tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog::reset();
+        tlsr8266_hal::mcu::clock::fake_clock::reset();
+        tlsr8266_hal::mcu::crypto::fake_crypto::reset();
+        FakeFlash::reset();
+
         // Setup test state
+        FLASH_CONFIGURATION_INDEX.set(-1); // no configuration slot used yet
         PAIR_CONFIG_MESH_NAME.lock()[..4].copy_from_slice(b"Test");
         PAIR_CONFIG_MESH_PWD.lock()[..4].copy_from_slice(b"Pass");
         PAIR_LOGIN_OK.set(true);
 
-        // Setup mocks
-        mock_pair_set_key(Any).returns(());
-        mock_pair_save_key().returns(());
-
         // Execute function
         rf_link_delete_pair();
 
-        // Verify results
+        // Verify results: authentication is revoked.
         assert!(!PAIR_LOGIN_OK.get());
-        mock_pair_set_key(Any).assert_called(1);
-        mock_pair_save_key().assert_called(1);
+
+        // pair_set_key ran for real: the assembled credentials reached the live
+        // pairing state (name, password, zeroed reserved long-term key).
+        {
+            let pair_state = PAIR_STATE.lock();
+            assert_eq!(&pair_state.pair_nn[..4], b"Test");
+            assert_eq!(&pair_state.pair_pass[..4], b"Pass");
+            assert_eq!(pair_state.pair_ltk, [0; 16]);
+        }
+
+        // pair_save_key ran for real: it selected the first configuration slot
+        // and wrote the validation header plus the mesh name to flash.
+        assert_eq!(
+            FLASH_CONFIGURATION_INDEX.get(),
+            0,
+            "pair_save_key must claim the first pairing slot"
+        );
+        let flash_adr_pairing = radio_config().flash_adr_pairing;
+        let mut header = [0u8; 1];
+        FakeFlash::read_slice(flash_adr_pairing, &mut header);
+        assert_eq!(header[0], PAIR_CONFIG_VALID_FLAG);
+        let mut name = [0u8; 4];
+        FakeFlash::read_slice(flash_adr_pairing + 0x10, &mut name);
+        assert_eq!(&name, b"Test");
     }
 }

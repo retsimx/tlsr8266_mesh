@@ -4,7 +4,7 @@
 //! The dependency direction is strictly downward. This directory owns the mesh
 //! transport (the send/receive tasks, the retransmission queue and the relay
 //! path) and the flash/radio half of re-pairing. It may reach `tlsr8266_hal`,
-//! `mesh_protocol`, `crate::config`, `crate::logging` and the `crate::sdk` glue
+//! `mesh_protocol`, `crate::config`, `crate::logging` and the `tlsr8266_radio` glue
 //! it drives; it never names `app`, `irq`, `light`, `uart`, `ota`,
 //! `factory_reset`, `diagnostics` or the PAC register crate
 //! (`sdk/check_layering.py` enforces it).
@@ -28,37 +28,38 @@ use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use heapless::Vec;
 
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
-use crate::sdk::ble_app::ble_ll_pair::{pair_enc_packet_mesh, pair_save_key};
-use crate::sdk::ble_app::flash_config::{pair_load_key, SYS_CHN_LISTEN};
-use crate::sdk::ble_app::light_ll::mesh_management::{
+use crate::{uprintln, BIT};
+pub use fsm::{
+    MeshPairAction, MeshPairFsm, MeshPairState, MESH_PAIR_CMD_INTERVAL, MESH_PAIR_TIMEOUT,
+};
+use mesh_protocol::mesh_types::*;
+use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
+use tlsr8266_hal::drivers::flash::flash_write_page;
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time64, sleep_us, CLOCK_SYS_CLOCK_1US};
+use tlsr8266_radio::ble::flash_config::{pair_load_key, SYS_CHN_LISTEN};
+use tlsr8266_radio::ble::pair::{pair_enc_packet_mesh, pair_save_key};
+use tlsr8266_radio::mesh_ll::node_status::{
     mesh_construct_packet, mesh_node_table_init, rf_link_match_group_mac,
 };
-use crate::sdk::ble_app::light_ll::packet_processing::{
+use tlsr8266_radio::mesh_ll::packet_processing::{
     is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_rc_data,
 };
-use crate::sdk::ble_app::queues::{self, SendPkt, MESH_RX_CHANNEL, MESH_TX_QUEUE, MESH_TX_WAKE};
+use tlsr8266_radio::queues::{self, SendPkt, MESH_RX_CHANNEL, MESH_TX_QUEUE, MESH_TX_WAKE};
 #[cfg(test)]
-use crate::sdk::ble_app::reset_radio_state_for_test;
-use crate::sdk::ble_app::rf_drv_8266::{
+use tlsr8266_radio::reset_radio_state_for_test;
+use tlsr8266_radio::rf::drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
     rf_set_tx_rx_off, rf_start_srx2tx,
 };
-use crate::sdk::ble_app::{
+use tlsr8266_radio::types::*;
+use tlsr8266_radio::{
     apply_new_mesh_credentials, current_access_code, dev_addr_validation_pending, device_address,
     flash_config_index, is_ble_connected, is_mesh_pair_enabled, is_paired_login,
     is_security_enabled, pair_credentials_snapshot, pair_setting_flag, set_mesh_pair_enabled,
     set_pair_setting_flag, set_security_enabled, switch_to_default_mesh_credentials,
     take_dev_addr_validation_pending,
 };
-use crate::sdk::light::*;
-use crate::{uprintln, BIT};
-pub use fsm::{
-    MeshPairAction, MeshPairFsm, MeshPairState, MESH_PAIR_CMD_INTERVAL, MESH_PAIR_TIMEOUT,
-};
-use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
-use tlsr8266_hal::common::sync::CriticalSectionMutex;
-use tlsr8266_hal::drivers::flash::flash_write_page;
-use tlsr8266_hal::mcu::clock::{clock_time, clock_time64, sleep_us, CLOCK_SYS_CLOCK_1US};
 
 /// The application edges the mesh subsystem must not compile in.
 ///
@@ -127,6 +128,40 @@ fn dispatch_uart_mesh_rx(pkt: &Packet) {
 /// Sole owner of the mesh pairing state.
 pub static MESH_PAIR: CriticalSectionMutex<MeshPairFsm> =
     CriticalSectionMutex::new(MeshPairFsm::new());
+
+/// The pairing-machine fields the root tests in `app.rs` assert on.
+///
+/// The fields themselves are `pub(super)` so they never become a writable
+/// public surface; this snapshot is the one read window the composition-root
+/// tests need.
+#[cfg(test)]
+#[derive(Default)]
+pub struct PairFsmView {
+    pub new_mesh_name: [u8; 16],
+    pub effect_new_mesh: u8,
+    pub mesh_pair_cmd_interval: u32,
+    pub mesh_pair_timeout: u32,
+}
+
+/// Snapshot the pairing machine's state for `app.rs`'s tests.
+#[cfg(test)]
+#[coverage(off)]
+pub fn pair_fsm_view() -> PairFsmView {
+    let pair = MESH_PAIR.lock();
+    PairFsmView {
+        new_mesh_name: pair.new_mesh_name,
+        effect_new_mesh: pair.effect_new_mesh,
+        mesh_pair_cmd_interval: pair.mesh_pair_cmd_interval,
+        mesh_pair_timeout: pair.mesh_pair_timeout,
+    }
+}
+
+/// Arm the immediate-effect path for `app.rs`'s tests.
+#[cfg(test)]
+#[coverage(off)]
+pub fn set_pair_effect_new_mesh(value: u8) {
+    MESH_PAIR.lock().effect_new_mesh = value;
+}
 
 /// Recording hooks the host tests install in place of the composition root's.
 ///
@@ -205,7 +240,6 @@ pub fn reset_for_test() {
 
 // p_cmd : cmd[3]+para[10]
 // para    : dst
-#[cfg_attr(test, mry::mry)]
 pub fn light_slave_tx_command(
     p_cmd: &Vec<u8, 13>,
     para: u16,
@@ -256,7 +290,6 @@ fn queue_mesh_packet(pkt: &Packet) {
 /// `destination`: the address of the destination
 /// `retransmit_count`: how many times the packet should be rebroadcast at each node
 /// `send_ack`: whether the destination device should send an ack after handling it
-#[cfg_attr(test, mry::mry)]
 pub fn send_mesh_message(
     data: &Vec<u8, 13>,
     destination: u16,
@@ -270,7 +303,6 @@ pub fn send_mesh_message(
 }
 
 /// Enable the re-pairing state machine and arm its command interval and timeout.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_init() {
     set_mesh_pair_enabled(true);
 
@@ -300,7 +332,6 @@ pub fn mesh_pair_init() {
 /// The due check and the payload are the state machine's; the flash save that
 /// follows takes its own locks and copies the credentials out of the action,
 /// so no pairing guard is alive while the sector is erased or written.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_proc_effect() {
     let action = {
         let pair = MESH_PAIR.lock();
@@ -334,7 +365,6 @@ pub fn mesh_pair_proc_effect() {
 /// Marks device address configuration as successfully validated.
 /// Called when LGT_CMD_CONFIG_DEV_ADDR is processed and device address is accepted.
 /// Consumes the validation flag, allowing mesh credentials to be saved.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_device_address_validation_completed() {
     take_dev_addr_validation_pending(); // validation completed successfully
     if is_mesh_pair_enabled() {
@@ -354,7 +384,6 @@ pub fn mesh_device_address_validation_completed() {
 }
 
 /// Feed one received mesh pairing command into the pairing state machine.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_cb(params: &Vec<u8, 10>) {
     let mut chunk = [0u8; 8];
     chunk.copy_from_slice(&params[1..9]);
@@ -500,7 +529,7 @@ fn save_and_apply(name: [u8; 16], pwd: [u8; 16], ltk: [u8; 16], use_pair_ltk: bo
         rf_set_ble_access_code(current_access_code()); // use new access code at once.
         dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
         sleep_us(1000);
-        crate::sdk::ble_app::rf_drv_8266::rf_clear_rx_irq(); // clear current rx in buffer
+        tlsr8266_radio::rf::drv_8266::rf_clear_rx_irq(); // clear current rx in buffer
     });
 
     safe_effect_new_mesh_finish();
@@ -611,7 +640,6 @@ pub fn mesh_pair_proc() {
 }
 
 /// Enable or disable mesh payload encryption.
-#[cfg_attr(test, mry::mry)]
 pub fn mesh_security_enable(enable: bool) {
     set_security_enabled(enable);
 }
@@ -840,34 +868,23 @@ pub async fn mesh_packet_rcv() {
 mod tests {
     use super::*;
     use crate::light::transitions::LIGHT_CMD_CHANNEL;
-    use crate::sdk::ble_app::ble_ll_pair::mock_pair_save_key;
-    use crate::sdk::ble_app::flash_config::{access_code, mock_access_code, mock_pair_load_key};
-    use crate::sdk::ble_app::light_ll::mesh_management::{
-        mock_mesh_node_table_init, mock_rf_link_match_group_mac,
-    };
-    use crate::sdk::ble_app::light_ll::packet_processing::{
-        mock_is_add_packet_buf_ready, mock_rf_link_add_tx_packet, mock_rf_link_rc_data,
-    };
-    use crate::sdk::ble_app::rf_drv_8266::{
-        mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
-        mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
-    };
-    use crate::sdk::ble_app::{
-        set_ble_connected, set_current_access_code, set_dev_addr_validation_pending,
-        set_device_address, set_flash_config_index, set_mesh_pair_enabled,
-        set_pair_config_mesh_credentials, set_pair_credentials, set_paired_login,
-        set_security_enabled,
-    };
     use core::sync::atomic::Ordering;
     use heapless::Vec;
-    use mry::Any;
     use tlsr8266_hal::common::sync::CriticalSectionMutexGuard;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::FLD_RF_IRQ_MASK;
+    use tlsr8266_radio::ble::flash_config::access_code;
+    use tlsr8266_radio::callbacks::{set_ble_app_hooks, BleAppHooks};
+    use tlsr8266_radio::{
+        set_ble_connected, set_current_access_code, set_dev_addr_validation_pending,
+        set_device_address, set_flash_config_index, set_group_addresses, set_mesh_pair_enabled,
+        set_pair_config_mesh_credentials, set_pair_credentials, set_paired_login,
+        set_security_enabled,
+    };
 
-    use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
+    use tlsr8266_radio::types::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
 
     /// `reg_system_tick`: the free-running tick `clock_time()` reads.
     const REG_SYSTEM_TICK: u32 = 0x740;
@@ -925,70 +942,157 @@ mod tests {
         pair().mesh_pair_time = 1_000;
     }
 
+    /// `reg_dma_tx_rptr` / `reg_dma_tx_wptr`: the DMA TX ring pointers that
+    /// `is_add_packet_buf_ready` and `rf_link_add_tx_packet` read.
+    const REG_DMA_TX_RPTR: u32 = 0x52a;
+    const REG_DMA_TX_WPTR: u32 = 0x52b;
+    /// `reg_rf_channel`: written once per `rf_set_ble_channel` hop.
+    const REG_RF_CHANNEL: u32 = 0x40d;
+    /// `reg_dma_tx_fifo`: the DMA TX queue registration write.
+    const REG_DMA_TX_FIFO: u32 = 0x52c;
+
+    /// Leave `used` slots occupied in the DMA TX ring, then forget the writes
+    /// that seeding produced.
+    fn seed_tx_ring(used: u8) {
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, used);
+        FakeMmio::clear_writes();
+    }
+
+    /// How many writes the bank recorded at `addr`.
+    fn writes_at(addr: u32) -> usize {
+        FakeMmio::writes()
+            .iter()
+            .filter(|write| write.addr == addr | tlsr8266_pac::REG_BASE_ADDR)
+            .count()
+    }
+
+    /// The hook set the SDK's `on_uart_mesh_rx` dispatcher records into.
+    ///
+    /// The packet decoder's relay path is an indirect call registered by the
+    /// composition root, so a test observes it exactly the way production does.
+    mod relay {
+        use super::Packet;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        pub static PACKETS: AtomicU32 = AtomicU32::new(0);
+
+        fn record(_pkt: &Packet) {
+            PACKETS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        pub fn hooks() -> super::BleAppHooks {
+            super::BleAppHooks {
+                on_mesh_pair_proc: noop,
+                on_light_data: noop_light,
+                on_light_response: |_, _| Err(()),
+                on_uart_mesh_rx: record,
+            }
+        }
+
+        fn noop() {}
+
+        fn noop_light(_pkt: &Packet) {}
+
+        /// Zero the counter and install the recording hooks.
+        pub fn install() {
+            PACKETS.store(0, Ordering::Relaxed);
+            super::set_ble_app_hooks(hooks());
+        }
+
+        pub fn count() -> u32 {
+            PACKETS.load(Ordering::Relaxed)
+        }
+    }
+
     // --- send_mesh_message Tests ---
 
-    /// Tests send_mesh_message with group match
+    /// A group address this node belongs to: the packet is delivered locally
+    /// *and* re-transmitted, and the returned sequence number is the one
+    /// `light_slave_tx_command` stamped into the constructed packet.
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_send_mesh_message_group_match() {
         // Setup
         reset_for_test();
+        set_device_address(0x1234);
+        let mut groups = [0u16; MAX_GROUP_COUNT as usize];
+        groups[0] = 0x8001;
+        set_group_addresses(groups);
+        // `light_slave_tx_command` seeds the sequence number with
+        // `clock_time() + device_address()`: 0x5000 + 0x1234.
+        fake_clock::set_ticks(0x5000);
 
-        let test_data: Vec<u8, 13> = Vec::from_slice(&[1, 2, 3, 4, 5]).unwrap();
-        let test_pkt = create_test_packet(0x1234, 0xFFFF, [10, 20, 30]);
-
-        mock_light_slave_tx_command(Any, 0xFFFF, 3, true).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((true, false)); // group match, not device match
+        let test_data: Vec<u8, 13> =
+            Vec::from_slice(&[1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
 
         // Execute
-        let result = send_mesh_message(&test_data, 0xFFFF, 3, true);
+        let result = send_mesh_message(&test_data, 0x8001, 3, true);
 
-        // Verify
-        assert_eq!(result, [10, 20, 30]);
-        mock_light_slave_tx_command(Any, 0xFFFF, 3, true).assert_called(1);
-        mock_rf_link_match_group_mac(Any).assert_called(1);
+        // Verify: the sequence number comes from the real packet, and a group
+        // address is both handed to the receive side and re-transmitted.
+        assert_eq!(result, [0x34, 0x62, 0x00]);
+        let local = MESH_RX_CHANNEL
+            .try_receive()
+            .expect("a group-addressed packet is delivered locally");
+        let local_dst = local.ll_app().value.dst;
+        assert_eq!(local_dst, 0x8001);
+        let tx = MESH_TX_QUEUE.lock();
+        assert_eq!(tx.len(), 1, "a group address is re-transmitted");
+        assert_eq!(tx[0].send_count, 3);
+        let tx_dst = tx[0].pkt.ll_app().value.dst;
+        assert_eq!(tx_dst, 0x8001);
     }
 
-    /// Tests send_mesh_message with device match
+    /// This node's own unicast address: delivered locally, never re-transmitted.
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_send_mesh_message_device_match() {
         // Setup
         reset_for_test();
+        set_device_address(0x0001);
+        fake_clock::set_ticks(0x5000);
 
-        let test_data: Vec<u8, 13> = Vec::from_slice(&[1, 2, 3]).unwrap();
-        let test_pkt = create_test_packet(0x0001, 0x0001, [5, 6, 7]);
-
-        mock_light_slave_tx_command(Any, 0x0001, 0, false).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, true)); // device match
+        let test_data: Vec<u8, 13> =
+            Vec::from_slice(&[1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
 
         // Execute
         let result = send_mesh_message(&test_data, 0x0001, 0, false);
 
         // Verify - device match means no retransmission
-        assert_eq!(result, [5, 6, 7]);
-        mock_rf_link_match_group_mac(Any).assert_called(1);
+        assert_eq!(result, [0x01, 0x50, 0x00]);
+        let local = MESH_RX_CHANNEL
+            .try_receive()
+            .expect("a self-addressed packet is delivered locally");
+        let local_dst = local.ll_app().value.dst;
+        assert_eq!(local_dst, 0x0001);
+        assert_eq!(
+            MESH_TX_QUEUE.lock().len(),
+            0,
+            "a device-addressed packet has nowhere to be re-transmitted"
+        );
     }
 
-    /// Tests send_mesh_message with no match
+    /// Neither this device nor a member group: the packet only goes to the wire.
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_send_mesh_message_no_match() {
         // Setup
         reset_for_test();
+        set_device_address(0x0001);
+        fake_clock::set_ticks(0x5000);
 
-        let test_data: Vec<u8, 13> = Vec::from_slice(&[1, 2, 3]).unwrap();
-        let test_pkt = create_test_packet(0x0002, 0x0003, [8, 9, 10]);
-
-        mock_light_slave_tx_command(Any, 0x0003, 2, false).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, false)); // no match
+        let test_data: Vec<u8, 13> =
+            Vec::from_slice(&[1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
 
         // Execute
         let result = send_mesh_message(&test_data, 0x0003, 2, false);
 
-        // Verify
-        assert_eq!(result, [8, 9, 10]);
-        mock_rf_link_match_group_mac(Any).assert_called(1);
+        // Verify: no local delivery, one queued transmission.
+        assert_eq!(result, [0x01, 0x50, 0x00]);
+        assert_eq!(MESH_RX_CHANNEL.len(), 0);
+        let tx = MESH_TX_QUEUE.lock();
+        assert_eq!(tx.len(), 1);
+        let tx_dst = tx[0].pkt.ll_app().value.dst;
+        assert_eq!(tx_dst, 0x0003);
+        assert_eq!(tx[0].send_count, 2);
     }
 
     // --- light_slave_tx_command Tests ---
@@ -1010,7 +1114,7 @@ mod tests {
     /// offset 22 — exactly where `val[1]` and `val[2]` read from.
     #[test]
     fn test_uart_light_ctrl_to_light_on_integration() {
-        use crate::sdk::ble_app::light_ll::packet_processing::parse_ble_packet_op_params;
+        use tlsr8266_radio::mesh_ll::packet_processing::parse_ble_packet_op_params;
 
         crate::light::reset_for_test();
         set_device_address(0x1234);
@@ -1174,14 +1278,9 @@ mod tests {
 
     // --- mesh_pair_proc_effect Tests ---
 
-    /// Tests mesh_pair_proc_effect with effect_new_mesh set
+    /// The immediate-effect command: credentials are persisted, the radio is
+    /// re-tuned to the new access code and the node table is cleared.
     #[test]
-    #[mry::lock(
-        pair_save_key,
-        rf_set_ble_access_code,
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet
-    )]
     fn test_mesh_pair_proc_effect_with_effect_new_mesh() {
         // Setup
         reset_for_test();
@@ -1193,19 +1292,31 @@ mod tests {
         set_device_address(0x0001);
         pair().effect_new_mesh = 1;
 
-        mock_pair_save_key().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
+        reset_fakes();
+        seed_tx_ring(0);
         FakeMmio::set_reg16(0xf20, 0);
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
 
         // Execute
         mesh_pair_proc_effect();
 
-        // Verify
+        // Verify: the credentials were written through the real save path at
+        // the next 64-byte slot, and the switch cleared the pending RX interrupt.
         assert_eq!(pair().effect_new_mesh, 0);
         assert_eq!(pair().effect_new_mesh_delay_time, 0);
-        mock_pair_save_key().assert_called(1);
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the real save path advances the wear-levelling slot"
+        );
+        let mut header = [0u8; 16];
+        FakeFlash::read_slice(FLASH_ADR_PAIRING + 0x40, &mut header);
+        assert_eq!(header[0], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(header[15], PAIR_CONFIG_VALID_FLAG);
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PAIRING),
+            0,
+            "a slot inside the sector is written without erasing"
+        );
         assert_eq!(
             test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
             LGT_CMD_SET_MESH_INFO as u32,
@@ -1218,15 +1329,9 @@ mod tests {
         );
     }
 
-    /// Tests mesh_pair_proc_effect with delay time exceeded
+    /// The delayed-effect window expired while the device is still inside a
+    /// default-mesh window: the persisted key is re-read instead.
     #[test]
-    #[mry::lock(
-        pair_load_key,
-        pair_save_key,
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet,
-        rf_set_ble_access_code
-    )]
     fn test_mesh_pair_proc_effect_with_delay_exceeded() {
         // Setup
         reset_for_test();
@@ -1237,6 +1342,11 @@ mod tests {
         set_paired_login(true);
         set_device_address(0x0001);
 
+        // The blank pairing sector means `pair_load_key` falls back to the
+        // configured default credentials; seed distinct ones so the reload is
+        // observable rather than looking like untouched state.
+        set_pair_config_mesh_credentials([0xA1; 16], [0xA2; 16], [0xA3; 16]);
+
         pair().effect_new_mesh = 0;
         pair().effect_new_mesh_delay_time = 1000;
         pair().mesh_pair_cmd_interval = 500;
@@ -1244,11 +1354,7 @@ mod tests {
         reset_fakes();
         // The 500 ms interval (16_000_000 ticks) has elapsed since the delay ref.
         fake_clock::set_ticks(1000 + 500 * 1000 * 32 + 1);
-        mock_pair_load_key().returns(());
-        mock_pair_save_key().returns(());
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_rf_set_ble_access_code(Any).returns(());
+        seed_tx_ring(0);
         FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
@@ -1260,6 +1366,11 @@ mod tests {
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
             "the pending RX interrupt must be acknowledged during the mesh switch"
+        );
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the expired window persists the buffered credentials"
         );
     }
 
@@ -1553,10 +1664,9 @@ mod tests {
         assert_eq!(result, -1);
     }
 
-    /// Tests mesh_cmd_notify with params too long
-    /// Note: Vec<u8, 10> can't actually exceed 10 elements, but this documents the behavior
+    /// `Vec<u8, 10>` makes the `p.len() > 10` guard unreachable, so a full
+    /// ten-byte parameter block is still accepted and queued.
     #[test]
-    #[mry::lock(is_add_packet_buf_ready)]
     fn test_mesh_cmd_notify_params_too_long() {
         // Setup
         reset_for_test();
@@ -1565,20 +1675,21 @@ mod tests {
         set_device_address(0x1234);
 
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).unwrap();
-        // The function checks p.len() > 10, which is impossible with Vec<u8, 10>
-        // This test documents that the capacity constraint prevents overlong params
 
-        mock_is_add_packet_buf_ready().returns(false);
+        reset_fakes();
+        seed_tx_ring(0);
 
         // Execute
-        let _result = mesh_cmd_notify(0x10, &params, 0x1234);
+        let result = mesh_cmd_notify(0x10, &params, 0x1234);
 
-        // With Vec<u8, 10>, the length can never exceed 10, so the early return is unreachable
+        // With Vec<u8, 10>, the length can never exceed 10, so the early return
+        // is unreachable and the notification is queued instead.
+        assert_eq!(result, 0);
+        assert_eq!(writes_at(REG_DMA_TX_FIFO), 2, "empty marker plus packet");
     }
 
     /// Tests mesh_cmd_notify with successful notification
     #[test]
-    #[mry::lock(is_add_packet_buf_ready, rf_link_add_tx_packet)]
     fn test_mesh_cmd_notify_success() {
         // Setup
         reset_for_test();
@@ -1588,21 +1699,19 @@ mod tests {
 
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 2, 3]).unwrap();
 
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
+        reset_fakes();
+        seed_tx_ring(0);
 
         // Execute
         let result = mesh_cmd_notify(0x10, &params, 0x1234);
 
-        // Verify
+        // Verify: the notification reached the DMA TX queue.
         assert_eq!(result, 0);
-        mock_is_add_packet_buf_ready().assert_called(1);
-        mock_rf_link_add_tx_packet(Any).assert_called(1);
+        assert_eq!(writes_at(REG_DMA_TX_FIFO), 2, "empty marker plus packet");
     }
 
-    /// Tests mesh_cmd_notify when buffer is not ready
+    /// Tests mesh_cmd_notify when the DMA ring has no free slot.
     #[test]
-    #[mry::lock(is_add_packet_buf_ready)]
     fn test_mesh_cmd_notify_buffer_not_ready() {
         // Setup
         reset_for_test();
@@ -1612,21 +1721,22 @@ mod tests {
 
         let params: Vec<u8, 10> = Vec::from_slice(&[1, 2, 3]).unwrap();
 
-        mock_is_add_packet_buf_ready().returns(false);
+        reset_fakes();
+        // Three slots in use: `is_add_packet_buf_ready` reports false.
+        seed_tx_ring(3);
 
         // Execute
         let result = mesh_cmd_notify(0x10, &params, 0x1234);
 
         // Verify
         assert_eq!(result, -1);
-        mock_is_add_packet_buf_ready().assert_called(1);
+        assert_eq!(writes_at(REG_DMA_TX_FIFO), 0, "nothing may be queued");
     }
 
     // --- mesh_pair_complete_notify Tests ---
 
     /// Tests mesh_pair_complete_notify
     #[test]
-    #[mry::lock(is_add_packet_buf_ready, rf_link_add_tx_packet)]
     fn test_mesh_pair_complete_notify() {
         // Setup
         reset_for_test();
@@ -1634,16 +1744,15 @@ mod tests {
         set_paired_login(true);
         set_device_address(0x5678);
 
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
+        reset_fakes();
+        seed_tx_ring(0);
 
         // Execute
         let result = mesh_pair_complete_notify();
 
-        // Verify
+        // Verify: the completion notification reached the DMA TX queue.
         assert_eq!(result, 0);
-        mock_is_add_packet_buf_ready().assert_called(1);
-        mock_rf_link_add_tx_packet(Any).assert_called(1);
+        assert_eq!(writes_at(REG_DMA_TX_FIFO), 2, "empty marker plus packet");
     }
 
     // --- safe_effect_new_mesh_finish Tests ---
@@ -1672,14 +1781,9 @@ mod tests {
 
     // --- save / reload path Tests ---
 
-    /// Device back in its default-mesh window: the pairing sector is left alone.
+    /// Device back in its default-mesh window: the pairing sector is left alone
+    /// and the persisted key is re-read instead.
     #[test]
-    #[mry::lock(
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet,
-        pair_load_key,
-        mesh_node_table_init
-    )]
     fn test_save_effect_new_mesh_default_mesh_active() {
         // Setup
         reset_for_test();
@@ -1687,26 +1791,39 @@ mod tests {
         set_ble_connected(true);
         set_paired_login(true);
         set_device_address(0x0001);
+        // Distinct configured defaults, so the real `pair_load_key` fallback is
+        // observable rather than looking like untouched state.
+        set_pair_config_mesh_credentials([0xB1; 16], [0xB2; 16], [0xB3; 16]);
         pair().default_mesh_time_ref = 1000; // Set to non-zero
                                              // The delayed-effect window has expired, so the save is due.
         pair().effect_new_mesh_delay_time = 1000;
         pair().mesh_pair_cmd_interval = 500;
         reset_fakes();
         fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
-
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_pair_load_key().returns(());
-        mock_mesh_node_table_init().returns(());
+        seed_tx_ring(0);
 
         // Execute
         mesh_pair_proc_effect();
 
-        // Verify
+        // Verify: no slot was consumed in the pairing sector, the saved key was
+        // reloaded and the node table was rebuilt around this device.
         assert_eq!(pair().default_mesh_time_ref, 0);
         assert_eq!(pair().mesh_pair_start_time, 0);
-        mock_pair_load_key().assert_called(1);
-        mock_mesh_node_table_init().assert_called(1);
+        assert_eq!(
+            flash_config_index(),
+            None,
+            "a blank pairing sector has no configuration record"
+        );
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_PAIRING),
+            0,
+            "no erase may happen inside a default-mesh window"
+        );
+        assert_eq!(
+            pair_credentials_snapshot().pair_nn,
+            [0xB1; 16],
+            "the persisted key is re-read"
+        );
         assert_eq!(
             test_hooks::STATUS_UPDATES.load(Ordering::Relaxed),
             1,
@@ -1716,12 +1833,6 @@ mod tests {
 
     /// Device address validation still pending: the pairing sector is left alone.
     #[test]
-    #[mry::lock(
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet,
-        pair_load_key,
-        mesh_node_table_init
-    )]
     fn test_save_effect_new_mesh_validation_pending() {
         // Setup
         reset_for_test();
@@ -1729,33 +1840,28 @@ mod tests {
         set_ble_connected(true);
         set_paired_login(true);
         set_device_address(0x0001);
+        set_pair_config_mesh_credentials([0xC1; 16], [0xC2; 16], [0xC3; 16]);
         pair().default_mesh_time_ref = 0;
         pair().effect_new_mesh_delay_time = 1000;
         pair().mesh_pair_cmd_interval = 500;
         reset_fakes();
         fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
-
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_pair_load_key().returns(());
-        mock_mesh_node_table_init().returns(());
+        seed_tx_ring(0);
 
         // Execute
         mesh_pair_proc_effect();
 
-        // Verify
-        mock_pair_load_key().assert_called(1);
-        mock_mesh_node_table_init().assert_called(1);
+        // Verify: the persisted key is re-read and nothing is written.
+        assert_eq!(
+            flash_config_index(),
+            None,
+            "a pending address validation must not write the pairing sector"
+        );
+        assert_eq!(pair_credentials_snapshot().pair_nn, [0xC1; 16]);
     }
 
     /// Nothing in the way: the collected credentials are written and used.
     #[test]
-    #[mry::lock(
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet,
-        pair_save_key,
-        rf_set_ble_access_code
-    )]
     fn test_save_effect_new_mesh_normal_save() {
         // Setup
         reset_for_test();
@@ -1775,19 +1881,23 @@ mod tests {
 
         reset_fakes();
         fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_pair_save_key().returns(());
-        mock_rf_set_ble_access_code(0xABCDEF12).returns(());
+        seed_tx_ring(0);
         FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
         mesh_pair_proc_effect();
 
-        // Verify
+        // Verify: the new credentials landed in the next pairing slot and the
+        // radio was re-tuned to the recomputed access code.
         assert_eq!(pair().mesh_pair_start_time, 0);
-        mock_pair_save_key().assert_called(1);
-        mock_rf_set_ble_access_code(0xABCDEF12).assert_called(1);
+        assert_eq!(
+            flash_config_index(),
+            Some(0x40),
+            "the real save path advances the wear-levelling slot"
+        );
+        let mut slot = [0u8; 16];
+        FakeFlash::read_slice(FLASH_ADR_PAIRING + 0x50, &mut slot);
+        assert_eq!(slot, [1; 16], "the mesh name is persisted");
         assert_eq!(
             test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
             LGT_CMD_SET_MESH_INFO as u32,
@@ -1801,6 +1911,11 @@ mod tests {
         assert_eq!(credentials.pair_nn, [1; 16]);
         assert_eq!(credentials.pair_pass, [2; 16]);
         assert_eq!(
+            current_access_code(),
+            access_code(&[1; 16], &[2; 16]),
+            "the access code is recomputed from the credentials just saved"
+        );
+        assert_eq!(
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
             "the pending RX interrupt must be acknowledged during the mesh switch"
@@ -1810,12 +1925,6 @@ mod tests {
     /// The receive-only immediate-effect command saves the mesh LTK the device
     /// already holds, not the one it just buffered.
     #[test]
-    #[mry::lock(
-        is_add_packet_buf_ready,
-        rf_link_add_tx_packet,
-        pair_save_key,
-        rf_set_ble_access_code
-    )]
     fn test_save_effect_new_mesh_uses_the_mesh_ltk_for_the_immediate_effect() {
         // Setup
         reset_for_test();
@@ -1833,23 +1942,24 @@ mod tests {
         pair().new_mesh_ltk = [3; 16];
 
         reset_fakes();
-        mock_is_add_packet_buf_ready().returns(true);
-        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
-        mock_pair_save_key().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
+        seed_tx_ring(0);
 
         // Execute
         mesh_pair_proc_effect();
 
         // Verify
         assert_eq!(pair_credentials_snapshot().pair_ltk, [9; 16]);
+        // The persisted LTK slot is the fourth block of the written record.
+        let mut ltk = [0u8; 16];
+        FakeFlash::read_slice(FLASH_ADR_PAIRING + 0x70, &mut ltk);
+        assert_eq!(ltk, [9; 16], "the saved LTK is the held mesh LTK");
     }
 
     // --- switch_to_default_mesh Tests ---
 
-    /// Tests switch_to_default_mesh
+    /// Tests switch_to_default_mesh: the window bookkeeping is the mesh layer's
+    /// and the access code / LTK are recomputed from the configured defaults.
     #[test]
-    #[mry::lock(access_code)]
     fn test_switch_to_default_mesh() {
         // Setup
         reset_for_test();
@@ -1862,9 +1972,11 @@ mod tests {
         ];
 
         set_pair_config_mesh_credentials(test_name, test_pwd, test_ltk);
+        // A sentinel, so "the code was recomputed" cannot be confused with
+        // "the code was left alone".
+        set_current_access_code(0x1111_1111);
 
         fake_clock::set_ticks(5000);
-        mock_access_code(Any, Any).returns(0xDEADBEEF);
 
         // Execute
         switch_to_default_mesh(10);
@@ -1872,19 +1984,23 @@ mod tests {
         // Verify
         assert_eq!(pair().default_mesh_time_ref, 5001);
         assert_eq!(pair().default_mesh_time, 10000);
-        assert_eq!(current_access_code(), 0xDEADBEEF);
+        assert_eq!(
+            current_access_code(),
+            access_code(&test_name, &test_pwd),
+            "the access code is recomputed from the configured defaults"
+        );
         assert_eq!(pair_credentials_snapshot().pair_ltk, test_ltk);
-        mock_access_code(Any, Any).assert_called(1);
     }
 
     // --- mesh_pair_proc Tests ---
 
-    /// Tests mesh_pair_proc with timeout
+    /// Tests mesh_pair_proc with timeout: the persisted key is re-read and the
+    /// application is told through the event hook.
     #[test]
-    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_timeout() {
         // Setup
         reset_for_test();
+        set_pair_config_mesh_credentials([0xD1; 16], [0xD2; 16], [0xD3; 16]);
         pair().mesh_pair_start_time = 1000;
         pair().mesh_pair_timeout = 10;
         set_pair_setting_flag(ePairState::PairSetting);
@@ -1892,14 +2008,17 @@ mod tests {
         reset_fakes();
         // 10 s (320_000_000 ticks) have elapsed since the pairing window opened.
         fake_clock::set_ticks(1000 + 10 * 1000 * 1000 * 32 + 1);
-        mock_pair_load_key().returns(());
 
         // Execute
         mesh_pair_proc();
 
         // Verify
         assert_eq!(pair_setting_flag(), ePairState::PairSetted);
-        mock_pair_load_key().assert_called(1);
+        assert_eq!(
+            pair_credentials_snapshot().pair_nn,
+            [0xD1; 16],
+            "the timeout re-reads the persisted key"
+        );
         assert_eq!(
             test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
             LGT_CMD_MESH_PAIR_TIMEOUT as u32,
@@ -1910,10 +2029,10 @@ mod tests {
 
     /// Tests mesh_pair_proc default mesh effect delay
     #[test]
-    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_default_mesh_effect_delay() {
         // Setup
         reset_for_test();
+        set_pair_config_mesh_credentials([0xE1; 16], [0xE2; 16], [0xE3; 16]);
         pair().default_mesh_effect_delay_ref = 1000;
         pair().default_mesh_time = 0;
         pair().mesh_pair_start_time = 0;
@@ -1922,7 +2041,6 @@ mod tests {
         reset_fakes();
         // The pairing command interval (500 ms = 16_000_000 ticks) has elapsed.
         fake_clock::set_ticks(1000 + MESH_PAIR_CMD_INTERVAL as u64 * 1000 * 32 + 1);
-        mock_pair_load_key().returns(());
 
         // Execute
         mesh_pair_proc();
@@ -1930,15 +2048,22 @@ mod tests {
         // Verify
         assert_eq!(pair().default_mesh_effect_delay_ref, 0);
         assert_eq!(pair().default_mesh_time_ref, 0);
-        mock_pair_load_key().assert_called(1);
+        assert_eq!(
+            pair_credentials_snapshot().pair_nn,
+            [0xE1; 16],
+            "the reload re-reads the persisted key"
+        );
     }
 
     /// Tests mesh_pair_proc default mesh effect delay with switch
     #[test]
-    #[mry::lock(access_code)]
     fn test_mesh_pair_proc_default_mesh_effect_delay_with_switch() {
         // Setup
         reset_for_test();
+        let name = [0xF1; 16];
+        let pwd = [0xF2; 16];
+        set_pair_config_mesh_credentials(name, pwd, [0xF3; 16]);
+        set_current_access_code(0x1111_1111);
         pair().default_mesh_effect_delay_ref = 1000;
         pair().default_mesh_time = 5000;
         pair().mesh_pair_start_time = 0;
@@ -1957,7 +2082,6 @@ mod tests {
                 }
             },
         );
-        mock_access_code(Any, Any).returns(0x11223344);
 
         // Execute
         mesh_pair_proc();
@@ -1965,15 +2089,19 @@ mod tests {
         // Verify
         assert_eq!(pair().default_mesh_effect_delay_ref, 0);
         assert_eq!(pair().default_mesh_time_ref, 2001);
-        mock_access_code(Any, Any).assert_called(1);
+        assert_eq!(
+            current_access_code(),
+            access_code(&name, &pwd),
+            "the switch recomputes the access code from the configured defaults"
+        );
     }
 
     /// Tests mesh_pair_proc default mesh timeout
     #[test]
-    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_default_mesh_timeout() {
         // Setup
         reset_for_test();
+        set_pair_config_mesh_credentials([0x11; 16], [0x12; 16], [0x13; 16]);
         pair().default_mesh_effect_delay_ref = 0;
         pair().default_mesh_time_ref = 1000;
         pair().default_mesh_time = 5000;
@@ -1982,14 +2110,17 @@ mod tests {
         reset_fakes();
         // 5 s (160_000_000 ticks) have elapsed since the default-mesh reference.
         fake_clock::set_ticks(1000 + 5000 * 1000 * 32 + 1);
-        mock_pair_load_key().returns(());
 
         // Execute
         mesh_pair_proc();
 
         // Verify
         assert_eq!(pair().default_mesh_time_ref, 0);
-        mock_pair_load_key().assert_called(1);
+        assert_eq!(
+            pair_credentials_snapshot().pair_nn,
+            [0x11; 16],
+            "the timeout re-reads the persisted key"
+        );
     }
 
     /// Tests mesh_pair_proc default mesh timeout with 255s delay
@@ -2019,7 +2150,6 @@ mod tests {
 
     /// Tests mesh_pair_proc state machine - Name1
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_state_name1() {
         // Setup
         reset_for_test();
@@ -2033,20 +2163,17 @@ mod tests {
 
         reset_fakes();
         fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
-        let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
-        mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Execute
         mesh_pair_proc();
 
-        // Verify - should advance to Name2
+        // Verify - should advance to Name2 and broadcast this chunk.
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName2);
+        assert_eq!(MESH_RX_CHANNEL.len(), 1, "the broadcast is queued");
     }
 
     /// Tests mesh_pair_proc state machine - transitions through all states
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_state_transitions() {
         // Setup
         reset_for_test();
@@ -2060,9 +2187,6 @@ mod tests {
         set_pair_credentials(credentials);
 
         reset_fakes();
-        let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
-        mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Every step needs its own due tick: the machine stamps `mesh_pair_time`
         // with the tick it was handed, so a frozen clock would park the next one.
@@ -2109,12 +2233,14 @@ mod tests {
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName1);
         assert_eq!(pair_setting_flag(), ePairState::PairSetMeshTxDone);
+
+        // Six intervals elapsed, so six broadcast chunks were queued.
+        assert_eq!(MESH_RX_CHANNEL.len(), 6, "every step broadcasts one chunk");
     }
 
     /// The broadcast carries the bytes the state machine built, not the buffer
     /// the packet was queued in.
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_broadcast_uses_the_machine_payload() {
         // Setup
         reset_for_test();
@@ -2130,39 +2256,30 @@ mod tests {
 
         reset_fakes();
         fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
-        // Capture the payload the mesh hands to the radio.
-        static SENT: std::sync::Mutex<Option<Vec<u8, 13>>> = std::sync::Mutex::new(None);
-        *SENT.lock().unwrap() = None;
-        mock_light_slave_tx_command(Any, Any, Any, Any).returns_with(
-            |cmd: Vec<u8, 13>, _dst: u16, _retransmit: u8, _ack: bool| {
-                *SENT.lock().unwrap() = Some(cmd);
-                create_test_packet(0x0001, 0xFFFF, [1, 2, 3])
-            },
-        );
-        mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Execute
         mesh_pair_proc();
 
-        // Verify: the destination is the broadcast address, no retransmit and no
-        // ack, and the payload is the pairing command's first chunk.
-        mock_light_slave_tx_command(Any, 0xFFFF, 0, false).assert_called(1);
-        let sent = SENT
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the broadcast was constructed");
-        assert_eq!(sent[0], LGT_CMD_MESH_PAIR);
-        assert_eq!(sent[3], MeshPairState::MeshPairName1 as u8);
+        // Verify: the broadcast went to 0xFFFF with no retransmit and no ack,
+        // and it carries the pairing command's first chunk.
+        let pkt = MESH_RX_CHANNEL
+            .try_receive()
+            .expect("the broadcast is queued for the receive side");
+        let mesh = pkt.mesh();
+        assert_eq!(mesh.dst_adr, 0xFFFF);
+        assert_eq!(mesh.internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT], 0);
+        assert_eq!(mesh.internal_par1[INTERNAL_PAR_SEND_ACK], 0);
+        let val = &pkt.att_write().value.val;
+        assert_eq!(val[0] & 0x3f, LGT_CMD_MESH_PAIR);
+        assert_eq!(val[3], MeshPairState::MeshPairName1 as u8);
         assert_eq!(
-            &sent[4..12],
+            &val[4..12],
             &[0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48]
         );
     }
 
     /// Tests mesh_pair_proc PairSetMeshTxDone state
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_tx_done_state() {
         // Setup
         reset_for_test();
@@ -2172,9 +2289,6 @@ mod tests {
 
         reset_fakes();
         fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
-        let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
-        mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Execute
         mesh_pair_proc();
@@ -2185,7 +2299,6 @@ mod tests {
 
     /// Tests mesh_pair_proc PairSetMeshRxDone state
     #[test]
-    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
     fn test_mesh_pair_proc_rx_done_state() {
         // Setup
         reset_for_test();
@@ -2198,9 +2311,6 @@ mod tests {
         reset_fakes();
         // Inside the 60 s pairing window, and past the 500 ms broadcast interval.
         fake_clock::set_ticks(1_000_000_000);
-        let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
-        mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
-        mock_rf_link_match_group_mac(Any).returns((false, false));
 
         // Execute
         mesh_pair_proc();
@@ -2247,14 +2357,6 @@ mod tests {
     /// A self-addressed packet is report-only: the TX task pops it, hands it to
     /// the UART bridge and never transmits or re-queues it.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_start_srx2tx,
-        rf_set_rxmode
-    )]
     fn test_send_mesh_msg_iteration_self_addressed_is_report_only() {
         use futures::executor::block_on;
 
@@ -2266,12 +2368,7 @@ mod tests {
         let mut dropped_rx_seen = 0;
         let test_pkt = create_test_packet(0x1234, 0x1234, [1, 2, 3]);
 
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_start_srx2tx(Any, Any).returns(());
-        mock_rf_set_rxmode().returns(());
+        reset_fakes();
 
         // Execute
         assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 0));
@@ -2280,12 +2377,17 @@ mod tests {
             &mut dropped_rx_seen,
         ));
 
-        // Verify - reported over the relay hook, popped, not transmitted
+        // Verify - reported over the relay hook, popped, and the radio was never
+        // touched: a report-only packet writes no RF register.
         assert_eq!(test_hooks::RELAYED_PACKETS.load(Ordering::Relaxed), 1);
         assert_eq!(test_hooks::RELAYED_SRC.load(Ordering::Relaxed), 0x1234);
         assert_eq!(test_hooks::RELAYED_DST.load(Ordering::Relaxed), 0x1234);
         assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
-        mock_rf_set_tx_rx_off().assert_called(0);
+        assert_eq!(
+            writes_at(REG_RF_CHANNEL),
+            0,
+            "a self-addressed packet must not reach the transmitter"
+        );
     }
 
     /// Tests queues::enqueue_mesh_tx normal add
@@ -2399,14 +2501,6 @@ mod tests {
 
     /// Tests send_mesh_msg_iteration with ready packet
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_start_srx2tx,
-        rf_set_rxmode
-    )]
     fn test_send_mesh_msg_iteration_with_ready_packet() {
         use futures::executor::block_on;
 
@@ -2424,18 +2518,12 @@ mod tests {
 
         assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
-        // Mock the required functions. `rand()` is the real
-        // `clock_time() as u16 ^ reg_rnd_number`, so seed both halves: 1000 ^
-        // 0x5555 keeps the channel selection and congestion delay identical.
+        // `rand()` is the real `clock_time() as u16 ^ reg_rnd_number`, so seed
+        // both halves: 1000 ^ 0x5555 keeps the channel selection and congestion
+        // delay identical.
         reset_fakes();
         fake_clock::set_ticks(1000);
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_start_srx2tx(Any, Any).returns(());
-        mock_rf_set_rxmode().returns(());
 
         // Execute
         block_on(mesh_packet_send_iteration(
@@ -2443,9 +2531,14 @@ mod tests {
             &mut dropped_rx_seen,
         ));
 
-        // Verify - packet should be processed and removed from buffer
+        // Verify - the packet was transmitted on every listen channel and
+        // removed from the buffer.
         assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
-        mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
+        assert_eq!(
+            writes_at(REG_RF_CHANNEL),
+            SYS_CHN_LISTEN.len(),
+            "one channel hop per listen channel"
+        );
     }
 
     /// The congestion backoff re-queue must keep the pre-migration 0..8 ms
@@ -2454,14 +2547,6 @@ mod tests {
     /// `rand()` used to be spelled `system_tick as u16 ^ rnd_number`; this pins
     /// both the value and the single draw it takes per retransmission.
     #[test]
-    #[mry::lock(
-        rf_set_tx_rx_off,
-        rf_set_ble_access_code,
-        rf_set_ble_crc_adv,
-        rf_set_ble_channel,
-        rf_start_srx2tx,
-        rf_set_rxmode
-    )]
     fn test_send_mesh_msg_iteration_requeues_with_congestion_delay() {
         use futures::executor::block_on;
 
@@ -2481,12 +2566,6 @@ mod tests {
         reset_fakes();
         fake_clock::set_ticks(1000);
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
-        mock_rf_set_tx_rx_off().returns(());
-        mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_set_ble_crc_adv().returns(());
-        mock_rf_set_ble_channel(Any).returns(());
-        mock_rf_start_srx2tx(Any, Any).returns(());
-        mock_rf_set_rxmode().returns(());
 
         // Execute
         block_on(mesh_packet_send_iteration(
@@ -2495,7 +2574,11 @@ mod tests {
         ));
 
         // Verify: transmitted once, then re-queued one step before the last send.
-        mock_rf_set_tx_rx_off().assert_called(SYS_CHN_LISTEN.len());
+        assert_eq!(
+            writes_at(REG_RF_CHANNEL),
+            SYS_CHN_LISTEN.len(),
+            "one channel hop per listen channel"
+        );
         let send_queue = MESH_TX_QUEUE.lock();
         assert_eq!(send_queue.len(), 1, "the retransmission is re-queued");
         assert_eq!(send_queue[0].send_count, 0);
@@ -2560,9 +2643,25 @@ mod tests {
 
     // --- rcv_mesh_msg_iteration Tests ---
 
+    /// A packet the decoder accepts: a real 13-byte mesh command with the
+    /// documented `l2cap_len` and a distinct sequence number.
+    fn decodable_packet(sno: u32) -> Packet {
+        let mut payload = [0u8; 13];
+        payload[0] = LGT_CMD_LIGHT_ONOFF | 0xc0;
+        payload[3] = LIGHT_ON_PARAM;
+        mesh_construct_packet(sno, 0xFFFF, &payload, 0, false)
+    }
+
+    /// The decoder caches opcode+sequence pairs, so a suite that reuses a
+    /// sequence number silently drops the second packet as a duplicate.
+    fn forget_decoded_packets() {
+        tlsr8266_radio::mesh_ll::node_status::RC_PKT_BUF
+            .lock()
+            .clear();
+    }
+
     /// Tests rcv_mesh_msg_iteration parks on receive and wakes on a push
     #[test]
-    #[mry::lock(rf_link_rc_data)]
     fn test_rcv_mesh_msg_iteration_no_packets() {
         use core::future::Future;
         use core::task::{Context, Poll};
@@ -2570,7 +2669,8 @@ mod tests {
 
         // Setup
         reset_for_test();
-        mock_rf_link_rc_data(Any).returns(());
+        forget_decoded_packets();
+        relay::install();
 
         // The RX channel is empty by default, so the iteration parks on receive()
         let future = mesh_packet_rcv_iteration();
@@ -2582,39 +2682,38 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
 
         // Enqueue a packet; Channel::try_send wakes the parked receiver
-        let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+        let test_pkt = decodable_packet(0x11_2233);
         assert!(queues::enqueue_mesh_rx(&test_pkt));
         assert_eq!(MESH_RX_CHANNEL.len(), 1);
 
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
 
-        // Verify - the packet was received and handed to the mesh decoder
+        // Verify - the packet was received and handed to the decoder, which
+        // relays every accepted command to the UART bridge.
         assert_eq!(MESH_RX_CHANNEL.len(), 0);
-        mock_rf_link_rc_data(Any).assert_called(1);
+        assert_eq!(relay::count(), 1);
     }
 
     /// Tests rcv_mesh_msg_iteration with packet to receive
     #[test]
-    #[mry::lock(rf_link_rc_data)]
     fn test_rcv_mesh_msg_iteration_with_packet() {
         use futures::executor::block_on;
 
         // Setup
         reset_for_test();
-        let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
+        forget_decoded_packets();
+        relay::install();
+        let test_pkt = decodable_packet(0x44_5566);
 
         // Add a packet to receive
         assert!(queues::enqueue_mesh_rx(&test_pkt));
         assert_eq!(MESH_RX_CHANNEL.len(), 1);
 
-        // Mock the rf_link_rc_data function
-        mock_rf_link_rc_data(Any).returns(());
-
         // Execute
         block_on(mesh_packet_rcv_iteration());
 
-        // Verify - packet should be processed and removed from buffer
+        // Verify - packet was processed, removed from the buffer, and relayed.
         assert_eq!(MESH_RX_CHANNEL.len(), 0);
-        mock_rf_link_rc_data(Any).assert_called(1);
+        assert_eq!(relay::count(), 1);
     }
 }

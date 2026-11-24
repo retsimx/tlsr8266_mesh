@@ -207,7 +207,6 @@ pub fn handle_ota_update() {
 }
 
 /// Check if OTA area is valid; if not or on error, erase it.
-#[cfg_attr(test, mry::mry)]
 pub fn check_ota_area_startup() {
     if let Ok(false) | Err(()) = is_ota_area_valid() {
         erase_ota_data();
@@ -362,7 +361,6 @@ pub fn on_gatt_ota_packet(data: &Packet) {
 /// Returns the last accepted packet index (or `u16::MAX` when the packet was
 /// rejected). Every [`OTA_STATE`] access is a short snapshot or store; the
 /// persistence work happens in [`rf_link_slave_data_ota_save`].
-#[cfg_attr(test, mry::mry)]
 pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
     if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue
         || OTA_UPDATE_IN_PROGRESS.get()
@@ -601,7 +599,6 @@ fn rf_led_ota_error() {
 
 /// Finish the OTA transfer: persist the flag / erase the staging area, give the
 /// LED feedback, then reboot.
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_ota_finish_led_and_reboot(st: OtaState) {
     match st {
         OtaState::Error => {
@@ -633,7 +630,6 @@ fn rf_slave_ota_finished_flag_set(reset_flag: OtaState) {
 /// Every [`OTA_STATE`] touch is a short snapshot or decrement, so the RF
 /// terminate transmission and the LED/erase/reboot path never run under the
 /// lock.
-#[cfg_attr(test, mry::mry)]
 pub fn rf_link_slave_ota_finish_handle() {
     rf_link_slave_data_ota_save();
 
@@ -719,6 +715,24 @@ pub fn ota_tick_timeout_1s_impl() -> bool {
         OTA_UPDATE_TIMEOUT_SECONDS.dec();
     }
     OTA_UPDATE_TIMEOUT_SECONDS.get() == 0
+}
+
+/// Install these four entry points into the radio crate's OTA seam.
+///
+/// Host tests compile `tlsr8266_radio` as a dependency, so the radio never sees
+/// this crate's `cfg(test)` and its OTA slot starts on the radio's own in-crate
+/// stand-in. A test that drives an OTA-gated radio branch (the system-timer
+/// event selection, the GATT terminate handshake) installs the real hooks here
+/// first; production does the same thing in `app::main_task` through
+/// [`tlsr8266_radio::callbacks::set_ota_hooks`].
+#[cfg(test)]
+pub fn install_hooks_for_test() {
+    tlsr8266_radio::callbacks::set_ota_hooks(tlsr8266_radio::callbacks::OtaHooks {
+        on_gatt_ota_write: on_gatt_ota_packet,
+        status_snapshot: ota_status_snapshot_impl,
+        request_termination: ota_request_termination_impl,
+        tick_timeout_1s: ota_tick_timeout_1s_impl,
+    });
 }
 
 // --- composition-root entry points ------------------------------------------
@@ -954,21 +968,22 @@ const TEST_RADIO_OPS: OtaRadioOps = OtaRadioOps {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use mry::Any;
-    use std::sync::{Arc, Mutex as StdMutex};
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{
-        mock_read_reg_gpio_oen, mock_read_reg_gpio_out, mock_write_reg_gpio_oen,
-        mock_write_reg_gpio_out, read_reg_gpio_oen, read_reg_gpio_out, write_reg_gpio_oen,
-        write_reg_gpio_out,
-    };
 
     /// `reg_gpio_gpio_func`: per-port GPIO-function select register.
     const REG_GPIO_GPIO_FUNC: u32 = 0x586;
+    /// `reg_gpio_oen`: per-port output-enable register (inverted logic).
+    const REG_GPIO_OEN: u32 = 0x582;
+    /// `reg_gpio_out`: per-port output-data register.
+    const REG_GPIO_OUT: u32 = 0x583;
     /// `reg_tmr_ctrl`: the watchdog clear bit lives here.
     const REG_TMR_CTRL: u32 = 0x620;
+    /// `reg_pwdn_ctrl`: the MCU reset latch `light_sw_reboot` writes.
+    const REG_PWDN_CTRL: u32 = 0x6f;
+    /// `FldPwdnCtrl::Reboot`: the bit that triggers the reset.
+    const PWDN_CTRL_REBOOT: u32 = 0x20;
 
     /// The HAL host seams are process-wide singletons, so every test that
     /// observes them starts from a known-empty bank and tick count.
@@ -976,6 +991,39 @@ mod tests {
         FakeMmio::reset();
         fake_clock::reset();
         FakeFlash::reset();
+    }
+
+    /// The values written to the register at `offset`, oldest first.
+    fn writes_to(offset: u32) -> Vec<u32> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|w| w.addr == (offset | tlsr8266_pac::REG_BASE_ADDR))
+            .map(|w| w.value)
+            .collect()
+    }
+
+    /// A staged image whose firmware flag the Ok-finish path accepts, so
+    /// `rf_ota_set_flag` really writes the ready sentinel.
+    fn seed_valid_firmware_flag() {
+        FakeFlash::write_slice(FLASH_ADR_LIGHT_NEW_FW + 8, &START_UP_FLAG.to_le_bytes());
+    }
+
+    /// The reboot latch fired exactly once: the observable of
+    /// `rf_link_slave_ota_finish_led_and_reboot`.
+    fn assert_reboot_latched() {
+        assert_eq!(
+            writes_to(REG_PWDN_CTRL),
+            vec![PWDN_CTRL_REBOOT],
+            "the finish path must latch exactly one MCU reset"
+        );
+    }
+
+    /// The reboot latch never fired.
+    fn assert_no_reboot() {
+        assert!(
+            writes_to(REG_PWDN_CTRL).is_empty(),
+            "no finish path may latch a reboot here"
+        );
     }
 
     /// The GATT write handler stages packets without holding `OTA_STATE` while
@@ -1026,25 +1074,30 @@ mod tests {
     /// `terminate_cnt` is the last owner-move: the countdown and the reboot must
     /// happen outside the critical section.
     #[test]
-    #[mry::lock(
-        rf_link_slave_ota_finish_handle,
-        rf_link_slave_ota_finish_led_and_reboot
-    )]
     fn test_finish_handle_counts_down_terminate_then_reboots() {
         reset_fakes();
         reset_for_test();
+        seed_valid_firmware_flag();
         set_finished_flag_for_test(OtaState::Ok);
         set_termination_requested_for_test(true);
         OTA_STATE.lock().terminate_cnt = 1;
 
         fake_clock::set_ticks(0);
-        mock_rf_link_slave_ota_finish_handle().calls_real_impl();
-        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
 
         rf_link_slave_ota_finish_handle();
 
         assert_eq!(OTA_STATE.lock().terminate_cnt, 0);
-        mock_rf_link_slave_ota_finish_led_and_reboot(OtaState::Ok).assert_called(1);
+        // The real reboot path ran with `Ok`: it armed the ready sentinel and
+        // latched exactly one reset. (The old mock asserted the state argument;
+        // the ready sentinel is written only on the `Ok` arm, `Error` erases the
+        // staging area instead.)
+        let mut ready = [0u8; 1];
+        FakeFlash::read_slice(FLASH_ADR_OTA_READY_FLAG, &mut ready);
+        assert_eq!(
+            ready[0], FLASH_OTA_READY_FLAG,
+            "the Ok finish must arm the boot-time OTA ready sentinel"
+        );
+        assert_reboot_latched();
 
         reset_for_test();
     }
@@ -1052,10 +1105,6 @@ mod tests {
     /// The terminate transmit only arms the countdown when the provider reports
     /// that the packet really was queued.
     #[test]
-    #[mry::lock(
-        rf_link_slave_ota_finish_handle,
-        rf_link_slave_ota_finish_led_and_reboot
-    )]
     fn test_finish_handle_does_not_arm_when_terminate_is_not_ready() {
         reset_fakes();
         reset_for_test();
@@ -1064,8 +1113,6 @@ mod tests {
         fake_radio::set_terminate_ready(false);
 
         fake_clock::set_ticks(0);
-        mock_rf_link_slave_ota_finish_handle().calls_real_impl();
-        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
 
         rf_link_slave_ota_finish_handle();
 
@@ -1079,17 +1126,19 @@ mod tests {
             0,
             "an unqueued terminate packet must not arm the countdown"
         );
-        mock_rf_link_slave_ota_finish_led_and_reboot(Any).assert_called(0);
+        assert_no_reboot();
+        // Nothing rebooted, so the error arm never erased the staging area.
+        assert_eq!(
+            FakeFlash::erase_count(FLASH_ADR_LIGHT_NEW_FW),
+            0,
+            "the error finish path must not run"
+        );
 
         reset_for_test();
     }
 
     /// The terminate transmit arms the six-packet countdown when it is queued.
     #[test]
-    #[mry::lock(
-        rf_link_slave_ota_finish_handle,
-        rf_link_slave_ota_finish_led_and_reboot
-    )]
     fn test_finish_handle_arms_when_terminate_is_ready() {
         reset_fakes();
         reset_for_test();
@@ -1098,15 +1147,13 @@ mod tests {
         fake_radio::set_terminate_ready(true);
 
         fake_clock::set_ticks(0);
-        mock_rf_link_slave_ota_finish_handle().calls_real_impl();
-        mock_rf_link_slave_ota_finish_led_and_reboot(Any).returns(());
 
         rf_link_slave_ota_finish_handle();
 
         assert_eq!(fake_radio::terminate_calls(), 1);
         // Armed to 6, then decremented once in this same call.
         assert_eq!(OTA_STATE.lock().terminate_cnt, 5);
-        mock_rf_link_slave_ota_finish_led_and_reboot(Any).assert_called(0);
+        assert_no_reboot();
 
         reset_for_test();
     }
@@ -1577,13 +1624,12 @@ mod tests {
     /// The failure indicator must genuinely alternate: `gpio_write` drives the pin
     /// high for any non-zero value, so the old `!`-on-`u32` toggle (`0xFFFF_FFFE`)
     /// held the pin high for the whole 6 s and looked identical to success.
+    ///
+    /// The GPIO helpers run for real against the fake register bank: each
+    /// `gpio_write` reads the port's OUT byte back before setting or clearing its
+    /// bit, so the write log carries the same alternating values the old write
+    /// mock recorded, and the OEN/func registers are ordinary register state.
     #[test]
-    #[mry::lock(
-        read_reg_gpio_oen,
-        write_reg_gpio_oen,
-        read_reg_gpio_out,
-        write_reg_gpio_out
-    )]
     fn test_rf_led_ota_error_alternates_pin_sixty_times() {
         // `OTA_LED` is port C, pin 0: the pin id's low byte is the bit mask and
         // the port number is the register offset, so (pin >> 8) << 3 == 0x10.
@@ -1593,21 +1639,10 @@ mod tests {
         reset_fakes();
         reset_for_test();
 
-        mock_read_reg_gpio_oen(Any).returns(0);
-        mock_write_reg_gpio_oen(Any, Any).returns(());
-        mock_read_reg_gpio_out(Any).returns(0);
-
-        // Record every OUT register write in call order.
-        let writes: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
-        let recorded_writes = Arc::clone(&writes);
-        mock_write_reg_gpio_out(Any, Any).returns_with(move |value: u8, _offset: u32| {
-            recorded_writes.lock().unwrap().push(value);
-        });
-
         rf_led_ota_error();
 
-        // `gpio_set_func` runs for real now: it selects the GPIO function for
-        // the LED pin by writing the pin mask into `reg_gpio_gpio_func`.
+        // `gpio_set_func` selects the GPIO function for the LED pin by writing
+        // the pin mask into `reg_gpio_gpio_func`.
         let func_writes: Vec<_> = FakeMmio::writes()
             .into_iter()
             .filter(|w| w.addr == (REG_GPIO_GPIO_FUNC + REG_OFFSET) | tlsr8266_pac::REG_BASE_ADDR)
@@ -1619,25 +1654,30 @@ mod tests {
         );
         assert_eq!(func_writes[0].value, u32::from(PIN_MASK));
 
-        // Output enabled once, before the first write.
-        mock_write_reg_gpio_oen(Any, Any).assert_called(1);
+        // Output enabled once, before the first write (OEN is active-low).
+        let oen_writes = writes_to(REG_GPIO_OEN + REG_OFFSET);
+        assert_eq!(
+            oen_writes,
+            vec![u32::from(0u8)],
+            "the LED pin must be enabled as an output exactly once"
+        );
+
         // Sixty writes that alternate high, low, high, low, ...
-        let expected: Vec<u8> = (0..60)
-            .map(|i| if i % 2 == 0 { PIN_MASK } else { 0 })
+        let out_writes = writes_to(REG_GPIO_OUT + REG_OFFSET);
+        let expected: Vec<u32> = (0..60)
+            .map(|i| u32::from(if i % 2 == 0 { PIN_MASK } else { 0 }))
             .collect();
         assert_eq!(
-            *writes.lock().unwrap(),
-            expected,
+            out_writes, expected,
             "the OTA error LED must be driven high and low alternately, sixty times"
         );
-        mock_write_reg_gpio_out(Any, REG_OFFSET).assert_called(60);
         // The real `wd_clear` pokes the CLR_WD bit of `reg_tmr_ctrl` once per
         // iteration; the write log is the observable that replaces the mock.
-        let wd_writes = FakeMmio::writes()
-            .into_iter()
-            .filter(|w| w.addr == REG_TMR_CTRL | tlsr8266_pac::REG_BASE_ADDR)
-            .count();
-        assert_eq!(wd_writes, 60, "the watchdog must be cleared once per blink");
+        assert_eq!(
+            writes_to(REG_TMR_CTRL).len(),
+            60,
+            "the watchdog must be cleared once per blink"
+        );
         // Cadence unchanged: 60 iterations of 100 ms, recorded by `sleep_us`.
         let expected_sleeps = vec![100 * 1000u32; 60];
         assert_eq!(fake_clock::sleeps(), expected_sleeps);

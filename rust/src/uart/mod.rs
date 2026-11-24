@@ -150,11 +150,11 @@ mod test_ops {
     use super::UartData;
 
     pub(super) fn enqueue_tx(msg: &UartData) -> bool {
-        crate::sdk::ble_app::queues::enqueue_uart_tx(msg)
+        tlsr8266_radio::queues::enqueue_uart_tx(msg)
     }
 
     pub(super) fn dropped_tx() -> u32 {
-        crate::sdk::ble_app::queues::dropped_uart_tx()
+        tlsr8266_radio::queues::dropped_uart_tx()
     }
 }
 
@@ -263,7 +263,6 @@ fn dispatch_uart_cmd(cmd: UartCommand) -> [u8; 3] {
 ///
 /// Packets this device sent are skipped (the host already knows about them) and
 /// so are frames already forwarded, keyed on the `dst`..`par` fingerprint.
-#[cfg_attr(test, mry::mry)]
 pub fn on_mesh_rx_packet(pkt: &Packet, own_dev_addr: u16) {
     // Don't report messages that we sent
     if !started()
@@ -366,7 +365,6 @@ pub fn clear_error() {
 /// Returns `Err(())` when the transport rejected the frame: the queue was full
 /// (and the registered ops counted the drop), or no ops have been registered yet
 /// (nothing is counted — there is no transport to count against).
-#[cfg_attr(test, mry::mry)]
 pub fn send_message(msg: &UartData) -> Result<(), ()> {
     if uart_tx_ops_push(msg) {
         Ok(())
@@ -385,7 +383,6 @@ pub fn send_message(msg: &UartData) -> Result<(), ()> {
 /// No validation, logging or status reporting happens here: CRC checks, the
 /// bridge start-up and drop logging all run in task context.
 #[inline(always)]
-#[cfg_attr(test, mry::mry)]
 pub fn take_rx_and_ack_tx_irq() {
     let (rx_frame, tx_done) = {
         let mut hw = UART_HW.lock();
@@ -500,15 +497,13 @@ pub async fn uart_send_async(msg: &UartData) {
 /// production re-entrancy check and `panic = "abort"` never drops the outer
 /// guard, so a re-entrant call would hand `UartDriver::send` a second
 /// `&mut UartDriver` aliasing the first (see `sdk::common::sync` assumption 3).
-#[cfg_attr(test, mry::mry)]
 pub fn send_sync_panic(msg: &UartData) {
     UART_HW.lock().send(msg);
 }
 
 /// Waits for the next UART ack counter, giving up at `deadline`.
 ///
-/// Free function on purpose: `Signal` appears in no `mry`-mocked signature,
-/// and the target/host timeout split lives in one place.
+/// Free function on purpose: the target/host timeout split lives in one place.
 #[cfg(not(test))]
 async fn wait_ack_or_timeout(deadline: Instant) -> Result<u8, ()> {
     UART_ACK_SIGNAL
@@ -723,25 +718,24 @@ pub fn reset_for_test() {
     while UART_RX_CHANNEL.try_receive().is_ok() {}
     set_tx_ops(TEST_TX_OPS);
     *UART_COMMAND_HANDLER.lock() = None;
-    crate::sdk::ble_app::queues::reset_for_test();
+    tlsr8266_radio::queues::reset_for_test();
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::queues::UART_TX_CHANNEL;
     use core::future::Future;
+    use core::sync::atomic::AtomicUsize;
     use futures::executor::block_on;
     use futures::task::noop_waker;
     use mesh_protocol::crc::crc16;
     use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
-    use mry::Any;
     use std::sync::Mutex as StdMutex;
     use std::task::{Context, Poll};
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{mock_write_reg_dma1_addr, write_reg_dma1_addr};
+    use tlsr8266_radio::queues::UART_TX_CHANNEL;
 
     /// `reg_dma_rx_rdy0`: DMA/UART interrupt flags, write-1-to-clear.
     const REG_DMA_RX_RDY0: u32 = 0x526;
@@ -755,6 +749,9 @@ mod tests {
             .filter(|w| w.addr == REG_DMA_TX_RDY0 | tlsr8266_pac::REG_BASE_ADDR)
             .count()
     }
+
+    /// DMA1 arm count observed by the ack injector when it latched the ack.
+    static INJECTED_AT_ARMS: AtomicUsize = AtomicUsize::new(0);
 
     fn reset_fakes() {
         FakeMmio::reset();
@@ -1039,32 +1036,47 @@ mod tests {
         assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
     }
 
+    /// The retry loop re-arms DMA1 when the ack for its counter has not
+    /// arrived, and exits once it has.
+    ///
+    /// The ack is delivered from a helper thread the moment the retransmission
+    /// is visible in the register write log. That is the same point a stub used
+    /// to inject it at (the second `write_reg_dma1_addr`), but observed through
+    /// the real PAC path: the accessor is a real write, so the delivery has to
+    /// come from outside the synchronous retry loop.
     #[test]
-    #[mry::lock(write_reg_dma1_addr)]
     fn test_send_with_retry_retransmits_until_ack_is_received() {
         reset_for_test();
         reset_fakes();
         UART_LAST_ACK.store(0, Ordering::Relaxed);
+        INJECTED_AT_ARMS.store(0, Ordering::SeqCst);
 
-        // The DMA1 address write is the per-transmission seam: inject the ack
-        // when the second transmission is armed, so the retry loop exits.
-        let sends = AtomicU8::new(0);
-        mock_write_reg_dma1_addr(Any).returns_with(move |_addr: u16| {
-            if sends.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-                UART_LAST_ACK.store(1, Ordering::Relaxed);
+        let injector = std::thread::spawn(|| {
+            // The loop arms DMA1 within microseconds, so this normally returns
+            // immediately. The bound exists so that a regression fails the
+            // assertion below instead of leaving the retry loop spinning.
+            for _ in 0..100_000 {
+                if dma1_arms() >= 2 {
+                    break;
+                }
+                std::thread::yield_now();
             }
+            // Latch the matching ack unconditionally, so the loop can always
+            // finish even when it never retransmitted.
+            INJECTED_AT_ARMS.store(dma1_arms(), Ordering::SeqCst);
+            UART_LAST_ACK.store(1, Ordering::Relaxed);
         });
 
         let msg = empty_frame();
 
         // The first wait finds no ack (host mode: `try_take` -> Err) and
-        // retransmits; the second send marks the ack, so the loop exits.
+        // retransmits; the injected ack ends the loop.
         block_on(send_with_retry(&msg, 1));
+        injector.join().expect("ack injector must not panic");
 
-        assert_eq!(
-            dma1_arms(),
-            2,
-            "DMA1 must be triggered once per retransmission"
+        assert!(
+            INJECTED_AT_ARMS.load(Ordering::SeqCst) >= 2,
+            "DMA1 must be re-armed when the ack for the sent counter is missing"
         );
     }
 

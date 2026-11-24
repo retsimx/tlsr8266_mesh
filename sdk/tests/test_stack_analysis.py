@@ -65,25 +65,37 @@ def _text(*blocks: str) -> str:
     return "\n".join(blocks) + "\n"
 
 
+# The linked image's crate prefixes, spelled the way `llvm-nm` prints them after
+# C-10 (#72).  The radio modules moved into `tlsr8266_radio`, and several paths
+# changed with them (`rf_drv.rs` -> `rf::drv_8266`, `light_ll::mesh_management`
+# -> `mesh_ll::node_status`, the OTA staging shims -> `ble::connection`), so the
+# fixture below uses the paths the linked image actually has.  The
+# `_RN...<hash>` prefix objdump prints is omitted on purpose: the crate
+# disambiguator changes on every rebuild, which is exactly why ``INDIRECT_EDGES``
+# matches substrings rather than whole names.
+RADIO = "tlsr8266_radio"
+RADIO_CALLBACKS = RADIO + "9callbacks"
+MESH = "tlsr8266_mesh"
+
 # A miniature version of the real call graph: a root reaches the light-data
 # dispatcher directly, the dispatcher reaches the app callback only through a
 # `bx rN`, and that callback reaches the light-event dispatcher, which in turn
-# reaches the app's light-event handler only through another `bx rN`. The two
-# `mesh_pair_proc_*` lookalikes are present because the table's
+# reaches the app's light-event handler only through another `bx rN`. The
+# `mesh_pair_proc` lookalikes are present because the table's
 # ``mesh_pair_proc_hook`` entry must not be confused with them.
 #
 # The light subsystem's status publish is modelled as the real firmware shape:
 # ``rf_link_light_event_callback`` calls ``light::device_status_update`` directly,
-# which calls the ``notify_status_update`` dispatcher, which reaches the SDK's
-# ``ll_device_status_update`` only through a ``bx rN``.
+# which calls the ``notify_status_update`` dispatcher, which reaches the radio
+# crate's ``ll_device_status_update`` only through a ``bx rN``.
 #
 # The OTA seam is modelled the same way: one synthetic pair per ``INDIRECT_EDGES``
 # entry — the OTA write dispatcher 24 B / 40 B (the real shape: a GATT write
 # lands in ``dispatch_ota_write``, which reaches the OTA packet handler), the
 # snapshot hook 24 B / 16 B, the two flag-only hooks 24 B / 8 B, and the four
-# radio providers 8 B / 16 B. ``callbacks21dispatch_ota_write`` is a *direct*
-# callee of the GATT write entry, because that is the real firmware shape; every
-# other OTA dispatcher stays a leaf, so the maxima do not move.
+# radio providers 8 B / 16 B. ``dispatch_ota_write`` is a *direct* callee of the
+# GATT write entry, because that is the real firmware shape; every other OTA
+# dispatcher stays a leaf, so the maxima do not move.
 #
 # The C-8 seams are the same shape and use the real symbol namespaces: `mesh`'s
 # three ``MeshEventHooks`` dispatchers (``mesh25dispatch_mesh_light_event``,
@@ -98,87 +110,90 @@ FIRMWARE_SHAPED = _text(
     _fn(
         "main_entrypoint",
         40,
-        (("rf_drv_826624rf_link_slave_data_write", False),),
+        ((f"{RADIO}2rf8drv_826624rf_link_slave_data_write", False),),
     ),
     _fn(
-        "rf_drv_826624rf_link_slave_data_write",
+        f"{RADIO}2rf8drv_826624rf_link_slave_data_write",
         184,
         (
-            ("callbacks13on_light_data", False),
-            ("callbacks21dispatch_ota_write", False),
+            (f"{RADIO_CALLBACKS}13on_light_data", False),
+            (f"{RADIO_CALLBACKS}18dispatch_ota_write", False),
         ),
     ),
-    _fn("callbacks13on_light_data", 24, indirect=True),
+    _fn(f"{RADIO_CALLBACKS}13on_light_data", 24, indirect=True),
     _fn(
-        "app21rf_link_data_callback",
+        f"{MESH}3app21rf_link_data_callback",
         128,
-        (("rf_drv16emit_light_event", False),),
+        ((f"{RADIO}7mesh_ll3adv16emit_light_event", False),),
     ),
-    _fn("rf_drv16emit_light_event", 8, indirect=True),
+    _fn(f"{RADIO}7mesh_ll3adv16emit_light_event", 8, indirect=True),
     _fn(
-        "app28rf_link_light_event_callback",
+        f"{MESH}3app28rf_link_light_event_callback",
         200,
-        (("light20device_status_update", False),),
+        ((f"{MESH}5light20device_status_update", False),),
     ),
     # The light subsystem's status publish: a real `bl` into the hook seam, then
-    # an indirect dispatch to the SDK's node-table writer.
+    # an indirect dispatch to the radio crate's node-table writer.
     _fn(
-        "light20device_status_update",
+        f"{MESH}5light20device_status_update",
         24,
-        (("light20notify_status_update", False),),
+        ((f"{MESH}5light20notify_status_update", False),),
     ),
-    _fn("light20notify_status_update", 8, indirect=True),
-    _fn("mesh_management23ll_device_status_update", 40),
-    _fn("callbacks17on_mesh_pair_proc", 24, indirect=True),
+    _fn(f"{MESH}5light20notify_status_update", 8, indirect=True),
+    _fn(f"{RADIO}7mesh_ll11node_status23ll_device_status_update", 40),
+    _fn(f"{RADIO_CALLBACKS}17on_mesh_pair_proc", 24, indirect=True),
     _fn(
-        "app19mesh_pair_proc_hook",
+        f"{MESH}3app19mesh_pair_proc_hook",
         8,
-        (("MeshManager14mesh_pair_proc", False),),
+        ((f"{MESH}4mesh14mesh_pair_proc", False),),
     ),
-    _fn("MeshManager14mesh_pair_proc", 180),
-    _fn("MeshManager21mesh_pair_proc_effect", 60),
-    _fn("callbacks17on_light_response", 24, indirect=True),
-    _fn("app25rf_link_response_callback", 96),
-    _fn("callbacks15on_uart_mesh_rx", 24, indirect=True),
-    _fn("app17uart_mesh_rx_hook", 72),
-    # OtaHooks: the four dispatchers in sdk/ble_app/callbacks.rs.
-    _fn("callbacks21dispatch_ota_write", 24, indirect=True),
-    _fn("ota21on_gatt_ota_packet", 40),
-    _fn("callbacks24dispatch_ota_snapshot", 24, indirect=True),
-    _fn("ota26ota_status_snapshot_impl", 16),
-    _fn("callbacks25dispatch_ota_terminate", 24, indirect=True),
-    _fn("ota31ota_request_termination_impl", 8),
-    _fn("callbacks19dispatch_ota_tick", 24, indirect=True),
-    _fn("ota27ota_tick_timeout_1s_impl", 8),
-    # OtaRadioOps: the four providers in ota/mod.rs.
-    _fn("ota17radio_stage_pkt", 8, indirect=True),
-    _fn("light_ll22stage_ota_packet", 16),
-    _fn("ota16radio_read_pkt", 8, indirect=True),
-    _fn("light_ll27read_staged_ota_packet", 16),
-    _fn("ota19radio_terminate_tx", 8, indirect=True),
-    _fn("app24ota_send_terminate_hook", 16),
-    _fn("ota22radio_begin_gatt_ota", 8, indirect=True),
-    _fn("app21ota_begin_gatt_hook", 16),
+    _fn(f"{MESH}4mesh14mesh_pair_proc", 180),
+    _fn(f"{RADIO_CALLBACKS}17on_light_response", 24, indirect=True),
+    _fn(f"{MESH}3app25rf_link_response_callback", 96),
+    _fn(f"{RADIO_CALLBACKS}15on_uart_mesh_rx", 24, indirect=True),
+    _fn(f"{MESH}3app17uart_mesh_rx_hook", 72),
+    # OtaHooks: the four dispatchers in the radio crate's `callbacks.rs`.
+    _fn(f"{RADIO_CALLBACKS}18dispatch_ota_write", 24, indirect=True),
+    _fn(f"{MESH}3ota18on_gatt_ota_packet", 40),
+    _fn(f"{RADIO_CALLBACKS}21dispatch_ota_snapshot", 24, indirect=True),
+    _fn(f"{MESH}3ota24ota_status_snapshot_impl", 16),
+    _fn(f"{RADIO_CALLBACKS}22dispatch_ota_terminate", 24, indirect=True),
+    _fn(f"{MESH}3ota28ota_request_termination_impl", 8),
+    _fn(f"{RADIO_CALLBACKS}17dispatch_ota_tick", 24, indirect=True),
+    _fn(f"{MESH}3ota24ota_tick_timeout_1s_impl", 8),
+    # OtaRadioOps: the four providers in ota/mod.rs, into the radio crate.
+    _fn(f"{MESH}3ota15radio_stage_pkt", 8, indirect=True),
+    _fn(f"{RADIO}3ble10connection16stage_ota_packet", 16),
+    _fn(f"{MESH}3ota14radio_read_pkt", 8, indirect=True),
+    _fn(f"{RADIO}3ble10connection22read_staged_ota_packet", 16),
+    _fn(f"{MESH}3ota18radio_terminate_tx", 8, indirect=True),
+    _fn(f"{MESH}3app23ota_send_terminate_hook", 16),
+    _fn(f"{MESH}3ota20radio_begin_gatt_ota", 8, indirect=True),
+    _fn(f"{MESH}3app19ota_begin_gatt_hook", 16),
     # C-8: mesh's three MeshEventHooks dispatchers. The light-event slot reaches
-    # the same app callback the SDK's emit seam does.
-    _fn("mesh25dispatch_mesh_light_event", 24, indirect=True),
-    _fn("mesh20publish_light_status", 24, indirect=True),
-    _fn("mesh21dispatch_uart_mesh_rx", 24, indirect=True),
+    # the same app callback the radio crate's emit seam does.
+    _fn(f"{MESH}4mesh25dispatch_mesh_light_event", 24, indirect=True),
+    _fn(f"{MESH}4mesh20publish_light_status", 24, indirect=True),
+    _fn(f"{MESH}4mesh21dispatch_uart_mesh_rx", 24, indirect=True),
     # C-8: uart's command handler and its two UartTxOps slots.
-    _fn("uart17dispatch_uart_cmd", 24, indirect=True),
-    _fn("app17uart_command_hook", 24),
-    _fn("uart16uart_tx_ops_push", 8, indirect=True),
-    _fn("app20enqueue_uart_tx_hook", 8),
-    _fn("uart19uart_tx_ops_dropped", 8, indirect=True),
-    _fn("app20dropped_uart_tx_hook", 8),
+    _fn(f"{MESH}4uart17dispatch_uart_cmd", 24, indirect=True),
+    _fn(f"{MESH}3app17uart_command_hook", 24),
+    _fn(f"{MESH}4uart16uart_tx_ops_push", 8, indirect=True),
+    _fn(f"{MESH}3app20enqueue_uart_tx_hook", 8),
+    _fn(f"{MESH}4uart19uart_tx_ops_dropped", 8, indirect=True),
+    _fn(f"{MESH}3app20dropped_uart_tx_hook", 8),
     # C-8: logging's async sink.
-    _fn("logging18dispatch_log_async", 24, indirect=True),
-    _fn("app17log_async_tx_hook", 8),
-    _fn("irq_handler", 24, (("handle_system_interrupts", False),)),
+    _fn(f"{MESH}7logging18dispatch_log_async", 24, indirect=True),
+    _fn(f"{MESH}3app17log_async_tx_hook", 8),
     _fn(
-        "handle_system_interrupts",
+        "irq_handler",
+        24,
+        ((f"{MESH}3irq24handle_system_interrupts", False),),
+    ),
+    _fn(
+        f"{MESH}3irq24handle_system_interrupts",
         272,
-        (("rf_drv16emit_light_event", False),),
+        ((f"{RADIO}7mesh_ll3adv16emit_light_event", False),),
     ),
 )
 
@@ -205,17 +220,18 @@ def _run_main(text: str, argv: list[str] | None = None) -> tuple[int, str]:
 class TestParseFunctions(unittest.TestCase):
     def test_parses_frames_and_direct_edges(self) -> None:
         funcs = _parse()
-        self.assertEqual(funcs["rf_drv_826624rf_link_slave_data_write"].frame, 184)
+        writer = f"{RADIO}2rf8drv_826624rf_link_slave_data_write"
+        self.assertEqual(funcs[writer].frame, 184)
         self.assertIn(
-            ("callbacks13on_light_data", False),
-            funcs["rf_drv_826624rf_link_slave_data_write"].calls,
+            (f"{RADIO_CALLBACKS}13on_light_data", False),
+            funcs[writer].calls,
         )
         self.assertEqual(funcs["irq_handler"].frame, 24)
 
     def test_indirect_dispatch_produces_no_edge(self) -> None:
         """The whole reason INDIRECT_EDGES exists: `bx rN` is a dead end."""
         funcs = _parse()
-        dispatcher = funcs["callbacks13on_light_data"]
+        dispatcher = funcs[f"{RADIO_CALLBACKS}13on_light_data"]
         self.assertTrue(dispatcher.indirect)
         self.assertEqual(dispatcher.calls, [])
 
@@ -234,8 +250,8 @@ class TestApplyIndirectEdges(unittest.TestCase):
         funcs = _parse()
         resolved = stack_analysis.apply_indirect_edges(funcs)
         self.assertIn(
-            ("app21rf_link_data_callback", False),
-            funcs["callbacks13on_light_data"].calls,
+            (f"{MESH}3app21rf_link_data_callback", False),
+            funcs[f"{RADIO_CALLBACKS}13on_light_data"].calls,
         )
         # An indirect dispatch pushes a return address: never a tail call.
         for caller, callee in resolved:
@@ -248,65 +264,105 @@ class TestApplyIndirectEdges(unittest.TestCase):
             resolved,
             [
                 (
-                    "rf_drv16emit_light_event",
-                    "app28rf_link_light_event_callback",
+                    f"{RADIO}7mesh_ll3adv16emit_light_event",
+                    f"{MESH}3app28rf_link_light_event_callback",
                 ),
-                ("callbacks17on_mesh_pair_proc", "app19mesh_pair_proc_hook"),
-                ("callbacks13on_light_data", "app21rf_link_data_callback"),
                 (
-                    "callbacks17on_light_response",
-                    "app25rf_link_response_callback",
+                    f"{RADIO_CALLBACKS}17on_mesh_pair_proc",
+                    f"{MESH}3app19mesh_pair_proc_hook",
                 ),
-                ("callbacks15on_uart_mesh_rx", "app17uart_mesh_rx_hook"),
                 (
-                    "light20notify_status_update",
-                    "mesh_management23ll_device_status_update",
+                    f"{RADIO_CALLBACKS}13on_light_data",
+                    f"{MESH}3app21rf_link_data_callback",
+                ),
+                (
+                    f"{RADIO_CALLBACKS}17on_light_response",
+                    f"{MESH}3app25rf_link_response_callback",
+                ),
+                (
+                    f"{RADIO_CALLBACKS}15on_uart_mesh_rx",
+                    f"{MESH}3app17uart_mesh_rx_hook",
+                ),
+                (
+                    f"{MESH}5light20notify_status_update",
+                    f"{RADIO}7mesh_ll11node_status23ll_device_status_update",
                 ),
                 # The OTA seam, in table order: four OtaHooks dispatchers...
-                ("callbacks21dispatch_ota_write", "ota21on_gatt_ota_packet"),
                 (
-                    "callbacks24dispatch_ota_snapshot",
-                    "ota26ota_status_snapshot_impl",
+                    f"{RADIO_CALLBACKS}18dispatch_ota_write",
+                    f"{MESH}3ota18on_gatt_ota_packet",
                 ),
                 (
-                    "callbacks25dispatch_ota_terminate",
-                    "ota31ota_request_termination_impl",
+                    f"{RADIO_CALLBACKS}21dispatch_ota_snapshot",
+                    f"{MESH}3ota24ota_status_snapshot_impl",
                 ),
                 (
-                    "callbacks19dispatch_ota_tick",
-                    "ota27ota_tick_timeout_1s_impl",
+                    f"{RADIO_CALLBACKS}22dispatch_ota_terminate",
+                    f"{MESH}3ota28ota_request_termination_impl",
+                ),
+                (
+                    f"{RADIO_CALLBACKS}17dispatch_ota_tick",
+                    f"{MESH}3ota24ota_tick_timeout_1s_impl",
                 ),
                 # ...then the four OtaRadioOps providers.
-                ("ota17radio_stage_pkt", "light_ll22stage_ota_packet"),
-                ("ota16radio_read_pkt", "light_ll27read_staged_ota_packet"),
-                ("ota19radio_terminate_tx", "app24ota_send_terminate_hook"),
-                ("ota22radio_begin_gatt_ota", "app21ota_begin_gatt_hook"),
+                (
+                    f"{MESH}3ota15radio_stage_pkt",
+                    f"{RADIO}3ble10connection16stage_ota_packet",
+                ),
+                (
+                    f"{MESH}3ota14radio_read_pkt",
+                    f"{RADIO}3ble10connection22read_staged_ota_packet",
+                ),
+                (
+                    f"{MESH}3ota18radio_terminate_tx",
+                    f"{MESH}3app23ota_send_terminate_hook",
+                ),
+                (
+                    f"{MESH}3ota20radio_begin_gatt_ota",
+                    f"{MESH}3app19ota_begin_gatt_hook",
+                ),
                 # ...then the C-8 subsystem seams.
                 (
-                    "mesh25dispatch_mesh_light_event",
-                    "app28rf_link_light_event_callback",
+                    f"{MESH}4mesh25dispatch_mesh_light_event",
+                    f"{MESH}3app28rf_link_light_event_callback",
                 ),
                 (
-                    "mesh20publish_light_status",
-                    "light20device_status_update",
+                    f"{MESH}4mesh20publish_light_status",
+                    f"{MESH}5light20device_status_update",
                 ),
-                ("mesh21dispatch_uart_mesh_rx", "app17uart_mesh_rx_hook"),
-                ("uart17dispatch_uart_cmd", "app17uart_command_hook"),
-                ("uart16uart_tx_ops_push", "app20enqueue_uart_tx_hook"),
-                ("uart19uart_tx_ops_dropped", "app20dropped_uart_tx_hook"),
-                ("logging18dispatch_log_async", "app17log_async_tx_hook"),
+                (
+                    f"{MESH}4mesh21dispatch_uart_mesh_rx",
+                    f"{MESH}3app17uart_mesh_rx_hook",
+                ),
+                (
+                    f"{MESH}4uart17dispatch_uart_cmd",
+                    f"{MESH}3app17uart_command_hook",
+                ),
+                (
+                    f"{MESH}4uart16uart_tx_ops_push",
+                    f"{MESH}3app20enqueue_uart_tx_hook",
+                ),
+                (
+                    f"{MESH}4uart19uart_tx_ops_dropped",
+                    f"{MESH}3app20dropped_uart_tx_hook",
+                ),
+                (
+                    f"{MESH}7logging18dispatch_log_async",
+                    f"{MESH}3app17log_async_tx_hook",
+                ),
             ],
         )
-        # The hook is the intermediate frame; the manager method keeps its own
+        # The hook is the intermediate frame; the mesh method keeps its own
         # direct `bl` edge and must not be wired twice.
         self.assertEqual(
-            funcs["app19mesh_pair_proc_hook"].calls,
-            [("MeshManager14mesh_pair_proc", False)],
+            funcs[f"{MESH}3app19mesh_pair_proc_hook"].calls,
+            [(f"{MESH}4mesh14mesh_pair_proc", False)],
         )
-        self.assertEqual(funcs["MeshManager14mesh_pair_proc"].calls, [])
+        self.assertEqual(funcs[f"{MESH}4mesh14mesh_pair_proc"].calls, [])
         # Two callee patterns are deliberately shared by two call sites: the
-        # app light-event callback (SDK emit + mesh dispatch) and the UART relay
-        # hook (SDK bridge + mesh relay). Each pair still resolves to one symbol.
+        # app light-event callback (radio emit + mesh dispatch) and the UART
+        # relay hook (radio bridge + mesh relay). Each pair still resolves to
+        # one symbol.
         callees = [
             callee
             for _caller, callees in stack_analysis.INDIRECT_EDGES.items()
@@ -319,7 +375,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
 
     def test_caller_with_zero_matches_is_rejected(self) -> None:
         funcs = _parse()
-        edges = {"no_such_dispatcher": ("app21rf_link_data_callback",)}
+        edges = {"no_such_dispatcher": (f"{MESH}3app21rf_link_data_callback",)}
         with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
             stack_analysis.apply_indirect_edges(funcs, edges)
         message = str(ctx.exception)
@@ -339,7 +395,12 @@ class TestApplyIndirectEdges(unittest.TestCase):
         self.assertIn("callee", message)
 
     def test_ambiguous_substring_is_rejected(self) -> None:
-        """`mesh_pair_proc` alone matches the hook, the method and the effect."""
+        """`mesh_pair_proc` alone matches the dispatcher, the hook and the method.
+
+        On the real image the dispatcher's own name is `on_mesh_pair_proc`, so a
+        bare `mesh_pair_proc` callee pattern is ambiguous three ways — which is
+        why the table names the hook.
+        """
         funcs = _parse()
         edges = {"on_mesh_pair_proc": ("mesh_pair_proc",)}
         with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
@@ -347,9 +408,9 @@ class TestApplyIndirectEdges(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("ambiguous", message)
         # Every candidate must be listed so the fix is obvious.
-        self.assertIn("app19mesh_pair_proc_hook", message)
-        self.assertIn("MeshManager14mesh_pair_proc", message)
-        self.assertIn("MeshManager21mesh_pair_proc_effect", message)
+        self.assertIn(f"{RADIO_CALLBACKS}17on_mesh_pair_proc", message)
+        self.assertIn(f"{MESH}3app19mesh_pair_proc_hook", message)
+        self.assertIn(f"{MESH}4mesh14mesh_pair_proc", message)
 
     def test_hook_substring_disambiguates(self) -> None:
         funcs = _parse()
@@ -357,14 +418,20 @@ class TestApplyIndirectEdges(unittest.TestCase):
             funcs, {"on_mesh_pair_proc": ("mesh_pair_proc_hook",)}
         )
         self.assertEqual(
-            resolved, [("callbacks17on_mesh_pair_proc", "app19mesh_pair_proc_hook")]
+            resolved,
+            [
+                (
+                    f"{RADIO_CALLBACKS}17on_mesh_pair_proc",
+                    f"{MESH}3app19mesh_pair_proc_hook",
+                )
+            ],
         )
 
     def test_rejected_table_leaves_the_graph_untouched(self) -> None:
         funcs = _parse()
         before = {name: list(f.calls) for name, f in funcs.items()}
         edges = {
-            "on_light_data": ("app21rf_link_data_callback",),
+            "on_light_data": (f"{MESH}3app21rf_link_data_callback",),
             "on_uart_mesh_rx": ("no_such_callback",),
         }
         with self.assertRaises(stack_analysis.IndirectEdgeError):
@@ -445,10 +512,10 @@ class TestApplyIndirectEdges(unittest.TestCase):
     def test_plain_device_status_update_is_ambiguous(self) -> None:
         """Why the mesh row names its callee `light20device_status_update`.
 
-        `device_status_update` alone matches three symbols on the real image:
-        the mesh dispatcher (renamed away), the lamp's own publisher and the
-        SDK's node-table writer one layer below. `_resolve_one` must reject it
-        rather than pick one.
+        `device_status_update` alone matches two symbols on the real image: the
+        lamp's own publisher and the radio crate's node-table writer one layer
+        below (`mesh_ll::node_status`). `_resolve_one` must reject it rather
+        than pick one.
         """
         funcs = _parse()
         with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
@@ -459,7 +526,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
         self.assertIn("ambiguous", message)
         self.assertIn("light20device_status_update", message)
         self.assertIn(
-            "mesh_management23ll_device_status_update", message
+            "mesh_ll11node_status23ll_device_status_update", message
         )
 
 
@@ -476,16 +543,19 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         # it used to be scored as 0 B — now counts.
         self.assertEqual(after - before, 408)
         self.assertEqual(cycles, [])
-        self.assertIn("app28rf_link_light_event_callback", chain)
+        self.assertIn(f"{MESH}3app28rf_link_light_event_callback", chain)
         # The OTA branch of the same GATT write entry is real but shorter
         # (24 + 40), so it is wired in without moving the maximum.
         ota_depth, ota_chain, _ = stack_analysis.longest_path(
-            funcs, "callbacks21dispatch_ota_write"
+            funcs, f"{RADIO_CALLBACKS}18dispatch_ota_write"
         )
         self.assertEqual(ota_depth, 24 + 40, "dispatch -> on_gatt_ota_packet")
         self.assertEqual(
             ota_chain,
-            ["callbacks21dispatch_ota_write", "ota21on_gatt_ota_packet"],
+            [
+                f"{RADIO_CALLBACKS}18dispatch_ota_write",
+                f"{MESH}3ota18on_gatt_ota_packet",
+            ],
         )
         # The light-data branch (24 + 128 + 8 + 200) stays the deepest callee of
         # the GATT write entry, so wiring the OTA branch in moves no maximum.
@@ -501,44 +571,46 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
             "irq_handler -> isr -> emit -> callback -> device_status_update -> "
             "notify_status_update -> ll_device_status_update",
         )
-        self.assertIn("app28rf_link_light_event_callback", chain)
-        self.assertIn("mesh_management23ll_device_status_update", chain)
+        self.assertIn(f"{MESH}3app28rf_link_light_event_callback", chain)
+        self.assertIn(
+            f"{RADIO}7mesh_ll11node_status23ll_device_status_update", chain
+        )
         # No OTA dispatcher is reachable from the IRQ root: the seam's frames
         # only enter the IRQ stack through the handlers that call them.
-        self.assertNotIn("callbacks21dispatch_ota_write", chain)
+        self.assertNotIn(f"{RADIO_CALLBACKS}18dispatch_ota_write", chain)
 
     def test_roots_no_longer_contain_indirect_only_callees(self) -> None:
         funcs = _parse()
         roots = set(stack_analysis.all_roots(funcs))
-        self.assertIn("app21rf_link_data_callback", roots)
-        self.assertIn("app28rf_link_light_event_callback", roots)
-        self.assertIn("app17uart_mesh_rx_hook", roots)
-        self.assertIn("app17uart_command_hook", roots)
-        self.assertIn("app17log_async_tx_hook", roots)
+        self.assertIn(f"{MESH}3app21rf_link_data_callback", roots)
+        self.assertIn(f"{MESH}3app28rf_link_light_event_callback", roots)
+        self.assertIn(f"{MESH}3app17uart_mesh_rx_hook", roots)
+        self.assertIn(f"{MESH}3app17uart_command_hook", roots)
+        self.assertIn(f"{MESH}3app17log_async_tx_hook", roots)
         # The OTA callees are roots only because nothing `bl`s them yet.
-        self.assertIn("ota21on_gatt_ota_packet", roots)
-        self.assertIn("app24ota_send_terminate_hook", roots)
+        self.assertIn(f"{MESH}3ota18on_gatt_ota_packet", roots)
+        self.assertIn(f"{MESH}3app23ota_send_terminate_hook", roots)
         stack_analysis.apply_indirect_edges(funcs)
         roots = set(stack_analysis.all_roots(funcs))
-        self.assertNotIn("app21rf_link_data_callback", roots)
-        self.assertNotIn("app28rf_link_light_event_callback", roots)
-        self.assertNotIn("app19mesh_pair_proc_hook", roots)
-        self.assertNotIn("app17uart_mesh_rx_hook", roots)
-        self.assertNotIn("app17uart_command_hook", roots)
-        self.assertNotIn("app20enqueue_uart_tx_hook", roots)
-        self.assertNotIn("app20dropped_uart_tx_hook", roots)
-        self.assertNotIn("app17log_async_tx_hook", roots)
-        self.assertNotIn("ota21on_gatt_ota_packet", roots)
-        self.assertNotIn("app24ota_send_terminate_hook", roots)
+        self.assertNotIn(f"{MESH}3app21rf_link_data_callback", roots)
+        self.assertNotIn(f"{MESH}3app28rf_link_light_event_callback", roots)
+        self.assertNotIn(f"{MESH}3app19mesh_pair_proc_hook", roots)
+        self.assertNotIn(f"{MESH}3app17uart_mesh_rx_hook", roots)
+        self.assertNotIn(f"{MESH}3app17uart_command_hook", roots)
+        self.assertNotIn(f"{MESH}3app20enqueue_uart_tx_hook", roots)
+        self.assertNotIn(f"{MESH}3app20dropped_uart_tx_hook", roots)
+        self.assertNotIn(f"{MESH}3app17log_async_tx_hook", roots)
+        self.assertNotIn(f"{MESH}3ota18on_gatt_ota_packet", roots)
+        self.assertNotIn(f"{MESH}3app23ota_send_terminate_hook", roots)
         self.assertIn("main_entrypoint", roots)
 
     def test_introducing_a_cycle_fails_the_gate(self) -> None:
         funcs = stack_analysis.parse_functions(
             _text(
-                _fn("caller", 32, (("callbacks13on_light_data", False),)),
-                _fn("callbacks13on_light_data", 24, indirect=True),
+                _fn("caller", 32, ((f"{RADIO_CALLBACKS}13on_light_data", False),)),
+                _fn(f"{RADIO_CALLBACKS}13on_light_data", 24, indirect=True),
                 _fn(
-                    "app21rf_link_data_callback",
+                    f"{MESH}3app21rf_link_data_callback",
                     64,
                     (("caller", False),),
                 ),
@@ -557,27 +629,46 @@ class TestMain(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("indirect dispatch edges (21):", out)
         self.assertIn(
-            "light20notify_status_update -> mesh_management23ll_device_status_update",
+            f"{MESH}5light20notify_status_update -> "
+            f"{RADIO}7mesh_ll11node_status23ll_device_status_update",
             out,
         )
         self.assertIn(
-            "callbacks15on_uart_mesh_rx -> app17uart_mesh_rx_hook", out
+            f"{RADIO_CALLBACKS}15on_uart_mesh_rx -> "
+            f"{MESH}3app17uart_mesh_rx_hook",
+            out,
         )
         # The OTA seam must be reported, not silently resolved.
         self.assertIn(
-            "callbacks21dispatch_ota_write -> ota21on_gatt_ota_packet", out
+            f"{RADIO_CALLBACKS}18dispatch_ota_write -> "
+            f"{MESH}3ota18on_gatt_ota_packet",
+            out,
         )
-        self.assertIn("ota17radio_stage_pkt -> light_ll22stage_ota_packet", out)
+        self.assertIn(
+            f"{MESH}3ota15radio_stage_pkt -> "
+            f"{RADIO}3ble10connection16stage_ota_packet",
+            out,
+        )
         # So must every C-8 seam, including the renamed status dispatcher.
         self.assertIn(
-            "mesh20publish_light_status -> light20device_status_update", out
-        )
-        self.assertIn("uart17dispatch_uart_cmd -> app17uart_command_hook", out)
-        self.assertIn(
-            "uart16uart_tx_ops_push -> app20enqueue_uart_tx_hook", out
+            f"{MESH}4mesh20publish_light_status -> "
+            f"{MESH}5light20device_status_update",
+            out,
         )
         self.assertIn(
-            "logging18dispatch_log_async -> app17log_async_tx_hook", out
+            f"{MESH}4uart17dispatch_uart_cmd -> "
+            f"{MESH}3app17uart_command_hook",
+            out,
+        )
+        self.assertIn(
+            f"{MESH}4uart16uart_tx_ops_push -> "
+            f"{MESH}3app20enqueue_uart_tx_hook",
+            out,
+        )
+        self.assertIn(
+            f"{MESH}7logging18dispatch_log_async -> "
+            f"{MESH}3app17log_async_tx_hook",
+            out,
         )
         self.assertIn("main: free 4096 B - max 656 B = margin 3440 B", out)
         self.assertIn("irq:  size 1792 B - max 604 B = margin 1188 B", out)
@@ -585,10 +676,11 @@ class TestMain(unittest.TestCase):
 
     def test_stale_caller_table_fails_closed(self) -> None:
         # Drop the UART dispatcher: on_uart_mesh_rx now matches nothing.
+        dropped = f"{RADIO_CALLBACKS}15on_uart_mesh_rx"
         text = FIRMWARE_SHAPED.replace(
-            _fn("callbacks15on_uart_mesh_rx", 24, indirect=True) + "\n", ""
+            _fn(dropped, 24, indirect=True) + "\n", ""
         )
-        self.assertNotIn("callbacks15on_uart_mesh_rx", text)
+        self.assertNotIn(dropped, text)
         code, out = _run_main(text)
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL: INDIRECT_EDGES['on_uart_mesh_rx']", out)
@@ -600,10 +692,11 @@ class TestMain(unittest.TestCase):
         # A stale OTA entry is the failure this table exists to catch: without
         # on_gatt_ota_packet the OTA write subtree would score as 0 B and the
         # gate would under-report both margins instead of failing.
-        text = FIRMWARE_SHAPED.replace(_fn("ota21on_gatt_ota_packet", 40) + "\n", "")
-        self.assertNotIn("ota21on_gatt_ota_packet", text)
+        callee = f"{MESH}3ota18on_gatt_ota_packet"
+        text = FIRMWARE_SHAPED.replace(_fn(callee, 40) + "\n", "")
+        self.assertNotIn(callee, text)
         # The dispatcher survives; only its callee is gone.
-        self.assertIn("callbacks21dispatch_ota_write", text)
+        self.assertIn(f"{RADIO_CALLBACKS}18dispatch_ota_write", text)
         code, out = _run_main(text)
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL: INDIRECT_EDGES['dispatch_ota_write']", out)

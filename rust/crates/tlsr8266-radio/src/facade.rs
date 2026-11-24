@@ -1,56 +1,36 @@
-//! BLE application layer: the radio surface the rest of the firmware names.
+//! The radio surface: everything the firmware drives the radio through.
 //!
-//! `app.rs` and `mesh/` drive the radio only through the facade in this module.
-//! The radio statics themselves are `pub(in crate::sdk)`: visible to the radio
-//! layer (`sdk/ble_app/**`, `sdk/rf_drv.rs`, `sdk/app_att_light.rs`,
-//! `sdk/light.rs`) and rejected by rustc everywhere else, so a module outside
-//! `sdk/` that names one of them — `crate::sdk::ble_app::ble_ll_pair::PAIR_LOGIN_OK`,
-//! say — fails to compile instead of merely failing review.
-//!
-//! The fence is `crate::sdk` rather than `crate::sdk::ble_app` because
-//! `sdk/rf_drv.rs` and `sdk/app_att_light.rs` legitimately own adjacent radio
-//! state (`DEVICE_ADDRESS`, `GROUP_ADDRESS`, `PAIR_LOGIN_OK`) and move into
-//! `crates/tlsr8266-radio` together with `ble_app/` in C-10. Widening it back to
-//! `pub(crate)` is what the boundary forbids, not the `sdk/`-internal sharing.
+//! `app.rs` and `mesh/` name the radio only through this module (re-exported at
+//! the crate root). The radio statics themselves are `pub(crate)`: visible to
+//! the rest of the radio crate and rejected by rustc everywhere else, so a
+//! module outside the crate that names one of them —
+//! `tlsr8266_radio::ble::pair::PAIR_LOGIN_OK`, say — fails to compile instead of
+//! merely failing review. The crate is the fence; nothing can widen it back by
+//! accident.
 
-pub mod ble_ll_attribute;
-pub mod ble_ll_channel_selection;
-pub mod ble_ll_pair;
-pub mod callbacks;
-pub mod config;
-pub mod flash_config;
-pub mod irq;
-pub mod light_ll;
-pub mod queues;
-pub mod rf_drv_8266;
-mod rf_drv_8266_tables;
-
-// `radio_config` stays crate-visible so it cannot be re-exported outside the
-// crate; the write path and the type are the SDK's public surface.
-pub(crate) use config::radio_config;
-pub use config::{set_radio_config, RadioConfig};
+// The read path and the write path are both public: the firmware reads the
+// active profile (`app::RADIO_CONFIG` is a copy of it) and installs a new one
+// through `set_radio_config`.
+pub use crate::config::radio_config;
+pub use crate::config::{set_radio_config, RadioConfig};
 
 use core::cmp::min;
 
-use crate::sdk::ble_app::ble_ll_pair::{
+use crate::ble::connection::{
+    BLE_PERIPHERAL_CONNECTION_ACTIVE, BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
+};
+use crate::ble::flash_config::access_code;
+use crate::ble::pair::{
     MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
     PAIR_CONFIG_PWD_ENCODE_SK, PAIR_LOGIN_OK, PAIR_SETTING_FLAG, PAIR_STATE, SECURITY_ENABLE,
 };
-use crate::sdk::ble_app::flash_config::access_code;
-use crate::sdk::ble_app::light_ll::connection_management::{
-    BLE_PERIPHERAL_CONNECTION_ACTIVE, BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP,
-};
-use crate::sdk::ble_app::light_ll::packet_processing::{
-    is_add_packet_buf_ready, rf_link_add_tx_packet,
-};
-use crate::sdk::ble_app::light_ll::status_management::{
-    rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY,
-};
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::ble::status::{rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY};
+use crate::mesh_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
+use crate::rf::drv_8266::{
     ADV_PRI_DATA, ADV_RSP_PRI_DATA, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, GROUP_ADDRESS,
     MAC_ID, MESH_DEVICE_ADDRESS_VALIDATION_PENDING, PKT_TERMINATE,
 };
-use crate::sdk::light::MAX_GROUP_COUNT;
+use crate::types::MAX_GROUP_COUNT;
 use mesh_protocol::packet_types::Packet;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::flash_write_page;
@@ -59,27 +39,26 @@ use tlsr8266_hal::mcu::crypto::encode_password;
 
 /// Types the facade signatures carry, re-exported so callers need no deeper
 /// import path.
-pub use crate::sdk::ble_app::ble_ll_pair::PairStateData;
-pub use crate::sdk::light::ePairState;
+pub use crate::ble::pair::PairStateData;
+pub use crate::types::ePairState;
 pub use mesh_protocol::packet_types::{AdvPrivate, AdvRspPrivate};
 
 // Same-purpose free functions already exist in the submodules; re-exporting
 // them keeps one implementation while the facade supplies the name.
 //
 // All nine are named by the C-10 facade contract (design 031 §3.4), so they stay
-// as zero-code `pub use` aliases even where today's `app.rs` / `mesh/` call sites
-// still reach the submodule directly. Routing those call sites through these
-// names belongs to the C-10 extraction, which is when the submodule paths stop
-// being writable from outside `sdk/`.
-pub use crate::sdk::ble_app::ble_ll_pair::pair_save_key as save_pair_key;
-pub use crate::sdk::ble_app::flash_config::pair_load_key as load_pair_key;
-pub use crate::sdk::ble_app::irq::mesh::configure_rf_for_mesh_listening as rf_switch_to_listen_channel;
-pub use crate::sdk::ble_app::light_ll::mesh_management::mesh_node_table_init;
-pub use crate::sdk::ble_app::light_ll::mesh_management::mesh_report_status_enable as report_mesh_status;
-pub use crate::sdk::ble_app::light_ll::pairing_management::rf_link_delete_pair as delete_pair_key;
-pub use crate::sdk::ble_app::queues::set_uart_status_reporting_enabled;
-pub use crate::sdk::ble_app::rf_drv_8266::rf_clear_rx_irq;
-pub use crate::sdk::ble_app::rf_drv_8266::rf_set_ble_access_code as rf_set_access_code;
+// as zero-code `pub use` aliases. The firmware reaches most of the radio through
+// them; the remaining direct `app.rs` / `mesh/` call sites name the concrete
+// module because that is where the function is defined.
+pub use crate::ble::flash_config::pair_load_key as load_pair_key;
+pub use crate::ble::pair::pair_save_key as save_pair_key;
+pub use crate::ble::pairing::rf_link_delete_pair as delete_pair_key;
+pub use crate::irq::mesh::configure_rf_for_mesh_listening as rf_switch_to_listen_channel;
+pub use crate::mesh_ll::node_status::mesh_node_table_init;
+pub use crate::mesh_ll::node_status::mesh_report_status_enable as report_mesh_status;
+pub use crate::queues::set_uart_status_reporting_enabled;
+pub use crate::rf::drv_8266::rf_clear_rx_irq;
+pub use crate::rf::drv_8266::rf_set_ble_access_code as rf_set_access_code;
 
 //------------------------------------------------------------------------------
 // Identity
@@ -141,7 +120,7 @@ pub fn take_dev_addr_validation_pending() -> bool {
 /// bytes the ceiling packet carries, then the scan-response payload.
 pub fn set_adv_private_data(pri: AdvPrivate, pri_bytes: &[u8; 8], rsp: AdvRspPrivate) {
     *ADV_PRI_DATA.lock() = pri;
-    crate::sdk::rf_drv::set_advertisement_manufacturer_data(pri_bytes);
+    crate::mesh_ll::adv::set_advertisement_manufacturer_data(pri_bytes);
     *ADV_RSP_PRI_DATA.lock() = rsp;
 }
 
@@ -253,7 +232,7 @@ pub fn switch_to_default_mesh_credentials() {
 /// Four 16-byte blocks, in the slot layout the pairing code reads: flags at
 /// `+0`, network name at `+16`, encoded password at `+32`, LTK at `+48`.
 pub fn write_out_of_mesh_credentials() {
-    let cfg = config::radio_config();
+    let cfg = crate::config::radio_config();
     let mut flags: [u8; 16] = [0; 16];
     let mut name: [u8; 16] = [0; 16];
     let mut password: [u8; 16] = [0; 16];
@@ -332,9 +311,10 @@ pub fn try_send_terminate_packet() -> bool {
 //------------------------------------------------------------------------------
 // Test-only state access
 //
-// Production never writes these outside `sdk/`; host tests do. They live behind
-// `cfg(test)` so the facade that ships has no write surface for state the radio
-// owns.
+// Production never writes these outside the crate; host tests do. They are gated
+// on `cfg(not(target_os = "none"))`, not `cfg(test)`, so the firmware's own test
+// fixture can drive them while the target build keeps no write surface for state
+// the radio owns.
 //------------------------------------------------------------------------------
 
 /// Restore every radio static the facade exposes to its power-on value.
@@ -342,16 +322,16 @@ pub fn try_send_terminate_packet() -> bool {
 /// The config-driven GATT profile is process-wide too, so it is re-seeded from
 /// the factory config here: a test that injects a name or version and forgets
 /// to restore it would otherwise leak into every later test in the run.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn reset_radio_state_for_test() {
-    set_radio_config(config::DEFAULT);
-    crate::sdk::app_att_light::init_gatt_profile(&config::DEFAULT);
+    set_radio_config(crate::config::DEFAULT);
+    crate::gatt::service_table::init_gatt_profile(&crate::config::DEFAULT);
     DEVICE_ADDRESS.set(0);
     *MAC_ID.lock() = [0; 6];
     *GROUP_ADDRESS.lock() = [0; MAX_GROUP_COUNT as usize];
     FLASH_CONFIGURATION_INDEX.set(0);
     MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
-    *PAIR_STATE.lock() = crate::sdk::ble_app::ble_ll_pair::DEFAULT_PAIR_STATE;
+    *PAIR_STATE.lock() = crate::ble::pair::DEFAULT_PAIR_STATE;
     PAIR_LOGIN_OK.set(false);
     PAIR_AC.set(0);
     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
@@ -362,60 +342,60 @@ pub fn reset_radio_state_for_test() {
     SLAVE_READ_STATUS_BUSY.set(0);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_device_address(address: u16) {
     DEVICE_ADDRESS.set(address);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_mac_id(mac: [u8; 6]) {
     *MAC_ID.lock() = mac;
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_group_addresses(groups: [u16; MAX_GROUP_COUNT as usize]) {
     *GROUP_ADDRESS.lock() = groups;
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_flash_config_index(index: i32) {
     FLASH_CONFIGURATION_INDEX.set(index);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_dev_addr_validation_pending(pending: bool) {
     MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(pending);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_pair_credentials(credentials: PairStateData) {
     *PAIR_STATE.lock() = credentials;
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_paired_login(paired: bool) {
     PAIR_LOGIN_OK.set(paired);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_current_access_code(code: u32) {
     PAIR_AC.set(code);
 }
 
 /// Replace the seeded default-mesh credential buffers with raw bytes.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_pair_config_mesh_credentials(name: [u8; 16], pwd: [u8; 16], ltk: [u8; 16]) {
     *PAIR_CONFIG_MESH_NAME.lock() = name;
     *PAIR_CONFIG_MESH_PWD.lock() = pwd;
     *PAIR_CONFIG_MESH_LTK.lock() = ltk;
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_ble_connected(connected: bool) {
     BLE_PERIPHERAL_CONNECTION_ACTIVE.set(connected);
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_first_connection_timestamp(timestamp: u32) {
     BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(timestamp);
 }
@@ -423,35 +403,39 @@ pub fn set_first_connection_timestamp(timestamp: u32) {
 /// The tick at which the current BLE connection was first seen, or `0` when the
 /// auth window has already been closed. Host tests assert the timeout rule
 /// through this read rather than the static.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn first_connection_timestamp() -> u32 {
     BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.get()
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn set_slave_read_status_busy(busy: u8) {
     SLAVE_READ_STATUS_BUSY.set(busy);
 }
 
 /// Read both private advertising payloads, for tests that assert what the
 /// vendoring step wrote.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn adv_private_data() -> (AdvPrivate, AdvRspPrivate) {
     (*ADV_PRI_DATA.lock(), *ADV_RSP_PRI_DATA.lock())
 }
 
 /// Read one staged response packet, for tests that assert what a response
 /// handler produced.
-#[cfg(test)]
+#[cfg(not(target_os = "none"))]
 pub fn buffered_response(index: usize) -> Packet {
-    crate::sdk::ble_app::light_ll::connection_management::BUFF_RESPONSE.lock()[index]
+    crate::ble::connection::BUFF_RESPONSE.lock()[index]
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::light_ll::status_management::mock_rf_link_slave_read_status_stop;
+    use crate::ble::connection::SLAVE_DATA_VALID;
+    use crate::ble::status::{
+        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
+        DEVICE_STATUS_READ_UNICAST_MODE,
+    };
 
     /// The storage layer keeps "no pairing record" as `-1`; the facade owns the
     /// mapping to `None`, so it needs a test of its own.
@@ -471,19 +455,61 @@ mod tests {
 
     /// The busy branch of `stop_slave_read_status_if_busy` moved into this
     /// module with the refactor, so both branches are covered here.
+    ///
+    /// The abort is observed through the state the real
+    /// `rf_link_slave_read_status_stop` clears, rather than through a mock of
+    /// the callee: a busy link loses its busy/unicast/pending-data state and
+    /// its buffer pointers, an idle link keeps all of them.
     #[test]
-    #[mry::lock(rf_link_slave_read_status_stop)]
     fn stop_slave_read_status_if_busy_aborts_only_a_busy_read() {
-        mock_rf_link_slave_read_status_stop().returns(());
-
         set_slave_read_status_busy(1);
+        SLAVE_DATA_VALID.set(1);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(3);
+        DEVICE_STATUS_BUFFER_READ_POINTER.set(2);
+
         stop_slave_read_status_if_busy();
-        mock_rf_link_slave_read_status_stop().assert_called(1);
+
+        assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0, "the busy flag is cleared");
+        assert_eq!(SLAVE_DATA_VALID.get(), 0, "pending status data is dropped");
+        assert_eq!(
+            DEVICE_STATUS_READ_UNICAST_MODE.get(),
+            false,
+            "the unicast window is closed"
+        );
+        assert_eq!(
+            (
+                DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+                DEVICE_STATUS_BUFFER_READ_POINTER.get()
+            ),
+            (0, 0),
+            "the status response buffer is reinitialised"
+        );
+
+        // An idle link must not be re-initialised: keep non-default state and
+        // prove the second call leaves it alone.
+        set_slave_read_status_busy(0);
+        SLAVE_DATA_VALID.set(3);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(5);
+
+        stop_slave_read_status_if_busy();
+
+        assert_eq!(SLAVE_DATA_VALID.get(), 3, "idle link keeps pending data");
+        assert_eq!(
+            DEVICE_STATUS_READ_UNICAST_MODE.get(),
+            true,
+            "idle link keeps its unicast window"
+        );
+        assert_eq!(
+            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            5,
+            "idle link keeps its buffer position"
+        );
 
         set_slave_read_status_busy(0);
-        stop_slave_read_status_if_busy();
-        mock_rf_link_slave_read_status_stop().assert_called(1); // not called again for an idle link
-
-        set_slave_read_status_busy(0);
+        SLAVE_DATA_VALID.set(0);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(false);
+        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
     }
 }

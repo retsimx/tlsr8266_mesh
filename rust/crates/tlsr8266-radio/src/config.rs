@@ -13,8 +13,8 @@
 
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 
-use crate::sdk::ble_app::ble_ll_pair::seed_pair_config;
-use crate::sdk::ble_app::rf_drv_8266::apply_vendor_id;
+use crate::ble::pair::seed_pair_config;
+use crate::rf::drv_8266::apply_vendor_id;
 
 /// Board and product configuration read by the BLE application layer.
 ///
@@ -52,7 +52,7 @@ pub struct RadioConfig {
 /// Factory defaults, byte-identical to the crate-root configuration constants.
 ///
 /// These literals deliberately duplicate the crate-root `config` values: that
-/// duplication is what removes the last upward import from `sdk/`, and it keeps
+/// duplication is what removes the last upward import from the radio crate, and it keeps
 /// host tests boilerplate-free. The crate-root `config` module plus the
 /// `version` module remain production's source of truth, injected by `app.rs`.
 pub(crate) const DEFAULT: RadioConfig = RadioConfig {
@@ -79,7 +79,7 @@ static RADIO_CONFIG: CriticalSectionMutex<RadioConfig> = CriticalSectionMutex::n
 ///
 /// `RadioConfig` is `Copy`, so callers get a self-contained snapshot; no
 /// interrupt-masking lock is ever held across I/O.
-pub(crate) fn radio_config() -> RadioConfig {
+pub fn radio_config() -> RadioConfig {
     *RADIO_CONFIG.lock()
 }
 
@@ -99,11 +99,11 @@ pub fn set_radio_config(cfg: RadioConfig) {
 mod tests {
     use super::*;
 
-    use crate::sdk::ble_app::ble_ll_pair::{
+    use crate::ble::pair::{
         PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
         PAIR_CONFIG_PWD_ENCODE_SK,
     };
-    use crate::sdk::ble_app::rf_drv_8266::{ADV_PRI_DATA, ADV_RSP_PRI_DATA};
+    use crate::rf::drv_8266::{ADV_PRI_DATA, ADV_RSP_PRI_DATA};
 
     /// Restore the factory configuration after a test that injected its own.
     fn restore_default() {

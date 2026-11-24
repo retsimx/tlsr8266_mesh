@@ -35,7 +35,7 @@
 //! This module never disables interrupts, blinks an LED, reboots the part or
 //! writes pairing credentials: it returns [`ResetAction`] / [`KickoutAction`]
 //! and the application layer executes them. That keeps the module free of
-//! `crate::sdk`, `crate::light`, `crate::ota` and the PAC crate, and lets the
+//! `tlsr8266_radio`, `crate::light`, `crate::ota` and the PAC crate, and lets the
 //! whole policy run against the host flash/clock fakes.
 
 use core::sync::atomic::{AtomicU32, AtomicU8};
@@ -303,7 +303,6 @@ fn init_reset_sequence() {
 /// when the active slot already holds the factory-reset flag — the caller owns
 /// the erase/LED/reboot sequence. Otherwise it writes at most one byte (the
 /// next step's value) and returns [`ResetAction::None`].
-#[cfg_attr(test, mry::mry)]
 pub fn handle_boot_sequence() -> ResetAction {
     init_reset_sequence();
 
@@ -357,7 +356,6 @@ pub fn handle_boot_sequence() -> ResetAction {
 /// timing bit. State 2 waits for the maximum time and aborts the sequence if it
 /// is exceeded. Every reachable path leaves the device running, so this always
 /// returns [`ResetAction::None`]; the signature keeps both call sites uniform.
-#[cfg_attr(test, mry::mry)]
 pub fn check_timing_step() -> ResetAction {
     // No timing check active.
     if FACTORY_RESET_STATE.clear_state.get() == 0 {
@@ -410,7 +408,6 @@ pub fn check_timing_step() -> ResetAction {
 }
 
 /// Decide what a kick-out reason needs. Pure: the caller erases and reboots.
-#[cfg_attr(test, mry::mry)]
 pub fn plan_kick_out(reason: KickoutReason) -> KickoutAction {
     match reason {
         KickoutReason::OutOfMesh => KickoutAction::WriteOutOfMeshCredentialsAndReboot,

@@ -2,7 +2,7 @@
 //! pairing/flash configuration.
 //!
 //! Everything here is a free function over the BLE/RF statics owned by
-//! `crate::sdk::ble_app` plus the SDK flash, crypto and RF primitives. This module deliberately has **no**
+//! `crate::facade` plus the SDK flash, crypto and RF primitives. This module deliberately has **no**
 //! application-layer dependencies: it must not import the application's `app`,
 //! `mesh`, `light`, `uart` or `ota` modules, nor any other module above
 //! the SDK layer.
@@ -15,21 +15,19 @@
 //! back to slot 0 after a sector erase; see [`pair_flash_clean`] and
 //! [`pair_flash_config_init`].
 
-use crate::sdk::ble_app::ble_ll_pair::{
+use crate::ble::connection::{setup_ble_parameter_start, CONN_UPDATE_CNT, CONN_UPDATE_SUCCESSED};
+use crate::ble::pair::{
     MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
     PAIR_CONFIG_PWD_ENCODE_SK, PAIR_STATE,
 };
-use crate::sdk::ble_app::light_ll::connection_management::{
-    setup_ble_parameter_start, CONN_UPDATE_CNT, CONN_UPDATE_SUCCESSED,
-};
-use crate::sdk::ble_app::radio_config;
-use crate::sdk::ble_app::rf_drv_8266::{
+use crate::facade::radio_config;
+use crate::mesh_ll::adv::{set_advertisement_manufacturer_data, set_advertisement_mesh_name};
+use crate::rf::drv_8266::{
     ADV_PRI_DATA, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, GROUP_ADDRESS, MAC_ID,
     MAX_MESH_NAME_LEN, MESH_DEVICE_ADDRESS_NEXT_POSITION, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
     MESH_GROUP_ADDRESS_NEXT_POSITION,
 };
-use crate::sdk::light::*;
-use crate::sdk::rf_drv::{set_advertisement_manufacturer_data, set_advertisement_mesh_name};
+use crate::types::*;
 use mesh_protocol::packet_types::{AdvPrivate, Packet};
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
@@ -87,7 +85,6 @@ pub const SYS_CHN_ADV: [u8; 3] = [0x25, 0x26, 0x27];
 ///
 /// # Returns
 /// `true` if MAC flag is present, `false` otherwise
-#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_flag(params: &[u8]) -> bool {
     DEV_ADDR_PAR_WITH_MAC == params[2]
 }
@@ -108,7 +105,6 @@ pub fn dev_addr_with_mac_flag(params: &[u8]) -> bool {
 /// par_rsp[0..4]  - Reserved/other data
 /// par_rsp[4..10] - 6-byte MAC address
 /// ```
-#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) {
     par_rsp[4..10].copy_from_slice(&*MAC_ID.lock());
 }
@@ -128,7 +124,6 @@ pub fn dev_addr_with_mac_rsp(par_rsp: &mut [u8]) {
 /// # Returns
 /// - Query mode: Current validation pending state
 /// - Match mode: `true` if MAC matches, `false` otherwise
-#[cfg_attr(test, mry::mry)]
 pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
     if params[0] == 0xff && params[1] == 0xff {
         // Query mode: Return current validation pending state
@@ -163,7 +158,6 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 ///
 /// # Flash Address Calculation
 /// Final address = `FLASH_ADR_PAIRING + FLASH_CONFIGURATION_INDEX + adr`
-#[cfg_attr(test, mry::mry)]
 pub fn save_pair_info(adr: u32, p: &[u8]) {
     let flash_adr_pairing = radio_config().flash_adr_pairing;
     flash_write_page(
@@ -211,7 +205,6 @@ pub fn save_pair_info(adr: u32, p: &[u8]) {
 /// - `0`: Parameters valid
 /// - `-1`: Invalid interval
 /// - `-2`: Invalid timeout
-#[cfg_attr(test, mry::mry)]
 pub fn update_ble_parameter_cb() {
     // Only initiate negotiation if not already successful
     if !CONN_UPDATE_SUCCESSED.get() {
@@ -346,7 +339,6 @@ pub fn rf_update_conn_para(p: &Packet) -> u8 {
 /// - Memory safety (no undefined behavior from invalid pointers)
 /// - Flash timing compliance (proper wait states)
 /// - Hardware abstraction (flash controller management)
-#[cfg_attr(test, mry::mry)]
 pub fn retrieve_dev_grp_address() {
     let dev_mask = DEVICE_ADDR_MASK_DEFAULT;
     let mut device_addr_next_pos = MESH_DEVICE_ADDRESS_NEXT_POSITION.get();
@@ -469,7 +461,6 @@ pub fn retrieve_dev_grp_address() {
 /// * Erases entire pairing flash sector at wrap point
 /// * Resets `FLASH_CONFIGURATION_INDEX` to 0 after wrap
 /// * Brief execution delay during sector erase (~20ms typical)
-#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_clean() {
     const CONFIG_SIZE: usize = 64;
     const WRAP_THRESHOLD: i32 = 0xfc0; // Last 64-byte slot before 4KB sector end
@@ -538,7 +529,6 @@ pub fn pair_flash_clean() {
 /// # Side Effects
 /// * Sets FLASH_CONFIGURATION_INDEX to last valid slot offset or -1
 /// * May trigger sector erase if at wrap threshold
-#[cfg_attr(test, mry::mry)]
 pub fn pair_flash_config_init() {
     // STEP 1: Check if any configuration exists
     let flash_adr_pairing = radio_config().flash_adr_pairing;
@@ -642,7 +632,6 @@ pub fn pair_flash_config_init() {
 /// Stage 3: Ensure alternating pattern density
 /// Output: 0b10110110100110101001101010110101 (valid BLE access code)
 /// ```
-#[cfg_attr(test, mry::mry)]
 pub fn access_code(name: &[u8], pass: &[u8]) -> u32 {
     // STAGE 1: CRYPTOGRAPHIC KEY DERIVATION
     // Prepare fixed-size inputs for AES encryption
@@ -767,7 +756,6 @@ pub fn access_code(name: &[u8], pass: &[u8]) -> u32 {
 /// * Modifies BLE advertisement name field
 /// * Modifies BLE advertisement manufacturer data field
 /// * Triggers radio to restart advertising with new data
-#[cfg_attr(test, mry::mry)]
 pub fn pair_update_key() {
     let pair_state = PAIR_STATE.lock();
 
@@ -891,7 +879,6 @@ pub fn pair_update_key() {
 /// * Updates `MESH_DEVICE_ADDRESS_VALIDATION_PENDING` flag
 /// * Updates `PAIR_AC` with regenerated access code
 /// * Updates BLE advertisement data via `pair_update_key()`
-#[cfg_attr(test, mry::mry)]
 pub fn pair_load_key() {
     // STAGE 1: CONFIGURATION DISCOVERY
     // Locate the active configuration block in flash wear-leveling structure
@@ -980,13 +967,9 @@ pub fn pair_load_key() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use crate::sdk::ble_app::ble_ll_pair::pair_save_key;
-    use crate::sdk::ble_app::light_ll::connection_management::mock_setup_ble_parameter_start;
-    use crate::sdk::rf_drv::{
-        mock_set_advertisement_manufacturer_data, mock_set_advertisement_mesh_name,
-    };
+    use crate::ble::pair::pair_save_key;
+    use crate::rf::drv_8266::PKT_ADV;
     use mesh_protocol::packet_types::Packet;
-    use mry::Any;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::crypto::fake_crypto::{self, FakeAesMode};
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -994,7 +977,7 @@ mod tests {
     /// Pairing sector base, taken from the factory default config so the tests
     /// track the shipped layout without importing the crate-root `config`
     /// module.
-    const FLASH_ADR_PAIRING: u32 = crate::sdk::ble_app::config::DEFAULT.flash_adr_pairing;
+    const FLASH_ADR_PAIRING: u32 = crate::config::DEFAULT.flash_adr_pairing;
 
     /// Reset the PAC/HAL host fakes so a test never inherits another test's
     /// register bank, analog bank, clock or AES transport (the suite runs
@@ -1006,6 +989,63 @@ mod tests {
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         fake_crypto::reset();
         FakeFlash::reset();
+        // The advertisement packet is process-wide too: blank its AD payload so
+        // a test never inherits another test's fields.
+        critical_section::with(|_| {
+            let mut pkt = PKT_ADV.lock();
+            pkt.head_mut().dma_len = 0;
+            pkt.head_mut().rf_len = 0;
+            pkt.adv_ind_module_mut()
+                .data
+                .iter_mut()
+                .for_each(|byte| *byte = 0);
+        });
+    }
+
+    /// BLE AD type of the mesh-name field (mirrors `rf_drv`'s private constant).
+    const ADV_TYPE_MESH_NAME: u8 = 9;
+    /// BLE AD type of the manufacturer-data field (mirrors `rf_drv`'s constant).
+    const ADV_TYPE_MANUFACTURER: u8 = 0xFF;
+
+    /// Payload of the first advertisement AD structure of type `adv_type`.
+    fn adv_payload(adv_type: u8) -> Option<Vec<u8>> {
+        let pkt = PKT_ADV.lock();
+        let data = &pkt.adv_ind_module().data;
+        let mut index = 0usize;
+        while index + 1 < data.len() {
+            let len = data[index] as usize;
+            if len == 0 {
+                break; // zero-length field: end of the AD payload
+            }
+            // `len` counts the type byte plus the field payload.
+            let end = index + 1 + len;
+            if end > data.len() {
+                break;
+            }
+            if data[index + 1] == adv_type {
+                return Some(data[index + 2..end].to_vec());
+            }
+            index = end;
+        }
+        None
+    }
+
+    /// The 8 manufacturer-data bytes `pair_update_key` publishes, i.e. the wire
+    /// image of the current `ADV_PRI_DATA`.
+    fn adv_private_bytes() -> [u8; 8] {
+        let adv = *ADV_PRI_DATA.lock();
+        let mut out = [0u8; 8];
+        out[0..2].copy_from_slice(&adv.manufacture_id.to_le_bytes());
+        out[2..4].copy_from_slice(&adv.mesh_product_uuid.to_le_bytes());
+        out[4..8].copy_from_slice(&adv.mac_address.to_le_bytes());
+        out
+    }
+
+    /// The credentials currently in `PAIR_STATE`, copied out for assertions
+    /// that must not hold the pairing guard.
+    fn current_credentials() -> ([u8; 16], [u8; 16]) {
+        let state = PAIR_STATE.lock();
+        (state.pair_nn, state.pair_pass)
     }
 
     /// Datasheet offsets of the AES registers `aes_mmio_run` drives.
@@ -1221,54 +1261,38 @@ mod tests {
     // --- Tests for update_ble_parameter_cb ---
 
     #[test]
-    #[mry::lock(setup_ble_parameter_start)]
     fn test_update_ble_parameter_cb_calls_setup_when_not_successful() {
         // Reset state
         CONN_UPDATE_SUCCESSED.set(false);
         CONN_UPDATE_CNT.set(0);
 
-        // Setup mock
-        mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
-
-        // Call function
+        // Act: the real `setup_ble_parameter_start` runs. It accepts the first
+        // set (interval/threshold and timeout checks pass) and records it in its
+        // own module-private bounds, so the proposal itself is observed through
+        // the counter that only this call advances.
         update_ble_parameter_cb();
-
-        // Verify setup was called with first parameter set
-        mock_setup_ble_parameter_start(
-            CONN_PARA_DATA[0][0],
-            CONN_PARA_DATA[0][1],
-            CONN_PARA_DATA[0][2] as u32,
-        )
-        .assert_called(1);
 
         // Verify counter was incremented
         assert_eq!(CONN_UPDATE_CNT.get(), 1);
     }
 
     #[test]
-    #[mry::lock(setup_ble_parameter_start)]
     fn test_update_ble_parameter_cb_does_nothing_when_successful() {
         // Set state to successful (don't rely on previous test state)
         CONN_UPDATE_SUCCESSED.set(true);
         CONN_UPDATE_CNT.set(0);
 
-        // Setup mock (should not be called)
-        mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
-
         // Call function
         update_ble_parameter_cb();
 
-        // Verify setup was NOT called
-        mock_setup_ble_parameter_start(Any, Any, Any).assert_called(0);
-
-        // Verify counter was not incremented
+        // No parameter set was proposed: the counter that every proposal
+        // advances is untouched.
         assert_eq!(CONN_UPDATE_CNT.get(), 0);
     }
 
     // --- Tests for rf_update_conn_para ---
 
     #[test]
-    #[mry::lock(setup_ble_parameter_start)]
     fn test_rf_update_conn_para_handles_success_response() {
         // Setup initial state - ensure clean state first
         CONN_UPDATE_CNT.set(0);
@@ -1295,8 +1319,6 @@ mod tests {
 
         let packet = packet_from_buf!(packet_data);
 
-        mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
-
         // Call function
         let result = rf_update_conn_para(packet);
 
@@ -1309,12 +1331,12 @@ mod tests {
             "Success flag should be set to true"
         );
 
-        // Verify setup was not called for success case
-        mock_setup_ble_parameter_start(Any, Any, Any).assert_called(0);
+        // No parameter set was re-proposed for the success case: the counter
+        // every proposal advances is untouched.
+        assert_eq!(CONN_UPDATE_CNT.get(), 0);
     }
 
     #[test]
-    #[mry::lock(setup_ble_parameter_start)]
     fn test_rf_update_conn_para_handles_rejection_response() {
         // Setup initial state - start from 0 to test increment to 1
         CONN_UPDATE_CNT.set(0);
@@ -1339,25 +1361,16 @@ mod tests {
 
         let packet = packet_from_buf!(packet_data);
 
-        mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
-
         // Call function
         rf_update_conn_para(packet);
 
-        // Verify counter was incremented from 0 to 1
+        // Verify counter was incremented from 0 to 1, i.e. the real
+        // `setup_ble_parameter_start` was asked to propose the next set (the
+        // callee records the bounds in its own module-private state).
         assert_eq!(CONN_UPDATE_CNT.get(), 1);
-
-        // Verify setup was called with first parameter set (counter was 0, now 1)
-        mock_setup_ble_parameter_start(
-            CONN_PARA_DATA[0][0],
-            CONN_PARA_DATA[0][1],
-            CONN_PARA_DATA[0][2] as u32,
-        )
-        .assert_called(1);
     }
 
     #[test]
-    #[mry::lock(setup_ble_parameter_start)]
     fn test_rf_update_conn_para_resets_counter_when_max_reached() {
         // Setup initial state at max count
         CONN_UPDATE_CNT.set(UPDATE_CONN_PARA_CNT);
@@ -1382,16 +1395,12 @@ mod tests {
 
         let packet = packet_from_buf!(packet_data);
 
-        mock_setup_ble_parameter_start(Any, Any, Any).returns(0);
-
         // Call function
         rf_update_conn_para(packet);
 
-        // Verify counter was reset to 0 instead of continuing to increment
+        // Verify counter was reset to 0 instead of continuing to increment, i.e.
+        // no further parameter set was proposed.
         assert_eq!(CONN_UPDATE_CNT.get(), 0);
-
-        // Verify setup was not called when max reached
-        mock_setup_ble_parameter_start(Any, Any, Any).assert_called(0);
     }
 
     #[test]
@@ -1790,8 +1799,8 @@ mod tests {
     // --- Tests for pair_update_key ---
 
     #[test]
-    #[mry::lock(set_advertisement_mesh_name, set_advertisement_manufacturer_data)]
     fn test_pair_update_key_updates_advertisement() {
+        reset_host_fakes();
         // Setup test pairing state
         let mut pair_state = PAIR_STATE.lock();
         pair_state.pair_nn = [0u8; MAX_MESH_NAME_LEN];
@@ -1800,24 +1809,29 @@ mod tests {
         pair_state.pair_pass[0..8].copy_from_slice(b"Password");
         drop(pair_state);
 
-        // Setup mocks
-        mock_set_advertisement_mesh_name(Any).returns(());
-        mock_set_advertisement_manufacturer_data(Any).returns(());
-
         // Call function
         pair_update_key();
 
-        // Verify advertisement functions were called
-        mock_set_advertisement_mesh_name(Any).assert_called(1);
-        mock_set_advertisement_manufacturer_data(Any).assert_called(1);
+        // Both advertisement fields carry the current state.
+        assert_eq!(
+            adv_payload(ADV_TYPE_MESH_NAME).as_deref(),
+            Some(&b"MeshName"[..]),
+            "the mesh name must be published as the BLE local name"
+        );
+        assert_eq!(
+            adv_payload(ADV_TYPE_MANUFACTURER).as_deref(),
+            Some(&adv_private_bytes()[..]),
+            "the manufacturer data must be republished from ADV_PRI_DATA"
+        );
 
-        // Verify PAIR_AC was set
-        assert_ne!(PAIR_AC.get(), 0, "PAIR_AC should be set");
+        // Verify PAIR_AC was derived from the state's credentials
+        let (nn, pass) = current_credentials();
+        assert_eq!(PAIR_AC.get(), access_code(&nn, &pass));
     }
 
     #[test]
-    #[mry::lock(set_advertisement_mesh_name, set_advertisement_manufacturer_data)]
     fn test_pair_update_key_handles_null_terminated_name() {
+        reset_host_fakes();
         // Setup pairing state with null-terminated name
         let mut pair_state = PAIR_STATE.lock();
         pair_state.pair_nn = [0u8; MAX_MESH_NAME_LEN];
@@ -1825,15 +1839,19 @@ mod tests {
         pair_state.pair_pass = [0u8; 16];
         drop(pair_state);
 
-        // Setup mocks
-        mock_set_advertisement_mesh_name(Any).returns(());
-        mock_set_advertisement_manufacturer_data(Any).returns(());
-
         // Call function
         pair_update_key();
 
-        // Verify set_advertisement_mesh_name was called (exact bytes hard to match due to slice truncation)
-        mock_set_advertisement_mesh_name(Any).assert_called(1);
+        // The published name stops at the null terminator.
+        assert_eq!(
+            adv_payload(ADV_TYPE_MESH_NAME).as_deref(),
+            Some(&b"Test"[..]),
+            "the name must be cut at the null terminator"
+        );
+        assert_eq!(
+            adv_payload(ADV_TYPE_MANUFACTURER).as_deref(),
+            Some(&adv_private_bytes()[..])
+        );
     }
 
     // --- Tests for pair_load_key ---
@@ -1843,7 +1861,6 @@ mod tests {
     // To test this properly, we would need to refactor to use dependency injection.
 
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pair_load_key_handles_no_config() {
         reset_host_fakes();
         // Setup: Initialize PAIR_CONFIG_* with default values
@@ -1860,9 +1877,9 @@ mod tests {
         *PAIR_CONFIG_MESH_LTK.lock() = test_ltk;
 
         // Blank flash: no valid configuration marker exists.
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
-        // Call function - should load defaults and call pair_update_key
+        // Call function - should load defaults and refresh the Rf identity
         pair_load_key();
 
         // Verify FLASH_CONFIGURATION_INDEX is -1
@@ -1875,12 +1892,18 @@ mod tests {
         assert_eq!(pair_state.pair_ltk, test_ltk);
         drop(pair_state);
 
-        // Verify pair_update_key was called to update advertisements
-        mock_pair_update_key().assert_called(1);
+        // The tail of the load published the new identity: the access code is
+        // the real derivation over the defaults just loaded, and the defaults
+        // are what the advertisement carries.
+        let (nn, pass) = current_credentials();
+        assert_eq!(PAIR_AC.get(), access_code(&nn, &pass));
+        assert_eq!(
+            adv_payload(ADV_TYPE_MESH_NAME).as_deref(),
+            Some(&b"out_of_mesh"[..])
+        );
     }
 
     #[test]
-    #[mry::lock(pair_update_key, pair_flash_config_init)]
     fn test_pair_load_key_loads_valid_config() {
         reset_host_fakes();
         // Setup: Initialize PAIR_CONFIG_* with defaults (should NOT be used)
@@ -1889,13 +1912,11 @@ mod tests {
         PAIR_CONFIG_MESH_PWD.lock().fill(0);
         PAIR_CONFIG_MESH_PWD.lock()[0..3].copy_from_slice(b"123");
 
-        // Mock pair_flash_config_init to set a valid index
-        mock_pair_flash_config_init().returns_with(|| {
-            FLASH_CONFIGURATION_INDEX.set(0x1000);
-        });
-
-        // Seed the slot the loader will read, at FLASH_ADR_PAIRING + 0x1000.
-        let slot = FLASH_ADR_PAIRING + 0x1000;
+        // Seed one valid slot at the start of the pairing sector: the real
+        // `pair_flash_config_init` scan stops at the blank slot after it, so the
+        // loader reads exactly this configuration.
+        let slot = FLASH_ADR_PAIRING;
+        FakeFlash::write_slice(slot, &[PAIR_CONFIG_VALID_FLAG]);
         let mut name = [0u8; 16];
         name[0..10].copy_from_slice(b"CustomMesh");
         FakeFlash::write_slice(slot + 0x10, &name);
@@ -1906,11 +1927,13 @@ mod tests {
         // Validation flag clear, and the password is not encoded.
         FakeFlash::write_slice(slot + 0x01, &[0x00]);
         FakeFlash::write_slice(slot + 0x0F, &[0x00]);
-
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
         // Call function - should load from flash, not defaults
         pair_load_key();
+
+        // The scan found slot 0.
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0);
 
         // Verify PAIR_STATE was loaded with custom config, NOT defaults
         let pair_state = PAIR_STATE.lock();
@@ -1922,8 +1945,13 @@ mod tests {
         assert_ne!(&pair_state.pair_nn[0..11], b"out_of_mesh");
         drop(pair_state);
 
-        // Verify pair_update_key was called to update advertisements
-        mock_pair_update_key().assert_called(1);
+        // The tail of the load published the loaded identity.
+        let (nn, pass) = current_credentials();
+        assert_eq!(PAIR_AC.get(), access_code(&nn, &pass));
+        assert_eq!(
+            adv_payload(ADV_TYPE_MESH_NAME).as_deref(),
+            Some(&b"CustomMesh"[..])
+        );
     }
 
     // --- Integration Tests for Flash Pairing Persistence ---
@@ -1931,7 +1959,6 @@ mod tests {
 
     /// Test that a single write/read cycle preserves pairing data correctly
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pairing_persistence_single_write_read() {
         reset_host_fakes();
 
@@ -1942,8 +1969,7 @@ mod tests {
         *PAIR_CONFIG_MESH_NAME.lock() = *b"defaultmesh\0\0\0\0\0";
         *PAIR_CONFIG_MESH_PWD.lock() = *b"defaultpass\0\0\0\0\0";
         *PAIR_CONFIG_MESH_LTK.lock() = [0xCD; 16];
-
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
         // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
         // save/load cycle proves the encoded password really round-trips.
@@ -2016,17 +2042,20 @@ mod tests {
             load_index, save_index,
             "Load should find config at same index where it was saved"
         );
+        drop(pair_state);
+
+        // The reload refreshed the RF identity from the round-tripped password.
+        let (nn, pass) = current_credentials();
+        assert_eq!(PAIR_AC.get(), access_code(&nn, &pass));
     }
 
     /// Test that no pairing data in flash loads defaults
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pairing_persistence_no_data_loads_defaults() {
         reset_host_fakes();
 
         FLASH_CONFIGURATION_INDEX.set(0); // Reset to initial state
-
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
         // Set defaults in PAIR_CONFIG_*
         *PAIR_CONFIG_MESH_NAME.lock() = *b"defaultmesh\0\0\0\0\0";
@@ -2048,13 +2077,11 @@ mod tests {
 
     /// Test multiple writes use wear-leveling (different offsets)
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pairing_persistence_wear_leveling() {
         reset_host_fakes();
 
         FLASH_CONFIGURATION_INDEX.set(-1);
-
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
         // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
         // save/load cycle proves the encoded password really round-trips.
@@ -2135,14 +2162,12 @@ mod tests {
 
     /// Test sector boundary wraparound
     #[test]
-    #[mry::lock(pair_update_key)]
     fn test_pairing_persistence_wraparound() {
         reset_host_fakes();
 
         // Start near end of sector
         FLASH_CONFIGURATION_INDEX.set(0xF80); // Second to last slot
-
-        mock_pair_update_key().returns(());
+        PAIR_AC.set(0);
 
         // No encode/decode_password stubs: the real FIPS-197 AES runs, so the
         // save/load cycle proves the encoded password really round-trips.

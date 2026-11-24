@@ -92,7 +92,7 @@ fn handle_system_interrupts() {
     }
 
     // Handle UART interrupts for external communication
-    crate::uart_manager::take_rx_and_ack_tx_irq();
+    crate::uart::take_rx_and_ack_tx_irq();
 }
 
 /// Handles one `SYSTEM_TIMER` interrupt: the BLE state machine plus the OTA
@@ -154,7 +154,7 @@ mod tests {
     };
     use crate::sdk::ble_app::rf_drv_8266::CURRENT_RF_STATE;
     use crate::sdk::light::RfOperationState;
-    use crate::uart_manager::{mock_take_rx_and_ack_tx_irq, take_rx_and_ack_tx_irq};
+    use crate::uart::{mock_take_rx_and_ack_tx_irq, take_rx_and_ack_tx_irq};
     use mesh_protocol::mesh_types::RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS;
     use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1S};
     use tlsr8266_pac::fake_mmio::FakeMmio;

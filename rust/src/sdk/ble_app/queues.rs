@@ -98,8 +98,9 @@ static DROPPED_UART_TX: AtomicU32 = AtomicU32::new(0);
 /// interrupt context, so the update is masked. `critical_section` nesting is
 /// counted, so a producer that is already masked pays two register writes.
 ///
-/// `uart_manager`'s `UART_RX_DROPPED` counter shares this helper rather than
-/// hand-copying the CAS-free read-modify-write.
+/// `uart`'s `UART_RX_DROPPED` counter cannot reach this helper (the SDK is
+/// above the transport, not below it), so it keeps its own copy of the same
+/// masked update.
 pub(crate) fn count_drop(counter: &AtomicU32) {
     critical_section::with(|_| {
         counter.store(

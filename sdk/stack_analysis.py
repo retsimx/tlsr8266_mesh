@@ -23,13 +23,15 @@ Model and caveats (reported alongside the result):
   * Indirect dispatch (``fn`` pointers, ``bx rN`` / legacy ``tjex``) has no
     ``bl`` edge to walk, so the known dispatchers are declared explicitly in
     ``INDIRECT_EDGES`` (caller substring -> callee substrings, resolved against
-    the linked symbols). That covers every fn-pointer seam: the app callback
-    seam, the OTA ``OtaHooks`` / ``OtaRadioOps`` seam, and the light subsystem's
-    status-update hook (``light::notify_status_update``). An indirect dispatch
-    pushes a return address, so it is modelled as a *normal* call, never a tail
-    call. Every entry must resolve to exactly one function; otherwise the gate
-    fails rather than silently scoring the missing callee as 0 B (which is what
-    ``longest_path`` does with an unknown name).
+    the linked symbols). That covers every fn-pointer seam in the firmware: the
+    app callback seam, the OTA ``OtaHooks`` / ``OtaRadioOps`` seam, the light
+    subsystem's status-update hook (``light::notify_status_update``), and the
+    ``mesh`` / ``logging`` / ``uart`` seams C-8 (#70) introduced
+    (``MeshEventHooks``, ``LogSinks``, ``UartTxOps`` and the UART command
+    handler). An indirect dispatch pushes a return address, so it is modelled as
+    a *normal* call, never a tail call. Every entry must resolve to exactly one
+    function; otherwise the gate fails rather than silently scoring the missing
+    callee as 0 B (which is what ``longest_path`` does with an unknown name).
 
 Usage:
     python3 sdk/stack_analysis.py [--elf _build/lightblemesh] [--top 15]
@@ -81,6 +83,11 @@ INDIRECT_RE = re.compile(r"\btjex\b|\bbx\s+(?!lr\b)\w")
 # compiles to a ``bx rN`` and its real callee — the OTA write path, the flash
 # save loop, the ``BUFF_RESPONSE`` staging shims — would otherwise be scored as
 # 0 B, hiding an OTA frame from both stack maxima.
+#
+# C-8 (#70) added the last four subsystems' seams, so every fn-pointer slot in
+# the firmware is modelled: ``MeshEventHooks`` (`mesh`), ``LogSinks``
+# (`logging`), ``UartTxOps`` + the command handler (`uart`). The last block
+# below is those entries, in registration order.
 INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "emit_light_event": ("rf_link_light_event_callback",),
     # Deliberately the hook, not ``mesh::mesh_pair_proc``: the dispatcher calls
@@ -91,7 +98,9 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "on_mesh_pair_proc": ("mesh_pair_proc_hook",),
     "on_light_data": ("rf_link_data_callback",),
     "on_light_response": ("rf_link_response_callback",),
-    "on_uart_mesh_rx": ("light_mesh_rx_cb",),
+    # C-8: the SDK's UART bridge dispatches into ``app::uart_mesh_rx_hook``, not
+    # the deleted ``uart_manager::light_mesh_rx_cb``.
+    "on_uart_mesh_rx": ("uart_mesh_rx_hook",),
     # The light subsystem publishes its own on/off state through a hook `app.rs`
     # registers at boot, so `device_status_update` reaches the SDK's node-table
     # writer with a `bx rN`, not a `bl`.  The dispatcher is IRQ-reachable:
@@ -114,6 +123,34 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "radio_read_pkt": ("read_staged_ota_packet",),
     "radio_terminate_tx": ("ota_send_terminate_hook",),
     "radio_begin_gatt_ota": ("ota_begin_gatt_hook",),
+    # ---- C-8 seams: `mesh`, `logging`, `uart` -------------------------------
+    # `mesh`'s three `MeshEventHooks` dispatchers, in slot order. The light
+    # event slot is the same app callback the SDK's `emit_light_event` reaches,
+    # so that callee pattern is intentionally shared by two call sites.
+    "dispatch_mesh_light_event": ("rf_link_light_event_callback",),
+    # Renamed from `dispatch_device_status_update` so the caller pattern is not
+    # a substring of its own callee's plain name. The callee stays
+    # module-qualified: `device_status_update` alone also matches the SDK's
+    # `ll_device_status_update`, which is a *different* seam one layer down, and
+    # the leading `20` is the length prefix of `device_status_update` in Rust's
+    # path-based legacy mangling (stable, unlike the crate hash).
+    "publish_light_status": ("light20device_status_update",),
+    "dispatch_uart_mesh_rx": ("uart_mesh_rx_hook",),
+    # `uart`'s command handler and its two `UartTxOps` slots. The tx-ops callees
+    # are the `app` hooks, not the SDK functions behind them: the hook is what
+    # the pointer holds, and its own direct `bl` already reaches
+    # `queues::enqueue_uart_tx`. Naming the SDK function instead would score the
+    # hook's frame as 0 B *and* make the pattern ambiguous with the hook.
+    "dispatch_uart_cmd": ("uart_command_hook",),
+    "uart_tx_ops_push": ("enqueue_uart_tx_hook",),
+    "uart_tx_ops_dropped": ("dropped_uart_tx_hook",),
+    # `logging`'s async sink. `dispatch_log_blocking` is *not* listed: it is
+    # never emitted on the linked image at all. Its only caller is
+    # `UartStream::send_blocking`, which needs the `uprint!` macro, and `uprint!`
+    # has no call sites — the panic path names `uart::send_sync_panic` directly
+    # through `send_blocking_with`. A row for it would therefore fail closed
+    # against a correct build; it is unreachable, not inlined away.
+    "dispatch_log_async": ("log_async_tx_hook",),
 }
 
 

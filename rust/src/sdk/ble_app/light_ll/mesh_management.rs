@@ -1429,7 +1429,7 @@ mod tests {
         *LAST_SWEEP.lock() = Instant::from_ticks(0);
 
         // `reset_for_test` above already cleared the global UART status-reporting
-        // flag owned by the queue module, so no `uart_manager` reset is needed.
+        // flag owned by the queue module, so no `uart` reset is needed.
 
         // Clear the mesh node status table
         let mut mesh_node_st = MESH_NODE_ST.lock();

@@ -1750,7 +1750,7 @@ mod tests {
         // Reset the UART statics, the echo-suppression deque and the shared
         // queues (this also drains MESH_TX_QUEUE and MESH_RX_CHANNEL) so each
         // test starts from a known-clean transport state.
-        crate::uart_manager::reset_for_test();
+        crate::uart::reset_for_test();
     }
 
     // ================================================================================
@@ -2984,7 +2984,7 @@ mod tests {
         reset_test_state();
 
         // Create a packet that simulates a response with 3-byte opcode format
-        // This mimics the format used in mesh.rs: opcode | 0xc0
+        // This mimics the format used in mesh/mod.rs: opcode | 0xc0
         let mut packet =
             create_test_packet(LGT_CMD_LIGHT_STATUS, [0x11, 0x22, 0x33], 0xABCD, 0x1234);
 

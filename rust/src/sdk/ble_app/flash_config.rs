@@ -4,7 +4,7 @@
 //! Everything here is a free function over the BLE/RF statics owned by
 //! `crate::sdk::ble_app` plus the SDK flash, crypto and RF primitives. This module deliberately has **no**
 //! application-layer dependencies: it must not import the application's `app`,
-//! `mesh`, `light`, `uart_manager` or `ota` modules, nor any other module above
+//! `mesh`, `light`, `uart` or `ota` modules, nor any other module above
 //! the SDK layer.
 //!
 //! # Flash Pairing Layout

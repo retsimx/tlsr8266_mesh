@@ -101,6 +101,17 @@ One path-scoped family of rules rides in the same pass:
   ``tlsr8266_pac`` (the lamp publishes its status through a hook the
   application registers, so it never needs the node table).
 
+  C-8 (#70) completed the application layer with ``diagnostics``, ``logging``,
+  ``uart`` and ``mesh``.  A row lists the siblings and layers *above* its
+  subsystem, never its own name, so the DAG is enforced from both ends:
+  ``uart`` forbids ``crate::mesh`` and ``mesh`` forbids ``crate::uart``.
+  ``crate::uart`` is the live name of the UART bridge; ``crate::uart_manager``
+  stays in the rows as a retired-name fence, so resurrecting the deleted module
+  fails the same rule.  A subsystem that is a single file rather than a
+  directory (``logging.rs``) declares its root in
+  ``SUBSYSTEM_ROOT_OVERRIDES``: the match accepts an exact file path as well as
+  a directory, so one table still carries every row.
+
 ``MAX_PRODUCTION_UNSAFE`` is a **one-way ratchet**: it may be lowered as
 ``unsafe`` sites are removed, never raised.  The value below was produced by
 running this exact rule on the finished tree, not by hand-counting tokens.
@@ -192,7 +203,11 @@ DEFAULT_CRATE_ROOTS = (
 # primary advertisement payload: `light::effects::adv_private_to_bytes` encodes
 # each field with `to_le_bytes()` instead, so one more documented site leaves
 # the firmware tree: 63 - 1 = 62.
-MAX_PRODUCTION_UNSAFE = 62
+#
+# C-8 (#70) moved `diagnostics::check_panic_info` to `app.rs` and replaced its
+# two `slice::from_raw_parts` views of the panic report buffer with safe
+# `chunks(10)`, so both documented sites leave the firmware tree: 62 - 2 = 60.
+MAX_PRODUCTION_UNSAFE = 60
 
 # Application-layer modules `rust/src/sdk/` must never name.  `crate::config`
 # is deliberately absent: it is the legitimate root-level constant module.
@@ -201,6 +216,8 @@ MAX_PRODUCTION_UNSAFE = 62
 # `factory_reset` and `light`, which moved out of `sdk/` (and out of the old
 # `light_manager` module) into app-root subsystems.  `light_manager` and
 # `main_light` stay listed as retired-name fences: nothing may name them again.
+# C-8 (#70) added `uart`: the UART bridge is now `rust/src/uart/`, and
+# `uart_manager` stays in the set as the fence for its deleted spelling.
 UPWARD_MODULES = frozenset(
     {
         "app",
@@ -210,6 +227,7 @@ UPWARD_MODULES = frozenset(
         "main_light",
         "mesh",
         "light_manager",
+        "uart",
         "uart_manager",
         "ota",
         "diagnostics",
@@ -224,14 +242,16 @@ UPWARD_MODULES = frozenset(
 # `crate::config`, `mesh_protocol`, `tlsr8266_hal`, `critical_section`, and its
 # own `ota::fsm` (internal, reachable as `super::fsm` or `crate::ota::fsm`, so it
 # is not in this set).  Everything above `ota` is forbidden: the SDK, the light
-# and mesh managers, the UART bridge, diagnostics, logging and the deleted
-# `state` module.  Together with `OTA_FORBIDDEN_CRATES` this turns the issue's
-# "zero imports" criterion into a checked rule instead of a review note.
+# and mesh managers, the UART bridge (`crate::uart`, and its retired
+# `crate::uart_manager` spelling), diagnostics, logging and the deleted `state`
+# module.  Together with `OTA_FORBIDDEN_CRATES` this turns the issue's "zero
+# imports" criterion into a checked rule instead of a review note.
 OTA_FORBIDDEN_MODULES = frozenset(
     {
         "sdk",
         "light_manager",
         "main_light",
+        "uart",
         "uart_manager",
         "mesh",
         "diagnostics",
@@ -250,12 +270,14 @@ OTA_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
 # `KickoutAction` instead of calling the layer above, so the whole application
 # side of the reset (interrupts off, LED blink, reboot, credential writes) lives
 # in the caller and is testable without it.  `crate::light` is forbidden too:
-# `light` is a sibling subsystem, not a dependency.
+# `light` is a sibling subsystem, not a dependency, and so is the UART bridge
+# (`crate::uart`, plus the retired `crate::uart_manager` spelling).
 FACTORY_RESET_FORBIDDEN_MODULES = frozenset(
     {
         "sdk",
         "light",
         "ota",
+        "uart",
         "uart_manager",
         "mesh",
         "diagnostics",
@@ -271,13 +293,15 @@ FACTORY_RESET_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
 # subsystem owns the lamp, its PWM, its persistence, the LED indicator and the
 # light-domain wire protocol, and it reaches downward only: `tlsr8266_hal`,
 # `mesh_protocol`, `crate::config` and the lamp's own maths/queue crates.  Every
-# layer above it is forbidden — including `factory_reset`, which is a sibling
-# subsystem and not a dependency — and so is the PAC: the lamp drives PWM, flash
-# and timers through the HAL.
+# layer above it is forbidden — including `factory_reset` and the UART bridge
+# (`crate::uart`, plus its retired `crate::uart_manager` spelling), which are
+# sibling subsystems and not dependencies — and so is the PAC: the lamp drives
+# PWM, flash and timers through the HAL.
 LIGHT_FORBIDDEN_MODULES = frozenset(
     {
         "sdk",
         "ota",
+        "uart",
         "uart_manager",
         "mesh",
         "factory_reset",
@@ -288,9 +312,94 @@ LIGHT_FORBIDDEN_MODULES = frozenset(
 )
 LIGHT_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
 
-# One row per subsystem directory directly under `rust/src/`: the `crate::`
-# modules its production code must never name, and the external crates it must
-# never import.  The rule names are derived from the key, `<dir>-upward-dep` and
+# Modules `rust/src/diagnostics/**` production code must never name.  It is the
+# leaf of the application layer: the panic sector, the boot breadcrumbs and the
+# RTT mirror, reaching downward only to `tlsr8266_hal`, `mesh_protocol` and
+# `crate::config`.  Everything above it is forbidden, `logging` included: the
+# sink is what writes the panic body, so the direction is
+# `logging -> diagnostics::rtt`, never back.
+DIAGNOSTICS_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "uart",
+        "uart_manager",
+        "mesh",
+        "light",
+        "ota",
+        "factory_reset",
+        "logging",
+        "state",
+    }
+)
+# `tlsr8266_pac` is forbidden for the same reason as everywhere else: the panic
+# sector is written through the HAL's flash driver, not by poking registers.
+DIAGNOSTICS_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# Modules `rust/src/logging.rs` production code must never name.  `logging` sits
+# above `diagnostics` (it mirrors a frame to RTT) and below `uart` (which calls
+# `uprintln!`), so the UART transport, `mesh`, `light` and every subsystem are
+# forbidden while `crate::diagnostics` is legal.  The transport is reached
+# through the `LogSinks` fn-pointer seam `app.rs` registers — that is what keeps
+# this row possible.
+LOGGING_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "uart",
+        "uart_manager",
+        "mesh",
+        "light",
+        "ota",
+        "factory_reset",
+        "state",
+    }
+)
+LOGGING_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# Modules `rust/src/uart/**` production code must never name.  The bridge owns
+# the framing, the ACK/retry bookkeeping and the two embassy tasks, and reaches
+# downward only: `tlsr8266_hal`, `mesh_protocol`, `crate::logging` (for
+# `uprintln!`) and its own `uart::protocol`.  The mesh relay and the host command
+# execution arrive through the `UartTxOps` / `UartCommandHandler` seams, so
+# `crate::mesh` and `crate::sdk` never appear here.
+UART_FORBIDDEN_MODULES = frozenset(
+    {
+        "sdk",
+        "mesh",
+        "light",
+        "ota",
+        "factory_reset",
+        "diagnostics",
+        "state",
+    }
+)
+UART_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# Modules `rust/src/mesh/**` production code must never name.  `mesh` is allowed
+# `crate::sdk` (`ble_app`'s queues, `light`/`ePairState`, `rf_drv_8266`) because
+# it owns the radio and the node table, and `crate::config` / `crate::logging`
+# like every other subsystem; it may not name the UART bridge, the lamp, the OTA
+# or reset subsystems, or diagnostics.  `app` and `irq` are the composition root
+# and the ISR layer above it, so they are forbidden too — the module doc's "it
+# never names `app`" is a checked claim, not a comment.  The lamp status, the
+# light events and the UART relay all arrive through `MeshEventHooks`.
+MESH_FORBIDDEN_MODULES = frozenset(
+    {
+        "app",
+        "irq",
+        "uart",
+        "uart_manager",
+        "light",
+        "ota",
+        "factory_reset",
+        "diagnostics",
+        "state",
+    }
+)
+MESH_FORBIDDEN_CRATES = frozenset({"tlsr8266_pac"})
+
+# One row per subsystem directly under `rust/src/`: the `crate::` modules its
+# production code must never name, and the external crates it must never import.
+# The rule names are derived from the key, `<dir>-upward-dep` and
 # `<dir>-forbidden-crate`, so `ota` keeps its C-6 spelling and a new subsystem
 # only needs a row here.  `crate::config`, `mesh_protocol`, `tlsr8266_hal`,
 # `critical_section` and the subsystem's own `fsm` stay legal everywhere.
@@ -301,7 +410,17 @@ SUBSYSTEM_PURITY = {
         FACTORY_RESET_FORBIDDEN_CRATES,
     ),
     "light": (LIGHT_FORBIDDEN_MODULES, LIGHT_FORBIDDEN_CRATES),
+    "diagnostics": (DIAGNOSTICS_FORBIDDEN_MODULES, DIAGNOSTICS_FORBIDDEN_CRATES),
+    "logging": (LOGGING_FORBIDDEN_MODULES, LOGGING_FORBIDDEN_CRATES),
+    "uart": (UART_FORBIDDEN_MODULES, UART_FORBIDDEN_CRATES),
+    "mesh": (MESH_FORBIDDEN_MODULES, MESH_FORBIDDEN_CRATES),
 }
+
+# A subsystem is normally a directory of the same name, but `logging` is a
+# single module file.  This override keeps one table: `main` resolves each row's
+# root as `rust/src/<name>` unless the name appears here, and the purity match
+# accepts an exact file path as well as a directory.
+SUBSYSTEM_ROOT_OVERRIDES = {"logging": "logging.rs"}
 
 LOGGING_MACROS = ("uprintln", "uprint")
 
@@ -1032,11 +1151,32 @@ def audit_ota_purity_source(text: str, path: str) -> list[Violation]:
     return audit_subsystem_purity_source(text, path, "ota")
 
 
+def subsystem_roots(src_root: str) -> dict[str, str]:
+    """The real path of every [`SUBSYSTEM_PURITY`] row under ``src_root``.
+
+    A row is normally the directory of the same name; ``logging`` overrides it
+    with its single module file, which is why the returned value may name a file
+    rather than a directory.  Keeping the resolution here means `main` and the
+    tests can never disagree about what a row covers.
+    """
+    return {
+        name: os.path.join(src_root, SUBSYSTEM_ROOT_OVERRIDES.get(name, name))
+        for name in SUBSYSTEM_PURITY
+    }
+
+
 def _subsystem_of(path: str, roots: dict[str, str]) -> str | None:
-    """The subsystem whose directory directly holds ``path``, if any."""
+    """The subsystem row that owns ``path``, if any.
+
+    A row's root is the directory holding its files, or — for a subsystem that
+    is a single module file (``logging.rs``) — that exact file.  Both shapes are
+    matched, so the table needs no second lookup path.
+    """
+    normalized = os.path.normpath(path)
     directory = os.path.normpath(os.path.dirname(path))
     for name, root in roots.items():
-        if directory == os.path.normpath(root):
+        root = os.path.normpath(root)
+        if directory == root or normalized == root:
             return name
     return None
 
@@ -1156,12 +1296,12 @@ def audit_universal(
     measured there, and the ``mesh-protocol`` crate is a separate tree whose
     ``unsafe`` sites are bounded by the rule itself, not by a ceiling.
 
-    ``subsystem_roots`` maps a [`SUBSYSTEM_PURITY`] directory name to the
-    directory it names; every file directly in one of them also gets that
-    subsystem's purity rule.  ``ota_root`` is C-6's spelling of the ``"ota"``
-    entry and is kept so existing callers do not have to change.  ``None`` on
-    both disables the purity rules, which is what the workspace crate trees want
-    (they have no subsystems).
+    ``subsystem_roots`` maps a [`SUBSYSTEM_PURITY`] row name to the directory —
+    or, for a single-file subsystem such as ``logging``, the exact file — that
+    row covers; every file it owns also gets that subsystem's purity rule.
+    ``ota_root`` is C-6's spelling of the ``"ota"`` entry and is kept so existing
+    callers do not have to change.  ``None`` on both disables the purity rules,
+    which is what the workspace crate trees want (they have no subsystems).
     """
     violations: list[Violation] = []
     unsafe_total = 0
@@ -1356,10 +1496,7 @@ def main(argv: list[str] | None = None) -> int:
                 universal, _unsafe_total = audit_universal(
                     src_paths,
                     _display_path(src_root),
-                    subsystem_roots={
-                        name: os.path.join(src_root, name)
-                        for name in SUBSYSTEM_PURITY
-                    },
+                    subsystem_roots=subsystem_roots(src_root),
                 )
             for label, crate_root, crate_paths in crate_audits:
                 display = _display_path(crate_root)

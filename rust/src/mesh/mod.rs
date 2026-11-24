@@ -1,10 +1,32 @@
+//! The mesh subsystem: packets in, packets out, and the pairing state machine's
+//! hardware side.
+//!
+//! The dependency direction is strictly downward. This directory owns the mesh
+//! transport (the send/receive tasks, the retransmission queue and the relay
+//! path) and the flash/radio half of re-pairing. It may reach `tlsr8266_hal`,
+//! `mesh_protocol`, `crate::config`, `crate::logging` and the `crate::sdk` glue
+//! it drives; it never names `app`, `irq`, `light`, `uart`, `ota`,
+//! `factory_reset`, `diagnostics` or the PAC register crate
+//! (`sdk/check_layering.py` enforces it).
+//!
+//! Three things the subsystem cannot do itself belong to its consumers: report
+//! a light event (the LED and the node table), publish the lamp's status, and
+//! relay a received packet to the UART bridge. Those arrive through
+//! [`MeshEventHooks`], registered once by `app::main_task`, and every call goes
+//! through a named `#[inline(never)]` dispatcher so `sdk/stack_analysis.py` can
+//! resolve the edge in the linked ELF.
+//!
+//! The pairing protocol itself — every transition, timer and payload byte — is
+//! in [`fsm`], which names no hardware at all.
+
+mod fsm;
+
 use core::ptr::addr_of;
 
 #[cfg(not(test))]
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use heapless::Vec;
 
-use crate::app::rf_link_light_event_callback;
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
 use crate::sdk::ble_app::ble_ll_pair::{
     pair_enc_packet_mesh, pair_save_key, MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK,
@@ -22,136 +44,159 @@ use crate::sdk::ble_app::light_ll::packet_processing::{
 use crate::sdk::ble_app::queues::{self, SendPkt, MESH_RX_CHANNEL, MESH_TX_QUEUE, MESH_TX_WAKE};
 use crate::sdk::ble_app::rf_drv_8266::{
     rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
-    rf_set_tx_rx_off, rf_start_srx2tx,
-};
-use crate::sdk::ble_app::rf_drv_8266::{
-    DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
+    rf_set_tx_rx_off, rf_start_srx2tx, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX,
+    MESH_DEVICE_ADDRESS_VALIDATION_PENDING,
 };
 use crate::sdk::light::*;
-use crate::uart_manager::light_mesh_rx_cb;
 use crate::{uprintln, BIT};
+pub use fsm::{
+    MeshPairAction, MeshPairFsm, MeshPairState, MESH_PAIR_CMD_INTERVAL, MESH_PAIR_TIMEOUT,
+};
 use mesh_protocol::packet_types::{Packet, PacketAttCmd, PacketAttValue, PacketL2capHead};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::flash_write_page;
-use tlsr8266_hal::mcu::clock::{
-    clock_time, clock_time64, clock_time_exceed, sleep_us, CLOCK_SYS_CLOCK_1US,
-};
+use tlsr8266_hal::mcu::clock::{clock_time, clock_time64, sleep_us, CLOCK_SYS_CLOCK_1US};
 
-pub const MESH_PAIR_CMD_INTERVAL: u32 = 500;
-
-//unit: s
-pub const MESH_PAIR_TIMEOUT: u32 = 10;
-
-/// Mesh pairing state machine commands for re-pairing devices in an existing mesh.
+/// The application edges the mesh subsystem must not compile in.
 ///
-/// Credentials are transmitted in 6 messages (Name1/2, Pwd1/2, Ltk1/2), then
-/// devices switch to the new mesh using MeshPairEffectDelay (delayed switch).
-///
-/// Note: MeshPairEffect (immediate switch) exists for receiving only - it's not
-/// sent by this implementation as it was part of a broken single-device optimization.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum MeshPairState {
-    MeshPairName1 = 0,
-    MeshPairName2,
-    MeshPairPwd1,
-    MeshPairPwd2,
-    MeshPairLtk1,
-    MeshPairLtk2,
-    MeshPairEffectDelay,
-    MeshPairEffect, // Receive-only: immediate effect (not sent by this code)
-    MeshPairDefaultMesh,
+/// `on_light_event` is the LED/mesh-timeout event (`app`'s
+/// `rf_link_light_event_callback`), `on_device_status_update` publishes the
+/// lamp state to the node table (owned by `light`), and `on_uart_mesh_rx`
+/// relays one received packet to the UART bridge.
+#[derive(Copy, Clone)]
+pub struct MeshEventHooks {
+    pub on_light_event: fn(u8),
+    pub on_device_status_update: fn(),
+    pub on_uart_mesh_rx: fn(&Packet),
 }
 
-impl TryFrom<u8> for MeshPairState {
-    type Error = ();
+/// Registered once by the composition root before any mesh traffic exists.
+static MESH_EVENT_HOOKS: CriticalSectionMutex<Option<MeshEventHooks>> =
+    CriticalSectionMutex::new(None);
 
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            x if x == MeshPairState::MeshPairName1 as u8 => Ok(MeshPairState::MeshPairName1),
-            x if x == MeshPairState::MeshPairName2 as u8 => Ok(MeshPairState::MeshPairName2),
-            x if x == MeshPairState::MeshPairPwd1 as u8 => Ok(MeshPairState::MeshPairPwd1),
-            x if x == MeshPairState::MeshPairPwd2 as u8 => Ok(MeshPairState::MeshPairPwd2),
-            x if x == MeshPairState::MeshPairLtk1 as u8 => Ok(MeshPairState::MeshPairLtk1),
-            x if x == MeshPairState::MeshPairLtk2 as u8 => Ok(MeshPairState::MeshPairLtk2),
-            x if x == MeshPairState::MeshPairEffectDelay as u8 => {
-                Ok(MeshPairState::MeshPairEffectDelay)
-            }
-            x if x == MeshPairState::MeshPairEffect as u8 => Ok(MeshPairState::MeshPairEffect),
-            x if x == MeshPairState::MeshPairDefaultMesh as u8 => {
-                Ok(MeshPairState::MeshPairDefaultMesh)
-            }
-            _ => Err(()),
-        }
+/// Install the application hooks. Called by `app::main_task` before
+/// `rf_drv_init(true)`, so the slots are never observed empty in production.
+pub fn set_mesh_event_hooks(hooks: MeshEventHooks) {
+    *MESH_EVENT_HOOKS.lock() = Some(hooks);
+}
+
+/// Report a light/mesh event (LED indication, node-table reset, pairing timeout).
+///
+/// `#[inline(never)]` on purpose: the call is indirect, so the symbol is what
+/// lets `sdk/stack_analysis.py`'s `INDIRECT_EDGES` entry `dispatch_mesh_light_event`
+/// resolve to `rf_link_light_event_callback`. The hook set is copied out of the
+/// mutex first: the critical section must not cover the callback, which touches
+/// the node table and the LED.
+#[inline(never)]
+fn dispatch_mesh_light_event(cmd: u8) {
+    let hooks = *MESH_EVENT_HOOKS.lock();
+    if let Some(hooks) = hooks {
+        (hooks.on_light_event)(cmd);
     }
 }
 
-/// Outcome of the send-buffer scan, computed inside the send critical section.
-enum SendScan {
-    /// Nothing is queued: park on the wake signal until a producer pushes.
-    Empty,
-    /// Packets are queued but none is due: park until the earliest due tick.
-    Wait(u64),
-    /// The first due packet, removed from the buffer.
-    Ready(SendPkt),
-}
-
-/// Everything the mesh re-pairing state machine owns.
+/// Publish the lamp's on/off state to the mesh node table.
 ///
-/// These 13 fields used to live on `MeshManager`, which meant every pairing
-/// call reached them through an aliasable `&'static mut App`. They now have one
-/// owner: [`MESH_PAIR`]. Every lock is short — no guard is ever held across a
-/// flash read/write (`pair_load_key`, `pair_save_key`, `flash_write_page`) or
-/// across a radio transmission.
-pub struct MeshPairingState {
-    mesh_pair_start_time: u32,
-    default_mesh_time: u32,
-    default_mesh_effect_delay_ref: u32,
-    new_mesh_name: [u8; 16],
-    new_mesh_pwd: [u8; 16],
-    new_mesh_ltk: [u8; 16],
-    default_mesh_time_ref: u32,
-    effect_new_mesh: u8,
-    effect_new_mesh_delay_time: u32,
-    mesh_pair_cmd_interval: u32,
-    mesh_pair_timeout: u32,
-    mesh_pair_time: u32,
-    mesh_pair_state: MeshPairState,
+/// `#[inline(never)]`: the `INDIRECT_EDGES` key `publish_light_status` resolves
+/// to `light::device_status_update`. The name says *what* it publishes rather
+/// than naming the callee, so the caller pattern is not a substring of the
+/// callee's own (module-qualified) symbol and both resolve uniquely.
+#[inline(never)]
+fn publish_light_status() {
+    let hooks = *MESH_EVENT_HOOKS.lock();
+    if let Some(hooks) = hooks {
+        (hooks.on_device_status_update)();
+    }
 }
 
-impl MeshPairingState {
-    /// Const constructor so [`MESH_PAIR`] can be a `static` initialiser.
-    pub const fn new() -> Self {
-        Self {
-            mesh_pair_start_time: 0,
-            default_mesh_time: 0,
-            default_mesh_effect_delay_ref: 0,
-            new_mesh_name: [0; 16],
-            new_mesh_pwd: [0; 16],
-            new_mesh_ltk: [0; 16],
-            default_mesh_time_ref: 0,
-            effect_new_mesh: 0,
-            effect_new_mesh_delay_time: 0,
-            mesh_pair_cmd_interval: 0,
-            mesh_pair_timeout: 0,
-            mesh_pair_time: 0,
-            mesh_pair_state: MeshPairState::MeshPairName1,
-        }
+/// Hand one received mesh packet to the UART bridge.
+///
+/// `#[inline(never)]`: the `INDIRECT_EDGES` key `dispatch_uart_mesh_rx` resolves
+/// to `uart_mesh_rx_hook`, which is the same hook the SDK's bridge calls.
+#[inline(never)]
+fn dispatch_uart_mesh_rx(pkt: &Packet) {
+    let hooks = *MESH_EVENT_HOOKS.lock();
+    if let Some(hooks) = hooks {
+        (hooks.on_uart_mesh_rx)(pkt);
     }
 }
 
 /// Sole owner of the mesh pairing state.
-pub static MESH_PAIR: CriticalSectionMutex<MeshPairingState> =
-    CriticalSectionMutex::new(MeshPairingState::new());
+pub static MESH_PAIR: CriticalSectionMutex<MeshPairFsm> =
+    CriticalSectionMutex::new(MeshPairFsm::new());
+
+/// Recording hooks the host tests install in place of the composition root's.
+///
+/// The three event edges are function pointers registered by `app::main_task`,
+/// so a test observes them exactly the way production does: it registers
+/// functions that count and record. The counters live here rather than in
+/// `mod tests` because [`reset_for_test`] has to clear them.
+#[cfg(test)]
+mod test_hooks {
+    use super::{MeshEventHooks, Packet};
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    pub static LIGHT_EVENTS: AtomicU32 = AtomicU32::new(0);
+    pub static LAST_LIGHT_EVENT: AtomicU32 = AtomicU32::new(0);
+    pub static STATUS_UPDATES: AtomicU32 = AtomicU32::new(0);
+    pub static RELAYED_PACKETS: AtomicU32 = AtomicU32::new(0);
+    pub static RELAYED_SRC: AtomicU32 = AtomicU32::new(0);
+    pub static RELAYED_DST: AtomicU32 = AtomicU32::new(0);
+
+    fn record_light_event(cmd: u8) {
+        LIGHT_EVENTS.store(LIGHT_EVENTS.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        LAST_LIGHT_EVENT.store(cmd as u32, Ordering::Relaxed);
+    }
+
+    fn record_device_status_update() {
+        STATUS_UPDATES.store(
+            STATUS_UPDATES.load(Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn record_uart_mesh_rx(pkt: &Packet) {
+        RELAYED_PACKETS.store(
+            RELAYED_PACKETS.load(Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+        RELAYED_SRC.store(pkt.ll_app().value.src as u32, Ordering::Relaxed);
+        RELAYED_DST.store(pkt.ll_app().value.dst as u32, Ordering::Relaxed);
+    }
+
+    /// The hook set a test starts from.
+    pub fn hooks() -> MeshEventHooks {
+        MeshEventHooks {
+            on_light_event: record_light_event,
+            on_device_status_update: record_device_status_update,
+            on_uart_mesh_rx: record_uart_mesh_rx,
+        }
+    }
+
+    /// Forget every call the previous test made.
+    pub fn reset() {
+        LIGHT_EVENTS.store(0, Ordering::Relaxed);
+        LAST_LIGHT_EVENT.store(0, Ordering::Relaxed);
+        STATUS_UPDATES.store(0, Ordering::Relaxed);
+        RELAYED_PACKETS.store(0, Ordering::Relaxed);
+        RELAYED_SRC.store(0, Ordering::Relaxed);
+        RELAYED_DST.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Restore the module-level pairing state and queues between host tests.
 ///
-/// Host tests share one process, so a test that leaves `MESH_PAIR` or the mesh
-/// queues dirty would leak into the next one.
+/// Host tests share one process, so a test that leaves `MESH_PAIR`, the mesh
+/// queues or a recorded hook call behind would leak into the next one. The
+/// recording hooks are reinstalled because production leaves the slot empty
+/// until `app::main_task` fills it.
 #[cfg(test)]
 pub fn reset_for_test() {
-    *MESH_PAIR.lock() = MeshPairingState::new();
+    *MESH_PAIR.lock() = MeshPairFsm::new();
     queues::reset_for_test();
+    test_hooks::reset();
+    set_mesh_event_hooks(test_hooks::hooks());
 }
 
 // p_cmd : cmd[3]+para[10]
@@ -176,6 +221,31 @@ pub fn light_slave_tx_command(
     mesh_construct_packet(cmd_sno, dst, &cmd_op_para, retransmit_count, send_ack)
 }
 
+/// Queue one constructed packet for local delivery and/or transmission.
+///
+/// A packet this node matches itself is handed to the receive side as well, so a
+/// locally generated command runs through the same decoder; the transmit half
+/// is skipped only for a device-addressed packet, which has nowhere to go.
+fn queue_mesh_packet(pkt: &Packet) {
+    let (group_match, device_match) = rf_link_match_group_mac(pkt);
+    if group_match || device_match {
+        queues::enqueue_mesh_rx(pkt);
+        if !device_match {
+            queues::enqueue_mesh_tx(
+                pkt,
+                0,
+                pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
+            );
+        }
+    } else {
+        queues::enqueue_mesh_tx(
+            pkt,
+            0,
+            pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
+        );
+    }
+}
+
 /// Send a message to the mesh and return the sequence number it was given.
 ///
 /// `data`: 13 bytes of data usually in form `[op, vendor_id_hi, vendor_id_lo, params...]`
@@ -190,23 +260,7 @@ pub fn send_mesh_message(
     send_ack: bool,
 ) -> [u8; 3] {
     let pkt = light_slave_tx_command(data, destination, retransmit_count, send_ack);
-    let (group_match, device_match) = rf_link_match_group_mac(&pkt);
-    if group_match || device_match {
-        queues::enqueue_mesh_rx(&pkt);
-        if !device_match {
-            queues::enqueue_mesh_tx(
-                &pkt,
-                0,
-                pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
-            );
-        }
-    } else {
-        queues::enqueue_mesh_tx(
-            &pkt,
-            0,
-            pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
-        );
-    }
+    queue_mesh_packet(&pkt);
 
     pkt.mesh().sno
 }
@@ -215,32 +269,60 @@ pub fn send_mesh_message(
 #[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_init() {
     MESH_PAIR_ENABLE.set(true);
+
+    // The broadcast machine transmits the credentials of whichever network the
+    // SDK currently holds, so it keeps its own copy; `mesh_pair_proc` refreshes
+    // it while a broadcast sequence is running.
+    let (name, pwd, ltk) = {
+        let pair_state = PAIR_STATE.lock();
+        (
+            pair_state.pair_nn,
+            pair_state.pair_pass,
+            pair_state.pair_ltk_mesh,
+        )
+    };
+
+    // Sample the SDK's pairing flag before taking the FSM's mutex: one
+    // critical-section lock must never be taken while another is held.
+    let flag = *PAIR_SETTING_FLAG.lock();
+
     let mut pair = MESH_PAIR.lock();
     pair.mesh_pair_cmd_interval = MESH_PAIR_CMD_INTERVAL;
     pair.mesh_pair_timeout = MESH_PAIR_TIMEOUT;
+    pair.set_credentials(&name, &pwd, &ltk);
+    pair.sync_flag(flag);
 }
 
 /// Apply a pending switch to the new mesh, if one is due.
 ///
-/// The due check runs under a short [`MESH_PAIR`] lock; the save that follows
-/// takes its own locks and copies the credentials out before it touches flash.
+/// The due check and the payload are the state machine's; the flash save that
+/// follows takes its own locks and copies the credentials out of the action,
+/// so no pairing guard is alive while the sector is erased or written.
 #[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_proc_effect() {
-    let due = {
+    let action = {
         let pair = MESH_PAIR.lock();
-        pair.effect_new_mesh != 0
-            || (pair.effect_new_mesh_delay_time != 0
-                && clock_time_exceed(
-                    pair.effect_new_mesh_delay_time,
-                    pair.mesh_pair_cmd_interval * 1000,
-                ))
+        pair.effect_action(clock_time(), MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get())
     };
 
-    if !due {
+    let Some(action) = action else {
         return;
-    }
+    };
 
-    save_effect_new_mesh();
+    match action {
+        MeshPairAction::ReloadSavedKey => reload_saved_key(),
+        MeshPairAction::SaveAndApply {
+            name,
+            pwd,
+            ltk,
+            use_pair_ltk,
+        } => save_and_apply(name, pwd, ltk, use_pair_ltk),
+        // The remaining arms belong to the timer and broadcast phases.
+        MeshPairAction::None
+        | MeshPairAction::SwitchToDefaultMesh { .. }
+        | MeshPairAction::Broadcast(_)
+        | MeshPairAction::TimedOut => {}
+    }
 
     let mut pair = MESH_PAIR.lock();
     pair.effect_new_mesh = 0;
@@ -270,38 +352,45 @@ pub fn mesh_device_address_validation_completed() {
 /// Feed one received mesh pairing command into the pairing state machine.
 #[cfg_attr(test, mry::mry)]
 pub fn mesh_pair_cb(params: &Vec<u8, 10>) {
+    let mut chunk = [0u8; 8];
+    chunk.copy_from_slice(&params[1..9]);
+    let now = clock_time();
+    let cmd = MeshPairState::try_from(params[0]);
+
+    // Receiving a chunk never acts: the credentials are persisted only once the
+    // delayed-effect window armed by `MeshPairEffectDelay` expires, in
+    // `mesh_pair_proc_effect`. That window is what gives the tool time to call
+    // the switch off, so this keeps the pre-split timing exactly — and it is why
+    // the accumulators' `MeshPairAction` return value is dropped here.
     let mut pair = MESH_PAIR.lock();
 
+    // A command from the network keeps the default-mesh window alive even
+    // when it is not one this firmware understands, exactly as before the
+    // split: the refresh is not part of the command dispatch.
     if pair.default_mesh_time_ref != 0 {
-        pair.default_mesh_time_ref = clock_time() | 1;
-    }
-    let cmd = MeshPairState::try_from(params[0]);
-    if cmd.is_err() {
-        return;
+        pair.default_mesh_time_ref = now | 1;
     }
 
-    match cmd.unwrap() {
-        MeshPairState::MeshPairName1 => {
-            pair.mesh_pair_start_time = clock_time() | 1;
-            pair.new_mesh_name[0..8].copy_from_slice(&params[1..9]);
+    match cmd {
+        Ok(state @ (MeshPairState::MeshPairName1 | MeshPairState::MeshPairName2)) => {
+            pair.accumulate_name(state, &chunk, now);
         }
-        MeshPairState::MeshPairName2 => pair.new_mesh_name[8..16].copy_from_slice(&params[1..9]),
-        MeshPairState::MeshPairPwd1 => pair.new_mesh_pwd[0..8].copy_from_slice(&params[1..9]),
-        MeshPairState::MeshPairPwd2 => pair.new_mesh_pwd[8..16].copy_from_slice(&params[1..9]),
-        MeshPairState::MeshPairLtk1 => pair.new_mesh_ltk[0..8].copy_from_slice(&params[1..9]),
-        MeshPairState::MeshPairLtk2 => pair.new_mesh_ltk[8..16].copy_from_slice(&params[1..9]),
-        MeshPairState::MeshPairEffectDelay => {
-            pair.effect_new_mesh_delay_time = clock_time() | 1;
-            if pair.default_mesh_time_ref != 0 {
-                /* Keep default_mesh_time_ref non-zero */
-                pair.default_mesh_time = pair.mesh_pair_cmd_interval * 2;
-            }
+        Ok(state @ (MeshPairState::MeshPairPwd1 | MeshPairState::MeshPairPwd2)) => {
+            pair.accumulate_pwd(state, &chunk);
         }
-        MeshPairState::MeshPairEffect => pair.effect_new_mesh = 1,
-        MeshPairState::MeshPairDefaultMesh => {
-            pair.default_mesh_effect_delay_ref = clock_time() | 1;
-            pair.default_mesh_time = params[1] as u32 * 1000;
+        Ok(state @ (MeshPairState::MeshPairLtk1 | MeshPairState::MeshPairLtk2)) => {
+            pair.accumulate_ltk(state, &chunk);
         }
+        Ok(MeshPairState::MeshPairEffectDelay) => {
+            pair.accumulate_effect_delay(now);
+        }
+        Ok(MeshPairState::MeshPairEffect) => {
+            pair.accumulate_effect();
+        }
+        Ok(MeshPairState::MeshPairDefaultMesh) => {
+            pair.accumulate_default_mesh(chunk[0], now);
+        }
+        Err(()) => {}
     }
 }
 
@@ -368,46 +457,38 @@ fn safe_effect_new_mesh_finish() {
     *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
 }
 
-/// Persist the mesh credentials collected by the pairing state machine.
+/// Drop the pending credentials and fall back to the persisted key.
 ///
-/// Every value the flash path needs is copied out of [`MESH_PAIR`] first, so no
-/// guard is alive when `pair_load_key` / `pair_save_key` erase or write the
-/// pairing sector.
-fn save_effect_new_mesh() {
-    let (default_mesh_active, use_pair_ltk_mesh) = {
-        let pair = MESH_PAIR.lock();
-        (pair.default_mesh_time_ref != 0, pair.effect_new_mesh != 0)
-    };
+/// This is the "we are still inside a default-mesh window (or the device
+/// address has not been validated yet), so do not overwrite the pairing sector"
+/// arm: it re-reads the saved key, re-initialises the node table and republishes
+/// the lamp status.
+fn reload_saved_key() {
+    mesh_pair_complete_notify();
+    sleep_us(1000);
+    /* Switch to normal mesh */
+    pair_load_key(); // flash read: MESH_PAIR is not held
+    MESH_PAIR.lock().default_mesh_time_ref = 0;
 
-    // Only skip saving if either:
-    // 1. We're in a default mesh timeout period, OR
-    // 2. Device address validation is still pending (not yet completed)
-    if default_mesh_active || MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get() {
-        mesh_pair_complete_notify();
-        sleep_us(1000);
-        /* Switch to normal mesh */
-        pair_load_key(); // flash read: MESH_PAIR is not held
-        MESH_PAIR.lock().default_mesh_time_ref = 0;
+    mesh_node_table_init();
+    publish_light_status();
+    safe_effect_new_mesh_finish();
+}
 
-        mesh_node_table_init();
-        crate::light::device_status_update();
-        safe_effect_new_mesh_finish();
-        return;
-    }
-
-    // Copy the credentials out before the PAIR_STATE write and the flash save.
-    let (new_mesh_name, new_mesh_pwd, new_mesh_ltk) = {
-        let pair = MESH_PAIR.lock();
-        (pair.new_mesh_name, pair.new_mesh_pwd, pair.new_mesh_ltk)
-    };
-
+/// Persist the credentials collected by the pairing state machine and use them.
+///
+/// Every value the flash path needs arrives in the action, so no pairing guard
+/// is alive when `pair_save_key` erases and writes the pairing sector.
+/// `use_pair_ltk` keeps the immediate-effect command's semantics: the mesh LTK
+/// already held by the device is what gets saved, not the buffered one.
+fn save_and_apply(name: [u8; 16], pwd: [u8; 16], ltk: [u8; 16], use_pair_ltk: bool) {
     {
         let mut pair_state = PAIR_STATE.lock();
 
-        if !use_pair_ltk_mesh {
-            pair_state.pair_nn.copy_from_slice(&new_mesh_name);
-            pair_state.pair_pass.copy_from_slice(&new_mesh_pwd);
-            pair_state.pair_ltk.copy_from_slice(&new_mesh_ltk);
+        if !use_pair_ltk {
+            pair_state.pair_nn.copy_from_slice(&name);
+            pair_state.pair_pass.copy_from_slice(&pwd);
+            pair_state.pair_ltk.copy_from_slice(&ltk);
         } else {
             let pair_ltk_mesh = pair_state.pair_ltk_mesh;
             pair_state.pair_ltk.copy_from_slice(&pair_ltk_mesh);
@@ -420,7 +501,7 @@ fn save_effect_new_mesh() {
     critical_section::with(|_| {
         pair_save_key(); // flash write: MESH_PAIR is not held
         rf_set_ble_access_code(PAIR_AC.get()); // use new access code at once.
-        rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
+        dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO); // clear online status :mesh_node_table_init()
         sleep_us(1000);
         crate::sdk::ble_app::rf_drv_8266::rf_clear_rx_irq(); // clear current rx in buffer
     });
@@ -447,130 +528,29 @@ fn switch_to_default_mesh(delay_s: u8) {
         .copy_from_slice(&*PAIR_CONFIG_MESH_LTK.lock());
 }
 
-impl MeshPairingState {
-    /// First phase of the pairing timer: apply a default-mesh switch or cancel.
-    ///
-    /// Returns `(load_key, switch_delay_s)`. `load_key` reaches flash and
-    /// `switch_delay_s` needs the radio statics, so both are deferred until the
-    /// caller has dropped its [`MESH_PAIR`] guard.
-    fn timer_step(&mut self) -> (bool, Option<u8>) {
-        let mut load_key = false;
-        let mut switch_delay = None;
-
-        if self.default_mesh_effect_delay_ref != 0
-            && clock_time_exceed(
-                self.default_mesh_effect_delay_ref,
-                MESH_PAIR_CMD_INTERVAL * 1000,
-            )
-        {
-            self.default_mesh_effect_delay_ref = 0;
-
-            if self.default_mesh_time == 0x00 {
-                load_key = true;
-                self.default_mesh_time_ref = 0;
-            } else {
-                switch_delay = Some((self.default_mesh_time / 1000) as u8);
-            }
-        } else if self.default_mesh_time_ref != 0
-            && clock_time_exceed(self.default_mesh_time_ref, self.default_mesh_time * 1000)
-        {
-            /* Switch to normal mesh */
-            if self.default_mesh_time == 255000 {
-                self.default_mesh_time_ref = clock_time() | 1;
-            } else {
-                load_key = true;
-                self.default_mesh_time_ref = 0;
-            }
+/// Execute one timer-phase [`MeshPairAction`].
+///
+/// All three arms are deliberately here rather than inside the state machine:
+/// they read or write flash, the radio statics and the application hooks, and
+/// every one of them runs with the pairing guard already dropped.
+fn apply_timer_action(action: MeshPairAction) {
+    match action {
+        MeshPairAction::None => {}
+        MeshPairAction::ReloadSavedKey => pair_load_key(),
+        MeshPairAction::SwitchToDefaultMesh { delay_s } => {
+            switch_to_default_mesh(delay_s);
+            // Keep the pre-split behaviour: the reference is refreshed once more
+            // after the access code has been recomputed.
+            MESH_PAIR.lock().default_mesh_time_ref = clock_time() | 1;
         }
-
-        (load_key, switch_delay)
-    }
-
-    /// Second phase: has the pairing window expired?
-    fn timed_out(&self) -> bool {
-        self.mesh_pair_start_time != 0
-            && clock_time_exceed(
-                self.mesh_pair_start_time,
-                self.mesh_pair_timeout * 1000 * 1000,
-            )
-    }
-
-    /// Third phase: advance the re-pairing broadcast state machine.
-    ///
-    /// Returns the 16-byte parameter block to broadcast, or `None` when the
-    /// command interval is not due or the machine has finished. Touches no
-    /// flash and no radio; the caller transmits after dropping the guard.
-    fn interval_tick(&mut self) -> Option<[u8; 16]> {
-        let mut op_para: [u8; 16] = [0; 16];
-
-        let flag = *PAIR_SETTING_FLAG.lock();
-        if !(flag as u8 >= ePairState::PairSetMeshTxStart as u8
-            && clock_time_exceed(self.mesh_pair_time, self.mesh_pair_cmd_interval * 1000))
-        {
-            return None;
-        }
-
-        self.mesh_pair_time = clock_time();
-        if flag == ePairState::PairSetMeshTxStart {
-            let pair_state = PAIR_STATE.lock();
-
-            op_para[0] = LGT_CMD_MESH_PAIR;
-            op_para[3] = self.mesh_pair_state as u8;
-            match self.mesh_pair_state {
-                MeshPairState::MeshPairName1 => {
-                    // send mesh name [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_nn[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairName2;
-                }
-                MeshPairState::MeshPairName2 => {
-                    // send mesh name [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_nn[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairPwd1;
-                }
-                MeshPairState::MeshPairPwd1 => {
-                    // send mesh pwd [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_pass[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairPwd2;
-                }
-                MeshPairState::MeshPairPwd2 => {
-                    // send mesh pwd [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_pass[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairLtk1;
-                }
-                MeshPairState::MeshPairLtk1 => {
-                    // send mesh ltk [0-7]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_ltk_mesh[0..8]);
-                    self.mesh_pair_state = MeshPairState::MeshPairLtk2;
-                }
-                MeshPairState::MeshPairLtk2 => {
-                    // send mesh ltk [8-15]
-                    op_para[4..4 + 8].copy_from_slice(&pair_state.pair_ltk_mesh[8..16]);
-                    self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxDone;
-                }
-                _ => {
-                    self.mesh_pair_state = MeshPairState::MeshPairName1;
-                    self.mesh_pair_start_time = 0;
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-                    return None;
-                }
-            }
-        } else if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetMeshTxDone {
-            // get mesh nodes' confirm value
-            op_para[0] = 0;
-            op_para[3] = 0x10; // bridge cnt
-            op_para[4] = PAR_READ_MESH_PAIR_CONFIRM;
-            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshRxDone;
-        } else if flag == ePairState::PairSetMeshRxDone {
-            //send cmd to switch to new mesh
-            op_para[0] = LGT_CMD_MESH_PAIR;
-            op_para[3] = MeshPairState::MeshPairEffectDelay as u8;
-            self.mesh_pair_state = MeshPairState::MeshPairName1;
-            self.mesh_pair_start_time = 0;
+        MeshPairAction::TimedOut => {
+            //mesh pair time out
+            pair_load_key();
             *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+            dispatch_mesh_light_event(LGT_CMD_MESH_PAIR_TIMEOUT);
         }
-
-        Some(op_para)
+        // The effect and broadcast phases execute their own arms.
+        MeshPairAction::SaveAndApply { .. } | MeshPairAction::Broadcast(_) => {}
     }
 }
 
@@ -581,63 +561,61 @@ impl MeshPairingState {
 /// `on_mesh_pair_proc` edge by this symbol name. Inlining it into the wrapper
 /// would erase it from the linked ELF.
 ///
-/// Each phase takes its own short [`MESH_PAIR`] lock. The two flash reads
-/// (`pair_load_key`) and the broadcast itself run with the guard dropped.
+/// Each phase takes its own short [`MESH_PAIR`] lock. The flash reads and writes
+/// (`pair_load_key`, `pair_save_key`), the broadcast itself and the application
+/// hooks all run with the guard dropped.
 #[inline(never)]
 pub fn mesh_pair_proc() {
-    let (load_key, switch_delay) = {
-        let mut pair = MESH_PAIR.lock();
-        pair.timer_step()
-    };
+    // Phase 1: the default-mesh window.
+    let now = clock_time();
+    let action = MESH_PAIR.lock().timer_step(now);
+    apply_timer_action(action);
 
-    if let Some(delay_s) = switch_delay {
-        switch_to_default_mesh(delay_s);
-        // Keep the pre-split behaviour: the reference is refreshed once more
-        // after the access code has been recomputed.
-        MESH_PAIR.lock().default_mesh_time_ref = clock_time() | 1;
-    }
-    if load_key {
-        pair_load_key();
-    }
-
-    let timed_out = {
-        let pair = MESH_PAIR.lock();
-        pair.timed_out()
-    };
+    // Phase 2: has the pairing window expired?
+    let timed_out = MESH_PAIR.lock().timed_out(clock_time());
     if timed_out {
-        //mesh pair time out
-        pair_load_key();
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
-        rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT);
+        apply_timer_action(MeshPairAction::TimedOut);
         return;
     }
 
-    let op_para = {
+    // Phase 3: advance the re-pair broadcast machine.
+    let flag = *PAIR_SETTING_FLAG.lock();
+    if flag as u8 >= ePairState::PairSetMeshTxStart as u8 {
+        // The SDK rewrites `PAIR_STATE` at runtime — a client sets the new
+        // network name, password and LTK immediately before arming the
+        // broadcast — so the copy taken at boot is refreshed here, outside the
+        // pairing lock, and only while a broadcast sequence is live.
+        let (name, pwd, ltk) = {
+            let pair_state = PAIR_STATE.lock();
+            (
+                pair_state.pair_nn,
+                pair_state.pair_pass,
+                pair_state.pair_ltk_mesh,
+            )
+        };
+        MESH_PAIR.lock().set_credentials(&name, &pwd, &ltk);
+    }
+
+    let now = clock_time();
+    let (action, flag_after) = {
         let mut pair = MESH_PAIR.lock();
-        pair.interval_tick()
+        pair.sync_flag(flag);
+        let action = pair.interval_tick(now);
+        (action, pair.pair_setting_flag())
     };
-    let Some(op_para) = op_para else {
+    // The state machine owns the flag's transitions; publish them only when one
+    // happened, so a concurrent SDK write is never overwritten with a stale
+    // copy.
+    if flag_after != flag {
+        *PAIR_SETTING_FLAG.lock() = flag_after;
+    }
+
+    let Some(MeshPairAction::Broadcast(op_para)) = action else {
         return;
     };
 
     let pkt = light_slave_tx_command(&Vec::from_slice(&op_para[..13]).unwrap(), 0xFFFF, 0, false);
-    let (group_match, device_match) = rf_link_match_group_mac(&pkt);
-    if group_match || device_match {
-        queues::enqueue_mesh_rx(&pkt);
-        if !device_match {
-            queues::enqueue_mesh_tx(
-                &pkt,
-                0,
-                pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
-            );
-        }
-    } else {
-        queues::enqueue_mesh_tx(
-            &pkt,
-            0,
-            pkt.mesh().internal_par1[INTERNAL_PAR_RETRANSMIT_COUNT],
-        );
-    }
+    queue_mesh_packet(&pkt);
 }
 
 /// Enable or disable mesh payload encryption.
@@ -672,6 +650,16 @@ fn report_queue_drops(dropped_mesh_tx_seen: &mut u32, dropped_mesh_rx_seen: &mut
         );
         *dropped_mesh_rx_seen = rx;
     }
+}
+
+/// Outcome of the send-buffer scan, computed inside the send critical section.
+enum SendScan {
+    /// Nothing is queued: park on the wake signal until a producer pushes.
+    Empty,
+    /// Packets are queued but none is due: park until the earliest due tick.
+    Wait(u64),
+    /// The first due packet, removed from the buffer.
+    Ready(SendPkt),
 }
 
 /// Process a single iteration of the mesh message sending task.
@@ -759,7 +747,7 @@ async fn mesh_packet_send_iteration(
     if result.pkt.ll_app().value.src == DEVICE_ADDRESS.get()
         && result.pkt.ll_app().value.dst == DEVICE_ADDRESS.get()
     {
-        light_mesh_rx_cb(&result.pkt);
+        dispatch_uart_mesh_rx(&result.pkt);
         return;
     }
 
@@ -860,9 +848,11 @@ pub async fn mesh_packet_rcv() {
 mod tests {
     use super::*;
     use crate::light::transitions::LIGHT_CMD_CHANNEL;
-    use crate::light::{device_status_update, mock_device_status_update};
     use crate::sdk::ble_app::ble_ll_pair::mock_pair_save_key;
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_rf_link_match_group_mac;
+    use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};
+    use crate::sdk::ble_app::light_ll::mesh_management::{
+        mock_mesh_node_table_init, mock_rf_link_match_group_mac,
+    };
     use crate::sdk::ble_app::light_ll::packet_processing::{
         mock_is_add_packet_buf_ready, mock_rf_link_add_tx_packet, mock_rf_link_rc_data,
     };
@@ -870,7 +860,7 @@ mod tests {
         mock_rf_set_ble_access_code, mock_rf_set_ble_channel, mock_rf_set_ble_crc_adv,
         mock_rf_set_rxmode, mock_rf_set_tx_rx_off, mock_rf_start_srx2tx,
     };
-    use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
+    use core::sync::atomic::Ordering;
     use heapless::Vec;
     use mry::Any;
     use tlsr8266_hal::common::sync::CriticalSectionMutexGuard;
@@ -879,15 +869,15 @@ mod tests {
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::FLD_RF_IRQ_MASK;
 
-    use crate::app::mock_rf_link_light_event_callback;
-    use crate::sdk::ble_app::flash_config::{mock_access_code, mock_pair_load_key};
-    use crate::sdk::ble_app::light_ll::mesh_management::mock_mesh_node_table_init;
-    use crate::uart_manager::mock_light_mesh_rx_cb;
+    use crate::sdk::light::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
 
     /// `reg_system_tick`: the free-running tick `clock_time()` reads.
     const REG_SYSTEM_TICK: u32 = 0x740;
     /// `reg_rnd_number`: the hardware entropy source `rand()` XORs in.
     const REG_RND_NUMBER: u32 = 0x448;
+
+    /// Ticks in one broadcast interval, at the HAL's 32 ticks/us.
+    const INTERVAL_TICKS: u32 = MESH_PAIR_CMD_INTERVAL * 1000 * CLOCK_SYS_CLOCK_1US;
 
     /// The HAL host seams are process-wide singletons, so every test that
     /// observes them starts from a known-empty bank and tick count.
@@ -902,7 +892,7 @@ mod tests {
     /// Every use is a single statement (`pair().field = value;` or an
     /// assertion), so the temporary guard is always released before the next
     /// call that locks [`MESH_PAIR`].
-    fn pair() -> CriticalSectionMutexGuard<'static, MeshPairingState> {
+    fn pair() -> CriticalSectionMutexGuard<'static, MeshPairFsm> {
         MESH_PAIR.lock()
     }
 
@@ -930,54 +920,11 @@ mod tests {
         }
     }
 
-    // --- TryFrom Tests ---
-
-    /// Tests MeshPairState::try_from with all valid enum values
-    #[test]
-    fn test_mesh_pair_state_try_from_valid() {
-        assert_eq!(
-            MeshPairState::try_from(0).unwrap(),
-            MeshPairState::MeshPairName1
-        );
-        assert_eq!(
-            MeshPairState::try_from(1).unwrap(),
-            MeshPairState::MeshPairName2
-        );
-        assert_eq!(
-            MeshPairState::try_from(2).unwrap(),
-            MeshPairState::MeshPairPwd1
-        );
-        assert_eq!(
-            MeshPairState::try_from(3).unwrap(),
-            MeshPairState::MeshPairPwd2
-        );
-        assert_eq!(
-            MeshPairState::try_from(4).unwrap(),
-            MeshPairState::MeshPairLtk1
-        );
-        assert_eq!(
-            MeshPairState::try_from(5).unwrap(),
-            MeshPairState::MeshPairLtk2
-        );
-        assert_eq!(
-            MeshPairState::try_from(6).unwrap(),
-            MeshPairState::MeshPairEffectDelay
-        );
-        assert_eq!(
-            MeshPairState::try_from(7).unwrap(),
-            MeshPairState::MeshPairEffect
-        );
-        assert_eq!(
-            MeshPairState::try_from(8).unwrap(),
-            MeshPairState::MeshPairDefaultMesh
-        );
-    }
-
-    /// Tests MeshPairState::try_from with invalid value
-    #[test]
-    fn test_mesh_pair_state_try_from_invalid() {
-        assert!(MeshPairState::try_from(9).is_err());
-        assert!(MeshPairState::try_from(255).is_err());
+    /// Arm the machine the way `mesh_pair_init` does, with a broadcast due.
+    fn arm_pairing() {
+        mesh_pair_init();
+        fake_clock::set_ticks(1_000);
+        pair().mesh_pair_time = 1_000;
     }
 
     // --- send_mesh_message Tests ---
@@ -1073,9 +1020,8 @@ mod tests {
         // Set the tick, which light_slave_tx_command uses to seed the mesh sequence number.
         fake_clock::set_ticks(0x5000_u64);
 
-        // Step 1: Construct the 13-byte payload that handle_light_ctrl extracts from
-        //         msg.data[CTRL_PAYLOAD_RANGE] (bytes 5..18 of a UART LightCtrl message).
-        //         Layout: [op, vid_lo*, vid_hi*, par0..par9]
+        // Step 1: Construct the 13-byte payload that the UART bridge extracts from a
+        //         LightCtrl message's payload range. Layout: [op, vid_lo*, vid_hi*, par0..par9]
         //         (* vid bytes are overwritten by light_slave_tx_command with VENDOR_ID)
         let uart_payload: [u8; 13] = [
             LGT_CMD_LIGHT_ONOFF, // op = 0x10 (will become 0xd0 after |= 0xc0)
@@ -1178,6 +1124,54 @@ mod tests {
         assert_eq!(pair().mesh_pair_timeout, MESH_PAIR_TIMEOUT);
     }
 
+    /// `mesh_pair_init` takes the credentials the broadcast machine will send
+    /// from the SDK's pairing state, and the flag it gates on.
+    #[test]
+    fn test_mesh_pair_init_seeds_credentials_and_flag() {
+        // Setup
+        reset_for_test();
+        PAIR_STATE.lock().pair_nn = [1; 16];
+        PAIR_STATE.lock().pair_pass = [2; 16];
+        PAIR_STATE.lock().pair_ltk_mesh = [3; 16];
+        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+
+        // Execute
+        mesh_pair_init();
+
+        // Verify
+        assert_eq!(pair().pair_setting_flag(), ePairState::PairSetMeshTxStart);
+        assert_eq!(pair().mesh_name, [1; 16]);
+        assert_eq!(pair().mesh_pwd, [2; 16]);
+        assert_eq!(pair().mesh_ltk, [3; 16]);
+    }
+
+    // --- mesh_event_hooks Tests ---
+
+    /// Before the composition root registers the hooks every edge is a no-op
+    /// rather than a call through a dangling pointer.
+    #[test]
+    fn test_event_hooks_are_inert_before_registration() {
+        reset_for_test();
+        *MESH_EVENT_HOOKS.lock() = None;
+
+        dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO);
+        publish_light_status();
+        dispatch_uart_mesh_rx(&create_test_packet(1, 2, [3, 3, 3]));
+
+        assert_eq!(test_hooks::LIGHT_EVENTS.load(Ordering::Relaxed), 0);
+        assert_eq!(test_hooks::STATUS_UPDATES.load(Ordering::Relaxed), 0);
+        assert_eq!(test_hooks::RELAYED_PACKETS.load(Ordering::Relaxed), 0);
+
+        // And the recorded hooks start counting again once reinstalled.
+        set_mesh_event_hooks(test_hooks::hooks());
+        dispatch_mesh_light_event(LGT_CMD_SET_MESH_INFO);
+        assert_eq!(test_hooks::LIGHT_EVENTS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
+            LGT_CMD_SET_MESH_INFO as u32
+        );
+    }
+
     // --- mesh_pair_proc_effect Tests ---
 
     /// Tests mesh_pair_proc_effect with effect_new_mesh set
@@ -1185,7 +1179,6 @@ mod tests {
     #[mry::lock(
         pair_save_key,
         rf_set_ble_access_code,
-        rf_link_light_event_callback,
         is_add_packet_buf_ready,
         rf_link_add_tx_packet
     )]
@@ -1202,7 +1195,6 @@ mod tests {
 
         mock_pair_save_key().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
         FakeMmio::set_reg16(0xf20, 0);
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
@@ -1214,6 +1206,11 @@ mod tests {
         assert_eq!(pair().effect_new_mesh, 0);
         assert_eq!(pair().effect_new_mesh_delay_time, 0);
         mock_pair_save_key().assert_called(1);
+        assert_eq!(
+            test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
+            LGT_CMD_SET_MESH_INFO as u32,
+            "the mesh switch must clear the online status through the hook"
+        );
         assert_eq!(
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
@@ -1228,8 +1225,7 @@ mod tests {
         pair_save_key,
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
-        rf_set_ble_access_code,
-        rf_link_light_event_callback
+        rf_set_ble_access_code
     )]
     fn test_mesh_pair_proc_effect_with_delay_exceeded() {
         // Setup
@@ -1253,7 +1249,6 @@ mod tests {
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_rf_set_ble_access_code(Any).returns(());
-        mock_rf_link_light_event_callback(Any).returns(());
         FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
@@ -1345,6 +1340,11 @@ mod tests {
         // Verify
         assert_eq!(pair().mesh_pair_start_time, 1001);
         assert_eq!(&pair().new_mesh_name[0..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            test_hooks::LIGHT_EVENTS.load(Ordering::Relaxed),
+            0,
+            "a received chunk must not touch flash, the radio or the LED"
+        );
     }
 
     /// Tests mesh_pair_cb with MeshPairName2
@@ -1485,13 +1485,18 @@ mod tests {
     fn test_mesh_pair_cb_invalid_command() {
         // Setup
         reset_for_test();
+        pair().default_mesh_time_ref = 100;
         let params: Vec<u8, 10> = Vec::from_slice(&[99, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        fake_clock::set_ticks(4000);
 
         // Execute - should return early without panic
         mesh_pair_cb(&params);
 
-        // Verify - no changes should occur
+        // Verify - no credential state should change, but the command still
+        // keeps the default-mesh window alive (it always did).
         assert_eq!(pair().mesh_pair_start_time, 0);
+        assert_eq!(pair().default_mesh_time_ref, 4001);
+        assert_eq!(pair().new_mesh_name, [0; 16]);
     }
 
     /// Tests mesh_pair_cb updates default_mesh_time_ref when it's set
@@ -1665,16 +1670,15 @@ mod tests {
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
     }
 
-    // --- save_effect_new_mesh Tests ---
+    // --- save / reload path Tests ---
 
-    /// Tests save_effect_new_mesh with default mesh time ref set
+    /// Device back in its default-mesh window: the pairing sector is left alone.
     #[test]
     #[mry::lock(
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
         pair_load_key,
-        mesh_node_table_init,
-        device_status_update
+        mesh_node_table_init
     )]
     fn test_save_effect_new_mesh_default_mesh_active() {
         // Setup
@@ -1684,31 +1688,39 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
         DEVICE_ADDRESS.set(0x0001);
         pair().default_mesh_time_ref = 1000; // Set to non-zero
+                                             // The delayed-effect window has expired, so the save is due.
+        pair().effect_new_mesh_delay_time = 1000;
+        pair().mesh_pair_cmd_interval = 500;
+        reset_fakes();
+        fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
 
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_pair_load_key().returns(());
         mock_mesh_node_table_init().returns(());
-        mock_device_status_update().returns(());
 
         // Execute
-        save_effect_new_mesh();
+        mesh_pair_proc_effect();
 
         // Verify
         assert_eq!(pair().default_mesh_time_ref, 0);
         assert_eq!(pair().mesh_pair_start_time, 0);
         mock_pair_load_key().assert_called(1);
         mock_mesh_node_table_init().assert_called(1);
+        assert_eq!(
+            test_hooks::STATUS_UPDATES.load(Ordering::Relaxed),
+            1,
+            "the lamp status is republished through the registered hook"
+        );
     }
 
-    /// Tests save_effect_new_mesh with validation pending
+    /// Device address validation still pending: the pairing sector is left alone.
     #[test]
     #[mry::lock(
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
         pair_load_key,
-        mesh_node_table_init,
-        device_status_update
+        mesh_node_table_init
     )]
     fn test_save_effect_new_mesh_validation_pending() {
         // Setup
@@ -1718,29 +1730,31 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
         DEVICE_ADDRESS.set(0x0001);
         pair().default_mesh_time_ref = 0;
+        pair().effect_new_mesh_delay_time = 1000;
+        pair().mesh_pair_cmd_interval = 500;
+        reset_fakes();
+        fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
 
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_pair_load_key().returns(());
         mock_mesh_node_table_init().returns(());
-        mock_device_status_update().returns(());
 
         // Execute
-        save_effect_new_mesh();
+        mesh_pair_proc_effect();
 
         // Verify
         mock_pair_load_key().assert_called(1);
         mock_mesh_node_table_init().assert_called(1);
     }
 
-    /// Tests save_effect_new_mesh normal save path
+    /// Nothing in the way: the collected credentials are written and used.
     #[test]
     #[mry::lock(
         is_add_packet_buf_ready,
         rf_link_add_tx_packet,
         pair_save_key,
-        rf_set_ble_access_code,
-        rf_link_light_event_callback
+        rf_set_ble_access_code
     )]
     fn test_save_effect_new_mesh_normal_save() {
         // Setup
@@ -1753,30 +1767,80 @@ mod tests {
 
         pair().default_mesh_time_ref = 0;
         pair().effect_new_mesh = 0;
+        pair().effect_new_mesh_delay_time = 1000;
+        pair().mesh_pair_cmd_interval = 500;
         pair().new_mesh_name = [1; 16];
         pair().new_mesh_pwd = [2; 16];
         pair().new_mesh_ltk = [3; 16];
 
+        reset_fakes();
+        fake_clock::set_ticks(1000 + INTERVAL_TICKS as u64 + 1);
         mock_is_add_packet_buf_ready().returns(true);
         mock_rf_link_add_tx_packet(Any).returns(Ok(()));
         mock_pair_save_key().returns(());
         mock_rf_set_ble_access_code(0xABCDEF12).returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).returns(());
         FakeMmio::set_reg16(0xf20, 0);
 
         // Execute
-        save_effect_new_mesh();
+        mesh_pair_proc_effect();
 
         // Verify
         assert_eq!(pair().mesh_pair_start_time, 0);
         mock_pair_save_key().assert_called(1);
         mock_rf_set_ble_access_code(0xABCDEF12).assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_SET_MESH_INFO).assert_called(1);
+        assert_eq!(
+            test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
+            LGT_CMD_SET_MESH_INFO as u32,
+            "the switch clears the online status through the registered hook"
+        );
+        assert_eq!(
+            PAIR_STATE.lock().pair_ltk,
+            [3; 16],
+            "use_pair_ltk == false writes the received LTK"
+        );
+        assert_eq!(PAIR_STATE.lock().pair_nn, [1; 16]);
+        assert_eq!(PAIR_STATE.lock().pair_pass, [2; 16]);
         assert_eq!(
             FakeMmio::reg16(0xf20),
             FLD_RF_IRQ_MASK::IRQ_RX.bits(),
             "the pending RX interrupt must be acknowledged during the mesh switch"
         );
+    }
+
+    /// The receive-only immediate-effect command saves the mesh LTK the device
+    /// already holds, not the one it just buffered.
+    #[test]
+    #[mry::lock(
+        is_add_packet_buf_ready,
+        rf_link_add_tx_packet,
+        pair_save_key,
+        rf_set_ble_access_code
+    )]
+    fn test_save_effect_new_mesh_uses_the_mesh_ltk_for_the_immediate_effect() {
+        // Setup
+        reset_for_test();
+        MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(false);
+        BLE_PERIPHERAL_CONNECTION_ACTIVE.set(true);
+        PAIR_LOGIN_OK.set(true);
+        DEVICE_ADDRESS.set(0x0001);
+        PAIR_AC.set(0xABCDEF12);
+        PAIR_STATE.lock().pair_ltk_mesh = [9; 16];
+
+        pair().default_mesh_time_ref = 0;
+        pair().effect_new_mesh = 1;
+        pair().new_mesh_ltk = [3; 16];
+
+        reset_fakes();
+        mock_is_add_packet_buf_ready().returns(true);
+        mock_rf_link_add_tx_packet(Any).returns(Ok(()));
+        mock_pair_save_key().returns(());
+        mock_rf_set_ble_access_code(Any).returns(());
+
+        // Execute
+        mesh_pair_proc_effect();
+
+        // Verify
+        assert_eq!(PAIR_STATE.lock().pair_ltk, [9; 16]);
     }
 
     // --- switch_to_default_mesh Tests ---
@@ -1817,7 +1881,7 @@ mod tests {
 
     /// Tests mesh_pair_proc with timeout
     #[test]
-    #[mry::lock(pair_load_key, rf_link_light_event_callback)]
+    #[mry::lock(pair_load_key)]
     fn test_mesh_pair_proc_timeout() {
         // Setup
         reset_for_test();
@@ -1829,7 +1893,6 @@ mod tests {
         // 10 s (320_000_000 ticks) have elapsed since the pairing window opened.
         fake_clock::set_ticks(1000 + 10 * 1000 * 1000 * 32 + 1);
         mock_pair_load_key().returns(());
-        mock_rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT).returns(());
 
         // Execute
         mesh_pair_proc();
@@ -1837,7 +1900,12 @@ mod tests {
         // Verify
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
         mock_pair_load_key().assert_called(1);
-        mock_rf_link_light_event_callback(LGT_CMD_MESH_PAIR_TIMEOUT).assert_called(1);
+        assert_eq!(
+            test_hooks::LAST_LIGHT_EVENT.load(Ordering::Relaxed),
+            LGT_CMD_MESH_PAIR_TIMEOUT as u32,
+            "the timeout event reaches the application through the hook"
+        );
+        assert_eq!(test_hooks::LIGHT_EVENTS.load(Ordering::Relaxed), 1);
     }
 
     /// Tests mesh_pair_proc default mesh effect delay
@@ -1876,8 +1944,9 @@ mod tests {
         pair().mesh_pair_start_time = 0;
 
         reset_fakes();
-        // Two reads of the tick: the first drives the interval predicate (must be
-        // past 500 ms), the second stamps the refreshed reference.
+        // The first read drives the interval predicate (must be past 500 ms); the
+        // next two stamp the switch reference (once inside the switch, once in
+        // the refresh that follows it).
         FakeMmio::on_read32(
             REG_SYSTEM_TICK,
             |call_idx| {
@@ -1936,20 +2005,16 @@ mod tests {
         reset_fakes();
         // `255 s` exceeds the documented `CLOCK_MAX_US`, so the tick span wraps
         // through 32 bits; the real predicate compares against the wrapped value.
-        // First read drives that predicate, second stamps the refreshed reference.
-        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| {
-            if call_idx == 0 {
-                1000 + (255_000u32 * 1000).wrapping_mul(32) + 1
-            } else {
-                3000
-            }
-        });
+        let now = 1000u32.wrapping_add((255_000u32 * 1000).wrapping_mul(32));
+        fake_clock::set_ticks(now.wrapping_add(1) as u64);
 
         // Execute
         mesh_pair_proc();
 
-        // Verify - should reset ref time, not clear it
-        assert_eq!(pair().default_mesh_time_ref, 3001);
+        // Verify - should reset ref time, not clear it. The reference is
+        // refreshed to the tick this step observed, because the clock is now an
+        // argument of the state machine rather than a read inside it.
+        assert_eq!(pair().default_mesh_time_ref, now.wrapping_add(1) | 1);
     }
 
     /// Tests mesh_pair_proc state machine - Name1
@@ -1958,26 +2023,14 @@ mod tests {
     fn test_mesh_pair_proc_state_name1() {
         // Setup
         reset_for_test();
+        arm_pairing();
         pair().mesh_pair_state = MeshPairState::MeshPairName1;
-        pair().mesh_pair_time = 1000;
-        pair().mesh_pair_cmd_interval = 500;
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
         PAIR_STATE.lock().pair_nn = [1; 16];
 
         reset_fakes();
-        // First read drives the 500 ms interval predicate, second stamps
-        // `mesh_pair_time`.
-        FakeMmio::on_read32(
-            REG_SYSTEM_TICK,
-            |call_idx| {
-                if call_idx == 0 {
-                    u32::MAX
-                } else {
-                    2000
-                }
-            },
-        );
+        fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -1995,8 +2048,7 @@ mod tests {
     fn test_mesh_pair_proc_state_transitions() {
         // Setup
         reset_for_test();
-        pair().mesh_pair_time = 1000;
-        pair().mesh_pair_cmd_interval = 500;
+        arm_pairing();
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
         PAIR_STATE.lock().pair_nn = [1; 16];
@@ -2004,49 +2056,102 @@ mod tests {
         PAIR_STATE.lock().pair_ltk_mesh = [3; 16];
 
         reset_fakes();
-        // Every iteration reads the tick twice: the interval predicate (must be
-        // past 500 ms) then the `mesh_pair_time` stamp.
-        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| {
-            if call_idx % 2 == 0 {
-                u32::MAX
-            } else {
-                2000
-            }
-        });
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
 
+        // Every step needs its own due tick: the machine stamps `mesh_pair_time`
+        // with the tick it was handed, so a frozen clock would park the next one.
+        let mut now = 1_000 + INTERVAL_TICKS as u64 + 1;
+
         // Test Name1 -> Name2
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairName1;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName2);
 
         // Test Name2 -> Pwd1
+        now += INTERVAL_TICKS as u64 + 1;
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairName2;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairPwd1);
 
         // Test Pwd1 -> Pwd2
+        now += INTERVAL_TICKS as u64 + 1;
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairPwd1;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairPwd2);
 
         // Test Pwd2 -> Ltk1
+        now += INTERVAL_TICKS as u64 + 1;
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairPwd2;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairLtk1);
 
         // Test Ltk1 -> Ltk2
+        now += INTERVAL_TICKS as u64 + 1;
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairLtk1;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairLtk2);
 
         // Test Ltk2 -> Name1 and state change to TxDone
+        now += INTERVAL_TICKS as u64 + 1;
+        fake_clock::set_ticks(now);
         pair().mesh_pair_state = MeshPairState::MeshPairLtk2;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName1);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxDone);
+    }
+
+    /// The broadcast carries the bytes the state machine built, not the buffer
+    /// the packet was queued in.
+    #[test]
+    #[mry::lock(light_slave_tx_command, rf_link_match_group_mac)]
+    fn test_mesh_pair_proc_broadcast_uses_the_machine_payload() {
+        // Setup
+        reset_for_test();
+        arm_pairing();
+        pair().mesh_pair_state = MeshPairState::MeshPairName1;
+        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+        PAIR_STATE.lock().pair_nn = [
+            0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e,
+            0x4f, 0x50,
+        ];
+
+        reset_fakes();
+        fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
+        // Capture the payload the mesh hands to the radio.
+        static SENT: std::sync::Mutex<Option<Vec<u8, 13>>> = std::sync::Mutex::new(None);
+        *SENT.lock().unwrap() = None;
+        mock_light_slave_tx_command(Any, Any, Any, Any).returns_with(
+            |cmd: Vec<u8, 13>, _dst: u16, _retransmit: u8, _ack: bool| {
+                *SENT.lock().unwrap() = Some(cmd);
+                create_test_packet(0x0001, 0xFFFF, [1, 2, 3])
+            },
+        );
+        mock_rf_link_match_group_mac(Any).returns((false, false));
+
+        // Execute
+        mesh_pair_proc();
+
+        // Verify: the destination is the broadcast address, no retransmit and no
+        // ack, and the payload is the pairing command's first chunk.
+        mock_light_slave_tx_command(Any, 0xFFFF, 0, false).assert_called(1);
+        let sent = SENT
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the broadcast was constructed");
+        assert_eq!(sent[0], LGT_CMD_MESH_PAIR);
+        assert_eq!(sent[3], MeshPairState::MeshPairName1 as u8);
+        assert_eq!(
+            &sent[4..12],
+            &[0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48]
+        );
     }
 
     /// Tests mesh_pair_proc PairSetMeshTxDone state
@@ -2055,23 +2160,12 @@ mod tests {
     fn test_mesh_pair_proc_tx_done_state() {
         // Setup
         reset_for_test();
-        pair().mesh_pair_time = 1000;
-        pair().mesh_pair_cmd_interval = 500;
+        arm_pairing();
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxDone;
 
         reset_fakes();
-        // The interval predicate must be past 500 ms, then the stamp is read.
-        FakeMmio::on_read32(
-            REG_SYSTEM_TICK,
-            |call_idx| {
-                if call_idx == 0 {
-                    u32::MAX
-                } else {
-                    2000
-                }
-            },
-        );
+        fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -2089,21 +2183,15 @@ mod tests {
     fn test_mesh_pair_proc_rx_done_state() {
         // Setup
         reset_for_test();
-        pair().mesh_pair_time = 1000;
-        pair().mesh_pair_cmd_interval = 500;
+        arm_pairing();
         pair().mesh_pair_timeout = 60; // Timeout in seconds - won't overflow when multiplied
         pair().mesh_pair_start_time = 5000;
 
         *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshRxDone;
 
         reset_fakes();
-        // Read 0 drives the pairing-timeout predicate (must stay inside the
-        // 60 s window), read 1 the 500 ms interval predicate (must be past it),
-        // read 2 the `mesh_pair_time` stamp.
-        FakeMmio::on_read32(REG_SYSTEM_TICK, |call_idx| match call_idx {
-            0 | 1 => 1_900_000_000,
-            _ => 6000,
-        });
+        // Inside the 60 s pairing window, and past the 500 ms broadcast interval.
+        fake_clock::set_ticks(1_000_000_000);
         let test_pkt = create_test_packet(0x0001, 0xFFFF, [1, 2, 3]);
         mock_light_slave_tx_command(Any, Any, Any, Any).returns(test_pkt);
         mock_rf_link_match_group_mac(Any).returns((false, false));
@@ -2154,7 +2242,6 @@ mod tests {
     /// the UART bridge and never transmits or re-queues it.
     #[test]
     #[mry::lock(
-        light_mesh_rx_cb,
         rf_set_tx_rx_off,
         rf_set_ble_access_code,
         rf_set_ble_crc_adv,
@@ -2173,7 +2260,6 @@ mod tests {
         let mut dropped_rx_seen = 0;
         let test_pkt = create_test_packet(0x1234, 0x1234, [1, 2, 3]);
 
-        mock_light_mesh_rx_cb(Any).returns(());
         mock_rf_set_tx_rx_off().returns(());
         mock_rf_set_ble_access_code(Any).returns(());
         mock_rf_set_ble_crc_adv().returns(());
@@ -2188,8 +2274,10 @@ mod tests {
             &mut dropped_rx_seen,
         ));
 
-        // Verify - reported over UART, popped, not transmitted
-        mock_light_mesh_rx_cb(Any).assert_called(1);
+        // Verify - reported over the relay hook, popped, not transmitted
+        assert_eq!(test_hooks::RELAYED_PACKETS.load(Ordering::Relaxed), 1);
+        assert_eq!(test_hooks::RELAYED_SRC.load(Ordering::Relaxed), 0x1234);
+        assert_eq!(test_hooks::RELAYED_DST.load(Ordering::Relaxed), 0x1234);
         assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
         mock_rf_set_tx_rx_off().assert_called(0);
     }

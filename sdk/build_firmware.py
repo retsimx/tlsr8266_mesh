@@ -49,7 +49,7 @@ Usage:
 LLVM tools resolve from ``--llc``/``--llvm-link``/``--opt``/``--ld``/
 ``--objcopy``, then ``LLC``/``LLVM_LINK``/``OPT``/``LLD``/``LLVM_OBJCOPY`` in
 the environment, then repo-root ``.env`` (only keys not already in the
-environment), then ``../llvm/build/bin/``.
+environment), then ``../llvm/build-native/bin/``, then ``../llvm/build/bin/``.
 """
 
 from __future__ import annotations
@@ -93,12 +93,17 @@ CARGO_LOCK_REL = "rust/Cargo.lock"
 WORKSPACE_CRATES_REL = "rust/crates"
 LINKER_SCRIPT_REL = "sdk/boot.link"
 
+# Ordered fallback candidates: `build-native` is the tree that ships `ld.lld`
+# on this host, so it is probed before the plain `build` tree.
 DEFAULT_TOOLS = {
-    "llc": "../llvm/build/bin/llc",
-    "llvm_link": "../llvm/build/bin/llvm-link",
-    "opt": "../llvm/build/bin/opt",
-    "ld": "../llvm/build/bin/ld.lld",
-    "objcopy": "../llvm/build/bin/llvm-objcopy",
+    "llc": ("../llvm/build-native/bin/llc", "../llvm/build/bin/llc"),
+    "llvm_link": ("../llvm/build-native/bin/llvm-link", "../llvm/build/bin/llvm-link"),
+    "opt": ("../llvm/build-native/bin/opt", "../llvm/build/bin/opt"),
+    "ld": ("../llvm/build-native/bin/ld.lld", "../llvm/build/bin/ld.lld"),
+    "objcopy": (
+        "../llvm/build-native/bin/llvm-objcopy",
+        "../llvm/build/bin/llvm-objcopy",
+    ),
 }
 TOOL_ENV_KEYS = {
     "llc": "LLC",
@@ -208,27 +213,53 @@ def _anchor(value: str, repo_root: Path) -> Path:
     return path if path.is_absolute() else Path(repo_root) / path
 
 
+def _is_executable(path: Path) -> bool:
+    """Whether ``path`` is a regular file this process may execute.
+
+    One predicate for both ends of resolution: the default-candidate probe and
+    the fail-closed check must agree on what "usable tool" means.
+    """
+    return path.is_file() and os.access(path, os.X_OK)
+
+
 def resolve_tool(
     cli_value: str | None,
     env_key: str,
     dotenv: dict[str, str],
-    default_rel: str,
+    defaults: Sequence[str],
     repo_root: Path,
 ) -> Path:
-    """Resolve a tool path: CLI flag > environment > ``.env`` > repo default."""
+    """Resolve a tool path: CLI flag > environment > ``.env`` > ordered defaults.
+
+    ``defaults`` is an ordered candidate list (``build-native`` before
+    ``build``); the first candidate that exists and is executable wins. When
+    none exists the first candidate is returned so :func:`_require_tool` fails
+    closed and reports every path that was checked.
+    """
     for candidate in (cli_value, os.environ.get(env_key), dotenv.get(env_key)):
         value = (candidate or "").strip()
         if value:
             return _anchor(value, repo_root)
-    return _anchor(default_rel, repo_root)
+    anchored = tuple(_anchor(default, repo_root) for default in defaults)
+    for path in anchored:
+        if _is_executable(path):
+            return path
+    return anchored[0]
 
 
-def _require_tool(path: Path, flag: str, env_key: str) -> Path:
+def _require_tool(
+    path: Path,
+    flag: str,
+    env_key: str,
+    checked: Sequence[Path] = (),
+) -> Path:
     """Fail loudly when a resolved tool is absent or not executable."""
     tool = Path(path)
-    if not tool.is_file() or not os.access(tool, os.X_OK):
+    if not _is_executable(tool):
+        tried = tuple(checked) or (tool,)
         raise BuildError(
-            f"{flag}: tool is missing or not executable: {tool} "
+            f"{flag}: tool is missing or not executable: "
+            f"{', '.join(str(candidate) for candidate in tried)} "
             f"(cwd: {Path.cwd()}); pass {flag} <path> or set {env_key}",
             exit_code=2,
         )
@@ -847,14 +878,24 @@ def _resolve_tools(
     """Resolve every pipeline tool: CLI flag > environment > ``.env`` > default."""
     resolved: dict[str, Path] = {}
     for name in (*LLVM_TOOLS, *LINK_TOOLS):
+        # Anchor once: this tuple is both what `resolve_tool` probes and what
+        # the failure message names, so the two can never drift apart.
+        candidates = tuple(
+            _anchor(default, repo_root) for default in DEFAULT_TOOLS[name]
+        )
         path = resolve_tool(
             getattr(args, name),
             TOOL_ENV_KEYS[name],
             dotenv,
-            DEFAULT_TOOLS[name],
+            candidates,
             repo_root,
         )
-        resolved[name] = _require_tool(path, TOOL_FLAGS[name], TOOL_ENV_KEYS[name])
+        resolved[name] = _require_tool(
+            path,
+            TOOL_FLAGS[name],
+            TOOL_ENV_KEYS[name],
+            candidates if path in candidates else (),
+        )
     return resolved
 
 
@@ -961,33 +1002,37 @@ def _build_parser() -> argparse.ArgumentParser:
         "--llc",
         default="",
         metavar="PATH",
-        help="llc binary (default: $LLC, .env LLC, then ../llvm/build/bin/llc).",
+        help="llc binary (default: $LLC, .env LLC, then "
+        "../llvm/build-native/bin/llc, then ../llvm/build/bin/llc).",
     )
     parser.add_argument(
         "--llvm-link",
         default="",
         metavar="PATH",
         help="llvm-link binary (default: $LLVM_LINK, .env LLVM_LINK, then "
-        "../llvm/build/bin/llvm-link).",
+        "../llvm/build-native/bin/llvm-link, then ../llvm/build/bin/llvm-link).",
     )
     parser.add_argument(
         "--opt",
         default="",
         metavar="PATH",
-        help="opt binary (default: $OPT, .env OPT, then ../llvm/build/bin/opt).",
+        help="opt binary (default: $OPT, .env OPT, then "
+        "../llvm/build-native/bin/opt, then ../llvm/build/bin/opt).",
     )
     parser.add_argument(
         "--ld",
         default="",
         metavar="PATH",
-        help="ld.lld linker (default: $LLD, .env LLD, then ../llvm/build/bin/ld.lld).",
+        help="ld.lld linker (default: $LLD, .env LLD, then "
+        "../llvm/build-native/bin/ld.lld, then ../llvm/build/bin/ld.lld).",
     )
     parser.add_argument(
         "--objcopy",
         default="",
         metavar="PATH",
         help="llvm-objcopy binary (default: $LLVM_OBJCOPY, .env LLVM_OBJCOPY, "
-        "then ../llvm/build/bin/llvm-objcopy).",
+        "then ../llvm/build-native/bin/llvm-objcopy, then "
+        "../llvm/build/bin/llvm-objcopy).",
     )
     parser.add_argument(
         "--out-dir",

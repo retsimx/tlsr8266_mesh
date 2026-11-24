@@ -137,7 +137,7 @@ pair.op.verify_credentials = 0x0c
 pair.op.reset_mesh = 0x0a
 pair.op.delete_pairing = 0x0e
 
-# --- Pairing state discriminants (PairState in state.rs) -----------------
+# --- Pairing state discriminants (mesh_protocol::mesh_types::PairState) ---
 pair.state.mesh_effect = 0x07
 pair.state.requesting_ltk = 0x09
 pair.state.pairing_complete = 0x0f

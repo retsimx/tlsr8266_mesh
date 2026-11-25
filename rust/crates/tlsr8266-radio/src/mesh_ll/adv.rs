@@ -188,7 +188,7 @@ fn clear_specific_group_from_memory(group_id: u16) -> Result<(), ()> {
 /// Helper function to delete groups from flash storage
 fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
     let flash_adr_dev_grp_adr = radio_config().flash_adr_dev_grp_adr;
-    let initial_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
+    let initial_pos = MESH_GROUP_ADDRESS_NEXT_POSITION.get();
     let mut found_any = false;
     let mut groups_deleted = 0;
 
@@ -587,10 +587,8 @@ pub fn add_device_address(dev_id: u16) -> Result<(), ()> {
 /// - For delete-all: removes up to 8 group entries to prevent excessive flash wear
 /// - Only processes entries identified as group addresses (not device addresses)
 pub fn remove_group(group_id: u16) -> Result<(), ()> {
-    let grp_next_pos: i16 = MESH_GROUP_ADDRESS_NEXT_POSITION.get().try_into().unwrap();
-
     // Early exit if no groups are stored
-    if grp_next_pos == 0 {
+    if MESH_GROUP_ADDRESS_NEXT_POSITION.get() == 0 {
         return Err(());
     }
 

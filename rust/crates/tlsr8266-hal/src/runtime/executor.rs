@@ -7,6 +7,8 @@ use embassy_executor::{raw, Spawner};
 
 #[cfg(target_os = "none")]
 use crate::mcu::irq_i::{irq_disable, irq_restore};
+#[cfg(all(target_os = "none", feature = "rtt"))]
+use tlsr8266_pac::read_reg_irq_src;
 #[cfg(target_os = "none")]
 use tlsr8266_pac::{
     read_reg_irq_en, read_reg_irq_mask, write_reg_mcu_wakeup_mask, write_reg_pwdn_ctrl, FldPwdnCtrl,
@@ -38,6 +40,16 @@ pub static EXECUTOR_POLLS: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature = "rtt")]
 #[no_mangle]
 pub static EXECUTOR_STALLS: AtomicU32 = AtomicU32::new(0);
+
+/// Host-tool contract: `probe-tlsr read --elf ... EXECUTOR_LOST_WAKES` resolves
+/// this exact symbol name, so it may not be renamed.
+///
+/// Counts parks that returned with no enabled IRQ source latched: the executor
+/// parked in `0x6f = 0x80` while `WORK_PENDING` was false, yet `reg_irq_src`
+/// showed none of the wake sources it had enabled.
+#[cfg(feature = "rtt")]
+#[no_mangle]
+pub static EXECUTOR_LOST_WAKES: AtomicU32 = AtomicU32::new(0);
 
 /// Tells the executor that a task has been woken and needs polling.
 ///
@@ -104,7 +116,8 @@ impl Executor {
                     // `FLD_IRQ::EN` field (bits 24-31), and sourcing bit 16 from
                     // `reg_irq_mask` keeps the permanently-latched USB 250 us interrupt
                     // out of the wake mask because that mask never enables it.
-                    write_reg_mcu_wakeup_mask(read_reg_irq_mask() & 0x00ff_ffff);
+                    let wakeup_mask = read_reg_irq_mask() & 0x00ff_ffff;
+                    write_reg_mcu_wakeup_mask(wakeup_mask);
                     // Only the path that actually parks counts as a stall.
                     #[cfg(feature = "rtt")]
                     EXECUTOR_STALLS.store(
@@ -112,6 +125,16 @@ impl Executor {
                         Ordering::Relaxed,
                     );
                     write_reg_pwdn_ctrl(FldPwdnCtrl::Sleep.bits()); // 0x80
+                    #[cfg(feature = "rtt")]
+                    // Sample while IRQs are still masked: `WORK_PENDING` was false above,
+                    // so a zero `reg_irq_src & wakeup_mask` means this park had no enabled
+                    // wake source latched, i.e. a lost wake.
+                    if (read_reg_irq_src() & wakeup_mask) == 0 {
+                        EXECUTOR_LOST_WAKES.store(
+                            EXECUTOR_LOST_WAKES.load(Ordering::Relaxed).wrapping_add(1),
+                            Ordering::Relaxed,
+                        );
+                    }
                 }
                 irq_restore(prev);
                 // Flush bus write so any pending IRQ vectors before next iteration can re-mask.

@@ -232,14 +232,13 @@ fn rc_pkt_buf_push(opcode: u8, cmd_pkt: &Packet) {
         rc_pkt_buf.pop_back();
     }
 
-    // Insert new entry at front for recent access optimization
-    rc_pkt_buf
-        .push_front(PktBuf {
-            op: opcode,
-            sno: cmd_pkt.att_cmd().value.sno,
-            notify_ok_flag: false, // Initialize as not notified
-        })
-        .unwrap();
+    // Insert new entry at front for recent access optimization.
+    // The `is_full` pop above guarantees the push cannot fail.
+    let _ = rc_pkt_buf.push_front(PktBuf {
+        op: opcode,
+        sno: cmd_pkt.att_cmd().value.sno,
+        notify_ok_flag: false, // Initialize as not notified
+    });
 }
 
 /// Checks notification completion status for request-response transactions.

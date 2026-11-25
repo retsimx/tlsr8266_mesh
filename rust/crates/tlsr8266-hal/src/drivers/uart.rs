@@ -370,6 +370,56 @@ impl UartDriver {
         })
     }
 
+    /// Sends a frame from the panic path, never waiting on a previous transfer.
+    ///
+    /// This is the sink behind `uart::send_sync_panic`, so it runs on the
+    /// `panic_fmt -> rust_begin_unwind` call graph: no indexing, no `unwrap`,
+    /// no formatting, and no waiting for a TX-complete interrupt that a
+    /// panicking system may never service.
+    ///
+    /// If a transfer is in flight, DMA1 is disabled, its pending TX flag is
+    /// cleared and the channel is re-enabled before the new transfer is armed.
+    /// [`Self::start_tx_unchecked`] only writes the address and the trigger, so
+    /// the channel-enable bit it depends on has to be restored here; without
+    /// that the panic frame would sit in the buffer and never shift out.
+    ///
+    /// The 4.5 ms shift-out wait covers a full 44-byte frame at 115200 baud
+    /// (3.82 ms) with margin. On the device it spins on the system tick while
+    /// kicking the watchdog; off-target it goes through `sleep_us`, which
+    /// advances the fake clock instead of blocking, so host tests never hang.
+    ///
+    /// # Parameters
+    ///
+    /// * `msg` - The UART data packet to transmit
+    pub fn send_panic(&mut self, msg: &UartData) {
+        if self.is_tx_busy() {
+            // Drop the in-flight transfer: disable DMA1, clear its TX flag,
+            // then re-enable the channel so the arm below can shift out.
+            write_reg_dma_chn_en(read_reg_dma_chn_en() & !(BIT!(1) as u8));
+            write_reg_dma_rx_rdy0(UartIrqMask::Tx as u8);
+            write_reg_dma_chn_en(read_reg_dma_chn_en() | (BIT!(1) as u8));
+            // The abandoned transfer is no longer in flight. `start_tx_unchecked`
+            // below sets the flag again for the frame it arms, so this store
+            // only closes out the transfer that was just dropped.
+            self.is_tx_busy = false;
+        }
+
+        self.start_tx_unchecked(msg);
+
+        // Wait for the frame to shift out before the panic handler returns.
+        #[cfg(target_os = "none")]
+        {
+            let t0 = clock_time();
+            while !clock_time_exceed(t0, 4_500) {
+                wd_clear();
+            }
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            crate::mcu::clock::sleep_us(4_500);
+        }
+    }
+
     /// Initializes the DMA buffer for UART data reception.
     ///
     /// This function configures DMA channel 0 with the address and size of the RX buffer,
@@ -451,6 +501,8 @@ mod tests {
     const REG_DMA0_CTRL: u32 = 0x502;
     /// `reg_dma0_mode`: receive channel mode.
     const REG_DMA0_MODE: u32 = 0x503;
+    /// `reg_dma1_addr`: transmit buffer address for DMA1 (16-bit).
+    const REG_DMA1_ADDR: u32 = 0x504;
     /// `reg_dma1_mode`: transmit channel mode.
     const REG_DMA1_MODE: u32 = 0x507;
     /// `reg_dma_chn_en`: per-channel DMA enables.
@@ -845,6 +897,92 @@ mod tests {
             1,
             "the busy-wait must kick the watchdog once before timing out"
         );
+    }
+
+    /// The panic sink clears a stuck DMA1 channel before arming the frame.
+    ///
+    /// With a transfer in flight, `send_panic` must disable DMA1 (bit 1 low),
+    /// clear the pending TX flag, re-enable DMA1 (bit 1 high), clear the busy
+    /// flag, arm the transfer and return — never spinning on the host.
+    #[test]
+    fn test_send_panic_busy_resets_dma1_and_arms() {
+        reset_fakes();
+        // Both channels enabled, as `init()` leaves them.
+        FakeMmio::set_reg8(REG_DMA_CHN_EN, (BIT!(0) | BIT!(1)) as u8);
+
+        let mut msg = UartData {
+            len: 4,
+            data: [0; UART_DATA_LEN],
+        };
+        msg.data[0] = 0xAA;
+        msg.data[1] = 0xBB;
+        msg.data[2] = 0xCC;
+        msg.data[3] = 0xDD;
+
+        let mut driver = UartDriver::default_const();
+        driver.is_tx_busy = true;
+
+        driver.send_panic(&msg);
+
+        // DMA1 is disabled, then re-enabled with the RX channel untouched.
+        assert_eq!(
+            values_written_to(REG_DMA_CHN_EN),
+            vec![
+                u32::from(BIT!(0) as u8),
+                u32::from((BIT!(0) | BIT!(1)) as u8)
+            ],
+            "DMA1 must be written low then high around the flag clear"
+        );
+
+        // The pending TX flag is cleared by writing the TX bit.
+        assert_eq!(
+            values_written_to(REG_DMA_RX_RDY0),
+            vec![u32::from(UartIrqMask::Tx.bits())],
+            "the pending TX flag must be cleared"
+        );
+
+        // The transfer is armed at the driver's TX buffer and triggered.
+        assert_eq!(
+            values_written_to(REG_DMA1_ADDR),
+            vec![u32::from(addr_of!(driver.tx_data_buf) as u16)],
+            "DMA1 must be pointed at the TX buffer"
+        );
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
+        assert!(driver.is_tx_busy);
+        assert_eq!(driver.tx_data_buf.data, msg.data);
+
+        // Host path: one recorded 4.5 ms shift-out wait, no watchdog spin.
+        assert_eq!(fake_clock::sleeps(), vec![4_500]);
+        assert_eq!(watchdog_clears(), 0, "the host path must not spin");
+    }
+
+    /// An idle driver skips the DMA1 reset and still arms the transfer.
+    #[test]
+    fn test_send_panic_idle_skips_dma1_reset() {
+        reset_fakes();
+        FakeMmio::set_reg8(REG_DMA_CHN_EN, (BIT!(0) | BIT!(1)) as u8);
+
+        let msg = UartData {
+            len: 2,
+            data: [0; UART_DATA_LEN],
+        };
+
+        let mut driver = UartDriver::default_const();
+        assert!(!driver.is_tx_busy());
+
+        driver.send_panic(&msg);
+
+        assert!(
+            values_written_to(REG_DMA_CHN_EN).is_empty(),
+            "an idle driver must not touch the DMA channel enables"
+        );
+        assert!(
+            values_written_to(REG_DMA_RX_RDY0).is_empty(),
+            "an idle driver has no pending TX flag to clear"
+        );
+        assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
+        assert!(driver.is_tx_busy);
+        assert_eq!(fake_clock::sleeps(), vec![4_500]);
     }
 
     /// Tests the DMA buffer initialization for UART reception.

@@ -22,6 +22,7 @@
 mod fsm;
 
 use core::ptr::addr_of;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(not(test))]
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
@@ -128,6 +129,13 @@ fn dispatch_uart_mesh_rx(pkt: &Packet) {
 /// Sole owner of the mesh pairing state.
 pub static MESH_PAIR: CriticalSectionMutex<MeshPairFsm> =
     CriticalSectionMutex::new(MeshPairFsm::new());
+
+/// Last `MESH_RX_CHANNEL` drop count turned into a log line.
+///
+/// Shared by the receive and send tasks, so it is module state rather than a
+/// task local: an idle node whose receive task overflows the channel must
+/// report the drop even when the send task never runs.
+static LAST_REPORTED_RX_DROPS: AtomicU32 = AtomicU32::new(0);
 
 /// The pairing-machine fields the root tests in `app.rs` assert on.
 ///
@@ -236,6 +244,7 @@ pub fn reset_for_test() {
     reset_radio_state_for_test();
     test_hooks::reset();
     set_mesh_event_hooks(test_hooks::hooks());
+    critical_section::with(|_| LAST_REPORTED_RX_DROPS.store(0, Ordering::Relaxed));
 }
 
 // p_cmd : cmd[3]+para[10]
@@ -474,11 +483,12 @@ fn mesh_cmd_notify(op: u8, p: &Vec<u8, 10>, dev_adr: u16) -> i32 {
 
 fn mesh_pair_complete_notify() -> i32 {
     let par = [CMD_NOTIFY_MESH_PAIR_END];
-    mesh_cmd_notify(
-        LGT_CMD_MESH_CMD_NOTIFY,
-        &Vec::from_slice(&par).unwrap(),
-        device_address(),
-    )
+    // One byte always fits; the `Err` arm is defence in depth, not a routine
+    // branch, and reports the same failure `mesh_cmd_notify` uses.
+    match Vec::from_slice(&par) {
+        Ok(msg) => mesh_cmd_notify(LGT_CMD_MESH_CMD_NOTIFY, &msg, device_address()),
+        Err(_) => -1,
+    }
 }
 
 /// Clear the pending credentials and mark pairing as settled.
@@ -647,8 +657,11 @@ pub fn mesh_pair_proc() {
         return;
     };
 
-    let pkt = light_slave_tx_command(&Vec::from_slice(&op_para[..13]).unwrap(), 0xFFFF, 0, false);
-    queue_mesh_packet(&pkt);
+    // 13 bytes always fit; a failure would only skip this pairing broadcast.
+    if let Ok(msg) = Vec::from_slice(&op_para[..13]) {
+        let pkt = light_slave_tx_command(&msg, 0xFFFF, 0, false);
+        queue_mesh_packet(&pkt);
+    }
 }
 
 /// Enable or disable mesh payload encryption.
@@ -656,13 +669,13 @@ pub fn mesh_security_enable(enable: bool) {
     set_security_enabled(enable);
 }
 
-/// Surface mesh queue overflow, one log line per change.
+/// Surface mesh TX queue overflow, one log line per change.
 ///
 /// The SDK cannot log — it must not reach the application's UART sink — so it
 /// only counts drops. Turning a counter delta into a line here keeps a
 /// sustained overload visible from RTT and the UART host without a write per
-/// iteration. The "last reported" marks are owned by the sender task.
-fn report_queue_drops(dropped_mesh_tx_seen: &mut u32, dropped_mesh_rx_seen: &mut u32) {
+/// iteration. The "last reported" mark is owned by the sender task.
+fn report_tx_queue_drops(dropped_mesh_tx_seen: &mut u32) {
     let tx = queues::dropped_mesh_tx();
     if tx != *dropped_mesh_tx_seen {
         uprintln!(
@@ -672,15 +685,31 @@ fn report_queue_drops(dropped_mesh_tx_seen: &mut u32, dropped_mesh_rx_seen: &mut
         );
         *dropped_mesh_tx_seen = tx;
     }
+}
 
+/// Surface mesh RX queue overflow, one log line per change.
+///
+/// Both mesh tasks call this, so the "last reported" mark is module state
+/// ([`LAST_REPORTED_RX_DROPS`]) rather than a task local. TC32 has no 32-bit
+/// atomic read-modify-write, so the compare and the store share one
+/// `critical_section::with`, the same idiom `queues::count_drop` uses: a task
+/// that claims a delta advances the mark in the same section, so the other
+/// task cannot log the same delta again. The line is written after the section
+/// so the mask is never held across formatting or a queue push.
+fn report_rx_queue_drops() {
     let rx = queues::dropped_mesh_rx();
-    if rx != *dropped_mesh_rx_seen {
-        uprintln!(
-            "mesh queue full: rx +{} (total {})",
-            rx.wrapping_sub(*dropped_mesh_rx_seen),
-            rx
-        );
-        *dropped_mesh_rx_seen = rx;
+    let delta = critical_section::with(|_| {
+        let last = LAST_REPORTED_RX_DROPS.load(Ordering::Relaxed);
+        if rx == last {
+            None
+        } else {
+            LAST_REPORTED_RX_DROPS.store(rx, Ordering::Relaxed);
+            Some(rx.wrapping_sub(last))
+        }
+    });
+
+    if let Some(delta) = delta {
+        uprintln!("mesh queue full: rx +{} (total {})", delta, rx);
     }
 }
 
@@ -713,11 +742,9 @@ enum SendScan {
 ///
 /// The parked arms `return`, so the outer `loop` in [`mesh_packet_sender`]
 /// re-enters and rescans instead of looping internally.
-async fn mesh_packet_send_iteration(
-    dropped_mesh_tx_seen: &mut u32,
-    dropped_mesh_rx_seen: &mut u32,
-) {
-    report_queue_drops(dropped_mesh_tx_seen, dropped_mesh_rx_seen);
+async fn mesh_packet_send_iteration(dropped_mesh_tx_seen: &mut u32) {
+    report_tx_queue_drops(dropped_mesh_tx_seen);
+    report_rx_queue_drops();
 
     let result = {
         // Reset before the scan: a push that lands after the scan leaves
@@ -741,10 +768,11 @@ async fn mesh_packet_send_iteration(
                 .find(|(_, elem)| now >= elem.delay)
             {
                 Some((index, _)) => SendScan::Ready(send_queue.swap_remove(index)),
-                None => {
-                    let earliest = send_queue.iter().map(|e| e.delay).min().unwrap();
-                    SendScan::Wait(earliest)
-                }
+                None => match send_queue.iter().map(|e| e.delay).min() {
+                    Some(earliest) => SendScan::Wait(earliest),
+                    // Unreachable: `is_empty()` above gates this arm.
+                    None => SendScan::Empty,
+                },
             }
         }
     };
@@ -833,27 +861,31 @@ async fn mesh_packet_send_iteration(
     }
 }
 
-/// Mesh transmit task: owns [`MESH_TX_QUEUE`] and the drop-log bookkeeping.
+/// Mesh transmit task: owns [`MESH_TX_QUEUE`] and the TX drop-log bookkeeping.
 #[coverage(off)]
 #[embassy_executor::task]
 pub async fn mesh_packet_sender() {
     let mut dropped_mesh_tx_seen: u32 = 0;
-    let mut dropped_mesh_rx_seen: u32 = 0;
 
     #[cfg(not(test))]
     loop {
-        mesh_packet_send_iteration(&mut dropped_mesh_tx_seen, &mut dropped_mesh_rx_seen).await;
+        mesh_packet_send_iteration(&mut dropped_mesh_tx_seen).await;
     }
 
     #[cfg(test)]
     {
         // In test builds, just run one iteration to allow testing
-        mesh_packet_send_iteration(&mut dropped_mesh_tx_seen, &mut dropped_mesh_rx_seen).await;
+        mesh_packet_send_iteration(&mut dropped_mesh_tx_seen).await;
     }
 }
 
 /// Process a single iteration of the mesh message receiving task.
+///
+/// RX queue overflow is reported here as well as in the send iteration: an idle
+/// node may overflow [`MESH_RX_CHANNEL`] without ever running the send task.
 async fn mesh_packet_rcv_iteration() {
+    report_rx_queue_drops();
+
     let mut result = MESH_RX_CHANNEL.receive().await;
 
     rf_link_rc_data(&mut result);
@@ -2561,17 +2593,13 @@ mod tests {
         set_device_address(0x1234);
         set_security_enabled(false);
         let mut dropped_tx_seen = 0;
-        let mut dropped_rx_seen = 0;
         let test_pkt = create_test_packet(0x1234, 0x1234, [1, 2, 3]);
 
         reset_fakes();
 
         // Execute
         assert!(queues::enqueue_mesh_tx(&test_pkt, 0, 0));
-        block_on(mesh_packet_send_iteration(
-            &mut dropped_tx_seen,
-            &mut dropped_rx_seen,
-        ));
+        block_on(mesh_packet_send_iteration(&mut dropped_tx_seen));
 
         // Verify - reported over the relay hook, popped, and the radio was never
         // touched: a report-only packet writes no RF register.
@@ -2671,10 +2699,11 @@ mod tests {
         // Setup
         reset_for_test();
         let mut dropped_tx_seen = 0;
-        let mut dropped_rx_seen = 0;
 
-        // The TX queue is empty by default, so the iteration parks on the wake
-        let future = mesh_packet_send_iteration(&mut dropped_tx_seen, &mut dropped_rx_seen);
+        // The TX queue is empty, so the scan takes the `SendScan::Empty` arm
+        // (the `min()` `None` arm) and the iteration parks on the wake.
+        assert!(MESH_TX_QUEUE.lock().is_empty());
+        let future = mesh_packet_send_iteration(&mut dropped_tx_seen);
         futures::pin_mut!(future);
 
         let waker = noop_waker();
@@ -2703,7 +2732,6 @@ mod tests {
         // Setup
         reset_for_test();
         let mut dropped_tx_seen = 0;
-        let mut dropped_rx_seen = 0;
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
 
         // Ensure security is disabled to avoid encryption overflow
@@ -2722,10 +2750,7 @@ mod tests {
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
 
         // Execute
-        block_on(mesh_packet_send_iteration(
-            &mut dropped_tx_seen,
-            &mut dropped_rx_seen,
-        ));
+        block_on(mesh_packet_send_iteration(&mut dropped_tx_seen));
 
         // Verify - the packet was transmitted on every listen channel and
         // removed from the buffer.
@@ -2749,7 +2774,6 @@ mod tests {
         // Setup
         reset_for_test();
         let mut dropped_tx_seen = 0;
-        let mut dropped_rx_seen = 0;
         let test_pkt = create_test_packet(0x1234, 0x5678, [1, 2, 3]);
 
         set_security_enabled(false);
@@ -2764,10 +2788,7 @@ mod tests {
         FakeMmio::set_reg16(REG_RND_NUMBER, 0x5555);
 
         // Execute
-        block_on(mesh_packet_send_iteration(
-            &mut dropped_tx_seen,
-            &mut dropped_rx_seen,
-        ));
+        block_on(mesh_packet_send_iteration(&mut dropped_tx_seen));
 
         // Verify: transmitted once, then re-queued one step before the last send.
         assert_eq!(
@@ -2801,7 +2822,6 @@ mod tests {
         // Setup
         reset_for_test();
         let mut dropped_tx_seen = 0;
-        let mut dropped_rx_seen = 0;
 
         // The scan samples the clock once (after the empty check).
         reset_fakes();
@@ -2812,7 +2832,7 @@ mod tests {
         assert!(queues::enqueue_mesh_tx(&far_pkt, u64::MAX / 2, 0));
         assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
 
-        let future = mesh_packet_send_iteration(&mut dropped_tx_seen, &mut dropped_rx_seen);
+        let future = mesh_packet_send_iteration(&mut dropped_tx_seen);
         futures::pin_mut!(future);
 
         let waker = noop_waker();
@@ -2911,5 +2931,56 @@ mod tests {
         // Verify - packet was processed, removed from the buffer, and relayed.
         assert_eq!(MESH_RX_CHANNEL.len(), 0);
         assert_eq!(relay::count(), 1);
+    }
+
+    /// Whether any frame queued on the UART log transport contains `needle`.
+    ///
+    /// Test builds route `uprintln!` through the default log sinks into
+    /// [`queues::UART_TX_CHANNEL`], so a test reads the line where the host
+    /// would. The channel is drained: the caller owns the log for its test.
+    fn uart_log_contains(needle: &str) -> bool {
+        let needle = needle.as_bytes();
+        let mut found = false;
+        while let Ok(frame) = queues::UART_TX_CHANNEL.try_receive() {
+            let payload = &frame.data[mesh_protocol::uart::UART_PAYLOAD_OFFSET..];
+            if payload.windows(needle.len()).any(|window| window == needle) {
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// An idle node that overflows [`MESH_RX_CHANNEL`] must report the drop
+    /// from the receive task alone.
+    ///
+    /// `report_queue_drops` used to run only inside the send iteration, so a
+    /// node with no TX traffic never logged RX overflow. The send task is never
+    /// polled here: the line must come from `mesh_packet_rcv_iteration`.
+    #[test]
+    fn test_rcv_mesh_msg_iteration_reports_rx_drops_without_tx() {
+        use futures::executor::block_on;
+
+        // Setup
+        reset_for_test();
+        forget_decoded_packets();
+        relay::install();
+
+        // Fill the channel, then overflow it once so the SDK counts one RX drop.
+        for sno in 0..queues::MESH_RX_QUEUE_CAPACITY as u32 {
+            assert!(queues::enqueue_mesh_rx(&decodable_packet(0x11_0000 + sno)));
+        }
+        assert!(!queues::enqueue_mesh_rx(&decodable_packet(0x11_ffff)));
+        assert_eq!(queues::dropped_mesh_rx(), 1);
+
+        // Execute: only the receive task runs.
+        block_on(mesh_packet_rcv_iteration());
+
+        // Verify: the queued packet was still decoded, and the overflow was
+        // logged over the UART sink with no TX activity.
+        assert_eq!(relay::count(), 1);
+        assert!(
+            uart_log_contains("mesh queue full: rx +1 (total 1)"),
+            "the receive task must report RX queue overflow without TX activity"
+        );
     }
 }

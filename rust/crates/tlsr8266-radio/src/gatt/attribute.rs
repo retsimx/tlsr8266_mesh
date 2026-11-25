@@ -639,12 +639,10 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
         let search_result = l2cap_att_search(current_handle, end_handle, &uuid);
 
         // No more matching attributes found
-        if (search_result.is_none()) {
+        let Some((found_attr, found_handle)) = search_result else {
             break;
-        }
+        };
 
-        // Unpack search result
-        let (found_attr, found_handle) = search_result.unwrap();
         let attr = &found_attr[0];
 
         // Check if attribute value matches the requested value
@@ -1039,7 +1037,9 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
     }
 
     // If attribute has a read callback, call it and let it handle the response
-    get_gAttributes()[att_num].r.unwrap()(packet);
+    if let Some(read_callback) = get_gAttributes().get(att_num).and_then(|attr| attr.r) {
+        read_callback(packet);
+    }
 
     None
 }
@@ -1370,8 +1370,9 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         attr_value_slice.copy_from_slice(incoming_value_slice);
     } else {
         // Attribute has a write callback - invoke it
-        let write_callback = current_attr.w.unwrap();
-        write_callback(packet);
+        if let Some(write_callback) = current_attr.w {
+            write_callback(packet);
+        }
     }
 
     response
@@ -1728,6 +1729,28 @@ mod tests {
         }
     }
 
+    /// A read of an attribute with no `r` callback must serve the stored value
+    /// instead of panicking on the missing callback.
+    #[test]
+    fn test_l2cap_att_handler_read_req_without_read_callback_does_not_panic() {
+        seed_system_tick();
+
+        // Handle 3 is the device name: RAM-backed with `r == None`.
+        assert!(
+            get_gAttributes()[3].r.is_none(),
+            "handle 3 must stay callback-free for this test to mean anything"
+        );
+
+        let mut data = [0; 6];
+        data[0] = GattOp::AttOpReadReq as u8;
+        data[1] = 3;
+
+        let packet = create_att_packet(0, &data);
+        let response = l2cap_att_handler(&packet).expect("a read request always gets a response");
+
+        assert_eq!(response.att_read_rsp().opcode, GattOp::AttOpReadRsp as u8);
+    }
+
     #[test]
     fn test_l2cap_att_handler_read_by_group_type_req() {
         seed_system_tick();
@@ -1786,6 +1809,30 @@ mod tests {
         if let Some(resp) = response {
             assert_eq!(resp.att_write_rsp().opcode, GattOp::AttOpWriteRsp as u8);
         }
+    }
+
+    /// A write to an attribute with no `w` callback must take the value-copy
+    /// path and answer normally instead of panicking on the missing callback.
+    #[test]
+    fn test_l2cap_att_handler_write_req_without_write_callback_does_not_panic() {
+        seed_system_tick();
+
+        // Handle 19 is the status CCC: RAM-backed with `w == None`.
+        assert!(
+            get_gAttributes()[19].w.is_none(),
+            "handle 19 must stay callback-free for this test to mean anything"
+        );
+
+        let mut data = [0; 23];
+        data[0] = GattOp::AttOpWriteReq as u8;
+        data[1] = 19;
+        data[4] = 0x01; // Keep the CCC at its default value.
+        data[5] = 0x00;
+
+        let packet = create_att_packet(0, &data);
+        let response = l2cap_att_handler(&packet).expect("a write request always gets a response");
+
+        assert_eq!(response.att_write_rsp().opcode, GattOp::AttOpWriteRsp as u8);
     }
 
     #[test]

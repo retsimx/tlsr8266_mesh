@@ -207,7 +207,11 @@ pub async fn main_task(spawner: Spawner) {
     let mut data = [0_u8; 13];
     data[0] = LGT_POWER_ON;
 
-    crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+    // 13 bytes always fit; the `Err` arm is defence in depth, not a routine
+    // branch, so it skips the broadcast silently.
+    if let Ok(msg) = Vec::from_slice(&data) {
+        crate::mesh::send_mesh_message(&msg, 0xffff, 3, false);
+    }
 
     loop {
         // Prove to a host that the loop is still turning (`fetch_add` does
@@ -317,12 +321,11 @@ fn uart_command_hook(cmd: UartCommand) -> [u8; 3] {
             payload,
             retransmit,
             ack,
-        } => crate::mesh::send_mesh_message(
-            &Vec::from_slice(&payload).unwrap(),
-            dst,
-            retransmit,
-            ack,
-        ),
+        } => match Vec::from_slice(&payload) {
+            Ok(msg) => crate::mesh::send_mesh_message(&msg, dst, retransmit, ack),
+            // 13 bytes always fit; skipping the send keeps the ACK sno at zero.
+            Err(_) => [0; 3],
+        },
         UartCommand::EnableStatusReporting => {
             tlsr8266_radio::mesh_ll::node_status::mesh_report_status_enable(true);
             tlsr8266_radio::queues::set_uart_status_reporting_enabled(true);
@@ -601,7 +604,11 @@ pub fn rf_link_data_callback(p: &Packet) {
             light_sw_reboot();
         }
         LightCommandAction::MeshPair(pair_params) => {
-            mesh_pair_cb(&Vec::from_slice(&pair_params).unwrap())
+            // The parameter array always fits; a failure would only mean the
+            // pairing broadcast is skipped.
+            if let Ok(params) = Vec::from_slice(&pair_params) {
+                mesh_pair_cb(&params)
+            }
         }
     }
 }
@@ -664,7 +671,11 @@ async fn report_panic_info() {
         data[0] = LGT_PANIC_MSG;
         data[3..3 + chunk.len()].copy_from_slice(chunk);
 
-        crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+        // 13 bytes always fit. The panic path must stay allocation-free and
+        // log-free, so a failure just skips this chunk.
+        if let Ok(msg) = Vec::from_slice(&data) {
+            crate::mesh::send_mesh_message(&msg, 0xffff, 3, false);
+        }
     }
 
     // Wait a moment to send the next message
@@ -675,7 +686,10 @@ async fn report_panic_info() {
     let mut data = [0u8; 13];
     data[0] = LGT_PANIC_MSG;
 
-    crate::mesh::send_mesh_message(&Vec::from_slice(&data).unwrap(), 0xffff, 3, false);
+    // Same defence-in-depth skip as the chunk loop above.
+    if let Ok(msg) = Vec::from_slice(&data) {
+        crate::mesh::send_mesh_message(&msg, 0xffff, 3, false);
+    }
 
     // Finally clear the panic info
     clear_panic_report();

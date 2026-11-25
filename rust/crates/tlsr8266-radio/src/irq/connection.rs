@@ -401,9 +401,7 @@ fn process_mesh_operations() {
 
     // Handle pairing operations if transmission buffer is available
     if is_add_packet_buf_ready() {
-        let pair_proc_result = pair_proc();
-        if pair_proc_result.is_some() {
-            let pkt = pair_proc_result.unwrap();
+        if let Some(pkt) = pair_proc() {
             let _ = rf_link_add_tx_packet(&pkt);
         }
     }
@@ -2380,6 +2378,34 @@ mod tests {
             MESH_NODE_ST.lock()[1].miss,
             2,
             "mesh_node_flush_status must age online remotes by one sweep"
+        );
+    }
+
+    /// A `pair_proc()` that yields `None` must skip the TX push, not panic.
+    #[test]
+    fn test_process_mesh_operations_pair_proc_none_does_not_panic() {
+        reset_global_state();
+
+        // Empty TX buffer, so `is_add_packet_buf_ready()` is true and the
+        // pairing arm is entered.
+        FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
+        FakeMmio::set_reg8(REG_DMA_TX_WPTR, 0);
+
+        // `pair_proc()` consumes a pending read and returns `None` once none is
+        // left, so draining it first pins the `None` arm.
+        let _ = crate::ble::pair::pair_proc();
+        assert!(
+            crate::ble::pair::pair_proc().is_none(),
+            "no pairing read may be pending for this test"
+        );
+
+        SLAVE_READ_STATUS_BUSY.set(0);
+        process_mesh_operations();
+
+        assert_eq!(
+            dma_tx_fifo_writes(),
+            0,
+            "a `None` pair_proc must not register a packet with the DMA engine"
         );
     }
 

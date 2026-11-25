@@ -122,6 +122,33 @@ static UART_ACK_SIGNAL: Signal<CsRawMutex, u8> = Signal::new();
 /// Most recent ack counter received from the host.
 static UART_LAST_ACK: AtomicU8 = AtomicU8::new(0);
 
+/// Total transmit attempts per frame: one initial transmit plus up to two
+/// retransmits.
+///
+/// A host that never ACKs must not wedge `uart_sender`.
+pub const MAX_TX_ATTEMPTS: u8 = 3;
+
+/// Retransmits only: `0` when the first attempt is ACKed, `2` when all three
+/// attempts expire.
+pub static UART_TX_RETRIES: AtomicU32 = AtomicU32::new(0);
+
+/// Frames that exhausted [`MAX_TX_ATTEMPTS`] and were dropped.
+pub static UART_TX_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// ACKs that arrived while no frame was awaiting one, or that carried a
+/// counter other than the frame in flight.
+pub static UART_LATE_ACKS: AtomicU32 = AtomicU32::new(0);
+
+/// Counter of the frame currently awaiting an ACK.
+static UART_PENDING_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+/// Whether a frame is currently awaiting an ACK.
+static UART_AWAITING_ACK: AtomicBool = AtomicBool::new(false);
+
+/// Set while a drop log is outstanding. A host that never acks must not turn
+/// each dropped frame into another frame that is itself dropped and logged.
+static UART_DROP_LOG_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// TX-side operations the application owns: queueing a frame and reading the
 /// dropped-frame counter.
 ///
@@ -440,6 +467,20 @@ fn count_rx_drop() {
     });
 }
 
+/// Bumps one of the TX observability counters from task context.
+///
+/// Same TC32-safe idiom as [`count_rx_drop`]: `thumbv6m` has no 32-bit atomic
+/// read-modify-write, so the load/modify/store runs inside a short masked
+/// critical section instead of `fetch_add`.
+fn count_tx_event(counter: &AtomicU32) {
+    critical_section::with(|_| {
+        counter.store(
+            counter.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
+    });
+}
+
 /// Send a frame on the async path, waiting for the previous transfer to finish.
 ///
 /// Holds [`UART_TX_LOCK`] for the whole call and [`UART_HW`] only for the
@@ -486,6 +527,10 @@ pub async fn uart_send_async(msg: &UartData) {
 
 /// Blocking UART write for the panic path.
 ///
+/// Delegates to [`UartDriver::send_panic`], the driver's DMA1-safe panic sink:
+/// it never waits on a previous transfer, clears a stuck DMA1 channel before
+/// arming the frame, and waits out the shift time without parking.
+///
 /// Must not touch the async queue or [`UART_TX_LOCK`]: a panic while sending
 /// would re-enter `panic_fmt` through `try_send`, a call-graph cycle the static
 /// stack gate rejects.
@@ -495,10 +540,10 @@ pub async fn uart_send_async(msg: &UartData) {
 /// Acquires [`UART_HW`] for the duration of the write, so it must never be
 /// called from a context that already holds that guard. `lock` has no
 /// production re-entrancy check and `panic = "abort"` never drops the outer
-/// guard, so a re-entrant call would hand `UartDriver::send` a second
+/// guard, so a re-entrant call would hand `UartDriver::send_panic` a second
 /// `&mut UartDriver` aliasing the first (see `sdk::common::sync` assumption 3).
 pub fn send_sync_panic(msg: &UartData) {
-    UART_HW.lock().send(msg);
+    UART_HW.lock().send_panic(msg);
 }
 
 /// Waits for the next UART ack counter, giving up at `deadline`.
@@ -539,6 +584,14 @@ async fn wait_tx_done(_deadline: Instant) -> Result<(), ()> {
 async fn ack_msg(msg: &UartData, sno: &[u8; 3]) {
     // If data[1] is 0xff, it means this message is an ack from the client
     if msg.data[1] == u8::from(UartMsg::Ack) {
+        // Late when nothing is waiting for an ack, or when the ack answers a
+        // frame other than the one in flight. `send_with_retry` owns clearing
+        // `UART_AWAITING_ACK`; this path only counts.
+        if !UART_AWAITING_ACK.load(Ordering::Relaxed)
+            || msg.data[0] != UART_PENDING_COUNTER.load(Ordering::Relaxed)
+        {
+            count_tx_event(&UART_LATE_ACKS);
+        }
         UART_LAST_ACK.store(msg.data[0], Ordering::Relaxed);
         UART_ACK_SIGNAL.signal(msg.data[0]);
         return;
@@ -661,15 +714,38 @@ fn prepare_outgoing_message(msg: &mut UartData, ack_counter: &mut u8) {
     *msg = ack_retry_frame(msg, *ack_counter);
 }
 
+/// Transmit one frame and wait for its ack, at most [`MAX_TX_ATTEMPTS`] times.
+///
+/// The frame identity is published before each transmit so an ack that lands
+/// before the wait is matched, not counted as late. A host that never acks
+/// costs at most three attempts, after which the frame is counted in
+/// [`UART_TX_DROPPED`] and abandoned — `uart_sender` then advances to the next
+/// queued frame instead of wedging on this one.
+///
+/// The drop is logged once per unresponsive episode, not once per frame. The
+/// log line is itself a frame on [`UART_TX_CHANNEL`], so it travels back
+/// through this same function: a host that never acks would drop and log the
+/// log, forever. [`UART_DROP_LOG_PENDING`] suppresses repeats until a matching
+/// ack proves the host is listening again.
 async fn send_with_retry(msg: &UartData, ack_counter: u8) {
+    let mut attempt: u8 = 1;
+
     loop {
+        // Publish the frame identity *before* transmitting: a fast ack that
+        // arrives between the send and the wait must match this counter rather
+        // than look late. `ack_msg` reads both, so the order is load-bearing.
+        UART_PENDING_COUNTER.store(ack_counter, Ordering::Relaxed);
+        UART_AWAITING_ACK.store(true, Ordering::Relaxed);
+
         // Arm the wake-up before transmitting so an ack that lands between
         // the send and the wait is still observed (the value is latched).
         UART_ACK_SIGNAL.reset();
         uart_send_async(msg).await;
 
         if UART_LAST_ACK.load(Ordering::Relaxed) == ack_counter {
-            break;
+            UART_AWAITING_ACK.store(false, Ordering::Relaxed);
+            UART_DROP_LOG_PENDING.store(false, Ordering::Relaxed);
+            return;
         }
 
         // One deadline for the whole wait: stale acks must not extend it.
@@ -680,7 +756,11 @@ async fn send_with_retry(msg: &UartData, ack_counter: u8) {
             #[cfg(not(test))]
             {
                 match wait_ack_or_timeout(deadline).await {
-                    Ok(ack) if ack == ack_counter => return,
+                    Ok(ack) if ack == ack_counter => {
+                        UART_AWAITING_ACK.store(false, Ordering::Relaxed);
+                        UART_DROP_LOG_PENDING.store(false, Ordering::Relaxed);
+                        return;
+                    }
                     Ok(_) => continue,
                     Err(()) => break,
                 }
@@ -688,12 +768,29 @@ async fn send_with_retry(msg: &UartData, ack_counter: u8) {
             #[cfg(test)]
             {
                 match wait_ack_or_timeout() {
-                    Ok(ack) if ack == ack_counter => return,
+                    Ok(ack) if ack == ack_counter => {
+                        UART_AWAITING_ACK.store(false, Ordering::Relaxed);
+                        UART_DROP_LOG_PENDING.store(false, Ordering::Relaxed);
+                        return;
+                    }
                     Ok(_) => continue,
                     Err(()) => break,
                 }
             }
         }
+
+        // 100 ms with no matching ack.
+        if attempt >= MAX_TX_ATTEMPTS {
+            UART_AWAITING_ACK.store(false, Ordering::Relaxed);
+            count_tx_event(&UART_TX_DROPPED);
+            if !UART_DROP_LOG_PENDING.swap(true, Ordering::Relaxed) {
+                uprintln!("uart tx drop: counter {} attempts {}", ack_counter, attempt);
+            }
+            return;
+        }
+
+        count_tx_event(&UART_TX_RETRIES);
+        attempt += 1;
     }
 }
 
@@ -712,6 +809,12 @@ pub fn reset_for_test() {
     UART_SENDER_STARTED.store(false, Ordering::Relaxed);
     UART_LAST_ACK.store(0, Ordering::Relaxed);
     UART_RX_DROPPED.store(0, Ordering::Relaxed);
+    UART_TX_RETRIES.store(0, Ordering::Relaxed);
+    UART_TX_DROPPED.store(0, Ordering::Relaxed);
+    UART_LATE_ACKS.store(0, Ordering::Relaxed);
+    UART_PENDING_COUNTER.store(0, Ordering::Relaxed);
+    UART_AWAITING_ACK.store(false, Ordering::Relaxed);
+    UART_DROP_LOG_PENDING.store(false, Ordering::Relaxed);
     UART_STARTED_SIGNAL.reset();
     UART_ACK_SIGNAL.reset();
     UART_TX_DONE.reset();
@@ -1023,6 +1126,8 @@ mod tests {
         assert_eq!(sent.front().unwrap(), &expected_fingerprint);
     }
 
+    /// An ack that landed before the wait ends the frame on the first attempt:
+    /// no retransmit, no drop, and the in-flight flag is cleared again.
     #[test]
     fn test_send_with_retry_exits_when_ack_already_received() {
         reset_for_test();
@@ -1034,6 +1139,16 @@ mod tests {
         block_on(send_with_retry(&msg, 5));
 
         assert_eq!(dma1_arms(), 1, "DMA1 must be triggered once");
+        assert_eq!(
+            UART_TX_RETRIES.load(Ordering::Relaxed),
+            0,
+            "a first-attempt ack must not count a retransmit"
+        );
+        assert_eq!(UART_TX_DROPPED.load(Ordering::Relaxed), 0);
+        assert!(
+            !UART_AWAITING_ACK.load(Ordering::Relaxed),
+            "the in-flight flag must be cleared once the frame is acked"
+        );
     }
 
     /// The retry loop re-arms DMA1 when the ack for its counter has not
@@ -1078,6 +1193,182 @@ mod tests {
             INJECTED_AT_ARMS.load(Ordering::SeqCst) >= 2,
             "DMA1 must be re-armed when the ack for the sent counter is missing"
         );
+    }
+
+    /// A host that never acks costs exactly [`MAX_TX_ATTEMPTS`] transmits, then
+    /// the frame is dropped and the function returns so `uart_sender` can move
+    /// on to the next queued frame.
+    ///
+    /// The host `wait_ack_or_timeout` takes the timeout branch immediately
+    /// (there is no time driver), so an unbounded retry loop would hang here.
+    #[test]
+    fn test_send_with_retry_drops_after_max_attempts() {
+        reset_for_test();
+        reset_fakes();
+        UART_LAST_ACK.store(0, Ordering::Relaxed);
+
+        let msg = empty_frame();
+
+        block_on(send_with_retry(&msg, 1));
+
+        assert_eq!(
+            dma1_arms(),
+            MAX_TX_ATTEMPTS as usize,
+            "one transmit plus one per retransmit, then stop"
+        );
+        assert_eq!(
+            UART_TX_RETRIES.load(Ordering::Relaxed),
+            u32::from(MAX_TX_ATTEMPTS - 1),
+            "retries count retransmits only"
+        );
+        assert_eq!(
+            UART_TX_DROPPED.load(Ordering::Relaxed),
+            1,
+            "an exhausted frame is counted once"
+        );
+        assert!(
+            !UART_AWAITING_ACK.load(Ordering::Relaxed),
+            "a dropped frame must not leave the in-flight flag set"
+        );
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            1,
+            "the drop must produce exactly one log line"
+        );
+    }
+
+    /// A host that never acks must not amplify its own drop logs: the log line
+    /// is itself a frame on `UART_TX_CHANNEL`, so it travels back through
+    /// `send_with_retry` and would be dropped and logged again, forever.
+    ///
+    /// Two consecutive exhausted frames therefore count two drops but emit one
+    /// log line.
+    #[test]
+    fn test_send_with_retry_logs_one_drop_per_unresponsive_episode() {
+        reset_for_test();
+        reset_fakes();
+        UART_LAST_ACK.store(0, Ordering::Relaxed);
+
+        let msg = empty_frame();
+
+        block_on(send_with_retry(&msg, 1));
+        block_on(send_with_retry(&msg, 2));
+
+        assert_eq!(
+            UART_TX_DROPPED.load(Ordering::Relaxed),
+            2,
+            "every exhausted frame is still counted"
+        );
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            1,
+            "the second drop in the same unresponsive episode must not log again"
+        );
+    }
+
+    /// A matching ack proves the host is listening again, so the guard is
+    /// cleared and the next unresponsive episode logs its own drop.
+    #[test]
+    fn test_send_with_retry_matching_ack_rearms_drop_log() {
+        reset_for_test();
+        reset_fakes();
+        UART_LAST_ACK.store(0, Ordering::Relaxed);
+
+        let msg = empty_frame();
+
+        block_on(send_with_retry(&msg, 1));
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            1,
+            "the first unresponsive episode logs once"
+        );
+
+        // Fast path: the ack for this counter is already latched.
+        UART_LAST_ACK.store(2, Ordering::Relaxed);
+        block_on(send_with_retry(&msg, 2));
+        assert!(
+            !UART_DROP_LOG_PENDING.load(Ordering::Relaxed),
+            "a matching ack must re-arm the drop log"
+        );
+
+        // A fresh episode after the ack logs again.
+        UART_LAST_ACK.store(0, Ordering::Relaxed);
+        block_on(send_with_retry(&msg, 3));
+        assert_eq!(
+            UART_TX_CHANNEL.len(),
+            2,
+            "a new episode after an ack logs again"
+        );
+    }
+
+    /// `reset_for_test()` clears the drop-log guard, so one test's unresponsive
+    /// episode cannot silence the next test's drop log.
+    #[test]
+    fn test_reset_for_test_clears_drop_log_guard() {
+        reset_for_test();
+        UART_DROP_LOG_PENDING.store(true, Ordering::Relaxed);
+
+        reset_for_test();
+
+        assert!(
+            !UART_DROP_LOG_PENDING.load(Ordering::Relaxed),
+            "reset_for_test must clear the drop-log guard"
+        );
+    }
+
+    /// An ack with no frame in flight is unsolicited: it is counted as late and
+    /// still latches `UART_LAST_ACK` for the fast path.
+    #[test]
+    fn test_ack_msg_counts_unsolicited_ack_as_late() {
+        reset_for_test();
+
+        let mut ack = empty_frame();
+        ack.data[0] = 3;
+        ack.data[1] = u8::from(UartMsg::Ack);
+
+        block_on(ack_msg(&ack, &[0, 0, 0]));
+
+        assert_eq!(UART_LATE_ACKS.load(Ordering::Relaxed), 1);
+        assert_eq!(UART_LAST_ACK.load(Ordering::Relaxed), 3);
+        assert_eq!(UART_ACK_SIGNAL.try_take(), Some(3));
+    }
+
+    /// An ack for a counter other than the frame in flight is stale: it is
+    /// counted as late even while a frame is awaiting its own ack.
+    #[test]
+    fn test_ack_msg_counts_stale_ack_as_late() {
+        reset_for_test();
+        UART_PENDING_COUNTER.store(7, Ordering::Relaxed);
+        UART_AWAITING_ACK.store(true, Ordering::Relaxed);
+
+        let mut ack = empty_frame();
+        ack.data[0] = 6;
+        ack.data[1] = u8::from(UartMsg::Ack);
+
+        block_on(ack_msg(&ack, &[0, 0, 0]));
+
+        assert_eq!(UART_LATE_ACKS.load(Ordering::Relaxed), 1);
+        assert!(
+            UART_AWAITING_ACK.load(Ordering::Relaxed),
+            "ack_msg must not clear the in-flight flag; the retry loop owns it"
+        );
+    }
+
+    /// An ack for the frame in flight is not late.
+    #[test]
+    fn test_ack_msg_matching_ack_is_not_late() {
+        reset_for_test();
+        UART_PENDING_COUNTER.store(7, Ordering::Relaxed);
+        UART_AWAITING_ACK.store(true, Ordering::Relaxed);
+
+        let mut ack = empty_frame();
+        ack.data[0] = 7;
+        ack.data[1] = u8::from(UartMsg::Ack);
+
+        block_on(ack_msg(&ack, &[0, 0, 0]));
+
+        assert_eq!(UART_LATE_ACKS.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_ACK_SIGNAL.try_take(), Some(7));
     }
 
     /// Tests that an incoming ack frame wakes a waiter parked on
@@ -1358,6 +1649,12 @@ mod tests {
         UART_SENDER_STARTED.store(true, Ordering::Relaxed);
         UART_LAST_ACK.store(7, Ordering::Relaxed);
         UART_RX_DROPPED.store(3, Ordering::Relaxed);
+        UART_TX_RETRIES.store(2, Ordering::Relaxed);
+        UART_TX_DROPPED.store(1, Ordering::Relaxed);
+        UART_LATE_ACKS.store(4, Ordering::Relaxed);
+        UART_PENDING_COUNTER.store(9, Ordering::Relaxed);
+        UART_AWAITING_ACK.store(true, Ordering::Relaxed);
+        UART_DROP_LOG_PENDING.store(true, Ordering::Relaxed);
         UART_STARTED_SIGNAL.signal(());
         UART_ACK_SIGNAL.signal(1);
         UART_TX_DONE.signal(());
@@ -1371,6 +1668,12 @@ mod tests {
         assert!(!UART_STARTED_SIGNAL.signaled());
         assert_eq!(UART_LAST_ACK.load(Ordering::Relaxed), 0);
         assert_eq!(UART_RX_DROPPED.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_TX_RETRIES.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_TX_DROPPED.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_LATE_ACKS.load(Ordering::Relaxed), 0);
+        assert_eq!(UART_PENDING_COUNTER.load(Ordering::Relaxed), 0);
+        assert!(!UART_AWAITING_ACK.load(Ordering::Relaxed));
+        assert!(!UART_DROP_LOG_PENDING.load(Ordering::Relaxed));
         assert!(UART_ACK_SIGNAL.try_take().is_none());
         assert!(UART_TX_DONE.try_take().is_none());
         assert_eq!(UART_RX_CHANNEL.len(), 0);

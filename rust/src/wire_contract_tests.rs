@@ -449,6 +449,46 @@ fn read_aes_packets(p: &mut Parser) -> Vec<AesPacket> {
     packets
 }
 
+struct CmdAction {
+    session_key: [u8; 16],
+    nonce: [u8; 8],
+    plain_cmd: Vec<u8>,
+    encrypted_cmd: Vec<u8>,
+}
+
+/// `cmd_action.N` command-encryption vectors, read without asserting.
+///
+/// Wire form is `plain_cmd = sno(3) | mac_slot(2) | payload(15)`; the fixture's
+/// `encrypted_cmd` is the same 20 bytes after `CommandAction.generate_data`
+/// wrote the 2-byte MAC into 3..5 and CTR-encrypted the 15-byte payload.
+fn read_cmd_actions(p: &mut Parser) -> Vec<CmdAction> {
+    let mut actions = Vec::new();
+    let mut index = 1;
+
+    while p.contains(&format!("cmd_action.{index}.session_key")) {
+        let session_key = exact(
+            &format!("cmd_action.{index}.session_key"),
+            p.bytes(&format!("cmd_action.{index}.session_key")),
+        );
+        let nonce = exact(
+            &format!("cmd_action.{index}.nonce"),
+            p.bytes(&format!("cmd_action.{index}.nonce")),
+        );
+        let plain_cmd = p.bytes(&format!("cmd_action.{index}.plain_cmd"));
+        let encrypted_cmd = p.bytes(&format!("cmd_action.{index}.encrypted_cmd"));
+
+        actions.push(CmdAction {
+            session_key,
+            nonce,
+            plain_cmd,
+            encrypted_cmd,
+        });
+        index += 1;
+    }
+
+    actions
+}
+
 /// The `ota.header` vector plus the two flash-layout constants, read without
 /// asserting.
 struct FirmwareHeader {
@@ -561,6 +601,7 @@ fn read_all(p: &mut Parser) {
     read_pairing_constants(p);
     let _ = read_aes_blocks(p);
     let _ = read_aes_packets(p);
+    let _ = read_cmd_actions(p);
     let _ = read_firmware_header(p);
 }
 
@@ -651,6 +692,49 @@ fn fixture_aes_packets() {
             aes_att_decryption_packet(&packet.key, &packet.ivm, &corrupted_mic, &mut ignored),
             Err(MicMismatch),
             "decryption accepted a corrupted MIC"
+        );
+    }
+}
+
+/// Value parity for `CommandAction.generate_data`: the committed
+/// `cmd_action.*` vectors drive the real CTR + CBC-MAC code over the 15-byte
+/// command payload, and the decryption direction must recover the original
+/// plaintext. `SoftwareAes` is the active transport after `fake_crypto::reset`.
+#[test]
+fn fixture_cmd_actions() {
+    fake_crypto::reset();
+    let mut p = Parser::new();
+    let actions = read_cmd_actions(&mut p);
+    assert!(
+        !actions.is_empty(),
+        "the fixture has no `cmd_action.*` vectors"
+    );
+
+    for action in &actions {
+        assert_eq!(action.plain_cmd.len(), 20, "`plain_cmd` must be 20 bytes");
+        assert_eq!(
+            action.encrypted_cmd.len(),
+            20,
+            "`encrypted_cmd` must be 20 bytes"
+        );
+
+        let mut command = action.plain_cmd.clone();
+        let (head, payload) = command.split_at_mut(5);
+        aes_att_encryption_packet(&action.session_key, &action.nonce, &mut head[3..5], payload);
+        assert_eq!(
+            command, action.encrypted_cmd,
+            "command encryption mismatch for fixture vector {:02x?}",
+            action.plain_cmd
+        );
+
+        let (head, payload) = command.split_at_mut(5);
+        aes_att_decryption_packet(&action.session_key, &action.nonce, &head[3..5], payload)
+            .expect("the encrypted cmd_action vector must decrypt");
+        assert_eq!(
+            &payload[..],
+            &action.plain_cmd[5..],
+            "decrypted payload mismatch for fixture vector {:02x?}",
+            action.plain_cmd
         );
     }
 }

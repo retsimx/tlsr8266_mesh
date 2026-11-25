@@ -47,11 +47,17 @@ use tlsr8266_radio::irq::BleConnectionEvent;
 #[no_mangle]
 #[link_section = ".ram_code"]
 pub extern "C" fn irq_handler() {
+    #[cfg(all(target_os = "none", feature = "rtt"))]
+    let isr_start = tlsr8266_hal::runtime::executor::note_isr_start();
+
     // Handle RF (Radio Frequency) interrupts first (highest priority)
     tlsr8266_radio::irq::handle_rf_irq();
 
     // Process lower-priority interrupts
     handle_system_interrupts();
+
+    #[cfg(all(target_os = "none", feature = "rtt"))]
+    tlsr8266_hal::runtime::executor::note_isr_ticks(isr_start);
 }
 
 /// Handles lower-priority system and application interrupts.

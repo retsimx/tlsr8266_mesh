@@ -1693,6 +1693,57 @@ mod tests {
         reset_for_test();
     }
 
+    /// A boot with a dirty staging sector must erase the whole OTA area.
+    ///
+    /// `check_ota_area_startup` is the boot-time recovery path: a half-written
+    /// image at `FLASH_ADR_LIGHT_NEW_FW` (left behind by a reset mid-transfer)
+    /// must never be copied out by `handle_ota_update`, so the area is erased
+    /// before the ready flag is consulted.
+    #[test]
+    fn test_check_ota_area_startup_erases_dirty_staging_sector() {
+        reset_fakes();
+        reset_for_test();
+
+        let sectors: Vec<u32> = (0..ERASE_SECTORS_FOR_OTA)
+            .map(|i| FLASH_ADR_LIGHT_NEW_FW + i * 0x1000)
+            .collect();
+        let erases_before: Vec<u32> = sectors
+            .iter()
+            .map(|&sector| FakeFlash::erase_count(sector))
+            .collect();
+
+        FakeFlash::write_slice(FLASH_ADR_LIGHT_NEW_FW, &[0x00, 0x11, 0x22, 0x33]);
+        assert_eq!(
+            is_ota_area_valid(),
+            Ok(false),
+            "a written word in the first staging sector must invalidate the area"
+        );
+
+        check_ota_area_startup();
+
+        for (sector, before) in sectors.into_iter().zip(erases_before) {
+            assert_eq!(
+                FakeFlash::erase_count(sector) - before,
+                1,
+                "boot recovery must erase staging sector {sector:#x} exactly once"
+            );
+        }
+        assert_eq!(
+            is_ota_area_valid(),
+            Ok(true),
+            "the staging area must validate after boot recovery"
+        );
+
+        let mut staged = [0u8; 4];
+        FakeFlash::read_slice(FLASH_ADR_LIGHT_NEW_FW, &mut staged);
+        assert_eq!(
+            staged, [0xFF; 4],
+            "boot recovery must leave the staging bytes erased"
+        );
+
+        reset_for_test();
+    }
+
     /// The failure indicator must genuinely alternate: `gpio_write` drives the pin
     /// high for any non-zero value, so the old `!`-on-`u32` toggle (`0xFFFF_FFFE`)
     /// held the pin high for the whole 6 s and looked identical to success.

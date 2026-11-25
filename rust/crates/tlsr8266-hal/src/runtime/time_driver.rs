@@ -210,6 +210,42 @@ mod tests {
         assert_eq!(FakeMmio::reg8(TMR_CTRL8), 0x01);
     }
 
+    /// Pins the 64-bit `clock_time64()` subtraction across the 32-bit
+    /// `reg_system_tick` wrap.
+    ///
+    /// `now` is `0xFFFF_FFF0`, four ticks below the 32-bit wrap, and the
+    /// deadline is `0x1_0000_0020`, i.e. 48 ticks later in the 64-bit domain.
+    /// A 32-bit subtraction would wrap to `0xFFFF_FFD0` (a ~134 s delta that
+    /// then clamps to one second) and a 32-bit `at <= now` comparison would
+    /// report the deadline as already past, so asserting the exact 48-tick
+    /// capture proves the driver used the extended clock rather than the raw
+    /// register.
+    #[test]
+    fn test_arm_tmr0_uses_64_bit_clock_across_tick_wrap() {
+        // Arrange: `now` sits just before the 32-bit tick register wraps
+        reset_fakes();
+        let driver = MyDriver::new();
+        fake_clock::set_ticks(0xFFFF_FFF0);
+        FakeMmio::set_reg8(TMR_CTRL8, 0x01); // TMR0 already enabled
+
+        // Act: a deadline 48 ticks later, in the next 32-bit epoch
+        let armed = driver.arm_tmr0(0x1_0000_0020);
+
+        // Assert: end state, not just the write order
+        assert!(armed, "a deadline past the wrap is still in the future");
+        assert_eq!(
+            FakeMmio::reg32(TMR0_CAPT),
+            0x30,
+            "the capture is the exact 48-tick 64-bit delta, not a wrapped one"
+        );
+        assert_eq!(FakeMmio::reg32(TMR0_TICK), 0, "the tick counter restarts");
+        assert_eq!(
+            FakeMmio::reg8(TMR_CTRL8),
+            0x01,
+            "TMR0 is left enabled and every other control bit preserved"
+        );
+    }
+
     // Proof slices (design 022 §6.2): the same `arm_tmr0` behaviour asserted
     // above, but expressed against the ordered bytes written to the hardware.
     // The real accessor bodies run and route through the in-process `FakeMmio`

@@ -24,6 +24,7 @@ implementation rather than re-typed here:
 
   * mesh_common.crc16                  -> CRC vectors + UART frame CRCs
   * mesh_common.aes_att_encryption     -> AES-128 block parity table
+  * mesh_common.CommandAction          -> 20-byte encrypted command vectors
   * flash_fw.BLEPacketParser           -> 20-byte BLE OTA packets
   * flash_fw_uart.UARTPacketParser     -> 10-byte UART OTA packets
 
@@ -345,6 +346,45 @@ for idx, key, ivm, plain, cipher, mic in packets:
 block_keys = list(table.keys())  # insertion order == first use
 
 # ---------------------------------------------------------------------------
+# 4b. CommandAction command encryption (mesh_common.CommandAction)
+# ---------------------------------------------------------------------------
+# Synthetic vectors, not captured traffic. A 20-byte command is
+#   plain_cmd = sno(3) | mac_slot(2) | payload(15)
+# and CommandAction.generate_data() mutates it in place: it writes the 2-byte
+# MAC into command[3:5] and CTR-encrypts command[5:20]. The emitted
+# encrypted_cmd is that production output; plain_cmd is the pre-call copy, so
+# the fixture carries both sides of the mapping. Vector 1 is all-zero
+# plaintext; vector 2 carries a non-zero sno and payload so the MAC and CTR
+# paths are not exercised only on zeros.
+CMD_ACTION_SESSION_KEY = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+CMD_ACTION_NONCE = bytes.fromhex("a1b2c3d4e5f60718")
+assert len(CMD_ACTION_SESSION_KEY) == mesh_common.KEY_SIZE
+assert len(CMD_ACTION_NONCE) == 8
+
+
+def cmd_action_vector(sno, mac_slot, payload):
+    """Encrypt one 20-byte command through the production entry point."""
+    assert len(sno) == 3 and len(mac_slot) == 2 and len(payload) == 15
+    plain_cmd = bytes(sno) + bytes(mac_slot) + bytes(payload)
+    encrypted = mesh_common.CommandAction(
+        mesh_common.BaseCommandAction(session_key=list(CMD_ACTION_SESSION_KEY))
+    ).generate_data(
+        list(CMD_ACTION_SESSION_KEY), list(CMD_ACTION_NONCE), bytearray(plain_cmd)
+    )
+    assert len(encrypted) == 20, len(encrypted)
+    return plain_cmd, bytes(encrypted)
+
+
+cmd_action_vectors = [
+    (1, *cmd_action_vector(bytes(3), bytes(2), bytes(15))),
+    (2, *cmd_action_vector(
+        bytes([0x01, 0x02, 0x03]),
+        bytes([0x04, 0x05]),
+        bytes(range(0x10, 0x1F)),
+    )),
+]
+
+# ---------------------------------------------------------------------------
 # 5. OTA header + synthetic blob + packet parsers
 # ---------------------------------------------------------------------------
 
@@ -561,7 +601,7 @@ w("pair.op.reset_mesh = 0x0a")
 w("pair.op.delete_pairing = 0x0e")
 w("")
 
-w("# --- Pairing state discriminants (PairState in state.rs) -----------------")
+w("# --- Pairing state discriminants (PairState in mesh-protocol/src/mesh_types.rs) ---")
 w("pair.state.mesh_effect = %s" % hexval(mesh_common.PAIR_STATE_MESH_EFFECT))
 w("pair.state.requesting_ltk = %s" % hexval(mesh_common.PAIR_STATE_REQUESTING_LTK))
 w("pair.state.pairing_complete = %s" % hexval(mesh_common.PAIR_STATE_PAIRING_COMPLETE))
@@ -627,6 +667,23 @@ for idx, key, ivm, plain, cipher, mic in packets:
     w("aes.packet.%d.plain = %s" % (idx, bytesval(plain)))
     w("aes.packet.%d.cipher = %s" % (idx, bytesval(cipher)))
     w("aes.packet.%d.mic = %s" % (idx, bytesval(mic)))
+w("")
+
+w("# --- CommandAction command encryption (mesh_common.CommandAction) -------")
+w("# SYNTHETIC vectors, not captured traffic. Wire form is")
+w("#   plain_cmd     = sno(3) | mac_slot(2) | payload(15)")
+w("#   encrypted_cmd = sno(3) | mac(2)    | cipher(15)")
+w("# encrypted_cmd is produced by the production CommandAction.generate_data,")
+w("# which overwrites mac_slot with the 2-byte MAC and CTR-encrypts the 15-byte")
+w("# payload; plain_cmd is the pre-call copy. Rust reproduces the 20 bytes with")
+w("# aes_att_encryption_packet and round-trips them with aes_att_decryption_packet.")
+for idx, plain_cmd, encrypted_cmd in cmd_action_vectors:
+    note = "all-zero plaintext" if idx == 1 else "non-zero sno and payload"
+    w("# vector %d: %s" % (idx, note))
+    w("cmd_action.%d.session_key = %s" % (idx, bytesval(CMD_ACTION_SESSION_KEY)))
+    w("cmd_action.%d.nonce = %s" % (idx, bytesval(CMD_ACTION_NONCE)))
+    w("cmd_action.%d.plain_cmd = %s" % (idx, bytesval(plain_cmd)))
+    w("cmd_action.%d.encrypted_cmd = %s" % (idx, bytesval(encrypted_cmd)))
 w("")
 
 w("# --- Firmware header (first 32 bytes of the image, rust/src/startup.rs) --")

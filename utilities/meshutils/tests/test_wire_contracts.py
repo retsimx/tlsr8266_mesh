@@ -178,6 +178,28 @@ def aes_packet_vector(number):
     }
 
 
+def cmd_action_vector(number):
+    """Return the fields of the ``cmd_action.N`` command-encryption vector."""
+    session_key = FIXTURE.as_bytes(f"cmd_action.{number}.session_key")
+    nonce = FIXTURE.as_bytes(f"cmd_action.{number}.nonce")
+    plain_cmd = FIXTURE.as_bytes(f"cmd_action.{number}.plain_cmd")
+    encrypted_cmd = FIXTURE.as_bytes(f"cmd_action.{number}.encrypted_cmd")
+    if len(session_key) != mesh_common.KEY_SIZE:
+        raise FixtureError(
+            f"cmd_action.{number}.session_key: expected {mesh_common.KEY_SIZE} bytes"
+        )
+    if len(nonce) != 8:
+        raise FixtureError(f"cmd_action.{number}.nonce: expected 8 bytes")
+    if len(plain_cmd) != 20 or len(encrypted_cmd) != 20:
+        raise FixtureError(f"cmd_action.{number}: expected 20-byte commands")
+    return {
+        "session_key": session_key,
+        "nonce": nonce,
+        "plain_cmd": plain_cmd,
+        "encrypted_cmd": encrypted_cmd,
+    }
+
+
 class Crc16Tests(unittest.TestCase):
     """CRC-16-MODBUS (poly 0xA001, init 0xFFFF) over the shared vectors."""
 
@@ -439,6 +461,31 @@ class AesPacketTests(unittest.TestCase):
                 )
 
 
+class CommandActionTests(unittest.TestCase):
+    """``CommandAction.generate_data`` over the 20-byte command vectors.
+
+    The fixture's ``encrypted_cmd`` is the production output for the paired
+    ``plain_cmd``: ``generate_data`` writes the 2-byte MAC into bytes 3..5 and
+    CTR-encrypts the 15-byte payload in place, so a fresh copy must reproduce it
+    byte for byte.
+    """
+
+    def test_generate_data(self):
+        for number in (1, 2):
+            vector = cmd_action_vector(number)
+            with self.subTest(vector=number):
+                command = mesh_common.CommandAction(
+                    mesh_common.BaseCommandAction(
+                        session_key=list(vector["session_key"]),
+                    )
+                ).generate_data(
+                    list(vector["session_key"]),
+                    list(vector["nonce"]),
+                    bytearray(vector["plain_cmd"]),
+                )
+                self.assertEqual(bytes(command), vector["encrypted_cmd"])
+
+
 class FirmwareHeaderTests(unittest.TestCase):
     """The 32-byte image header every OTA image starts with."""
 
@@ -577,7 +624,7 @@ class ZzOrphanVectorTests(unittest.TestCase):
         self.assertEqual(len(rust_only), 17)
         self.assertEqual(sorted(shared - CONSUMED_KEYS), [])
         self.assertEqual(sorted(CONSUMED_KEYS - shared), [])
-        self.assertEqual(len(shared), 126)
+        self.assertEqual(len(shared), 134)
 
 
 if __name__ == "__main__":

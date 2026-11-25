@@ -376,6 +376,61 @@ mod tests {
         assert_eq!(dropped_uart_tx(), 5);
     }
 
+    /// Repeated rejections bump each drop counter by exactly one, and draining
+    /// the queue lets the next enqueue through without touching the counter.
+    ///
+    /// The single-instant count is already pinned by
+    /// [`test_drop_counters_count_full_queue_rejections`]; this test pins the
+    /// *shape* of the counter over time, which a "count == 5 at the end"
+    /// assertion cannot distinguish from a counter that skips or double-counts
+    /// on the way there.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset, then fill `MESH_RX_CHANNEL`, `MESH_TX_QUEUE` and
+    ///    `UART_TX_CHANNEL` to capacity
+    /// 2. Reject five more of each, asserting the matching drop counter equals
+    ///    the rejection ordinal *after every single rejection*
+    /// 3. Drain each queue, assert the next enqueue returns `true` and the
+    ///    counter is unchanged
+    #[test]
+    fn test_drop_counters_increment_monotonically_and_recover_after_drain() {
+        reset_for_test();
+
+        let pkt = test_packet(0x10, 0x20, 1);
+        let msg = test_uart_msg(0x05);
+        for _ in 0..MESH_RX_QUEUE_CAPACITY {
+            assert!(enqueue_mesh_rx(&pkt));
+        }
+        for _ in 0..MESH_TX_QUEUE_CAPACITY {
+            assert!(enqueue_mesh_tx(&pkt, 0, 0));
+        }
+        for _ in 0..UART_TX_QUEUE_CAPACITY {
+            assert!(enqueue_uart_tx(&msg));
+        }
+
+        for n in 1..=5 {
+            assert!(!enqueue_mesh_rx(&pkt));
+            assert_eq!(dropped_mesh_rx(), n);
+            assert!(!enqueue_mesh_tx(&pkt, 0, 0));
+            assert_eq!(dropped_mesh_tx(), n);
+            assert!(!enqueue_uart_tx(&msg));
+            assert_eq!(dropped_uart_tx(), n);
+        }
+
+        // Drain every queue: one free slot is enough to prove recovery.
+        assert!(MESH_RX_CHANNEL.try_receive().is_ok());
+        MESH_TX_QUEUE.lock().clear();
+        assert!(UART_TX_CHANNEL.try_receive().is_ok());
+
+        assert!(enqueue_mesh_rx(&pkt));
+        assert_eq!(dropped_mesh_rx(), 5);
+        assert!(enqueue_mesh_tx(&pkt, 0, 0));
+        assert_eq!(dropped_mesh_tx(), 5);
+        assert!(enqueue_uart_tx(&msg));
+        assert_eq!(dropped_uart_tx(), 5);
+    }
+
     #[test]
     fn test_reset_for_test_clears_drop_counters() {
         reset_for_test();

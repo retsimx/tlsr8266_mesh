@@ -2073,6 +2073,43 @@ mod tests {
         );
     }
 
+    /// The RX drop counter rises by exactly one per rejected frame and stops
+    /// moving once the channel has room again.
+    ///
+    /// [`test_take_rx_and_ack_tx_irq_counts_drop_when_channel_full`] pins a
+    /// single rejection; this test pins the counter's shape across repeated
+    /// rejections and the recovery after a drain.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Reset, fill `UART_RX_CHANNEL` to its 12-slot capacity
+    /// 2. Raise the RX flag with a frame in the DMA buffer and call the ISR body
+    ///    five times, asserting `UART_RX_DROPPED` equals the call ordinal after
+    ///    every call
+    /// 3. Drain one slot, assert the next `try_send` succeeds and the counter is
+    ///    unchanged
+    #[test]
+    fn test_uart_rx_channel_drop_counter_monotonic_and_recovers_after_drain() {
+        reset_for_test();
+        reset_fakes();
+        let frame = frame_with_valid_crc();
+        for _ in 0..12 {
+            UART_RX_CHANNEL.try_send(frame).unwrap();
+        }
+        UART_HW.lock().rx_data_buf = frame;
+
+        for n in 1..=5 {
+            // The flag is write-1-to-clear, so it must be raised every round.
+            FakeMmio::set_reg8(REG_DMA_RX_RDY0, UartIrqMask::Rx as u8);
+            take_rx_and_ack_tx_irq();
+            assert_eq!(UART_RX_DROPPED.load(Ordering::Relaxed), n);
+        }
+
+        assert!(UART_RX_CHANNEL.try_receive().is_ok());
+        assert!(UART_RX_CHANNEL.try_send(frame).is_ok());
+        assert_eq!(UART_RX_DROPPED.load(Ordering::Relaxed), 5);
+    }
+
     /// The panic sink arms DMA1 synchronously and does not touch the queue.
     #[test]
     fn test_send_sync_panic_starts_dma1() {

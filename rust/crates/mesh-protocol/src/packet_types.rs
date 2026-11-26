@@ -887,9 +887,9 @@ mod tests {
     /// Tests that structs implement required traits
     #[test]
     fn test_struct_traits() {
-        // Test Clone trait
+        // Test Clone trait: the type is Copy, so cloning degrades to a bitwise copy
         let pkt1 = RfPacketAdvIndModuleT::default();
-        let pkt2 = pkt1.clone();
+        let pkt2 = pkt1;
         let dma_len1 = pkt1.dma_len;
         let dma_len2 = pkt2.dma_len;
         assert_eq!(dma_len1, dma_len2);
@@ -939,6 +939,7 @@ mod tests {
     ///   - IV: 8 bytes starting from head.rf_len (offset 5)
     ///   - MIC: 2 bytes at internal_par2[1] (must be offset 41)
     ///   - Data: 0x1c bytes starting from sno (offset 13, so data covers bytes 13..41)
+    ///
     /// The MIC must immediately follow the data region (offset 41) for AES-CCM to work correctly.
     /// MeshPkt is repr(C, align(4)): the 1-byte padding after op (offset 21) means internal_par2
     /// is at offset 40 and internal_par2[1] is at offset 41.
@@ -989,7 +990,7 @@ mod tests {
         // Copy to temporary for comparison due to packed struct alignment
         let sno_copy = pkt_buf.sno;
         assert_eq!(sno_copy, [0x02, 0x03, 0x04]);
-        assert_eq!(pkt_buf.notify_ok_flag, true);
+        assert!(pkt_buf.notify_ok_flag);
 
         // Test Debug trait (PktBuf has Debug)
         let debug_str = format!("{:?}", pkt_buf);

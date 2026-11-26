@@ -126,17 +126,20 @@ static LAST_INDEX: AtomicU16 = AtomicU16::new(u16::MAX);
 /// seconds.
 static LAST_OTA_TIMEOUT_TICK: CriticalSectionMutex<u64> = CriticalSectionMutex::new(0);
 
-/// Flash address of the "firmware staged and ready to copy" sentinel byte.
+/// Flash addresses and sizes shared by the staging path and the boot copier.
 ///
 /// Part of the wire/flash contract: `rust/src/wire_contract_tests.rs` asserts
 /// these four constants against `tests/fixtures/wire_vectors.json`.
-pub const FLASH_ADR_OTA_READY_FLAG: u32 = 0x3F000;
-/// Sentinel written to [`FLASH_ADR_OTA_READY_FLAG`] once an image is staged.
-pub const FLASH_OTA_READY_FLAG: u8 = 0xa5;
-/// Upper bound on the staged image size, in KiB.
-pub const FW_SIZE_MAX_K: u32 = 128;
-/// Sectors erased before a staged image is copied out.
-pub const ERASE_SECTORS_FOR_OTA: u32 = FW_SIZE_MAX_K.div_ceil(4);
+pub mod flash_layout {
+    /// Flash address of the "firmware staged and ready to copy" sentinel byte.
+    pub const FLASH_ADR_OTA_READY_FLAG: u32 = 0x3F000;
+    /// Sentinel written to [`FLASH_ADR_OTA_READY_FLAG`] once an image is staged.
+    pub const FLASH_OTA_READY_FLAG: u8 = 0xa5;
+    /// Upper bound on the staged image size, in KiB.
+    pub const FW_SIZE_MAX_K: u32 = 128;
+    /// Sectors erased before a staged image is copied out.
+    pub const ERASE_SECTORS_FOR_OTA: u32 = FW_SIZE_MAX_K.div_ceil(4);
+}
 
 /// Slots in the shared response buffer, and therefore the most GATT OTA packets
 /// a single drain can stage.
@@ -157,11 +160,13 @@ pub const OTA_STAGING_SLOTS: usize = 16;
 #[coverage(off)]
 pub fn handle_ota_update() {
     // This function requires that *everything* be in ram
-    // SAFETY: (2) boot-OTA flag read. `FLASH_ADR_OTA_READY_FLAG` is a fixed byte
-    // address in the flash window, read as one `u8` before any code from the staged
-    // image runs; no reference to it is created.
+    // SAFETY: (2) boot-OTA flag read. `flash_layout::FLASH_ADR_OTA_READY_FLAG` is
+    // a fixed byte address in the flash window, read as one `u8` before any code
+    // from the staged image runs; no reference to it is created.
     unsafe {
-        if *(FLASH_ADR_OTA_READY_FLAG as *const u8) != FLASH_OTA_READY_FLAG {
+        if *(flash_layout::FLASH_ADR_OTA_READY_FLAG as *const u8)
+            != flash_layout::FLASH_OTA_READY_FLAG
+        {
             // Nothing to do
             return;
         }
@@ -214,7 +219,7 @@ pub fn handle_ota_update() {
     buff[0] = 0;
     // The copy already succeeded, so a stall here is harmless: the flag stays
     // armed and the next boot re-runs this same (idempotent) copy.
-    let _ = flash_write_page(FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
+    let _ = flash_write_page(flash_layout::FLASH_ADR_OTA_READY_FLAG, 1, buff.as_mut_ptr());
 
     // Force reboot
     tlsr8266_hal::pm::mcu_trigger_reboot();
@@ -238,7 +243,7 @@ pub fn check_ota_area_startup() {
 /// - `Err(())` if hardware I/O error occurs
 fn is_ota_area_valid() -> Result<bool, ()> {
     let mut buf: [u8; 4] = [0; 4];
-    for i in 0..ERASE_SECTORS_FOR_OTA {
+    for i in 0..flash_layout::ERASE_SECTORS_FOR_OTA {
         flash_read_page(FLASH_ADR_LIGHT_NEW_FW + i * 0x1000, 4, buf.as_mut_ptr());
         let tmp =
             buf[0] as u32 | (buf[1] as u32) << 8 | (buf[2] as u32) << 16 | (buf[3] as u32) << 24;
@@ -252,11 +257,12 @@ fn is_ota_area_valid() -> Result<bool, ()> {
 
 /// Erase every sector of the OTA staging area.
 fn erase_ota_data() {
-    for i in 0..ERASE_SECTORS_FOR_OTA {
+    for i in 0..flash_layout::ERASE_SECTORS_FOR_OTA {
         // A sector that fails to erase still reads non-erased, so
         // `is_ota_area_valid` rejects the area and the next boot erases again.
-        let _ =
-            flash_erase_sector(FLASH_ADR_LIGHT_NEW_FW + (ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000);
+        let _ = flash_erase_sector(
+            FLASH_ADR_LIGHT_NEW_FW + (flash_layout::ERASE_SECTORS_FOR_OTA - 1 - i) * 0x1000,
+        );
     }
 }
 
@@ -542,7 +548,7 @@ fn rf_link_slave_data_ota_save() {
                 n_data_len,
                 OTA_UPDATE_CURRENT_FLASH_ADDRESS.get(),
                 packet_len,
-                FW_SIZE_MAX_K * 1024,
+                flash_layout::FW_SIZE_MAX_K * 1024,
             );
             reset_flag = match decision {
                 OtaChunkDecision::WriteFirstChunk | OtaChunkDecision::WriteNextChunk => {
@@ -634,11 +640,15 @@ fn rf_ota_set_flag() {
 
     // A failed erase leaves the sentinel byte un-erased, so the flag write below
     // keeps the old value and the staged image is not armed this time.
-    let _ = flash_erase_sector(FLASH_ADR_OTA_READY_FLAG);
-    let flag: u32 = FLASH_OTA_READY_FLAG as u32;
+    let _ = flash_erase_sector(flash_layout::FLASH_ADR_OTA_READY_FLAG);
+    let flag: u32 = flash_layout::FLASH_OTA_READY_FLAG as u32;
     // A failed flag write leaves the sentinel unarmed rather than claiming a
     // copy that never starts; the transfer is retried by the peer.
-    let _ = flash_write_page(FLASH_ADR_OTA_READY_FLAG, 4, addr_of!(flag) as *mut u8);
+    let _ = flash_write_page(
+        flash_layout::FLASH_ADR_OTA_READY_FLAG,
+        4,
+        addr_of!(flag) as *mut u8,
+    );
 }
 
 /// Signal a successful OTA with the LED pattern.
@@ -1164,9 +1174,10 @@ mod tests {
         // the ready sentinel is written only on the `Ok` arm, `Error` erases the
         // staging area instead.)
         let mut ready = [0u8; 1];
-        FakeFlash::read_slice(FLASH_ADR_OTA_READY_FLAG, &mut ready);
+        FakeFlash::read_slice(flash_layout::FLASH_ADR_OTA_READY_FLAG, &mut ready);
         assert_eq!(
-            ready[0], FLASH_OTA_READY_FLAG,
+            ready[0],
+            flash_layout::FLASH_OTA_READY_FLAG,
             "the Ok finish must arm the boot-time OTA ready sentinel"
         );
         assert_reboot_latched();
@@ -1419,7 +1430,7 @@ mod tests {
 
         // (a) BLE-bridge mode: 16-byte payloads. 131068 + 16 overruns the 128 KiB
         // staging area, so the packet is rejected at the size bound.
-        set_current_flash_address_for_test(FW_SIZE_MAX_K * 1024 - 4);
+        set_current_flash_address_for_test(flash_layout::FW_SIZE_MAX_K * 1024 - 4);
 
         let mut staged = PacketAttData::default();
         staged.head.l2cap_len = 7 + 16;
@@ -1447,7 +1458,7 @@ mod tests {
         );
         assert_eq!(
             current_flash_address_for_test(),
-            FW_SIZE_MAX_K * 1024 - 4,
+            flash_layout::FW_SIZE_MAX_K * 1024 - 4,
             "the size-bound rejection must not move the write cursor"
         );
 
@@ -1685,7 +1696,9 @@ mod tests {
             "the first staging sector must be erased exactly once"
         );
         assert_eq!(
-            FakeFlash::erase_count(FLASH_ADR_LIGHT_NEW_FW + (ERASE_SECTORS_FOR_OTA - 1) * 0x1000),
+            FakeFlash::erase_count(
+                FLASH_ADR_LIGHT_NEW_FW + (flash_layout::ERASE_SECTORS_FOR_OTA - 1) * 0x1000
+            ),
             1,
             "the last staging sector must be erased exactly once"
         );
@@ -1704,7 +1717,7 @@ mod tests {
         reset_fakes();
         reset_for_test();
 
-        let sectors: Vec<u32> = (0..ERASE_SECTORS_FOR_OTA)
+        let sectors: Vec<u32> = (0..flash_layout::ERASE_SECTORS_FOR_OTA)
             .map(|i| FLASH_ADR_LIGHT_NEW_FW + i * 0x1000)
             .collect();
         let erases_before: Vec<u32> = sectors

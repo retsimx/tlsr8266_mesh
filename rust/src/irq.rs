@@ -142,7 +142,9 @@ fn handle_system_timer_irq() {
 mod tests {
     use super::*;
     use crate::config::FLASH_ADR_LIGHT_NEW_FW;
-    use crate::ota::{ERASE_SECTORS_FOR_OTA, FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
+    use crate::ota::flash_layout::{
+        ERASE_SECTORS_FOR_OTA, FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG,
+    };
     use mesh_protocol::crc::crc16;
     use mesh_protocol::mesh_types::{RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, START_UP_FLAG};
     use mesh_protocol::packet_types::{Packet, PacketAttData};

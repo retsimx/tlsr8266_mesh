@@ -188,16 +188,18 @@ pub fn handle_ota_update() {
     // 4-byte-aligned page; the 256-byte TC32 frame slot provides that alignment.
     let new_fw_size = unsafe { *(buff.as_ptr().offset(0x18) as *const u32) };
 
-    // Fail-safe contract: on a bus stall the loop returns *before* the ready
-    // flag is cleared, so the retry flag survives and the copy is attempted
-    // again after the next reset. Clearing it after a partial copy would leave a
-    // blank running image with no way back except a SWire reflash.
+    // Fail-safe contract: a bus stall reboots *before* the ready flag is cleared,
+    // so the retry flag survives and the copy is attempted again on the next
+    // boot. Returning instead would resume `main_entrypoint` on a partly erased
+    // image and leave recovery to an external power cycle. Clearing the flag
+    // after a partial copy would leave a blank running image with no way back
+    // except a SWire reflash.
     let mut current_addr = 0;
     while current_addr < new_fw_size {
         // Check if we need to clear the next sector
         if current_addr % FLASH_SECTOR_SIZE as u32 == 0 && flash_erase_sector(current_addr).is_err()
         {
-            return;
+            reboot_and_retry_copy();
         }
 
         // Read the page at this address from the new firmware
@@ -209,7 +211,7 @@ pub fn handle_ota_update() {
 
         // Write the page to the real firmware
         if flash_write_page(current_addr, PAGE_SIZE, buff.as_mut_ptr()).is_err() {
-            return;
+            reboot_and_retry_copy();
         }
 
         current_addr += PAGE_SIZE;
@@ -224,6 +226,25 @@ pub fn handle_ota_update() {
     // Force reboot
     tlsr8266_hal::pm::mcu_trigger_reboot();
 
+    #[allow(clippy::empty_loop)]
+    loop {}
+}
+
+/// Abort the boot-time copy by rebooting with the ready flag still armed.
+///
+/// The flag is the recovery contract: the next boot re-runs the idempotent copy
+/// instead of resuming `main_entrypoint` on a partly erased image, so no
+/// external reset is needed. `-> !` also keeps the caller off the resume path on
+/// host builds, where [`light_sw_reboot`] returns instead of holding the reset.
+///
+/// Safe to call from the `.ram_code` copier: both abort sites run after the flash
+/// driver released chip select and returned, so the flash-resident reboot path
+/// can be fetched. The parking loop stays in RAM for the same reason the copier
+/// does — the running image above `current_addr` may already be the new image.
+#[inline(never)]
+#[link_section = ".ram_code"]
+fn reboot_and_retry_copy() -> ! {
+    light_sw_reboot();
     #[allow(clippy::empty_loop)]
     loop {}
 }

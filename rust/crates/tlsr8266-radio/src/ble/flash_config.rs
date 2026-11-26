@@ -156,17 +156,21 @@ pub fn dev_addr_with_mac_match(params: &[u8]) -> bool {
 /// * `adr` - Offset within configuration slot (0=flag, 16=name, 32=pwd, 48=ltk)
 /// * `p` - Data buffer to write
 ///
+/// # Returns
+/// * `Ok(())` when the block was programmed
+/// * `Err(())` when the SPI bus stalled, so the caller can withhold the header
+///
 /// # Flash Address Calculation
 /// Final address = `FLASH_ADR_PAIRING + FLASH_CONFIGURATION_INDEX + adr`
-pub fn save_pair_info(adr: u32, p: &[u8]) {
+pub fn save_pair_info(adr: u32, p: &[u8]) -> Result<(), ()> {
     let flash_adr_pairing = radio_config().flash_adr_pairing;
     // No read-back verification exists: a lost program leaves this block erased
     // (0xFF) until the next pairing save rewrites the whole record.
-    let _ = flash_write_page(
+    flash_write_page(
         (flash_adr_pairing as i32 + FLASH_CONFIGURATION_INDEX.get() + adr as i32) as u32,
         p.len() as u32,
         p.as_ptr(),
-    );
+    )
 }
 
 /// Initiates BLE connection parameter negotiation.
@@ -1236,7 +1240,7 @@ mod tests {
         // Call function with test data
         let test_data = [0x01, 0x02, 0x03, 0x04];
         let test_addr = 0x10u32;
-        save_pair_info(test_addr, &test_data);
+        assert!(save_pair_info(test_addr, &test_data).is_ok());
 
         // Calculate expected address
         let expected_addr = (FLASH_ADR_PAIRING as i32 + 0x80 + test_addr as i32) as u32;
@@ -1254,7 +1258,7 @@ mod tests {
         FLASH_CONFIGURATION_INDEX.set(0x00);
 
         let test_data = [0xAA, 0xBB];
-        save_pair_info(0x20, &test_data);
+        assert!(save_pair_info(0x20, &test_data).is_ok());
 
         let expected_addr = (FLASH_ADR_PAIRING as i32 + 0x20) as u32;
         let mut got = [0u8; 2];

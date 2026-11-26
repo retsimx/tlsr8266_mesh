@@ -12,9 +12,9 @@ produce byte-identical output, which is what makes the fixture's sha256
 reviewable.
 
 That output IS the contract. Both suites -- ``rust/crates/mesh-protocol/src/lib.rs``
-(``fixture_tests``, for the protocol half) and ``rust/src/wire_contract_tests.rs``
+(``fixture_tests``, for the protocol half) and ``rust/src/wire_contract_tests/``
 (the firmware-owned remainder), plus the host tooling in
-``utilities/meshutils/tests/test_wire_contracts.py`` -- assert it byte for byte, so:
+``utilities/meshutils/tests/`` -- assert it byte for byte, so:
 
   * never hand-edit ``tests/wire_vectors.txt``;
   * change this script, re-run it, then run both suites and review the diff.
@@ -470,9 +470,9 @@ out = []
 w = out.append
 
 w("# wire_vectors.txt -- cross-boundary golden vectors for the TLSR8266 mesh")
-w("# firmware (Rust, rust/src/wire_contract_tests.rs and")
+w("# firmware (Rust, rust/src/wire_contract_tests/ and")
 w("# rust/crates/mesh-protocol/src/lib.rs) and the host tooling")
-w("# (Python, utilities/meshutils/tests/test_wire_contracts.py).")
+w("# (Python, utilities/meshutils/tests/test_wire_contract_*.py).")
 w("#")
 w("# Format (normative):")
 w("#   * one `key = value` per line; blank lines and lines starting with `#`")

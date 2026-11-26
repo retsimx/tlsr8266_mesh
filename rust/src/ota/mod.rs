@@ -128,7 +128,7 @@ static LAST_OTA_TIMEOUT_TICK: CriticalSectionMutex<u64> = CriticalSectionMutex::
 
 /// Flash addresses and sizes shared by the staging path and the boot copier.
 ///
-/// Part of the wire/flash contract: `rust/src/wire_contract_tests.rs` asserts
+/// Part of the wire/flash contract: `rust/src/wire_contract_tests/mod.rs` asserts
 /// these four constants against `tests/fixtures/wire_vectors.json`.
 pub mod flash_layout {
     /// Flash address of the "firmware staged and ready to copy" sentinel byte.

@@ -1,7 +1,7 @@
 # wire_vectors.txt -- cross-boundary golden vectors for the TLSR8266 mesh
-# firmware (Rust, rust/src/wire_contract_tests.rs and
+# firmware (Rust, rust/src/wire_contract_tests/ and
 # rust/crates/mesh-protocol/src/lib.rs) and the host tooling
-# (Python, utilities/meshutils/tests/test_wire_contracts.py).
+# (Python, utilities/meshutils/tests/test_wire_contract_*.py).
 #
 # Format (normative):
 #   * one `key = value` per line; blank lines and lines starting with `#`

@@ -151,12 +151,12 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "dispatch_uart_cmd": ("uart_command_hook",),
     "uart_tx_ops_push": ("enqueue_uart_tx_hook",),
     "uart_tx_ops_dropped": ("dropped_uart_tx_hook",),
-    # `logging`'s async sink. `dispatch_log_blocking` is *not* listed: it is
-    # never emitted on the linked image at all. Its only caller is
-    # `UartStream::send_blocking`, which needs the `uprint!` macro, and `uprint!`
-    # has no call sites — the panic path names `uart::send_sync_panic` directly
-    # through `send_blocking_with`. A row for it would therefore fail closed
-    # against a correct build; it is unreachable, not inlined away.
+    # `logging`'s async sink. There is no row for a registered blocking sink:
+    # `LogSinks::blocking_tx` and its `dispatch_log_blocking` shim were dead on
+    # the linked image (only reachable through the call-less `uprint!` macro) and
+    # were deleted (tech-debt row 56). The panic path names
+    # `uart::send_sync_panic` directly through `send_blocking_with`, so that edge
+    # is a direct `bl` the parser already sees, not an indirect one.
     "dispatch_log_async": ("log_async_tx_hook",),
 }
 

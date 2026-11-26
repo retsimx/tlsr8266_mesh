@@ -9,16 +9,16 @@
 //! handler, but the UART transport itself sits *above* this module: the async
 //! sink queues through `queues::enqueue_uart_tx` and the panic sink writes the
 //! DMA buffer directly. `logging` therefore names no transport at all. [`LogSinks`]
-//! is installed once by `app::main_task` (before the boot banner), and every send
-//! routes through it. With nothing registered the sends are a no-op, which is
-//! what makes `logging` sit below `uart` in the layering graph.
+//! is installed once by `app::main_task` (before the boot banner), and every
+//! queued line routes through it. With nothing registered the send is a no-op,
+//! which is what makes `logging` sit below `uart` in the layering graph.
 //!
 //! ## Key Responsibilities:
 //! - `UartStream<const N: usize>`: a fixed-capacity byte sink implementing
 //!   `core::fmt::Write`
 //! - Chunked framing into 44-byte built-in-UART packets (`build_uart_frame`)
-//! - The async (`send_async`), registered-blocking (`send_blocking`) and direct
-//!   panic-path (`send_blocking_with`) send sinks, each with one RTT mirror
+//! - The async (`send_async`) and direct panic-path (`send_blocking_with`) send
+//!   sinks, each with one RTT mirror
 //! - `uprintln!`, `print_to_uart` and `get_uart_stream`
 
 use core::cell::Cell;
@@ -31,26 +31,28 @@ use mesh_protocol::uart::{
     UartData, UartMsg, UART_DATA_LEN, UART_PAYLOAD_MAX_SIZE, UART_PAYLOAD_OFFSET,
 };
 
-/// The UART transport sinks every log line is handed to.
+/// The UART transport sink every queued log line is handed to.
 ///
-/// Every slot is a plain `fn` pointer so the struct is `Copy` and can be copied
+/// The slot is a plain `fn` pointer so the struct is `Copy` and can be copied
 /// out of the critical section in one go — the lock is never held across a sink
-/// call. Ownership runs `app.rs` → `logging`: the providers live above this
-/// module, so the composition root installs them once, before the boot banner,
-/// and a line logged earlier is dropped rather than routed somewhere unexpected.
+/// call. The panic path does not route through here: `lib.rs` names
+/// `uart::send_sync_panic` directly, through `UartStream::send_blocking_with`,
+/// so the panic call graph keeps a direct edge to the transport.
+///
+/// Ownership runs `app.rs` → `logging`: the provider lives above this module, so
+/// the composition root installs it once, before the boot banner, and a line
+/// logged earlier is dropped rather than routed somewhere unexpected.
 #[derive(Copy, Clone)]
 pub struct LogSinks {
     /// Queue one frame on the async transport; `true` only when it was queued.
     pub async_tx: fn(&UartData) -> bool,
-    /// Write one frame on the blocking transport (panic path).
-    pub blocking_tx: fn(&UartData),
 }
 
-/// Test-only stand-ins for the sinks `app::main_task` registers.
+/// Test-only stand-in for the sink `app::main_task` registers.
 ///
 /// Before this module became sink-injected it reached `uart` directly,
 /// so a host test in another module that logs without registering (the UART RX
-/// drop-report line) still expects its frame. These adapters keep that
+/// drop-report line) still expects its frame. This adapter keeps that
 /// behaviour for test builds only; [`LOG_SINKS`] starts empty in production, so
 /// a line logged before `app::main_task` registers is dropped.
 #[cfg(test)]
@@ -60,16 +62,11 @@ mod test_sinks {
     pub(super) fn async_tx(msg: &UartData) -> bool {
         crate::uart::send_message(msg).is_ok()
     }
-
-    pub(super) fn blocking_tx(msg: &UartData) {
-        crate::uart::send_sync_panic(msg)
-    }
 }
 
 #[cfg(test)]
 const TEST_LOG_SINKS: LogSinks = LogSinks {
     async_tx: test_sinks::async_tx,
-    blocking_tx: test_sinks::blocking_tx,
 };
 
 #[cfg(not(test))]
@@ -105,14 +102,6 @@ fn dispatch_log_async(frame: &UartData) -> bool {
     }
 }
 
-/// Hands one frame to the blocking sink; a no-op before registration.
-#[inline(never)]
-fn dispatch_log_blocking(frame: &UartData) {
-    if let Some(sinks) = log_sinks() {
-        (sinks.blocking_tx)(frame);
-    }
-}
-
 #[cfg(test)]
 fn reset_log_sinks_for_test() {
     critical_section::with(|cs| LOG_SINKS.borrow(cs).set(None));
@@ -126,18 +115,14 @@ pub fn get_uart_stream() -> UartStream<128> {
 
 // Helper function to print and send data to the uart
 #[inline]
-pub fn print_to_uart<F>(doasync: bool, f: F)
+pub fn print_to_uart<F>(f: F)
 where
     F: FnOnce(&mut UartStream<128>) -> fmt::Result,
 {
     critical_section::with(|_| {
         let mut stream = get_uart_stream();
         let _ = f(&mut stream);
-        if doasync {
-            stream.send_async(false);
-        } else {
-            stream.send_blocking(false);
-        }
+        stream.send_async(false);
     });
 }
 
@@ -148,7 +133,7 @@ macro_rules! uprintln {
             use core::fmt::Write;
             use $crate::logging::print_to_uart;
 
-            print_to_uart(true, |stream| {
+            print_to_uart(|stream| {
                 core::writeln!(stream, $($arg)*)
             });
         }
@@ -269,22 +254,6 @@ impl<const N: usize> UartStream<N> {
         }
     }
 
-    /// Hands the stream to the registered blocking UART sink, one chunk at a
-    /// time, after one RTT mirror.
-    ///
-    /// A thin front for [`UartStream::send_blocking_with`]: the only difference
-    /// between the registered and the direct path is which sink receives the
-    /// chunks, and sharing the loop keeps the audited raw-pointer copy in one
-    /// place. It must never touch the async channel: a panic while sending
-    /// would re-enter `panic_fmt` through `try_send`, a call-graph cycle the
-    /// static stack gate rejects. The panic handler calls `send_blocking_with`
-    /// directly, so nothing in the firmware reaches this route today and the
-    /// linker drops it from the image; it stays for the registered blocking
-    /// path, tested on the host.
-    pub fn send_blocking(&self, is_panic: bool) {
-        self.send_blocking_with(is_panic, dispatch_log_blocking);
-    }
-
     /// Hands the stream to `sink` directly, one chunk at a time, after one RTT
     /// mirror.
     ///
@@ -292,11 +261,15 @@ impl<const N: usize> UartStream<N> {
     /// `uart::send_sync_panic` by name, so the call is a direct edge on
     /// the panic call graph (the static stack gate and
     /// `sdk/stack_analysis.py` both rely on it) rather than an indirect one
-    /// through the registered sinks. `sink` is called on a monomorphised
+    /// through the registered async sink. `sink` is called on a monomorphised
     /// generic, so nothing is lost to a dynamic dispatch.
     ///
     /// The mirror happens exactly once, here: the caller must not mirror the
     /// same bytes again.
+    // Only the target panic handler and the unit tests drive this (the host
+    // library build has no panic handler), so it is gated the same way the
+    // `diagnostics` panic-record writers are.
+    #[cfg(any(target_os = "none", test))]
     pub fn send_blocking_with<F: Fn(&UartData)>(&self, is_panic: bool, sink: F) {
         let mut buffer = self.as_bytes();
 
@@ -337,7 +310,6 @@ mod tests {
     use crate::uart::reset_for_test;
     use core::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex as StdMutex, MutexGuard};
-    use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_radio::queues::UART_TX_CHANNEL;
 
     /// The 44-byte frame `build_uart_frame` must produce for `payload`.
@@ -356,9 +328,9 @@ mod tests {
         }
     }
 
-    /// Installs the test stand-ins for `app::main_task`'s hooks, so the
+    /// Installs the test stand-in for `app::main_task`'s log sink, so the
     /// assertions below observe the frames `logging` produced through the
-    /// registered sinks.
+    /// registered sink.
     fn install_test_sinks() {
         set_log_sinks(TEST_LOG_SINKS);
     }
@@ -370,11 +342,11 @@ mod tests {
     /// the exact bytes `logging` produces installs a recorder and asserts on
     /// the recording instead of mocking the transport one layer down.
     static RECORDED_ASYNC: StdMutex<Vec<UartData>> = StdMutex::new(Vec::new());
-    static RECORDED_BLOCKING: StdMutex<Vec<UartData>> = StdMutex::new(Vec::new());
+    /// Frames handed to the direct sink (`send_blocking_with`'s argument).
+    static RECORDED_DIRECT: StdMutex<Vec<UartData>> = StdMutex::new(Vec::new());
 
     const RECORDING_SINKS: LogSinks = LogSinks {
         async_tx: record_async,
-        blocking_tx: record_blocking,
     };
 
     fn record_async(msg: &UartData) -> bool {
@@ -382,8 +354,8 @@ mod tests {
         true
     }
 
-    fn record_blocking(msg: &UartData) {
-        recorded(&RECORDED_BLOCKING).push(*msg);
+    fn record_direct(msg: &UartData) {
+        recorded(&RECORDED_DIRECT).push(*msg);
     }
 
     fn recorded(sink: &'static StdMutex<Vec<UartData>>) -> MutexGuard<'static, Vec<UartData>> {
@@ -394,20 +366,20 @@ mod tests {
         recorded(&RECORDED_ASYNC).clone()
     }
 
-    fn blocking_frames() -> Vec<UartData> {
-        recorded(&RECORDED_BLOCKING).clone()
+    fn direct_frames() -> Vec<UartData> {
+        recorded(&RECORDED_DIRECT).clone()
     }
 
     /// Installs [`RECORDING_SINKS`] and restores the test default on drop.
     ///
-    /// The sinks are process-wide, so an RAII guard keeps a failing assertion
+    /// The sink is process-wide, so an RAII guard keeps a failing assertion
     /// from leaking the recorder into the next test.
     struct RecordingSinks;
 
     impl RecordingSinks {
         fn install() -> Self {
             recorded(&RECORDED_ASYNC).clear();
-            recorded(&RECORDED_BLOCKING).clear();
+            recorded(&RECORDED_DIRECT).clear();
             set_log_sinks(RECORDING_SINKS);
             Self
         }
@@ -419,17 +391,6 @@ mod tests {
         }
     }
 
-    /// `reg_dma_tx_rdy0`: the DMA1 transmit trigger `uart::send_sync_panic` arms.
-    const REG_DMA_TX_RDY0: u32 = 0x524;
-
-    /// Number of DMA1 transmit triggers recorded in the fake register bank.
-    fn dma1_arms() -> usize {
-        FakeMmio::writes()
-            .into_iter()
-            .filter(|w| w.addr == REG_DMA_TX_RDY0 | tlsr8266_pac::REG_BASE_ADDR)
-            .count()
-    }
-
     /// Calls made to the direct sink in the `send_blocking_with` test.
     static DIRECT_SINK_CALLS: AtomicU32 = AtomicU32::new(0);
 
@@ -437,31 +398,34 @@ mod tests {
         DIRECT_SINK_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A single-chunk line must reach the sink exactly once, framed as a print
+    /// message, and must never reach the async sink.
     #[test]
-    fn test_uart_stream_send_synchronous() {
+    fn test_send_blocking_with_single_chunk_frame() {
         reset_for_test();
+        // The registered sink is installed and must stay untouched.
         let _sinks = RecordingSinks::install();
 
         let mut stream = UartStream::<128>::new();
         let test_data = b"Hello UART";
         assert_eq!(stream.write_all(test_data), Ok(()));
 
-        // doasync = false routes to the blocking panic sink, never the queue.
-        stream.send_blocking(false);
+        // The direct sink is the panic path's; is_panic = false frames a print.
+        stream.send_blocking_with(false, record_direct);
 
         assert_eq!(
-            blocking_frames(),
+            direct_frames(),
             vec![expected_frame(test_data, UartMsg::PrintMessage)],
-            "the exact frame must reach the blocking sink, exactly once"
+            "the exact frame must reach the sink, exactly once"
         );
         assert!(
             async_frames().is_empty(),
-            "a blocking send must never reach the async sink"
+            "a direct send must never reach the async sink"
         );
     }
 
     #[test]
-    fn test_uart_stream_send_panic_mode() {
+    fn test_send_blocking_with_panic_mode() {
         reset_for_test();
         let _sinks = RecordingSinks::install();
 
@@ -470,32 +434,19 @@ mod tests {
         assert_eq!(stream.write_all(test_data), Ok(()));
 
         // is_panic = true flags the frame as a panic message.
-        stream.send_blocking(true);
+        stream.send_blocking_with(true, record_direct);
 
         assert_eq!(
-            blocking_frames(),
+            direct_frames(),
             vec![expected_frame(test_data, UartMsg::PanicMessage)],
-            "the exact frame must reach the blocking sink, exactly once"
+            "the exact frame must reach the sink, exactly once"
         );
         assert!(async_frames().is_empty());
     }
 
     #[test]
-    fn test_print_to_uart_blocking_sink() {
-        reset_for_test();
-        let _sinks = RecordingSinks::install();
-
-        // A default stream is empty; this also covers the `Default` impl.
+    fn test_default_stream_is_empty() {
         assert_eq!(UartStream::<128>::default().as_bytes(), b"");
-
-        // doasync = false routes straight to the panic sink instead of the queue.
-        print_to_uart(false, |stream| write!(stream, "sync"));
-
-        assert_eq!(
-            blocking_frames(),
-            vec![expected_frame(b"sync", UartMsg::PrintMessage)]
-        );
-        assert!(async_frames().is_empty());
     }
 
     #[test]
@@ -507,7 +458,7 @@ mod tests {
         let test_data = b"Hello async";
         assert_eq!(stream.write_all(test_data), Ok(()));
 
-        // doasync = true routes through the transport queue, never the driver.
+        // The async sink routes through the transport queue, never the driver.
         stream.send_async(false);
 
         let queued = UART_TX_CHANNEL.try_receive().expect("one frame queued");
@@ -542,36 +493,29 @@ mod tests {
             "one call per chunk, and the mirror/registration paths add none"
         );
         assert!(
-            blocking_frames().is_empty() && async_frames().is_empty(),
-            "the registered sinks must not see the frames of a direct send"
+            direct_frames().is_empty() && async_frames().is_empty(),
+            "the registered sink must not see the frames of a direct send"
         );
     }
 
-    /// Before `app::main_task` registers the sinks, a log line must be dropped:
+    /// Before `app::main_task` registers the sink, a log line must be dropped:
     /// no transport may be reached from this module.
     ///
     /// This is the one test that clears the crate-wide test default, so it puts
     /// it back: other modules' tests log without registering (see `test_sinks`).
     #[test]
-    fn test_unregistered_sinks_drop_log_lines() {
+    fn test_unregistered_sink_drops_log_lines() {
         reset_for_test();
-        FakeMmio::reset();
         reset_log_sinks_for_test();
 
         let mut stream = UartStream::<128>::new();
         assert_eq!(stream.write_all(b"lost line"), Ok(()));
 
         stream.send_async(false);
-        stream.send_blocking(false);
 
         assert!(
             UART_TX_CHANNEL.try_receive().is_err(),
             "an unregistered sink must not reach the async transport"
-        );
-        assert_eq!(
-            dma1_arms(),
-            0,
-            "an unregistered sink must not arm the blocking transport"
         );
 
         install_test_sinks();

@@ -91,12 +91,14 @@ def decode_mesh_message(payload: bytes):
 def decode_node_status(payload: bytes):
     """Yield ``(node_id, online, on_off)`` triples from a NODE_STATUS payload.
 
-    Stops at the first zero node id, the firmware's list terminator.
+    Decodes every whole entry in the payload.  Node 0 is a valid address, so a
+    zero node id is not a terminator; an all-zero entry is an unused slot and
+    is skipped.
     """
     for i in range(
         0, len(payload) - NODE_STATUS_ENTRY_LEN + 1, NODE_STATUS_ENTRY_LEN
     ):
         node_id, online, on_off = payload[i:i + NODE_STATUS_ENTRY_LEN]
-        if node_id == 0:
-            return
+        if node_id == 0 and online == 0 and on_off == 0:
+            continue
         yield (node_id, online, on_off)

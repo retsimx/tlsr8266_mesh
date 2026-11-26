@@ -41,7 +41,7 @@ class FrameTests(unittest.TestCase):
 
 
 class NodeStatusTests(unittest.TestCase):
-    def test_entries_until_terminator(self):
+    def test_decodes_contiguous_entries(self):
         payload = bytes([0x1F, 1, 1, 0x05, 0, 1])
         payload += bytes(uc.CRC_OFFSET - uc.PAYLOAD_OFFSET - len(payload))
 
@@ -50,11 +50,19 @@ class NodeStatusTests(unittest.TestCase):
             [(0x1F, 1, 1), (0x05, 0, 1)],
         )
 
-    def test_stops_at_zero_node(self):
-        payload = bytes([0x1F, 1, 1, 0, 1, 1])
+    def test_node_zero_is_a_valid_address(self):
+        payload = bytes([0x00, 1, 1, 0x05, 0, 1])
 
         self.assertEqual(
-            list(proto.decode_node_status(payload)), [(0x1F, 1, 1)]
+            list(proto.decode_node_status(payload)),
+            [(0x00, 1, 1), (0x05, 0, 1)],
+        )
+
+    def test_unused_entry_does_not_truncate(self):
+        payload = bytes([0x00, 0, 0, 0x05, 1, 1])
+
+        self.assertEqual(
+            list(proto.decode_node_status(payload)), [(0x05, 1, 1)]
         )
 
     def test_partial_trailing_entry_ignored(self):

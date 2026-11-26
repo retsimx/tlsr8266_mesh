@@ -382,9 +382,12 @@ pub fn rf_drv_init(enable: bool) -> u8 {
 
             // Check if custom RF power settings are stored at specific flash memory offsets
             // These calibration values adjust the transmission power parameters
-            let mut power_settings = [0u8; 0x13];
+            //
+            // Erased defaults: a failed read leaves no calibration values to apply,
+            // rather than a zeroed (and plausible) set read from a dead bus.
+            let mut power_settings = [0xFFu8; 0x13];
             // The MAC sector is guaranteed to be aligned to FLASH_SECTOR_SIZE
-            flash_read_page(
+            let _ = flash_read_page(
                 cfg.flash_adr_mac,
                 power_settings.len() as u32,
                 power_settings.as_mut_ptr(),
@@ -953,18 +956,22 @@ pub fn rf_link_slave_init(interval: u32) {
     // Set RF hardware configuration
     write_reg_rf_tx_wail_settle_time_lo(0x68);
 
-    // Generate a MAC address if one doesn't exist in flash
+    // Generate a MAC address if one doesn't exist in flash. A failed read is
+    // treated like the blank slot: a zeroed buffer must not pass for a stored
+    // address.
     let mut mac_check: [u32; 1] = [0];
-    flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8);
-    if mac_check[0] == u32::MAX {
+    if flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8).is_err()
+        || mac_check[0] == u32::MAX
+    {
         // Generate random MAC address values. A failed program leaves the
         // flash erased, so the next boot takes this same branch again.
         let mac: [u16; 2] = [rand(), rand()];
         let _ = flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
     }
 
-    // Read the MAC address from flash
-    flash_read_page(cfg.flash_adr_mac, 6, MAC_ID.lock().as_mut_ptr());
+    // Read the MAC address from flash. A failed read leaves the previous (or
+    // zeroed) MAC in place; there is no boot-time channel to report it.
+    let _ = flash_read_page(cfg.flash_adr_mac, 6, MAC_ID.lock().as_mut_ptr());
 
     // Set the MAC address in the advertisement packet
     PKT_ADV.lock().adv_ind_module_mut().adv_a = *MAC_ID.lock();

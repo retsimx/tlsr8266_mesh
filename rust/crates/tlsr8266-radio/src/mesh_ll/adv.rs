@@ -196,7 +196,11 @@ fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
 
     for pos in (0..initial_pos).step_by(2).rev() {
         let flash_addr = flash_adr_dev_grp_adr + pos as u32;
-        let group_address = read_group_address(flash_addr);
+        // A dead bus cannot be scanned, so the delete is reported as failed and
+        // the caller retries rather than claiming success.
+        let Ok(group_address) = read_group_address(flash_addr) else {
+            return Err(());
+        };
 
         if !is_group_address(group_address) {
             continue;
@@ -227,12 +231,12 @@ fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
     }
 }
 
-fn read_group_address(flash_addr: u32) -> u16 {
+fn read_group_address(flash_addr: u32) -> Result<u16, ()> {
     let mut bytes = [0u8; 2];
     // `bytes` is a live 2-byte local and `flash_read_page` is documented to write
     // exactly `len` = 2 bytes into it.
-    flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
-    u16::from_le_bytes(bytes)
+    flash_read_page(flash_addr, 2, bytes.as_mut_ptr())?;
+    Ok(u16::from_le_bytes(bytes))
 }
 
 fn write_group_address(flash_addr: u32, value: u16) {

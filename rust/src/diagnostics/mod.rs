@@ -127,26 +127,28 @@ pub fn boot_init() -> BootResetReason {
 ///
 /// Non-erasing: `read_panic_report()` still owns consuming the sector. The read
 /// is bounded to [`PANIC_READ_MAX`] and clipped to the UART budget, so the body
-/// always fits one log line.
-pub fn read_panic_preview() -> Option<PanicPreview> {
+/// always fits one log line. `Ok(None)` means the sector holds no trusted
+/// record; `Err(())` means the flash bus failed, so the caller reports the
+/// message as unreadable rather than printing a partial body.
+pub fn read_panic_preview() -> Result<Option<PanicPreview>, ()> {
     let mut flag: u8 = 0;
-    flash_read_page(FLASH_ADR_PANIC_INFO, 1, addr_of_mut!(flag));
+    flash_read_page(FLASH_ADR_PANIC_INFO, 1, addr_of_mut!(flag))?;
     if flag != PANIC_VALID_FLAG {
-        return None;
+        return Ok(None);
     }
 
     let mut len_bytes: [u8; 2] = [0; 2];
-    flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, len_bytes.as_mut_ptr());
+    flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, len_bytes.as_mut_ptr())?;
     let len = u16::from_le_bytes(len_bytes) as usize;
     if len > 256 {
-        return None;
+        return Ok(None);
     }
 
     // Only the logged prefix is read, and `len` is checked against the 256-byte
     // sector record above.
     let read = len.min(PANIC_READ_MAX);
     let mut message: [u8; PANIC_READ_MAX] = [0; PANIC_READ_MAX];
-    flash_read_page(FLASH_ADR_PANIC_INFO + 3, read as u32, message.as_mut_ptr());
+    flash_read_page(FLASH_ADR_PANIC_INFO + 3, read as u32, message.as_mut_ptr())?;
 
     // The bounded read can end mid-codepoint, so keep only the prefix that
     // decodes to valid UTF-8.
@@ -168,7 +170,7 @@ pub fn read_panic_preview() -> Option<PanicPreview> {
     };
     preview.buf[..body.len()].copy_from_slice(body.as_bytes());
 
-    Some(preview)
+    Ok(Some(preview))
 }
 
 /// Keeps the longest prefix of `msg` that fits the UART stream, on a char
@@ -184,23 +186,25 @@ fn clip_to_uart_budget(msg: &str) -> &str {
 
 /// Reads the stored panic message into `out`, returning its length.
 ///
-/// `None` means the sector holds no complete record: either the flag is blank,
-/// or the length word is zero / larger than `out`. A blank flag leaves the sector
-/// untouched (nothing was ever written), while a corrupt record erases it — such
-/// a record can never be delivered, so erasing it stops it being re-examined on
-/// every boot. That makes [`clear_panic_report`] the normal eraser rather than
-/// the only one.
-pub fn read_panic_report(out: &mut [u8; 256]) -> Option<usize> {
+/// `Ok(None)` means the sector holds no complete record: either the flag is
+/// blank, or the length word is zero / larger than `out`. A blank flag leaves the
+/// sector untouched (nothing was ever written), while a corrupt record erases it
+/// — such a record can never be delivered, so erasing it stops it being
+/// re-examined on every boot. That makes [`clear_panic_report`] the normal eraser
+/// rather than the only one. `Err(())` means the flash bus failed; `out` may
+/// hold a partial prefix and must be discarded, and the sector is left
+/// intact so the record can be retried after the next reset.
+pub fn read_panic_report(out: &mut [u8; 256]) -> Result<Option<usize>, ()> {
     let mut flag: u8 = 0;
-    flash_read_page(FLASH_ADR_PANIC_INFO, 1, addr_of_mut!(flag));
+    flash_read_page(FLASH_ADR_PANIC_INFO, 1, addr_of_mut!(flag))?;
 
     // If the panic info flag isn't set, there's nothing to do
     if flag != PANIC_VALID_FLAG {
-        return None;
+        return Ok(None);
     }
 
     let mut len_bytes: [u8; 2] = [0; 2];
-    flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, len_bytes.as_mut_ptr());
+    flash_read_page(FLASH_ADR_PANIC_INFO + 1, 2, len_bytes.as_mut_ptr())?;
     let length = u16::from_le_bytes(len_bytes) as usize;
 
     // A zero length or a length beyond the sector record cannot be a record this
@@ -210,12 +214,12 @@ pub fn read_panic_report(out: &mut [u8; 256]) -> Option<usize> {
         // The corrupt record is erased so it is not retried on every boot; a
         // failed erase still leaves the same reject path, so it is discarded.
         let _ = flash_erase_sector(FLASH_ADR_PANIC_INFO);
-        return None;
+        return Ok(None);
     }
 
-    flash_read_page(FLASH_ADR_PANIC_INFO + 3, length as u32, out.as_mut_ptr());
+    flash_read_page(FLASH_ADR_PANIC_INFO + 3, length as u32, out.as_mut_ptr())?;
 
-    Some(length)
+    Ok(Some(length))
 }
 
 /// Erases the panic sector once its report has been delivered.
@@ -273,8 +277,24 @@ pub fn record_panic_sentinel() {
 #[coverage(off)]
 mod tests {
     use super::*;
-    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
+    use tlsr8266_pac::fake_mmio::FakeMmio;
+    use tlsr8266_pac::FLD_MASTER_SPI;
+
+    /// `reg_master_spi_ctrl`: chip select and busy bits.
+    const REG_MASTER_SPI_CTRL: u32 = 0x0d;
+
+    /// Restores the host default (the in-memory NOR device) even if the owning
+    /// test panics, so a failure cannot strand later tests in `SpiRegisters`
+    /// mode. The device is process-global, hence the guard.
+    struct RestoreInMemory;
+
+    impl Drop for RestoreInMemory {
+        fn drop(&mut self) {
+            FakeFlash::set_mode(FakeFlashMode::InMemory);
+        }
+    }
 
     /// Seed the panic-info sector with the layout `write_panic_bytes` produces:
     /// valid flag at `+0`, `len` at `+1`, `body` at `+3`.
@@ -379,7 +399,9 @@ mod tests {
         let body = b"panic body";
         seed_panic_info(body, body.len() as u16);
 
-        let preview = read_panic_preview().expect("a valid record yields a preview");
+        let preview = read_panic_preview()
+            .expect("the flash read must succeed")
+            .expect("a valid record yields a preview");
 
         assert_eq!(&preview.buf[..preview.len], body);
         assert!(!preview.truncated);
@@ -393,7 +415,9 @@ mod tests {
         let body = [b'x'; 200];
         seed_panic_info(&body, body.len() as u16);
 
-        let preview = read_panic_preview().expect("a valid record yields a preview");
+        let preview = read_panic_preview()
+            .expect("the flash read must succeed")
+            .expect("a valid record yields a preview");
 
         assert_eq!(&preview.buf[..preview.len], &body[..PANIC_LOG_BODY_MAX]);
         assert!(preview.truncated);
@@ -412,7 +436,9 @@ mod tests {
         body[PANIC_LOG_BODY_MAX] = 0xFF;
         seed_panic_info(&body, body.len() as u16);
 
-        let preview = read_panic_preview().expect("a valid record yields a preview");
+        let preview = read_panic_preview()
+            .expect("the flash read must succeed")
+            .expect("a valid record yields a preview");
 
         assert_eq!(&preview.buf[..preview.len], &body[..PANIC_LOG_BODY_MAX]);
         assert!(preview.truncated);
@@ -427,10 +453,36 @@ mod tests {
         let body = [b'w'; PANIC_READ_MAX];
         seed_panic_info(&body, body.len() as u16);
 
-        let preview = read_panic_preview().expect("a valid record yields a preview");
+        let preview = read_panic_preview()
+            .expect("the flash read must succeed")
+            .expect("a valid record yields a preview");
 
         assert_eq!(&preview.buf[..preview.len], &body[..PANIC_LOG_BODY_MAX]);
         assert!(preview.truncated);
+    }
+
+    /// A dead flash bus is reported as unreadable: the readers return `Err(())`
+    /// instead of `Ok(None)` (no record) or a partially filled body.
+    #[test]
+    fn test_panic_readers_unreadable_bus() {
+        FakeFlash::reset();
+        FakeMmio::reset();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreInMemory;
+
+        // The SPI busy flag never clears: every transfer gives up on its budget.
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, |_| FLD_MASTER_SPI::BUSY.bits());
+
+        assert!(
+            matches!(read_panic_preview(), Err(())),
+            "a dead bus must not look like an absent panic record"
+        );
+
+        let mut buf = [0x5Au8; 256];
+        assert!(
+            matches!(read_panic_report(&mut buf), Err(())),
+            "a dead bus must not report a length for a partial read"
+        );
     }
 
     /// AC4: an invalid panic flag means the sector is not trusted at all.
@@ -441,7 +493,7 @@ mod tests {
         FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG ^ 0xFF]);
 
         // None at all: the invalid flag short-circuits before the length read.
-        assert!(read_panic_preview().is_none());
+        assert!(matches!(read_panic_preview(), Ok(None)));
     }
 
     /// AC4: a length beyond the 256-byte sector record is rejected before any
@@ -453,7 +505,7 @@ mod tests {
         let len: u16 = 257;
         seed_panic_info(&[b'x'; 8], len);
 
-        assert!(read_panic_preview().is_none());
+        assert!(matches!(read_panic_preview(), Ok(None)));
     }
 
     /// AC4: the bounded read can end inside a multi-byte character. The partial
@@ -474,7 +526,9 @@ mod tests {
         // 72 the stream budget allows and the marker says the cut happened.
         seed_panic_info(&body, len);
 
-        let preview = read_panic_preview().expect("a valid record yields a preview");
+        let preview = read_panic_preview()
+            .expect("the flash read must succeed")
+            .expect("a valid record yields a preview");
         let decoded = &preview.buf[..preview.len];
 
         assert_eq!(decoded, &body[..PANIC_LOG_BODY_MAX]);
@@ -552,7 +606,7 @@ mod tests {
         let mut buf = [0u8; 256];
 
         // A blank sector reads 0xFF, which is not a valid panic flag.
-        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(read_panic_report(&mut buf), Ok(None));
 
         // Nothing was reported, so the sector must not be cleared.
         assert_eq!(FakeFlash::erase_count(FLASH_ADR_PANIC_INFO), 0);
@@ -566,7 +620,9 @@ mod tests {
         seed_panic_info(test_message, test_message.len() as u16);
 
         let mut buf = [0u8; 256];
-        let len = read_panic_report(&mut buf).expect("the seeded record is valid");
+        let len = read_panic_report(&mut buf)
+            .expect("the flash read must succeed")
+            .expect("the seeded record is valid");
 
         assert_eq!(len, test_message.len());
         assert_eq!(&buf[..len], test_message);
@@ -594,7 +650,7 @@ mod tests {
         seed_panic_info(&[b'x'; 8], 257);
 
         let mut buf = [0u8; 256];
-        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(read_panic_report(&mut buf), Ok(None));
         assert_eq!(buf, [0u8; 256]);
         assert_eq!(
             FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
@@ -612,7 +668,7 @@ mod tests {
         seed_panic_info(b"ignored body", 0);
 
         let mut buf = [0xAAu8; 256];
-        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(read_panic_report(&mut buf), Ok(None));
         assert_eq!(buf, [0xAAu8; 256], "the caller's buffer is left untouched");
         assert_eq!(
             FakeFlash::erase_count(FLASH_ADR_PANIC_INFO),
@@ -630,7 +686,7 @@ mod tests {
         seed_panic_info(b"stale tail", 0xFFFF);
 
         let mut buf = [0x55u8; 256];
-        assert_eq!(read_panic_report(&mut buf), None);
+        assert_eq!(read_panic_report(&mut buf), Ok(None));
         assert_eq!(
             buf, [0x55u8; 256],
             "a rejected length must not overwrite the 256-byte buffer"

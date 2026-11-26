@@ -436,11 +436,17 @@ impl LightFlashStore {
             (0..FLASH_SECTOR_SIZE).step_by(size_of::<LuminanceRecord>() * ENTRIES_PER_CHUNK)
         {
             let addr = FLASH_ADR_LUM + offset as u32;
-            flash_read_page(
+            // A dead bus leaves this chunk partial, so the scan stops with the
+            // state already recovered from the chunks that did read cleanly.
+            if flash_read_page(
                 addr,
                 size_of::<LuminanceRecord>() as u32 * ENTRIES_PER_CHUNK as u32,
                 buffer.as_mut_ptr() as *mut u8,
-            );
+            )
+            .is_err()
+            {
+                break 'scan;
+            }
 
             for (idx, entry) in buffer.iter().enumerate() {
                 match entry.save_flag {

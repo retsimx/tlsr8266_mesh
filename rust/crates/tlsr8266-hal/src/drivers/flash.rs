@@ -162,6 +162,14 @@ fn flash_send_addr(addr: u32) -> bool {
 /// * `len` - Number of bytes to read
 /// * `buf` - Pointer to buffer where read data will be stored
 ///
+/// # Returns
+///
+/// * `Ok(())` when every byte was clocked in and the transaction completed
+/// * `Err(())` when the SPI bus stalled; chip select is released and the
+///   caller's buffer contents are **unspecified** (a prefix may have been
+///   filled from the dead bus before the abort). Callers must not use the
+///   buffer after an error.
+///
 /// # Algorithm
 ///
 /// 1. Disable interrupts to prevent timing issues during SPI communication
@@ -193,19 +201,23 @@ fn flash_send_addr(addr: u32) -> bool {
 // The documented caller contract is a raw-pointer buffer ABI (`buf` valid for
 // `len` writable bytes), kept as a safe fn to preserve the firmware API.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
+// The project convention for fallible hardware calls is `Result<_, ()>`
+// (docs/checklists/firmware.md item 23); the only failure is a bus timeout, so a
+// bespoke error type would carry no information.
+#[allow(clippy::result_unit_err)]
+pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) -> Result<(), ()> {
     #[cfg(not(target_os = "none"))]
     if FakeFlash::mode() == fake_flash::FakeFlashMode::InMemory {
         // Pointer safety: never build a slice from a null pointer or a zero length.
         if len == 0 || buf.is_null() {
-            return;
+            return Ok(());
         }
         // SAFETY: (2) raw-pointer buffer ABI. `len != 0` and `buf` is non-null, so the
         // caller contract gives a `len`-byte writable region; the slice never escapes.
         FakeFlash::read_slice(addr, unsafe {
             core::slice::from_raw_parts_mut(buf, len as usize)
         });
-        return;
+        return Ok(());
     }
 
     // Use critical section for atomic SPI operation
@@ -214,31 +226,32 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
         // chip select before returning, so the flash part cannot stay selected.
         if !flash_send_cmd(FLASH_CMD::READ_CMD) {
             mspi_high();
-            return;
+            return Err(());
         }
 
         // Send address (always required for flash_read_page)
         if !flash_send_addr(addr) {
             mspi_high();
-            return;
+            return Err(());
         }
 
         // Issue additional clock cycle to prepare for data reading
         mspi_write(0x00);
         if !mspi_wait() {
             mspi_high();
-            return;
+            return Err(());
         }
 
         // Set SPI controller to auto mode (0x0a) for efficient reading
         mspi_ctrl_write(0x0a);
         if !mspi_wait() {
             mspi_high();
-            return;
+            return Err(());
         }
 
         // Read requested data bytes into the provided buffer using a safer pattern
         // Still unsafe due to raw pointer usage, but more contained and idiomatic
+        let mut stalled = false;
         // SAFETY: (2) raw-pointer buffer ABI. The caller contract requires `buf` to be
         // valid for writes of `len` bytes; the slice is used only by the loop below and
         // never escapes this critical section.
@@ -250,6 +263,7 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
             for byte in buffer.iter_mut() {
                 *byte = mspi_get();
                 if !mspi_wait() {
+                    stalled = true;
                     break;
                 }
             }
@@ -257,7 +271,15 @@ pub fn flash_read_page(addr: u32, len: u32, buf: *mut u8) {
 
         // End SPI transaction
         mspi_high();
-    });
+
+        if stalled {
+            // The prefix already written came from a dead bus, so the whole
+            // buffer is unusable; the caller decides whether to retry.
+            Err(())
+        } else {
+            Ok(())
+        }
+    })
 }
 
 /// Writes data or status to flash memory.
@@ -824,7 +846,7 @@ mod tests {
         let buf_ptr = vec_to_raw_mut(&mut buffer);
 
         // Call the function we're testing
-        flash_read_page(0x1000, 4, buf_ptr);
+        assert!(flash_read_page(0x1000, 4, buf_ptr).is_ok());
 
         // Verify expected buffer contents after read
         assert_eq!(buffer, PATTERN);
@@ -1038,7 +1060,7 @@ mod tests {
 
         // Step 1: the target sector starts erased.
         let mut read_buffer = [0u8; 4];
-        flash_read_page(ADDR, 4, read_buffer.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 4, read_buffer.as_mut_ptr()).is_ok());
         assert_eq!(read_buffer, [0xFF; 4]);
 
         // Step 2: erase the sector to prepare for the write.
@@ -1055,7 +1077,7 @@ mod tests {
 
         // Step 4: read the data back.
         let mut verify_buffer = [0u8; 4];
-        flash_read_page(ADDR, 4, verify_buffer.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 4, verify_buffer.as_mut_ptr()).is_ok());
 
         // Step 5: verify the data matches what we wrote.
         assert_eq!(verify_buffer, write_data);
@@ -1119,7 +1141,8 @@ mod tests {
     }
 
     /// A stuck SPI bus aborts `flash_read_page`: only the command byte reaches
-    /// the wire, the caller's buffer is untouched, and chip select is released.
+    /// the wire, the caller's buffer is untouched, chip select is released, and
+    /// the failure is reported.
     #[test]
     fn test_flash_read_page_stuck_spi_releases_cs() {
         reset_protocol_fakes();
@@ -1130,7 +1153,10 @@ mod tests {
         FakeMmio::on_read8(REG_MASTER_SPI_CTRL, stuck_spi);
 
         let mut buffer = [0x11u8; 4];
-        flash_read_page(0x1000, 4, buffer.as_mut_ptr());
+        assert!(
+            flash_read_page(0x1000, 4, buffer.as_mut_ptr()).is_err(),
+            "a stalled bus must report a failed read"
+        );
 
         // The command byte was clocked out; the address phase never started.
         assert_eq!(
@@ -1155,6 +1181,52 @@ mod tests {
             values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
             Some(cs_asserted()),
             "a timed-out read must still release chip select"
+        );
+    }
+
+    /// A bus that stalls part-way through the payload reports `Err(())`: the
+    /// bytes already clocked in are in the buffer, but the caller must discard it.
+    #[test]
+    fn test_flash_read_page_mid_payload_stall_reports_err() {
+        reset_protocol_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreDefault;
+
+        const PATTERN: [u8; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
+        FakeMmio::on_read8(REG_MASTER_SPI_DATA, |call_idx| {
+            PATTERN[call_idx.min(PATTERN.len() - 1)]
+        });
+
+        // The command, address, dummy and mode waits are the first six control
+        // reads; the seventh completes the first payload byte. From the eighth
+        // on the bus is dead, so the second payload wait exhausts its budget.
+        CTRL_POLLS.store(0, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, |call_idx| {
+            if call_idx < 7 {
+                0
+            } else {
+                FLD_MASTER_SPI::BUSY.bits()
+            }
+        });
+
+        let mut buffer = [0x11u8; 4];
+        assert!(
+            flash_read_page(0x1000, 4, buffer.as_mut_ptr()).is_err(),
+            "a mid-payload stall must report a failed read"
+        );
+
+        // Exactly the prefix the dead bus delivered before the abort: the
+        // caller's buffer is partially filled and must not be trusted.
+        assert_eq!(buffer[..2], PATTERN[..2]);
+        assert_eq!(
+            buffer[2..],
+            [0x11u8; 2],
+            "bytes after the stall must be left untouched"
+        );
+        assert_eq!(
+            values_written_to(REG_MASTER_SPI_CTRL).last().copied(),
+            Some(cs_asserted()),
+            "a partially filled read must still release chip select"
         );
     }
 
@@ -1278,19 +1350,19 @@ mod tests {
         // Erased silicon reads 0xFF.
         assert!(flash_erase_sector(ADDR).is_ok());
         let mut erased = [0u8; 8];
-        flash_read_page(ADDR, 8, erased.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 8, erased.as_mut_ptr()).is_ok());
         assert_eq!(erased, [0xFF; 8]);
 
         // ... including the far end of the 4 KiB sector.
         let mut tail = [0u8; 1];
-        flash_read_page(last_byte_in_sector, 1, tail.as_mut_ptr());
+        assert!(flash_read_page(last_byte_in_sector, 1, tail.as_mut_ptr()).is_ok());
         assert_eq!(tail, [0xFF], "the erase must clear the whole 4 KiB sector");
 
         // A pattern written through the public API reads back byte-exact.
         let pattern = [0xA5u8, 0x5A, 0x0F, 0xF0];
         assert!(flash_write_page(ADDR, pattern.len() as u32, pattern.as_ptr()).is_ok());
         let mut readback = [0u8; 4];
-        flash_read_page(ADDR, 4, readback.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 4, readback.as_mut_ptr()).is_ok());
         assert_eq!(readback, pattern);
 
         // NOR writes can only clear bits: 0xFF & 0x0F & 0xF0 == 0x00.
@@ -1300,7 +1372,7 @@ mod tests {
         let high_nibble = [0xF0u8];
         assert!(flash_write_page(ADDR, 1, high_nibble.as_ptr()).is_ok());
         let mut merged = [0xFFu8; 1];
-        flash_read_page(ADDR, 1, merged.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 1, merged.as_mut_ptr()).is_ok());
         assert_eq!(merged[0], 0x00);
 
         // Two erases of the same sector were performed above.
@@ -1373,10 +1445,10 @@ mod tests {
         FakeFlash::write_slice(ADDR, &[0xA5]);
 
         let mut buf = [0x11u8; 4];
-        flash_read_page(ADDR, 0, buf.as_mut_ptr());
+        assert!(flash_read_page(ADDR, 0, buf.as_mut_ptr()).is_ok());
         assert_eq!(buf, [0x11; 4]);
 
-        flash_read_page(ADDR, 4, std::ptr::null_mut());
+        assert!(flash_read_page(ADDR, 4, std::ptr::null_mut()).is_ok());
 
         let mut byte = [0u8; 1];
         FakeFlash::read_slice(ADDR, &mut byte);

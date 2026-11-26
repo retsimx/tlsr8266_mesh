@@ -18,7 +18,7 @@
 //! [`PYTHON_ONLY_KEYS`] and are deliberately not consumed here.
 
 use crate::config::{FLASH_ADR_LIGHT_NEW_FW, MESH_LTK, MESH_NAME, MESH_PWD, OUT_OF_MESH};
-use crate::ota::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
+use crate::ota::flash_layout::{FLASH_ADR_OTA_READY_FLAG, FLASH_OTA_READY_FLAG};
 use core::mem::size_of;
 use mesh_protocol::mesh_types::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_REQ,

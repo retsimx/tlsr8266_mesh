@@ -816,8 +816,17 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
                     None => break, // No more characteristics found
 
                     Some((found_attrs, handle)) => {
+                        // A declaration is only usable together with the value
+                        // entry that follows it. `l2cap_att_search` clamps its
+                        // two-entry slice at the end of the table, so a
+                        // declaration on the last handle returns a one-element
+                        // slice; stop instead of indexing past it.
+                        let Some(value_attr) = found_attrs.get(1) else {
+                            break;
+                        };
+
                         // Enforce format consistency and buffer space limit
-                        if !((counter == 0 || found_attrs[1].uuid_len == counter)
+                        if !((counter == 0 || value_attr.uuid_len == counter)
                             && bytes_read + found_attrs[0].uuid_len < 0x13)
                         {
                             break;
@@ -848,20 +857,17 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 
                         // 4. Characteristic UUID (variable length)
                         rf_packet_att_rsp.att_read_rsp_mut().value[bytes_read as usize + 1
-                            ..(bytes_read as usize + 1 + found_attrs[1].uuid_len as usize)]
-                            // SAFETY: (4) `found_attrs[1]` is the value entry
+                            ..(bytes_read as usize + 1 + value_attr.uuid_len as usize)]
+                            // SAFETY: (4) `value_attr` is the value entry
                             // paired with the declaration the search returned, so
                             // its `uuid` is a static UUID valid for `uuid_len`
                             // (2 or 16) bytes.
                             .copy_from_slice(unsafe {
-                                slice::from_raw_parts(
-                                    found_attrs[1].uuid,
-                                    found_attrs[1].uuid_len as usize,
-                                )
+                                slice::from_raw_parts(value_attr.uuid, value_attr.uuid_len as usize)
                             });
 
                         // Update for next iteration
-                        counter = found_attrs[1].uuid_len;
+                        counter = value_attr.uuid_len;
                         bytes_read += counter;
                         handle_start = handle + 2; // Skip to next potential characteristic
                     }
@@ -3341,6 +3347,67 @@ mod tests {
         // when we determined there were no matches
         let err_handle = response.att_err_rsp().err_handle;
         assert_eq!(err_handle, 1);
+    }
+
+    // A characteristic declaration on the last table handle has no value entry
+    // after it, so `l2cap_att_search` returns a one-element slice. The 0x2803
+    // branch must stop at that point instead of indexing `found_attrs[1]`.
+    #[test]
+    fn test_read_by_type_request_characteristic_on_last_handle() {
+        seed_system_tick();
+
+        let last_handle = get_g_attributes().len() - 1;
+        assert_eq!(get_g_attributes()[0].att_num as usize, last_handle);
+
+        // The shipped table ends with a user description, so the truncated
+        // slice is only reachable once the last entry looks like a declaration.
+        assert_ne!(
+            unsafe { slice::from_raw_parts(get_g_attributes()[last_handle].uuid, 2) },
+            &uuid16_to_bytes(GATT_UUID_CHARACTER),
+            "last table entry must not be a characteristic declaration"
+        );
+
+        let original_uuid = get_g_attributes()[last_handle].uuid;
+        let original_uuid_len = get_g_attributes()[last_handle].uuid_len;
+        let mut char_decl_uuid = uuid16_to_bytes(GATT_UUID_CHARACTER);
+
+        // Temporarily turn the last entry into a characteristic declaration.
+        unsafe {
+            (*(addr_of_mut!(get_g_attributes()[last_handle]) as *mut AttributeT)).uuid =
+                char_decl_uuid.as_mut_ptr();
+            (*(addr_of_mut!(get_g_attributes()[last_handle]) as *mut AttributeT)).uuid_len = 2;
+        }
+
+        // Start one handle below the end so the search reaches the last entry.
+        let mut data = [0; 10];
+        data[0] = GattOp::AttOpReadByTypeReq as u8;
+        data[1] = (last_handle - 1) as u8;
+        data[2] = 0;
+        data[3] = last_handle as u8;
+        data[4] = 0;
+        data[5] = char_decl_uuid[0];
+        data[6] = char_decl_uuid[1];
+
+        let packet = create_att_packet(GattOp::AttOpReadByTypeReq as u8, &data);
+        let response = handle_read_by_type_request(&packet);
+
+        // Restore the table before asserting so a failure cannot leak state.
+        unsafe {
+            (*(addr_of_mut!(get_g_attributes()[last_handle]) as *mut AttributeT)).uuid =
+                original_uuid;
+            (*(addr_of_mut!(get_g_attributes()[last_handle]) as *mut AttributeT)).uuid_len =
+                original_uuid_len;
+        }
+
+        // The unmatched declaration is reported as an error, not a panic.
+        let response = response.unwrap();
+        assert_eq!(response.att_err_rsp().opcode, GattOp::AttOpErrorRsp as u8);
+        assert_eq!(
+            response.att_err_rsp().err_opcode,
+            GattOp::AttOpReadByTypeReq as u8
+        );
+        let err_handle = response.att_err_rsp().err_handle;
+        assert_eq!(err_handle, (last_handle - 1) as u16);
     }
 
     #[test]

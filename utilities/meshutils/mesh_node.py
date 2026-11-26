@@ -25,15 +25,19 @@ key and printed as human-readable output.
 Usage
 -----
   python3 mesh_node.py --address <MAC> --mesh-address <N> \\
-      --mesh-name <name> --mesh-password <password> <command>
+      [--mesh-name <name>] [--mesh-password <password>] <command>
+
+Credentials may also be supplied through the environment (MESH_NAME,
+MESH_PASSWORD) or the repository-root .env file, which keeps them out of
+shell history and `ps` output. CLI flags take precedence.
 
 Arguments
 ---------
   --address           BLE MAC address of the target node (e.g., 12:34:56:78:9A:1D)
   --mesh-address      Mesh node address as a decimal integer (e.g., 29)
                       Not required for --get-ltk.
-  --mesh-name         Mesh network name (e.g., mlm)
-  --mesh-password     Mesh network password (e.g., your-mesh-password)
+  --mesh-name         Mesh network name (e.g., mlm); defaults to $MESH_NAME
+  --mesh-password     Mesh network password; defaults to $MESH_PASSWORD
   --verbose           Print raw decrypted notification bytes
 
 Commands (mutually exclusive)
@@ -98,6 +102,7 @@ from mesh_common import (
     command_characteristic_uuid,
     PAIR_OP_VERIFY_CREDENTIALS,
     PAIR_OP_GET_MESH_LTK,
+    MESH_NAME_ENV, MESH_PASSWORD_ENV, DOTENV_PATH,
     # Classes
     BaseCommandAction,
     # Functions
@@ -108,6 +113,8 @@ from mesh_common import (
     reverse_section,
     parse_mac_address,
     aes_att_decryption,
+    load_dotenv,
+    resolve_mesh_credential,
 )
 
 # Opcodes from light.rs
@@ -128,14 +135,19 @@ LIGHT_DEL_GRP_PARAM = 0x00
 MAX_LUM_BRIGHTNESS_VALUE = 0x7fff
 
 
-async def main():
+def build_arg_parser():
+    """Build the CLI parser.
+
+    Mesh credentials are optional flags so they can come from the environment
+    or the repository-root ``.env`` instead of shell history and `ps`.
+    """
     parser = argparse.ArgumentParser(description='TLSR8266 Mesh Node Control Tool')
     parser.add_argument('--address', required=True, help="MAC address")
     parser.add_argument('--mesh-address', type=int, default=0, help="Node mesh address (not required for --get-ltk)")
-    parser.add_argument('--mesh-name', required=True)
-    parser.add_argument('--mesh-password', required=True)
+    parser.add_argument('--mesh-name', help=f"Mesh network name (default: ${MESH_NAME_ENV} or .env {MESH_NAME_ENV})")
+    parser.add_argument('--mesh-password', help=f"Mesh network password (default: ${MESH_PASSWORD_ENV} or .env {MESH_PASSWORD_ENV})")
     parser.add_argument('--verbose', action='store_true')
-    
+
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--on', action='store_true', help="Turn the light ON")
     group.add_argument('--off', action='store_true', help="Turn the light OFF")
@@ -149,14 +161,35 @@ async def main():
     group.add_argument('--get-groups', action='store_true', help="Query group memberships")
     group.add_argument('--get-status', action='store_true', help="Query current status")
     group.add_argument('--get-ltk', action='store_true', help="Retrieve the mesh Long-Term Key from device flash")
+    return parser
 
+
+async def main():
+    parser = build_arg_parser()
     args = parser.parse_args()
-    
+
+    # Resolve credentials: CLI flag > environment > .env (no weak default here;
+    # mesh_node.py always operates on an already-provisioned mesh).
+    dotenv = load_dotenv()
+    mesh_name = resolve_mesh_credential(args.mesh_name, MESH_NAME_ENV, dotenv)
+    mesh_password = resolve_mesh_credential(
+        args.mesh_password, MESH_PASSWORD_ENV, dotenv)
+    if mesh_name is None:
+        parser.error(
+            f"--mesh-name is required (or set {MESH_NAME_ENV} in the "
+            f"environment or {DOTENV_PATH})"
+        )
+    if mesh_password is None:
+        parser.error(
+            f"--mesh-password is required (or set {MESH_PASSWORD_ENV} in the "
+            f"environment or {DOTENV_PATH})"
+        )
+
     print(f"Connecting to {args.address}...")
     try:
         async with BleakClient(args.address) as client:
             print("Authenticating...")
-            session_key = await authenticate(client, args.mesh_name, args.mesh_password)
+            session_key = await authenticate(client, mesh_name, mesh_password)
             print("Authentication successful.")
 
             mac_bytes_fwd, mac_bytes_rev = parse_mac_address(args.address)
@@ -244,7 +277,7 @@ async def main():
                 print("Requested factory reset (kick out)")
 
             elif args.get_ltk:
-                plaintext_credentials = encode_mesh_credentials(args.mesh_name, args.mesh_password)
+                plaintext_credentials = encode_mesh_credentials(mesh_name, mesh_password)
                 my_randm = get_random_bytes(8)
                 tmp_key = bytearray(my_randm) + b'\x00' * 8
                 proof_enc = encrypt_data(tmp_key, plaintext_credentials)

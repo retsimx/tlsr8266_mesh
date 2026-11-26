@@ -28,9 +28,27 @@ The included script `meshutils/mesh_add.py` is used to provision a device to joi
 The script accepts the following arguments:
 
 * `--mesh_address` (required): The mesh address to assign to the light. Currently we only support up to 63 lights in the mesh (0 is reserved). So this value should be a unique (in the mesh) number between 1 and 63.
-* `--mesh_name` (required): The name of the BLE mesh. Must be 16 characters or fewer.
-* `--mesh_password` (required): The password of the BLE mesh. Must be 16 characters or fewer.
-* `--mesh_ltk` (optional): A custom Long-Term Key for the mesh in hex format (32 hex characters / 16 bytes). If not provided, the script will use a default LTK with a security warning and confirmation prompt.
+* `--mesh_name` (optional): The name of the BLE mesh. Must be 16 characters or fewer. Defaults to `$MESH_NAME`, then `.env` `MESH_NAME`, then `out_of_mesh`.
+* `--mesh_password` (optional): The password of the BLE mesh. Must be 16 characters or fewer. Defaults to `$MESH_PASSWORD`, then `.env` `MESH_PASSWORD`, then `123`.
+* `--mesh_ltk` (optional): A custom Long-Term Key for the mesh in hex format (32 hex characters / 16 bytes). Defaults to `$MESH_LTK`, then `.env` `MESH_LTK`. If none is supplied, the script uses a default LTK with a security warning and confirmation prompt.
+
+### Credentials From The Environment
+
+Passing mesh credentials as command-line flags exposes them in `ps` output and
+shell history. Instead, export them or put them in the gitignored `.env` at the
+repository root:
+
+```bash
+export MESH_NAME=myhome
+export MESH_PASSWORD=securepass
+export MESH_LTK=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+
+python mesh_add.py --mesh_address 5
+```
+
+Precedence is explicit: **CLI flag > environment variable > `.env` > built-in
+default**. Flags keep working, so an explicit `--mesh_ltk` always wins over
+`$MESH_LTK`. Never commit a real `.env`; it is gitignored.
 
 ### Usage Examples
 

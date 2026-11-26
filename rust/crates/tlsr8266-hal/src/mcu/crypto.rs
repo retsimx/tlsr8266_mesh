@@ -99,11 +99,16 @@ fn aes_mmio_run_into(
 
 /// [`aes_mmio_run_into`] with the timeout reported as `Result`.
 ///
+/// Test-only: production callers need the `_into` shape so the 17-byte
+/// `Result` return never takes a scratch slot on the ISR stack (see
+/// [`aes_mmio_run_into`]), which leaves this form with no shipping caller.
+///
 /// # Returns
 ///
 /// * `Ok` with the 16-byte block once the hardware sets its done bit
 /// * `Err(())` if the done bit never appeared within [`AES_WAIT_MAX_ITERS`]
 ///   polls, i.e. the crypto block is stuck
+#[cfg(test)]
 fn aes_mmio_run(key: &[u8], source: &[u8], direction: AesDirection) -> Result<[u8; 16], ()> {
     let mut result = [0u8; 16];
     if aes_mmio_run_into(key, source, direction, &mut result) {
@@ -132,10 +137,14 @@ fn aes_run_into(key: &[u8], source: &[u8], direction: AesDirection, out: &mut [u
 
 /// Low-level AES encryption/decryption, reporting a hardware timeout.
 ///
-/// This is [`aes_ll_encryption`] with the stuck-hardware case surfaced to the
-/// caller instead of being collapsed into a zero block. Use it where a silent
-/// all-zero block would be mistaken for a valid result (e.g. MIC checks, which
-/// must fail closed).
+/// This is [`aes_ll_encryption`] with the stuck-hardware case surfaced instead
+/// of being collapsed into a zero block, so a caller that feeds a silent
+/// all-zero block into a MIC check can fail closed.
+///
+/// Test-only: #75 introduced it as public, but both production entry points use
+/// the `_into` shape to keep the `Result` return out of the ISR stack budget
+/// (see [`aes_mmio_run_into`]). With no shipping caller it would be dead public
+/// surface (tech-debt row #60), so it stays private to the timeout test.
 ///
 /// # Parameters
 /// * `key` - The AES key (at least 16 bytes)
@@ -146,23 +155,13 @@ fn aes_run_into(key: &[u8], source: &[u8], direction: AesDirection, out: &mut [u
 /// * `Ok` with the 16-byte encrypted/decrypted result
 /// * `Err(())` if the AES block never reported completion (see
 ///   [`AES_WAIT_MAX_ITERS`])
-// The project convention for fallible hardware calls is `Result<_, ()>`
-// (docs/checklists/firmware.md); there is no extra information to carry, so a
-// bespoke error type would be noise.
-#[allow(clippy::result_unit_err)]
-pub fn aes_ll_encryption_checked(
+#[cfg(test)]
+fn aes_ll_encryption_checked(
     key: &[u8],
     source: &[u8],
     direction: AesDirection,
 ) -> Result<[u8; 16], ()> {
-    #[cfg(not(target_os = "none"))]
-    {
-        fake_crypto::encryption_checked(key, source, direction)
-    }
-    #[cfg(target_os = "none")]
-    {
-        critical_section::with(|_| aes_mmio_run(key, source, direction))
-    }
+    fake_crypto::encryption_checked(key, source, direction)
 }
 
 /// Low-level AES encryption/decryption function for the TLSR8266 hardware.
@@ -179,8 +178,9 @@ pub fn aes_ll_encryption_checked(
 ///
 /// # Returns
 /// A 16-byte array containing the encrypted/decrypted result, or `[0u8; 16]` if
-/// the hardware never reported completion ([`aes_ll_encryption_checked`] is the
-/// form that reports the timeout).
+/// the hardware never reported completion. Production callers take the `_into`
+/// shape so the timeout never costs a `Result` scratch slot; the checked form
+/// that reports it is private and test-only.
 ///
 /// # AES Implementation Notes
 /// - On device: uses hardware AES acceleration; the TLSR8266 requires keys to be
@@ -651,7 +651,8 @@ pub mod fake_crypto {
         }
     }
 
-    /// Host `aes_ll_encryption_checked` body.
+    /// Host body of the test-only [`super::aes_ll_encryption_checked`].
+    #[cfg(test)]
     pub(crate) fn encryption_checked(
         key: &[u8],
         source: &[u8],

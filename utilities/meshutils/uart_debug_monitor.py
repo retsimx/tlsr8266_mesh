@@ -10,6 +10,7 @@ The script handles the UART protocol and automatically decodes various message t
 - Panic/error messages (PANIC_MESSAGE) 
 - Light status messages (LIGHT_STATUS)
 - Mesh network messages (MESH_MESSAGE)
+- Node online/offline and on/off changes (NODE_STATUS)
 - General packet information
 
 Usage:
@@ -39,8 +40,6 @@ from time import sleep
 
 import serial
 
-from mesh_common import crc16
-
 # UART Protocol Constants (from flash_fw_uart.py)
 # Packet structure:
 # [0] = counter byte
@@ -50,6 +49,10 @@ from mesh_common import crc16
 # [42-43] = CRC16 of bytes 0-42
 
 from uart_constants import *
+from uart_protocol import (
+    build_ack, build_packet, check_crc, decode_mesh_message,
+    decode_node_status, frame_payload, timestamp as format_timestamp,
+)
 
 # Global variables
 connection = None
@@ -108,16 +111,8 @@ def send_enable_uart():
     
     try:
         # Create ENABLE_UART packet
-        packet = [0] * PACKET_LENGTH
-        packet[0] = 0  # counter
-        packet[1] = 0  # command type (not ACK)
-        packet[2] = ENABLE_UART  # command code
-        
-        # Calculate and add CRC
-        crc = crc16(packet, PACKET_LENGTH - 2)
-        packet[CRC_OFFSET] = crc & 0xFF
-        packet[CRC_OFFSET + 1] = (crc >> 8) & 0xFF
-        
+        packet = build_packet(ENABLE_UART)
+
         # Send packet
         connection.write(packet)
         connection.flush()
@@ -152,16 +147,6 @@ def enable_uart_thread():
             sleep(0.1)
 
 
-def format_timestamp():
-    """
-    Return a formatted timestamp string for message prefixes.
-    
-    Returns:
-        str: Formatted timestamp
-    """
-    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-
-
 def decode_light_status(payload):
     """
     Decode a LIGHT_STATUS message payload.
@@ -186,47 +171,6 @@ def decode_light_status(payload):
         return f"Decode error: {e}, Raw data: {payload.hex()}"
 
 
-def decode_mesh_message(payload):
-    """
-    Decode a MESH_MESSAGE payload.
-    
-    The payload contains an AppCmdValue structure:
-    [0-2]   sno (3 bytes)
-    [3-4]   src (2 bytes, little-endian)  
-    [5-6]   dst (2 bytes, little-endian)
-    [7]     op (1 byte)
-    [8-9]   vendor_id (2 bytes, little-endian)
-    [10-19] par (10 bytes)
-    
-    Args:
-        payload (bytes): Message payload containing AppCmdValue
-        
-    Returns:
-        str: Human-readable mesh message information
-    """
-    try:
-        if len(payload) >= 10:  # Need at least sno + src + dst + op + vendor_id
-            # Extract addresses (little-endian u16) - display as hex
-            src_addr = struct.unpack("<H", payload[3:5])[0]
-            dst_addr = struct.unpack("<H", payload[5:7])[0]
-            
-            # Extract operation code
-            op = payload[7]
-            
-            # Extract vendor ID (little-endian u16)
-            vendor_id = struct.unpack("<H", payload[8:10])[0]
-            
-            # Extract parameter data (up to 10 bytes)
-            params = payload[10:20] if len(payload) >= 20 else payload[10:]
-            params_hex = params.hex() if params else "(no params)"
-            
-            return f"Src: 0x{src_addr:04X}, Dst: 0x{dst_addr:04X}, Op: 0x{op:02X}, Vendor: 0x{vendor_id:04X}, Params: {params_hex}"
-        else:
-            return f"Raw data: {payload.hex()}"
-    except Exception as e:
-        return f"Decode error: {e}, Raw data: {payload.hex()}"
-
-
 def send_ack(counter_byte):
     """
     Send an ACK packet back to the device.
@@ -235,20 +179,9 @@ def send_ack(counter_byte):
         counter_byte (int): Counter byte from the received packet to acknowledge
     """
     global connection
-    
-    # Create ACK packet
-    ack_packet = [0] * PACKET_LENGTH
-    ack_packet[0] = counter_byte  # Echo back the counter
-    ack_packet[1] = ACK           # ACK command type
-    # ack_packet[2] remains 0 (unused for ACK)
-    
-    # Calculate and add CRC
-    crc = crc16(ack_packet, PACKET_LENGTH - 2)
-    ack_packet[CRC_OFFSET] = crc & 0xFF
-    ack_packet[CRC_OFFSET + 1] = (crc >> 8) & 0xFF
-    
-    # Send ACK
-    connection.write(ack_packet)
+
+    # Send ACK (echoes back the counter byte)
+    connection.write(build_ack(counter_byte))
     connection.flush()
 
 
@@ -314,7 +247,7 @@ def process_packet(packet):
     counter = packet[0]
     cmd_type = packet[1]
     cmd_code = packet[2]
-    payload = packet[PAYLOAD_OFFSET:CRC_OFFSET]
+    payload = frame_payload(packet)
     
     # Remove null bytes from payload for text messages
     payload_clean = payload[:payload.index(0) if 0 in payload else len(payload)]
@@ -346,9 +279,26 @@ def process_packet(packet):
         
     elif cmd_code == MESH_MESSAGE:
         # Mesh network message
-        mesh_info = decode_mesh_message(payload)
+        msg = decode_mesh_message(payload)
+        if msg is None:
+            mesh_info = f"Raw data: {payload.hex()}"
+        else:
+            params = msg.params.hex() if msg.params else "(no params)"
+            mesh_info = (
+                f"Src: 0x{msg.src:04X}, Dst: 0x{msg.dst:04X}, "
+                f"Op: 0x{msg.op:02X}, Vendor: 0x{msg.vendor:04X}, "
+                f"Params: {params}"
+            )
         print(f"[{timestamp}] MESH_MSG: {mesh_info}")
-        
+
+    elif cmd_code == NODE_STATUS:
+        # Node online/offline and on/off changes
+        for node_id, online, on_off in decode_node_status(payload):
+            online_str = "ONLINE " if online else "OFFLINE"
+            on_str = "ON " if on_off else "OFF"
+            print(f"[{timestamp}] NODE_STATUS: node 0x{node_id:02X} "
+                  f"({node_id:3d})  {online_str}  {on_str}")
+
     elif cmd_type == ACK:
         # ACK packet - already handled in recv_thread, this shouldn't be reached
         if verbose:
@@ -408,14 +358,13 @@ def recv_thread():
             read_data = read_data[PACKET_LENGTH:]
             
             # Validate packet CRC
-            calculated_crc = crc16(packet, PACKET_LENGTH - 2)
-            received_crc = packet[CRC_OFFSET] | (packet[CRC_OFFSET + 1] << 8)
-            
-            if calculated_crc != received_crc:
+            check = check_crc(packet)
+
+            if not check.ok:
                 crc_errors += 1
                 if verbose:
-                    print(f"[{format_timestamp()}] CRC ERROR: Expected 0x{calculated_crc:04X}, "
-                          f"got 0x{received_crc:04X} (Error #{crc_errors})")
+                    print(f"[{format_timestamp()}] CRC ERROR: Expected 0x{check.expected:04X}, "
+                          f"got 0x{check.actual:04X} (Error #{crc_errors})")
                 continue
             
             # Handle ACK packets (don't send ACK for ACK)

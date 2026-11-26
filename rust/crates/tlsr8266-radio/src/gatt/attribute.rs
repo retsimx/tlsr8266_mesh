@@ -6,7 +6,7 @@ use crate::ble::connection::{
 };
 use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate};
 use crate::gatt::service_table::{
-    attr_effective_len, get_gAttributes, is_readonly_ram_attr, AttributeT,
+    attr_effective_len, get_g_attributes, is_readonly_ram_attr, AttributeT,
     GATT_UUID_CLIENT_CHAR_CFG, SEND_TO_MASTER,
 };
 use crate::rf::drv_8266::PKT_ERR_RSP;
@@ -149,12 +149,12 @@ impl TryFrom<u8> for GattOp {
 /// 5. Compare UUIDs based on their length (16-bit or 128-bit)
 /// 6. Return the attribute and its position if found
 pub fn l2cap_att_search(
-    mut handle_start: usize,
+    handle_start: usize,
     handle_end: usize,
     uuid: &[u8],
 ) -> Option<(&[AttributeT], usize)> {
     // The first attribute in the table contains the total number of attributes
-    let table = get_gAttributes();
+    let table = get_g_attributes();
     let att_num = table[0].att_num as usize;
 
     // Handle 0 is the count entry: its `uuid` is null, so there is nothing to
@@ -272,7 +272,7 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
 
     // Process different ATT operations based on the opcode in byte 3
     // Each operation is handled by a separate function for clarity and maintainability
-    return match GattOp::try_from(packet.l2cap_data().value[3]).ok() {
+    match GattOp::try_from(packet.l2cap_data().value[3]).ok() {
         Some(GattOp::AttOpExchangeMtuReq) => handle_exchange_mtu_request(),
         Some(GattOp::AttOpFindInfoReq) => handle_find_info_request(packet),
         Some(GattOp::AttOpFindByTypeValueReq) => handle_find_by_type_value_request(packet),
@@ -284,7 +284,7 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
         }
         // If the opcode is not recognized or not implemented, return None
         _ => None,
-    };
+    }
 }
 
 /// Handles MTU Exchange Response packets with special connection setup logic.
@@ -484,12 +484,12 @@ fn handle_find_info_request(packet: &Packet) -> Option<Packet> {
     GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
     // Extract handle range from the request
-    let mut start_handle = packet.l2cap_data().value[4] as usize;
+    let start_handle = packet.l2cap_data().value[4] as usize;
     let mut end_handle = packet.l2cap_data().value[6] as usize;
 
     // Ensure end_handle doesn't exceed the total attribute count
-    if get_gAttributes()[0].att_num < packet.l2cap_data().value[6] {
-        end_handle = get_gAttributes()[0].att_num as usize;
+    if get_g_attributes()[0].att_num < packet.l2cap_data().value[6] {
+        end_handle = get_g_attributes()[0].att_num as usize;
     }
 
     // Start constructing the response
@@ -507,11 +507,11 @@ fn handle_find_info_request(packet: &Packet) -> Option<Packet> {
 
     // Get the first attribute's UUID length to determine response format
     // If no attributes in range, this will be caught later
-    let uuid_len = get_gAttributes()[start_handle].uuid_len;
+    let uuid_len = get_g_attributes()[start_handle].uuid_len;
 
     // Process attributes within the requested range
     for current_handle in start_handle..=end_handle {
-        let current_attr = &get_gAttributes()[current_handle];
+        let current_attr = &get_g_attributes()[current_handle];
 
         // If we encounter a different UUID length, end the current response
         if current_attr.uuid_len != uuid_len {
@@ -692,7 +692,7 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
     // Return appropriate response based on search results
     if handle_pairs_count == 0 {
         // No matches found - return error response
-        return prepare_error_response(GattOp::AttOpFindByTypeValueReq as u8, start_handle as u16);
+        prepare_error_response(GattOp::AttOpFindByTypeValueReq as u8, start_handle as u16)
     } else {
         // Matches found - calculate total response size
         let total_bytes = handle_pairs_count * 4; // Each pair is 4 bytes (start handle + end handle)
@@ -980,20 +980,20 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
     }
 
     // Validate handle doesn't exceed total attribute count
-    if get_gAttributes()[0].att_num < att_num as u8 {
+    if get_g_attributes()[0].att_num < att_num as u8 {
         return None;
     }
 
     // Check if attribute has a read callback function
-    if get_gAttributes()[att_num].r.is_none() {
+    if get_g_attributes()[att_num].r.is_none() {
         // No read callback - directly return the attribute's value
         let mut rf_packet_att_rsp = create_att_response_template();
-        let current_attr = &get_gAttributes()[att_num];
+        let current_attr = &get_g_attributes()[att_num];
         // Config-driven values serve a runtime length, so `attr_len` is only the
         // buffer maximum for those handles.
         let value_len = attr_effective_len(att_num, current_attr);
         // SAFETY: (4) `att_num` is nonzero and was bounded by
-        // `get_gAttributes()[0].att_num` above, so both table reads are in
+        // `get_g_attributes()[0].att_num` above, so both table reads are in
         // bounds; `p_attr_value` is that entry's static value of `value_len`
         // effective bytes (the largest is the 19-byte device name) and the
         // destination is this local packet's 22-byte `value` array.
@@ -1037,7 +1037,7 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
     }
 
     // If attribute has a read callback, call it and let it handle the response
-    if let Some(read_callback) = get_gAttributes().get(att_num).and_then(|attr| attr.r) {
+    if let Some(read_callback) = get_g_attributes().get(att_num).and_then(|attr| attr.r) {
         read_callback(packet);
     }
 
@@ -1267,14 +1267,14 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 
     // --- Validate handle: check high byte and total attribute count ---
     let high_byte_is_zero = packet.l2cap_data().value[5] == 0;
-    let handle_in_range = get_gAttributes()[0].att_num >= att_handle as u8;
+    let handle_in_range = get_g_attributes()[0].att_num >= att_handle as u8;
 
     if !high_byte_is_zero || !handle_in_range {
         return None;
     }
 
     // --- Get current attribute and check if it's a CCCD ---
-    let current_attr = &get_gAttributes()[att_handle];
+    let current_attr = &get_g_attributes()[att_handle];
     let is_cccd = !current_attr.uuid.is_null()
         // SAFETY: (4) the null check above excludes the count entry, and every
         // other entry's `uuid` is a whole static UUID (>= 2 bytes), so two bytes
@@ -1292,7 +1292,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         // SAFETY: (4) `att_handle >= 2` above, so `att_handle - 1` is a valid
         // table entry (<= the count) and its `p_attr_value` is non-null: only
         // entry 0 carries a null value pointer. One byte is in bounds.
-        let declaration_properties = unsafe { *get_gAttributes()[att_handle - 1].p_attr_value };
+        let declaration_properties = unsafe { *get_g_attributes()[att_handle - 1].p_attr_value };
         let write_permitted = declaration_properties & 0xc != 0;
 
         if !write_permitted {
@@ -1383,7 +1383,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 mod tests {
     use super::*;
     use crate::gatt::service_table::{
-        get_gAttributes, GATT_UUID_CHARACTER, GATT_UUID_CHAR_USER_DESC, GATT_UUID_PRIMARY_SERVICE,
+        get_g_attributes, GATT_UUID_CHARACTER, GATT_UUID_CHAR_USER_DESC, GATT_UUID_PRIMARY_SERVICE,
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
     };
     use core::ptr::null_mut;
@@ -1737,7 +1737,7 @@ mod tests {
 
         // Handle 3 is the device name: RAM-backed with `r == None`.
         assert!(
-            get_gAttributes()[3].r.is_none(),
+            get_g_attributes()[3].r.is_none(),
             "handle 3 must stay callback-free for this test to mean anything"
         );
 
@@ -1819,7 +1819,7 @@ mod tests {
 
         // Handle 19 is the status CCC: RAM-backed with `w == None`.
         assert!(
-            get_gAttributes()[19].w.is_none(),
+            get_g_attributes()[19].w.is_none(),
             "handle 19 must stay callback-free for this test to mean anything"
         );
 
@@ -1963,7 +1963,7 @@ mod tests {
         seed_system_tick();
 
         // Get the total number of attributes
-        let total_attrs = get_gAttributes()[0].att_num;
+        let total_attrs = get_g_attributes()[0].att_num;
 
         // Create Find Information Request with end handle greater than total attributes
         let mut data = [0; 6];
@@ -2022,8 +2022,8 @@ mod tests {
 
         // Find a 128-bit UUID attribute
         let mut uuid128_handle = 0;
-        for i in 1..get_gAttributes()[0].att_num as usize {
-            if get_gAttributes()[i].uuid_len == 16 {
+        for i in 1..get_g_attributes()[0].att_num as usize {
+            if get_g_attributes()[i].uuid_len == 16 {
                 uuid128_handle = i;
                 break;
             }
@@ -2073,7 +2073,7 @@ mod tests {
         // Verify the UUID was copied correctly
         // Get the 128-bit UUID from attribute table
         let expected_uuid =
-            unsafe { slice::from_raw_parts(get_gAttributes()[uuid128_handle].uuid, 16) };
+            unsafe { slice::from_raw_parts(get_g_attributes()[uuid128_handle].uuid, 16) };
 
         // UUID starts at offset 3 in the response
         let response_uuid = &response.att_read_rsp().value[3..19];
@@ -2090,8 +2090,8 @@ mod tests {
         {
             // Find an attribute with UUID != 0x2902 and that can be modified
             let test_attr_idx = 3; // Device name attribute
-            let original_uuid = unsafe { *(get_gAttributes()[test_attr_idx].uuid as *const u16) };
-            let original_write_callback = get_gAttributes()[test_attr_idx].w;
+            let original_uuid = unsafe { *(get_g_attributes()[test_attr_idx].uuid as *const u16) };
+            let original_write_callback = get_g_attributes()[test_attr_idx].w;
 
             // Verify this attribute doesn't have UUID 0x2902
             assert_ne!(
@@ -2101,7 +2101,7 @@ mod tests {
 
             // Temporarily clear the write callback so our code path is executed
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
             }
 
             // Create a Write Request packet
@@ -2123,7 +2123,7 @@ mod tests {
 
             // Restore original write callback
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_write_callback;
             }
         }
@@ -2132,8 +2132,8 @@ mod tests {
         {
             // Find an attribute with UUID != 0x2902 and index >= 2
             let test_attr_idx = 5; // Some attribute with index >= 2 (not a CCCD)
-            let original_uuid = unsafe { *(get_gAttributes()[test_attr_idx].uuid as *const u16) };
-            let original_write_callback = get_gAttributes()[test_attr_idx].w;
+            let original_uuid = unsafe { *(get_g_attributes()[test_attr_idx].uuid as *const u16) };
+            let original_write_callback = get_g_attributes()[test_attr_idx].w;
 
             // Verify this attribute doesn't have UUID 0x2902
             assert_ne!(
@@ -2147,20 +2147,20 @@ mod tests {
 
             // Temporarily clear the write callback so our code path is executed
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
             }
 
             // Backup the original value of the previous attribute
             let prev_attr_idx = test_attr_idx - 1;
             let original_prev_attr_value =
-                unsafe { *get_gAttributes()[prev_attr_idx].p_attr_value };
+                unsafe { *get_g_attributes()[prev_attr_idx].p_attr_value };
 
             // Set the previous attribute's permissions to have no write permission
             // 0xc = 1100 in binary, so ~0xc & original = remove bits 2 and 3 (write permissions)
             unsafe {
                 let no_write_perm = original_prev_attr_value & !0xc;
                 let mut temp_val = no_write_perm;
-                (*(addr_of_mut!(get_gAttributes()[prev_attr_idx]) as *mut AttributeT))
+                (*(addr_of_mut!(get_g_attributes()[prev_attr_idx]) as *mut AttributeT))
                     .p_attr_value = addr_of_mut!(temp_val);
             }
 
@@ -2183,7 +2183,7 @@ mod tests {
 
             // Restore original write callback
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_write_callback;
                 // We don't need to restore prev_attr_value since we never modified the actual memory
             }
@@ -2193,8 +2193,8 @@ mod tests {
         {
             // Find an attribute with UUID != 0x2902 and index >= 2
             let test_attr_idx = 5; // Some attribute with index >= 2 (not a CCCD)
-            let original_uuid = unsafe { *(get_gAttributes()[test_attr_idx].uuid as *const u16) };
-            let original_write_callback = get_gAttributes()[test_attr_idx].w;
+            let original_uuid = unsafe { *(get_g_attributes()[test_attr_idx].uuid as *const u16) };
+            let original_write_callback = get_g_attributes()[test_attr_idx].w;
 
             // Verify this attribute doesn't have UUID 0x2902
             assert_ne!(
@@ -2208,20 +2208,20 @@ mod tests {
 
             // Temporarily clear the write callback so our code path is executed
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
             }
 
             // Backup the original value of the previous attribute
             let prev_attr_idx = test_attr_idx - 1;
             let original_prev_attr_value =
-                unsafe { *get_gAttributes()[prev_attr_idx].p_attr_value };
+                unsafe { *get_g_attributes()[prev_attr_idx].p_attr_value };
 
             // Set the previous attribute's permissions to have write permission
             // 0x4 = 0100 in binary = write permission
             unsafe {
                 let write_perm = original_prev_attr_value | 0x4;
                 let mut temp_val = write_perm;
-                (*(addr_of_mut!(get_gAttributes()[prev_attr_idx]) as *mut AttributeT))
+                (*(addr_of_mut!(get_g_attributes()[prev_attr_idx]) as *mut AttributeT))
                     .p_attr_value = addr_of_mut!(temp_val);
             }
 
@@ -2248,7 +2248,7 @@ mod tests {
 
             // Restore original write callback
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_write_callback;
                 // We don't need to restore prev_attr_value since we never modified the actual memory
             }
@@ -2258,17 +2258,18 @@ mod tests {
         {
             // Find or create a CCCD attribute (UUID = 0x2902)
             let test_attr_idx = 16; // Common index for a CCCD
-            let original_uuid = unsafe { *(get_gAttributes()[test_attr_idx].uuid as *const u16) };
-            let original_uuid_len = get_gAttributes()[test_attr_idx].uuid_len;
-            let original_write_callback = get_gAttributes()[test_attr_idx].w;
+            let original_uuid = unsafe { *(get_g_attributes()[test_attr_idx].uuid as *const u16) };
+            let original_uuid_len = get_g_attributes()[test_attr_idx].uuid_len;
+            let original_write_callback = get_g_attributes()[test_attr_idx].w;
 
             // Temporarily modify the attribute to have UUID 0x2902
             unsafe {
                 let mut cccd_uuid: u16 = 0x2902;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).uuid =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).uuid =
                     addr_of_mut!(cccd_uuid) as *mut u8;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).uuid_len = 2;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).uuid_len =
+                    2;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
             }
 
             // Create a Write Request packet
@@ -2296,11 +2297,11 @@ mod tests {
             // Restore original UUID and write callback
             unsafe {
                 let mut orig_uuid = original_uuid;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).uuid =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).uuid =
                     addr_of_mut!(orig_uuid) as *mut u8;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).uuid_len =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).uuid_len =
                     original_uuid_len;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_write_callback;
             }
         }
@@ -2332,7 +2333,7 @@ mod tests {
         // Test 6: Return None when att_num exceeds total attributes
         {
             // Get the total number of attributes
-            let total_attrs = get_gAttributes()[0].att_num;
+            let total_attrs = get_g_attributes()[0].att_num;
 
             // Create a Write Request packet with att_num beyond the total
             let mut data = [0; 8];
@@ -2364,10 +2365,10 @@ mod tests {
         let mut uuid128_handle = 0;
         let mut uuid128_attr = None;
 
-        for i in 1..get_gAttributes()[0].att_num as usize {
-            if get_gAttributes()[i].uuid_len == 16 {
+        for i in 1..get_g_attributes()[0].att_num as usize {
+            if get_g_attributes()[i].uuid_len == 16 {
                 uuid128_handle = i;
-                uuid128_attr = Some(&get_gAttributes()[i]);
+                uuid128_attr = Some(&get_g_attributes()[i]);
                 break;
             }
         }
@@ -2498,7 +2499,7 @@ mod tests {
         // exceeds the total number of attributes
 
         // Get the total number of attributes
-        let total_attrs = get_gAttributes()[0].att_num;
+        let total_attrs = get_g_attributes()[0].att_num;
 
         // Create Read Request packet with attribute handle > total_attrs
         let mut data = [0; 6];
@@ -2543,7 +2544,7 @@ mod tests {
         // exceeds the total number of attributes
 
         // Get the total number of attributes
-        let total_attrs = get_gAttributes()[0].att_num;
+        let total_attrs = get_g_attributes()[0].att_num;
 
         // Create Write Request packet with attribute handle > total_attrs
         let mut data = [0; 8];
@@ -2590,9 +2591,9 @@ mod tests {
 
         // Create a temporary attribute that points to SEND_TO_MASTER for testing
         let temp_attr_idx = 5; // Use an attribute that likely has r callback as None
-        let original_ptr = get_gAttributes()[temp_attr_idx].p_attr_value;
-        let original_len = get_gAttributes()[temp_attr_idx].attr_len;
-        let original_r = get_gAttributes()[temp_attr_idx].r;
+        let original_ptr = get_g_attributes()[temp_attr_idx].p_attr_value;
+        let original_len = get_g_attributes()[temp_attr_idx].attr_len;
+        let original_r = get_g_attributes()[temp_attr_idx].r;
 
         // Temporarily modify the attribute to point to SEND_TO_MASTER
         unsafe {
@@ -2601,11 +2602,11 @@ mod tests {
 
             // Point attribute to SEND_TO_MASTER
             let send_to_master_ptr = SEND_TO_MASTER.as_ptr() as *mut u8;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
                 send_to_master_ptr;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
                 SEND_TO_MASTER.lock().len() as u8;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
         }
 
         // Create a Read Request for this attribute
@@ -2632,11 +2633,11 @@ mod tests {
 
         // Restore the original attribute
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
                 original_ptr;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
                 original_len;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
         }
     }
 
@@ -2647,11 +2648,11 @@ mod tests {
 
         // Save original attribute properties
         let temp_attr_idx = 0x18;
-        let original_r = get_gAttributes()[temp_attr_idx].r;
+        let original_r = get_g_attributes()[temp_attr_idx].r;
 
         // Temporarily modify the attribute to have no read callback
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
         }
 
         // Create a Read Request for attribute 0x18
@@ -2682,7 +2683,7 @@ mod tests {
 
         // Restore original attribute properties
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
         }
 
         // Reset flags
@@ -2699,9 +2700,9 @@ mod tests {
 
         // Temporarily modify attribute 0x18 to point to SEND_TO_MASTER and have no read callback
         let temp_attr_idx = 0x18;
-        let original_ptr = get_gAttributes()[temp_attr_idx].p_attr_value;
-        let original_len = get_gAttributes()[temp_attr_idx].attr_len;
-        let original_r = get_gAttributes()[temp_attr_idx].r;
+        let original_ptr = get_g_attributes()[temp_attr_idx].p_attr_value;
+        let original_len = get_g_attributes()[temp_attr_idx].attr_len;
+        let original_r = get_g_attributes()[temp_attr_idx].r;
 
         // Temporarily modify the attribute
         unsafe {
@@ -2709,11 +2710,11 @@ mod tests {
             SEND_TO_MASTER.lock().fill(0xAA);
 
             // Point attribute to SEND_TO_MASTER
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
                 SEND_TO_MASTER.as_ptr() as *mut u8;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
                 SEND_TO_MASTER.lock().len() as u8;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = None;
         }
 
         // Create a Read Request for attribute 0x18
@@ -2744,11 +2745,11 @@ mod tests {
 
         // Restore original attribute properties
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).p_attr_value =
                 original_ptr;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).attr_len =
                 original_len;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
         }
 
         // Reset flags
@@ -2763,7 +2764,7 @@ mod tests {
 
         // Find an attribute that we can temporarily modify for this test
         let temp_attr_idx = 8; // Choose an attribute index that's likely safe to modify
-        let original_r = get_gAttributes()[temp_attr_idx].r;
+        let original_r = get_g_attributes()[temp_attr_idx].r;
 
         // Flag to track if callback was called
         static mut CALLBACK_CALLED: bool = false;
@@ -2776,7 +2777,7 @@ mod tests {
         // Set up the callback on the attribute
         unsafe {
             CALLBACK_CALLED = false;
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r =
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r =
                 Some(test_callback);
         }
 
@@ -2805,7 +2806,7 @@ mod tests {
 
         // Restore original callback
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
+            (*(addr_of_mut!(get_g_attributes()[temp_attr_idx]) as *mut AttributeT)).r = original_r;
         }
     }
 
@@ -2859,12 +2860,12 @@ mod tests {
 
         // Find a valid attribute with a large attr_len
         let attr_to_modify = 1; // Use the first service definition
-        let original_attr_len = get_gAttributes()[attr_to_modify].attr_len;
+        let original_attr_len = get_g_attributes()[attr_to_modify].attr_len;
 
         // Temporarily increase the attribute length to trigger the buffer overflow check
         unsafe {
             // Two handles plus 20 bytes cannot fit the 22-byte value array.
-            (*(addr_of_mut!(get_gAttributes()[attr_to_modify]) as *mut AttributeT)).attr_len = 20;
+            (*(addr_of_mut!(get_g_attributes()[attr_to_modify]) as *mut AttributeT)).attr_len = 20;
         }
 
         // Create a valid UUID for primary service that exists
@@ -2901,7 +2902,7 @@ mod tests {
 
         // Restore original attribute length
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[attr_to_modify]) as *mut AttributeT)).attr_len =
+            (*(addr_of_mut!(get_g_attributes()[attr_to_modify]) as *mut AttributeT)).attr_len =
                 original_attr_len;
         }
     }
@@ -2954,11 +2955,11 @@ mod tests {
         {
             // Find an attribute without a write callback (w is None)
             let test_attr_idx = 8; // Device name attribute often doesn't have a write callback
-            let original_w = get_gAttributes()[test_attr_idx].w;
+            let original_w = get_g_attributes()[test_attr_idx].w;
 
             // Ensure the write callback is None
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
             }
 
             // Create a Write Request packet with handle1 < 3
@@ -2984,7 +2985,7 @@ mod tests {
 
             // Restore original write callback
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_w;
             }
         }
@@ -2993,13 +2994,13 @@ mod tests {
         {
             // Find an attribute without a write callback
             let test_attr_idx = 12;
-            let original_w = get_gAttributes()[test_attr_idx].w;
-            let original_p_attr_value = get_gAttributes()[test_attr_idx].p_attr_value;
+            let original_w = get_g_attributes()[test_attr_idx].w;
+            let original_p_attr_value = get_g_attributes()[test_attr_idx].p_attr_value;
 
             // Ensure the write callback is None and p_attr_value points to RAM start
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
                     .p_attr_value = addr_of!(__RAM_START_ADDR) as *mut u8; // Point to __RAM_START_ADDR
             }
 
@@ -3026,9 +3027,9 @@ mod tests {
 
             // Restore original values
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_w;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
                     .p_attr_value = original_p_attr_value;
             }
         }
@@ -3037,11 +3038,11 @@ mod tests {
         {
             // Find an attribute that can be written to
             let test_attr_idx = 14;
-            let original_w = get_gAttributes()[test_attr_idx].w;
+            let original_w = get_g_attributes()[test_attr_idx].w;
             let original_attr_value = unsafe {
                 slice::from_raw_parts(
-                    get_gAttributes()[test_attr_idx].p_attr_value,
-                    get_gAttributes()[test_attr_idx].attr_len as usize,
+                    get_g_attributes()[test_attr_idx].p_attr_value,
+                    get_g_attributes()[test_attr_idx].attr_len as usize,
                 )
                 .to_vec()
             };
@@ -3051,12 +3052,12 @@ mod tests {
 
             // Ensure the write callback is None and the attribute value is writable
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w = None;
 
                 // Set up a new buffer pointer
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
                     .p_attr_value = test_value.as_mut_ptr();
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).attr_len =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).attr_len =
                     test_value.len() as u8;
             }
 
@@ -3091,13 +3092,13 @@ mod tests {
 
             // Restore original values
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_w;
 
                 // No need to restore attribute value since we used a temporary buffer
                 // Just restore the original pointer and length
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
-                    .p_attr_value = get_gAttributes()[test_attr_idx].p_attr_value;
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
+                    .p_attr_value = get_g_attributes()[test_attr_idx].p_attr_value;
             }
         }
 
@@ -3108,7 +3109,7 @@ mod tests {
 
             // Find an attribute to modify for testing
             let test_attr_idx = 15;
-            let original_w = get_gAttributes()[test_attr_idx].w;
+            let original_w = get_g_attributes()[test_attr_idx].w;
 
             // Define a test callback function
             let test_callback = |_packet: &Packet| unsafe {
@@ -3118,7 +3119,7 @@ mod tests {
             // Set the write callback
             unsafe {
                 WRITE_CALLBACK_CALLED = false;
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     Some(test_callback);
             }
 
@@ -3149,7 +3150,7 @@ mod tests {
 
             // Restore original write callback
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                     original_w;
             }
         }
@@ -3169,7 +3170,7 @@ mod tests {
             // 7.1: With a write callback
             {
                 let test_attr_idx = 18;
-                let original_w = get_gAttributes()[test_attr_idx].w;
+                let original_w = get_g_attributes()[test_attr_idx].w;
 
                 // Define a callback
                 static mut CALLED: bool = false;
@@ -3179,7 +3180,7 @@ mod tests {
 
                 // Set up the write callback
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                         Some(test_callback);
                 }
 
@@ -3197,7 +3198,7 @@ mod tests {
 
                 // Restore original callback
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                         original_w;
                 }
             }
@@ -3205,11 +3206,12 @@ mod tests {
             // 7.2: Without a write callback, early return due to handle1 < 3
             {
                 let test_attr_idx = 5;
-                let original_w = get_gAttributes()[test_attr_idx].w;
+                let original_w = get_g_attributes()[test_attr_idx].w;
 
                 // Remove write callback
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
+                        None;
                 }
 
                 let mut packet = create_att_packet(0, &data);
@@ -3225,7 +3227,7 @@ mod tests {
 
                 // Restore original callback
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                         original_w;
                 }
             }
@@ -3233,13 +3235,14 @@ mod tests {
             // 7.3: Without a write callback, early return due to p_attr_value <= __RAM_START_ADDR
             {
                 let test_attr_idx = 5;
-                let original_w = get_gAttributes()[test_attr_idx].w;
-                let original_p_attr_value = get_gAttributes()[test_attr_idx].p_attr_value;
+                let original_w = get_g_attributes()[test_attr_idx].w;
+                let original_p_attr_value = get_g_attributes()[test_attr_idx].p_attr_value;
 
                 // Remove write callback and set invalid pointer
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w = None;
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
+                        None;
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
                         .p_attr_value = addr_of!(__RAM_START_ADDR) as *mut u8;
                 }
 
@@ -3256,9 +3259,9 @@ mod tests {
 
                 // Restore original values
                 unsafe {
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT)).w =
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT)).w =
                         original_w;
-                    (*(addr_of_mut!(get_gAttributes()[test_attr_idx]) as *mut AttributeT))
+                    (*(addr_of_mut!(get_g_attributes()[test_attr_idx]) as *mut AttributeT))
                         .p_attr_value = original_p_attr_value;
                 }
             }
@@ -3416,13 +3419,13 @@ mod tests {
 
         // Find the actual handle range by scanning the attribute table
         let mut start_handle = 1; // Default start from 1
-        let total_attrs = get_gAttributes()[0].att_num as usize;
+        let total_attrs = get_g_attributes()[0].att_num as usize;
         let mut found_handle = 0;
 
         // Find an attribute with our target UUID to use in the test
         for i in 1..total_attrs {
-            if get_gAttributes()[i].uuid_len == 2 {
-                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+            if get_g_attributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_g_attributes()[i].uuid, 2) };
                 if attr_uuid == target_uuid {
                     found_handle = i;
                     start_handle = i;
@@ -3434,7 +3437,7 @@ mod tests {
         // If we didn't find our target UUID, fall back to finding any 16-bit UUID
         if found_handle == 0 {
             for i in 1..total_attrs {
-                if get_gAttributes()[i].uuid_len == 2 {
+                if get_g_attributes()[i].uuid_len == 2 {
                     found_handle = i;
                     start_handle = i;
                     break;
@@ -3444,7 +3447,7 @@ mod tests {
             // Get the actual UUID from the found attribute
             if found_handle > 0 {
                 target_uuid.copy_from_slice(unsafe {
-                    slice::from_raw_parts(get_gAttributes()[found_handle].uuid, 2)
+                    slice::from_raw_parts(get_g_attributes()[found_handle].uuid, 2)
                 });
             }
         }
@@ -3531,9 +3534,9 @@ mod tests {
         // We need to modify an attribute to force a break condition
         // Find a Characteristic attribute to modify
         let mut char_attr_idx = 0;
-        for i in 1..get_gAttributes()[0].att_num as usize {
-            if get_gAttributes()[i].uuid_len == 2 {
-                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+        for i in 1..get_g_attributes()[0].att_num as usize {
+            if get_g_attributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_g_attributes()[i].uuid, 2) };
                 if attr_uuid == &uuid16_to_bytes(GATT_UUID_CHARACTER) {
                     char_attr_idx = i;
                     break;
@@ -3547,14 +3550,14 @@ mod tests {
         );
 
         // Save the original UUID length for restoration later
-        let original_uuid_len = get_gAttributes()[char_attr_idx + 1].uuid_len;
+        let original_uuid_len = get_g_attributes()[char_attr_idx + 1].uuid_len;
 
         // Case 1: Trigger break through inconsistent format
         // Modify the UUID length of the next attribute to force format inconsistency
         unsafe {
             // First call should work and establish a format
             // Then we modify the attribute to cause a break on the next match
-            (*(addr_of_mut!(get_gAttributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len =
+            (*(addr_of_mut!(get_g_attributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len =
                 if original_uuid_len == 2 { 16 } else { 2 };
         }
 
@@ -3576,16 +3579,16 @@ mod tests {
         // Case 2: Trigger break through buffer space limitation
         // Create an attribute with a very large UUID length to force a buffer space issue
         let max_space_attr_idx = char_attr_idx + 2; // Another characteristic
-        let original_uuid_len2 = get_gAttributes()[max_space_attr_idx].uuid_len;
+        let original_uuid_len2 = get_g_attributes()[max_space_attr_idx].uuid_len;
 
         unsafe {
             // Restore the first modification
-            (*(addr_of_mut!(get_gAttributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len =
+            (*(addr_of_mut!(get_g_attributes()[char_attr_idx + 1]) as *mut AttributeT)).uuid_len =
                 original_uuid_len;
 
             // Modify another attribute to have a large UUID length
             // This should cause bytes_read + found_attr[0].uuid_len >= 0x13
-            (*(addr_of_mut!(get_gAttributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len =
+            (*(addr_of_mut!(get_g_attributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len =
                 0x10;
         }
 
@@ -3600,7 +3603,7 @@ mod tests {
 
         // Restore the original attribute
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len =
+            (*(addr_of_mut!(get_g_attributes()[max_space_attr_idx]) as *mut AttributeT)).uuid_len =
                 original_uuid_len2;
         }
     }
@@ -3613,9 +3616,9 @@ mod tests {
         let char_uuid = uuid16_to_bytes(GATT_UUID_CHARACTER);
         let mut char_handle = 0;
 
-        for i in 1..get_gAttributes()[0].att_num as usize {
-            if get_gAttributes()[i].uuid_len == 2 {
-                let attr_uuid = unsafe { slice::from_raw_parts(get_gAttributes()[i].uuid, 2) };
+        for i in 1..get_g_attributes()[0].att_num as usize {
+            if get_g_attributes()[i].uuid_len == 2 {
+                let attr_uuid = unsafe { slice::from_raw_parts(get_g_attributes()[i].uuid, 2) };
                 if attr_uuid == &char_uuid {
                     char_handle = i;
                     break;
@@ -3949,7 +3952,7 @@ mod tests {
 
         // The CCC entry is declared with `att_num == 0`. The table must be left
         // exactly as declared; the handler has to cope with a zero group span.
-        assert_eq!(get_gAttributes()[19].att_num, 0);
+        assert_eq!(get_g_attributes()[19].att_num, 0);
 
         let packet = create_att_packet(0, &data);
         let response = handle_find_by_type_value_request(&packet).unwrap();
@@ -3975,7 +3978,7 @@ mod tests {
         assert!((l2cap_len as usize - 1) <= response.att_read_rsp().value.len());
 
         // The table was not mutated by the call.
-        assert_eq!(get_gAttributes()[19].att_num, 0);
+        assert_eq!(get_g_attributes()[19].att_num, 0);
     }
 
     #[test]
@@ -4122,7 +4125,7 @@ mod tests {
         // ---- Case 5: Test handle range adjustment ----
         {
             // att_num is the total number of attributes
-            let att_num = get_gAttributes()[0].att_num as usize;
+            let att_num = get_g_attributes()[0].att_num as usize;
 
             // We know PRIMARY_SERVICE_UUID exists in the attribute table
             // Search beyond att_num should be adjusted to att_num
@@ -4158,7 +4161,7 @@ mod tests {
         {
             // The first attribute in gAttributes has its att_num set to the total number of attributes
             // in our case, that's 28 (index 0-27)
-            let att_num = get_gAttributes()[0].att_num as usize;
+            let att_num = get_g_attributes()[0].att_num as usize;
 
             // Search with handle_start equal to att_num should return None
             let uuid_bytes = uuid16_to_bytes(GATT_UUID_PRIMARY_SERVICE);
@@ -4308,7 +4311,7 @@ mod tests {
         assert_eq!(format_length, 13 + 4, "13 name bytes + two 2-byte handles");
         assert_eq!(
             format_length - 4,
-            attr_effective_len(3, &get_gAttributes()[3]),
+            attr_effective_len(3, &get_g_attributes()[3]),
             "served length is the effective length, not the buffer maximum"
         );
         assert!(format_length - 4 <= value_capacity);
@@ -4336,7 +4339,7 @@ mod tests {
         assert_eq!(format_length, 4 + 4, "4 revision bytes + two handles");
         assert_eq!(
             format_length - 4,
-            attr_effective_len(9, &get_gAttributes()[9])
+            attr_effective_len(9, &get_g_attributes()[9])
         );
         assert!(format_length - 4 <= value_capacity);
         assert_eq!(
@@ -4351,7 +4354,7 @@ mod tests {
         assert_eq!(format_length, 11 + 4, "11 name bytes + two handles");
         assert_eq!(
             format_length - 4,
-            attr_effective_len(11, &get_gAttributes()[11])
+            attr_effective_len(11, &get_g_attributes()[11])
         );
         assert!(format_length - 4 <= value_capacity);
         assert_eq!(&response.att_read_rsp().value[5..16], b"out_of_mesh");
@@ -4378,7 +4381,7 @@ mod tests {
         crate::facade::set_radio_config(cfg);
         crate::gatt::service_table::init_gatt_profile(&cfg);
         assert_eq!(
-            attr_effective_len(3, &get_gAttributes()[3]),
+            attr_effective_len(3, &get_g_attributes()[3]),
             19,
             "the injected 19-byte name is live"
         );

@@ -18,7 +18,7 @@ use crate::ble::connection::{
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG,
     BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME, LAST_PACKET_RECEIVED_TIMESTAMP,
     LIGHT_CONN_SN_MASTER, SLAVE_CONNECTED_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK,
-    SLAVE_WINDOW_SIZE, SLAVE_WINDOW_SIZE_UPDATE,
+    SLAVE_WINDOW_SIZE,
 };
 use crate::ble::pair::pair_dec_packet_mesh;
 use crate::callbacks::dispatch_ota_snapshot;
@@ -87,7 +87,6 @@ pub fn handle_rf_packet_reception() {
         return;
     }
 
-    let mut dma_len = 0;
     let mut light_rx_buff = LIGHT_RX_BUFF.lock();
 
     // Configure DMA for next reception using the new write pointer
@@ -98,7 +97,7 @@ pub fn handle_rf_packet_reception() {
 
     // Extract timing and length information from received packet
     let rx_time = light_rx_buff[rx_index].rx_time;
-    dma_len = light_rx_buff[rx_index].dma_len;
+    let dma_len = light_rx_buff[rx_index].dma_len;
 
     // Mark this buffer entry as processed by setting dma_len to 1
     light_rx_buff[rx_index].dma_len = 1;
@@ -126,7 +125,7 @@ pub fn handle_rf_packet_reception() {
     // Delegate complex packet processing to the slow path function
     // This separation keeps the interrupt handler fast path minimal while providing
     // comprehensive packet processing capabilities in the slow path
-    process_received_packet_slow_path(rx_index, dma_len, &mut *light_rx_buff);
+    process_received_packet_slow_path(rx_index, dma_len, &mut light_rx_buff);
 }
 
 /// Complex packet processing function (marked inline(never) for code size optimization).
@@ -275,18 +274,18 @@ fn handle_connection_request(entry: &LightRxBuff, packet: &Packet, rx_time: u32)
 ///
 /// This function validates and processes mesh network packets, including
 /// decryption, duplicate detection, and forwarding to the mesh manager.
-fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
+fn handle_mesh_packet(packet: &Packet, _rx_time: u32) {
     // Create a mutable copy of the packet for decryption and processing
     let mut packet = *packet;
 
-    /// Validates mesh packet integrity and filters duplicates.
-    ///
-    /// This closure performs comprehensive packet validation including:
-    /// - Timing validation for connected devices
-    /// - Packet format validation (length, type, channel ID)
-    /// - Mesh packet decryption and authentication
-    /// - Duplicate packet detection
-    /// - Command parsing and opcode extraction
+    // Validates mesh packet integrity and filters duplicates.
+    //
+    // This closure performs comprehensive packet validation including:
+    // - Timing validation for connected devices
+    // - Packet format validation (length, type, channel ID)
+    // - Mesh packet decryption and authentication
+    // - Duplicate packet detection
+    // - Command parsing and opcode extraction
     let mut pkt_valid = || {
         // For connected devices, validate timing to prevent stale packet processing
         if BLE_PERIPHERAL_CONNECTION_ACTIVE.get() {
@@ -322,7 +321,7 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
         }
 
         // Parse the mesh command opcode and parameters from the decrypted packet
-        let (success, op_cmd, op_cmd_len, params, params_len) =
+        let (success, op_cmd, op_cmd_len, _params, _params_len) =
             parse_ble_packet_op_params(&packet, true);
         if !success {
             return false;
@@ -337,11 +336,7 @@ fn handle_mesh_packet(packet: &Packet, rx_time: u32) {
 
         // Check for duplicate packets using opcode and packet content
         // This prevents processing the same mesh command multiple times
-        if is_exist_in_rc_pkt_buf(op, &packet) {
-            return false;
-        }
-
-        true
+        !is_exist_in_rc_pkt_buf(op, &packet)
     };
 
     // If packet validation passes, hand it to the mesh RX queue for processing
@@ -418,7 +413,7 @@ mod tests {
     use crate::ble::connection::{
         BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME, BRIDGE_RECEIVE_TIMING_TICK,
-        CONN_UPDATE_CNT,
+        CONN_UPDATE_CNT, SLAVE_WINDOW_SIZE_UPDATE,
     };
     use crate::ble::pair::SECURITY_ENABLE;
     use crate::mesh_ll::node_status::RC_PKT_BUF;

@@ -42,7 +42,7 @@ pub enum LightOpType {
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
-pub enum ePairState {
+pub enum PairAuthState {
     PairSetted = 0,
     PairSetting = 1,
     PairSetMeshTxStart = 2,
@@ -219,10 +219,8 @@ impl AtomicBlePeripheralLinkState {
     /// Loads the current state.
     pub fn get(&self) -> BlePeripheralLinkState {
         let value = self.inner.load(core::sync::atomic::Ordering::Relaxed);
-        BlePeripheralLinkState::from_u8(value).unwrap_or_else(|| {
-            // Log error or handle invalid state - for now, default to Disconnected
-            BlePeripheralLinkState::Disconnected
-        })
+        // An invalid discriminant defaults to Disconnected.
+        BlePeripheralLinkState::from_u8(value).unwrap_or(BlePeripheralLinkState::Disconnected)
     }
 
     /// Stores a new state.
@@ -571,7 +569,7 @@ mod tests {
     /// # Algorithm
     ///
     /// 1. Test BlePeripheralLinkState discriminant values
-    /// 2. Test ePairState discriminant values
+    /// 2. Test PairAuthState discriminant values
     ///
     /// # Notes
     ///
@@ -586,11 +584,11 @@ mod tests {
         assert_eq!(BlePeripheralLinkState::Connected as u8, 5);
         assert_eq!(BlePeripheralLinkState::Receiving as u8, 7);
 
-        // ePairState values
-        assert_eq!(ePairState::PairSetted as u8, 0);
-        assert_eq!(ePairState::PairSetting as u8, 1);
-        assert_eq!(ePairState::PairSetMeshTxStart as u8, 2);
-        assert_eq!(ePairState::PairSetMeshTxDone as u8, 3);
-        assert_eq!(ePairState::PairSetMeshRxDone as u8, 4);
+        // PairAuthState values
+        assert_eq!(PairAuthState::PairSetted as u8, 0);
+        assert_eq!(PairAuthState::PairSetting as u8, 1);
+        assert_eq!(PairAuthState::PairSetMeshTxStart as u8, 2);
+        assert_eq!(PairAuthState::PairSetMeshTxDone as u8, 3);
+        assert_eq!(PairAuthState::PairSetMeshRxDone as u8, 4);
     }
 }

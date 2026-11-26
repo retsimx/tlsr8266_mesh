@@ -256,7 +256,7 @@ During provisioning, a special mesh LTK can be provided with the `MESH_FLAG_OFFS
 if MESH_PAIR_ENABLE.get() && MIN_PACKET_LEN_WITH_MESH < data.head().l2cap_len && data.att_write().value[MESH_FLAG_OFFSET] != 0 {
     // This is a mesh LTK - decrypt and prepare for mesh mode
     aes_att_decryption(&pair_state.pair_sk.clone(), &pair_state.pair_work.clone(), &mut pair_state.pair_ltk_mesh);
-    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetMeshTxStart;
     return true;
 }
 ```

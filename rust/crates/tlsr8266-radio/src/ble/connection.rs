@@ -40,12 +40,10 @@
 //! - Compatibility with mesh network timing requirements
 //! - Prevention of invalid configurations that could cause connection drops
 
-use core::ptr::addr_of;
-use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize};
 
 use crate::ble::channel_selection::ble_ll_build_available_channel_table;
-use crate::ble::flash_config::{rf_update_conn_para, update_ble_parameter_cb, SYS_CHN_LISTEN};
+use crate::ble::flash_config::{update_ble_parameter_cb, SYS_CHN_LISTEN};
 use crate::ble::pair::{pair_init, PAIR_AC, SECURITY_ENABLE};
 use crate::ble::status::DEVICE_STATUS_TICK_COUNTER;
 use crate::callbacks;
@@ -317,7 +315,7 @@ fn check_par_con(packet: &Packet) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }
 
 /// Establishes a BLE peripheral (slave) connection with comprehensive parameter setup.
@@ -405,7 +403,7 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
 
     if BLE_PERIPHERAL_CONNECTION_ENABLED.get() && adv_matches {
         // Validate connection parameters
-        if check_par_con(packet) == true {
+        if check_par_con(packet) {
             // Stop any ongoing RF operations to prepare for connection setup
             rf_stop_trx();
 
@@ -527,11 +525,8 @@ pub fn rf_link_slave_connect(packet: &Packet, time: u32) {
             // RF TX wait/settle timing: low byte of the 32-bit
             // reg_rf_tx_wail_settle_time (0xf04). 0x67 = 32/48 MHz SYSTEM CLOCK.
             write_reg_rf_tx_wail_settle_time_lo(0x67);
-
-            return;
         }
     }
-    return;
 }
 
 /// Implements adaptive timing adjustment algorithm for BLE slave connections.
@@ -606,7 +601,7 @@ pub fn rf_link_timing_adjust(time: u32) {
 ///
 /// # Parameters
 /// * `enable` - If true, enables both connection acceptance and advertising.
-///              If false, disables both to make device non-discoverable.
+///   If false, disables both to make device non-discoverable.
 ///
 /// # Side Effects
 /// * Modifies global connection and advertising enable flags
@@ -653,11 +648,7 @@ pub fn rf_link_slave_pairing_enable(enable: bool) {
 /// # Returns
 /// * Success code (0) if parameters are valid
 /// * Error code (0xfffffffd/0xfffffffe) if validation fails
-pub fn setup_ble_parameter_start(
-    mut interval_min: u16,
-    mut interval_max: u16,
-    timeout: u32,
-) -> u32 {
+pub fn setup_ble_parameter_start(interval_min: u16, interval_max: u16, timeout: u32) -> u32 {
     let mut invalid = false;
 
     // Handle default parameter case: both intervals are zero
@@ -666,8 +657,6 @@ pub fn setup_ble_parameter_start(
         // This maintains the existing timing without changes
         UPDATE_INTERVAL_USER_MAX.set(SLAVE_LINK_INTERVAL.get() as u16);
         UPDATE_INTERVAL_USER_MIN.set(SLAVE_LINK_INTERVAL.get() as u16);
-        interval_max = UPDATE_INTERVAL_USER_MAX.get();
-        interval_min = UPDATE_INTERVAL_USER_MIN.get();
     } else {
         // Validate user-provided interval range
         if interval_min < INTERVAL_THRESHOLD {
@@ -689,14 +678,14 @@ pub fn setup_ble_parameter_start(
     }
 
     // Return success if all validations passed
-    if invalid == false {
+    if !invalid {
         return 0; // Success
     }
 
     // Clear stored parameters on interval validation failure
     UPDATE_INTERVAL_USER_MIN.set(0);
     UPDATE_INTERVAL_USER_MAX.set(0);
-    return 0xfffffffe; // Error: invalid interval range
+    0xfffffffe // Error: invalid interval range
 }
 
 /// Manages delayed connection parameter updates with timeout handling.
@@ -718,19 +707,16 @@ pub fn setup_ble_parameter_start(
 /// receiving parameter update requests, improving compatibility with different
 /// master implementations.
 fn update_connect_para() {
-    if NEED_UPDATE_CONNECT_PARA.get() {
-        if GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get() != 0 {
-            // Check if sufficient delay has elapsed since connection establishment
-            let elapsed_time =
-                read_reg_system_tick() - GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get();
-            if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < elapsed_time {
-                // Clear update flags and trigger parameter update
-                NEED_UPDATE_CONNECT_PARA.set(false);
-                GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
+    if NEED_UPDATE_CONNECT_PARA.get() && GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get() != 0 {
+        // Check if sufficient delay has elapsed since connection establishment
+        let elapsed_time = read_reg_system_tick() - GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get();
+        if UPDATE_CONNECT_PARA_DELAY_MS * CLOCK_SYS_CLOCK_1US * 1000 < elapsed_time {
+            // Clear update flags and trigger parameter update
+            NEED_UPDATE_CONNECT_PARA.set(false);
+            GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(0);
 
-                // Execute the parameter update callback
-                update_ble_parameter_cb();
-            }
+            // Execute the parameter update callback
+            update_ble_parameter_cb();
         }
     }
 }

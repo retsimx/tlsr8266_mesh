@@ -59,7 +59,6 @@ use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
 use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::{clock_time, clock_time_exceed};
-use tlsr8266_pac::BIT;
 
 /// Mesh node status table storing information about all known nodes in the mesh network.
 /// Contains up to 64 entries with each node's device address, sequence number, and parameters.
@@ -470,10 +469,14 @@ pub fn mesh_node_flush_status() {
             let max = MESH_NODE_MAX.get() as usize;
             if cursor < max {
                 let mut st = MESH_NODE_ST.lock();
-                let mut table = NodeTable::new(&mut st[..]);
+                let table = NodeTable::new(&mut st[..]);
 
-                for index in cursor..max {
-                    let node = &mut table.nodes[index];
+                // Snapshot the resume point: the loop range is evaluated once,
+                // so advancing `cursor` on a full batch only affects the next
+                // outer pass, never the range being iterated.
+                let start = cursor;
+                for (offset, node) in table.nodes[start..max].iter_mut().enumerate() {
+                    let index = start + offset;
                     if !is_online(node) {
                         continue;
                     }
@@ -567,7 +570,7 @@ fn mesh_node_keep_alive() {
     }
 
     let mut st = MESH_NODE_ST.lock();
-    let mut table = NodeTable::new(&mut st[..]);
+    let table = NodeTable::new(&mut st[..]);
     let local = &mut table.nodes[0];
     local.val.sn = DEVICE_NODE_SN.get();
     local.miss = 1;
@@ -661,7 +664,7 @@ fn mesh_node_adv_status(p_data: &mut [u8]) -> u32 {
     mesh_node_keep_alive();
 
     let mut st = MESH_NODE_ST.lock();
-    let mut table = NodeTable::new(&mut st[..]);
+    let table = NodeTable::new(&mut st[..]);
     let max = MESH_NODE_MAX.get() as usize;
     let slots = min(capacity, max);
 
@@ -1150,11 +1153,11 @@ pub fn mesh_report_status_enable_mask(data: &[u8]) {
 
     // Process selective address list if reporting is enabled
     if MESH_NODE_REPORT_ENABLE.get() && data.len() > 1 {
-        for index in 1..data.len() {
+        for &addr in &data[1..] {
             if MESH_NODE_MAX.get() != 0 {
                 // Search node table for matching device addresses
                 mesh_node_st.iter_mut().enumerate().for_each(|(i, v)| {
-                    if data[index] == v.val.dev_adr {
+                    if addr == v.val.dev_adr {
                         // Enable reporting for this node by setting corresponding bit
                         mesh_node_mask[i >> 5] |= 1 << (i & 0x1f);
                     }

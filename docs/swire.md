@@ -211,6 +211,33 @@ probe-tlsr reset
 
 All three flash commands stop the core and leave it stopped, and `flash-erase` erases whole 4 KiB sectors, so the span must be sector-aligned or neighbouring data goes with it. A restore has to finish before `reset`; keep the `reset`, or the device stays dark until the next power cycle. Erasing these sectors removes the MAC and pairing keys, so back up first and check that `nvm-backup.bin` is exactly `0x6000` bytes (24576 bytes) before erasing. `flash-read --out` writes through a sibling `.tmp` file and renames it, so a failed backup cannot truncate an existing one.
 
+### Runtime Health Symbols
+
+The RTT build (`FEATURES=rtt`) exports three executor counters that prove the
+CPU is parking between interrupts instead of busy-polling. Read them over SWire
+with the symbol form of `read`:
+
+```bash
+ELF=_build/lightblemesh
+probe-tlsr read --elf "$ELF" EXECUTOR_POLLS
+probe-tlsr read --elf "$ELF" EXECUTOR_STALLS
+probe-tlsr read --elf "$ELF" EXECUTOR_LOST_WAKES
+```
+
+| Symbol | Meaning | Expected at idle |
+|---|---|---|
+| `EXECUTOR_POLLS` | `Executor::run` loop iterations; a busy-polling executor grows this without bound | ~100–350 polls/s |
+| `EXECUTOR_STALLS` | Entries into the `0x6f = 0x80` CPU idle stall, i.e. iterations that actually parked | Monotonically increasing |
+| `EXECUTOR_LOST_WAKES` | Parks that returned with no enabled IRQ source latched | `0` |
+
+All three are `#[cfg(feature = "rtt")]`, so a default image has no such symbols
+and `read` cannot resolve them. Sample twice a second apart and compare: on a
+healthy idle node `EXECUTOR_POLLS` advances within the band, `EXECUTOR_STALLS`
+never decreases, and `EXECUTOR_LOST_WAKES` stays at zero. A flat
+`EXECUTOR_STALLS` with a climbing `EXECUTOR_POLLS` means the executor is
+spinning instead of parking; a non-zero `EXECUTOR_LOST_WAKES` means a park lost
+its wake source.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

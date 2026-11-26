@@ -20,16 +20,13 @@
 //!   helpers
 //! - [`irq`] — the interrupt-facing state machines
 //! - [`facade`] — the surface the firmware drives the radio through
-//!
-//! # Why `allow(warnings)`
-//!
-//! Temporary by design: the extraction lands the move unchanged so the diff is
-//! reviewable, and C-16 (#78) removes this attribute together with the dead code
-//! and doc-link breakage the move leaves behind.
 
 #![feature(coverage_attribute)]
 #![cfg_attr(target_os = "none", no_std)]
-#![allow(warnings)]
+// The project mandates `Result<_, ()>` for fallible hardware/protocol calls
+// (docs/checklists/firmware.md); a richer error type would invent information
+// these call sites do not have.
+#![allow(clippy::result_unit_err)]
 
 pub mod ble {
     pub mod channel_selection;

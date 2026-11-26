@@ -13,11 +13,9 @@
  * with configuration for different power levels and communication modes.
  */
 
-use core::cmp::min;
 use core::mem::size_of;
-use core::ops::{Deref, DerefMut};
-use core::ptr::{addr_of, addr_of_mut};
-use core::slice;
+use core::ops::DerefMut;
+use core::ptr::addr_of;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize};
 
 use crate::ble::connection::{
@@ -57,22 +55,20 @@ use mesh_protocol::mesh_types::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP,
 };
 use mesh_protocol::packet_types::{
-    AdvPrivate, AdvRspPrivate, Packet, PacketAttCmd, PacketAttData, PacketAttErrRsp,
-    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+    AdvPrivate, AdvRspPrivate, Packet, PacketAttData, PacketAttErrRsp, PacketAttValue,
+    PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::drivers::flash::{flash_read_page, flash_write_page};
 use tlsr8266_hal::mcu::analog::{analog_read, analog_write};
 use tlsr8266_hal::mcu::clock::{is_16mhz_xtal, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_hal::mcu::cmd_table::{load_tbl_cmd_set, TBLCMDSET};
-use tlsr8266_hal::mcu::irq_i::irq_disable;
 use tlsr8266_hal::mcu::random::rand;
-use tlsr8266_hal::pm::light_sw_reboot;
 use tlsr8266_pac::BIT;
 use tlsr8266_pac::{
     read_reg_irq_mask, read_reg_rf_mode, read_reg_system_tick, read_reg_system_tick_mode,
-    write_reg16, write_reg32, write_reg8, write_reg_dma2_addr, write_reg_dma2_ctrl,
-    write_reg_dma3_addr, write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src,
+    write_reg16, write_reg32, write_reg_dma2_addr, write_reg_dma2_ctrl, write_reg_dma3_addr,
+    write_reg_dma_chn_irq_msk, write_reg_irq_mask, write_reg_irq_src,
     write_reg_pll_rx_fine_div_tune, write_reg_rf_access_code, write_reg_rf_channel,
     write_reg_rf_crc, write_reg_rf_event_clear, write_reg_rf_irq_mask, write_reg_rf_irq_status,
     write_reg_rf_mode, write_reg_rf_mode_control, write_reg_rf_sched_tick, write_reg_rf_sn,
@@ -83,8 +79,16 @@ use tlsr8266_pac::{
 };
 use tlsr8266_pac::{rega_deepsleep_flag, write_reg_rf_rx_gain_agc, write_reg_rf_rx_mode};
 
-const RF_FAST_MODE: bool = true;
 const RF_TRX_OFF: u8 = 0x45;
+
+// Firmware SRAM scratch offsets inside `__RAM_START_ADDR = 0x808000`, written by
+// `rf_link_slave_init` and read back by the host tooling. These are RAM
+// addresses, not PAC MMIO registers: they already carry the `REG_BASE_ADDR`
+// bit, so the `write_reg*` accessors' base OR is a no-op for them. They stay
+// local to this module.
+const SRAM_IDENT_MAC: u32 = 0x808004;
+const SRAM_IDENT_VERSION: u32 = 0x808008;
+const SRAM_IDENT_CRC: u32 = 0x80800c;
 
 /// Private advertising data structure used in BLE advertisements.
 /// Contains manufacturer ID, mesh product UUID, and MAC address for device identification.
@@ -372,8 +376,8 @@ pub fn rf_drv_init(enable: bool) -> u8 {
 
             // Configure the Automatic Gain Control (AGC) settings
             // Each value corresponds to different RF gain stages
-            for i in 0..6 {
-                write_reg_rf_rx_gain_agc(TBL_AGC[i], (i << 2) as u32)
+            for (i, &gain) in TBL_AGC.iter().take(6).enumerate() {
+                write_reg_rf_rx_gain_agc(gain, (i << 2) as u32)
             }
 
             // Check if custom RF power settings are stored at specific flash memory offsets
@@ -663,7 +667,8 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     }
 
     // Extract operation command and parameters from the packet using the refactored function
-    let (success, op_cmd, op_cmd_len, params, params_len) = parse_ble_packet_op_params(data, false);
+    let (_success, op_cmd, op_cmd_len, params, _params_len) =
+        parse_ble_packet_op_params(data, false);
 
     // Determine if this packet targets this device by checking:
     // 1. If it matches one of the device's configured group addresses (group_match)
@@ -716,11 +721,8 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     pkt_light_status.att_cmd_mut().value = PacketAttValue::default();
 
     // Create a clone of the packet instead of using unsafe raw memory operations
-    // For efficient memory usage, we only clone the portion of the data we need
-    let copy_size = params_len as usize + 0x11;
-
     // First clone the packet header which has the same structure
-    *pkt_light_data = data.clone();
+    *pkt_light_data = *data;
 
     // Configure the BLE packet headers for the response
     // These values define the packet format according to the BLE specification
@@ -739,7 +741,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     // Process the command data if this packet is intended for this device
     // (either directly targeted or matches one of our group addresses)
     if device_match || group_match {
-        on_light_data(&*pkt_light_data);
+        on_light_data(&pkt_light_data);
     }
 
     // Update the stored sequence number with the one from this packet
@@ -834,7 +836,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     if device_match || group_match {
         // Copy command data to the status packet
         let ptr = &pkt_light_data.att_cmd_mut().value.val[3..];
-        pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(&ptr);
+        pkt_light_status.att_cmd_mut().value.val[3..3 + ptr.len()].copy_from_slice(ptr);
 
         // Set the sequence number in the status packet
         pkt_light_status.att_cmd_mut().value.sno = *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock();
@@ -847,7 +849,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
 
         // Create a temporary packet for passing to the response callback
         // Copy the original packet data to the temporary packet
-        let mut tmp_pkt = data.att_write().value.clone();
+        let mut tmp_pkt = data.att_write().value;
 
         // Set this device's address as the source in the temporary packet
         let device_addr = DEVICE_ADDRESS.get();
@@ -857,12 +859,11 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
         // Call the response callback to fill in application-specific status data
         // If the callback returns true, add the status packet to the response queue
         if on_light_response(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt).is_ok() {
-            rf_link_slave_add_status(&*pkt_light_status);
+            rf_link_slave_add_status(&pkt_light_status);
         }
     }
 
     // Return true to indicate successful packet processing
-    return;
 }
 
 /**
@@ -881,16 +882,13 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
  * @return true if packet was processed successfully, false otherwise
  */
 pub fn rf_link_slave_data_write(data: &Packet) {
-    let mut data: Packet = data.clone();
+    let mut data: Packet = *data;
 
     // Check if security is enabled and attempt packet decryption
     if PAIR_LOGIN_OK.get() && pair_dec_packet(&mut data).is_ok() {
         // Process the decrypted packet
-        rf_link_slave_data_write_no_dec(&mut data);
-        return;
+        rf_link_slave_data_write_no_dec(&data);
     }
-
-    return;
 }
 
 /**
@@ -938,89 +936,82 @@ pub fn rf_link_slave_init(interval: u32) {
     // configuration lock is held while the radio is set up.
     let cfg = radio_config();
 
-    // SAFETY: (2) startup RF-init boundary; no unsafe operation remains. Every
-    // callee is a safe `fn` (register accessors, `flash_read_page`, `pair_load_key`)
-    // and the raw pointers they take come from live locals/statics. Retained because
-    // the crate root sets `#![allow(warnings)]`, which hides the `unused_unsafe` this
-    // block would otherwise raise; removing it is a separate change.
-    unsafe {
-        // Initialize the basic MCU link layer functionality
-        blc_ll_init_basic_mcu();
+    // Initialize the basic MCU link layer functionality
+    blc_ll_init_basic_mcu();
 
-        // Set up interrupt handler status for advertisement mode
-        *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
+    // Set up interrupt handler status for advertisement mode
+    *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
 
-        // Initialize link state and timing parameters
-        BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Disconnected);
-        MESH_LISTEN_INTERVAL_US.set(interval * CLOCK_SYS_CLOCK_1US);
+    // Initialize link state and timing parameters
+    BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Disconnected);
+    MESH_LISTEN_INTERVAL_US.set(interval * CLOCK_SYS_CLOCK_1US);
 
-        // Configure connection timer tick
-        SLAVE_CONNECTED_TICK.set(CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick());
-        write_reg_system_tick_irq(SLAVE_CONNECTED_TICK.get());
+    // Configure connection timer tick
+    SLAVE_CONNECTED_TICK.set(CLOCK_SYS_CLOCK_1US * 100000 + read_reg_system_tick());
+    write_reg_system_tick_irq(SLAVE_CONNECTED_TICK.get());
 
-        // Set RF hardware configuration
-        write_reg_rf_tx_wail_settle_time_lo(0x68);
+    // Set RF hardware configuration
+    write_reg_rf_tx_wail_settle_time_lo(0x68);
 
-        // Generate a MAC address if one doesn't exist in flash
-        let mut mac_check: [u32; 1] = [0];
-        flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8);
-        if mac_check[0] == u32::MAX {
-            // Generate random MAC address values. A failed program leaves the
-            // flash erased, so the next boot takes this same branch again.
-            let mac: [u16; 2] = [rand(), rand()];
-            let _ = flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
-        }
-
-        // Read the MAC address from flash
-        flash_read_page(cfg.flash_adr_mac, 6, MAC_ID.lock().as_mut_ptr());
-
-        // Set the MAC address in the advertisement packet
-        PKT_ADV.lock().adv_ind_module_mut().adv_a = *MAC_ID.lock();
-
-        // Configure the advertisement data
-        rf_link_slave_set_adv(&ADV_DATA.lock().clone());
-
-        // Load encryption keys for secure communication
-        pair_load_key();
-
-        let access_code = PAIR_AC.get();
-
-        // Immediately configure RF hardware with new access code
-        // This ensures the hardware is ready for mesh listening before interrupts fire
-        rf_set_ble_access_code(access_code);
-
-        // Set device MAC address in packet templates for responses
-        PKT_LIGHT_DATA.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
-        PKT_LIGHT_STATUS.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
-
-        // Enable advertising
-        BLE_PERIPHERAL_ADVERTISING_ENABLED.set(true);
-
-        // Load device group addresses from flash memory
-        retrieve_dev_grp_address();
-
-        // Initialize mesh network node functionality
-        mesh_node_table_init();
-
-        // Write device identification info to system memory
-        // This includes MAC address, firmware version, and data integrity check
-        let mac_id = MAC_ID.lock();
-        let mac_as_u32 = u32::from_le_bytes([mac_id[0], mac_id[1], mac_id[2], mac_id[3]]);
-        let build_version = cfg.build_version;
-        write_reg32(0x808004, mac_as_u32);
-        write_reg32(0x808008, build_version);
-        let crc_data = [
-            (mac_as_u32 & 0xFF) as u8,
-            ((mac_as_u32 >> 8) & 0xFF) as u8,
-            ((mac_as_u32 >> 16) & 0xFF) as u8,
-            ((mac_as_u32 >> 24) & 0xFF) as u8,
-            (build_version & 0xFF) as u8,
-            ((build_version >> 8) & 0xFF) as u8,
-            ((build_version >> 16) & 0xFF) as u8,
-            ((build_version >> 24) & 0xFF) as u8,
-        ];
-        write_reg16(0x80800c, crc16(&crc_data));
+    // Generate a MAC address if one doesn't exist in flash
+    let mut mac_check: [u32; 1] = [0];
+    flash_read_page(cfg.flash_adr_mac, 4, mac_check.as_mut_ptr() as *mut u8);
+    if mac_check[0] == u32::MAX {
+        // Generate random MAC address values. A failed program leaves the
+        // flash erased, so the next boot takes this same branch again.
+        let mac: [u16; 2] = [rand(), rand()];
+        let _ = flash_write_page(cfg.flash_adr_mac, 4, mac.as_ptr() as *const u8);
     }
+
+    // Read the MAC address from flash
+    flash_read_page(cfg.flash_adr_mac, 6, MAC_ID.lock().as_mut_ptr());
+
+    // Set the MAC address in the advertisement packet
+    PKT_ADV.lock().adv_ind_module_mut().adv_a = *MAC_ID.lock();
+
+    // Configure the advertisement data
+    rf_link_slave_set_adv(&ADV_DATA.lock().clone());
+
+    // Load encryption keys for secure communication
+    pair_load_key();
+
+    let access_code = PAIR_AC.get();
+
+    // Immediately configure RF hardware with new access code
+    // This ensures the hardware is ready for mesh listening before interrupts fire
+    rf_set_ble_access_code(access_code);
+
+    // Set device MAC address in packet templates for responses
+    PKT_LIGHT_DATA.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
+    PKT_LIGHT_STATUS.lock().att_cmd_mut().value.src[0..2].copy_from_slice(&MAC_ID.lock()[0..2]);
+
+    // Enable advertising
+    BLE_PERIPHERAL_ADVERTISING_ENABLED.set(true);
+
+    // Load device group addresses from flash memory
+    retrieve_dev_grp_address();
+
+    // Initialize mesh network node functionality
+    mesh_node_table_init();
+
+    // Write device identification info to system memory
+    // This includes MAC address, firmware version, and data integrity check
+    let mac_id = MAC_ID.lock();
+    let mac_as_u32 = u32::from_le_bytes([mac_id[0], mac_id[1], mac_id[2], mac_id[3]]);
+    let build_version = cfg.build_version;
+    write_reg32(SRAM_IDENT_MAC, mac_as_u32);
+    write_reg32(SRAM_IDENT_VERSION, build_version);
+    let crc_data = [
+        (mac_as_u32 & 0xFF) as u8,
+        ((mac_as_u32 >> 8) & 0xFF) as u8,
+        ((mac_as_u32 >> 16) & 0xFF) as u8,
+        ((mac_as_u32 >> 24) & 0xFF) as u8,
+        (build_version & 0xFF) as u8,
+        ((build_version >> 8) & 0xFF) as u8,
+        ((build_version >> 16) & 0xFF) as u8,
+        ((build_version >> 24) & 0xFF) as u8,
+    ];
+    write_reg16(SRAM_IDENT_CRC, crc16(&crc_data));
 }
 
 /**
@@ -1040,17 +1031,13 @@ pub fn rf_set_power_level_index(index: u32) {
         11 // Use the lowest power setting if out of range
     };
 
-    // Configure the four analog registers that control RF power
-    // SAFETY: (2) analog-register writes; no unsafe operation remains. `tbl_index`
-    // is bounded by the `TBL_RF_POWER.len()` check above, so the table reads are in
-    // bounds, and `analog_write` is a safe `fn`. Same retained no-op as in
-    // `rf_link_slave_init` (the crate root's `#![allow(warnings)]`).
-    unsafe {
-        analog_write(REGA_RF_PA_GAIN, TBL_RF_POWER[tbl_index].a); // PA gain control
-        analog_write(REGA_RF_PA_BIAS, TBL_RF_POWER[tbl_index].b); // PA bias control
-        analog_write(REGA_RF_OUTPUT_MATCH, TBL_RF_POWER[tbl_index].c); // RF output match network
-        analog_write(REGA_RF_OUTPUT_POWER, TBL_RF_POWER[tbl_index].d); // RF output power
-    }
+    // Configure the four analog registers that control RF power. `tbl_index` is
+    // bounded by the `TBL_RF_POWER.len()` check above, so the table reads are in
+    // bounds, and `analog_write` is a safe `fn`.
+    analog_write(REGA_RF_PA_GAIN, TBL_RF_POWER[tbl_index].a); // PA gain control
+    analog_write(REGA_RF_PA_BIAS, TBL_RF_POWER[tbl_index].b); // PA bias control
+    analog_write(REGA_RF_OUTPUT_MATCH, TBL_RF_POWER[tbl_index].c); // RF output match network
+    analog_write(REGA_RF_OUTPUT_POWER, TBL_RF_POWER[tbl_index].d); // RF output power
 }
 
 /**
@@ -1229,11 +1216,7 @@ fn rf_set_tp_gain(gain: u8) {
     // Apply adjustment by subtracting from base power value
     // Handle potential overflow by ensuring power_adjustment doesn't exceed RF_TP_BASE
     let base_value = RF_TP_BASE.get() as u8;
-    let power_value = if power_adjustment > base_value {
-        0 // If adjustment would cause overflow, use minimum power (0)
-    } else {
-        base_value - power_adjustment
-    };
+    let power_value = base_value.saturating_sub(power_adjustment);
 
     // Write final power value to analog register REGA_RF_TX_POWER (0x93, TX power control)
     analog_write(REGA_RF_TX_POWER, power_value);
@@ -1362,7 +1345,9 @@ mod tests {
     use core::sync::atomic::Ordering;
     use mesh_protocol::mesh_types::DEV_ADDR_PAR_WITH_MAC;
     use mesh_protocol::packet_types::Packet;
-    use mesh_protocol::packet_types::{PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT};
+    use mesh_protocol::packet_types::{
+        PacketAttCmd, PacketAttWrite, PacketL2capHead, RfPacketAdvIndModuleT,
+    };
     use tlsr8266_hal::common::sync::SimplifyLS;
     use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;

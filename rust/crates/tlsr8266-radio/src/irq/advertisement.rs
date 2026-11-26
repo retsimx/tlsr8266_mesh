@@ -36,7 +36,7 @@ use tlsr8266_pac::*;
 /// ## Returns:
 /// Always returns 3 to ensure complete coverage of all advertisement channels
 pub fn get_ble_advertisement_channel_count() -> u32 {
-    return 3;
+    3
 }
 
 /// Handles the BLE advertisement state interrupt.

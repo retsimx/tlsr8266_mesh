@@ -500,7 +500,7 @@ fn safe_effect_new_mesh_finish() {
         pair.new_mesh_ltk = [0; 16];
         pair.mesh_pair_start_time = 0;
     }
-    set_pair_setting_flag(ePairState::PairSetted);
+    set_pair_setting_flag(PairAuthState::PairSetted);
 }
 
 /// Drop the pending credentials and fall back to the persisted key.
@@ -591,7 +591,7 @@ fn apply_timer_action(action: MeshPairAction) {
         MeshPairAction::TimedOut => {
             //mesh pair time out
             pair_load_key();
-            set_pair_setting_flag(ePairState::PairSetted);
+            set_pair_setting_flag(PairAuthState::PairSetted);
             dispatch_mesh_light_event(LGT_CMD_MESH_PAIR_TIMEOUT);
         }
         // The effect and broadcast phases execute their own arms.
@@ -625,7 +625,7 @@ pub fn mesh_pair_proc() {
 
     // Phase 3: advance the re-pair broadcast machine.
     let flag = pair_setting_flag();
-    if flag as u8 >= ePairState::PairSetMeshTxStart as u8 {
+    if flag as u8 >= PairAuthState::PairSetMeshTxStart as u8 {
         // The SDK rewrites the pairing credentials at runtime — a client sets
         // the new network name, password and LTK immediately before arming the
         // broadcast — so the copy taken at boot is refreshed here, outside the
@@ -928,7 +928,7 @@ mod tests {
         set_security_enabled,
     };
 
-    use tlsr8266_radio::types::{ePairState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
+    use tlsr8266_radio::types::{PairAuthState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
 
     /// `reg_system_tick`: the free-running tick `clock_time()` reads.
     const REG_SYSTEM_TICK: u32 = 0x740;
@@ -1355,13 +1355,16 @@ mod tests {
         credentials.pair_pass = [2; 16];
         credentials.pair_ltk_mesh = [3; 16];
         set_pair_credentials(credentials);
-        set_pair_setting_flag(ePairState::PairSetMeshTxStart);
+        set_pair_setting_flag(PairAuthState::PairSetMeshTxStart);
 
         // Execute
         mesh_pair_init();
 
         // Verify
-        assert_eq!(pair().pair_setting_flag(), ePairState::PairSetMeshTxStart);
+        assert_eq!(
+            pair().pair_setting_flag(),
+            PairAuthState::PairSetMeshTxStart
+        );
         assert_eq!(pair().mesh_name, [1; 16]);
         assert_eq!(pair().mesh_pwd, [2; 16]);
         assert_eq!(pair().mesh_ltk, [3; 16]);
@@ -1884,7 +1887,7 @@ mod tests {
         pair().new_mesh_pwd = [2; 16];
         pair().new_mesh_ltk = [3; 16];
         pair().mesh_pair_start_time = 1000;
-        set_pair_setting_flag(ePairState::PairSetting);
+        set_pair_setting_flag(PairAuthState::PairSetting);
 
         // Execute
         safe_effect_new_mesh_finish();
@@ -1894,7 +1897,7 @@ mod tests {
         assert_eq!(pair().new_mesh_pwd, [0; 16]);
         assert_eq!(pair().new_mesh_ltk, [0; 16]);
         assert_eq!(pair().mesh_pair_start_time, 0);
-        assert_eq!(pair_setting_flag(), ePairState::PairSetted);
+        assert_eq!(pair_setting_flag(), PairAuthState::PairSetted);
     }
 
     // --- save / reload path Tests ---
@@ -2231,7 +2234,7 @@ mod tests {
         set_pair_config_mesh_credentials([0xD1; 16], [0xD2; 16], [0xD3; 16]);
         pair().mesh_pair_start_time = 1000;
         pair().mesh_pair_timeout = 10;
-        set_pair_setting_flag(ePairState::PairSetting);
+        set_pair_setting_flag(PairAuthState::PairSetting);
 
         reset_fakes();
         // 10 s (320_000_000 ticks) have elapsed since the pairing window opened.
@@ -2241,7 +2244,7 @@ mod tests {
         mesh_pair_proc();
 
         // Verify
-        assert_eq!(pair_setting_flag(), ePairState::PairSetted);
+        assert_eq!(pair_setting_flag(), PairAuthState::PairSetted);
         assert_eq!(
             pair_credentials_snapshot().pair_nn,
             [0xD1; 16],
@@ -2384,7 +2387,7 @@ mod tests {
         arm_pairing();
         pair().mesh_pair_state = MeshPairState::MeshPairName1;
 
-        set_pair_setting_flag(ePairState::PairSetMeshTxStart);
+        set_pair_setting_flag(PairAuthState::PairSetMeshTxStart);
         let mut credentials = pair_credentials_snapshot();
         credentials.pair_nn = [1; 16];
         set_pair_credentials(credentials);
@@ -2407,7 +2410,7 @@ mod tests {
         reset_for_test();
         arm_pairing();
 
-        set_pair_setting_flag(ePairState::PairSetMeshTxStart);
+        set_pair_setting_flag(PairAuthState::PairSetMeshTxStart);
         let mut credentials = pair_credentials_snapshot();
         credentials.pair_nn = [1; 16];
         credentials.pair_pass = [2; 16];
@@ -2460,7 +2463,7 @@ mod tests {
         pair().mesh_pair_state = MeshPairState::MeshPairLtk2;
         mesh_pair_proc();
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName1);
-        assert_eq!(pair_setting_flag(), ePairState::PairSetMeshTxDone);
+        assert_eq!(pair_setting_flag(), PairAuthState::PairSetMeshTxDone);
 
         // Six intervals elapsed, so six broadcast chunks were queued.
         assert_eq!(MESH_RX_CHANNEL.len(), 6, "every step broadcasts one chunk");
@@ -2474,7 +2477,7 @@ mod tests {
         reset_for_test();
         arm_pairing();
         pair().mesh_pair_state = MeshPairState::MeshPairName1;
-        set_pair_setting_flag(ePairState::PairSetMeshTxStart);
+        set_pair_setting_flag(PairAuthState::PairSetMeshTxStart);
         let mut credentials = pair_credentials_snapshot();
         credentials.pair_nn = [
             0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e,
@@ -2513,7 +2516,7 @@ mod tests {
         reset_for_test();
         arm_pairing();
 
-        set_pair_setting_flag(ePairState::PairSetMeshTxDone);
+        set_pair_setting_flag(PairAuthState::PairSetMeshTxDone);
 
         reset_fakes();
         fake_clock::set_ticks(1_000 + INTERVAL_TICKS as u64 + 1);
@@ -2522,7 +2525,7 @@ mod tests {
         mesh_pair_proc();
 
         // Verify - should advance to RxDone state
-        assert_eq!(pair_setting_flag(), ePairState::PairSetMeshRxDone);
+        assert_eq!(pair_setting_flag(), PairAuthState::PairSetMeshRxDone);
     }
 
     /// Tests mesh_pair_proc PairSetMeshRxDone state
@@ -2534,7 +2537,7 @@ mod tests {
         pair().mesh_pair_timeout = 60; // Timeout in seconds - won't overflow when multiplied
         pair().mesh_pair_start_time = 5000;
 
-        set_pair_setting_flag(ePairState::PairSetMeshRxDone);
+        set_pair_setting_flag(PairAuthState::PairSetMeshRxDone);
 
         reset_fakes();
         // Inside the 60 s pairing window, and past the 500 ms broadcast interval.
@@ -2547,7 +2550,7 @@ mod tests {
         assert_eq!(pair().mesh_pair_state, MeshPairState::MeshPairName1);
         // mesh_pair_start_time should be cleared when transitioning from PairSetMeshRxDone
         assert_eq!(pair().mesh_pair_start_time, 0);
-        assert_eq!(pair_setting_flag(), ePairState::PairSetted);
+        assert_eq!(pair_setting_flag(), PairAuthState::PairSetted);
     }
 
     // --- mesh_security_enable Tests ---

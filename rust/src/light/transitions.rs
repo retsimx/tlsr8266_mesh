@@ -50,16 +50,15 @@ pub struct LightState {
 
 #[derive(Copy, Clone)]
 #[repr(C, packed)]
-pub(crate) struct LumSaveT {
+pub(crate) struct LuminanceRecord {
     save_flag: u8,
     brightness: u16,
     cw: u16,
     ww: u16,
 }
 
-impl LightState {
-    #[cfg(test)]
-    pub fn default() -> Self {
+impl Default for LightState {
+    fn default() -> Self {
         Self {
             cw: I16F16::lit(formatcp!("{}", MAX_LUM_BRIGHTNESS_VALUE)),
             ww: I16F16::lit(formatcp!("{}", 0u16)),
@@ -424,7 +423,7 @@ impl LightFlashStore {
         let mut store = Self {
             light_lum_addr: FLASH_ADR_LUM,
         };
-        let mut buffer = [LumSaveT {
+        let mut buffer = [LuminanceRecord {
             save_flag: 0xFF,
             brightness: 0,
             cw: 0,
@@ -434,12 +433,12 @@ impl LightFlashStore {
 
         // Scan the entire sector in chunks
         'scan: for offset in
-            (0..FLASH_SECTOR_SIZE).step_by(size_of::<LumSaveT>() * ENTRIES_PER_CHUNK)
+            (0..FLASH_SECTOR_SIZE).step_by(size_of::<LuminanceRecord>() * ENTRIES_PER_CHUNK)
         {
             let addr = FLASH_ADR_LUM + offset as u32;
             flash_read_page(
                 addr,
-                size_of::<LumSaveT>() as u32 * ENTRIES_PER_CHUNK as u32,
+                size_of::<LuminanceRecord>() as u32 * ENTRIES_PER_CHUNK as u32,
                 buffer.as_mut_ptr() as *mut u8,
             );
 
@@ -453,11 +452,11 @@ impl LightFlashStore {
                             min(entry.cw, MAX_LUM_BRIGHTNESS_VALUE),
                             min(entry.ww, MAX_LUM_BRIGHTNESS_VALUE),
                         ));
-                        store.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
+                        store.light_lum_addr = addr + (idx * size_of::<LuminanceRecord>()) as u32;
                     }
                     0xFF => {
                         // Reached end of written data - set address for next write
-                        store.light_lum_addr = addr + (idx * size_of::<LumSaveT>()) as u32;
+                        store.light_lum_addr = addr + (idx * size_of::<LuminanceRecord>()) as u32;
                         break 'scan;
                     }
                     _ => {
@@ -508,7 +507,7 @@ impl LightFlashStore {
     //save cur lum value, if disconnected for a while
     pub fn light_state_save(&mut self) {
         if self.light_lum_addr
-            >= (FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32)
+            >= (FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LuminanceRecord>() as u32)
         {
             self.light_lum_erase();
         }
@@ -524,7 +523,7 @@ impl LightFlashStore {
             )
         };
 
-        let lum_save = LumSaveT {
+        let lum_save = LuminanceRecord {
             save_flag: LIGHT_SAVE_VALID_FLAG,
             brightness,
             cw,
@@ -536,11 +535,11 @@ impl LightFlashStore {
         // good; the next save writes the next slot.
         let _ = flash_write_page(
             self.light_lum_addr,
-            size_of::<LumSaveT>() as u32,
+            size_of::<LuminanceRecord>() as u32,
             addr_of!(lum_save) as *const u8,
         );
 
-        self.light_lum_addr += size_of::<LumSaveT>() as u32;
+        self.light_lum_addr += size_of::<LuminanceRecord>() as u32;
     }
 
     pub fn check_light_state_save(&mut self) {
@@ -643,9 +642,9 @@ mod tests {
         );
     }
 
-    /// Program one valid packed `LumSaveT` entry at `addr` in the fake device.
+    /// Program one valid packed `LuminanceRecord` entry at `addr` in the fake device.
     fn seed_lum_entry(addr: u32, brightness: u16, cw: u16, ww: u16) {
-        let mut entry = [0u8; size_of::<LumSaveT>()];
+        let mut entry = [0u8; size_of::<LuminanceRecord>()];
         entry[0] = LIGHT_SAVE_VALID_FLAG;
         entry[1..3].copy_from_slice(&brightness.to_le_bytes());
         entry[3..5].copy_from_slice(&cw.to_le_bytes());
@@ -657,7 +656,7 @@ mod tests {
     /// terminator. The range covers one entry past the last scan chunk's start,
     /// so the straddling final entry is a complete record too.
     fn seed_full_lum_sector(brightness: u16, cw: u16, ww: u16) {
-        let entry = size_of::<LumSaveT>();
+        let entry = size_of::<LuminanceRecord>();
         let bytes = (usize::from(FLASH_SECTOR_SIZE) + entry * 10).div_ceil(entry) * entry;
         let mut sector = vec![0u8; bytes];
         for record in sector.chunks_mut(entry) {
@@ -1307,11 +1306,11 @@ mod tests {
 
         assert_eq!(
             store.light_lum_addr,
-            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+            FLASH_ADR_LUM + size_of::<LuminanceRecord>() as u32
         );
 
         // The packed entry that production programmed is now in the fake device.
-        let mut entry = [0u8; size_of::<LumSaveT>()];
+        let mut entry = [0u8; size_of::<LuminanceRecord>()];
         FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
         assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
         assert_eq!(u16::from_le_bytes([entry[1], entry[2]]), 500);
@@ -1327,21 +1326,21 @@ mod tests {
         reset_for_test();
         let mut store = LightFlashStore::default();
         store.light_lum_addr =
-            FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LumSaveT>() as u32;
+            FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LuminanceRecord>() as u32;
         with_core(|core| core.brightness = 500);
 
         store.light_state_save();
 
         assert_eq!(
             store.light_lum_addr,
-            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+            FLASH_ADR_LUM + size_of::<LuminanceRecord>() as u32
         );
         assert_eq!(
             FakeFlash::erase_count(FLASH_ADR_LUM),
             1,
             "a full sector is erased before the entry is written at its start"
         );
-        let mut entry = [0u8; size_of::<LumSaveT>()];
+        let mut entry = [0u8; size_of::<LuminanceRecord>()];
         FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
         assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
         assert_eq!(u16::from_le_bytes([entry[1], entry[2]]), 500);
@@ -1383,7 +1382,7 @@ mod tests {
         // The next save lands right after the 0xFF terminator.
         assert_eq!(
             store.light_lum_addr,
-            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+            FLASH_ADR_LUM + size_of::<LuminanceRecord>() as u32
         );
 
         // The light_onoff should have been called
@@ -1411,7 +1410,7 @@ mod tests {
 
         assert_eq!(with_core(|core| core.last_transition_time), 0);
         // The 7-byte packed entry landed at the store's write pointer.
-        let mut entry = [0u8; size_of::<LumSaveT>()];
+        let mut entry = [0u8; size_of::<LuminanceRecord>()];
         FakeFlash::read_slice(FLASH_ADR_LUM, &mut entry);
         assert_eq!(entry[0], LIGHT_SAVE_VALID_FLAG);
         assert_eq!(
@@ -1879,7 +1878,7 @@ mod tests {
         assert_eq!(with_core(|core| core.brightness_tr.to.to_num::<u16>()), 0);
         assert_eq!(
             store.light_lum_addr,
-            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32
+            FLASH_ADR_LUM + size_of::<LuminanceRecord>() as u32
         );
         assert_eq!(
             FakeAnalog::get(REGA_LIGHT_OFF),
@@ -1915,11 +1914,11 @@ mod tests {
         // First entry: a flag that is neither valid nor the 0xFF terminator, so
         // the scan skips it. Second entry: valid. The blank device supplies the
         // 0xFF terminator at entry 2.
-        let mut invalid = [0xFFu8; size_of::<LumSaveT>()];
+        let mut invalid = [0xFFu8; size_of::<LuminanceRecord>()];
         invalid[0] = 0x42;
         FakeFlash::write_slice(FLASH_ADR_LUM, &invalid);
         seed_lum_entry(
-            FLASH_ADR_LUM + size_of::<LumSaveT>() as u32,
+            FLASH_ADR_LUM + size_of::<LuminanceRecord>() as u32,
             saved_brightness,
             saved_cw,
             saved_ww,
@@ -1944,7 +1943,7 @@ mod tests {
         // 0xFF terminator at index 2.
         assert_eq!(
             store.light_lum_addr,
-            FLASH_ADR_LUM + 2 * size_of::<LumSaveT>() as u32
+            FLASH_ADR_LUM + 2 * size_of::<LuminanceRecord>() as u32
         );
 
         assert_tmr1_started();

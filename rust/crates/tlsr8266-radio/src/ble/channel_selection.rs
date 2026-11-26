@@ -105,7 +105,7 @@ pub fn ble_ll_select_next_data_channel(channel_map: &[u8], hop: u8) -> u32 {
         // We use modulo to ensure we pick a valid channel within the available range
         // This is the remapping feature of Channel Selection Algorithm #1
         if BLE_LL_CHANNEL_NUM.get() > 0 {
-            index = BLE_LL_CHANNEL_TABLE.lock()[(index % BLE_LL_CHANNEL_NUM.get())] as usize;
+            index = BLE_LL_CHANNEL_TABLE.lock()[index % BLE_LL_CHANNEL_NUM.get()] as usize;
         }
     }
 

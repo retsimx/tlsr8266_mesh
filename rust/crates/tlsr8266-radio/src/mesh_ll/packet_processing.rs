@@ -1578,7 +1578,7 @@ mod tests {
     };
     use core::sync::atomic::Ordering;
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
-    use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
+    use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
 
     // ================================================================================
@@ -1854,7 +1854,7 @@ mod tests {
 
         let result = is_exist_in_rc_pkt_buf(LGT_CMD_LIGHT_ONOFF, &packet);
 
-        assert_eq!(result, false, "Empty buffer should not contain any packets");
+        assert!(!result, "Empty buffer should not contain any packets");
     }
 
     /// Tests duplicate detection with matching packet.
@@ -1877,7 +1877,7 @@ mod tests {
 
         let result = is_exist_in_rc_pkt_buf(LGT_CMD_LIGHT_ONOFF, &packet);
 
-        assert_eq!(result, true, "Should find matching packet in buffer");
+        assert!(result, "Should find matching packet in buffer");
     }
 
     /// Tests duplicate detection with different operation codes.
@@ -1900,10 +1900,7 @@ mod tests {
 
         let result = is_exist_in_rc_pkt_buf(LGT_CMD_LIGHT_STATUS, &packet);
 
-        assert_eq!(
-            result, false,
-            "Should not find packet with different opcode"
-        );
+        assert!(!result, "Should not find packet with different opcode");
     }
 
     /// Tests duplicate detection with different sequence numbers.
@@ -1926,8 +1923,8 @@ mod tests {
 
         let result = is_exist_in_rc_pkt_buf(LGT_CMD_LIGHT_ONOFF, &packet);
 
-        assert_eq!(
-            result, false,
+        assert!(
+            !result,
             "Should not find packet with different sequence number"
         );
     }
@@ -1939,24 +1936,24 @@ mod tests {
     /// Tests response classification for known response opcodes.
     #[test]
     fn test_rf_link_is_notify_rsp_valid_responses() {
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP1), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP2), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP3), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_STATUS), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_DEV_ADDR_RSP), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_USER_NOTIFY_RSP), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_START_OTA_RSP), true);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_OTA_DATA_RSP), true);
+        assert!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP1));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP2));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_GRP_RSP3));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_STATUS));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_DEV_ADDR_RSP));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_USER_NOTIFY_RSP));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_START_OTA_RSP));
+        assert!(rf_link_is_notify_rsp(LGT_CMD_OTA_DATA_RSP));
     }
 
     /// Tests response classification for non-response opcodes.
     #[test]
     fn test_rf_link_is_notify_rsp_non_responses() {
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_ONOFF), false);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_LIGHT_READ_STATUS), false);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_CONFIG_DEV_ADDR), false);
-        assert_eq!(rf_link_is_notify_rsp(LGT_CMD_START_OTA_REQ), false);
-        assert_eq!(rf_link_is_notify_rsp(0xFF), false); // Invalid opcode
+        assert!(!rf_link_is_notify_rsp(LGT_CMD_LIGHT_ONOFF));
+        assert!(!rf_link_is_notify_rsp(LGT_CMD_LIGHT_READ_STATUS));
+        assert!(!rf_link_is_notify_rsp(LGT_CMD_CONFIG_DEV_ADDR));
+        assert!(!rf_link_is_notify_rsp(LGT_CMD_START_OTA_REQ));
+        assert!(!rf_link_is_notify_rsp(0xFF)); // Invalid opcode
     }
 
     // ================================================================================
@@ -1969,14 +1966,14 @@ mod tests {
         reset_test_state();
         crate::callbacks::test_ota::set_in_progress_for_test(false);
 
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_CONFIG_GRP), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_USER_NOTIFY_REQ), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_START_OTA_REQ), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_OTA_DATA_REQ), true);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_END_OTA_REQ), true);
+        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS));
+        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ));
+        assert!(rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR));
+        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_CONFIG_GRP));
+        assert!(rf_link_is_notify_req(LGT_CMD_USER_NOTIFY_REQ));
+        assert!(rf_link_is_notify_req(LGT_CMD_START_OTA_REQ));
+        assert!(rf_link_is_notify_req(LGT_CMD_OTA_DATA_REQ));
+        assert!(rf_link_is_notify_req(LGT_CMD_END_OTA_REQ));
     }
 
     /// Tests request classification during OTA update.
@@ -1986,10 +1983,10 @@ mod tests {
         crate::callbacks::test_ota::set_in_progress_for_test(true);
 
         // All requests should be blocked during OTA
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS), false);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ), false);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR), false);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_START_OTA_REQ), false);
+        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS));
+        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ));
+        assert!(!rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR));
+        assert!(!rf_link_is_notify_req(LGT_CMD_START_OTA_REQ));
     }
 
     /// Tests request classification for non-request opcodes.
@@ -1998,10 +1995,10 @@ mod tests {
         reset_test_state();
         crate::callbacks::test_ota::set_in_progress_for_test(false);
 
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_STATUS), false);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_DEV_ADDR_RSP), false);
-        assert_eq!(rf_link_is_notify_req(LGT_CMD_LIGHT_ONOFF), false);
-        assert_eq!(rf_link_is_notify_req(0xFF), false); // Invalid opcode
+        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_STATUS));
+        assert!(!rf_link_is_notify_req(LGT_CMD_DEV_ADDR_RSP));
+        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_ONOFF));
+        assert!(!rf_link_is_notify_req(0xFF)); // Invalid opcode
     }
 
     // ================================================================================
@@ -2023,7 +2020,7 @@ mod tests {
         let pkt = rc_pkt_buf.iter().next().unwrap();
         assert_eq!(pkt.op, LGT_CMD_LIGHT_ONOFF);
         assert_eq!(pkt.sno, [0x01, 0x02, 0x03]);
-        assert_eq!(pkt.notify_ok_flag, false);
+        assert!(!pkt.notify_ok_flag);
     }
 
     /// Tests FIFO behavior when buffer becomes full.
@@ -2088,8 +2085,8 @@ mod tests {
         drop(rc_pkt_buf);
 
         let result = req_cmd_is_notify_ok(LGT_CMD_LIGHT_READ_STATUS, &packet);
-        assert_eq!(
-            result, false,
+        assert!(
+            !result,
             "Should return false when notify_ok_flag is not set"
         );
     }
@@ -2118,10 +2115,7 @@ mod tests {
         drop(rc_pkt_buf);
 
         let result = req_cmd_is_notify_ok(LGT_CMD_LIGHT_READ_STATUS, &packet);
-        assert_eq!(
-            result, true,
-            "Should return true when notify_ok_flag is set"
-        );
+        assert!(result, "Should return true when notify_ok_flag is set");
     }
 
     /// Tests setting notification OK flag.
@@ -2153,10 +2147,7 @@ mod tests {
         // Verify flag was set
         let rc_pkt_buf = RC_PKT_BUF.lock();
         let first_pkt = rc_pkt_buf.iter().next().unwrap();
-        assert_eq!(
-            first_pkt.notify_ok_flag, true,
-            "notify_ok_flag should be set"
-        );
+        assert!(first_pkt.notify_ok_flag, "notify_ok_flag should be set");
     }
 
     // ================================================================================
@@ -2335,7 +2326,7 @@ mod tests {
 
         let result = is_add_packet_buf_ready();
 
-        assert_eq!(result, true, "Empty buffer should be ready for packets");
+        assert!(result, "Empty buffer should be ready for packets");
     }
 
     /// Tests transmission buffer ready status with buffer near capacity.
@@ -2348,7 +2339,7 @@ mod tests {
         let result = is_add_packet_buf_ready();
 
         // (5 - 2) & 7 = 3, which is not < 3
-        assert_eq!(result, false, "Buffer with 3+ packets should not be ready");
+        assert!(!result, "Buffer with 3+ packets should not be ready");
     }
 
     /// Tests transmission buffer ready status with buffer having capacity.
@@ -2361,7 +2352,7 @@ mod tests {
         let result = is_add_packet_buf_ready();
 
         // (4 - 2) & 7 = 2, which is < 3
-        assert_eq!(result, true, "Buffer with <3 packets should be ready");
+        assert!(result, "Buffer with <3 packets should be ready");
     }
 
     // ================================================================================
@@ -2429,7 +2420,7 @@ mod tests {
     #[test]
     fn test_parse_ble_packet_op_params_single_byte_op() {
         // Create a packet with shorter length to fit within parameter limits
-        let mut packet = Packet {
+        let packet = Packet {
             att_cmd: PacketAttCmd {
                 head: PacketL2capHead {
                     dma_len: 0x1A, // 26 bytes
@@ -2461,13 +2452,10 @@ mod tests {
             },
         };
 
-        let (success, op_codes, op_len, parameters, params_len) =
+        let (success, op_codes, op_len, _parameters, params_len) =
             parse_ble_packet_op_params(&packet, false);
 
-        assert_eq!(
-            success, true,
-            "Should successfully parse single-byte opcode"
-        );
+        assert!(success, "Should successfully parse single-byte opcode");
         assert_eq!(op_len, 1, "Should detect single-byte opcode");
         assert_eq!(op_codes[0], 0x30, "Should extract correct opcode");
         assert_eq!(params_len, 9, "Should extract 9 parameters");
@@ -2477,7 +2465,7 @@ mod tests {
     #[test]
     fn test_parse_ble_packet_op_params_two_byte_op_rejected() {
         // Create a packet with 2-byte opcode format (should be rejected)
-        let mut packet = Packet {
+        let packet = Packet {
             att_cmd: PacketAttCmd {
                 head: PacketL2capHead {
                     dma_len: 0x1B, // 27 bytes
@@ -2507,14 +2495,14 @@ mod tests {
         let (success, _op_codes, _op_len, _parameters, _params_len) =
             parse_ble_packet_op_params(&packet, false);
 
-        assert_eq!(success, false, "Should reject two-byte opcode format");
+        assert!(!success, "Should reject two-byte opcode format");
     }
 
     /// Tests parsing three-byte operation codes.
     #[test]
     fn test_parse_ble_packet_op_params_three_byte_op() {
         // Create a packet with shorter length to fit within parameter limits
-        let mut packet = Packet {
+        let packet = Packet {
             att_cmd: PacketAttCmd {
                 head: PacketL2capHead {
                     dma_len: 0x1C, // 28 bytes
@@ -2546,10 +2534,10 @@ mod tests {
             },
         };
 
-        let (success, op_codes, op_len, parameters, params_len) =
+        let (success, op_codes, op_len, _parameters, params_len) =
             parse_ble_packet_op_params(&packet, false);
 
-        assert_eq!(success, true, "Should successfully parse three-byte opcode");
+        assert!(success, "Should successfully parse three-byte opcode");
         assert_eq!(op_len, 3, "Should detect three-byte opcode");
         assert_eq!(
             op_codes[0], 0xc0,
@@ -2573,10 +2561,10 @@ mod tests {
         packet.att_cmd_mut().value.val[0] = 0x06 | 0xc0; // Set opcode to 6 with 3-byte format
         packet.att_cmd_mut().head.l2cap_len = 30; // Set length to test parameter extraction
 
-        let (success, op_codes, op_len, parameters, params_len) =
+        let (success, op_codes, _op_len, _parameters, _params_len) =
             parse_ble_packet_op_params(&packet, true);
 
-        assert_eq!(success, true, "Should handle special opcode 6");
+        assert!(success, "Should handle special opcode 6");
         assert_eq!(op_codes[0] & 0x3f, 0x06, "Should extract opcode 6");
     }
 
@@ -2586,10 +2574,10 @@ mod tests {
         let mut packet = create_test_packet(0x30, [0x01, 0x02, 0x03], 0x1234, 0x5678);
         packet.att_cmd_mut().head.l2cap_len = 100; // Set unreasonably large length
 
-        let (success, op_codes, op_len, parameters, params_len) =
+        let (success, _op_codes, _op_len, _parameters, params_len) =
             parse_ble_packet_op_params(&packet, false);
 
-        assert_eq!(success, false, "Should detect parameter length overflow");
+        assert!(!success, "Should detect parameter length overflow");
         assert_eq!(params_len, 0, "Should set params_len to 0 on overflow");
     }
 
@@ -2639,7 +2627,7 @@ mod tests {
         packet.head_mut().rf_len = 0;
         let time = 12345678;
 
-        let result = rf_link_slave_data(&packet, time);
+        rf_link_slave_data(&packet, time);
 
         // void function: no return value to check
     }
@@ -2746,7 +2734,6 @@ mod tests {
 
         // Verify packet processing completed without error
         // The actual mesh_node_update_status call is tested in integration
-        assert!(true, "Status advertisement processing completed");
     }
 
     /// Tests status advertisement processing with a valid signature: the real

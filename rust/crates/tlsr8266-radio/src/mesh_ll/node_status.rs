@@ -1974,8 +1974,8 @@ mod tests {
         for length in 3..=13 {
             let mut cmd_op_para = vec![0u8; length];
             // Fill with recognizable pattern
-            for i in 0..length {
-                cmd_op_para[i] = (i + 1) as u8;
+            for (i, byte) in cmd_op_para.iter_mut().enumerate() {
+                *byte = (i + 1) as u8;
             }
 
             let packet = mesh_construct_packet(
@@ -1986,7 +1986,7 @@ mod tests {
                 length % 2 == 0,
             );
 
-            let mesh_pkt = unsafe { packet.mesh };
+            let _mesh_pkt = unsafe { packet.mesh };
 
             // Verify wire-format bytes via val[] overlay.
             // Raw flat copy: val[i] == cmd_op_para[i] for all copied bytes.
@@ -2189,7 +2189,7 @@ mod tests {
         // mark it offline, and the advertisement must then skip it.
         {
             let mut st = MESH_NODE_ST.lock();
-            st[0].val.sn = DEVICE_NODE_SN.get() as u8;
+            st[0].val.sn = DEVICE_NODE_SN.get();
             st[1].miss = 1;
             st[1].val = MeshNodeStValT {
                 dev_adr: 0x20,
@@ -2230,7 +2230,7 @@ mod tests {
         let adv_dst = adv.att_write().value.dst;
         let adv_val = adv.att_write().value.val;
         assert_eq!(adv_sno[0], DEVICE_ADDRESS.get() as u8);
-        assert_eq!(adv_sno[1], self_sn as u8, "self sn as last advertised");
+        assert_eq!(adv_sno[1], self_sn, "self sn as last advertised");
         assert_eq!(adv_sno[2], 0, "self par[0]");
         assert_eq!(adv_src[0], 0, "self par[1]");
         // The offline remote is skipped, leaving its slot (bytes 4..8) empty.
@@ -2259,11 +2259,11 @@ mod tests {
 
         // Test enabling
         mesh_report_status_enable(true);
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
 
         // Test disabling
         mesh_report_status_enable(false);
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
+        assert!(!MESH_NODE_REPORT_ENABLE.get());
     }
 
     /// Tests mesh_report_status_enable with multiple 32-bit words.
@@ -2306,7 +2306,7 @@ mod tests {
 
         // Test disabling
         mesh_report_status_enable(false);
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
+        assert!(!MESH_NODE_REPORT_ENABLE.get());
 
         // Note: The current implementation doesn't clear the mask when disabling,
         // it only sets the global MESH_NODE_REPORT_ENABLE flag to false.
@@ -2364,21 +2364,6 @@ mod tests {
             };
         }
         MESH_NODE_MAX.set(3);
-
-        let mut expected = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
-        };
-        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
-        expected.data[3] = 0x10; // node 0: id
-        expected.data[4] = 1; // node 0: online
-        expected.data[5] = 1; // node 0: on
-        expected.data[6] = 0x20; // node 1: id
-        expected.data[7] = 1; // node 1: online
-        expected.data[8] = 0; // node 1: off
-        expected.data[9] = 0x30; // node 2: id
-        expected.data[10] = 0; // node 2: offline (tick==0)
-        expected.data[11] = 1; // node 2: on
 
         queues::set_uart_status_reporting_enabled(true);
 
@@ -2447,12 +2432,12 @@ mod tests {
         // Test with enable mask
         let enable_data = [1u8];
         mesh_report_status_enable_mask(&enable_data);
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
 
         // Test with disable mask
         let disable_data = [0u8];
         mesh_report_status_enable_mask(&disable_data);
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
+        assert!(!MESH_NODE_REPORT_ENABLE.get());
     }
 
     /// Tests mesh_report_status_enable_mask with minimal data.
@@ -2470,7 +2455,7 @@ mod tests {
         mesh_report_status_enable_mask(&minimal_data);
 
         // Should be set to true
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
     }
 
     /// Tests mesh_report_status_enable_mask with selective address reporting.
@@ -2503,7 +2488,7 @@ mod tests {
         mesh_report_status_enable_mask(&selective_data);
 
         // Verify global enable flag
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
 
         // Verify selective address bitmask (tests lines 944-949)
         {
@@ -2564,7 +2549,7 @@ mod tests {
         mesh_report_status_enable_mask(&non_matching_data);
 
         // Verify global enable flag is set
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
 
         // Verify no bits are set in the mask since no addresses matched
         {
@@ -2599,7 +2584,7 @@ mod tests {
         mesh_report_status_enable_mask(&data_with_addresses);
 
         // Verify global enable flag is set
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), true);
+        assert!(MESH_NODE_REPORT_ENABLE.get());
 
         // Verify no bits are set since MESH_NODE_MAX = 0 skips the search
         {
@@ -2639,7 +2624,7 @@ mod tests {
         mesh_report_status_enable_mask(&disabled_data);
 
         // Verify global enable flag is disabled
-        assert_eq!(MESH_NODE_REPORT_ENABLE.get(), false);
+        assert!(!MESH_NODE_REPORT_ENABLE.get());
 
         // Verify no bits are set since reporting is disabled (condition line 940 fails)
         {
@@ -2887,15 +2872,6 @@ mod tests {
     fn test_send_uart_node_changes_single_entry_correct_format() {
         reset_mesh_state();
 
-        let mut expected = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
-        };
-        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
-        expected.data[3] = 0x20; // node_id
-        expected.data[4] = 1; // online
-        expected.data[5] = 1; // on_off (par[0] was non-zero)
-
         queues::set_uart_status_reporting_enabled(true);
 
         send_uart_node_changes(&[(0x20, 1, 1)]);
@@ -2909,24 +2885,6 @@ mod tests {
     #[test]
     fn test_send_uart_node_changes_multiple_entries_packed() {
         reset_mesh_state();
-
-        let mut expected = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
-        };
-        expected.data[2] = UartMsg::NodeStatus as u8;
-        // Entry 0: node 0x10, online, on
-        expected.data[3] = 0x10;
-        expected.data[4] = 1;
-        expected.data[5] = 1;
-        // Entry 1: node 0x20, online, off
-        expected.data[6] = 0x20;
-        expected.data[7] = 1;
-        expected.data[8] = 0;
-        // Entry 2: node 0x30, offline, on
-        expected.data[9] = 0x30;
-        expected.data[10] = 0;
-        expected.data[11] = 1;
 
         queues::set_uart_status_reporting_enabled(true);
 
@@ -3110,15 +3068,6 @@ mod tests {
             };
         }
         MESH_NODE_MAX.set(2);
-
-        let mut expected = UartData {
-            len: UART_DATA_LEN as u32,
-            data: [0; UART_DATA_LEN],
-        };
-        expected.data[2] = UartMsg::NodeStatus as u8; // 0x07
-        expected.data[3] = 0x20; // node_id
-        expected.data[4] = 0; // online = 0 (offline, timed out)
-        expected.data[5] = 1; // on_off = 1 (par[0] was 0x01, non-zero)
 
         queues::set_uart_status_reporting_enabled(true);
 

@@ -1240,9 +1240,8 @@ mod tests {
         );
 
         // Verify connection state was initialized
-        assert_eq!(
-            CONN_UPDATE_SUCCESSED.get(),
-            false,
+        assert!(
+            !CONN_UPDATE_SUCCESSED.get(),
             "Connection update should be reset"
         );
         assert_eq!(
@@ -1293,9 +1292,8 @@ mod tests {
             RfOperationState::Receiving,
             "Should transition to RX state"
         );
-        assert_eq!(
+        assert!(
             NEED_UPDATE_CONNECT_PARA.get(),
-            true,
             "Should enable parameter updates"
         );
     }
@@ -1411,9 +1409,8 @@ mod tests {
             original_next_tick,
             "Next connect tick should be unchanged when adjustment is disabled"
         );
-        assert_eq!(
-            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
             "Timing adjustment flag should remain disabled"
         );
     }
@@ -1449,9 +1446,8 @@ mod tests {
         );
 
         // Verify adjustment flag was disabled
-        assert_eq!(
-            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
             "Timing adjustment flag should be disabled after adjustment"
         );
     }
@@ -1495,9 +1491,8 @@ mod tests {
         );
 
         // Verify adjustment flag was disabled
-        assert_eq!(
-            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
             "Timing adjustment flag should be disabled after adjustment"
         );
     }
@@ -1541,9 +1536,8 @@ mod tests {
         );
 
         // Verify adjustment flag was still disabled
-        assert_eq!(
-            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
             "Timing adjustment flag should be disabled after processing"
         );
     }
@@ -1606,14 +1600,12 @@ mod tests {
 
         rf_link_slave_pairing_enable(true);
 
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
-            true,
             "Connection should be enabled when pairing is enabled"
         );
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
-            true,
             "Advertising should be enabled when pairing is enabled"
         );
     }
@@ -1631,14 +1623,12 @@ mod tests {
 
         rf_link_slave_pairing_enable(false);
 
-        assert_eq!(
-            BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
             "Connection should be disabled when pairing is disabled"
         );
-        assert_eq!(
-            BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
             "Advertising should be disabled when pairing is disabled"
         );
     }
@@ -1653,26 +1643,22 @@ mod tests {
         // Test multiple enable/disable cycles
         for _ in 0..3 {
             rf_link_slave_pairing_enable(true);
-            assert_eq!(
+            assert!(
                 BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
-                true,
                 "Connection should be enabled"
             );
-            assert_eq!(
+            assert!(
                 BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
-                true,
                 "Advertising should be enabled"
             );
 
             rf_link_slave_pairing_enable(false);
-            assert_eq!(
-                BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
-                false,
+            assert!(
+                !BLE_PERIPHERAL_CONNECTION_ENABLED.get(),
                 "Connection should be disabled"
             );
-            assert_eq!(
-                BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
-                false,
+            assert!(
+                !BLE_PERIPHERAL_ADVERTISING_ENABLED.get(),
                 "Advertising should be disabled"
             );
         }
@@ -1831,7 +1817,6 @@ mod tests {
 
         // The function should complete without error
         // More detailed testing would require mocking the internal function calls
-        assert!(true, "Function should execute without panicking");
     }
 
     // ================================================================================
@@ -2225,7 +2210,7 @@ mod tests {
         );
 
         // Verify flags remain set
-        assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), true);
+        assert!(NEED_UPDATE_CONNECT_PARA.get());
         assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), start_time);
     }
 
@@ -2252,7 +2237,7 @@ mod tests {
         assert_eq!(CONN_UPDATE_CNT.get(), 1, "callback must be called once");
 
         // Verify flags were cleared
-        assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), false);
+        assert!(!NEED_UPDATE_CONNECT_PARA.get());
         assert_eq!(GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(), 0);
     }
 
@@ -2281,7 +2266,7 @@ mod tests {
             0,
             "callback must not be called at exactly the delay"
         );
-        assert_eq!(NEED_UPDATE_CONNECT_PARA.get(), true);
+        assert!(NEED_UPDATE_CONNECT_PARA.get());
     }
 
     /// Tests the OTA staging providers' wrap-on-stage / direct-index-on-read
@@ -2299,13 +2284,17 @@ mod tests {
         };
         BUFF_RESPONSE.lock().fill(zeroed);
 
-        let mut first = PacketAttData::default();
-        first.att = 0xA1;
+        let mut first = PacketAttData {
+            att: 0xA1,
+            ..Default::default()
+        };
         first.dat[0] = 0x11;
         let p1 = Packet { att_data: first };
 
-        let mut second = PacketAttData::default();
-        second.att = 0xB2;
+        let mut second = PacketAttData {
+            att: 0xB2,
+            ..Default::default()
+        };
         second.dat[0] = 0x22;
         let p2 = Packet { att_data: second };
 

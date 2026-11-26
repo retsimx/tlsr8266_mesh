@@ -260,7 +260,7 @@ mod tests {
     fn pwm_writes(id: u32) -> Vec<u32> {
         FakeMmio::writes()
             .into_iter()
-            .filter(|w| w.addr == PWM_CMP_BASE + id * 4 | tlsr8266_pac::REG_BASE_ADDR)
+            .filter(|w| w.addr == (PWM_CMP_BASE + id * 4) | tlsr8266_pac::REG_BASE_ADDR)
             .map(|w| w.value)
             .collect()
     }
@@ -677,8 +677,8 @@ mod tests {
         assert_eq!(product_uuid, 0x02, "product uuid 0x02 = CCT light");
         assert_eq!(status, 0x01, "status 0x01 = advertising");
         assert_eq!(device_address, 0x1F00, "the mesh device address");
-        for i in 0..16 {
-            assert_eq!(rsv[i], i as u8, "rsv[{i}] must be {i}");
+        for (i, &byte) in rsv.iter().enumerate() {
+            assert_eq!(byte, i as u8, "rsv[{i}] must be {i}");
         }
     }
 

@@ -1528,10 +1528,10 @@ mod tests {
     /// `write_reg_rf_rx_gain_agc(value, i)` writes `value` at `0x480 + i`, and
     /// production shifts the index by two, so stage `i` lands at `0x480 + 4i`.
     fn assert_agc_applied() {
-        for i in 0..6 {
+        for (i, &expected) in TBL_AGC.iter().take(6).enumerate() {
             assert_eq!(
                 FakeMmio::reg32(0x480 + ((i << 2) as u32)),
-                TBL_AGC[i],
+                expected,
                 "AGC stage {} must carry its table value",
                 i
             );
@@ -2053,7 +2053,7 @@ mod tests {
             rf_link_slave_set_adv(&test_adv_data);
 
             // Get updated packet from the global state
-            let updated_pkt = PKT_ADV.lock().clone();
+            let updated_pkt = *PKT_ADV.lock();
 
             // Verify the correct values were set
             let p = updated_pkt.head().dma_len;
@@ -2577,7 +2577,7 @@ mod tests {
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_LIGHT_STATUS);
 
         // Verify unicast flag is set for a non-broadcast address
-        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), true);
+        assert!(DEVICE_STATUS_READ_UNICAST_MODE.get());
 
         // Verify destination specific info fields have been cleared
         assert_eq!(test_packet.att_cmd().value.val[8], 0);
@@ -2645,7 +2645,7 @@ mod tests {
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_LIGHT_GRP_RSP2);
 
         // Verify unicast flag is cleared for a broadcast address
-        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), false);
+        assert!(!DEVICE_STATUS_READ_UNICAST_MODE.get());
 
         // Broadcast packets don't have the destination fields cleared
         // and don't have special fields set
@@ -2696,7 +2696,7 @@ mod tests {
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), LGT_CMD_DEV_ADDR_RSP);
 
         // Verify unicast flag is set for a non-broadcast address
-        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), true);
+        assert!(DEVICE_STATUS_READ_UNICAST_MODE.get());
 
         // Verify destination specific info fields have been cleared
         assert_eq!(test_packet.att_cmd().value.val[8], 0);
@@ -2919,9 +2919,8 @@ mod tests {
             0,
             "a non-notification must stop an in-flight status read"
         );
-        assert_eq!(
-            DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            false,
+        assert!(
+            !DEVICE_STATUS_READ_UNICAST_MODE.get(),
             "stopping the read must clear unicast mode"
         );
         assert_eq!(
@@ -2985,7 +2984,7 @@ mod tests {
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
-            (BRIDGE_MAX_CNT as u32) * 2 + 1,
+            BRIDGE_MAX_CNT * 2 + 1,
             "a bridged group config waits the maximum bridge delay"
         );
         assert_eq!(
@@ -3395,7 +3394,7 @@ mod tests {
         assert_eq!(register_writes(0x80800c), vec![expected_crc as u32]);
 
         // Verify advertising is enabled
-        assert_eq!(BLE_PERIPHERAL_ADVERTISING_ENABLED.get(), true);
+        assert!(BLE_PERIPHERAL_ADVERTISING_ENABLED.get());
     }
 
     /// The version word at `0x808008` and the CRC over it must come from the

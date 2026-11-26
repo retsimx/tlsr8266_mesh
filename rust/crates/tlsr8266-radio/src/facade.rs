@@ -645,9 +645,8 @@ mod tests {
 
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0, "the busy flag is cleared");
         assert_eq!(SLAVE_DATA_VALID.get(), 0, "pending status data is dropped");
-        assert_eq!(
-            DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            false,
+        assert!(
+            !DEVICE_STATUS_READ_UNICAST_MODE.get(),
             "the unicast window is closed"
         );
         assert_eq!(
@@ -669,9 +668,8 @@ mod tests {
         stop_slave_read_status_if_busy();
 
         assert_eq!(SLAVE_DATA_VALID.get(), 3, "idle link keeps pending data");
-        assert_eq!(
+        assert!(
             DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            true,
             "idle link keeps its unicast window"
         );
         assert_eq!(

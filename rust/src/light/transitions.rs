@@ -571,6 +571,9 @@ impl LightFlashStore {
 }
 
 #[cfg(test)]
+// Kept test-only on purpose: production must not gain a `Default` for
+// `LightFlashStore`, so this impl cannot become a derive on the struct.
+#[allow(clippy::derivable_impls)]
 impl Default for LightFlashStore {
     fn default() -> Self {
         Self { light_lum_addr: 0 }
@@ -1281,8 +1284,9 @@ mod tests {
 
         reset_fakes();
         reset_for_test();
-        let mut store = LightFlashStore::default();
-        store.light_lum_addr = 0x1234;
+        let mut store = LightFlashStore {
+            light_lum_addr: 0x1234,
+        };
 
         store.light_lum_erase();
 
@@ -1300,8 +1304,9 @@ mod tests {
 
         reset_fakes();
         reset_for_test();
-        let mut store = LightFlashStore::default();
-        store.light_lum_addr = FLASH_ADR_LUM;
+        let mut store = LightFlashStore {
+            light_lum_addr: FLASH_ADR_LUM,
+        };
         with_core(|core| {
             core.brightness = 500;
             core.cw_tr.current = I16F16::from_num(300);
@@ -1330,9 +1335,10 @@ mod tests {
 
         reset_fakes();
         reset_for_test();
-        let mut store = LightFlashStore::default();
-        store.light_lum_addr =
-            FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32 - size_of::<LuminanceRecord>() as u32;
+        let mut store = LightFlashStore {
+            light_lum_addr: FLASH_ADR_LUM + FLASH_SECTOR_SIZE as u32
+                - size_of::<LuminanceRecord>() as u32,
+        };
         with_core(|core| core.brightness = 500);
 
         store.light_state_save();

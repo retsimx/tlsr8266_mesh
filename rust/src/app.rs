@@ -1129,9 +1129,8 @@ mod tests {
         FakeMmio::reset();
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 5);
         FakeMmio::set_reg8(REG_DMA_TX_RPTR, 2);
-        assert_eq!(
-            ota_send_terminate_hook(),
-            false,
+        assert!(
+            !ota_send_terminate_hook(),
             "a full packet buffer must not report a queued terminate packet"
         );
 
@@ -1139,9 +1138,8 @@ mod tests {
         FakeMmio::reset();
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 2);
         FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
-        assert_eq!(
+        assert!(
             ota_send_terminate_hook(),
-            true,
             "a free packet buffer must report the queued terminate packet"
         );
     }
@@ -1151,16 +1149,14 @@ mod tests {
     fn test_ota_begin_gatt_hook_requires_pairing() {
         set_slave_read_status_busy(0);
         set_paired_login(false);
-        assert_eq!(
-            ota_begin_gatt_hook(),
-            false,
+        assert!(
+            !ota_begin_gatt_hook(),
             "an unpaired link must not begin a GATT OTA"
         );
 
         set_paired_login(true);
-        assert_eq!(
+        assert!(
             ota_begin_gatt_hook(),
-            true,
             "a paired link with an idle status read may begin a GATT OTA"
         );
 
@@ -2272,8 +2268,8 @@ mod tests {
             device_address(),
             "the scan response carries this node's address"
         );
-        for i in 0..16 {
-            assert_eq!(rsp_rsv[i], i as u8, "rsv[{i}] must be {i}");
+        for (i, &byte) in rsp_rsv.iter().enumerate() {
+            assert_eq!(byte, i as u8, "rsv[{i}] must be {i}");
         }
         // Once from the on/off restore, once at the end of user_init.
         assert_eq!(

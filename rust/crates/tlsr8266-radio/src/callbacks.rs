@@ -570,7 +570,7 @@ mod tests {
             mesh_protocol::mesh_types::OtaState::Continue
         );
         dispatch_ota_terminate();
-        assert_eq!(dispatch_ota_tick(), false);
+        assert!(!dispatch_ota_tick());
 
         assert_eq!(OTA_WRITE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(OTA_SNAPSHOT_CALLS.load(Ordering::SeqCst), 1);
@@ -580,8 +580,8 @@ mod tests {
         // The dispatchers must not substitute one slot for another.
         OTA_SNAPSHOT_IN_PROGRESS.store(true, Ordering::SeqCst);
         OTA_TICK_RESULT.store(true, Ordering::SeqCst);
-        assert_eq!(dispatch_ota_snapshot().in_progress, true);
-        assert_eq!(dispatch_ota_tick(), true);
+        assert!(dispatch_ota_snapshot().in_progress);
+        assert!(dispatch_ota_tick());
 
         set_ota_hooks(TEST_OTA_HOOKS);
     }
@@ -654,28 +654,25 @@ mod tests {
         set_ota_hooks(TEST_OTA_HOOKS);
 
         // The terminate slot reaches `ota_request_termination_impl`.
-        assert_eq!(
-            crate::callbacks::test_ota::is_termination_requested(),
-            false
-        );
+        assert!(!crate::callbacks::test_ota::is_termination_requested());
         dispatch_ota_terminate();
-        assert_eq!(crate::callbacks::test_ota::is_termination_requested(), true);
+        assert!(crate::callbacks::test_ota::is_termination_requested());
 
         // The tick slot reaches `ota_tick_timeout_1s_impl`: a zero counter is
         // already expired and must not underflow.
         crate::callbacks::test_ota::set_timeout_for_test(0);
-        assert_eq!(dispatch_ota_tick(), true);
+        assert!(dispatch_ota_tick());
 
         // The snapshot slot reaches `ota_status_snapshot_impl`.
         crate::callbacks::test_ota::set_in_progress_for_test(true);
-        assert_eq!(dispatch_ota_snapshot().in_progress, true);
+        assert!(dispatch_ota_snapshot().in_progress);
 
         // The write slot reaches `on_gatt_ota_packet`, which claims the OTA when
         // the begin gate allows it.
         crate::callbacks::test_ota::set_in_progress_for_test(false);
         crate::callbacks::test_ota::set_gatt_ota_begin_for_test(true);
         dispatch_ota_write(&test_packet());
-        assert_eq!(dispatch_ota_snapshot().in_progress, true);
+        assert!(dispatch_ota_snapshot().in_progress);
 
         crate::callbacks::test_ota::reset_for_test();
     }

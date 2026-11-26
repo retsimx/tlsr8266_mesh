@@ -125,7 +125,7 @@ mod tests {
         // Reset static variables
         BLE_LL_CHANNEL_NUM.set(0);
         BLE_LL_LAST_UNMAPPED_CH.set(0);
-        let mut channel_table = [0u8; 40];
+        let channel_table = [0u8; 40];
         BLE_LL_CHANNEL_TABLE.lock().copy_from_slice(&channel_table);
 
         // Act
@@ -148,7 +148,7 @@ mod tests {
         // Reset static variables
         BLE_LL_CHANNEL_NUM.set(0);
         BLE_LL_LAST_UNMAPPED_CH.set(0);
-        let mut channel_table = [0u8; 40];
+        let channel_table = [0u8; 40];
         BLE_LL_CHANNEL_TABLE.lock().copy_from_slice(&channel_table);
 
         // Act
@@ -167,7 +167,7 @@ mod tests {
         // Reset static variables
         BLE_LL_CHANNEL_NUM.set(0);
         BLE_LL_LAST_UNMAPPED_CH.set(0);
-        let mut channel_table = [0u8; 40];
+        let channel_table = [0u8; 40];
         BLE_LL_CHANNEL_TABLE.lock().copy_from_slice(&channel_table);
 
         // Act
@@ -220,7 +220,7 @@ mod tests {
 
         // Mock BLE_LL_CHANNEL_TABLE to return a specific value for remapping
         let mut channel_table = [0u8; 40];
-        channel_table[15 % 30] = 20; // Remap to channel 20
+        channel_table[15] = 20; // Remap to channel 20
         BLE_LL_CHANNEL_TABLE.lock().copy_from_slice(&channel_table);
 
         let hop = 5;
@@ -265,7 +265,7 @@ mod tests {
         // Reset static variables
         BLE_LL_CHANNEL_NUM.set(0);
         BLE_LL_LAST_UNMAPPED_CH.set(5); // Start from channel 5
-        let mut channel_table = [0u8; 40];
+        let channel_table = [0u8; 40];
         BLE_LL_CHANNEL_TABLE.lock().copy_from_slice(&channel_table);
 
         // Act

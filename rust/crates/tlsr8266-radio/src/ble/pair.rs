@@ -1299,7 +1299,7 @@ mod tests {
     use crate::ble::flash_config::access_code;
     use core::sync::atomic::AtomicUsize;
     use mesh_protocol::packet_types::{
-        MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
+        MeshPkt, PacketAttRawValue, PacketL2capData, PacketL2capHead, PacketLlApp,
     };
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::clock::fake_clock;
@@ -1874,7 +1874,7 @@ mod tests {
 
     // Helper function to create a test mesh packet
     fn create_test_mesh_packet(is_broadcast: bool) -> Packet {
-        let mut packet = Packet {
+        Packet {
             mesh: MeshPkt {
                 head: PacketL2capHead {
                     dma_len: 0,
@@ -1900,8 +1900,7 @@ mod tests {
                 dst_adr: 0,
                 no_use: [0; 4],
             },
-        };
-        packet
+        }
     }
 
     #[test]
@@ -2827,7 +2826,7 @@ mod tests {
         // Assert
         // Check state reset
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
 
         // Check IV initialization from MAC ID
         let mac_id = MAC_ID.lock();
@@ -2926,8 +2925,8 @@ mod tests {
 
         // Assert
         assert!(result.is_none()); // Should return None after reset
-        assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared
-        assert_eq!(PAIR_ENC_ENABLE.get(), false); // Encryption should be disabled
+        assert!(!PAIR_READ_PENDING.get()); // Flag should be cleared
+        assert!(!PAIR_ENC_ENABLE.get()); // Encryption should be disabled
 
         // The reset really ran `pair_par_init`: the state machine moved from
         // AwaitingRandom to the Init state it publishes.
@@ -2966,7 +2965,7 @@ mod tests {
 
         // Check state transition
         assert_eq!(BLE_PAIR_ST.get(), PairState::RandomConfirmation);
-        assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared
+        assert!(!PAIR_READ_PENDING.get()); // Flag should be cleared
     }
 
     #[test]
@@ -2987,8 +2986,8 @@ mod tests {
 
         // Assert
         assert!(result.is_none()); // Should return None after reset
-        assert_eq!(PAIR_READ_PENDING.get(), false);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_READ_PENDING.get());
+        assert!(!PAIR_ENC_ENABLE.get());
         // `pair_par_init` ran: ReceivingMeshLtk became Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
     }
@@ -3031,7 +3030,7 @@ mod tests {
 
         // Check state transition
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3082,7 +3081,7 @@ mod tests {
 
         // Check state transition
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3130,8 +3129,8 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3222,8 +3221,8 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_ENC_ENABLE.get(), true); // Encryption should be enabled
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(PAIR_ENC_ENABLE.get()); // Encryption should be enabled
+        assert!(!PAIR_READ_PENDING.get());
 
         // Verify final session key was stored
         assert_eq!(PAIR_STATE.lock().pair_sk, sk_final);
@@ -3257,7 +3256,7 @@ mod tests {
 
         // Check state transition (remains Completed in simple mode?) - Code doesn't change state here for simple mode
         // assert_eq!(BLE_PAIR_ST.get(), PairState::Completed); // Let's assume it should go to completed based on secure mode logic
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3309,7 +3308,7 @@ mod tests {
 
         // Check state transition
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!PAIR_READ_PENDING.get());
 
         // Verify session key was restored from copy
         assert_eq!(PAIR_STATE.lock().pair_sk, initial_sk_copy);
@@ -3336,7 +3335,7 @@ mod tests {
         let pkt = result.unwrap();
         // `rf_link_delete_pair` really ran: it revoked the login and persisted
         // the configured credentials to the pairing sector.
-        assert_eq!(PAIR_LOGIN_OK.get(), false);
+        assert!(!PAIR_LOGIN_OK.get());
         let slot = pairing_slot(0);
         assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
         assert_eq!(&slot[0x10..0x18], b"MeshName");
@@ -3362,8 +3361,8 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), false); // Should not be set if mesh disabled
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(!MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get()); // Should not be set if mesh disabled
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3385,7 +3384,7 @@ mod tests {
         let pkt = result.unwrap();
         // `rf_link_delete_pair` really ran: it revoked the login and persisted
         // the configured credentials to the pairing sector.
-        assert_eq!(PAIR_LOGIN_OK.get(), false);
+        assert!(!PAIR_LOGIN_OK.get());
         let slot = pairing_slot(0);
         assert_eq!(slot[0], PAIR_CONFIG_VALID_FLAG);
         assert_eq!(&slot[0x10..0x18], b"MeshName");
@@ -3409,8 +3408,8 @@ mod tests {
 
         // Check state transition and flags
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get(), true); // Should be set if mesh enabled
-        assert_eq!(PAIR_READ_PENDING.get(), false);
+        assert!(MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get()); // Should be set if mesh enabled
+        assert!(!PAIR_READ_PENDING.get());
     }
 
     #[test]
@@ -3441,10 +3440,9 @@ mod tests {
 
         // Check state transition
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(PAIR_READ_PENDING.get(), false); // Flag should be cleared even though we returned a packet
+        assert!(!PAIR_READ_PENDING.get()); // Flag should be cleared even though we returned a packet
     }
 
-    #[test]
     #[test]
     fn test_pair_proc_completed_case() {
         // Arrange: Use the Completed state which is explicitly handled in the match statement
@@ -3479,9 +3477,8 @@ mod tests {
         assert_eq!(dma_len, 2 + 6, "dma_len should be l2cap_len + 6");
 
         // Flag should be cleared
-        assert_eq!(
-            PAIR_READ_PENDING.get(),
-            false,
+        assert!(
+            !PAIR_READ_PENDING.get(),
             "PAIR_READ_PENDING should be cleared"
         );
     }
@@ -3531,9 +3528,8 @@ mod tests {
         assert_eq!(dma_len, 0x17 + 6, "dma_len should be l2cap_len + 6");
 
         // Flag should be cleared
-        assert_eq!(
-            PAIR_READ_PENDING.get(),
-            false,
+        assert!(
+            !PAIR_READ_PENDING.get(),
             "PAIR_READ_PENDING should be cleared"
         );
     }
@@ -3605,7 +3601,7 @@ mod tests {
         pair_read(&dummy_packet);
 
         // Assert
-        assert_eq!(PAIR_READ_PENDING.get(), true); // Verify the flag is set
+        assert!(PAIR_READ_PENDING.get()); // Verify the flag is set
     }
 
     #[test]
@@ -3750,7 +3746,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -3787,7 +3783,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -3875,7 +3871,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -3969,7 +3965,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -4197,7 +4193,7 @@ mod tests {
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted); // Should be set to PairSetted upon failure
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -4244,7 +4240,7 @@ mod tests {
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
         assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
-        assert_eq!(PAIR_ENC_ENABLE.get(), false); // Line 892: PAIR_ENC_ENABLE cleared
+        assert!(!PAIR_ENC_ENABLE.get()); // Line 892: PAIR_ENC_ENABLE cleared
     }
 
     #[test]
@@ -4273,7 +4269,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::Idle);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -4305,7 +4301,7 @@ mod tests {
         // RESET_MESH currently has no arm action: pairing state and the
         // encryption flag stay exactly as they were.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Completed);
-        assert_eq!(PAIR_ENC_ENABLE.get(), true);
+        assert!(PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -4338,9 +4334,8 @@ mod tests {
 
         // In simple mode, the client sends XOR(nn, pass)
         let mut expected_credential_proof = [0u8; 16];
-        for i in 0..16 {
-            expected_credential_proof[i] =
-                b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
+        for (i, proof) in expected_credential_proof.iter_mut().enumerate() {
+            *proof = b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
         }
 
         pkt.att_val_mut().value[0] = PAIR_OP_VERIFY_CREDENTIALS;
@@ -4355,7 +4350,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::SessionKeyExchange);
-        assert_eq!(PAIR_LOGIN_OK.get(), true);
+        assert!(PAIR_LOGIN_OK.get());
 
         // Verify the random challenge was stored
         let pair_state = PAIR_STATE.lock();
@@ -4402,8 +4397,8 @@ mod tests {
         let mut proof_key = [0u8; 16];
         proof_key[0..RANDOM_CHALLENGE_SIZE].copy_from_slice(&test_random);
         let mut proof_plain = [0u8; 16];
-        for index in 0..16 {
-            proof_plain[index] = b"TestPassword\0\0\0\0"[index] ^ b"TestNetwork\0\0\0\0\0"[index];
+        for (index, plain) in proof_plain.iter_mut().enumerate() {
+            *plain = b"TestPassword\0\0\0\0"[index] ^ b"TestNetwork\0\0\0\0\0"[index];
         }
         let expected_work = aes_att_encryption(&proof_key, &proof_plain);
         pkt.att_val_mut().value[9..9 + RANDOM_CHALLENGE_SIZE]
@@ -4414,8 +4409,8 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::SessionKeyExchange);
-        assert_eq!(PAIR_LOGIN_OK.get(), true);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false); // Temporarily disabled during verification
+        assert!(PAIR_LOGIN_OK.get());
+        assert!(!PAIR_ENC_ENABLE.get()); // Temporarily disabled during verification
 
         // Verify the random challenge was stored
         let pair_state = PAIR_STATE.lock();
@@ -4465,7 +4460,7 @@ mod tests {
         pair_write(&pkt);
 
         // Assert
-        assert_eq!(PAIR_LOGIN_OK.get(), false); // Login should fail
+        assert!(!PAIR_LOGIN_OK.get()); // Login should fail
 
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
@@ -4503,9 +4498,8 @@ mod tests {
 
         // In simple mode, the client sends XOR(nn, pass)
         let mut expected_credential_proof = [0u8; 16];
-        for i in 0..16 {
-            expected_credential_proof[i] =
-                b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
+        for (i, proof) in expected_credential_proof.iter_mut().enumerate() {
+            *proof = b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
         }
 
         pkt.att_val_mut().value[0] = PAIR_OP_GET_MESH_LTK;
@@ -4607,9 +4601,8 @@ mod tests {
 
         // In simple mode, the client sends XOR(nn, pass)
         let mut expected_credential_proof = [0u8; 16];
-        for i in 0..16 {
-            expected_credential_proof[i] =
-                b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
+        for (i, proof) in expected_credential_proof.iter_mut().enumerate() {
+            *proof = b"TestNetwork\0\0\0\0\0\0"[i] ^ b"TestPassword\0\0\0\0\0"[i];
         }
 
         pkt.att_val_mut().value[0] = PAIR_OP_GET_MESH_LTK;
@@ -4813,7 +4806,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]
@@ -4847,7 +4840,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(PAIR_ENC_ENABLE.get(), false);
+        assert!(!PAIR_ENC_ENABLE.get());
     }
 
     #[test]

@@ -1128,7 +1128,7 @@ mod tests {
 
         // Opcode 0 (`0xc0 & 0x3f`) with the packet's sequence number is already
         // in the duplicate-detection cache.
-        RC_PKT_BUF.lock().push_front(PktBuf {
+        let _ = RC_PKT_BUF.lock().push_front(PktBuf {
             op: 0,
             sno: [0; 3],
             notify_ok_flag: false,
@@ -1183,9 +1183,8 @@ mod tests {
             45000,
             "Connected timestamp should be updated"
         );
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            true,
             "Connection should be marked active"
         );
 
@@ -1228,9 +1227,8 @@ mod tests {
             500_000 - CLOCK_SYS_CLOCK_1US * 200,
             "an early packet must advance the next connection tick"
         );
-        assert_eq!(
-            BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
             "one adjustment per connection event only"
         );
 
@@ -1640,6 +1638,9 @@ mod tests {
         // Set the status byte at the expected location: addr_of!(entry) + dma_len + 3
         // Status check: byte & 0x51 == 0x40, so we need a byte like 0x40
         let status_offset = test_dma_len as usize + 3;
+        // Read back through `entry_ptr`; that alias is invisible to the
+        // compiler, so the write is not dead even though it looks it.
+        #[allow(unused_assignments)]
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40; // Will pass: 0x40 & 0x51 = 0x40 ✓
         }
@@ -1710,6 +1711,9 @@ mod tests {
 
         // Set status byte to pass validation
         let status_offset = test_dma_len as usize + 3;
+        // Read back through `entry_ptr`; that alias is invisible to the
+        // compiler, so the write is not dead even though it looks it.
+        #[allow(unused_assignments)]
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40;
         }
@@ -1796,6 +1800,9 @@ mod tests {
         // Set status byte to pass validation (after the packet copy, which
         // overwrites the same stretch of the buffer).
         let status_offset = test_dma_len as usize + 3;
+        // Read back through `entry_ptr`; that alias is invisible to the
+        // compiler, so the write is not dead even though it looks it.
+        #[allow(unused_assignments)]
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40;
         }
@@ -1861,6 +1868,9 @@ mod tests {
 
         // Set status byte to pass validation
         let status_offset = test_dma_len as usize + 3;
+        // Read back through `entry_ptr`; that alias is invisible to the
+        // compiler, so the write is not dead even though it looks it.
+        #[allow(unused_assignments)]
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40;
         }
@@ -1882,12 +1892,11 @@ mod tests {
         // sequence number and marks the link active.
         assert_eq!(
             LIGHT_CONN_SN_MASTER.get(),
-            ((0x10u16) * 0x100) | (((0x08u16 >> 3) & 1) as u16),
+            ((0x10u16) * 0x100) | ((0x08u16 >> 3) & 1),
             "the BLE data handler must adopt the master sequence number"
         );
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            true,
             "the BLE data handler must mark the connection active"
         );
         assert_eq!(
@@ -1910,9 +1919,7 @@ mod tests {
 
         // Create a mesh packet with channel ID 0xffff (node status)
         let mut packet = create_mesh_packet();
-        unsafe {
-            packet.head_mut().chan_id = 0xffff; // Special node status channel
-        }
+        packet.head_mut().chan_id = 0xffff; // Special node status channel
 
         let rx_time = 75000u32;
 
@@ -1938,9 +1945,7 @@ mod tests {
         // A 2-byte opcode (MSB set, 0x40 clear) is unsupported, so the real
         // parser rejects the frame.
         let mut packet = create_mesh_packet();
-        unsafe {
-            packet.att_write_mut().value.val[0] = 0x80;
-        }
+        packet.att_write_mut().value.val[0] = 0x80;
 
         let rx_time = 80000u32;
 
@@ -1994,6 +1999,9 @@ mod tests {
 
         // Set status byte to pass validation
         let status_offset = test_dma_len as usize + 3;
+        // Read back through `entry_ptr`; that alias is invisible to the
+        // compiler, so the write is not dead even though it looks it.
+        #[allow(unused_assignments)]
         if status_offset < extended_buffer.len() {
             extended_buffer[status_offset] = 0x40;
         }
@@ -2016,9 +2024,8 @@ mod tests {
             0,
             "no scan/connection response may be armed"
         );
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            true,
             "the BLE data path must adopt the new session"
         );
     }

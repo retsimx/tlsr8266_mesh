@@ -383,8 +383,8 @@ mod tests {
     fn test_compute_crc() {
         let mut msg = empty_frame();
 
-        for i in 0..42 {
-            msg.data[i] = i as u8;
+        for (i, byte) in msg.data.iter_mut().enumerate().take(42) {
+            *byte = i as u8;
         }
 
         compute_crc(&mut msg);

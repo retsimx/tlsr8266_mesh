@@ -266,9 +266,8 @@ mod tests {
         );
 
         // Verify advertisement flag remains cleared
-        assert_eq!(
-            BLE_ADVERTISING_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_ADVERTISING_ENABLED.get(),
             "Advertisement flag should remain cleared after completion"
         );
 
@@ -281,9 +280,8 @@ mod tests {
         );
 
         // Verify online status flag is cleared
-        assert_eq!(
-            MESH_DEVICE_ONLINE_STATUS.get(),
-            false,
+        assert!(
+            !MESH_DEVICE_ONLINE_STATUS.get(),
             "Online status flag should be cleared after handling"
         );
 
@@ -350,9 +348,8 @@ mod tests {
         );
 
         // Verify online status flag remains cleared
-        assert_eq!(
-            MESH_DEVICE_ONLINE_STATUS.get(),
-            false,
+        assert!(
+            !MESH_DEVICE_ONLINE_STATUS.get(),
             "Online status flag should remain cleared"
         );
 
@@ -486,16 +483,14 @@ mod tests {
 
             if cycle < SYS_CHN_ADV.len() - 1 {
                 // The flag stays set until the whole channel sequence is done.
-                assert_eq!(
+                assert!(
                     BLE_ADVERTISING_ENABLED.get(),
-                    true,
                     "Advertisement flag should remain true after channel {}",
                     cycle
                 );
             } else {
-                assert_eq!(
-                    BLE_ADVERTISING_ENABLED.get(),
-                    false,
+                assert!(
+                    !BLE_ADVERTISING_ENABLED.get(),
                     "the last channel closes the advertisement sequence"
                 );
             }
@@ -535,9 +530,8 @@ mod tests {
         );
 
         // Verify online status flag is cleared
-        assert_eq!(
-            MESH_DEVICE_ONLINE_STATUS.get(),
-            false,
+        assert!(
+            !MESH_DEVICE_ONLINE_STATUS.get(),
             "Online status flag should be cleared after handling"
         );
     }
@@ -569,16 +563,14 @@ mod tests {
             // Since we reset ST_PNO to 0 before this test, each call advances through channels 0,1,2
             // Only after channel 2 (the 3rd call) does BLE_ADVERTISING_ENABLED get cleared
             if cycle < 2 {
-                assert_eq!(
+                assert!(
                     BLE_ADVERTISING_ENABLED.get(),
-                    true,
                     "Advertisement should remain enabled during sequence cycle {}",
                     cycle
                 );
             } else {
-                assert_eq!(
-                    BLE_ADVERTISING_ENABLED.get(),
-                    false,
+                assert!(
+                    !BLE_ADVERTISING_ENABLED.get(),
                     "Advertisement should be auto-disabled after complete sequence (cycle {})",
                     cycle
                 );

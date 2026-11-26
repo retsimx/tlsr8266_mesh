@@ -1614,7 +1614,7 @@ mod tests {
         report_rx_drops(&mut last_reported);
 
         assert!(
-            UART_TX_CHANNEL.len() >= 1,
+            !UART_TX_CHANNEL.is_empty(),
             "a drop delta must produce a log frame"
         );
         assert_eq!(last_reported, 2);

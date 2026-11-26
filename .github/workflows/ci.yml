@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run clippy
-        run: cargo clippy --workspace --lib --target i686-unknown-linux-gnu -- -D warnings
+        run: cargo clippy --workspace --all-targets --target i686-unknown-linux-gnu -- -D warnings
         working-directory: rust
 
   test:

@@ -122,7 +122,6 @@ pub fn configure_ble_receive_state() {
 mod tests {
     use super::*;
     use crate::types::{BlePeripheralLinkState, RfOperationState};
-    use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 
     use crate::ble::connection::BLE_PERIPHERAL_CONNECTION_INSTANT;
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -279,9 +278,8 @@ mod tests {
         );
 
         // Verify timing adjustment is enabled
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.get(),
-            true,
             "Timing adjustment should be enabled"
         );
     }

@@ -1049,7 +1049,7 @@ mod tests {
             let pkt = PKT_ADV.lock();
 
             // Check UUID flag is set
-            assert_eq!(SET_UUID_FLAG.get(), true);
+            assert!(SET_UUID_FLAG.get());
 
             // Check packet length is updated
             assert_eq!(
@@ -1124,7 +1124,7 @@ mod tests {
             let pkt = PKT_ADV.lock();
 
             // UUID flag should not be set
-            assert_eq!(SET_UUID_FLAG.get(), false);
+            assert!(!SET_UUID_FLAG.get());
 
             // Data should remain unchanged
             assert_eq!(pkt.head().rf_len, BLE_HEADER_LEN + large_data.len() as u8);

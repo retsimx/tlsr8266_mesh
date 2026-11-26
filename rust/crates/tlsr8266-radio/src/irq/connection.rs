@@ -955,9 +955,8 @@ mod tests {
         );
 
         // Verify: Update flag is set for timing coordination
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get(),
-            true,
             "Timing update flag should be set during parameter transition"
         );
     }
@@ -1186,9 +1185,8 @@ mod tests {
             0,
             "Update flag must be cleared"
         );
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG.get(),
-            true,
             "Timing flag must be set"
         );
 
@@ -1336,16 +1334,11 @@ mod tests {
         FakeMmio::clear_writes();
 
         // Verify initial state is set correctly by reset_cleanup_state
-        assert_eq!(
+        assert!(
             BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            true,
             "Initial connection state should be active"
         );
-        assert_eq!(
-            PAIR_LOGIN_OK.get(),
-            true,
-            "Initial pair login should be true"
-        );
+        assert!(PAIR_LOGIN_OK.get(), "Initial pair login should be true");
 
         // Execute cleanup
         cleanup_ble_disconnection();
@@ -1381,16 +1374,11 @@ mod tests {
         );
 
         // Verify connection state flags are cleared
-        assert_eq!(
-            BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
             "Connection active flag should be cleared"
         );
-        assert_eq!(
-            PAIR_LOGIN_OK.get(),
-            false,
-            "Pair login flag should be cleared"
-        );
+        assert!(!PAIR_LOGIN_OK.get(), "Pair login flag should be cleared");
 
         // Verify connection parameter update state is reset
         assert_eq!(
@@ -1398,9 +1386,8 @@ mod tests {
             0,
             "Service discovery timestamp should be cleared"
         );
-        assert_eq!(
-            NEED_UPDATE_CONNECT_PARA.get(),
-            false,
+        assert!(
+            !NEED_UPDATE_CONNECT_PARA.get(),
             "Connection parameter update flag should be cleared"
         );
     }
@@ -1423,9 +1410,8 @@ mod tests {
         cleanup_ble_disconnection();
 
         // Verify mesh status reporting is disabled
-        assert_eq!(
-            MESH_NODE_REPORT_ENABLE.get(),
-            false,
+        assert!(
+            !MESH_NODE_REPORT_ENABLE.get(),
             "mesh status reporting must be disabled on disconnect"
         );
 
@@ -1461,16 +1447,14 @@ mod tests {
             0,
             "First connection timestamp should be cleared in security enabled mode"
         );
-        assert_eq!(
-            PAIR_LOGIN_OK.get(),
-            false,
+        assert!(
+            !PAIR_LOGIN_OK.get(),
             "Pair login should be cleared in security enabled mode"
         );
 
         // Verify mesh status reporting is disabled
-        assert_eq!(
-            MESH_NODE_REPORT_ENABLE.get(),
-            false,
+        assert!(
+            !MESH_NODE_REPORT_ENABLE.get(),
             "mesh status reporting must be disabled on disconnect"
         );
     }
@@ -1497,9 +1481,8 @@ mod tests {
             0,
             "status read operation must be stopped"
         );
-        assert_eq!(
-            DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            false,
+        assert!(
+            !DEVICE_STATUS_READ_UNICAST_MODE.get(),
             "unicast status mode must be disabled by the stop handler"
         );
     }
@@ -1523,9 +1506,8 @@ mod tests {
         cleanup_ble_disconnection();
 
         // Verify status read stop is NOT called
-        assert_eq!(
+        assert!(
             DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            true,
             "the stop handler must not run when no status read is busy"
         );
         assert_eq!(
@@ -1697,20 +1679,18 @@ mod tests {
         cleanup_ble_disconnection();
 
         // Verify comprehensive state reset
-        assert_eq!(
-            BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
             "Connection active should be false"
         );
-        assert_eq!(PAIR_LOGIN_OK.get(), false, "Pair login should be false");
+        assert!(!PAIR_LOGIN_OK.get(), "Pair login should be false");
         assert_eq!(
             GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.get(),
             0,
             "Service discovery timeout should be cleared"
         );
-        assert_eq!(
-            NEED_UPDATE_CONNECT_PARA.get(),
-            false,
+        assert!(
+            !NEED_UPDATE_CONNECT_PARA.get(),
             "Connection parameter update flag should be false"
         );
         assert_eq!(SLAVE_DATA_VALID.get(), 0, "Data validity should be cleared");
@@ -1746,9 +1726,8 @@ mod tests {
             0,
             "First connection timestamp should be cleared"
         );
-        assert_eq!(
-            PAIR_LOGIN_OK.get(),
-            false,
+        assert!(
+            !PAIR_LOGIN_OK.get(),
             "Pair login should be cleared multiple times"
         );
 
@@ -1765,9 +1744,8 @@ mod tests {
         );
 
         // Verify mesh status reporting is disabled
-        assert_eq!(
-            MESH_NODE_REPORT_ENABLE.get(),
-            false,
+        assert!(
+            !MESH_NODE_REPORT_ENABLE.get(),
             "mesh status reporting must be disabled on disconnect"
         );
     }
@@ -1793,9 +1771,8 @@ mod tests {
             0,
             "any non-zero busy value must trigger the stop handler"
         );
-        assert_eq!(
-            DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            false,
+        assert!(
+            !DEVICE_STATUS_READ_UNICAST_MODE.get(),
             "the stop handler must run for any non-zero busy value"
         );
     }
@@ -1864,9 +1841,8 @@ mod tests {
             ],
             "each cleanup must reset the DMA TX read pointer"
         );
-        assert_eq!(
-            MESH_NODE_REPORT_ENABLE.get(),
-            false,
+        assert!(
+            !MESH_NODE_REPORT_ENABLE.get(),
             "each cleanup must disable mesh status reporting"
         );
 
@@ -1986,9 +1962,8 @@ mod tests {
 
         // Verify cleanup did not run: the disconnect path clears the pairing
         // login flag and retargets the RF state at advertisement.
-        assert_eq!(
+        assert!(
             PAIR_LOGIN_OK.get(),
-            true,
             "no cleanup must run before the supervision timeout expires"
         );
         assert_eq!(
@@ -2064,9 +2039,8 @@ mod tests {
         );
 
         // The cleanup still ran before the reboot verdict was reported.
-        assert_eq!(
-            PAIR_LOGIN_OK.get(),
-            false,
+        assert!(
+            !PAIR_LOGIN_OK.get(),
             "cleanup must clear the pairing login flag before reboot"
         );
         assert_eq!(
@@ -2099,9 +2073,8 @@ mod tests {
         handle_status_read_timeout();
 
         // Verify no action taken when no operation is busy
-        assert_eq!(
+        assert!(
             DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            true,
             "the stop handler must not run without a busy status read"
         );
     }
@@ -2130,9 +2103,8 @@ mod tests {
             0,
             "timed-out status read must be stopped"
         );
-        assert_eq!(
-            DEVICE_STATUS_READ_UNICAST_MODE.get(),
-            false,
+        assert!(
+            !DEVICE_STATUS_READ_UNICAST_MODE.get(),
             "the stop handler must disable unicast status mode"
         );
     }
@@ -2591,9 +2563,8 @@ mod tests {
         );
 
         // 2/3. no supervision timeout, no status-read timeout
-        assert_eq!(
-            BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
-            false,
+        assert!(
+            !BLE_PERIPHERAL_CONNECTION_ACTIVE.get(),
             "no timeout path may run while the connection is live"
         );
 

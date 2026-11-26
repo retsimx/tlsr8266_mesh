@@ -1175,9 +1175,8 @@ mod tests {
         on_gatt_ota_packet(&packet);
         on_gatt_ota_packet(&packet);
 
-        assert_eq!(
+        assert!(
             OTA_UPDATE_IN_PROGRESS.get(),
-            true,
             "the first accepted write must claim the OTA"
         );
         assert_eq!(OTA_STATE.lock().slave_ota_data_cache_idx, 2);
@@ -1197,9 +1196,8 @@ mod tests {
             att_data: PacketAttData::default(),
         });
 
-        assert_eq!(
-            OTA_UPDATE_IN_PROGRESS.get(),
-            false,
+        assert!(
+            !OTA_UPDATE_IN_PROGRESS.get(),
             "an unpaired write must not claim the OTA"
         );
         assert_eq!(OTA_STATE.lock().slave_ota_data_cache_idx, 0);
@@ -1345,16 +1343,16 @@ mod tests {
         reset_for_test();
 
         assert_eq!(fake_radio::terminate_calls(), 0);
-        assert_eq!(fake_radio::begin(), false);
-        assert_eq!(fake_radio::terminate(), false);
+        assert!(!fake_radio::begin());
+        assert!(!fake_radio::terminate());
         assert_eq!(*RF_SLAVE_OTA_FINISHED_FLAG.lock(), OtaState::Continue);
         assert_eq!(
             timeout_seconds_for_test(),
             RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS
         );
-        assert_eq!(ota_status_snapshot_impl().in_progress, false);
-        assert_eq!(is_mesh_ota_blocked(), false);
-        assert_eq!(is_termination_requested(), false);
+        assert!(!ota_status_snapshot_impl().in_progress);
+        assert!(!is_mesh_ota_blocked());
+        assert!(!is_termination_requested());
         assert_eq!(current_flash_address_for_test(), 0);
         assert_eq!(last_ota_timeout_tick_for_test(), 0);
         assert_eq!(LAST_INDEX.load(Ordering::Relaxed), u16::MAX);

@@ -802,9 +802,8 @@ mod tests {
         );
 
         // Verify advertising was enabled (cycle count % ADV_INTERVAL2LISTEN_INTERVAL != 0)
-        assert_eq!(
-            BLE_ADVERTISING_ENABLED.get(),
-            false, // Should be false when count % interval == 0
+        assert!(
+            !BLE_ADVERTISING_ENABLED.get(), // Should be false when count % interval == 0
             "Advertising state should be determined by interval ratio"
         );
 
@@ -963,14 +962,12 @@ mod tests {
         // Verify that after incrementing, neither advertising nor online status is enabled
         // 8 % 4 = 0, so advertising should be false
         // 8 % 8 = 0, so online status should be false
-        assert_eq!(
-            BLE_ADVERTISING_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_ADVERTISING_ENABLED.get(),
             "Advertising should not be enabled when cycle count % 4 == 0"
         );
-        assert_eq!(
-            MESH_DEVICE_ONLINE_STATUS.get(),
-            false,
+        assert!(
+            !MESH_DEVICE_ONLINE_STATUS.get(),
             "Online status should not be enabled when cycle count % 8 == 0"
         );
 
@@ -1023,14 +1020,12 @@ mod tests {
 
         // Verify that advertising and online status flags were NOT modified
         // They should remain as they were set before the function call
-        assert_eq!(
-            BLE_ADVERTISING_ENABLED.get(),
-            false,
+        assert!(
+            !BLE_ADVERTISING_ENABLED.get(),
             "Advertising flag should remain unchanged when online status is already scheduled"
         );
-        assert_eq!(
+        assert!(
             MESH_DEVICE_ONLINE_STATUS.get(),
-            true,
             "Online status flag should remain unchanged when already scheduled"
         );
 

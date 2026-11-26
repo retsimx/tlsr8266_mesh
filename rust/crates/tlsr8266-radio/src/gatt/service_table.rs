@@ -974,9 +974,8 @@ mod tests {
         dispatch_ota_write(&pkt);
 
         // The mesh-blocked/finish-flag gates keep the real handler inert here.
-        assert_eq!(
-            crate::callbacks::test_ota::snapshot().in_progress,
-            false,
+        assert!(
+            !crate::callbacks::test_ota::snapshot().in_progress,
             "a packet on an idle OTA must not claim the transfer"
         );
 
@@ -1136,8 +1135,8 @@ mod tests {
             // the original pointer is restored before `writable_props` (a local)
             // goes out of scope.
             unsafe {
-                (*(addr_of_mut!(get_g_attributes()[declaration]) as *mut AttributeT))
-                    .p_attr_value = addr_of_mut!(writable_props);
+                (*(addr_of_mut!(get_g_attributes()[declaration]))).p_attr_value =
+                    addr_of_mut!(writable_props);
             }
 
             let write_req = l2cap_att_handler(&write_packet(
@@ -1153,8 +1152,7 @@ mod tests {
 
             // SAFETY: (4) restore the declaration value pointer patched above.
             unsafe {
-                (*(addr_of_mut!(get_g_attributes()[declaration]) as *mut AttributeT))
-                    .p_attr_value = original_props;
+                (*(addr_of_mut!(get_g_attributes()[declaration]))).p_attr_value = original_props;
             }
 
             assert_eq!(
@@ -1186,8 +1184,7 @@ mod tests {
         // SAFETY: (4) test-only patch of the table's own CCC entry; the pointer is
         // restored before the local buffer `ccc` goes out of scope.
         unsafe {
-            (*(addr_of_mut!(get_g_attributes()[19]) as *mut AttributeT)).p_attr_value =
-                addr_of_mut!(ccc) as *mut u8;
+            (*(addr_of_mut!(get_g_attributes()[19]))).p_attr_value = addr_of_mut!(ccc) as *mut u8;
         }
 
         let response = l2cap_att_handler(&write_packet(
@@ -1198,8 +1195,7 @@ mod tests {
 
         // SAFETY: (4) restore the CCC value pointer patched above.
         unsafe {
-            (*(addr_of_mut!(get_g_attributes()[19]) as *mut AttributeT)).p_attr_value =
-                original_ptr;
+            (*(addr_of_mut!(get_g_attributes()[19]))).p_attr_value = original_ptr;
         }
 
         assert_eq!(

@@ -504,7 +504,7 @@ mod tests {
 
         // Verify cleanup occurred
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0);
-        assert_eq!(DEVICE_STATUS_READ_UNICAST_MODE.get(), false);
+        assert!(!DEVICE_STATUS_READ_UNICAST_MODE.get());
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
 
         // The real parameter reset ran as the last step of the shutdown: the

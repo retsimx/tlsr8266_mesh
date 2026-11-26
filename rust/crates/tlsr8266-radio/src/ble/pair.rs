@@ -593,36 +593,37 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
     }
 }
 
-/// Save pairing configuration data to flash memory
+/// Start a new pairing record in the next wear-levelling slot.
 ///
-/// This function handles the saving of pairing data segments to flash memory.
-/// It manages the flash sector rotation for wear-leveling when a new set of
-/// pairing data needs to be stored.
-///
-/// @param addr The offset within the pairing data structure
-/// @param data The data to save to flash
-pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
-    // Flash storage offset constants
-    const OFFSET_HEADER: u32 = 0x00; // Pairing header with validation flags
-
-    // For a new config set (addr=0), clean the old sector and increment the index
-    if addr == OFFSET_HEADER {
-        // Cast to i32 to match FLASH_CONFIGURATION_INDEX type
-        // Special case: if index is -1 (no config), set to 0, otherwise increment by SECTOR_SIZE
-        let current_index = FLASH_CONFIGURATION_INDEX.get();
-        if current_index < 0 {
-            FLASH_CONFIGURATION_INDEX.set(0);
-        } else {
-            FLASH_CONFIGURATION_INDEX.set(current_index + SECTOR_SIZE);
-        }
-
-        // Clean the flash (handles wraparound if needed)
-        // Note: pair_flash_clean() may reset index back to 0 if we wrapped around
-        pair_flash_clean();
+/// Advances [`FLASH_CONFIGURATION_INDEX`] to a fresh 64-byte slot and lets
+/// [`pair_flash_clean`] erase the sector when the index wraps. This is split
+/// from the block write so programming the header can no longer rotate the slot
+/// as a side effect: a caller starts a record explicitly, then writes blocks.
+pub fn pair_flash_start_config() {
+    // Cast to i32 to match FLASH_CONFIGURATION_INDEX type
+    // Special case: if index is -1 (no config), set to 0, otherwise increment by SECTOR_SIZE
+    let current_index = FLASH_CONFIGURATION_INDEX.get();
+    if current_index < 0 {
+        FLASH_CONFIGURATION_INDEX.set(0);
+    } else {
+        FLASH_CONFIGURATION_INDEX.set(current_index + SECTOR_SIZE);
     }
 
-    // Save the data to flash at the calculated address
-    save_pair_info(addr, data);
+    // Clean the flash (handles wraparound if needed)
+    // Note: pair_flash_clean() may reset index back to 0 if we wrapped around
+    pair_flash_clean();
+}
+
+/// Write one block of the current pairing record to flash memory.
+///
+/// @param addr The offset within the pairing record (0=header, 0x10=name,
+///             0x20=password, 0x30=LTK)
+/// @param data The block to program
+///
+/// Returns `Err(())` when the SPI bus stalled, so the caller can withhold the
+/// header and leave the record uncommitted.
+pub fn pair_flash_save_config(addr: u32, data: &[u8]) -> Result<(), ()> {
+    save_pair_info(addr, data)
 }
 
 /// Save the current pairing keys to flash memory
@@ -637,15 +638,14 @@ pub fn pair_save_key() {
     const OFFSET_PASSWORD: u32 = 0x20; // Mesh network password (encrypted)
     const OFFSET_LTK: u32 = 0x30; // Long-term key
 
-    let mut pass = [0u8; 16];
-
     // Set validation flags that indicate valid pairing data
-    pass[0] = PAIR_CONFIG_VALID_FLAG;
-    pass[15] = PAIR_CONFIG_VALID_FLAG;
+    let mut header = [0u8; 16];
+    header[0] = PAIR_CONFIG_VALID_FLAG;
+    header[15] = PAIR_CONFIG_VALID_FLAG;
 
     // Store mesh MAC address configuration if mesh pairing is enabled
     if MESH_PAIR_ENABLE.get() {
-        pass[1] = if MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get() {
+        header[1] = if MESH_DEVICE_ADDRESS_VALIDATION_PENDING.get() {
             1
         } else {
             0
@@ -654,26 +654,29 @@ pub fn pair_save_key() {
 
     let pair_state = PAIR_STATE.lock();
 
-    // Save header with validation flags first
-    pair_flash_save_config(OFFSET_HEADER, &pass);
-
-    // Save mesh name
-    pair_flash_save_config(OFFSET_NAME, &pair_state.pair_nn);
+    // Start a new record before writing any block: the block writer no longer
+    // rotates the wear-levelling index.
+    pair_flash_start_config();
 
     // Make a copy of the password before encoding
-    pass = pair_state.pair_pass;
+    let pass = pair_state.pair_pass;
 
     // Encode password before saving to flash for security.
     // Copy the key out of the mutex first so the lock is released before
     // encode_password runs (its AES call masks interrupts).
     let key = *PAIR_CONFIG_PWD_ENCODE_SK.lock();
-    pass = encode_password(&key, &pass);
+    let pass = encode_password(&key, &pass);
 
-    // Save encoded password
-    pair_flash_save_config(OFFSET_PASSWORD, &pass);
-
-    // Save long-term key
-    pair_flash_save_config(OFFSET_LTK, &pair_state.pair_ltk);
+    // Commit the three payload blocks first and the header last, and only when
+    // all three payloads were programmed: discovery validates nothing but the
+    // flag byte (`pair_flash_config_init`), so a withheld header leaves this
+    // slot erased — the record is reported absent instead of valid-but-stale.
+    let name_written = pair_flash_save_config(OFFSET_NAME, &pair_state.pair_nn).is_ok();
+    let pass_written = pair_flash_save_config(OFFSET_PASSWORD, &pass).is_ok();
+    let ltk_written = pair_flash_save_config(OFFSET_LTK, &pair_state.pair_ltk).is_ok();
+    if name_written && pass_written && ltk_written {
+        let _ = pair_flash_save_config(OFFSET_HEADER, &header);
+    }
 
     // Release the pairing state before `pair_update_key` re-locks it. On the
     // device a nested lock on the same mutex is allowed, but the host build's
@@ -1298,7 +1301,7 @@ mod tests {
     use mesh_protocol::packet_types::{
         MeshPkt, PacketAttRawValue, PacketAttReadRsp, PacketL2capData, PacketL2capHead, PacketLlApp,
     };
-    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::MicMismatch;
     use tlsr8266_pac::fake_mmio::FakeMmio;
@@ -2478,40 +2481,43 @@ mod tests {
         }
     }
 
-    // Helper to set up global state for testing pair_flash_save_config
+    // Helper to set up global state for testing the pairing record writes
     fn setup_flash_config_state(initial_idx: i32) {
         FLASH_CONFIGURATION_INDEX.set(initial_idx);
     }
 
     #[test]
-    fn test_pair_flash_save_config_new_set() {
+    fn test_pair_flash_start_config_advances_the_index() {
         // Arrange
-        const OFFSET_HEADER: u32 = 0x00;
         const SECTOR_SIZE: i32 = 0x40;
         reset_host_fakes();
         let initial_idx = 100; // Arbitrary initial index
         setup_flash_config_state(initial_idx);
-        let test_addr = OFFSET_HEADER;
-        let test_data = [1, 2, 3, 4];
 
         // Act
-        pair_flash_save_config(test_addr, &test_data);
+        pair_flash_start_config();
 
         // Assert
-        // The header write advanced the wear-levelling index by one slot (and
-        // `pair_flash_clean` left it alone, being far from the wrap point)...
+        // Starting a record advances the wear-levelling index by one slot (and
+        // `pair_flash_clean` leaves it alone, being far from the wrap point)...
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx + SECTOR_SIZE);
 
-        // ...and `save_pair_info` put the bytes in that slot of the NOR device.
-        let slot = pairing_slot(initial_idx + SECTOR_SIZE);
-        assert_eq!(
-            &slot[test_addr as usize..test_addr as usize + test_data.len()],
-            &test_data
-        );
+        // ...and the start itself programs nothing: the slot is still erased.
+        assert_eq!(pairing_slot(initial_idx + SECTOR_SIZE), [0xFF; 0x40]);
     }
 
     #[test]
-    fn test_pair_flash_save_config_existing_set() {
+    fn test_pair_flash_start_config_uses_slot_zero_when_unset() {
+        reset_host_fakes();
+        setup_flash_config_state(-1); // No configuration stored yet
+
+        pair_flash_start_config();
+
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0, "-1 starts at slot 0");
+    }
+
+    #[test]
+    fn test_pair_flash_save_config_keeps_the_index() {
         // Arrange
         const OFFSET_NAME: u32 = 0x10; // Use a non-header offset
         reset_host_fakes();
@@ -2521,10 +2527,10 @@ mod tests {
         let test_data = [5, 6, 7, 8];
 
         // Act
-        pair_flash_save_config(test_addr, &test_data);
+        assert!(pair_flash_save_config(test_addr, &test_data).is_ok());
 
         // Assert
-        // A non-header write neither rotates the slot nor rewrites the header...
+        // A block write neither rotates the slot nor rewrites the header...
         assert_eq!(FLASH_CONFIGURATION_INDEX.get(), initial_idx);
 
         // ...it only lands the bytes in the current slot.
@@ -2545,7 +2551,7 @@ mod tests {
         let test_data = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
 
         // Act
-        pair_flash_save_config(test_addr, &test_data);
+        assert!(pair_flash_save_config(test_addr, &test_data).is_ok());
 
         // Assert
         // The offset and the payload reach the NOR device unchanged.
@@ -2686,6 +2692,120 @@ mod tests {
         assert_eq!(&slot[OFFSET_LTK as usize..][..16], &test_ltk);
 
         assert_eq!(PAIR_AC.get(), access_code(&test_nn, &test_pass));
+    }
+
+    /// Datasheet offsets of the two SPI registers the flash driver drives.
+    const REG_MASTER_SPI_DATA: u32 = 0x0c;
+    const REG_MASTER_SPI_CTRL: u32 = 0x0d;
+    /// Command bytes at the head of every page program: enable, then write.
+    const WRITE_ENABLE: u8 = 0x06;
+    const WRITE: u8 = 0x02;
+    /// Status-register read and the dummy byte that clocks it in.
+    const READ_STATUS: u8 = 0x05;
+
+    /// Address whose page program `fail_one_page_program` must fail. A `fn` hook
+    /// cannot capture state, so the address is published here.
+    static FAILED_WRITE_ADDR: AtomicU32 = AtomicU32::new(0);
+
+    /// Holds the SPI BUSY flag set once the write command and its 24-bit address
+    /// for [`FAILED_WRITE_ADDR`] are on the wire, so exactly one page program
+    /// fails and every other transaction completes.
+    fn fail_one_page_program(_poll: usize) -> u8 {
+        let target = FAILED_WRITE_ADDR.load(Ordering::Relaxed);
+        let bytes = data_register_writes();
+        let fails = bytes
+            .len()
+            .checked_sub(5)
+            .map(|start| &bytes[start..])
+            .is_some_and(|tail| {
+                tail[0] == WRITE_ENABLE
+                    && tail[1] == WRITE
+                    && u32::from_be_bytes([0, tail[2], tail[3], tail[4]]) == target
+            });
+        if fails {
+            tlsr8266_pac::FLD_MASTER_SPI::BUSY.bits()
+        } else {
+            0
+        }
+    }
+
+    /// Every byte clocked onto the SPI data register, oldest first.
+    fn data_register_writes() -> Vec<u8> {
+        FakeMmio::writes()
+            .into_iter()
+            .filter(|write| write.addr == REG_MASTER_SPI_DATA | tlsr8266_pac::REG_BASE_ADDR)
+            .map(|write| write.value as u8)
+            .collect()
+    }
+
+    /// The five-byte head of a page program: write-enable, write, 24-bit address.
+    fn write_frame(addr: u32) -> [u8; 5] {
+        [
+            WRITE_ENABLE,
+            WRITE,
+            (addr >> 16) as u8,
+            (addr >> 8) as u8,
+            addr as u8,
+        ]
+    }
+
+    /// Restore the default in-memory NOR device even when a test panics: the
+    /// mode is process-wide and the suite runs single-threaded.
+    struct RestoreInMemoryFlash;
+
+    impl Drop for RestoreInMemoryFlash {
+        fn drop(&mut self) {
+            FakeFlash::set_mode(FakeFlashMode::InMemory);
+        }
+    }
+
+    /// Tech-debt #63: a payload block that fails to program must withhold the
+    /// header. Discovery validates only the flag byte, so committing it over
+    /// stale content would publish a valid-looking record with the wrong keys.
+    #[test]
+    fn test_pair_save_key_withholds_the_header_when_a_payload_write_fails() {
+        // Arrange
+        let test_nn = [0x11; 16];
+        let test_pass = [0x22; 16];
+        let test_ltk = [0x33; 16];
+
+        reset_host_fakes();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreInMemoryFlash;
+        FLASH_CONFIGURATION_INDEX.set(-1); // No configuration stored yet
+        setup_save_key_state(true, true, test_nn, test_pass, test_ltk);
+
+        // The password is stored encoded; computed before the SPI hook is armed.
+        let encoded_pass = aes_att_encryption(&PAIR_CONFIG_PWD_ENCODE_SK.lock(), &test_pass);
+
+        // Slot 0 is the fresh record. The LTK is the last payload block: let the
+        // name and the password programs complete, then stall the bus on the LTK.
+        let slot = FLASH_ADR_PAIRING;
+        FAILED_WRITE_ADDR.store(slot + 0x30, Ordering::Relaxed);
+        FakeMmio::on_read8(REG_MASTER_SPI_CTRL, fail_one_page_program);
+
+        // Expected wire image: two complete page programs, then the third one
+        // aborted at its address phase, and nothing after it. A fourth frame for
+        // the header at `slot` would mean the record was committed.
+        let mut expected = Vec::new();
+        expected.extend(write_frame(slot + 0x10));
+        expected.extend(test_nn);
+        expected.extend([READ_STATUS, 0x00]);
+        expected.extend(write_frame(slot + 0x20));
+        expected.extend(encoded_pass);
+        expected.extend([READ_STATUS, 0x00]);
+        expected.extend(write_frame(slot + 0x30));
+
+        // Act
+        pair_save_key();
+
+        // Assert
+        assert_eq!(
+            data_register_writes(),
+            expected,
+            "a failed payload program must leave the header unprogrammed"
+        );
+        assert_eq!(FLASH_CONFIGURATION_INDEX.get(), 0, "record stays in slot 0");
     }
 
     #[test]

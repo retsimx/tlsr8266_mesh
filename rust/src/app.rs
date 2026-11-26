@@ -117,11 +117,10 @@ pub async fn main_task(spawner: Spawner) {
     uart::set_command_handler(uart_command_hook);
 
     // Point the log sink at the UART transport before the first line. `logging`
-    // sits below `uart`, so these adapters — not a compiled-in import — are the
-    // only edge from a log line to the wire.
+    // sits below `uart`, so this adapter — not a compiled-in import — is the only
+    // edge from a log line to the wire.
     crate::logging::set_log_sinks(crate::logging::LogSinks {
         async_tx: log_async_tx_hook,
-        blocking_tx: log_blocking_tx_hook,
     });
 
     // Report why the previous boot ended and mark this one as running
@@ -277,13 +276,6 @@ fn log_boot_reset_reason(reason: BootResetReason) {
 #[inline(never)]
 fn log_async_tx_hook(msg: &UartData) -> bool {
     crate::uart::send_message(msg).is_ok()
-}
-
-/// `logging::LogSinks::blocking_tx`: write one log frame straight to the UART
-/// (panic path).
-#[inline(never)]
-fn log_blocking_tx_hook(msg: &UartData) {
-    crate::uart::send_sync_panic(msg)
 }
 
 /// `uart::UartTxOps::enqueue_tx`: one queue slot on the SDK's UART TX channel.
@@ -820,10 +812,6 @@ mod tests {
         true
     }
 
-    fn record_log_blocking(frame: &UartData) {
-        LOG_FRAMES.lock().unwrap().push(*frame);
-    }
-
     fn record_mesh_pair_proc() {
         MESH_PAIR_PROC_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
@@ -841,7 +829,6 @@ mod tests {
         LOG_FRAMES.lock().unwrap().clear();
         crate::logging::set_log_sinks(crate::logging::LogSinks {
             async_tx: record_log_frame,
-            blocking_tx: record_log_blocking,
         });
     }
 

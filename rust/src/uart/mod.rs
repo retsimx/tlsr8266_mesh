@@ -542,6 +542,10 @@ pub async fn uart_send_async(msg: &UartData) {
 /// production re-entrancy check and `panic = "abort"` never drops the outer
 /// guard, so a re-entrant call would hand `UartDriver::send_panic` a second
 /// `&mut UartDriver` aliasing the first (see `sdk::common::sync` assumption 3).
+// Only the target panic handler and the unit tests call this (the host library
+// build has no panic handler), so it is gated the same way the `diagnostics`
+// panic-record writers are.
+#[cfg(any(target_os = "none", test))]
 pub fn send_sync_panic(msg: &UartData) {
     UART_HW.lock().send_panic(msg);
 }

@@ -2,7 +2,7 @@
 use core::ptr::addr_of;
 use core::sync::atomic::Ordering;
 
-use embassy_executor::Spawner;
+use embassy_executor::{SpawnError, SpawnToken, Spawner};
 
 #[cfg(not(test))]
 use embassy_time::{Duration, Timer};
@@ -183,21 +183,31 @@ pub async fn main_task(spawner: Spawner) {
     let mut flash_store = user_init();
     record_breadcrumb(CRUMB_INIT_DONE);
 
-    // Start the mesh packet sender / receive handler
-    spawner.spawn(crate::mesh::mesh_packet_sender().unwrap());
-    spawner.spawn(crate::mesh::mesh_packet_rcv().unwrap());
+    // Start the mesh packet sender / receive handler. Every boot spawn goes
+    // through `spawn_boot_task`, which reports a spawn-graph wiring bug and
+    // reboots instead of unwrapping into the panic handler.
+    spawn_boot_task(
+        spawner,
+        "mesh_packet_sender",
+        crate::mesh::mesh_packet_sender(),
+    );
+    spawn_boot_task(spawner, "mesh_packet_rcv", crate::mesh::mesh_packet_rcv());
 
     // Start the UART tasks. `uart_sender` parks on `started_signal` until the
     // first valid host frame arrives, so a headless light never retries DMA TX
     // for the boot banners.
-    spawner.spawn(uart_receiver().unwrap());
-    spawner.spawn(uart_sender(&tlsr8266_radio::queues::UART_TX_CHANNEL).unwrap());
+    spawn_boot_task(spawner, "uart_receiver", uart_receiver());
+    spawn_boot_task(
+        spawner,
+        "uart_sender",
+        uart_sender(&tlsr8266_radio::queues::UART_TX_CHANNEL),
+    );
 
     // Start the light command consumer
-    spawner.spawn(light_manager().unwrap());
+    spawn_boot_task(spawner, "light_manager", light_manager());
 
     // Start the panic checker to see if there is information we need to send
-    spawner.spawn(panic_check().unwrap());
+    spawn_boot_task(spawner, "panic_check", panic_check());
 
     // Ready to go, enable interrupts and run the main loop
     irq_enable();
@@ -227,6 +237,32 @@ pub async fn main_task(spawner: Spawner) {
 
         // Clear any uart errors if they've occurred
         uart::clear_error();
+    }
+}
+
+/// Spawns one task in the boot spawn graph.
+///
+/// A `#[embassy_executor::task]` constructor returns `Err` only when its static
+/// slot is already taken — a wiring bug in `main_task`, not a runtime
+/// condition. Name the failed spawn on the log channel and reboot, rather than
+/// unwrapping into the panic handler.
+fn spawn_boot_task<S>(spawner: Spawner, name: &str, task: Result<SpawnToken<S>, SpawnError>) {
+    match task {
+        Ok(token) => spawner.spawn(token),
+        Err(_) => boot_spawn_abort(name),
+    }
+}
+
+/// Reports a failed boot spawn and reboots. Never returns.
+#[cold]
+#[inline(never)]
+fn boot_spawn_abort(name: &str) -> ! {
+    uprintln!("[BOOT] spawn failed: {}; rebooting", name);
+    light_sw_reboot();
+    // On target `light_sw_reboot` never returns. Off target it does, so park
+    // here rather than resuming boot with a task missing.
+    loop {
+        core::hint::spin_loop();
     }
 }
 

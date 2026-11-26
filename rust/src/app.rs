@@ -282,9 +282,18 @@ fn log_boot_reset_reason(reason: BootResetReason) {
         }
         BootResetReason::Panic { breadcrumb } => {
             // A record that is not trusted at all is reported as nothing rather
-            // than as an empty message.
-            let Some(preview) = read_panic_preview() else {
-                return;
+            // than as an empty message; a flash read failure is reported as an
+            // explicit unreadable marker instead of a partial body.
+            let preview = match read_panic_preview() {
+                Ok(Some(preview)) => preview,
+                Ok(None) => return,
+                Err(()) => {
+                    uprintln!(
+                        "[PANIC] sentinel=0xe1 breadcrumb={} msg=<unreadable>",
+                        breadcrumb
+                    );
+                    return;
+                }
             };
 
             let body = core::str::from_utf8(&preview.buf[..preview.len]).unwrap_or("");
@@ -684,8 +693,10 @@ async fn panic_check() {
 async fn report_panic_info() {
     let mut buf = [0u8; 256];
 
-    // If the panic info flag isn't set, there's nothing to do.
-    let Some(len) = read_panic_report(&mut buf) else {
+    // Nothing to report when the flag is blank; an unreadable bus (`Err`) is
+    // left alone so the record is retried after the next reset rather than
+    // reported from a partial buffer.
+    let Ok(Some(len)) = read_panic_report(&mut buf) else {
         return;
     };
 
@@ -770,12 +781,12 @@ mod tests {
     use mesh_protocol::packet_types::PacketL2capHead;
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use tlsr8266_hal::common::sync::SimplifyLS;
-    use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+    use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::{encode_password, fake_crypto};
     use tlsr8266_pac::fake_mmio::FakeMmio;
-    use tlsr8266_pac::{FLD_IRQ, FLD_TMR};
+    use tlsr8266_pac::{FLD_IRQ, FLD_MASTER_SPI, FLD_TMR};
     use tlsr8266_radio::ble::status::{
         DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
         DEVICE_STATUS_RECORD_INDEX,
@@ -2639,6 +2650,35 @@ mod tests {
         FakeFlash::write_slice(FLASH_ADR_PANIC_INFO, &[PANIC_VALID_FLAG]);
         FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 1, &len.to_le_bytes());
         FakeFlash::write_slice(FLASH_ADR_PANIC_INFO + 3, body);
+    }
+
+    /// Restores the host default (the in-memory NOR device) even if the owning
+    /// test panics, so a failure cannot strand later tests in `SpiRegisters`
+    /// mode. The device is process-global, hence the guard.
+    struct RestoreInMemory;
+
+    impl Drop for RestoreInMemory {
+        fn drop(&mut self) {
+            FakeFlash::set_mode(FakeFlashMode::InMemory);
+        }
+    }
+
+    /// A panic record that cannot be read from a dead bus is reported as
+    /// explicitly unreadable, not as a partial body or as nothing at all.
+    #[test]
+    fn test_log_boot_reset_reason_panic_unreadable() {
+        reset_log_capture();
+        FakeFlash::set_mode(FakeFlashMode::SpiRegisters);
+        let _restore = RestoreInMemory;
+
+        // `reg_master_spi_ctrl`: the BUSY flag never clears.
+        FakeMmio::on_read8(0x0d, |_| FLD_MASTER_SPI::BUSY.bits());
+
+        log_boot_reset_reason(BootResetReason::Panic {
+            breadcrumb: CRUMB_PANIC,
+        });
+
+        assert_uart_print(b"[PANIC] sentinel=0xe1 breadcrumb=255 msg=<unreadable>\n");
     }
 
     /// A clean previous boot prints nothing at all.

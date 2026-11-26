@@ -179,7 +179,11 @@ pub fn handle_ota_update() {
 
     // Read the first page of the new firmware
     let mut buff: [u8; PAGE_SIZE as usize] = [0; PAGE_SIZE as usize];
-    flash_read_page(FLASH_ADR_LIGHT_NEW_FW, PAGE_SIZE, buff.as_mut_ptr());
+    if flash_read_page(FLASH_ADR_LIGHT_NEW_FW, PAGE_SIZE, buff.as_mut_ptr()).is_err() {
+        // A dead bus leaves nothing trustworthy to copy: return before the ready
+        // flag is cleared so the retry flag survives for the next reset.
+        return;
+    }
 
     // Get the size of the binary being copied
     // SAFETY: (2) boot-OTA image header. `buff` is the 256-byte page just read from
@@ -200,12 +204,18 @@ pub fn handle_ota_update() {
             return;
         }
 
-        // Read the page at this address from the new firmware
-        flash_read_page(
+        // Read the page at this address from the new firmware. A failed read
+        // leaves `buff` untrustworthy, so the copy stops here and the ready flag
+        // survives for the retry after the next reset.
+        if flash_read_page(
             FLASH_ADR_LIGHT_NEW_FW + current_addr,
             PAGE_SIZE,
             buff.as_mut_ptr(),
-        );
+        )
+        .is_err()
+        {
+            return;
+        }
 
         // Write the page to the real firmware
         if flash_write_page(current_addr, PAGE_SIZE, buff.as_mut_ptr()).is_err() {
@@ -244,7 +254,7 @@ pub fn check_ota_area_startup() {
 fn is_ota_area_valid() -> Result<bool, ()> {
     let mut buf: [u8; 4] = [0; 4];
     for i in 0..flash_layout::ERASE_SECTORS_FOR_OTA {
-        flash_read_page(FLASH_ADR_LIGHT_NEW_FW + i * 0x1000, 4, buf.as_mut_ptr());
+        flash_read_page(FLASH_ADR_LIGHT_NEW_FW + i * 0x1000, 4, buf.as_mut_ptr())?;
         let tmp =
             buf[0] as u32 | (buf[1] as u32) << 8 | (buf[2] as u32) << 16 | (buf[3] as u32) << 24;
         if tmp != ONES_32 {
@@ -464,7 +474,11 @@ fn rf_ota_save_data(data: &[u8]) -> OtaState {
     // Verification buffer; the largest packet this path carries is 16 bytes.
     let mut tmp = [0u8; 0x10];
 
-    flash_read_page(addr, data.len() as u32, tmp.as_mut_ptr());
+    if flash_read_page(addr, data.len() as u32, tmp.as_mut_ptr()).is_err() {
+        // A dead bus cannot prove the program landed, so the packet is reported
+        // as a failed verification and retransmitted.
+        return OtaState::Error;
+    }
 
     if data == &tmp[..data.len()] {
         OTA_UPDATE_CURRENT_FLASH_ADDRESS
@@ -558,17 +572,26 @@ fn rf_link_slave_data_ota_save() {
                 }
                 OtaChunkDecision::VerifyFinalHeader { expected_index } => {
                     let mut total = [0u8; 4];
-                    // Blocking flash read: no OTA_STATE guard is held here.
-                    flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 0x18, 4, total.as_mut_ptr());
-                    let ota_pkt_total = u32::from_le_bytes(total).div_ceil(packet_len) as u16;
-                    if ota_pkt_total < 3 || ota_pkt_total != expected_index {
-                        // invalid fw
+                    // Blocking flash read: no OTA_STATE guard is held here. A
+                    // failed read gives no size to verify, so the transfer fails
+                    // and the cursor returns to the start for a fresh attempt.
+                    if flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 0x18, 4, total.as_mut_ptr())
+                        .is_err()
+                    {
                         OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
                         ota_rcv_last_idx = 0;
                         OtaState::Error
                     } else {
-                        // ota ok, save, reboot
-                        OtaState::Ok
+                        let ota_pkt_total = u32::from_le_bytes(total).div_ceil(packet_len) as u16;
+                        if ota_pkt_total < 3 || ota_pkt_total != expected_index {
+                            // invalid fw
+                            OTA_UPDATE_CURRENT_FLASH_ADDRESS.set(0);
+                            ota_rcv_last_idx = 0;
+                            OtaState::Error
+                        } else {
+                            // ota ok, save, reboot
+                            OtaState::Ok
+                        }
                     }
                 }
                 OtaChunkDecision::RejectError => {
@@ -618,18 +641,26 @@ fn rf_link_slave_data_ota_save() {
 fn rf_ota_set_flag() {
     let fw_flag_telink = START_UP_FLAG;
     let mut flag_new = 0;
-    flash_read_page(
+    // A failed read leaves the staged header untrusted, so the image is not
+    // armed; the transfer is retried by the peer.
+    if flash_read_page(
         FLASH_ADR_LIGHT_NEW_FW + 8,
         size_of_val(&flag_new) as u32,
         addr_of!(flag_new) as *mut u8,
-    );
+    )
+    .is_err()
+    {
+        return; // invalid flag
+    }
     flag_new &= 0xffffff4b;
     if flag_new != fw_flag_telink {
         return; // invalid flag
     }
 
     let mut flag0 = 0;
-    flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8);
+    if flash_read_page(FLASH_ADR_LIGHT_NEW_FW + 8, 1, addr_of!(flag0) as *mut u8).is_err() {
+        return; // invalid flag
+    }
     if 0x4b != flag0 {
         flag0 = 0x4b;
         // The flag rewrite is re-attempted by the next staged transfer if it

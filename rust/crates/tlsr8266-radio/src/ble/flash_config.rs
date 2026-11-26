@@ -358,7 +358,11 @@ pub fn retrieve_dev_grp_address() {
         // FLASH READ: Read 16-bit address value in little-endian format
         // Uses flash_read_page for safe flash access with proper timing
         let mut addr_bytes = [0u8; 2];
-        flash_read_page(flash_offset, 2, addr_bytes.as_mut_ptr());
+        // A dead bus ends the scan: the addresses found so far are already
+        // committed, and a partial read is never parsed as an address.
+        if flash_read_page(flash_offset, 2, addr_bytes.as_mut_ptr()).is_err() {
+            break;
+        }
         let group_addr = u16::from_le_bytes(addr_bytes);
 
         // Advance to next flash position (2 bytes per address)
@@ -476,8 +480,12 @@ pub fn pair_flash_clean() {
         // Read from the previous slot (current index - 64) since we just incremented past the boundary
         let src_addr = (flash_adr_pairing as i32 + FLASH_CONFIGURATION_INDEX.get() - 64) as u32;
 
-        // Read current configuration from previous slot into backup buffer
-        flash_read_page(src_addr, CONFIG_SIZE as u32, config_backup.as_mut_ptr());
+        // Read current configuration from previous slot into backup buffer.
+        // A failed read must not be written back over the live slot, so the wrap
+        // is skipped this time and retried on the next save.
+        if flash_read_page(src_addr, CONFIG_SIZE as u32, config_backup.as_mut_ptr()).is_err() {
+            return;
+        }
 
         // Erase sector and re-write the saved record at offset 0. A skipped
         // write after a landed erase leaves the sector blank, so discovery
@@ -537,7 +545,12 @@ pub fn pair_flash_config_init() {
     // STEP 1: Check if any configuration exists
     let flash_adr_pairing = radio_config().flash_adr_pairing;
     let mut first_buffer = [0u8; 0x40];
-    flash_read_page(flash_adr_pairing, 0x40, first_buffer.as_mut_ptr());
+    // An unreadable first slot is treated as "no configuration" (the same state
+    // as first boot) rather than as a partial record.
+    if flash_read_page(flash_adr_pairing, 0x40, first_buffer.as_mut_ptr()).is_err() {
+        FLASH_CONFIGURATION_INDEX.set(-1);
+        return;
+    }
 
     if first_buffer[0] != PAIR_CONFIG_VALID_FLAG {
         // No configuration has ever been written
@@ -552,7 +565,10 @@ pub fn pair_flash_config_init() {
     let mut buffer = [0u8; 0x40];
 
     for offset in (0x40..=0xfc0).step_by(0x40) {
-        flash_read_page(flash_adr_pairing + offset as u32, 0x40, buffer.as_mut_ptr());
+        // A dead bus ends the scan at the last slot that read cleanly.
+        if flash_read_page(flash_adr_pairing + offset as u32, 0x40, buffer.as_mut_ptr()).is_err() {
+            break;
+        }
 
         if buffer[0] != PAIR_CONFIG_VALID_FLAG {
             // Found boundary between used and unused slots
@@ -921,23 +937,35 @@ pub fn pair_load_key() {
         // STAGE 2B: LOAD MESH NETWORK NAME
         // Offset 0x10, 16 bytes (MAX_MESH_NAME_LEN)
         // May be null-terminated or use full 16 bytes
-        flash_read_page(
+        //
+        // Any failed read leaves the zeroed state from STAGE 2A in place — the
+        // device loads as unpaired rather than with credentials half-read from a
+        // dead bus — and the access code is not regenerated from that state.
+        if flash_read_page(
             pairing_addr + 0x10,
             MAX_MESH_NAME_LEN as u32,
             pair_state.pair_nn.as_mut_ptr(),
-        );
+        )
+        .is_err()
+        {
+            return;
+        }
 
         // STAGE 2C: LOAD NETWORK PASSWORD
         // Offset 0x20, 16 bytes
         // May be encoded (checked later via flag at 0x0F)
-        flash_read_page(pairing_addr + 0x20, 0x10, pair_state.pair_pass.as_mut_ptr());
+        if flash_read_page(pairing_addr + 0x20, 0x10, pair_state.pair_pass.as_mut_ptr()).is_err() {
+            return;
+        }
 
         // STAGE 2D: LOAD ADDRESS VALIDATION FLAG (if pairing enabled)
         // Offset 0x01, 1 byte
         // Indicates whether device address has been confirmed in mesh network
         if MESH_PAIR_ENABLE.get() {
             let mut validation_flag = [0u8; 1];
-            flash_read_page(pairing_addr + 0x1, 1, validation_flag.as_mut_ptr());
+            if flash_read_page(pairing_addr + 0x1, 1, validation_flag.as_mut_ptr()).is_err() {
+                return;
+            }
             // Convert byte to boolean: non-zero = validation pending
             MESH_DEVICE_ADDRESS_VALIDATION_PENDING.set(validation_flag[0] != 0);
         }
@@ -946,7 +974,9 @@ pub fn pair_load_key() {
         // Offset 0x0F contains encoding flag
         // If flag == PAIR_CONFIG_VALID_FLAG, password is encoded and must be decoded
         let mut config_flag = [0u8; 1];
-        flash_read_page(pairing_addr + 0xF, 1, config_flag.as_mut_ptr());
+        if flash_read_page(pairing_addr + 0xF, 1, config_flag.as_mut_ptr()).is_err() {
+            return;
+        }
         if config_flag[0] == PAIR_CONFIG_VALID_FLAG {
             // Copy the key out of the mutex first so the lock is released
             // before decode_password runs (its AES call masks interrupts).
@@ -958,7 +988,9 @@ pub fn pair_load_key() {
         // STAGE 2E: LOAD LONG-TERM KEY
         // Offset 0x30, 16 bytes
         // Used for BLE encryption during pairing process
-        flash_read_page(pairing_addr + 0x30, 0x10, pair_state.pair_ltk.as_mut_ptr());
+        if flash_read_page(pairing_addr + 0x30, 0x10, pair_state.pair_ltk.as_mut_ptr()).is_err() {
+            return;
+        }
     }
 
     // STAGE 4: STATE SYNCHRONIZATION

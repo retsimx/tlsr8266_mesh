@@ -151,11 +151,12 @@ pub enum KickoutAction {
 /// Read one byte of flash through the HAL.
 ///
 /// The HAL routes this to `FakeFlash` in host tests, so the module needs no
-/// raw-pointer access of its own.
-fn read_flash_byte(addr: u32) -> u8 {
+/// raw-pointer access of its own. `Err(())` means the bus stalled, so the slot
+/// value is unknown: callers must not treat it as either erased or programmed.
+fn read_flash_byte(addr: u32) -> Result<u8, ()> {
     let mut byte = 0u8;
-    flash_read_page(addr, 1, &mut byte);
-    byte
+    flash_read_page(addr, 1, &mut byte)?;
+    Ok(byte)
 }
 
 /// Program one byte of flash: the only write shape the sequence needs.
@@ -191,7 +192,7 @@ fn advance_slot() {
 fn write_reset_sequence(step: u8) {
     let reset_step = ResetStep::from_step_number(step);
     let current_addr = active_slot();
-    let current_value = read_flash_byte(current_addr);
+    let current_value = read_flash_byte(current_addr).expect("the in-memory device always reads");
 
     // A step write starts from the step's base value, so a timing bit left over
     // from an earlier step cannot leak into the new one.
@@ -214,7 +215,12 @@ fn write_reset_sequence(step: u8) {
 /// Mark the current step as having satisfied its minimum power-on time.
 fn write_timing_validation() {
     let current_addr = active_slot();
-    let current_value = read_flash_byte(current_addr);
+    // A dead bus cannot prove the step's value, so the validation bit is skipped;
+    // the sequence then aborts at the maximum-time check instead of advancing on
+    // an unknown slot.
+    let Ok(current_value) = read_flash_byte(current_addr) else {
+        return;
+    };
     let step_number = FACTORY_RESET_STATE.consecutive_reset_count.get();
 
     if let Some(validated_value) = timing_validated_value(current_value, step_number) {
@@ -229,13 +235,20 @@ fn write_timing_validation() {
 /// scan and the timing check both depend on.
 #[cfg(test)]
 fn read_reset_sequence() -> u8 {
-    ResetStep::from_flash_value(read_flash_byte(active_slot())).step_number()
+    ResetStep::from_flash_value(
+        read_flash_byte(active_slot()).expect("the in-memory device always reads"),
+    )
+    .step_number()
 }
 
 /// Abort the sequence: invalidate the active slot and move to the next one.
 fn clear_reset_sequence() {
     let current_addr = active_slot();
-    let current_value = read_flash_byte(current_addr);
+    // An unreadable slot cannot be invalidated safely, so the sequence state is
+    // left where it is rather than advancing on an unknown value.
+    let Ok(current_value) = read_flash_byte(current_addr) else {
+        return;
+    };
 
     // Only an in-progress sequence has anything to invalidate.
     if current_value != 0xFF {
@@ -265,11 +278,19 @@ fn init_reset_sequence() {
     let mut chunk = [0xFFu8; RESET_SECTOR_SCAN_CHUNK];
     let mut scanned = 0u32;
     while scanned < SECTOR_SIZE {
-        flash_read_page(
+        if flash_read_page(
             FLASH_ADR_RESET_CNT + scanned,
             RESET_SECTOR_SCAN_CHUNK as u32,
             chunk.as_mut_ptr(),
-        );
+        )
+        .is_err()
+        {
+            // An unreadable chunk may be partially filled, so the scan stops and
+            // the sequence stays idle this boot instead of trusting it.
+            FACTORY_RESET_STATE.flash_address_index.set(0);
+            FACTORY_RESET_STATE.consecutive_reset_count.set(0);
+            return;
+        }
         for (offset, &value) in chunk.iter().enumerate() {
             // Skip completely erased locations; the last programmed slot is
             // the latest one whether it is valid or invalidated.
@@ -312,8 +333,11 @@ fn init_reset_sequence() {
 pub fn handle_boot_sequence() -> ResetAction {
     init_reset_sequence();
 
-    // Check for the factory reset condition before any step processing.
-    let flash_value = read_flash_byte(active_slot());
+    // Check for the factory reset condition before any step processing. A slot
+    // that cannot be read is not acted on: the next boot re-runs the scan.
+    let Ok(flash_value) = read_flash_byte(active_slot()) else {
+        return ResetAction::None;
+    };
     if ResetStep::should_factory_reset(flash_value) {
         return ResetAction::FactoryResetAndReboot;
     }

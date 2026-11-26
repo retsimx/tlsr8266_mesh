@@ -371,7 +371,7 @@ mod tests {
         let _serial = serial();
         assert_eq!(cs_depth(), 0, "no guard is held at test start");
 
-        enter_cs(|| critical_section::RestoreState::invalid());
+        enter_cs(critical_section::RestoreState::invalid);
         assert_eq!(cs_depth(), 1, "one held guard must read as depth 1");
 
         exit_cs(|_| {});

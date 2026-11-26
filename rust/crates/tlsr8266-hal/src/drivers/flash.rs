@@ -790,7 +790,7 @@ mod tests {
         v.as_mut_ptr()
     }
 
-    fn vec_to_raw(v: &Vec<u8>) -> *const u8 {
+    fn vec_to_raw(v: &[u8]) -> *const u8 {
         v.as_ptr()
     }
 

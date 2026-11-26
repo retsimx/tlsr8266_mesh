@@ -26,6 +26,9 @@ Instructions for updating firmware using the UART interface, which allows remote
 ### [Mesh Adoption](adoption.md)
 Detailed process for adding new devices to the mesh network, including mesh address management, security best practices, and step-by-step instructions for using the mesh_add.py script. Covers mesh creation, custom Long-Term Key (LTK) generation, and troubleshooting.
 
+### [Mesh Node Control Utility](mesh_node.md)
+Guide to `mesh_node.py` for direct BLE control of individual provisioned mesh nodes without the smart-device-daemon or MQTT broker. Covers authenticated login with existing mesh credentials, light and colour-temperature control, group membership, mesh address and BLE MAC reconfiguration, factory reset, Long-Term Key retrieval, status querying, and AES-CCM notification decryption.
+
 ### [Pairing](pairing.md)
 Comprehensive documentation on the BLE pairing and security mechanisms for the TLSR8266 mesh system. Covers the pairing state machine, protocol flow, security features, key management, credential verification methods, and includes practical examples for implementation.
 

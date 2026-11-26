@@ -12,8 +12,11 @@ factory reset.
 **Usage:**
 ```bash
 python3 mesh_node.py --address <mac> --mesh-address <id> \
-    --mesh-name <name> --mesh-password <pwd> [command]
+    [--mesh-name <name>] [--mesh-password <pwd>] [command]
 ```
+
+Mesh name and password may instead be supplied with `MESH_NAME` /
+`MESH_PASSWORD` (environment or repo-root `.env`); CLI flags win when present.
 
 See [docs/mesh_node.md](../../docs/mesh_node.md) for full documentation.
 
@@ -24,9 +27,13 @@ name/password/LTK, and assigning a mesh address.
 
 **Usage:**
 ```bash
-python3 mesh_add.py --mesh_address <id> --mesh_name <name> \
-    --mesh_password <pwd> --mesh_ltk <hex>
+python3 mesh_add.py --mesh_address <id> [--mesh_name <name>] \
+    [--mesh_password <pwd>] [--mesh_ltk <hex>]
 ```
+
+`MESH_NAME`, `MESH_PASSWORD`, and `MESH_LTK` may be supplied by the
+environment or the repo-root `.env` instead of flags (flags win). The
+default-LTK warning still applies when no custom key is provided.
 
 ### `flash_fw.py`
 Flashes new firmware to a provisioned device over BLE OTA.

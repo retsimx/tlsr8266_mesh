@@ -13,7 +13,11 @@ The pairing protocol consists of the following phases:
 4. Verification of successful pairing
 
 Usage:
-  python mesh_add.py --mesh_address <addr> --mesh_name <name> --mesh_password <pwd> [--mesh_ltk <ltk>]
+  python mesh_add.py --mesh_address <addr> [--mesh_name <name>] [--mesh_password <pwd>] [--mesh_ltk <ltk>]
+
+Credentials may also be supplied through the environment (MESH_NAME,
+MESH_PASSWORD, MESH_LTK) or the repository-root .env file, which keeps them
+out of shell history and `ps` output. CLI flags take precedence.
 
 Examples:
   # Add a light with address 5 to mesh "myhome" with password "securepass"
@@ -43,11 +47,27 @@ from mesh_common import (
     PAIR_OP_SET_MESH_PASSWORD, PAIR_OP_SET_MESH_LTK,
     PAIR_STATE_MESH_EFFECT, PAIR_STATE_PAIRING_COMPLETE, MESH_FLAG,
     DEFAULT_LTK, DEFAULT_MESH_NAME, DEFAULT_MESH_PASSWORD,
+    MESH_NAME_ENV, MESH_PASSWORD_ENV, MESH_LTK_ENV,
     # Classes
     BaseCommandAction, Command,
     # Functions
     authenticate, parse_mac_address, encrypt_data,
+    load_dotenv, resolve_mesh_credential,
 )
+
+def build_arg_parser():
+    """Build the CLI parser.
+
+    Mesh credentials are optional flags so they can come from the environment
+    or the repository-root ``.env`` instead of shell history and `ps`.
+    """
+    args_parser = argparse.ArgumentParser(description='TLSR8266 Mesh Device Provisioning Tool')
+    args_parser.add_argument('--mesh_address', help="The address of the new node in the mesh. Should be a unique (in the mesh) value between 1 and 63", required=True, type=int)
+    args_parser.add_argument('--mesh_name', help=f"The name of the mesh. eg `mymesh`. (Must be 16 bytes or fewer). Default: ${MESH_NAME_ENV}, .env {MESH_NAME_ENV}, then {DEFAULT_MESH_NAME}", required=False, type=str, default=None)
+    args_parser.add_argument('--mesh_password', help=f"The password of the mesh. eg `mymeshpwd` (Must be 16 bytes or fewer). Default: ${MESH_PASSWORD_ENV}, .env {MESH_PASSWORD_ENV}, then {DEFAULT_MESH_PASSWORD}", required=False, type=str, default=None)
+    args_parser.add_argument('--mesh_ltk', help=f"The long-term key for the mesh in hex format (32 hex characters / 16 bytes). Default: ${MESH_LTK_ENV} or .env {MESH_LTK_ENV}, then the public default LTK", required=False, type=str)
+    return args_parser
+
 
 async def main():
     """
@@ -61,22 +81,24 @@ async def main():
     5. Verifies successful pairing
     """
     # Parse command line arguments
-    args_parser = argparse.ArgumentParser(description='TLSR8266 Mesh Device Provisioning Tool')
-    args_parser.add_argument('--mesh_address', help="The address of the new node in the mesh. Should be a unique (in the mesh) value between 1 and 63", required=True, type=int)
-    args_parser.add_argument('--mesh_name', help="The name of the mesh. eg `mymesh`. (Must be 16 bytes or fewer)", required=True, type=str, default="out_of_mesh")
-    args_parser.add_argument('--mesh_password', help="The password of the mesh. eg `mymeshpwd` (Must be 16 bytes or fewer)", required=True, type=str, default="123")
-    args_parser.add_argument('--mesh_ltk', help="The long-term key for the mesh in hex format (32 hex characters / 16 bytes)", required=False, type=str)
+    args = build_arg_parser().parse_args()
 
-    args = args_parser.parse_args()
+    # Resolve credentials: CLI flag > environment > .env > existing default
+    dotenv = load_dotenv()
+    mesh_name = resolve_mesh_credential(
+        args.mesh_name, MESH_NAME_ENV, dotenv, DEFAULT_MESH_NAME)
+    mesh_password = resolve_mesh_credential(
+        args.mesh_password, MESH_PASSWORD_ENV, dotenv, DEFAULT_MESH_PASSWORD)
+    mesh_ltk = resolve_mesh_credential(args.mesh_ltk, MESH_LTK_ENV, dotenv)
 
     # Validate and prepare LTK before starting connection process
     using_default_ltk = True
     ltk_bytes = bytearray(DEFAULT_LTK)
     
-    if args.mesh_ltk:
+    if mesh_ltk:
         try:
             # Validate the provided LTK (must be 32 hex chars / 16 bytes)
-            ltk_hex = args.mesh_ltk.replace(':', '').replace('-', '').strip()
+            ltk_hex = mesh_ltk.replace(':', '').replace('-', '').strip()
             if len(ltk_hex) != 32:
                 print(f"WARNING: Invalid LTK length ({len(ltk_hex)} hex chars). LTK must be 16 bytes (32 hex characters).")
                 print("Falling back to default LTK.")
@@ -92,13 +114,10 @@ async def main():
         print(f"Default LTK: {binascii.hexlify(bytes(ltk_bytes)).decode()}")
         confirmation = input("Continue with default LTK? [y/N]: ")
         if confirmation.lower() != 'y':
-            print("Aborted. Please provide a custom LTK using the --mesh_ltk argument.")
+            print(f"Aborted. Provide a custom LTK with --mesh_ltk or {MESH_LTK_ENV} (environment or .env).")
             return
 
     # Scan for unprovisioned device (advertising with default name)
-    mesh_name = args.mesh_name
-    mesh_password = args.mesh_password
-
     print(f"Scanning for unprovisioned device with name 'out_of_mesh'...")
     device = await BleakScanner.find_device_by_name(name="out_of_mesh", timeout=5)
 

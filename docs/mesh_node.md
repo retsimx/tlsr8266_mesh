@@ -37,9 +37,26 @@ python3 mesh_node.py --address <mac> --mesh-address <node_id> \
 |---|---|
 | `--address` | BLE MAC address of the target node (e.g. `12:34:56:78:9A:1D`) |
 | `--mesh-address` | Node address within the mesh (1–63) |
-| `--mesh-name` | Mesh network name |
-| `--mesh-password` | Mesh network password |
+| `--mesh-name` | Mesh network name (default: `$MESH_NAME`, then `.env` `MESH_NAME`) |
+| `--mesh-password` | Mesh network password (default: `$MESH_PASSWORD`, then `.env` `MESH_PASSWORD`) |
 | `--verbose` | Print raw decrypted notification bytes |
+
+### Credentials From The Environment
+
+Passing mesh credentials as command-line flags exposes them in `ps` output and
+shell history. Instead, export them or put them in the gitignored `.env` at the
+repository root:
+
+```bash
+export MESH_NAME=mlm
+export MESH_PASSWORD=your-mesh-password
+
+python3 mesh_node.py --address 12:34:56:78:9A:1D --mesh-address 29 --get-status
+```
+
+Precedence is explicit: **CLI flag > environment variable > `.env` > built-in
+default**. `--mesh-name` and `--mesh-password` are still accepted and take
+precedence when given. Never commit a real `.env`; it is gitignored.
 
 ## Commands (mutually exclusive)
 

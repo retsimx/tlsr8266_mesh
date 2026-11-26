@@ -8,8 +8,11 @@ command processing required for secure communication with TLSR8266 devices.
 """
 
 import binascii
-import random
 import math
+import os
+import random
+from pathlib import Path
+
 from Cryptodome.Cipher import AES
 from Cryptodome.Random import get_random_bytes
 
@@ -53,6 +56,65 @@ DEFAULT_LTK = [
 # Default credentials for unprovisioned devices (from Rust config.rs)
 DEFAULT_MESH_NAME = "out_of_mesh"
 DEFAULT_MESH_PASSWORD = "123"
+
+# Environment keys that may supply mesh credentials instead of CLI flags, so
+# secrets stay out of shell history and `ps` output.
+MESH_NAME_ENV = "MESH_NAME"
+MESH_PASSWORD_ENV = "MESH_PASSWORD"
+MESH_LTK_ENV = "MESH_LTK"
+
+# Repository-root .env, matching the convention in sdk/build_firmware.py.
+DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+def parse_dotenv(path):
+    """Parse a minimal ``KEY=VALUE`` dotenv file.
+
+    Blank lines and ``#`` comments are ignored, one leading ``export `` is
+    stripped, values are split on the first ``=`` and surrounding single or
+    double quotes are removed. Nothing is written to ``os.environ``. A missing
+    file yields an empty mapping.
+    """
+    dotenv_path = Path(path)
+    if not dotenv_path.is_file():
+        return {}
+
+    values = {}
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def load_dotenv():
+    """Return the credentials declared in the repository-root ``.env``."""
+    return parse_dotenv(DOTENV_PATH)
+
+
+def resolve_mesh_credential(cli_value, env_key, dotenv, default=None):
+    """Resolve one mesh credential: CLI flag > environment > ``.env`` > default.
+
+    Empty or whitespace-only values at a higher precedence level fall through
+    to the next one. The returned value is stripped so stray newlines from
+    ``.env`` files cannot change 16-byte credential padding.
+    """
+    for candidate in (cli_value, os.environ.get(env_key), dotenv.get(env_key)):
+        if candidate is not None and candidate.strip():
+            return candidate.strip()
+    return default
+
 
 def crc16(packet, length=None):
     """

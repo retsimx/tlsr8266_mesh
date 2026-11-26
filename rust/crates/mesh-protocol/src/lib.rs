@@ -462,7 +462,7 @@ mod fixture_tests {
     // --- tests ------------------------------------------------------------
 
     /// Number of fixture keys this crate asserts, mirrored as
-    /// `MESH_PROTOCOL_KEYS` in `rust/src/wire_contract_tests.rs`.
+    /// `MESH_PROTOCOL_KEYS` in `rust/src/wire_contract_tests/mod.rs`.
     const CRATE_FIXTURE_KEY_COUNT: usize = 69;
 
     #[test]

@@ -9,15 +9,11 @@
 //! - Mesh network state management
 //! - Online status broadcasting
 
-use core::ptr::addr_of;
-use core::slice;
-
-use crate::ble::connection::{back_to_rxmode_bridge, BLE_PERIPHERAL_LINK_STATE};
+use crate::ble::connection::BLE_PERIPHERAL_LINK_STATE;
 use crate::ble::flash_config::SYS_CHN_LISTEN;
 use crate::ble::pair::PAIR_AC;
-use crate::ble::status::{app_bridge_cmd_handle, tx_packet_bridge};
+use crate::ble::status::app_bridge_cmd_handle;
 use crate::mesh_ll::node_status::{
-    mesh_node_flush_status, mesh_report_status_enable_mask, mesh_send_online_status,
     MESH_DEVICE_ONLINE_STATUS, MESH_LISTEN_CYCLE_COUNT, MESH_LISTEN_INTERVAL_US, MESH_NODE_MASK,
     MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
 };
@@ -194,9 +190,9 @@ pub fn handle_mesh_listening_state() {
             // Use XOR with random number to create pseudo-random timing offset
             // The 0x7fff mask limits the randomization to prevent excessive delays
             write_reg_system_tick_irq(
-                (((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff)
+                ((read_reg_system_tick() ^ read_reg_rnd_number() as u32) & 0x7fff)
                     * CLOCK_SYS_CLOCK_1US
-                    + read_reg_system_tick_irq()),
+                    + read_reg_system_tick_irq(),
             );
             *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
             return;

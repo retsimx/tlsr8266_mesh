@@ -349,7 +349,8 @@ COMPOSITION_ROOT_FILES = frozenset({"app.rs", "irq.rs"})
 # in `rust/src`; R-10 (#46) moved 45 into `mesh-protocol`, C-2 (#64) 6 into
 # `tlsr8266-pac`, C-4/C-5 (#66/#67) 17 into `tlsr8266-hal`, C-7 (#69) and
 # C-8 (#70) removed 4 more, and C-10 (#72) moved the 44 RF/BLE sites into
-# `tlsr8266-radio`: 132 - 45 - 6 - 17 - 4 - 44 = 16.
+# `tlsr8266-radio`: 132 - 45 - 6 - 17 - 4 - 44 = 16.  C-16 (#78) then deleted 4
+# empty `unsafe` blocks in `tlsr8266-radio`, taking that crate 44 -> 40.
 #
 # `sdk/tests` asserts `measured == ceiling` for all five roots.  The tool only
 # fails on an *excess*, so an improvement never blocks a developer; that
@@ -358,7 +359,7 @@ MAX_PRODUCTION_UNSAFE_BY_CRATE = {
     "tlsr8266_mesh": 16,
     "tlsr8266-pac": 6,
     "tlsr8266-hal": 16,
-    "tlsr8266-radio": 44,
+    "tlsr8266-radio": 40,
     "mesh-protocol": 45,
 }
 

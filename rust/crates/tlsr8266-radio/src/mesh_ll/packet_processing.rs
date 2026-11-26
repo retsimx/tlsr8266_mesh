@@ -71,10 +71,8 @@
 //! - Safe rejection of protocol violations and invalid formats
 //! - Graceful degradation under resource exhaustion conditions
 
-use core::cmp::min;
-use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts_mut};
-use core::slice;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::ptr::addr_of;
+use core::sync::atomic::AtomicUsize;
 
 use bytemuck;
 
@@ -90,7 +88,6 @@ use crate::ble::pair::pair_enc_packet;
 use crate::callbacks::{dispatch_ota_snapshot, on_light_data, on_light_response, on_uart_mesh_rx};
 use crate::facade::radio_config;
 use crate::gatt::attribute::l2cap_att_handler;
-use crate::rf::drv_8266::*;
 use crate::rf::drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
 use crate::types::*;
 use mesh_protocol::mesh_types::*;
@@ -107,8 +104,7 @@ use crate::ble::status::{
 };
 use crate::mesh_ll::node_status::{
     mesh_node_update_status, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
-    MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST, PKT_LIGHT_DATA,
-    PKT_LIGHT_STATUS, RC_PKT_BUF, STATUS_MESSAGE_SEQUENCE_NUMBER,
+    PKT_LIGHT_DATA, PKT_LIGHT_STATUS, RC_PKT_BUF, STATUS_MESSAGE_SEQUENCE_NUMBER,
 };
 
 /// Implements duplicate packet detection using cached packet buffer.
@@ -738,7 +734,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
     }
 
     // COMMAND PACKET PROCESSING: OPERATION CODE AND PARAMETER EXTRACTION
-    let (success, mut op_cmd, mut op_cmd_len, mut params, mut params_len) =
+    let (success, op_cmd, op_cmd_len, params, params_len) =
         parse_ble_packet_op_params(packet, true);
     if !success {
         // Malformed packet - discard without processing
@@ -1194,8 +1190,12 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) {
 
     // L2CAP/ATT PROTOCOL PROCESSING: Route packet through protocol stack
     if let Some(res_pkt) = l2cap_att_handler(packet) {
-        // Queue generated response packet for transmission
-        rf_link_add_tx_packet(&res_pkt);
+        // Queue the generated response for transmission. A full TX FIFO drops
+        // it: this path is best-effort and the peer retries the ATT request, so
+        // there is no recovery action and no logging seam in this crate.
+        if let Err(()) = rf_link_add_tx_packet(&res_pkt) {
+            // Dropped: see above.
+        }
     }
 
     // Default: packet processed without special conditions
@@ -1415,7 +1415,7 @@ pub fn rf_link_add_tx_packet(packet: &Packet) -> Result<(), ()> {
         return Ok(()); // Packet successfully queued for transmission
     }
 
-    return Err(()); // Buffer full - packet rejected to prevent overflow
+    Err(()) // Buffer full - packet rejected to prevent overflow
 }
 
 /// Extracts operation codes and parameters from BLE/mesh packets using adaptive parsing.
@@ -1573,6 +1573,10 @@ pub fn parse_ble_packet_op_params(
 mod tests {
     use super::*;
     use crate::callbacks::{set_ble_app_hooks, BleAppHooks};
+    use crate::mesh_ll::node_status::{
+        MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
+    };
+    use core::sync::atomic::Ordering;
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
     use tlsr8266_hal::mcu::clock::{fake_clock, CLOCK_SYS_CLOCK_1US};
     use tlsr8266_pac::fake_mmio::FakeMmio;

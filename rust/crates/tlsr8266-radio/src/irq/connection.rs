@@ -25,19 +25,16 @@ use crate::ble::connection::{
 use crate::ble::flash_config::pair_load_key;
 use crate::ble::pair::{PAIR_LOGIN_OK, PAIR_SETTING_FLAG, SECURITY_ENABLE};
 use crate::ble::status::{
-    rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop, tx_packet_bridge,
-    DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-    DEVICE_STATUS_READ_BUSY_TIMESTAMP, SLAVE_READ_STATUS_BUSY,
+    rf_link_slave_read_status_stop, tx_packet_bridge, DEVICE_STATUS_BUFFER_READ_POINTER,
+    DEVICE_STATUS_BUFFER_WRITE_POINTER, DEVICE_STATUS_READ_BUSY_TIMESTAMP, SLAVE_READ_STATUS_BUSY,
 };
 use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_tick};
 use crate::mesh_ll::node_status::{mesh_node_flush_status, mesh_report_status_enable};
-use crate::mesh_ll::packet_processing::{
-    is_add_packet_buf_ready, rf_link_add_tx_packet, rf_link_slave_data,
-};
+use crate::mesh_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
 use crate::rf::drv_8266::*;
 use crate::rf::drv_8266::{CURRENT_RF_STATE, PKT_INIT};
 use crate::types::{
-    ePairState, BlePeripheralLinkState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
+    BlePeripheralLinkState, PairAuthState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
     SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
 use tlsr8266_hal::common::sync::SimplifyLS;
@@ -91,7 +88,7 @@ pub fn handle_ble_connection_parameter_updates() {
         BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP.set(0);
 
         // Get the new channel map that was received from the master
-        let chn_map = SLAVE_CHN_MAP.lock().clone();
+        let chn_map = *SLAVE_CHN_MAP.lock();
 
         // Rebuild the frequency hopping table based on the new channel map
         // This updates which of the 37 BLE channels are available for data transmission
@@ -175,7 +172,7 @@ pub fn cleanup_ble_disconnection() {
     PAIR_LOGIN_OK.set(false);
 
     // Handle security-specific cleanup
-    if SECURITY_ENABLE.get() == false {
+    if !SECURITY_ENABLE.get() {
         // Security disabled: simply disable mesh status reporting
         mesh_report_status_enable(false);
     } else {
@@ -191,14 +188,14 @@ pub fn cleanup_ble_disconnection() {
     }
 
     // Handle pairing key management based on current pairing state
-    if *PAIR_SETTING_FLAG.lock() == ePairState::PairSetted {
+    if *PAIR_SETTING_FLAG.lock() == PairAuthState::PairSetted {
         // Device is already paired: just clear data validity flag
         SLAVE_DATA_VALID.set(0);
     } else {
         // Device not paired: clear data and load pairing keys from storage
         SLAVE_DATA_VALID.set(0);
         pair_load_key(); // Load stored pairing keys if available
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
     }
 
     // Configure the RF TX wait/settle timing low byte based on the SYSTEM CLOCK
@@ -614,7 +611,7 @@ pub fn process_queued_status_responses() {
     // Process all queued response packets
     while DEVICE_STATUS_BUFFER_WRITE_POINTER.get() != rptr {
         // Ensure read pointer stays within buffer bounds
-        rptr = rptr % BUFF_RESPONSE_PACKET_COUNT;
+        rptr %= BUFF_RESPONSE_PACKET_COUNT;
 
         // Get the next packet from the response buffer
         let packet = BUFF_RESPONSE.lock()[rptr];
@@ -627,7 +624,7 @@ pub fn process_queued_status_responses() {
 
         // Advance the read pointer to the next packet
         // Use atomic update to prevent race conditions
-        rptr = ((DEVICE_STATUS_BUFFER_READ_POINTER.get() + 1) % BUFF_RESPONSE_PACKET_COUNT);
+        rptr = (DEVICE_STATUS_BUFFER_READ_POINTER.get() + 1) % BUFF_RESPONSE_PACKET_COUNT;
         DEVICE_STATUS_BUFFER_READ_POINTER.set(rptr);
     }
 }
@@ -716,7 +713,7 @@ mod tests {
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
         PAIR_LOGIN_OK.set(false);
         SECURITY_ENABLE.set(false);
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
         FLASH_CONFIGURATION_INDEX.set(0);
 
         // Status-read bookkeeping, so "stop was called" is observable through the
@@ -1313,7 +1310,7 @@ mod tests {
         BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0x12345678);
 
         // Reset pairing state
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
         SLAVE_DATA_VALID.set(1);
 
         // Reset connection parameter state
@@ -1554,7 +1551,7 @@ mod tests {
         // Setup: Device already paired. `pair_load_key` always re-scans the
         // pairing sector (setting FLASH_CONFIGURATION_INDEX); a sentinel index
         // makes an unexpected load visible.
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
         SLAVE_DATA_VALID.set(123);
         FLASH_CONFIGURATION_INDEX.set(7);
 
@@ -1571,7 +1568,7 @@ mod tests {
         // Verify pairing state remains unchanged
         assert_eq!(
             *PAIR_SETTING_FLAG.lock(),
-            ePairState::PairSetted,
+            PairAuthState::PairSetted,
             "Pairing state should remain PairSetted"
         );
 
@@ -1594,7 +1591,7 @@ mod tests {
         reset_cleanup_state();
 
         // Setup: Device not paired, blank NOR device.
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting; // Not PairSetted
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetting; // Not PairSetted
         SLAVE_DATA_VALID.set(456);
         FLASH_CONFIGURATION_INDEX.set(7);
 
@@ -1619,7 +1616,7 @@ mod tests {
         // Verify pairing state is set to PairSetted
         assert_eq!(
             *PAIR_SETTING_FLAG.lock(),
-            ePairState::PairSetted,
+            PairAuthState::PairSetted,
             "Pairing state should be set to PairSetted after loading keys"
         );
     }
@@ -1735,7 +1732,7 @@ mod tests {
 
         // Setup: Security enabled, device not paired, blank NOR device.
         SECURITY_ENABLE.set(true);
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetting;
         BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0x12345678);
         PAIR_LOGIN_OK.set(true);
         FLASH_CONFIGURATION_INDEX.set(7);
@@ -1763,7 +1760,7 @@ mod tests {
         );
         assert_eq!(
             *PAIR_SETTING_FLAG.lock(),
-            ePairState::PairSetted,
+            PairAuthState::PairSetted,
             "Pairing state should be set to PairSetted after loading"
         );
 
@@ -1812,7 +1809,7 @@ mod tests {
         reset_cleanup_state();
 
         // Setup initial state
-        *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+        *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetting;
         FakeMmio::clear_writes();
 
         // Execute cleanup first time

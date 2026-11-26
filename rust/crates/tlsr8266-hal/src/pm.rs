@@ -248,15 +248,6 @@ pub enum PM_WAKEUP {
 //
 // #endif
 
-pub const TCMD_UNDER_RD: u8 = 0x80;
-pub const TCMD_UNDER_WR: u8 = 0x40;
-pub const TCMD_UNDER_BOTH: u8 = 0xc0;
-pub const TCMD_MASK: u8 = 0x3f;
-
-pub const TCMD_WRITE: u8 = 0x3;
-pub const TCMD_WAIT: u8 = 0x7;
-pub const TCMD_WAREG: u8 = 0x8;
-
 const TBL_CPU_WAKEUP_INIT: [TBLCMDSET; 0x13] = [
     TBLCMDSET {
         adr: 0x60,
@@ -510,7 +501,7 @@ mod tests {
         // Execute
         cpu_wakeup_init();
 
-        // Every TCMD_WRITE entry of `TBL_CPU_WAKEUP_INIT`, in table order.
+        // Every write command in `TBL_CPU_WAKEUP_INIT`, in table order.
         assert_eq!(
             FakeMmio::writes(),
             vec![
@@ -580,17 +571,17 @@ mod tests {
                     value: 0x01
                 },
             ],
-            "every TCMD_WRITE entry must reach its register, in table order"
+            "every write command must reach its register, in table order"
         );
 
-        // Every TCMD_WAREG entry, as the analog bank now holds them.
+        // Every analog-write command, as the analog bank now holds them.
         assert_eq!(FakeAnalog::get(0x81), 0xc0);
         assert_eq!(FakeAnalog::get(0x20), 0xd0);
         assert_eq!(FakeAnalog::get(0x2d), 0x0f);
         assert_eq!(FakeAnalog::get(0x2c), 0x00);
         assert_eq!(FakeAnalog::get(0x05), 0x62);
 
-        // The table has no TCMD_WAIT entry
+        // The table has no wait command
         assert!(fake_clock::sleeps().is_empty());
     }
 
@@ -870,19 +861,5 @@ mod tests {
         assert_eq!(PM_WAKEUP::TIMER as u32, BIT!(6));
         assert_eq!(PM_WAKEUP::COMP as u32, BIT!(7));
         assert_eq!(PM_WAKEUP::PAD as u32, BIT!(8));
-    }
-
-    /// Tests TCMD constants
-    ///
-    /// Verifies that TCMD constants have the correct values.
-    #[test]
-    fn test_tcmd_constants() {
-        assert_eq!(TCMD_UNDER_RD, 0x80);
-        assert_eq!(TCMD_UNDER_WR, 0x40);
-        assert_eq!(TCMD_UNDER_BOTH, 0xc0);
-        assert_eq!(TCMD_MASK, 0x3f);
-        assert_eq!(TCMD_WRITE, 0x3);
-        assert_eq!(TCMD_WAIT, 0x7);
-        assert_eq!(TCMD_WAREG, 0x8);
     }
 }

@@ -78,7 +78,7 @@ use crate::rf::drv_8266::*;
 use crate::types::*;
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
-use tlsr8266_pac::{read_reg_rnd_number, read_reg_system_tick};
+use tlsr8266_pac::read_reg_system_tick;
 
 use crate::mesh_ll::node_status::{
     mesh_send_online_status, MESH_LISTEN_INTERVAL_US, PKT_LIGHT_DATA,
@@ -270,7 +270,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
             if rf_link_is_notify_req(pkt_light_data.att_cmd().value.val[0] & 0x3f) {
                 // Calculate relay timing based on processing delay
                 // Formula: (elapsed_time_us + 500) / 1024, clamped to 255
-                let mut relay_time = min(
+                let relay_time = min(
                     (((read_reg_system_tick() - bridge_cmd_time) / CLOCK_SYS_CLOCK_1US) + 500)
                         >> 10,
                     0xff,

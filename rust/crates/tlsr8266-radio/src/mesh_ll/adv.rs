@@ -17,10 +17,12 @@ use crate::types::{DEVICE_ADDR_MASK_DEFAULT, MAX_GROUP_COUNT};
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_read_page, flash_write_page};
 
+/// Storage for the optional mesh light-event handler.
+type LightEventCell = critical_section::Mutex<core::cell::Cell<Option<fn(u8)>>>;
+
 /// Mesh light-event handler, registered once from `App::init()` so this module
 /// never imports the application layer.
-static LIGHT_EVENT_CB: critical_section::Mutex<core::cell::Cell<Option<fn(u8)>>> =
-    critical_section::Mutex::new(core::cell::Cell::new(None));
+static LIGHT_EVENT_CB: LightEventCell = critical_section::Mutex::new(core::cell::Cell::new(None));
 
 /// Registers the handler that receives mesh light event codes.
 pub fn set_light_event_handler(cb: fn(u8)) {
@@ -227,27 +229,21 @@ fn delete_groups_from_flash(group_id: u16, delete_all: bool) -> Result<(), ()> {
 
 fn read_group_address(flash_addr: u32) -> u16 {
     let mut bytes = [0u8; 2];
-    // SAFETY: (2) flash-driver raw-pointer handoff. `bytes` is a live 2-byte local
-    // and `flash_read_page` is documented to write exactly `len` = 2 bytes into it.
-    // No unsafe operation remains inside the block; the driver fn is safe, and the
-    // stale braces only survive because the crate root sets `#![allow(warnings)]`.
-    unsafe {
-        flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
-    }
+    // `bytes` is a live 2-byte local and `flash_read_page` is documented to write
+    // exactly `len` = 2 bytes into it.
+    flash_read_page(flash_addr, 2, bytes.as_mut_ptr());
     u16::from_le_bytes(bytes)
 }
 
 fn write_group_address(flash_addr: u32, value: u16) {
     let bytes = value.to_le_bytes();
-    // SAFETY: (2) flash-driver raw-pointer handoff. `bytes` is the 2-byte
-    // `value.to_le_bytes()` array and `DEVICE_ADDR_SIZE` is 2, so the driver reads
-    // exactly that buffer. No unsafe operation remains; see the read path above.
-    unsafe {
-        // The in-RAM group table is authoritative. A lost program leaves the
-        // slot's old value behind: a lost delete resurrects that group on the
-        // next boot scan, and a lost add leaves an 0xFFFF hole that ends it.
-        let _ = flash_write_page(flash_addr, DEVICE_ADDR_SIZE, bytes.as_ptr());
-    }
+    // `bytes` is the 2-byte `value.to_le_bytes()` array and `DEVICE_ADDR_SIZE` is
+    // 2, so the driver reads exactly that buffer.
+    //
+    // The in-RAM group table is authoritative. A lost program leaves the
+    // slot's old value behind: a lost delete resurrects that group on the
+    // next boot scan, and a lost add leaves an 0xFFFF hole that ends it.
+    let _ = flash_write_page(flash_addr, DEVICE_ADDR_SIZE, bytes.as_ptr());
 }
 
 fn is_group_address(address: u16) -> bool {
@@ -264,10 +260,9 @@ fn compact_adv_data_removing_invalid_manufacturer(
     }
 
     let adv_data_len = (pkt.head().rf_len as i8 - BLE_HEADER_LEN as i8) as usize;
-    let data = &pkt.adv_ind_module().data;
 
     // Process fields in-place using functional iterator patterns
-    let data_clone = pkt.adv_ind_module().data.clone();
+    let data_clone = pkt.adv_ind_module().data;
     let mut write_pos = 0;
 
     // Use iterator to process non-manufacturer fields
@@ -393,7 +388,7 @@ pub fn set_advertisement_uuid(uuid_data: &[u8]) {
     match SET_UUID_FLAG.get() {
         false => {
             // First time: insert and shift existing data
-            let existing_payload_len = if rf_len >= 9 { rf_len - 9 } else { 0 };
+            let existing_payload_len = rf_len.saturating_sub(9);
 
             // Functional approach to data manipulation
             let (save_range, insert_range, restore_range) = {
@@ -724,7 +719,7 @@ pub fn add_group(group_id: u16) -> Result<(), ()> {
         return Ok(());
     }
 
-    return Err(());
+    Err(())
 }
 
 #[cfg(test)]

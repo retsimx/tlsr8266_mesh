@@ -6,9 +6,7 @@ use crate::mcu::analog::analog_write;
 use crate::mcu::clock::sleep_us;
 use tlsr8266_pac::write_reg8;
 
-pub const TCMD_UNDER_RD: u8 = 0x80;
 pub const TCMD_UNDER_WR: u8 = 0x40;
-pub const TCMD_UNDER_BOTH: u8 = 0xc0;
 pub const TCMD_MASK: u8 = 0x3f;
 
 pub const TCMD_WRITE: u8 = 0x3;

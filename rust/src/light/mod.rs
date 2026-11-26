@@ -40,7 +40,7 @@ pub use transitions::reset_for_test;
 pub use transitions::{transition_step, LightFlashStore, Message};
 // `wire_contract_tests` size-asserts the persisted record through this path.
 #[cfg(test)]
-pub(crate) use transitions::LumSaveT;
+pub(crate) use transitions::LuminanceRecord;
 
 // must be 255
 pub const PMW_MAX_TICK_BASE: u16 = 255;

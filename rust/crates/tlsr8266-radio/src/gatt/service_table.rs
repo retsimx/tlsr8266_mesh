@@ -1,14 +1,11 @@
-use core::cell::UnsafeCell;
 use core::ptr::{addr_of, null, null_mut};
-use core::slice;
 use core::sync::atomic::AtomicU8;
 
 use crate::ble::pair::{pair_read, pair_write, PAIR_LOGIN_OK};
 use crate::facade::RadioConfig;
 use crate::mesh_ll::node_status::{mesh_report_status_enable, mesh_report_status_enable_mask};
 use crate::rf::drv_8266::rf_link_slave_data_write;
-use crate::types::*;
-use mesh_protocol::packet_types::{Packet, PacketAttValue};
+use mesh_protocol::packet_types::Packet;
 use mesh_protocol::service::{
     SERVICE_UUID_DEVICE_INFORMATION, TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA,
     TELINK_SPP_DATA_PAIR, TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
@@ -35,7 +32,6 @@ pub const CHAR_PROP_AUTHEN: u8 = 0x40;
 pub const CHAR_PROP_EXTENDED: u8 = 0x80;
 // additional characteristic properties are defined
 /** @} end of group GATT_Characteristic_Property */
-
 /** @addtogroup GATT_CCCC_Bits Client CharacteristicConfiguration bits
  * @{
  */
@@ -44,19 +40,16 @@ pub const CLIENT_CHAR_CFG_NOTI: u16 = 0x0001;
 pub const CLIENT_CHAR_CFG_IND: u16 = 0x0002;
 // permit reads of the Characteristic Value
 /** @} end of group GATT_CCCC_Bits */
-
 /** @addtogroup GATT_Property_length GATT characteristic property length
  * @{
  */
 pub const CHAR_PROP_SIZE: u8 = 1;
 /** @} end of group GATT_Property_length */
-
 /** @addtogroup GATT_Char_Cfg_Bit_length GATT characteristic configuration Bits length
  * @{
  */
 pub const CHAR_CFG_BITS_SIZE: u8 = 2;
 /** @} end of group GATT_Char_Cfg_Bit_length */
-
 pub const GATT_UUID_PRIMARY_SERVICE: u16 = 0x2800; // Primary Service
 pub const GATT_UUID_SECONDARY_SERVICE: u16 = 0x2801; // Secondary Service
 pub const GATT_UUID_INCLUDE: u16 = 0x2802; // Include
@@ -91,7 +84,6 @@ static CHARACTER_UUID: u16 = GATT_UUID_CHARACTER;
 static GAP_SERVICE_UUID: u16 = 0x1800;
 static DEV_NAME_UUID: u16 = GATT_UUID_DEVICE_NAME;
 static APPEARANCE_UIID: u16 = 0x2a01;
-static PERI_CONN_PARAM_UUID: u16 = 0x2a04;
 
 static DEV_INFO_UUID: u16 = SERVICE_UUID_DEVICE_INFORMATION;
 static CLIENT_CHARACTER_CFG_UUID: u16 = GATT_UUID_CLIENT_CHAR_CFG;
@@ -108,9 +100,6 @@ static DEV_NAME_CHARACTER: u8 = CHAR_PROP_READ;
 static APPEARANCE_CHARACTER: u8 = CHAR_PROP_READ;
 static APPEARANCE: u16 = GAP_APPEARE_UNKNOWN;
 
-// Peripheral Preferred Connection Parameters Characteristic Properties
-static PERI_CONN_PARAM_CHAR: u8 = CHAR_PROP_READ;
-
 static FW_REVISION_CHAR: u8 = CHAR_PROP_READ;
 
 static MANU_NAME_STRING_CHAR: u8 = CHAR_PROP_READ;
@@ -120,25 +109,6 @@ static MODEL_ID_VALUE: &[u8] = b"model id 123";
 
 static HW_REVISION_CHAR: u8 = CHAR_PROP_READ;
 static HW_REVISION_VALUE: u32 = 0x22222222;
-
-#[repr(C, align(4))]
-struct GapPeriConnectParamsT {
-    /** Minimum value for the connection event (interval. 0x0006 - 0x0C80 * 1.25 ms) */
-    pub interval_min: u16,
-    /** Maximum value for the connection event (interval. 0x0006 - 0x0C80 * 1.25 ms) */
-    pub interval_max: u16,
-    /** Number of LL latency connection events (0x0000 - 0x03e8) */
-    pub latency: u16,
-    /** Connection Timeout (0x000A - 0x0C80 * 10 ms) */
-    pub timeout: u16,
-}
-
-const PERI_CONN_PARAMETERS: GapPeriConnectParamsT = GapPeriConnectParamsT {
-    interval_min: 20,
-    interval_max: 40,
-    latency: 0,
-    timeout: 1000,
-};
 
 // ---- Config-driven GATT values --------------------------------------------
 // The 29-entry table below stays immutable in `.rodata`, so the three values
@@ -200,7 +170,6 @@ pub static SEND_TO_MASTER: CriticalSectionMutex<[u8; 16]> = CriticalSectionMutex
 
 static USERDESC_UUID: u16 = GATT_UUID_CHAR_USER_DESC;
 
-static SPP_STATUSNAME: &[u8] = b"Status";
 static SPP_COMMANDNAME: &[u8] = b"Command";
 static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
@@ -230,7 +199,6 @@ fn mesh_status_write(p: &Packet) {
     }
 }
 
-#[derive(PartialEq)]
 pub struct AttributeT {
     pub att_num: u8,
     pub uuid_len: u8,
@@ -511,7 +479,7 @@ struct TestGAttributes(core::cell::UnsafeCell<GAttributesType>);
 
 #[cfg(not(target_os = "none"))]
 // SAFETY: host tests are the only writers and they serialise through the
-// single `&mut` handed out by `get_gAttributes()`; production has no access to
+// single `&mut` handed out by `get_g_attributes()`; production has no access to
 // this type at all.
 unsafe impl Sync for TestGAttributes {}
 
@@ -520,13 +488,13 @@ static G_ATTRIBUTES: TestGAttributes = TestGAttributes(core::cell::UnsafeCell::n
 
 /// The GATT attribute table.
 #[cfg(target_os = "none")]
-pub fn get_gAttributes() -> &'static [AttributeT; GATT_ATT_COUNT] {
+pub fn get_g_attributes() -> &'static [AttributeT; GATT_ATT_COUNT] {
     &G_ATTRIBUTES.0
 }
 
 /// The GATT attribute table, writable for tests that temporarily patch entries.
 #[cfg(not(target_os = "none"))]
-pub fn get_gAttributes() -> &'static mut [AttributeT; GATT_ATT_COUNT] {
+pub fn get_g_attributes() -> &'static mut [AttributeT; GATT_ATT_COUNT] {
     // SAFETY: the cell is a `static`, so the pointer is non-null and aligned;
     // the returned lifetime is unconstrained because tests own the table for the
     // whole process and each call re-borrows the same cell without keeping the
@@ -1086,15 +1054,15 @@ mod tests {
         assert_eq!(&manu[7..], &[0u8; 9][..], "the tail is zeroed");
         assert_eq!(*FW_REVISION_BUF.lock(), 0xA1B2_C3D4u32.to_le_bytes());
 
-        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 19);
+        assert_eq!(attr_effective_len(3, &get_g_attributes()[3]), 19);
         assert_eq!(
-            attr_effective_len(9, &get_gAttributes()[9]),
+            attr_effective_len(9, &get_g_attributes()[9]),
             4,
             "the version word is fixed"
         );
-        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 7);
+        assert_eq!(attr_effective_len(11, &get_g_attributes()[11]), 7);
         assert_eq!(
-            attr_effective_len(4, &get_gAttributes()[4]),
+            attr_effective_len(4, &get_g_attributes()[4]),
             7,
             "other handles keep attr_len"
         );
@@ -1108,8 +1076,8 @@ mod tests {
         assert_eq!(DEV_NAME_LEN.get(), 2);
         assert_eq!(&device[..2], b"ab");
         assert_eq!(&device[2..], &[0u8; 17][..]);
-        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 2);
-        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 1);
+        assert_eq!(attr_effective_len(3, &get_g_attributes()[3]), 2);
+        assert_eq!(attr_effective_len(11, &get_g_attributes()[11]), 1);
 
         // An over-long name is clamped to the buffer size.
         let mut long = cfg;
@@ -1123,8 +1091,8 @@ mod tests {
         assert_eq!(MANU_NAME_LEN.get(), 11);
         assert_eq!(*FW_REVISION_BUF.lock(), [0; 4]);
         assert_eq!(&DEV_NAME_BUF.lock()[..13], b"Telink tLight");
-        assert_eq!(attr_effective_len(3, &get_gAttributes()[3]), 13);
-        assert_eq!(attr_effective_len(11, &get_gAttributes()[11]), 11);
+        assert_eq!(attr_effective_len(3, &get_g_attributes()[3]), 13);
+        assert_eq!(attr_effective_len(11, &get_g_attributes()[11]), 11);
     }
 
     /// `AttOpWriteReq` and `AttOpWriteCmd` to handles 3, 9 and 11 must not change
@@ -1163,13 +1131,13 @@ mod tests {
 
         for handle in [3usize, 9, 11] {
             let declaration = handle - 1;
-            let original_props = get_gAttributes()[declaration].p_attr_value;
+            let original_props = get_g_attributes()[declaration].p_attr_value;
             // SAFETY: (4) test-only patch of the table's own declaration entry;
             // the original pointer is restored before `writable_props` (a local)
             // goes out of scope.
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[declaration]) as *mut AttributeT)).p_attr_value =
-                    addr_of_mut!(writable_props);
+                (*(addr_of_mut!(get_g_attributes()[declaration]) as *mut AttributeT))
+                    .p_attr_value = addr_of_mut!(writable_props);
             }
 
             let write_req = l2cap_att_handler(&write_packet(
@@ -1185,8 +1153,8 @@ mod tests {
 
             // SAFETY: (4) restore the declaration value pointer patched above.
             unsafe {
-                (*(addr_of_mut!(get_gAttributes()[declaration]) as *mut AttributeT)).p_attr_value =
-                    original_props;
+                (*(addr_of_mut!(get_g_attributes()[declaration]) as *mut AttributeT))
+                    .p_attr_value = original_props;
             }
 
             assert_eq!(
@@ -1213,12 +1181,12 @@ mod tests {
     /// without depending on the host's static layout.
     #[test]
     fn test_status_ccc_remains_writable() {
-        let original_ptr = get_gAttributes()[19].p_attr_value;
+        let original_ptr = get_g_attributes()[19].p_attr_value;
         let mut ccc = STATUS_CCC;
         // SAFETY: (4) test-only patch of the table's own CCC entry; the pointer is
         // restored before the local buffer `ccc` goes out of scope.
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[19]) as *mut AttributeT)).p_attr_value =
+            (*(addr_of_mut!(get_g_attributes()[19]) as *mut AttributeT)).p_attr_value =
                 addr_of_mut!(ccc) as *mut u8;
         }
 
@@ -1230,7 +1198,8 @@ mod tests {
 
         // SAFETY: (4) restore the CCC value pointer patched above.
         unsafe {
-            (*(addr_of_mut!(get_gAttributes()[19]) as *mut AttributeT)).p_attr_value = original_ptr;
+            (*(addr_of_mut!(get_g_attributes()[19]) as *mut AttributeT)).p_attr_value =
+                original_ptr;
         }
 
         assert_eq!(

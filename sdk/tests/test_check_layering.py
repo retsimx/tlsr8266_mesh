@@ -2119,7 +2119,7 @@ class TestUnsafeRatchet(unittest.TestCase):
                 "tlsr8266_mesh": 16,
                 "tlsr8266-pac": 6,
                 "tlsr8266-hal": 16,
-                "tlsr8266-radio": 44,
+                "tlsr8266-radio": 40,
                 "mesh-protocol": 45,
             },
         )

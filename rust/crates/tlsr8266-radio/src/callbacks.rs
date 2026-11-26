@@ -304,8 +304,8 @@ pub mod test_ota {
     pub const HOOKS: OtaHooks = OtaHooks {
         on_gatt_ota_write: write,
         status_snapshot: snapshot,
-        request_termination: request_termination,
-        tick_timeout_1s: tick_timeout_1s,
+        request_termination,
+        tick_timeout_1s,
     };
 
     fn finished_flag() -> OtaState {

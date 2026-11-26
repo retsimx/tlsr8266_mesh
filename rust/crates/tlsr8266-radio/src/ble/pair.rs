@@ -87,8 +87,8 @@ pub(crate) static PAIR_CONFIG_MESH_LTK: CriticalSectionMutex<[u8; 16]> =
 
 /// Current state of the mesh pairing process.
 /// Tracks progress through pairing sequence: idle, setting, transmitting, receiving, etc.
-pub(crate) static PAIR_SETTING_FLAG: CriticalSectionMutex<ePairState> =
-    CriticalSectionMutex::new(ePairState::PairSetted);
+pub(crate) static PAIR_SETTING_FLAG: CriticalSectionMutex<PairAuthState> =
+    CriticalSectionMutex::new(PairAuthState::PairSetted);
 
 /// Initialization Vector for Master (IVM) used in mesh encryption.
 /// 8-byte nonce used with AES encryption for securing mesh communications from master.
@@ -288,7 +288,7 @@ pub fn pair_dec_packet(ps: &mut Packet) -> Result<(), ()> {
         let data = slice_from_raw_parts_mut(data_ptr, data_len);
         aes_att_decryption_packet(
             pair_sk,    // Session key
-            &*pair_ivm, // IV modifier
+            &pair_ivm,  // IV modifier
             &src,       // Expected MIC (Message Integrity Check)
             &mut *data, // Data to decrypt (in place)
         )
@@ -390,7 +390,7 @@ pub fn pair_enc_packet(ps: &mut Packet) {
     // Perform encryption using AES-CCM
     aes_att_encryption_packet(
         session_key, // Session key
-        &*pair_ivs,  // IV modifier
+        &pair_ivs,   // IV modifier
         dst_slice,   // Output buffer for the calculated MIC
         data_slice,  // Data to encrypt (in place)
     );
@@ -542,8 +542,6 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
 
             // Perform encryption using AES-CCM
             aes_att_encryption_packet(pair_ltk, iv, dst, payload); // dst is the mic_output buffer
-
-            return;
         } else {
             // Direct mesh packet encryption
             // - Use IV from packet's handle1 field (8 bytes)
@@ -606,9 +604,6 @@ pub fn pair_enc_packet_mesh(ps: &mut Packet) {
 pub fn pair_flash_save_config(addr: u32, data: &[u8]) {
     // Flash storage offset constants
     const OFFSET_HEADER: u32 = 0x00; // Pairing header with validation flags
-    const OFFSET_NAME: u32 = 0x10; // Mesh network name
-    const OFFSET_PASSWORD: u32 = 0x20; // Mesh network password (encrypted)
-    const OFFSET_LTK: u32 = 0x30; // Long-term key
 
     // For a new config set (addr=0), clean the old sector and increment the index
     if addr == OFFSET_HEADER {
@@ -657,7 +652,7 @@ pub fn pair_save_key() {
         };
     }
 
-    let mut pair_state = PAIR_STATE.lock();
+    let pair_state = PAIR_STATE.lock();
 
     // Save header with validation flags first
     pair_flash_save_config(OFFSET_HEADER, &pass);
@@ -789,7 +784,7 @@ pub fn pair_proc() -> Option<Packet> {
     let security_check_needed = BLE_PAIR_ST.get() == PairState::AwaitingRandom
         || BLE_PAIR_ST.get() == PairState::ReceivingMeshLtk;
 
-    if security_check_needed && SECURITY_ENABLE.get() == false && !PAIR_LOGIN_OK.get() {
+    if security_check_needed && !SECURITY_ENABLE.get() && !PAIR_LOGIN_OK.get() {
         // `pair_par_init` re-locks `PAIR_STATE` (through `pair_load_key`), so the
         // guard must not be held across it.
         drop(pair_state);
@@ -820,7 +815,7 @@ pub fn pair_proc() -> Option<Packet> {
             }
 
             // Either send as plaintext or encrypt based on security mode
-            if SECURITY_ENABLE.get() == false {
+            if !SECURITY_ENABLE.get() {
                 pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE]
                     .copy_from_slice(&pair_state.pair_work);
             } else {
@@ -835,7 +830,7 @@ pub fn pair_proc() -> Option<Packet> {
         PairState::SessionKeyExchange => {
             pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
 
-            if SECURITY_ENABLE.get() == false {
+            if !SECURITY_ENABLE.get() {
                 // Simple mode: Just XOR network name and password
                 for index in 0..KEY_SIZE {
                     pair_state.pair_work[index] =
@@ -911,7 +906,7 @@ pub fn pair_proc() -> Option<Packet> {
             // Provide the LTK either directly or encrypted based on security mode
             pkt_read_rsp.head_mut().l2cap_len = RESP_WITH_KEY;
 
-            if SECURITY_ENABLE.get() == false {
+            if !SECURITY_ENABLE.get() {
                 // Simple mode: Send LTK directly
                 pkt_read_rsp.att_read_rsp_mut().value[1..1 + KEY_SIZE]
                     .copy_from_slice(&pair_state.pair_ltk);
@@ -977,7 +972,7 @@ pub fn pair_proc() -> Option<Packet> {
     // Set first byte of value to current pairing state as a raw u8 value
     pkt_read_rsp.att_read_rsp_mut().value[0] = pair_st as u8;
 
-    return Some(pkt_read_rsp);
+    Some(pkt_read_rsp)
 }
 
 /// Set pairing keys from provided key material
@@ -1053,7 +1048,6 @@ pub fn pair_write(data: &Packet) {
                 .pair_randm
                 .copy_from_slice(&src[0..RANDOM_CHALLENGE_SIZE]);
             BLE_PAIR_ST.set(PairState::AwaitingRandom);
-            return;
         }
 
         // --- Step 2: Network Provisioning - Set Network Name ---
@@ -1063,7 +1057,7 @@ pub fn pair_write(data: &Packet) {
                 // Simple mode: Must be logged in and in completed state
                 if PAIR_LOGIN_OK.get() && BLE_PAIR_ST.get() == PairState::Completed {
                     pair_state.pair_nn.copy_from_slice(&src[0..KEY_SIZE]);
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+                    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetting;
                     BLE_PAIR_ST.set(PairState::ReceivingMeshName);
                     return;
                 }
@@ -1080,7 +1074,7 @@ pub fn pair_write(data: &Packet) {
 
                 // Only accept valid mesh names
                 if name_len <= MAX_MESH_NAME_LEN {
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetting;
+                    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetting;
                     BLE_PAIR_ST.set(PairState::ReceivingMeshName);
                     return;
                 }
@@ -1091,7 +1085,6 @@ pub fn pair_write(data: &Packet) {
             drop(pair_state);
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
-            return;
         }
 
         // --- Step 3: Network Provisioning - Set Network Password ---
@@ -1135,7 +1128,6 @@ pub fn pair_write(data: &Packet) {
             drop(pair_state);
             pair_par_init();
             PAIR_ENC_ENABLE.set(false);
-            return;
         }
 
         // --- Step 4: Network Provisioning - Set LTK ---
@@ -1151,7 +1143,7 @@ pub fn pair_write(data: &Packet) {
                 if BLE_PAIR_ST.get() != PairState::ReceivingMeshPassword {
                     drop(pair_state);
                     pair_par_init();
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+                    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
                     PAIR_ENC_ENABLE.set(false);
                     return;
                 }
@@ -1165,7 +1157,7 @@ pub fn pair_write(data: &Packet) {
                     // Mesh mode: Decrypt mesh LTK
                     pair_state.pair_ltk_mesh =
                         aes_att_decryption(&pair_state.pair_sk, &pair_state.pair_work);
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+                    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetMeshTxStart;
                     return;
                 }
 
@@ -1175,7 +1167,7 @@ pub fn pair_write(data: &Packet) {
                 // `pair_save_key` re-locks `PAIR_STATE`, so release it first.
                 drop(pair_state);
                 pair_save_key();
-                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+                *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
                 crate::mesh_ll::adv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
@@ -1192,7 +1184,7 @@ pub fn pair_write(data: &Packet) {
                 {
                     // Mesh mode: Store plaintext mesh LTK
                     pair_state.pair_ltk_mesh.copy_from_slice(&src[0..KEY_SIZE]);
-                    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetMeshTxStart;
+                    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetMeshTxStart;
                     return;
                 }
 
@@ -1201,7 +1193,7 @@ pub fn pair_write(data: &Packet) {
                 // `pair_save_key` re-locks `PAIR_STATE`, so release it first.
                 drop(pair_state);
                 pair_save_key();
-                *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+                *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
                 crate::mesh_ll::adv::emit_light_event(LGT_CMD_PAIR_OK);
                 return;
             }
@@ -1209,22 +1201,19 @@ pub fn pair_write(data: &Packet) {
             // Invalid state - reset pairing
             drop(pair_state);
             pair_par_init();
-            *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+            *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
             PAIR_ENC_ENABLE.set(false);
-            return;
         }
 
         // --- Step 5: Pair Maintenance - Delete Pairing ---
         PAIR_OP_DELETE_PAIRING => {
             PAIR_ENC_ENABLE.set(false);
             BLE_PAIR_ST.set(PairState::Idle);
-            return;
         }
 
         // --- Step 5: Pair Maintenance - Reset Mesh ---
         PAIR_OP_RESET_MESH => {
             // No specific action yet for reset mesh
-            return;
         }
 
         // --- Combined handling for LTK Request and Credential Verification ---
@@ -1263,20 +1252,18 @@ pub fn pair_write(data: &Packet) {
                 const CLIENT_PROOF_OFFSET: usize = 9;
                 pair_state.pair_work =
                     aes_att_encryption(&pair_state.pair_sk, &pair_state.pair_work);
-                &pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE]
-                    == &pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE]
+                pair_state.pair_work[0..RANDOM_CHALLENGE_SIZE]
+                    == pktdata[CLIENT_PROOF_OFFSET..CLIENT_PROOF_OFFSET + RANDOM_CHALLENGE_SIZE]
             };
 
             // Handle GET_MESH_LTK: Only for already-logged-in users
-            if is_get_ltk {
-                if PAIR_LOGIN_OK.get() && verification_succeeded {
-                    // Verification succeeded: transition to RequestingLtk
-                    BLE_PAIR_ST.set(PairState::RequestingLtk);
-                    return;
-                }
-                // GET_MESH_LTK failed: either not logged in or verification failed
-                // Fall through to reset pairing
+            if is_get_ltk && PAIR_LOGIN_OK.get() && verification_succeeded {
+                // Verification succeeded: transition to RequestingLtk
+                BLE_PAIR_ST.set(PairState::RequestingLtk);
+                return;
             }
+            // GET_MESH_LTK failed: either not logged in or verification failed
+            // Fall through to reset pairing
 
             // Handle VERIFY_CREDENTIALS: Authenticate the user
             if is_verify {
@@ -1293,13 +1280,11 @@ pub fn pair_write(data: &Packet) {
             // Reset pairing on verification failure or if we reach here
             drop(pair_state);
             pair_par_init();
-            return;
         }
 
         // --- Default: Unknown or unsupported opcode ---
         _ => {
             // No specific handling for unknown opcodes
-            return;
         }
     }
 }
@@ -3572,7 +3557,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetting);
 
         // Verify mesh name was stored after decryption
         let pair_state = PAIR_STATE.lock();
@@ -3607,7 +3592,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetting);
 
         // Verify mesh name was stored directly
         let pair_state = PAIR_STATE.lock();
@@ -3914,7 +3899,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted);
 
         // Verify LTK was stored after decryption
         let pair_state = PAIR_STATE.lock();
@@ -3981,7 +3966,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetMeshTxStart);
 
         // Verify mesh LTK was stored after decryption
         let pair_state = PAIR_STATE.lock();
@@ -4031,7 +4016,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted);
 
         // Verify LTK was stored directly
         let pair_state = PAIR_STATE.lock();
@@ -4091,7 +4076,7 @@ mod tests {
         // Assert
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Should be set to PairSetted upon failure
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted); // Should be set to PairSetted upon failure
         assert_eq!(PAIR_ENC_ENABLE.get(), false);
     }
 
@@ -4138,7 +4123,7 @@ mod tests {
         // Assert - Verify fallthrough path (lines 890-892)
         // `pair_par_init` really ran: the pairing state machine was reset to Init.
         assert_eq!(BLE_PAIR_ST.get(), PairState::Init);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted); // Line 891: PAIR_SETTING_FLAG set
         assert_eq!(PAIR_ENC_ENABLE.get(), false); // Line 892: PAIR_ENC_ENABLE cleared
     }
 
@@ -4620,7 +4605,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetting);
 
         // Verify mesh name was stored after decryption
         let pair_state = PAIR_STATE.lock();
@@ -4667,7 +4652,7 @@ mod tests {
 
         // Verify pairing accepted the mesh name and transitioned to next state
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshName);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetting);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetting);
     }
 
     #[test]
@@ -4791,7 +4776,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetMeshTxStart);
 
         // Verify mesh LTK was stored
         let pair_state = PAIR_STATE.lock();
@@ -4850,7 +4835,7 @@ mod tests {
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow, not the mesh LTK
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted);
 
         // Verify regular LTK was stored, not mesh LTK
         let pair_state = PAIR_STATE.lock();
@@ -4918,7 +4903,7 @@ mod tests {
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow even with 0x80 bit set, because mesh is disabled
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted);
 
         // Verify regular LTK was stored
         let pair_state = PAIR_STATE.lock();
@@ -4988,7 +4973,7 @@ mod tests {
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
 
         // Should use the normal LTK flow because packet is too short
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetted);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetted);
 
         // Verify regular LTK was stored
         let pair_state = PAIR_STATE.lock();
@@ -5059,7 +5044,7 @@ mod tests {
 
         // Assert
         assert_eq!(BLE_PAIR_ST.get(), PairState::ReceivingMeshLtk);
-        assert_eq!(*PAIR_SETTING_FLAG.lock(), ePairState::PairSetMeshTxStart);
+        assert_eq!(*PAIR_SETTING_FLAG.lock(), PairAuthState::PairSetMeshTxStart);
 
         // Verify mesh LTK was stored after decryption
         let pair_state = PAIR_STATE.lock();

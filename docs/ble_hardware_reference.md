@@ -455,30 +455,72 @@ From cold boot to BLE operational. Entry point: `main_entrypoint()` in `lib.rs`.
 
 ### 3.1 Boot Sequence (Numbered Steps)
 
-1. **OTA check** — `OtaManager::handle_ota_update()`. If a new firmware image exists at `FLASH_ADR_LIGHT_NEW_FW`, validate and swap it before proceeding.
-2. **CPU wakeup init** — `cpu_wakeup_init()`. Configures power rails and basic CPU state.
-3. **Create executor** — Instantiate the Embassy async executor.
-4. **Spawn main task** — `App::run(spawner)` becomes the main async entry.
+`main_entrypoint()` is referenced from the assembler bootstrap in `startup.rs`.
+
+1. **OTA recovery** — `ota::handle_ota_update()` (a free function in `ota/mod.rs`,
+   `#[link_section = ".ram_code"]`). Runs first, before any clock, task or
+   interrupt exists. If `FLASH_ADR_OTA_READY_FLAG` (0x3F000) reads
+   `FLASH_OTA_READY_FLAG` (0xA5), it enables the peripheral clocks and system
+   tick for the copy (`ota_enable_clocks_for_copy()`: `reg_rst1` = 0,
+   `reg_clk_en1` = 0xFF, `reg_system_tick_ctrl` = 0x01), masks interrupts,
+   copies the staged image from `FLASH_ADR_LIGHT_NEW_FW` page by page (erasing
+   each 4 KiB sector first), clears the ready flag, and latches an MCU reboot
+   (`reg_pwdn_ctrl` = `Reboot`). A flash bus stall returns *before* the flag is
+   cleared, so the copy is retried on the next boot.
+2. **CPU wakeup init** — `cpu_wakeup_init()` loads the 19-entry
+   `TBL_CPU_WAKEUP_INIT` table through `load_tbl_cmd_set()`: it releases the
+   module resets (`reg_rst0`–`reg_rst2` = 0), enables the peripheral clocks
+   (`reg_clk_en0`/`reg_clk_en1` = 0xFF), unlocks and re-locks `reg_func_id`,
+   starts TMR0 and the system tick, and applies the crystal-oscillator and
+   power-down trims (analog 0x05, 0x20, 0x2C, 0x2D, 0x81).
+3. **Create the executor** — `EXECUTOR.init(Executor::new())`. `EXECUTOR` is the
+   `static_cell::StaticCell<Executor>` in `lib.rs`; `Executor::new()` wraps
+   `embassy_executor::raw::Executor` with a null pender context.
+4. **Spawn the root task** — `executor.run(|spawner| spawner.spawn(app::main_task(spawner).unwrap()))`.
+   `Executor::run` never returns; it polls the root task and every task the root
+   task spawns later.
+
+The rest of the sequence runs inside `app::main_task` (the boot order is
+normative — design 018 §5):
+
 5. **Clock init** — `clock_init()`:
    1. Write `0xFF000000 | USB_EN` to `reg_rst_clk0` (0x060) — assert resets, enable USB clock.
-   2. Write clock source = `SEL_HS_DIV` (1), divider = 6 to `reg_clk_sel` (0x066) → 192 MHz ÷ 6 = 32 MHz.
-   3. Write `reg_tmr_ctrl` (0x620) — enable Timer 0, set watchdog capture = `2000 × 32000 >> 18`, enable watchdog.
+   2. Auto-detect the crystal: `detect_xtal_is_16mhz()` runs inside
+      `critical_section::with`. It saves `reg_clk_sel`, switches the source to
+      the crystal pad (`SEL_16M_PAD`, divider 0), aligns to a `32K_RC` tick
+      edge, counts system ticks over a fixed `32K_RC` window (~1 ms), restores
+      the saved `reg_clk_sel`, and caches the verdict in `IS_16MHZ_XTAL`
+      (`is_16mhz_xtal()`). A bounded or failed measurement reports 12 MHz so the
+      board still boots.
+   3. Write clock source = `SEL_HS_DIV` (1), divider = 6 to `reg_clk_sel` (0x066) → 192 MHz ÷ 6 = 32 MHz.
+   4. Write `reg_tmr_ctrl` (0x620) — enable Timer 0, set watchdog capture = `2000 × 32000 >> 18`, enable watchdog.
 6. **DMA init** — `dma_init()`: write 0 to `reg_dma_chn_irq_msk` (0x521) — disable all DMA IRQs.
 7. **GPIO init** — `gpio_init()`: for each port PA–PF:
    1. Write `setting1` register (input enable, output enable inverted, initial output).
    2. Write `setting2` register (drive strength, GPIO/peripheral function select).
    3. Write analog registers 0x0A–0x14 for pull-up/pull-down configuration (2 bits per pin via `analog_write()`).
 8. **IRQ init** — `irq_init()`: write `0x2002` (`TMR1_EN | ZB_RT_EN`) to `reg_irq_mask` (0x640).
-9. **UART init** — `uart::init()`.
-10. **RF driver init** — `rf_drv_init(true)`:
+9. **UART init and log wiring** — `uart::init()`, then `uart::set_tx_ops()` and
+   `uart::set_command_handler()`, then `logging::set_log_sinks()`. All three
+   precede the first log line, so the boot banner is not dropped.
+10. **Boot report** — `boot_init()` reports why the previous boot ended (clean,
+    watchdog or panic) and prints `Booting FW version <n>, xtal: 12MHz|16MHz`.
+11. **SDK seam registration** — every callback slot is filled *before*
+    `rf_drv_init(true)`: `set_ota_radio_ops()`, `set_ota_hooks()`,
+    `set_light_event_handler()`, `set_ble_app_hooks()`, `set_mesh_event_hooks()`
+    and `light::set_status_update_hook()`.
+12. **Radio config and GATT profile** — `set_radio_config(RADIO_CONFIG)` then
+    `init_gatt_profile(&RADIO_CONFIG)`, so the first advertisement carries the
+    vendor id and the first GATT read the configured names and version.
+13. **RF driver init** — `rf_drv_init(true)`:
     1. Read deep-sleep flag from analog register 0x3F, mask with 0x40.
-    2. Load all 61 entries from `TBL_RF_INI` — each entry is an `(address, data, command)` tuple written to the appropriate register or analog address (command 0xC3 = digital register write, command 0xC8 = analog register write).
-    3. Load 7 AGC table entries from `TBL_AGC` into `reg_rf_rx_gain_agc` (0x480, indexed).
+    2. Load the `TBL_RF_INI` entries — all 61 on a 16 MHz part, the first 57 on a 12 MHz part (selected by `is_16mhz_xtal()`); each entry is an `(address, data, command)` tuple written to the appropriate register or analog address (command 0xC3 = digital register write, command 0xC8 = analog register write).
+    3. Load the first 6 AGC table entries from `TBL_AGC` (7 defined; the loop takes 6) into `reg_rf_rx_gain_agc` (0x480, indexed).
     4. Read power calibration bytes from flash at `FLASH_ADR_MAC + 0x11` and `+ 0x12`. If valid (≠ 0xFF):
        - Set `RF_TP_BASE` from byte at offset 0x11.
        - Calculate `RF_TP_GAIN = ((RF_TP_BASE − 0x19) << 8) / 80` if base > 0x19, else 0.
        - Secondary calibration at offset 0x12 may override gain calculation.
-11. **User init** — `user_init()` → `rf_link_slave_init(interval)`:
+14. **User init** — `user_init()` → `rf_link_slave_init(interval)`:
     1. Call `blc_ll_init_basic_mcu()`:
        - `reg_rf_sys_timer_config` (0xF0A) = 700.
        - DMA2 address → `LIGHT_RX_BUFF[0]`, DMA2 control = 0x104.
@@ -503,10 +545,26 @@ From cold boot to BLE operational. Entry point: `main_entrypoint()` in `lib.rs`.
     14. Load group addresses from flash via `retrieve_dev_grp_address()`.
     15. Init mesh node table via `mesh_node_table_init()`.
     16. Write device info (MAC + build version + CRC16) to memory at 0x808004.
-12. **Spawn async tasks** — mesh sender, mesh receiver, light manager, panic checker.
-13. **Enable interrupts** — `irq_enable()`: write 1 to `reg_irq_en` (0x643).
-14. **Send boot notification** — broadcast `LGT_POWER_ON` mesh message to address 0xFFFF.
-15. **Enter main loop** — `loop { wd_clear(); main_loop(); }`.
+15. **Spawn the per-owner tasks** — `mesh_packet_sender`, `mesh_packet_rcv`,
+    `uart_receiver`, `uart_sender(&UART_TX_CHANNEL)`, `light_manager`,
+    `panic_check`. `uart_sender` parks on `started_signal` until the first valid
+    host frame arrives, so a headless light never retries DMA TX for the boot
+    banners.
+16. **Enable interrupts** — `irq_enable()`: write 1 to `reg_irq_en` (0x643).
+17. **Send boot notification** — broadcast `LGT_POWER_ON` mesh message to address 0xFFFF.
+18. **Enter the heartbeat loop** — `loop { HEARTBEAT += 1; wd_clear();
+    main_loop(&mut flash_store).await; uart::clear_error(); }`. `HEARTBEAT` is
+    the `AtomicU32` in `lib.rs`; `main_loop` awaits
+    `Timer::after(LOOP_INTERVAL_US)` and then runs `light_user_func`,
+    `rf_link_slave_proc` and `led_indicate_step`.
+19. **Idle stall** — when no task is runnable, `Executor::run` writes
+    `reg_pwdn_ctrl` (0x6F) = `0x80` (`FldPwdnCtrl::Sleep`) with the wakeup mask
+    set to `reg_irq_mask & 0x00FF_FFFF`. The core sleeps until an enabled
+    interrupt fires; in the idle case that is the TMR0 alarm the embassy time
+    driver arms for the next deadline (capped at 1 s). `EXECUTOR_POLLS` counts
+    loop iterations, `EXECUTOR_STALLS` counts parks, and
+    `EXECUTOR_LOST_WAKES` counts parks that returned with no enabled source
+    latched (see [swire.md](swire.md)).
 
 ### 3.2 RF Init Table (TBL_RF_INI) — Full Contents
 

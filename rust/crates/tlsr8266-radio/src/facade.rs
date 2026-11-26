@@ -31,6 +31,7 @@ use crate::rf::drv_8266::{
     MAC_ID, MESH_DEVICE_ADDRESS_VALIDATION_PENDING, PKT_TERMINATE,
 };
 use crate::types::MAX_GROUP_COUNT;
+#[cfg(not(target_os = "none"))]
 use mesh_protocol::packet_types::Packet;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::flash_write_page;
@@ -40,7 +41,7 @@ use tlsr8266_hal::mcu::crypto::encode_password;
 /// Types the facade signatures carry, re-exported so callers need no deeper
 /// import path.
 pub use crate::ble::pair::PairStateData;
-pub use crate::types::ePairState;
+pub use crate::types::PairAuthState;
 pub use mesh_protocol::packet_types::{AdvPrivate, AdvRspPrivate};
 
 // Same-purpose free functions already exist in the submodules; re-exporting
@@ -174,12 +175,12 @@ pub fn pair_credentials_snapshot() -> PairStateData {
 }
 
 /// Current mesh pairing FSM state.
-pub fn pair_setting_flag() -> ePairState {
+pub fn pair_setting_flag() -> PairAuthState {
     *PAIR_SETTING_FLAG.lock()
 }
 
 /// Move the mesh pairing FSM to `flag`.
-pub fn set_pair_setting_flag(flag: ePairState) {
+pub fn set_pair_setting_flag(flag: PairAuthState) {
     *PAIR_SETTING_FLAG.lock() = flag;
 }
 
@@ -346,7 +347,7 @@ pub fn reset_radio_state_for_test() {
     *PAIR_STATE.lock() = crate::ble::pair::DEFAULT_PAIR_STATE;
     PAIR_LOGIN_OK.set(false);
     PAIR_AC.set(0);
-    *PAIR_SETTING_FLAG.lock() = ePairState::PairSetted;
+    *PAIR_SETTING_FLAG.lock() = PairAuthState::PairSetted;
     SECURITY_ENABLE.set(false);
     MESH_PAIR_ENABLE.set(false);
     BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);

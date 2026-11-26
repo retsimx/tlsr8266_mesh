@@ -291,7 +291,7 @@ impl Parser {
 /// Every protocol struct now lives in `mesh-protocol` and is size-asserted
 /// there; the light manager's persisted luminance record is firmware-owned.
 fn struct_size_expectations() -> Vec<(&'static str, usize)> {
-    vec![("size.LumSaveT", size_of::<crate::light::LumSaveT>())]
+    vec![("size.LumSaveT", size_of::<crate::light::LuminanceRecord>())]
 }
 
 fn read_struct_sizes(p: &mut Parser) {

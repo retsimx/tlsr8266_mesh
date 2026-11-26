@@ -86,7 +86,7 @@ pub fn configure_ble_receive_state() {
     SLAVE_NEXT_CONNECT_TICK.set(SLAVE_LINK_INTERVAL.get() + read_reg_system_tick_irq());
 
     // Configure interrupt timing based on operational mode
-    if dispatch_ota_snapshot().in_progress == false {
+    if !dispatch_ota_snapshot().in_progress {
         // Normal operation: use window size or minimum timing (0xed8 = ~3.8ms)
         if SLAVE_WINDOW_SIZE.get() == 0 || SLAVE_WINDOW_SIZE.get() <= CLOCK_SYS_CLOCK_1US * 0xed8 {
             write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());

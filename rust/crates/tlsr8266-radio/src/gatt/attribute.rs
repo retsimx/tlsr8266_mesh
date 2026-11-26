@@ -1146,8 +1146,12 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
                     format_length = attr_len;
                 }
 
-                // Calculate end handle based on attribute's att_num field
-                let group_end_handle = ((current_handle - 1) + found_attr.att_num as usize) as u16;
+                // Calculate end handle based on attribute's att_num field. A
+                // zero-span entry (the CCC records `att_num == 0`) still spans
+                // its own handle, so the group ends at `current_handle` rather
+                // than below its start.
+                let group_span = (found_attr.att_num as usize).max(1);
+                let group_end_handle = ((current_handle - 1) + group_span) as u16;
 
                 // Add start handle to response (2 bytes)
                 response.att_read_rsp_mut().value[entry_start] = (current_handle & 0xff) as u8;
@@ -1174,8 +1178,10 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
                 // cannot be expressed in 16-bit units.
                 written += 4 + attr_len;
 
-                // Move start handle beyond current group to search for next group
-                handle_start = current_handle + found_attr.att_num as usize;
+                // Move start handle beyond current group to search for next
+                // group. Advance by at least one handle so a zero-span match
+                // cannot be rediscovered.
+                handle_start = current_handle + group_span;
 
                 // Check if we've reached the end of the requested range
                 if handle_start > handle_end {
@@ -4477,5 +4483,45 @@ mod tests {
         // Leave the process-wide configuration as it was found.
         crate::facade::set_radio_config(factory);
         crate::gatt::service_table::init_gatt_profile(&factory);
+    }
+
+    /// Regression for tech-debt row #61: the CCC at handle 19 is declared with a
+    /// zero group span (`att_num == 0`), and `ReadByGroupType` computed the group
+    /// end as `(current_handle - 1) + att_num` and advanced by `att_num`. A match
+    /// on handle 19 therefore reported end handle 18 — below its own start — and
+    /// the same handle was matched again until the response buffer filled.
+    #[test]
+    fn test_read_by_group_type_ccc_zero_span_terminates() {
+        seed_system_tick();
+
+        // The CCC records `att_num == 0`; the table must be left as declared.
+        assert_eq!(get_g_attributes()[19].att_num, 0);
+
+        let response =
+            handle_read_by_group_type_request(&read_by_group_type_packet(1, 28, 0x2902)).unwrap();
+
+        // A single, well-formed entry: the zero-span group ends at its own
+        // handle, so the end is never below the start.
+        assert_eq!(
+            response.att_read_rsp().opcode,
+            GattOp::AttOpReadByGroupTypeRsp as u8
+        );
+        let value = response.att_read_rsp().value;
+        assert_eq!(value[0], 2 + 4, "2 CCC bytes + two 2-byte handles");
+        assert_eq!(&value[1..7], &[19, 0, 19, 0, 0x01, 0x00]);
+
+        // The handler stopped after the single match instead of re-matching 19.
+        assert!(value[7..].iter().all(|byte| *byte == 0));
+
+        // The header lengths agree with the one entry actually written.
+        let l2cap_len = response.head().l2cap_len;
+        let rf_len = response.head().rf_len;
+        let dma_len = response.head().dma_len;
+        assert_eq!(l2cap_len, 8, "opcode + format + one 6-byte entry");
+        assert_eq!(rf_len, 12);
+        assert_eq!(dma_len, 14);
+
+        // The table was not mutated by the call.
+        assert_eq!(get_g_attributes()[19].att_num, 0);
     }
 }

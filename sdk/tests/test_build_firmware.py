@@ -67,7 +67,52 @@ OPT_SAFE_LITERAL = (
     "loop-simplify,lcssa,loop-rotate,loop-mssa(licm),"
     "instcombine<no-verify-fixpoint>,simplifycfg,adce,dse"
 )
-OPT_PASSES_LITERAL = "default<O2>,mergefunc,constmerge,globaldce"
+OPT_PASSES_LITERAL = "internalize,default<O2>,mergefunc,constmerge,globaldce"
+OPT_INLINE_THRESHOLD_LITERAL = 50
+PRESERVE_ROOTS_LITERAL = (
+    "__start",
+    "__reset",
+    "__irq",
+    "irq_handler",
+    "main_entrypoint",
+    "startup_init",
+    "HEARTBEAT",
+    "irq_stk",
+    "_TLSR_RTT",
+    "__pender",
+    "_critical_section_1_0_acquire",
+    "_critical_section_1_0_release",
+    "panic",
+    "panic_fmt",
+    "panic_bounds_check",
+    "panic_cannot_unwind",
+    "rust_begin_unwind",
+    "rust_eh_personality",
+    "_Unwind_Resume",
+    "__rust_start_panic",
+    "abort",
+    "memcpy",
+    "memmove",
+    "memset",
+    "memcmp",
+    "tlsr8266_l2cap_att_handler",
+    "tlsr8266_mesh_status_write",
+    "tlsr8266_rf_link_slave_data_write",
+    "tlsr8266_dispatch_ota_write",
+    "tlsr8266_pair_write",
+    "tlsr8266_pair_read",
+    "tlsr8266_enqueue_mesh_rx",
+    "tlsr8266_enqueue_mesh_tx",
+    "tlsr8266_handle_system_interrupts",
+)
+PRESERVE_REGEXES_LITERAL = (
+    r"^__aeabi_[A-Za-z0-9_]+$",
+    r"^_critical_section_[0-9]+_[0-9]+_(?:acquire|release)$",
+    r"^_R(?:N|I)v.*4core9panicking(?:[0-9]+)(?:panic_fmt|panic_bounds_check|panic_cannot_unwind)$",
+    r"^_R(?:N|I)v.*(?:[0-9]+)?rust_(?:begin_unwind|eh_personality)$",
+    r"^(?:rust_begin_unwind|rust_eh_personality|__rust_start_panic)$",
+    r"^_Unwind_[A-Za-z0-9_]+$",
+)
 
 
 def _write(path: Path, content: str | bytes = b"x\n") -> Path:
@@ -169,7 +214,9 @@ class TestFeatureSelection(unittest.TestCase):
 
 class TestToolTable(unittest.TestCase):
     def test_pipeline_is_llvm_only(self) -> None:
-        self.assertEqual(build_firmware.SCHEMA_VERSION, 3)
+        self.assertEqual(build_firmware.SCHEMA_VERSION, 4)
+        self.assertEqual(build_firmware.OPT_PASSES, OPT_PASSES_LITERAL)
+        self.assertEqual(build_firmware.OPT_INLINE_THRESHOLD, OPT_INLINE_THRESHOLD_LITERAL)
         self.assertEqual(
             build_firmware.TOOL_ORDER, ("llc", "llvm_link", "opt", "ld", "objcopy")
         )
@@ -614,7 +661,7 @@ class TestManifestAndCache(_RepoCase):
 
     def test_manifest_shape_is_llvm_only(self) -> None:
         baseline = self.compute()
-        self.assertEqual(baseline["schema_version"], 3)
+        self.assertEqual(baseline["schema_version"], 4)
         self.assertEqual(baseline["build_version"], 3543)
         self.assertEqual(set(baseline), {
             "schema_version",
@@ -628,11 +675,17 @@ class TestManifestAndCache(_RepoCase):
             "flags",
         })
         self.assertEqual(list(baseline["tools"]), list(build_firmware.TOOL_ORDER))
+        resolved_literal = sorted(PRESERVE_ROOTS_LITERAL)
+        api_literal = "".join(f"{name}\n" for name in resolved_literal)
         self.assertEqual(
             baseline["flags"],
             {
-                "opt_passes": build_firmware.OPT_PASSES,
-                "opt_inline_threshold": build_firmware.OPT_INLINE_THRESHOLD,
+                "opt_passes": OPT_PASSES_LITERAL,
+                "opt_inline_threshold": OPT_INLINE_THRESHOLD_LITERAL,
+                "preserve_roots": resolved_literal,
+                "preserve_regexes": list(PRESERVE_REGEXES_LITERAL),
+                "resolved_preserve_roots": resolved_literal,
+                "resolved_preserve_roots_sha256": hashlib.sha256(api_literal.encode()).hexdigest(),
                 "llc_flags": build_firmware.LLC_FLAGS,
                 "ldflags": build_firmware.LLD_FLAGS,
             },
@@ -677,6 +730,20 @@ class TestManifestAndCache(_RepoCase):
             with mock.patch.object(build_firmware, "OPT_PASSES", changed):
                 self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
 
+        with self.subTest("OPT_INLINE_THRESHOLD"):
+            with mock.patch.object(build_firmware, "OPT_INLINE_THRESHOLD", 49):
+                self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
+
+        with self.subTest("OPT_PRESERVE_ROOTS"):
+            changed_roots = (*build_firmware.OPT_PRESERVE_ROOTS, "extra_preserve_root")
+            with mock.patch.object(build_firmware, "OPT_PRESERVE_ROOTS", changed_roots):
+                self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
+
+        with self.subTest("OPT_PRESERVE_ROOT_REGEXES"):
+            changed_regexes = (*build_firmware.OPT_PRESERVE_ROOT_REGEXES, r"^extra_[A-Za-z0-9_]+$")
+            with mock.patch.object(build_firmware, "OPT_PRESERVE_ROOT_REGEXES", changed_regexes):
+                self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
+
         with self.subTest("LLD_FLAGS"):
             with mock.patch.object(build_firmware, "LLD_FLAGS", "--tc32 --gc-sections"):
                 self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
@@ -696,6 +763,71 @@ class TestManifestAndCache(_RepoCase):
             opt = self.tools["opt"]
             opt.write_bytes(opt.read_bytes() + b"# grow\n")
             self.assertFalse(build_firmware.manifests_equal(baseline, self.compute()))
+
+    def test_literal_preserve_contract_and_narrow_resolution(self) -> None:
+        self.assertEqual(tuple(build_firmware.OPT_PRESERVE_ROOTS), PRESERVE_ROOTS_LITERAL)
+        self.assertEqual(tuple(build_firmware.OPT_PRESERVE_ROOT_REGEXES), PRESERVE_REGEXES_LITERAL)
+
+        synthetic = _write(
+            self.repo / "synthetic.ll",
+            "\n".join(
+                [
+                    "define void @__aeabi_memcpy4() { ret void }",
+                    "declare i8 @_critical_section_1_0_acquire()",
+                    "declare void @_RNvNtCsgudHjhsztDx_4core9panicking5panic_fmt()",
+                    "declare void @_RNvNtCsgudHjhsztDx_4core9panicking18panic_bounds_check()",
+                    "declare void @_RNvNtCsgudHjhsztDx_4core9panicking20panic_cannot_unwind()",
+                    "declare void @_RNvCsk71k48rTdWK_7___rustc17rust_begin_unwind()",
+                    "declare void @rust_eh_personality()",
+                    "declare void @_Unwind_Resume()",
+                    "declare i32 @memcmp(ptr, ptr, i32)",
+                    "declare void @tlsr8266_l2cap_att_handler()",
+                    "declare void @tlsr8266_mesh_status_write()",
+                    "declare void @tlsr8266_pair_write()",
+                    "declare void @_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg()",
+                    "declare void @_RNvNtNtCsgudHjhsztDx_4core9panicking11panic_const23panic_const_rem_by_zero()",
+                    "define void @unrelated_public_symbol() { ret void }",
+                ]
+            )
+            + "\n",
+        )
+        resolved = build_firmware.resolve_preserve_roots([synthetic])
+        self.assertIn("__aeabi_memcpy4", resolved)
+        self.assertIn("_critical_section_1_0_acquire", resolved)
+        self.assertIn("_RNvNtCsgudHjhsztDx_4core9panicking5panic_fmt", resolved)
+        self.assertIn("_RNvNtCsgudHjhsztDx_4core9panicking18panic_bounds_check", resolved)
+        self.assertIn("_RNvNtCsgudHjhsztDx_4core9panicking20panic_cannot_unwind", resolved)
+        self.assertIn("_RNvCsk71k48rTdWK_7___rustc17rust_begin_unwind", resolved)
+        self.assertIn("rust_eh_personality", resolved)
+        self.assertIn("_Unwind_Resume", resolved)
+        self.assertIn("memcmp", resolved)
+        self.assertIn("tlsr8266_l2cap_att_handler", resolved)
+        self.assertIn("tlsr8266_mesh_status_write", resolved)
+        self.assertIn("tlsr8266_pair_write", resolved)
+        self.assertNotIn("_RNvNtNtCs7TpBKVb4AXc_14tlsr8266_radio4gatt9attribute17l2cap_att_handler", resolved)
+        self.assertNotIn("_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg", resolved)
+        self.assertNotIn("_RNvNtNtCsgudHjhsztDx_4core9panicking11panic_const23panic_const_rem_by_zero", resolved)
+        self.assertNotIn("unrelated_public_symbol", resolved)
+
+        stage = self.out / "default"
+        api = build_firmware.write_opt_public_api_file(stage, [synthetic])
+        self.assertEqual(api, stage / "opt_preserve_api.txt")
+        self.assertEqual(api.read_text(encoding="utf-8").splitlines(), resolved)
+
+    def test_resolved_preserve_roots_invalidate_cache_and_hash_file(self) -> None:
+        baseline = self.compute()
+        original_ll = self.ll_a.read_bytes()
+        self.ll_a.write_bytes(original_ll + b"\ndeclare void @__aeabi_extra()\n")
+        changed = self.compute()
+        self.assertFalse(build_firmware.manifests_equal(baseline, changed))
+        self.assertIn("__aeabi_extra", changed["flags"]["resolved_preserve_roots"])
+        rendered = "".join(
+            f"{name}\n" for name in changed["flags"]["resolved_preserve_roots"]
+        )
+        self.assertEqual(
+            changed["flags"]["resolved_preserve_roots_sha256"],
+            hashlib.sha256(rendered.encode()).hexdigest(),
+        )
 
     def test_cache_hit_skips_pipeline(self) -> None:
         stage = self.out / "default"
@@ -857,6 +989,7 @@ class TestPipelineCommands(_TempCase):
                 "obj": str(stage / "merged.o"),
                 "elf": str(stage / "lightblemesh"),
                 "bin": str(stage / "lightblemesh.bin"),
+                "preserve_api": str(stage / "opt_preserve_api.txt"),
             },
         )
 
@@ -880,6 +1013,7 @@ class TestPipelineCommands(_TempCase):
                     "/tools/opt",
                     f"-passes={OPT_PASSES_LITERAL}",
                     "-inline-threshold=50",
+                    f"-internalize-public-api-file={stage / 'opt_preserve_api.txt'}",
                     str(stage / "merged.bc"),
                     "-o",
                     str(stage / "merged_opt.bc"),
@@ -923,6 +1057,19 @@ class TestPipelineCommands(_TempCase):
         with self.subTest("ld.lld links the single merged object"):
             self.assertEqual(commands[3][1][-1], str(stage / "merged.o"))
             self.assertIn("--tc32", commands[3][1])
+        with self.subTest("internalize is the only inlining boundary"):
+            opt_argv = commands[1][1]
+            opt_passes = next(
+                arg[len("-passes=") :]
+                for arg in opt_argv
+                if arg.startswith("-passes=")
+            )
+            self.assertEqual(opt_passes, OPT_PASSES_LITERAL)
+            self.assertIn("-inline-threshold=50", opt_argv)
+            self.assertNotIn("always-inline", opt_passes)
+            self.assertNotIn("inline", opt_passes)
+            self.assertNotRegex(opt_passes, r"(?:^|,)strip(?:-|,|$)")
+            self.assertNotRegex(opt_passes, r"(?:^|,)strip-dead")
 
 
 class TestBuildVersion(_RepoCase):

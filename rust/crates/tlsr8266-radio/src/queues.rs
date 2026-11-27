@@ -113,6 +113,7 @@ pub(crate) fn count_drop(counter: &AtomicU32) {
 /// Queue a mesh packet for the RX task.
 ///
 /// Returns `false` when the channel is full and the packet was dropped.
+#[export_name = "tlsr8266_enqueue_mesh_rx"]
 pub fn enqueue_mesh_rx(pkt: &Packet) -> bool {
     if MESH_RX_CHANNEL.try_send(*pkt).is_ok() {
         true
@@ -130,6 +131,7 @@ pub fn enqueue_mesh_rx(pkt: &Packet) -> bool {
 ///
 /// The wake is signalled after the queue guard is released so no interrupt-mask
 /// is held while touching the signal.
+#[export_name = "tlsr8266_enqueue_mesh_tx"]
 pub fn enqueue_mesh_tx(pkt: &Packet, delay: u64, send_count: u8) -> bool {
     let pushed = {
         let mut queue = MESH_TX_QUEUE.lock();

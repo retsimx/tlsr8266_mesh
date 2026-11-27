@@ -256,6 +256,7 @@ pub fn l2cap_att_search(
 /// * For attributes with read/write callbacks, the callback function is responsible for processing
 ///   the request and generating any response.
 /// * Special handling is implemented for OTA (Over-The-Air) updates and specific attribute handles.
+#[export_name = "tlsr8266_l2cap_att_handler"]
 pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
     // Check if this is an MTU exchange response packet (opcode & 3 = 3)
     // MTU exchange responses have special handling for connection setup

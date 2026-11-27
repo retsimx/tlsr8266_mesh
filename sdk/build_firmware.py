@@ -68,7 +68,7 @@ from typing import TextIO
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TARGET = "lightblemesh"
 DEFAULT_MANIFEST = "rust/Cargo.toml"
 DEFAULT_OUT_DIR = "_build"
@@ -82,7 +82,61 @@ OPT_INLINE_THRESHOLD = 50
 # monomorphisations and `constmerge`/`globaldce` drop duplicate constants and
 # unreachable globals. There is no separate linker LTO step: every crate
 # (including `core`) is linked into this one module before it is optimised.
-OPT_PASSES = "default<O2>,mergefunc,constmerge,globaldce"
+OPT_PASSES = "internalize,default<O2>,mergefunc,constmerge,globaldce"
+
+# The internalize public-API contract. Exact entries cover ABI, startup, IRQ,
+# diagnostics/RTT, and runtime/libcall names that must survive whole-program
+# optimization. Regex entries are deliberately narrow: they resolve only the
+# emitted compiler-builtin, critical-section, and Rust panic/runtime families.
+OPT_PRESERVE_ROOTS = (
+    "__start",
+    "__reset",
+    "__irq",
+    "irq_handler",
+    "main_entrypoint",
+    "startup_init",
+    "HEARTBEAT",
+    "irq_stk",
+    "_TLSR_RTT",
+    "__pender",
+    "_critical_section_1_0_acquire",
+    "_critical_section_1_0_release",
+    "panic",
+    "panic_fmt",
+    "panic_bounds_check",
+    "panic_cannot_unwind",
+    "rust_begin_unwind",
+    "rust_eh_personality",
+    "_Unwind_Resume",
+    "__rust_start_panic",
+    "abort",
+    "memcpy",
+    "memmove",
+    "memset",
+    "memcmp",
+    # Stable namespaced ABI anchors for strict GATT/resolver evidence. These
+    # replace Rust-v0 mangled-name fragments and are exported by the firmware
+    # source with #[export_name = ...].
+    "tlsr8266_l2cap_att_handler",
+    "tlsr8266_mesh_status_write",
+    "tlsr8266_rf_link_slave_data_write",
+    "tlsr8266_dispatch_ota_write",
+    "tlsr8266_pair_write",
+    "tlsr8266_pair_read",
+    "tlsr8266_enqueue_mesh_rx",
+    "tlsr8266_enqueue_mesh_tx",
+    "tlsr8266_handle_system_interrupts",
+)
+OPT_PRESERVE_ROOT_REGEXES = (
+    r"^__aeabi_[A-Za-z0-9_]+$",
+    r"^_critical_section_[0-9]+_[0-9]+_(?:acquire|release)$",
+    r"^_R(?:N|I)v.*4core9panicking(?:[0-9]+)(?:panic_fmt|panic_bounds_check|panic_cannot_unwind)$",
+    r"^_R(?:N|I)v.*(?:[0-9]+)?rust_(?:begin_unwind|eh_personality)$",
+    r"^(?:rust_begin_unwind|rust_eh_personality|__rust_start_panic)$",
+    r"^_Unwind_[A-Za-z0-9_]+$",
+)
+OPT_PRESERVE_API_NAME = "opt_preserve_api.txt"
+
 LLC_FLAGS = "-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6,+tc32"
 LLD_FLAGS = "--tc32 --gc-sections -T ./sdk/boot.link"
 
@@ -652,11 +706,62 @@ def _tool_entry(path: Path) -> dict[str, object]:
     return {"path": str(tool), "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
 
 
-def _flags_block() -> dict[str, object]:
-    """The flag strings that participate in cache invalidation."""
+LLVM_SYMBOL_RE = re.compile(r'@(?:"([^"]+)"|([A-Za-z0-9_.$-]+))')
+
+
+def resolve_preserve_roots(ll_paths: Sequence[Path]) -> list[str]:
+    """Resolve the exact roots and narrow emitted-name patterns against linked IR."""
+    resolved = set(OPT_PRESERVE_ROOTS)
+    linked_names: set[str] = set()
+    for ll_path in ll_paths:
+        source = Path(ll_path)
+        try:
+            text = source.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise BuildError(
+                f"cannot read linked IR for preserve-root resolution: {source}: {exc}",
+                exit_code=2,
+            ) from exc
+        for match in LLVM_SYMBOL_RE.finditer(text):
+            name = match.group(1) or match.group(2)
+            if name:
+                linked_names.add(name)
+
+    compiled = tuple(re.compile(pattern) for pattern in OPT_PRESERVE_ROOT_REGEXES)
+    for name in linked_names:
+        if any(pattern.search(name) is not None for pattern in compiled):
+            resolved.add(name)
+    return sorted(resolved)
+
+
+def render_opt_public_api(resolved_roots: Sequence[str]) -> str:
+    """Render a one-symbol-per-line LLVM opt public-API file."""
+    return "".join(f"{name}\n" for name in sorted(set(resolved_roots)))
+
+
+def write_opt_public_api_file(stage_dir: Path, ll_paths: Sequence[Path]) -> Path:
+    """Generate the per-feature file consumed by llvm opt's internalize pass."""
+    destination = Path(stage_dir) / OPT_PRESERVE_API_NAME
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        render_opt_public_api(resolve_preserve_roots(ll_paths)), encoding="utf-8"
+    )
+    return destination
+
+
+def _flags_block(ll_paths: Sequence[Path] = ()) -> dict[str, object]:
+    """The pipeline/preserve contract strings that participate in cache invalidation."""
+    resolved = resolve_preserve_roots(ll_paths)
+    rendered_api = render_opt_public_api(resolved)
     return {
         "opt_passes": OPT_PASSES,
         "opt_inline_threshold": OPT_INLINE_THRESHOLD,
+        "preserve_roots": sorted(set(OPT_PRESERVE_ROOTS)),
+        "preserve_regexes": list(OPT_PRESERVE_ROOT_REGEXES),
+        "resolved_preserve_roots": resolved,
+        "resolved_preserve_roots_sha256": hashlib.sha256(
+            rendered_api.encode("utf-8")
+        ).hexdigest(),
         "llc_flags": LLC_FLAGS,
         "ldflags": LLD_FLAGS,
     }
@@ -687,7 +792,7 @@ def compute_manifest(
         "linker_script_sha256": _sha256(linker_script),
         "tools": {name: _tool_entry(tools[name]) for name in TOOL_ORDER},
         "toolchain": dict(toolchain) if toolchain is not None else {},
-        "flags": _flags_block(),
+        "flags": _flags_block(ll_paths),
     }
 
 
@@ -809,6 +914,7 @@ def _stage_paths(stage_dir: Path) -> dict[str, str]:
         "obj": str(stage / "merged.o"),
         "elf": str(stage / TARGET),
         "bin": str(stage / f"{TARGET}.bin"),
+        "preserve_api": str(stage / OPT_PRESERVE_API_NAME),
     }
 
 
@@ -831,6 +937,7 @@ def _pipeline_commands(
                 str(tools["opt"]),
                 f"-passes={OPT_PASSES}",
                 f"-inline-threshold={OPT_INLINE_THRESHOLD}",
+                f"-internalize-public-api-file={paths['preserve_api']}",
                 paths["bc"],
                 "-o",
                 paths["opt_bc"],
@@ -947,6 +1054,7 @@ def _run_build(args: argparse.Namespace) -> int:
     build_inputs = _build_inputs(repo_root)
     stage_dir = out_root / slug
     stage = _stage_paths(stage_dir)
+    write_opt_public_api_file(stage_dir, ll_paths)
 
     manifest = compute_manifest(
         features,

@@ -62,6 +62,7 @@ pub extern "C" fn irq_handler() {
 
 /// Handles lower-priority system and application interrupts.
 /// Marked `#[inline(never)]` to keep the main interrupt handler small and fast.
+#[export_name = "tlsr8266_handle_system_interrupts"]
 #[inline(never)]
 fn handle_system_interrupts() {
     // Get system interrupt sources

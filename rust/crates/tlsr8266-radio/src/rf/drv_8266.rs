@@ -884,6 +884,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
  * @param data - Reference to the received packet data
  * @return true if packet was processed successfully, false otherwise
  */
+#[export_name = "tlsr8266_rf_link_slave_data_write"]
 pub fn rf_link_slave_data_write(data: &Packet) {
     let mut data: Packet = *data;
 

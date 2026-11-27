@@ -1007,6 +1007,7 @@ pub fn pair_set_key(key: &[u8]) {
 /// has been received and needs to be processed by the pair_proc function.
 ///
 /// @param _ Unused packet parameter
+#[export_name = "tlsr8266_pair_read"]
 pub fn pair_read(_: &Packet) {
     PAIR_READ_PENDING.set(true);
 }
@@ -1036,6 +1037,7 @@ pub fn pair_read(_: &Packet) {
 ///
 /// @param data Packet containing the pairing command
 /// Processing pair_write commands always completes; the function has void return.
+#[export_name = "tlsr8266_pair_write"]
 pub fn pair_write(data: &Packet) {
     let pktdata = &data.att_val().value;
     let opcode = pktdata[0];

@@ -175,6 +175,7 @@ static SPP_OTANAME: &[u8] = b"OTA";
 static SPP_PAIRNAME: &[u8] = b"Pair";
 static SPP_DEVICENAME: &[u8] = b"DevName";
 
+#[export_name = "tlsr8266_mesh_status_write"]
 fn mesh_status_write(p: &Packet) {
     if !PAIR_LOGIN_OK.get() {
         return;

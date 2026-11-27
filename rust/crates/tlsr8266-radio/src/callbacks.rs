@@ -214,6 +214,7 @@ fn ota_hooks_or_panic() -> OtaHooks {
 /// Delivers one GATT OTA write through the hook.
 ///
 /// `#[inline(never)]`: see [`on_mesh_pair_proc`].
+#[export_name = "tlsr8266_dispatch_ota_write"]
 #[inline(never)]
 pub fn dispatch_ota_write(p: &Packet) {
     let hooks = ota_hooks_or_panic();

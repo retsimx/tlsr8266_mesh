@@ -831,6 +831,7 @@ pub fn reset_for_test() {
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
+    use super::protocol::CTRL_FINGERPRINT_RANGE;
     use super::*;
     use core::future::Future;
     use core::sync::atomic::AtomicUsize;
@@ -838,11 +839,17 @@ mod tests {
     use futures::task::noop_waker;
     use mesh_protocol::crc::crc16;
     use mesh_protocol::packet_types::{PacketL2capHead, PacketLlApp};
+    use mesh_protocol::uart::{UART_CRC_OFFSET, UART_PAYLOAD_OFFSET};
     use std::sync::Mutex as StdMutex;
     use std::task::{Context, Poll};
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_radio::queues::UART_TX_CHANNEL;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/rust_parser.rs"
+    ));
 
     /// `reg_dma_rx_rdy0`: DMA/UART interrupt flags, write-1-to-clear.
     const REG_DMA_RX_RDY0: u32 = 0x526;
@@ -963,6 +970,90 @@ mod tests {
     /// dispatches `HostAttached`.
     fn start_bridge() {
         UART_SENDER_STARTED.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn compatibility_fixture_pins_light_ctrl_status_and_node_status_layout() {
+        let source = include_str!("../../../tests/fixtures/mesh_uart_compat.txt");
+        let mut p = Parser::parse(source).unwrap();
+
+        assert_eq!(p.u8("uart.packet_length").unwrap(), UART_DATA_LEN as u8);
+        assert_eq!(
+            p.u8("uart.payload_offset").unwrap(),
+            UART_PAYLOAD_OFFSET as u8
+        );
+        assert_eq!(p.u8("uart.crc_offset").unwrap(), UART_CRC_OFFSET as u8);
+        assert_eq!(
+            p.u8("uart.op.light_ctrl").unwrap(),
+            u8::from(UartMsg::LightCtrl)
+        );
+        assert_eq!(
+            p.u8("uart.op.light_status").unwrap(),
+            u8::from(UartMsg::LightStatus)
+        );
+        assert_eq!(
+            p.u8("uart.op.node_status").unwrap(),
+            u8::from(UartMsg::NodeStatus)
+        );
+
+        assert_eq!(
+            p.u8("uart.light_ctrl.dst_start").unwrap(),
+            CTRL_DESTINATION_RANGE.start as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.dst_end").unwrap(),
+            CTRL_DESTINATION_RANGE.end as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.payload_start").unwrap(),
+            CTRL_PAYLOAD_RANGE.start as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.payload_end").unwrap(),
+            CTRL_PAYLOAD_RANGE.end as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.retransmit_offset").unwrap(),
+            CTRL_RETRANSMIT_INDEX as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.ack_offset").unwrap(),
+            CTRL_ACK_FLAG_INDEX as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.fingerprint_start").unwrap(),
+            CTRL_FINGERPRINT_RANGE.start as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.fingerprint_end").unwrap(),
+            CTRL_FINGERPRINT_RANGE.end as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.ack_sno_start").unwrap(),
+            SNO_RANGE.start as u8
+        );
+        assert_eq!(
+            p.u8("uart.light_ctrl.ack_sno_end").unwrap(),
+            SNO_RANGE.end as u8
+        );
+
+        let frame = light_ctrl_frame();
+        assert_eq!(
+            fingerprint(&frame).len(),
+            p.u8("uart.light_ctrl.fingerprint_len").unwrap() as usize
+        );
+        let sno = [0xaa, 0xbb, 0xcc];
+        let ack = protocol::build_ack(&frame, sno);
+        assert_eq!(ack.data[1], p.u8("uart.op.ack").unwrap());
+        assert_eq!(ack.data[SNO_RANGE], sno);
+
+        assert!(p.bool("uart.light_status.platform_enable").unwrap());
+        assert!(p.bool("uart.light_status.zero_sno_ack").unwrap());
+        assert!(p.bool("uart.light_status.enable_mesh_reporting").unwrap());
+        assert!(p.bool("uart.light_status.enable_uart_reporting").unwrap());
+        assert_eq!(p.u8("uart.node_status_entry_len").unwrap(), 3);
+        assert_eq!(p.u8("uart.node_status_max_entries").unwrap(), 13);
+        assert!(p.bool("uart.node_status.on_off_from_par0").unwrap());
     }
 
     #[test]

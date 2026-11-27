@@ -1523,6 +1523,10 @@ fn handle_write_request_or_command(view: WriteRequestView<'_>) -> Option<Packet>
 #[coverage(off)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/rust_parser.rs"
+    ));
     use crate::gatt::service_table::{
         get_g_attributes, GATT_UUID_CHARACTER, GATT_UUID_CHAR_USER_DESC, GATT_UUID_PRIMARY_SERVICE,
         TELINK_SPP_DATA_SERVER2CLIENT_UUID,
@@ -1695,6 +1699,25 @@ mod tests {
 
     fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         write_request_view(packet).and_then(super::handle_write_request_or_command)
+    }
+
+    fn write_packet(opcode: u8, handle: u16, payload: &[u8]) -> Packet {
+        let mut packet = Packet {
+            l2cap_data: PacketL2capData {
+                l2cap_len: payload.len() as u16 + 3,
+                chan_id: 4,
+                opcode,
+                handle: 4,
+                handle1: handle as u8,
+                value: [0; 30],
+            },
+        };
+        packet.l2cap_data_mut().value[1] = 4;
+        packet.l2cap_data_mut().value[3] = opcode;
+        packet.l2cap_data_mut().value[4] = handle as u8;
+        packet.l2cap_data_mut().value[5] = (handle >> 8) as u8;
+        packet.l2cap_data_mut().value[6..6 + payload.len()].copy_from_slice(payload);
+        packet
     }
 
     #[test]
@@ -2423,8 +2446,9 @@ mod tests {
                 (*(addr_of_mut!(get_g_attributes()[test_attr_idx]))).w = None;
             }
 
-            // Backup the original value of the previous attribute
+            // Backup the original pointer and value of the previous attribute.
             let prev_attr_idx = test_attr_idx - 1;
+            let original_prev_attr_ptr = get_g_attributes()[prev_attr_idx].p_attr_value;
             let original_prev_attr_value =
                 unsafe { *get_g_attributes()[prev_attr_idx].p_attr_value };
 
@@ -2454,10 +2478,12 @@ mod tests {
                 "Write to attribute with no write permission in previous attr should be rejected"
             );
 
-            // Restore original write callback
+            // Restore both original pointers before the temporary permission
+            // values leave scope.
             unsafe {
                 (*(addr_of_mut!(get_g_attributes()[test_attr_idx]))).w = original_write_callback;
-                // We don't need to restore prev_attr_value since we never modified the actual memory
+                (*(addr_of_mut!(get_g_attributes()[prev_attr_idx]))).p_attr_value =
+                    original_prev_attr_ptr;
             }
         }
 
@@ -2483,8 +2509,9 @@ mod tests {
                 (*(addr_of_mut!(get_g_attributes()[test_attr_idx]))).w = None;
             }
 
-            // Backup the original value of the previous attribute
+            // Backup the original pointer and value of the previous attribute.
             let prev_attr_idx = test_attr_idx - 1;
+            let original_prev_attr_ptr = get_g_attributes()[prev_attr_idx].p_attr_value;
             let original_prev_attr_value =
                 unsafe { *get_g_attributes()[prev_attr_idx].p_attr_value };
 
@@ -2518,10 +2545,12 @@ mod tests {
                 GattOp::AttOpWriteRsp as u8
             );
 
-            // Restore original write callback
+            // Restore both original pointers before the temporary permission
+            // values leave scope.
             unsafe {
                 (*(addr_of_mut!(get_g_attributes()[test_attr_idx]))).w = original_write_callback;
-                // We don't need to restore prev_attr_value since we never modified the actual memory
+                (*(addr_of_mut!(get_g_attributes()[prev_attr_idx]))).p_attr_value =
+                    original_prev_attr_ptr;
             }
         }
 
@@ -4749,5 +4778,170 @@ mod tests {
 
         // The table was not mutated by the call.
         assert_eq!(get_g_attributes()[19].att_num, 0);
+    }
+
+    #[test]
+    fn test_gatt_fixture_att_opcode_and_legacy_outcome_matrix() {
+        let mut fixture = parse_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/gatt_compat.txt"
+        )))
+        .expect("gatt fixture must parse");
+
+        let mtu = fixture.u8("gatt.att.mtu").unwrap();
+        assert_eq!(mtu, 23);
+        assert_eq!(fixture.u8("gatt.att.find_info_format16").unwrap(), 0x01);
+        assert_eq!(fixture.u8("gatt.att.find_info_format128").unwrap(), 0x02);
+        assert_eq!(fixture.u8("gatt.att.error_opcode").unwrap(), 0x01);
+        assert_eq!(
+            u8::from_str_radix(fixture.str("gatt.att.error_reason").unwrap(), 16).unwrap(),
+            0x0a
+        );
+        assert_eq!(
+            u8::from_str_radix(fixture.str("gatt.att.write_rsp_opcode").unwrap(), 16).unwrap(),
+            0x13
+        );
+        assert_eq!(fixture.u8("gatt.att.write_rsp_l2cap_len").unwrap(), 1);
+
+        let opcode_keys = [
+            "att.op.error_rsp",
+            "att.op.exchange_mtu_req",
+            "att.op.exchange_mtu_rsp",
+            "att.op.find_info_req",
+            "att.op.find_info_rsp",
+            "att.op.find_by_type_value_req",
+            "att.op.find_by_type_value_rsp",
+            "att.op.read_by_type_req",
+            "att.op.read_by_type_rsp",
+            "att.op.read_req",
+            "att.op.read_rsp",
+            "att.op.read_blob_req",
+            "att.op.read_blob_rsp",
+            "att.op.read_multi_req",
+            "att.op.read_multi_rsp",
+            "att.op.read_by_group_type_req",
+            "att.op.read_by_group_type_rsp",
+            "att.op.write_req",
+            "att.op.write_rsp",
+            "att.op.prepare_write_req",
+            "att.op.prepare_write_rsp",
+            "att.op.execute_write_req",
+            "att.op.execute_write_rsp",
+            "att.op.handle_value_noti",
+            "att.op.handle_value_ind",
+            "att.op.handle_value_cfm",
+            "att.op.write_cmd",
+        ];
+        for key in opcode_keys {
+            let opcode = u8::from_str_radix(fixture.str(key).unwrap(), 16).unwrap();
+            assert!(
+                GattOp::try_from(opcode).is_ok(),
+                "{key} must be a supported ATT opcode"
+            );
+        }
+
+        // MTU request/response.
+        seed_system_tick();
+        let packet = create_att_packet(0, &[GattOp::AttOpExchangeMtuReq as u8, mtu, 0]);
+        let response = l2cap_att_handler(&packet).unwrap();
+        assert_eq!(response.att_mtu().opcode, GattOp::AttOpExchangeMtuRsp as u8);
+        assert_eq!(response.att_mtu().mtu, [mtu, 0]);
+
+        // Non-ATT, unsupported, and invalid read/write handles stay silent.
+        let mut wrong_channel = create_att_packet(GattOp::AttOpReadReq as u8, &[0x03, 0]);
+        wrong_channel.l2cap_data_mut().chan_id = 5;
+        assert!(l2cap_att_handler(&wrong_channel).is_none());
+        let unsupported = create_att_packet(0x0c, &[0]);
+        assert!(l2cap_att_handler(&unsupported).is_none());
+        for handle in [0u8, 29, 0xff] {
+            let read = create_att_packet(0, &[GattOp::AttOpReadReq as u8, handle, 0]);
+            assert!(
+                l2cap_att_handler(&read).is_none(),
+                "read handle {handle} silent"
+            );
+            let write = write_packet(GattOp::AttOpWriteReq as u8, handle as u16, &[0xaa]);
+            assert!(
+                l2cap_att_handler(&write).is_none(),
+                "write handle {handle} silent"
+            );
+        }
+
+        // Normal read-only declarations stay silent; the permission-patched
+        // compatibility guard has its own 0x13/no-mutation oracle below elsewhere.
+        let factory = crate::facade::radio_config();
+        crate::gatt::service_table::init_gatt_profile(&factory);
+        for handle in [3u16, 9, 11] {
+            let request =
+                l2cap_att_handler(&write_packet(GattOp::AttOpWriteReq as u8, handle, &[0xee]));
+            if let Some(response) = request {
+                assert_eq!(
+                    response.att_write_rsp().opcode,
+                    u8::from_str_radix(fixture.str("gatt.att.write_rsp_opcode").unwrap(), 16)
+                        .unwrap(),
+                    "readonly compatibility Write Request keeps 0x13"
+                );
+            }
+            assert!(l2cap_att_handler(
+                &write_packet(GattOp::AttOpWriteCmd as u8, handle, &[0xee],)
+            )
+            .is_none());
+        }
+
+        // Pair read: first read arms deferred read; pair_proc returns a Read Response.
+        let pair_read = create_att_packet(0, &[GattOp::AttOpReadReq as u8, 27, 0]);
+        assert!(l2cap_att_handler(&pair_read).is_none());
+        let pair_response = crate::ble::pair::pair_proc();
+        assert_eq!(
+            pair_response
+                .as_ref()
+                .map(|packet| packet.att_read_rsp().opcode),
+            Some(GattOp::AttOpReadRsp as u8)
+        );
+
+        // Command read clears SEND_TO_MASTER and is a 16-byte Read Response.
+        SEND_TO_MASTER.lock().fill(0xaa);
+        let command_read = create_att_packet(0, &[GattOp::AttOpReadReq as u8, 21, 0]);
+        let command_response = l2cap_att_handler(&command_read).unwrap();
+        assert_eq!(
+            command_response.att_read_rsp().opcode,
+            GattOp::AttOpReadRsp as u8
+        );
+        assert_eq!(command_response.att_read_rsp().value.len(), 22);
+        assert!(SEND_TO_MASTER.lock().iter().all(|&byte| byte == 0));
+
+        // OTA completed read requests termination; Continue read does not.
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Continue);
+        crate::callbacks::test_ota::set_termination_requested_for_test(false);
+        let ota_read = create_att_packet(0, &[GattOp::AttOpReadReq as u8, 24, 0]);
+        let _ = l2cap_att_handler(&ota_read);
+        assert!(!crate::callbacks::test_ota::is_termination_requested());
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Ok);
+        let _ = l2cap_att_handler(&ota_read);
+        assert!(crate::callbacks::test_ota::is_termination_requested());
+        crate::callbacks::test_ota::set_termination_requested_for_test(false);
+        crate::callbacks::test_ota::set_finished_flag_for_test(OtaState::Continue);
+
+        // Invalid range outcomes are ATT Error 0x01 / reason 0x0a.
+        for (data, opcode) in [
+            (
+                &[GattOp::AttOpFindInfoReq as u8, 0, 0, 1, 0][..],
+                GattOp::AttOpFindInfoReq as u8,
+            ),
+            (
+                &[GattOp::AttOpFindInfoReq as u8, 8, 0, 2, 0][..],
+                GattOp::AttOpFindInfoReq as u8,
+            ),
+        ] {
+            let response = l2cap_att_handler(&create_att_packet(0, data)).unwrap();
+            assert_eq!(
+                response.att_err_rsp().opcode,
+                fixture.u8("gatt.att.error_opcode").unwrap()
+            );
+            assert_eq!(response.att_err_rsp().err_opcode, opcode);
+            assert_eq!(
+                response.att_err_rsp().err_reason,
+                u8::from_str_radix(fixture.str("gatt.att.error_reason").unwrap(), 16).unwrap()
+            );
+        }
     }
 }

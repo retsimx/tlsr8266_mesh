@@ -601,6 +601,7 @@ pub mod fake_flash {
         bytes: Vec<u8>,
         mode: FakeFlashMode,
         erase_counts: BTreeMap<u32, u32>,
+        erase_history: Vec<u32>,
         fail_next_write: bool,
     }
 
@@ -610,6 +611,7 @@ pub mod fake_flash {
                 bytes: Vec::new(),
                 mode: FakeFlashMode::InMemory,
                 erase_counts: BTreeMap::new(),
+                erase_history: Vec::new(),
                 fail_next_write: false,
             }
         }
@@ -644,6 +646,7 @@ pub mod fake_flash {
             state.bytes.clear();
             state.bytes.resize(FLASH_SIZE_BYTES, 0xFF);
             state.erase_counts.clear();
+            state.erase_history.clear();
             state.fail_next_write = false;
             state.mode = FakeFlashMode::InMemory;
         }
@@ -706,6 +709,12 @@ pub mod fake_flash {
             }
             state.bytes[base..end].fill(0xFF);
             *state.erase_counts.entry(base as u32).or_insert(0) += 1;
+            state.erase_history.push(base as u32);
+        }
+
+        /// Ordered sector bases erased since [`FakeFlash::reset`].
+        pub fn erase_history() -> Vec<u32> {
+            lock().erase_history.clone()
         }
 
         /// Number of erases performed on the sector containing `addr`.

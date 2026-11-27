@@ -1,0 +1,304 @@
+# F-3 compatibility fixture: GATT table and legacy ATT behavior
+# All UUID bytes are little-endian on the wire. Default values are hex bytes.
+
+gatt.table.count = 29
+gatt.table.max_valid_handle = 28
+gatt.att.mtu = 23
+gatt.att.exchange_mtu_rsp = 17 00
+gatt.att.read_by_type_max_value_len = 19
+gatt.att.read_rsp_max_value_len = 22
+gatt.att.find_info_format16 = 01
+gatt.att.find_info_format128 = 02
+gatt.att.error_opcode = 01
+gatt.att.error_reason = 0a
+gatt.att.write_rsp_opcode = 13
+gatt.att.write_rsp_l2cap_len = 1
+
+att.op.error_rsp = 01
+att.op.exchange_mtu_req = 02
+att.op.exchange_mtu_rsp = 03
+att.op.find_info_req = 04
+att.op.find_info_rsp = 05
+att.op.find_by_type_value_req = 06
+att.op.find_by_type_value_rsp = 07
+att.op.read_by_type_req = 08
+att.op.read_by_type_rsp = 09
+att.op.read_req = 0a
+att.op.read_rsp = 0b
+att.op.read_blob_req = 0c
+att.op.read_blob_rsp = 0d
+att.op.read_multi_req = 0e
+att.op.read_multi_rsp = 0f
+att.op.read_by_group_type_req = 10
+att.op.read_by_group_type_rsp = 11
+att.op.write_req = 12
+att.op.write_rsp = 13
+att.op.prepare_write_req = 16
+att.op.prepare_write_rsp = 17
+att.op.execute_write_req = 18
+att.op.execute_write_rsp = 19
+att.op.handle_value_noti = 1b
+att.op.handle_value_ind = 1d
+att.op.handle_value_cfm = 1e
+att.op.write_cmd = 52
+
+att.case.non_att_channel.outcome = silent
+att.case.unsupported_opcode.outcome = silent
+att.case.read_handle_zero.outcome = silent
+att.case.read_handle_out_of_range.outcome = silent
+att.case.read_handle_high_byte.outcome = silent
+att.case.write_handle_zero.outcome = silent
+att.case.write_handle_one.outcome = silent
+att.case.write_handle_out_of_range.outcome = silent
+att.case.write_handle_high_byte.outcome = silent
+att.case.write_non_writable.outcome = silent
+att.case.find_info_start_zero.outcome = att_error
+att.case.find_info_start_gt_end.outcome = att_error
+att.case.find_by_type_no_match.outcome = att_error
+att.case.read_by_type_no_match16.outcome = att_error
+att.case.read_by_type_no_match128.outcome = att_error
+att.case.read_by_group_invalid_range.outcome = att_error
+att.case.read_by_group_no_match.outcome = att_error
+att.case.write_req_readonly_gate.outcome = write_rsp_no_mutation
+att.case.write_req_rom_or_readonly_ram.outcome = write_rsp_no_mutation
+att.case.write_cmd_readonly_gate.outcome = silent_no_mutation
+att.case.write_cmd_rom_or_readonly_ram.outcome = silent_no_mutation
+att.case.pair_deferred_read.outcome = deferred_read
+att.case.command_read.outcome = consume_on_read
+att.case.ota_read_continue.outcome = read_response
+att.case.ota_read_completed.outcome = read_response_then_terminate
+
+att.readonly_handles = 03 09 11
+att.write_gate_max_exclusive = 3
+
+gatt.row.00.span = 28
+gatt.row.00.uuid_len = 0
+gatt.row.00.uuid = none
+gatt.row.00.default_len = 0
+gatt.row.00.max_len = 0
+gatt.row.00.value = none
+gatt.row.00.behavior = sentinel
+
+gatt.row.01.span = 6
+gatt.row.01.uuid_len = 2
+gatt.row.01.uuid = 00 28
+gatt.row.01.default_len = 2
+gatt.row.01.max_len = 2
+gatt.row.01.value = 00 18
+gatt.row.01.behavior = ro_static
+
+gatt.row.02.span = 0
+gatt.row.02.uuid_len = 2
+gatt.row.02.uuid = 03 28
+gatt.row.02.default_len = 1
+gatt.row.02.max_len = 1
+gatt.row.02.value = 02
+gatt.row.02.behavior = ro_static
+
+gatt.row.03.span = 0
+gatt.row.03.uuid_len = 2
+gatt.row.03.uuid = 00 2a
+gatt.row.03.default_len = 13
+gatt.row.03.max_len = 19
+gatt.row.03.value = 54 65 6c 69 6e 6b 20 74 4c 69 67 68 74
+gatt.row.03.behavior = ro_dynamic_config
+
+gatt.row.04.span = 0
+gatt.row.04.uuid_len = 2
+gatt.row.04.uuid = 01 29
+gatt.row.04.default_len = 7
+gatt.row.04.max_len = 7
+gatt.row.04.value = 44 65 76 4e 61 6d 65
+gatt.row.04.behavior = ro_static
+
+gatt.row.05.span = 0
+gatt.row.05.uuid_len = 2
+gatt.row.05.uuid = 03 28
+gatt.row.05.default_len = 1
+gatt.row.05.max_len = 1
+gatt.row.05.value = 02
+gatt.row.05.behavior = ro_static
+
+gatt.row.06.span = 0
+gatt.row.06.uuid_len = 2
+gatt.row.06.uuid = 01 2a
+gatt.row.06.default_len = 2
+gatt.row.06.max_len = 2
+gatt.row.06.value = 00 00
+gatt.row.06.behavior = ro_static
+
+gatt.row.07.span = 9
+gatt.row.07.uuid_len = 2
+gatt.row.07.uuid = 00 28
+gatt.row.07.default_len = 2
+gatt.row.07.max_len = 2
+gatt.row.07.value = 0a 18
+gatt.row.07.behavior = ro_static
+
+gatt.row.08.span = 0
+gatt.row.08.uuid_len = 2
+gatt.row.08.uuid = 03 28
+gatt.row.08.default_len = 1
+gatt.row.08.max_len = 1
+gatt.row.08.value = 02
+gatt.row.08.behavior = ro_static
+
+gatt.row.09.span = 0
+gatt.row.09.uuid_len = 2
+gatt.row.09.uuid = 26 2a
+gatt.row.09.default_len = 4
+gatt.row.09.max_len = 4
+gatt.row.09.value = build_version_u32_le
+gatt.row.09.behavior = ro_dynamic_build_version
+
+gatt.row.10.span = 0
+gatt.row.10.uuid_len = 2
+gatt.row.10.uuid = 03 28
+gatt.row.10.default_len = 1
+gatt.row.10.max_len = 1
+gatt.row.10.value = 02
+gatt.row.10.behavior = ro_static
+
+gatt.row.11.span = 0
+gatt.row.11.uuid_len = 2
+gatt.row.11.uuid = 29 2a
+gatt.row.11.default_len = 11
+gatt.row.11.max_len = 16
+gatt.row.11.value = 6f 75 74 5f 6f 66 5f 6d 65 73 68
+gatt.row.11.behavior = ro_dynamic_config
+
+gatt.row.12.span = 0
+gatt.row.12.uuid_len = 2
+gatt.row.12.uuid = 03 28
+gatt.row.12.default_len = 1
+gatt.row.12.max_len = 1
+gatt.row.12.value = 02
+gatt.row.12.behavior = ro_static
+
+gatt.row.13.span = 0
+gatt.row.13.uuid_len = 2
+gatt.row.13.uuid = 24 2a
+gatt.row.13.default_len = 12
+gatt.row.13.max_len = 12
+gatt.row.13.value = 6d 6f 64 65 6c 20 69 64 20 31 32 33
+gatt.row.13.behavior = ro_static
+
+gatt.row.14.span = 0
+gatt.row.14.uuid_len = 2
+gatt.row.14.uuid = 03 28
+gatt.row.14.default_len = 1
+gatt.row.14.max_len = 1
+gatt.row.14.value = 02
+gatt.row.14.behavior = ro_static
+
+gatt.row.15.span = 0
+gatt.row.15.uuid_len = 2
+gatt.row.15.uuid = 27 2a
+gatt.row.15.default_len = 4
+gatt.row.15.max_len = 4
+gatt.row.15.value = 22 22 22 22
+gatt.row.15.behavior = ro_static
+
+gatt.row.16.span = 13
+gatt.row.16.uuid_len = 2
+gatt.row.16.uuid = 00 28
+gatt.row.16.default_len = 16
+gatt.row.16.max_len = 16
+gatt.row.16.value = 10 19 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00
+gatt.row.16.behavior = ro_static
+
+gatt.row.17.span = 0
+gatt.row.17.uuid_len = 2
+gatt.row.17.uuid = 03 28
+gatt.row.17.default_len = 1
+gatt.row.17.max_len = 1
+gatt.row.17.value = 1a
+gatt.row.17.behavior = ro_static
+
+gatt.row.18.span = 0
+gatt.row.18.uuid_len = 16
+gatt.row.18.uuid = 11 19 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00
+gatt.row.18.default_len = 1
+gatt.row.18.max_len = 1
+gatt.row.18.value = 00
+gatt.row.18.behavior = status_report_write
+
+gatt.row.19.span = 0
+gatt.row.19.uuid_len = 2
+gatt.row.19.uuid = 02 29
+gatt.row.19.default_len = 2
+gatt.row.19.max_len = 2
+gatt.row.19.value = 01 00
+gatt.row.19.behavior = cccd_writable
+
+gatt.row.20.span = 0
+gatt.row.20.uuid_len = 2
+gatt.row.20.uuid = 03 28
+gatt.row.20.default_len = 1
+gatt.row.20.max_len = 1
+gatt.row.20.value = 0e
+gatt.row.20.behavior = ro_static
+
+gatt.row.21.span = 0
+gatt.row.21.uuid_len = 16
+gatt.row.21.uuid = 12 19 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00
+gatt.row.21.default_len = 16
+gatt.row.21.max_len = 16
+gatt.row.21.value = 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+gatt.row.21.behavior = command_bridge_write_consume_on_read
+
+gatt.row.22.span = 0
+gatt.row.22.uuid_len = 2
+gatt.row.22.uuid = 01 29
+gatt.row.22.default_len = 7
+gatt.row.22.max_len = 7
+gatt.row.22.value = 43 6f 6d 6d 61 6e 64
+gatt.row.22.behavior = ro_static
+
+gatt.row.23.span = 0
+gatt.row.23.uuid_len = 2
+gatt.row.23.uuid = 03 28
+gatt.row.23.default_len = 1
+gatt.row.23.max_len = 1
+gatt.row.23.value = 06
+gatt.row.23.behavior = ro_static
+
+gatt.row.24.span = 0
+gatt.row.24.uuid_len = 16
+gatt.row.24.uuid = 13 19 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00
+gatt.row.24.default_len = 16
+gatt.row.24.max_len = 16
+gatt.row.24.value = e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0
+gatt.row.24.behavior = ota_write_terminate_on_completed_read
+
+gatt.row.25.span = 0
+gatt.row.25.uuid_len = 2
+gatt.row.25.uuid = 01 29
+gatt.row.25.default_len = 3
+gatt.row.25.max_len = 3
+gatt.row.25.value = 4f 54 41
+gatt.row.25.behavior = ro_static
+
+gatt.row.26.span = 0
+gatt.row.26.uuid_len = 2
+gatt.row.26.uuid = 03 28
+gatt.row.26.default_len = 1
+gatt.row.26.max_len = 1
+gatt.row.26.value = 0a
+gatt.row.26.behavior = ro_static
+
+gatt.row.27.span = 0
+gatt.row.27.uuid_len = 16
+gatt.row.27.uuid = 14 19 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00
+gatt.row.27.default_len = 16
+gatt.row.27.max_len = 16
+gatt.row.27.value = e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0 e0
+gatt.row.27.behavior = pair_write_deferred_read
+
+gatt.row.28.span = 0
+gatt.row.28.uuid_len = 2
+gatt.row.28.uuid = 01 29
+gatt.row.28.default_len = 4
+gatt.row.28.max_len = 4
+gatt.row.28.value = 50 61 69 72
+gatt.row.28.behavior = ro_static

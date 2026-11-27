@@ -1011,6 +1011,90 @@ class TestBaselineJson(unittest.TestCase):
             self.assertEqual(baseline["legacy_edges_resolved"], 21)
             self.assertEqual(baseline["gatt_edges_resolved"], 5)
 
+    def test_compare_baseline_prints_structured_delta_without_failing(self) -> None:
+        current = {
+            "elf_bytes": 500,
+            "bin_bytes": 400,
+            "sections": {".text": 120, ".rodata": 30, ".data": 10,
+                         ".bss": 20, ".ram_code": 15},
+            "free_main_sram": 4096,
+            "main_max": 656,
+            "irq_max": 604,
+            "main_margin": 3440,
+            "irq_margin": 1188,
+            "allowed_indirect": 26,
+        }
+        baseline = dict(current)
+        baseline["elf_bytes"] = 480
+        baseline["bin_bytes"] = 390
+        baseline["sections"] = dict(current["sections"])
+        baseline["sections"][".text"] = 100
+        baseline["allowed_indirect"] = 21
+
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline_path = Path(tmp) / "baseline.json"
+            baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                valid = stack_analysis.compare_baseline(current, str(baseline_path))
+
+        self.assertTrue(valid)
+        out = buf.getvalue()
+        self.assertIn("BASELINE DELTA (informational", out)
+        for metric in (
+            "elf_bytes", "bin_bytes", ".text", ".rodata", ".data", ".bss",
+            ".ram_code", "free_main_sram", "main_max", "irq_max",
+            "main_margin", "irq_margin", "allowed_indirect",
+        ):
+            self.assertIn(metric, out)
+
+    def test_compare_baseline_rejects_missing_and_non_numeric_schema(self) -> None:
+        complete = {
+            "elf_bytes": 500,
+            "bin_bytes": 400,
+            "sections": {".text": 120, ".rodata": 30, ".data": 10,
+                         ".bss": 20, ".ram_code": 15},
+            "free_main_sram": 4096,
+            "main_max": 656,
+            "irq_max": 604,
+            "main_margin": 3440,
+            "irq_margin": 1188,
+            "allowed_indirect": 26,
+        }
+
+        cases = []
+        missing_baseline = json.loads(json.dumps(complete))
+        del missing_baseline["elf_bytes"]
+        cases.append((complete, missing_baseline))
+
+        string_baseline = json.loads(json.dumps(complete))
+        string_baseline["bin_bytes"] = "400"
+        cases.append((complete, string_baseline))
+
+        missing_section = json.loads(json.dumps(complete))
+        del missing_section["sections"][".text"]
+        cases.append((complete, missing_section))
+
+        bool_current = json.loads(json.dumps(complete))
+        bool_current["main_margin"] = True
+        cases.append((bool_current, complete))
+
+        missing_current = json.loads(json.dumps(complete))
+        del missing_current["sections"][".bss"]
+        cases.append((missing_current, complete))
+
+        for current, baseline in cases:
+            with self.subTest(current=current, baseline=baseline):
+                with tempfile.TemporaryDirectory() as tmp:
+                    baseline_path = Path(tmp) / "baseline.json"
+                    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        valid = stack_analysis.compare_baseline(current, str(baseline_path))
+
+                self.assertFalse(valid)
+                self.assertIn("INVALID SCHEMA", buf.getvalue())
+
 
 class TestIndirectEdgesFeedDepth(unittest.TestCase):
     def test_depth_increases_once_edges_are_applied(self) -> None:
@@ -1205,7 +1289,8 @@ class TestMain(unittest.TestCase):
     def test_parse_args_accepts_explicit_modes_and_defaults_to_strict(self) -> None:
         args = stack_analysis.parse_args(
             ["--elf", "x.elf", "--top", "7", "--min-margin", "512",
-             "--exclude-panic", "--strict", "--baseline-json", "base.json"]
+             "--exclude-panic", "--strict", "--baseline-json", "base.json",
+             "--compare-baseline", "snapshot.json"]
         )
         self.assertEqual(
             (args.elf, args.top, args.min_margin, args.exclude_panic),
@@ -1214,6 +1299,7 @@ class TestMain(unittest.TestCase):
         self.assertTrue(args.strict)
         self.assertFalse(args.legacy)
         self.assertEqual(args.baseline_json, "base.json")
+        self.assertEqual(args.compare_baseline, "snapshot.json")
 
         default_args = stack_analysis.parse_args([])
         self.assertTrue(default_args.strict)

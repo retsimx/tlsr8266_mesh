@@ -1106,6 +1106,11 @@ mod tests {
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_pac::fake_mmio::FakeMmio;
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/rust_parser.rs"
+    ));
+
     /// `reg_gpio_gpio_func`: per-port GPIO-function select register.
     const REG_GPIO_GPIO_FUNC: u32 = 0x586;
     /// `reg_gpio_oen`: per-port output-enable register (inverted logic).
@@ -1158,6 +1163,84 @@ mod tests {
             writes_to(REG_PWDN_CTRL).is_empty(),
             "no finish path may latch a reboot here"
         );
+    }
+
+    #[test]
+    fn compatibility_fixture_pins_ota_constants_chunks_window_and_timeouts() {
+        let source = include_str!("../../../tests/fixtures/ota_flash_adv_compat.txt");
+        let mut p = Parser::parse(source).unwrap();
+
+        assert_eq!(
+            p.u32("ota.flash_adr_ota_ready_flag").unwrap(),
+            flash_layout::FLASH_ADR_OTA_READY_FLAG
+        );
+        assert_eq!(
+            p.u8("ota.flash_ota_ready_flag").unwrap(),
+            flash_layout::FLASH_OTA_READY_FLAG
+        );
+        assert_eq!(
+            p.u32("ota.flash_adr_light_new_fw").unwrap(),
+            FLASH_ADR_LIGHT_NEW_FW
+        );
+        assert_eq!(
+            p.u32("ota.fw_size_max_k").unwrap(),
+            flash_layout::FW_SIZE_MAX_K
+        );
+        assert_eq!(
+            p.u32("ota.erase_sectors_for_ota").unwrap(),
+            flash_layout::ERASE_SECTORS_FOR_OTA
+        );
+        assert_eq!(p.u32("ota.startup_flag").unwrap(), START_UP_FLAG);
+        assert_eq!(p.u32("ota.header_bin_size_offset").unwrap(), 0x18);
+        assert_eq!(
+            p.u8("ota.timeout_default_s").unwrap() as u16,
+            RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS
+        );
+        assert_eq!(p.u8("ota.timeout_post_finish_s").unwrap(), 4);
+        assert_eq!(p.u8("ota.ble_packet_bytes").unwrap(), 20);
+        assert_eq!(p.u8("ota.ble_chunk_bytes").unwrap(), 16);
+        assert_eq!(p.u8("ota.mesh_packet_bytes").unwrap(), 10);
+        assert_eq!(p.u8("ota.mesh_chunk_bytes").unwrap(), 8);
+        assert_eq!(p.u8("ota.min_final_packet_count").unwrap(), 3);
+
+        let slots = p.u8("ota.packet_window.staging_slots").unwrap() as usize;
+        let packet_size = p.u8("ota.packet_window.packet_size").unwrap() as usize;
+        let window_bytes = p.u16("ota.packet_window.window_bytes").unwrap() as usize;
+        assert_eq!(OTA_STAGING_SLOTS, slots);
+        assert_eq!(
+            OTA_STAGING_SLOTS,
+            tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT
+        );
+        assert_eq!(packet_size, core::mem::size_of::<Packet>());
+        assert_eq!(window_bytes, slots * packet_size);
+        assert_eq!(core::mem::size_of::<[Packet; 16]>(), 768);
+        assert!(p.bool("ota.packet_window.shared_buffer").unwrap());
+        assert_eq!(p.u16("ota.packet_window.extra_sram_bytes").unwrap(), 0);
+
+        assert_eq!(p.u8("ota.chunk.index_width").unwrap(), 2);
+        assert!(p.bool("ota.chunk.wrap_ffff_to_zero").unwrap());
+        assert!(p.bool("ota.chunk.last_plus_one_rule").unwrap());
+
+        assert_eq!(
+            fsm::evaluate_chunk(0, u16::MAX, 8, 0, 8, flash_layout::FW_SIZE_MAX_K * 1024),
+            fsm::OtaChunkDecision::WriteFirstChunk
+        );
+        assert_eq!(
+            fsm::evaluate_chunk(7, 6, 8, 56, 8, flash_layout::FW_SIZE_MAX_K * 1024),
+            fsm::OtaChunkDecision::WriteNextChunk
+        );
+        assert_eq!(
+            fsm::evaluate_chunk(9, 6, 8, 56, 8, flash_layout::FW_SIZE_MAX_K * 1024),
+            fsm::OtaChunkDecision::RejectError
+        );
+        assert_eq!(
+            fsm::evaluate_chunk(0, u16::MAX, 0, 0, 8, flash_layout::FW_SIZE_MAX_K * 1024),
+            fsm::OtaChunkDecision::VerifyFinalHeader { expected_index: 0 }
+        );
+        assert!(p.bool("ota.stale_reject").unwrap());
+        assert!(p.bool("ota.gap_reject").unwrap());
+        assert!(p.bool("ota.overflow_reject").unwrap());
+        assert!(p.bool("ota.final_header.accept_only_min_three").unwrap());
     }
 
     /// The GATT write handler stages packets without holding `OTA_STATE` while

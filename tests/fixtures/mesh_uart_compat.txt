@@ -1,0 +1,115 @@
+# F-3 compatibility fixture: legacy mesh and UART contracts
+
+uart.packet_length = 44
+uart.payload_offset = 3
+uart.crc_offset = 42
+uart.node_status_entry_len = 3
+uart.node_status_max_entries = 13
+
+uart.op.light_ctrl = 02
+uart.op.light_status = 03
+uart.op.node_status = 07
+uart.op.ack = ff
+
+uart.light_ctrl.dst_start = 3
+uart.light_ctrl.dst_end = 5
+uart.light_ctrl.payload_start = 5
+uart.light_ctrl.payload_end = 18
+uart.light_ctrl.payload_len = 13
+uart.light_ctrl.retransmit_offset = 18
+uart.light_ctrl.ack_offset = 19
+uart.light_ctrl.fingerprint_start = 3
+uart.light_ctrl.fingerprint_end = 18
+uart.light_ctrl.fingerprint_len = 15
+uart.light_ctrl.ack_sno_start = 2
+uart.light_ctrl.ack_sno_end = 5
+uart.light_status.platform_enable = true
+uart.light_status.zero_sno_ack = true
+uart.light_status.enable_mesh_reporting = true
+uart.light_status.enable_uart_reporting = true
+uart.node_status.on_off_from_par0 = true
+uart.node_status.off_value = 00
+uart.node_status.on_value = 01
+
+mesh.status.node_val_len = 4
+mesh.status.node_par_len = 2
+mesh.status.value_len = 24
+mesh.status.records_per_packet = 5
+mesh.status.node_max_num = 64
+
+mesh.opcode.product.light_onoff = 10
+mesh.opcode.product.set_light = 30
+mesh.opcode.product.light_read_status = 1a
+mesh.opcode.product.light_status = 1b
+mesh.opcode.admin.notify_mesh = 02
+mesh.opcode.admin.mesh_pair = 09
+mesh.opcode.admin.mesh_cmd_notify = 0a
+mesh.opcode.admin.grp_rsp1 = 14
+mesh.opcode.admin.grp_rsp2 = 15
+mesh.opcode.admin.grp_rsp3 = 16
+mesh.opcode.admin.config_grp = 17
+mesh.opcode.admin.grp_req = 1d
+mesh.opcode.admin.config_dev_addr = 20
+mesh.opcode.admin.dev_addr_rsp = 21
+mesh.opcode.admin.kick_out = 23
+mesh.opcode.admin.ota_start_req = 24
+mesh.opcode.admin.ota_start_rsp = 25
+mesh.opcode.admin.ota_data_req = 26
+mesh.opcode.admin.ota_data_rsp = 27
+mesh.opcode.admin.ota_end_req = 28
+mesh.opcode.admin.ota_end_rsp = 29
+mesh.opcode.admin.user_notify_req = 2a
+mesh.opcode.admin.user_notify_rsp = 2b
+mesh.opcode.admin.set_mac_addr = 31
+mesh.opcode.admin.power_on = 32
+mesh.opcode.admin.panic_msg = 34
+mesh.opcode.admin.light_ack = 35
+mesh.opcode.admin.set_mesh_info = c5
+mesh.opcode.admin.set_dev_addr = c6
+mesh.opcode.admin.del_pair = c7
+mesh.opcode.admin.mesh_pair_timeout = cf
+
+mesh.python_shared.opcodes = 10 14 17 1a 1b 1d 20 23 24 25 26 27 28 30 31
+mesh.light_add_grp_param = 01
+mesh.light_del_grp_param = 00
+mesh.max_lum_brightness_value = 7fff
+mesh.vendor_id = 0211
+
+mesh.request_response.get_status = 0
+mesh.request_response.get_group1 = 1
+mesh.request_response.get_group2 = 2
+mesh.request_response.get_group3 = 3
+mesh.request_response.get_dev_addr = 4
+mesh.request_response.get_user_notify = 7
+mesh.request_response.cmd_start_ota = 8
+mesh.request_response.cmd_ota_data = 9
+mesh.request_response.cmd_end_ota = 10
+
+mesh.notify_req.1a = true
+mesh.notify_req.1d = true
+mesh.notify_req.20 = true
+mesh.notify_req.17 = true
+mesh.notify_req.2a = true
+mesh.notify_req.24 = true
+mesh.notify_req.26 = true
+mesh.notify_req.28 = true
+mesh.notify_rsp.14 = true
+mesh.notify_rsp.15 = true
+mesh.notify_rsp.16 = true
+mesh.notify_rsp.1b = true
+mesh.notify_rsp.21 = true
+mesh.notify_rsp.2b = true
+mesh.notify_rsp.25 = true
+mesh.notify_rsp.27 = true
+
+mesh.spp_handle_21.ingress = mesh_routing
+mesh.uart_02.ingress = mesh_routing
+mesh.route.foreign_unicast = queue_tx_only
+mesh.route.self_unicast = local_delivery_only
+mesh.route.matching_group_or_broadcast = local_delivery_and_queue_tx
+mesh.dedupe.key = op_sno
+mesh.dedupe.buffer = rc_packet_fifo
+mesh.automatic_ack.opcode = 35
+mesh.automatic_ack.high_bit = c0
+mesh.automatic_ack.condition = addressed_non_notify_send_ack
+mesh.relay.foreign_traffic = forward

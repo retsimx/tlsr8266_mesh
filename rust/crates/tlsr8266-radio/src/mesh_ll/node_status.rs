@@ -1383,6 +1383,10 @@ pub fn ll_device_status_update(val_par: &[u8]) {
 #[coverage(off)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/rust_parser.rs"
+    ));
     use crate::queues::UART_TX_CHANNEL;
     use crate::types::{INTERNAL_PAR_RETRANSMIT_COUNT, INTERNAL_PAR_SEND_ACK};
     use mesh_protocol::mesh_types::{MeshNodeStT, MeshNodeStValT, MESH_NODE_ST_PAR_LEN};
@@ -3722,5 +3726,77 @@ mod tests {
         drop(mesh_node_st);
 
         assert_eq!(MESH_NODE_MAX.get(), 1, "only this device is known");
+    }
+
+    #[test]
+    fn test_mesh_fixture_node_status_geometry_and_par0_projection() {
+        let mut fixture = parse_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/mesh_uart_compat.txt"
+        )))
+        .expect("mesh fixture must parse");
+
+        assert_eq!(
+            MESH_NODE_ST_VAL_LEN as u8,
+            fixture.u8("mesh.status.node_val_len").unwrap()
+        );
+        assert_eq!(
+            MESH_NODE_ST_PAR_LEN as u8,
+            fixture.u8("mesh.status.node_par_len").unwrap()
+        );
+        assert_eq!(
+            MESH_STATUS_VALUE_LEN as u8,
+            fixture.u8("mesh.status.value_len").unwrap()
+        );
+        assert_eq!(fixture.u8("mesh.status.records_per_packet").unwrap(), 5);
+        assert_eq!(
+            MESH_NODE_MAX_NUM as u8,
+            fixture.u8("mesh.status.node_max_num").unwrap()
+        );
+
+        assert_eq!(
+            fixture.u8("uart.packet_length").unwrap(),
+            UART_DATA_LEN as u8
+        );
+        assert_eq!(fixture.u8("uart.node_status_entry_len").unwrap(), 3);
+        assert_eq!(fixture.u8("uart.node_status_max_entries").unwrap(), 13);
+        assert_eq!(
+            fixture.str("uart.node_status.on_off_from_par0").unwrap(),
+            "true"
+        );
+
+        let off = fixture.u8("uart.node_status.off_value").unwrap();
+        let on = fixture.u8("uart.node_status.on_value").unwrap();
+        assert_eq!(off, 0);
+        assert_eq!(on, 1);
+
+        reset_mesh_state();
+        queues::set_uart_status_reporting_enabled(true);
+        let cases = [([0u8; 2], off), ([1, 0], on), ([0xff, 0], on)];
+        let entries = [
+            (0x20, 1, cases[0].1),
+            (0x21, 1, cases[1].1),
+            (0x22, 1, cases[2].1),
+        ];
+        send_uart_node_changes(entries.as_slice());
+
+        assert_eq!(UART_TX_CHANNEL.len(), 1);
+        let msg = UART_TX_CHANNEL.try_receive().expect("NodeStatus packet");
+        assert_eq!(msg.data[2], fixture.u8("uart.op.node_status").unwrap());
+        assert_eq!(msg.len as u8, fixture.u8("uart.packet_length").unwrap());
+        assert_eq!(msg.data[3], 0x20);
+        assert_eq!(msg.data[4], 1);
+        assert_eq!(msg.data[5], off);
+        assert_eq!(msg.data[6], 0x21);
+        assert_eq!(msg.data[7], 1);
+        assert_eq!(msg.data[8], on);
+        assert_eq!(msg.data[9], 0x22);
+        assert_eq!(msg.data[10], 1);
+        assert_eq!(msg.data[11], on);
+
+        let par_zero = cases[0].0;
+        let par_on = cases[1].0;
+        assert_eq!(u8::from(par_zero[0] != 0), off);
+        assert_eq!(u8::from(par_on[0] != 0), on);
     }
 }

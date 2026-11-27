@@ -43,6 +43,14 @@ mod fixture_tests {
         compute_crc, verify_crc, UartData, UartMsg, UART_CRC_OFFSET, UART_DATA_LEN,
         UART_PAYLOAD_MAX_SIZE, UART_PAYLOAD_OFFSET,
     };
+
+    mod compat_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/rust_parser.rs"
+        ));
+    }
+
     use core::mem::size_of;
 
     /// Golden vectors committed at the repository root and asserted from both
@@ -146,8 +154,12 @@ mod fixture_tests {
 
     impl Parser {
         fn new() -> Self {
+            Self::from_source(FIXTURE)
+        }
+
+        fn from_source(source: &str) -> Self {
             Self {
-                vectors: parse_fixture(FIXTURE),
+                vectors: parse_fixture(source),
                 consumed: Vec::new(),
             }
         }
@@ -524,5 +536,146 @@ mod fixture_tests {
     #[test]
     fn fixture_pairing_constants() {
         check_pairing_constants(&mut Parser::new());
+    }
+
+    #[test]
+    fn compatibility_fixture_pins_mesh_uart_ota_and_status_geometry() {
+        use crate::mesh_types::{
+            LGT_CMD_DEV_ADDR_RSP, LGT_CMD_LIGHT_GRP_REQ, LGT_CMD_LIGHT_GRP_RSP1,
+            LGT_CMD_LIGHT_GRP_RSP2, LGT_CMD_LIGHT_GRP_RSP3, LGT_CMD_LIGHT_ONOFF,
+            LGT_CMD_LIGHT_STATUS, LGT_CMD_MESH_CMD_NOTIFY, LGT_CMD_MESH_PAIR, LGT_CMD_NOTIFY_MESH,
+            LGT_CMD_SET_LIGHT, MESH_NODE_MAX_NUM, MESH_NODE_ST_PAR_LEN, MESH_NODE_ST_VAL_LEN,
+            MESH_STATUS_RECORDS_PER_PACKET, MESH_STATUS_VALUE_LEN,
+            RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS, START_UP_FLAG,
+        };
+
+        let mesh = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/mesh_uart_compat.txt"
+        ));
+        let mut mesh_p = compat_fixture::Parser::parse(mesh).unwrap();
+
+        assert_eq!(mesh_p.u8("uart.op.light_ctrl").unwrap(), 0x02);
+        assert_eq!(mesh_p.u8("uart.op.light_status").unwrap(), 0x03);
+        assert_eq!(mesh_p.u8("uart.op.node_status").unwrap(), 0x07);
+        assert_eq!(mesh_p.u8("uart.op.ack").unwrap(), 0xff);
+        assert_eq!(
+            MESH_NODE_ST_VAL_LEN,
+            mesh_p.u8("mesh.status.node_val_len").unwrap() as usize
+        );
+        assert_eq!(
+            MESH_NODE_ST_PAR_LEN,
+            mesh_p.u8("mesh.status.node_par_len").unwrap() as usize
+        );
+        assert_eq!(
+            MESH_STATUS_VALUE_LEN,
+            mesh_p.u8("mesh.status.value_len").unwrap() as usize
+        );
+        assert_eq!(
+            MESH_STATUS_RECORDS_PER_PACKET as usize,
+            mesh_p.u8("mesh.status.records_per_packet").unwrap() as usize
+        );
+        assert_eq!(
+            MESH_NODE_MAX_NUM,
+            mesh_p.u8("mesh.status.node_max_num").unwrap() as usize
+        );
+
+        assert_eq!(mesh_p.u8("uart.light_ctrl.dst_start").unwrap(), 3);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.dst_end").unwrap(), 5);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.payload_start").unwrap(), 5);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.payload_end").unwrap(), 18);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.payload_len").unwrap(), 13);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.retransmit_offset").unwrap(), 18);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.ack_offset").unwrap(), 19);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.fingerprint_len").unwrap(), 15);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.ack_sno_start").unwrap(), 2);
+        assert_eq!(mesh_p.u8("uart.light_ctrl.ack_sno_end").unwrap(), 5);
+
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.product.light_onoff").unwrap(),
+            LGT_CMD_LIGHT_ONOFF
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.product.set_light").unwrap(),
+            LGT_CMD_SET_LIGHT
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.notify_mesh").unwrap(),
+            LGT_CMD_NOTIFY_MESH
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.mesh_pair").unwrap(),
+            LGT_CMD_MESH_PAIR
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.mesh_cmd_notify").unwrap(),
+            LGT_CMD_MESH_CMD_NOTIFY
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.grp_rsp1").unwrap(),
+            LGT_CMD_LIGHT_GRP_RSP1
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.grp_rsp2").unwrap(),
+            LGT_CMD_LIGHT_GRP_RSP2
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.grp_rsp3").unwrap(),
+            LGT_CMD_LIGHT_GRP_RSP3
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.grp_req").unwrap(),
+            LGT_CMD_LIGHT_GRP_REQ
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.admin.dev_addr_rsp").unwrap(),
+            LGT_CMD_DEV_ADDR_RSP
+        );
+        assert_eq!(
+            mesh_p.u8("mesh.opcode.product.light_status").unwrap(),
+            LGT_CMD_LIGHT_STATUS
+        );
+
+        let ota = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/ota_flash_adv_compat.txt"
+        ));
+        let mut ota_p = compat_fixture::Parser::parse(ota).unwrap();
+        assert_eq!(ota_p.u32("ota.startup_flag").unwrap(), START_UP_FLAG);
+        assert_eq!(ota_p.u32("ota.header_bin_size_offset").unwrap(), 0x18);
+        assert_eq!(
+            ota_p.u8("ota.timeout_default_s").unwrap() as u16,
+            RF_SLAVE_OTA_TIMEOUT_DEFAULT_SECONDS
+        );
+        assert_eq!(ota_p.u8("ota.timeout_post_finish_s").unwrap(), 4);
+
+        let gatt = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/gatt_compat.txt"
+        ));
+        let mut gatt_p = compat_fixture::Parser::parse(gatt).unwrap();
+        assert_eq!(gatt_p.u8("gatt.table.count").unwrap(), 29);
+        assert_eq!(gatt_p.u8("gatt.table.max_valid_handle").unwrap(), 28);
+        assert_eq!(gatt_p.u8("gatt.att.mtu").unwrap(), 23);
+        assert_eq!(
+            gatt_p.bytes("gatt.att.exchange_mtu_rsp").unwrap(),
+            vec![0x17, 0x00]
+        );
+        assert_eq!(
+            gatt_p.bytes("gatt.row.18.uuid").unwrap(),
+            TELINK_SPP_DATA_SERVER2CLIENT.to_vec()
+        );
+        assert_eq!(
+            gatt_p.bytes("gatt.row.21.uuid").unwrap(),
+            TELINK_SPP_DATA_CLIENT2SERVER.to_vec()
+        );
+        assert_eq!(
+            gatt_p.bytes("gatt.row.24.uuid").unwrap(),
+            TELINK_SPP_DATA_OTA.to_vec()
+        );
+        assert_eq!(
+            gatt_p.bytes("gatt.row.27.uuid").unwrap(),
+            TELINK_SPP_DATA_PAIR.to_vec()
+        );
     }
 }

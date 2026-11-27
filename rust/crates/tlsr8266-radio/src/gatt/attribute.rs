@@ -123,6 +123,153 @@ impl TryFrom<u8> for GattOp {
     }
 }
 
+#[derive(Clone, Copy)]
+struct HandleRangeView {
+    start: u16,
+    end: u16,
+}
+
+#[derive(Clone, Copy)]
+struct FindByTypeValueView {
+    start: u16,
+    end: u16,
+    uuid: [u8; 2],
+    target_value: u16,
+}
+
+#[derive(Clone, Copy)]
+struct ReadByTypeView<'a> {
+    start: u16,
+    end: u16,
+    uuid: &'a [u8],
+    uuid128: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ReadRequestView<'a> {
+    packet: &'a Packet,
+    handle: u16,
+}
+
+#[derive(Clone, Copy)]
+struct ReadByGroupTypeView {
+    start: u16,
+    end: u16,
+    uuid: [u8; 2],
+}
+
+#[derive(Clone, Copy)]
+struct WriteRequestView<'a> {
+    packet: &'a Packet,
+    handle: u16,
+    payload: &'a [u8],
+    write_gate: u16,
+    is_request: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AttRequestView {
+    opcode: u8,
+}
+
+fn handle_range_view(packet: &Packet) -> Option<HandleRangeView> {
+    let value = &packet.l2cap_data().value;
+    Some(HandleRangeView {
+        start: *value.get(4)? as u16,
+        end: *value.get(6)? as u16,
+    })
+}
+
+fn find_by_type_value_view(packet: &Packet) -> Option<FindByTypeValueView> {
+    let value = &packet.l2cap_data().value;
+    let uuid = [*value.get(8)?, *value.get(9)?];
+    let value_bytes = [*value.get(10)?, *value.get(11)?];
+    Some(FindByTypeValueView {
+        start: *value.get(4)? as u16,
+        end: *value.get(6)? as u16,
+        uuid,
+        target_value: u16::from_le_bytes(value_bytes),
+    })
+}
+
+fn read_by_type_view(packet: &Packet) -> Option<ReadByTypeView<'_>> {
+    let data = packet.l2cap_data();
+    let value = &data.value;
+    let start = *value.get(4)? as u16;
+    let end = *value.get(6)? as u16;
+
+    // Preserve the legacy 128-bit marker: handle1 plus value[0] are read as
+    // the two-byte, little-endian marker that the old branch recognized.
+    let marker = u16::from_le_bytes([data.handle1, *value.first()?]);
+    if marker == 0x15 {
+        Some(ReadByTypeView {
+            start,
+            end,
+            uuid: value.get(8..24)?,
+            uuid128: true,
+        })
+    } else {
+        Some(ReadByTypeView {
+            start,
+            end,
+            uuid: value.get(8..10)?,
+            uuid128: false,
+        })
+    }
+}
+
+fn read_request_view(packet: &Packet) -> Option<ReadRequestView<'_>> {
+    let value = &packet.l2cap_data().value;
+    let handle = *value.get(4)? as u16;
+    if *value.get(5)? != 0 {
+        return None;
+    }
+    Some(ReadRequestView { packet, handle })
+}
+
+fn read_by_group_type_view(packet: &Packet) -> Option<ReadByGroupTypeView> {
+    let value = &packet.l2cap_data().value;
+    Some(ReadByGroupTypeView {
+        start: *value.get(4)? as u16,
+        end: *value.get(6)? as u16,
+        uuid: [*value.get(8)?, *value.get(9)?],
+    })
+}
+
+fn write_request_view(packet: &Packet) -> Option<WriteRequestView<'_>> {
+    let data = packet.l2cap_data();
+    let value = &data.value;
+    let handle = *value.get(4)? as u16;
+    if *value.get(5)? != 0 {
+        return None;
+    }
+
+    let write_gate = u16::from_le_bytes([data.handle1, *value.first()?]);
+    Some(WriteRequestView {
+        packet,
+        handle,
+        payload: value.get(6..)?,
+        write_gate,
+        is_request: packet.l2cap_data().value[3] == GattOp::AttOpWriteReq as u8,
+    })
+}
+
+fn att_channel_view(packet: &Packet) -> Option<u16> {
+    let channel = packet.l2cap_data().value.get(1..3)?;
+    Some(u16::from_le_bytes([channel[0], channel[1]]))
+}
+
+fn att_request_view(packet: &Packet) -> Option<AttRequestView> {
+    Some(AttRequestView {
+        opcode: *packet.l2cap_data().value.get(3)?,
+    })
+}
+
+#[inline(never)]
+fn is_ll_control_pdu(packet: &Packet) -> bool {
+    packet.l2cap_data().opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8
+}
+
 /// Searches for an attribute with the specified UUID within a range of handle values.
 ///
 /// This function implements a key BLE ATT protocol operation for finding attributes by UUID.
@@ -257,33 +404,40 @@ pub fn l2cap_att_search(
 ///   the request and generating any response.
 /// * Special handling is implemented for OTA (Over-The-Air) updates and specific attribute handles.
 #[export_name = "tlsr8266_l2cap_att_handler"]
+#[inline(never)]
 pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
-    // Check if this is an MTU exchange response packet (opcode & 3 = 3)
-    // MTU exchange responses have special handling for connection setup
-    if packet.l2cap_data().opcode & 3 == GattOp::AttOpExchangeMtuRsp as u8 {
-        return handle_mtu_exchange_response(packet);
+    // Preserve the legacy LL/control-PDU response path before ATT channel
+    // dispatch: control PDUs are not required to carry chan_id == 4.
+    if is_ll_control_pdu(packet) {
+        return handle_ll_control_pdu(packet);
     }
 
-    // Check if this packet is for the ATT channel (channel ID = 4)
-    // The channel ID is encoded in bytes 1-2 of the value field
-    // If not the ATT channel, we don't process this packet
-    if *bytemuck::from_bytes::<u16>(&packet.l2cap_data().value[1..3]) != 4u16 {
+    // Channel 4 is the only L2CAP channel dispatched to the ATT request frame.
+    // This is a bounds-checked view of the same little-endian channel bytes
+    // that the legacy handler read from `value[1..3]`.
+    if att_channel_view(packet) != Some(4) {
         return None;
     }
 
-    // Process different ATT operations based on the opcode in byte 3
-    // Each operation is handled by a separate function for clarity and maintainability
-    match GattOp::try_from(packet.l2cap_data().value[3]).ok() {
-        Some(GattOp::AttOpExchangeMtuReq) => handle_exchange_mtu_request(),
-        Some(GattOp::AttOpFindInfoReq) => handle_find_info_request(packet),
-        Some(GattOp::AttOpFindByTypeValueReq) => handle_find_by_type_value_request(packet),
-        Some(GattOp::AttOpReadByTypeReq) => handle_read_by_type_request(packet),
-        Some(GattOp::AttOpReadReq) => handle_read_request(packet),
-        Some(GattOp::AttOpReadByGroupTypeReq) => handle_read_by_group_type_request(packet),
-        Some(GattOp::AttOpWriteReq) | Some(GattOp::AttOpWriteCmd) => {
-            handle_write_request_or_command(packet)
-        }
-        // If the opcode is not recognized or not implemented, return None
+    let view = att_request_view(packet)?;
+    dispatch_att_request(packet, view)
+}
+
+#[inline(never)]
+fn handle_ll_control_pdu(packet: &Packet) -> Option<Packet> {
+    handle_mtu_exchange_response(packet)
+}
+
+#[inline(never)]
+fn dispatch_att_request(packet: &Packet, view: AttRequestView) -> Option<Packet> {
+    match view.opcode {
+        0x02 => handle_exchange_mtu_request(),
+        0x04 => handle_range_view(packet).and_then(handle_find_info_request),
+        0x06 => find_by_type_value_view(packet).and_then(handle_find_by_type_value_request),
+        0x08 => read_by_type_view(packet).and_then(handle_read_by_type_request),
+        0x0A => read_request_view(packet).and_then(handle_read_request),
+        0x10 => read_by_group_type_view(packet).and_then(handle_read_by_group_type_request),
+        0x12 | 0x52 => write_request_view(packet).and_then(handle_write_request_or_command),
         _ => None,
     }
 }
@@ -317,6 +471,7 @@ pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
 /// * **Handle 0xC**: Marks connection established and returns device version info
 /// * **Handle 8**: Marks service discovery as active and returns feature info
 /// * **Handle 2**: Sets the slave link timeout but doesn't return a response
+#[inline(never)]
 fn handle_mtu_exchange_response(packet: &Packet) -> Option<Packet> {
     // Extract the handle value from the packet
     let handle = packet.l2cap_data().handle1;
@@ -429,6 +584,7 @@ fn create_att_response_template() -> Packet {
 ///
 /// The MTU size is hardcoded to 23 bytes (0x17 0x00 in little-endian format),
 /// which is the minimum required MTU according to the Bluetooth Core Specification.
+#[inline(never)]
 fn handle_exchange_mtu_request() -> Option<Packet> {
     Some(Packet {
         att_mtu: PacketAttMtu {
@@ -480,16 +636,17 @@ fn handle_exchange_mtu_request() -> Option<Packet> {
 /// * UUID format is indicated by the first byte of the response value:
 ///   - 0x01: All UUIDs are 16-bit
 ///   - 0x02: All UUIDs are 128-bit
-fn handle_find_info_request(packet: &Packet) -> Option<Packet> {
+#[inline(never)]
+fn handle_find_info_request(view: HandleRangeView) -> Option<Packet> {
     // Mark service discovery as active
     GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
-    // Extract handle range from the request
-    let start_handle = packet.l2cap_data().value[4] as usize;
-    let mut end_handle = packet.l2cap_data().value[6] as usize;
+    // The ATT frame builder has already checked both range bytes.
+    let start_handle = view.start as usize;
+    let mut end_handle = view.end as usize;
 
     // Ensure end_handle doesn't exceed the total attribute count
-    if get_g_attributes()[0].att_num < packet.l2cap_data().value[6] {
+    if get_g_attributes()[0].att_num < view.end as u8 {
         end_handle = get_g_attributes()[0].att_num as usize;
     }
 
@@ -611,22 +768,15 @@ fn prepare_error_response(err_opcode: u8, err_handle: u16) -> Option<Packet> {
 /// * The response contains pairs of handles: the attribute handle and the group end handle
 /// * Limited to 10 handle pairs per response to avoid packet fragmentation
 /// * Primarily used in service discovery to locate specific services by UUID
-fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
+#[inline(never)]
+fn handle_find_by_type_value_request(view: FindByTypeValueView) -> Option<Packet> {
     // Mark service discovery as active
     GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
-    // Extract handle range and UUID from request
-    let start_handle = packet.l2cap_data().value[4] as usize;
-    let end_handle = packet.l2cap_data().value[6] as usize;
-
-    // Extract UUID to search for (typically Primary Service UUID 0x2800)
-    let mut uuid = [0; 2];
-    uuid.copy_from_slice(&packet.l2cap_data().value[8..10]);
-
-    // Extract value to match (typically a 16-bit service UUID)
-    let mut value_bytes = [0u8; 2];
-    value_bytes.copy_from_slice(&packet.l2cap_data().value[10..12]);
-    let target_value: u16 = *bytemuck::from_bytes(&value_bytes);
+    let start_handle = view.start as usize;
+    let end_handle = view.end as usize;
+    let uuid = view.uuid;
+    let target_value = view.target_value;
 
     // Initialize response packet and counters
     let mut response = create_att_response_template();
@@ -751,29 +901,23 @@ fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
 /// * For characteristic declarations, multiple components (properties, value handle, UUID)
 ///   are packed together in a specific format
 /// * The response is limited to avoid packet fragmentation
-fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
+#[inline(never)]
+fn handle_read_by_type_request(view: ReadByTypeView<'_>) -> Option<Packet> {
     // Mark service discovery as active
     GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
-    // Extract handle range from the request
-    let original_handle_start = packet.l2cap_data().value[4] as usize;
+    let original_handle_start = view.start as usize;
     let mut handle_start = original_handle_start;
-    let handle_end = packet.l2cap_data().value[6] as usize;
+    let handle_end = view.end as usize;
 
     // Initialize response packet and tracking variables
     let mut rf_packet_att_rsp = create_att_response_template();
     let mut bytes_read = 0;
 
     // ---- Handle selection based on UUID type (16-bit or 128-bit) ----
-    // SAFETY: (4) audited `Packet`-union view. `handle1` is at offset 6 of the
-    // 4-byte-aligned union, so the 2-byte read is aligned and lies inside the
-    // 48-byte packet buffer the RF/DMA layer filled.
-    if unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) } == 0x15 {
+    if view.uuid128 {
         // ---- 128-bit UUID search ----
-        let mut uuid = [0; 16];
-        uuid.copy_from_slice(&packet.l2cap_data().value[8..8 + 0x10]);
-
-        match l2cap_att_search(handle_start, handle_end, &uuid) {
+        match l2cap_att_search(handle_start, handle_end, view.uuid) {
             None => {
                 // No match found - prepare for error response
                 rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
@@ -803,8 +947,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
         }
     } else {
         // ---- 16-bit UUID search ----
-        let mut uuid = [0; 2];
-        uuid.copy_from_slice(&packet.l2cap_data().value[8..=9]);
+        let uuid = view.uuid;
 
         // Special handling for Characteristic UUID (0x2803)
         if uuid[0] == 3 && uuid[1] == 0x28 {
@@ -813,7 +956,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 
             // Search for all characteristics in the handle range
             loop {
-                match l2cap_att_search(handle_start, handle_end, &uuid) {
+                match l2cap_att_search(handle_start, handle_end, uuid) {
                     None => break, // No more characteristics found
 
                     Some((found_attrs, handle)) => {
@@ -882,7 +1025,7 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
             }
         } else {
             // ---- Regular 16-bit UUID search ----
-            match l2cap_att_search(handle_start, handle_end, &uuid) {
+            match l2cap_att_search(handle_start, handle_end, uuid) {
                 None => {
                     // No matching attributes found
                     rf_packet_att_rsp.att_read_rsp_mut().value[0] = 0;
@@ -971,14 +1114,10 @@ fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
 ///   such as reading dynamic system state or triggering side effects
 /// * When a read callback is present, it's the callback's responsibility to generate
 ///   and send any response packet
-fn handle_read_request(packet: &Packet) -> Option<Packet> {
-    // Get attribute handle from request
-    let att_num = packet.l2cap_data().value[4] as usize;
-
-    // Validate handle has zero in high byte
-    if packet.l2cap_data().value[5] != 0 {
-        return None;
-    }
+#[inline(never)]
+fn handle_read_request(view: ReadRequestView<'_>) -> Option<Packet> {
+    // The request view is bounds checked and rejects a nonzero handle high byte.
+    let att_num = view.handle as usize;
 
     // Handle 0 is the table's count entry: no UUID, no value. Reject it instead
     // of serving a zero-length read built from its null value pointer.
@@ -1045,7 +1184,7 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
 
     // If attribute has a read callback, call it and let it handle the response
     if let Some(read_callback) = get_g_attributes().get(att_num).and_then(|attr| attr.r) {
-        read_callback(packet);
+        read_callback(view.packet);
     }
 
     None
@@ -1089,18 +1228,16 @@ fn handle_read_request(packet: &Packet) -> Option<Packet> {
 ///   `attr_effective_len`, never the table's buffer maximum
 /// * Response size is limited to avoid packet fragmentation
 /// * Primarily used during service discovery to locate service declarations
-fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
+#[inline(never)]
+fn handle_read_by_group_type_request(view: ReadByGroupTypeView) -> Option<Packet> {
     // Mark service discovery as active
     GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
 
-    // Extract handle range and target UUID from the request
-    let start_handle = packet.l2cap_data().value[4] as usize;
-    let handle_end = packet.l2cap_data().value[6] as usize;
+    let start_handle = view.start as usize;
+    let handle_end = view.end as usize;
     let mut handle_start = start_handle;
 
-    // Extract UUID to search for (typically 0x2800 for Primary Service)
-    let mut uuid = [0; 2];
-    uuid.copy_from_slice(&packet.l2cap_data().value[8..=9]);
+    let uuid = view.uuid;
 
     // Immediately check if request is valid, return error for invalid range
     if start_handle == 0 || start_handle > handle_end {
@@ -1269,20 +1406,20 @@ fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
 ///   such as triggering device operations or performing value validation
 /// * If the attribute value points to a memory address <= __RAM_START_ADDR, it's in ROM
 ///   and can't be written to directly
-fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
-    // --- Extract attribute handle from request ---
-    let att_handle = packet.l2cap_data().value[4] as usize;
+#[inline(never)]
+fn handle_write_request_or_command(view: WriteRequestView<'_>) -> Option<Packet> {
+    // The write view is bounds checked and rejects a nonzero handle high byte.
+    let att_handle = view.handle as usize;
 
     // --- Reject the count entry: handle 0 has no UUID and no writable value ---
     if att_handle == 0 {
         return None;
     }
 
-    // --- Validate handle: check high byte and total attribute count ---
-    let high_byte_is_zero = packet.l2cap_data().value[5] == 0;
+    // --- Validate total attribute count ---
     let handle_in_range = get_g_attributes()[0].att_num >= att_handle as u8;
 
-    if !high_byte_is_zero || !handle_in_range {
+    if !handle_in_range {
         return None;
     }
 
@@ -1315,7 +1452,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
 
     // --- Prepare response based on operation type ---
     // Write Request (0x12) needs a response; Write Command (0x52) doesn't
-    let is_write_request = packet.l2cap_data().value[3] == GattOp::AttOpWriteReq as u8;
+    let is_write_request = view.is_request;
     let response = if is_write_request {
         Some(Packet {
             att_write_rsp: PacketAttWriteRsp {
@@ -1338,10 +1475,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
         // Handle case when no write callback is defined
 
         // Early return if request data is insufficient (handle too small)
-        // SAFETY: (4) audited `Packet`-union view. `handle1` is at offset 6 of
-        // the 4-byte-aligned union, so the 2-byte read is aligned and lies
-        // inside the 48-byte packet buffer the RF/DMA layer filled.
-        let handle_value = unsafe { *(addr_of!(packet.l2cap_data().handle1) as *const u16) };
+        let handle_value = view.write_gate;
         if handle_value < 3 {
             return response;
         }
@@ -1366,16 +1500,10 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
             slice::from_raw_parts_mut(current_attr.p_attr_value, current_attr.attr_len as usize)
         };
 
-        // SAFETY: (4) audited `Packet`-union view. The source is `value[6]` of
-        // the packet the RF/DMA layer filled; `attr_len` is at most 19 in the
-        // table, and the only 19-byte entry (handle 3) is excluded by
-        // `is_readonly_ram_attr` above, so the largest reachable copy is 16
-        // bytes and `value[6..6 + attr_len]` stays inside the 30-byte field.
-        let incoming_value_slice = unsafe {
-            slice::from_raw_parts(
-                addr_of!(packet.l2cap_data().value[6]),
-                current_attr.attr_len as usize,
-            )
+        // The write view guarantees a bounded payload slice. Reject a short
+        // request rather than reading past the 30-byte union value field.
+        let Some(incoming_value_slice) = view.payload.get(..current_attr.attr_len as usize) else {
+            return response;
         };
 
         // Update attribute value with incoming data
@@ -1384,7 +1512,7 @@ fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
     } else {
         // Attribute has a write callback - invoke it
         if let Some(write_callback) = current_attr.w {
-            write_callback(packet);
+            write_callback(view.packet);
         }
     }
 
@@ -1545,6 +1673,28 @@ mod tests {
         }
 
         packet
+    }
+
+    // Test-module compatibility adapters keep the old direct-handler tests
+    // pointed at the same narrow views used by the production dispatcher.
+    fn handle_find_by_type_value_request(packet: &Packet) -> Option<Packet> {
+        find_by_type_value_view(packet).and_then(super::handle_find_by_type_value_request)
+    }
+
+    fn handle_read_by_type_request(packet: &Packet) -> Option<Packet> {
+        read_by_type_view(packet).and_then(super::handle_read_by_type_request)
+    }
+
+    fn handle_read_request(packet: &Packet) -> Option<Packet> {
+        read_request_view(packet).and_then(super::handle_read_request)
+    }
+
+    fn handle_read_by_group_type_request(packet: &Packet) -> Option<Packet> {
+        read_by_group_type_view(packet).and_then(super::handle_read_by_group_type_request)
+    }
+
+    fn handle_write_request_or_command(packet: &Packet) -> Option<Packet> {
+        write_request_view(packet).and_then(super::handle_write_request_or_command)
     }
 
     #[test]
@@ -1882,11 +2032,123 @@ mod tests {
     }
 
     #[test]
+    fn test_l2cap_att_supported_opcode_dispatch_matrix() {
+        seed_system_tick();
+
+        let mtu = create_att_packet(0, &[0x02, 0x17, 0x00]);
+        assert_eq!(l2cap_att_handler(&mtu).unwrap().att_mtu().opcode, 0x03);
+
+        let find_info = create_att_packet(0, &[0x04, 1, 0, 29, 0]);
+        assert_eq!(
+            l2cap_att_handler(&find_info).unwrap().att_read_rsp().opcode,
+            0x05
+        );
+
+        let mut find_by_type = [0u8; 12];
+        find_by_type[0] = 0x06;
+        find_by_type[1] = 1;
+        find_by_type[3] = 29;
+        find_by_type[5..7].copy_from_slice(&GATT_UUID_PRIMARY_SERVICE.to_le_bytes());
+        find_by_type[7..9].copy_from_slice(&0x1800u16.to_le_bytes());
+        let find_by_type = create_att_packet(0, &find_by_type);
+        assert!(l2cap_att_handler(&find_by_type).is_some());
+
+        let mut read_by_type = [0u8; 10];
+        read_by_type[0] = 0x08;
+        read_by_type[1] = 1;
+        read_by_type[3] = 29;
+        read_by_type[5..7].copy_from_slice(&GATT_UUID_PRIMARY_SERVICE.to_le_bytes());
+        let read_by_type = create_att_packet(0, &read_by_type);
+        assert!(l2cap_att_handler(&read_by_type).is_some());
+
+        let read = create_att_packet(0, &[0x0A, 3, 0]);
+        assert_eq!(
+            l2cap_att_handler(&read).unwrap().att_read_rsp().opcode,
+            0x0B
+        );
+
+        let mut read_by_group = [0u8; 10];
+        read_by_group[0] = 0x10;
+        read_by_group[1] = 1;
+        read_by_group[3] = 29;
+        read_by_group[5..7].copy_from_slice(&GATT_UUID_PRIMARY_SERVICE.to_le_bytes());
+        let read_by_group = create_att_packet(0, &read_by_group);
+        assert!(l2cap_att_handler(&read_by_group).is_some());
+
+        let write_req = create_att_packet(0, &[0x12, 19, 0, 0, 0x01, 0x00]);
+        assert_eq!(
+            l2cap_att_handler(&write_req)
+                .unwrap()
+                .att_write_rsp()
+                .opcode,
+            0x13
+        );
+
+        let write_cmd = create_att_packet(0, &[0x52, 19, 0, 0, 0x01, 0x00]);
+        assert!(l2cap_att_handler(&write_cmd).is_none());
+    }
+
+    #[test]
+    fn test_ll_control_pdu_is_out_of_att_dispatch_frame() {
+        seed_system_tick();
+
+        let mut control = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
+        control.l2cap_data_mut().handle1 = 0x0C;
+
+        assert!(is_ll_control_pdu(&control));
+        assert_eq!(
+            l2cap_att_handler(&control).unwrap().version_ind().opcode,
+            0x0C
+        );
+        assert!(dispatch_att_request(&control, AttRequestView { opcode: 0x03 }).is_none());
+    }
+
+    #[test]
+    fn test_ll_control_pdu_with_non_att_channel_is_handled_before_att_gate() {
+        seed_system_tick();
+
+        let mut control = create_att_packet(GattOp::AttOpExchangeMtuRsp as u8, &[0x17, 0x00]);
+        control.l2cap_data_mut().chan_id = 5;
+        control.l2cap_data_mut().value[1..3].copy_from_slice(&5u16.to_le_bytes());
+        control.l2cap_data_mut().handle1 = 0x0C;
+
+        assert!(is_ll_control_pdu(&control));
+        assert_eq!(att_channel_view(&control), Some(5));
+        assert_eq!(
+            l2cap_att_handler(&control).unwrap().version_ind().opcode,
+            0x0C
+        );
+    }
+
+    #[test]
+    fn test_supported_dispatch_bounds_are_checked() {
+        seed_system_tick();
+
+        for opcode in [0x02, 0x04, 0x06, 0x08, 0x0A, 0x10, 0x12, 0x52] {
+            let mut packet = Packet {
+                l2cap_data: PacketL2capData {
+                    l2cap_len: 0,
+                    chan_id: 4,
+                    opcode: 0,
+                    handle: 0,
+                    handle1: 0,
+                    value: [0; 30],
+                },
+            };
+            packet.l2cap_data_mut().value[1] = 4;
+            packet.l2cap_data_mut().value[3] = opcode;
+
+            let _ = l2cap_att_handler(&packet);
+        }
+    }
+
+    #[test]
     fn test_l2cap_att_handler_invalid_channel_id() {
         // Create a packet with an invalid channel ID (not 4)
         let mut packet = create_att_packet(0, &[GattOp::AttOpReadReq as u8, 0x03, 0x00]);
 
         // Override the channel ID bytes in the value array
+        packet.l2cap_data_mut().chan_id = 5;
         packet.l2cap_data_mut().value[1] = 5; // Channel ID 5 instead of 4
         packet.l2cap_data_mut().value[2] = 0;
 

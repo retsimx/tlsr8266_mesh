@@ -739,7 +739,7 @@ class TestStrictIndirectContract(unittest.TestCase):
         )
         code, out = _run_main(
             text,
-            ["--elf", "synthetic.elf", "--top", "3", "--strict"],
+            ["--elf", "synthetic.elf", "--top", "3"],
             GATT_SYMS,
         )
         self.assertEqual(code, 1, out)
@@ -763,10 +763,10 @@ class TestStrictIndirectContract(unittest.TestCase):
         self.assertIn("ambiguous", message)
         self.assertEqual({name: func.calls for name, func in funcs.items()}, before)
 
-    def test_strict_gatt_reports_five_targets_and_1684_style_failure(self) -> None:
+    def test_direct_default_strict_gatt_reports_five_targets_and_margin_failure(self) -> None:
         code, out = _run_main(
             STRICT_GATT_FIXTURE,
-            ["--elf", "synthetic.elf", "--top", "3", "--strict",
+            ["--elf", "synthetic.elf", "--top", "3",
              "--min-margin", "400"],
             GATT_SYMS,
         )
@@ -777,11 +777,14 @@ class TestStrictIndirectContract(unittest.TestCase):
         self.assertIn("dispatch_ota_write", out)
         self.assertIn("l2cap_att_handler -> pair_write", out)
         self.assertIn("l2cap_att_handler -> pair_read", out)
-        self.assertIn("1,684 B-style (1684 B)", out)
         self.assertIn("FAIL: main stack margin below minimum", out)
+        self.assertNotIn("strict GATT-inclusive path violates", out)
 
-    def test_normal_mode_does_not_add_gatt_edges(self) -> None:
-        code, out = _run_main(STRICT_GATT_FIXTURE)
+    def test_legacy_mode_does_not_add_gatt_edges(self) -> None:
+        code, out = _run_main(
+            STRICT_GATT_FIXTURE,
+            ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
+        )
         self.assertEqual(code, 0, out)
         self.assertIn("indirect dispatch edges (21):", out)
         self.assertNotIn("strict GATT dispatch edges", out)
@@ -927,7 +930,7 @@ class TestRamReachability(unittest.TestCase):
 
 
 class TestBaselineJson(unittest.TestCase):
-    def test_baseline_reports_image_sections_and_stack_counts(self) -> None:
+    def test_legacy_baseline_reports_image_sections_and_stack_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             elf = Path(tmp) / "firmware.elf"
             bin_path = Path(tmp) / "firmware.bin"
@@ -948,7 +951,7 @@ class TestBaselineJson(unittest.TestCase):
                 contextlib.redirect_stdout(buf),
             ):
                 code = stack_analysis.main([
-                    "--elf", str(elf), "--top", "3",
+                    "--elf", str(elf), "--top", "3", "--legacy",
                     "--baseline-json", str(out_path),
                 ])
 
@@ -968,6 +971,45 @@ class TestBaselineJson(unittest.TestCase):
             self.assertGreater(baseline["indirect_functions"], 0)
             self.assertEqual(baseline["allowed_indirect"], 21)
             self.assertEqual(baseline["mode"], "legacy")
+            self.assertFalse(baseline["strict"])
+
+    def test_direct_default_strict_baseline_reports_gatt_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            elf = Path(tmp) / "firmware.elf"
+            bin_path = Path(tmp) / "firmware.bin"
+            out_path = Path(tmp) / "baseline.json"
+            elf.write_bytes(b"ELF")
+            bin_path.write_bytes(b"BIN")
+
+            sections = {
+                ".text": (0x0, 0x1000),
+                ".rodata": (0x1000, 0x400),
+                ".ram_code": (0x1400, 0x400),
+            }
+            strict_pass_fixture = STRICT_GATT_FIXTURE.replace(
+                _fn("mesh_status_write", 1644),
+                _fn("mesh_status_write", 64),
+            )
+            buf = io.StringIO()
+            with (
+                mock.patch.object(stack_analysis, "objdump", return_value=strict_pass_fixture),
+                mock.patch.object(stack_analysis, "read_symbols", return_value=SYMS),
+                mock.patch.object(stack_analysis, "read_elf_sections", return_value=sections),
+                contextlib.redirect_stdout(buf),
+            ):
+                code = stack_analysis.main([
+                    "--elf", str(elf), "--top", "3",
+                    "--baseline-json", str(out_path),
+                ])
+
+            self.assertEqual(code, 0, buf.getvalue())
+            with out_path.open("r", encoding="utf-8") as handle:
+                baseline = json.load(handle)
+
+            self.assertEqual(baseline["mode"], "strict")
+            self.assertTrue(baseline["strict"])
+            self.assertEqual(baseline["legacy_edges_resolved"], 21)
+            self.assertEqual(baseline["gatt_edges_resolved"], 5)
 
 
 class TestIndirectEdgesFeedDepth(unittest.TestCase):
@@ -1064,8 +1106,11 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
-    def test_pass_reports_resolved_edges_and_margins(self) -> None:
-        code, out = _run_main(FIRMWARE_SHAPED)
+    def test_legacy_pass_reports_resolved_edges_and_margins(self) -> None:
+        code, out = _run_main(
+            FIRMWARE_SHAPED,
+            ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
+        )
         self.assertEqual(code, 0, out)
         self.assertIn("indirect dispatch edges (21):", out)
         self.assertIn(
@@ -1121,7 +1166,10 @@ class TestMain(unittest.TestCase):
             _fn(dropped, 24, indirect=True) + "\n", ""
         )
         self.assertNotIn(dropped, text)
-        code, out = _run_main(text)
+        code, out = _run_main(
+            text,
+            ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
+        )
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL: INDIRECT_EDGES['on_uart_mesh_rx']", out)
         self.assertIn("matches no parsed function", out)
@@ -1137,7 +1185,10 @@ class TestMain(unittest.TestCase):
         self.assertNotIn(callee, text)
         # The dispatcher survives; only its callee is gone.
         self.assertIn(f"{RADIO_CALLBACKS}18dispatch_ota_write", text)
-        code, out = _run_main(text)
+        code, out = _run_main(
+            text,
+            ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
+        )
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL: INDIRECT_EDGES['dispatch_ota_write']", out)
         self.assertIn("matches no parsed function", out)
@@ -1146,12 +1197,12 @@ class TestMain(unittest.TestCase):
     def test_margin_below_minimum_still_fails(self) -> None:
         code, out = _run_main(
             FIRMWARE_SHAPED, ["--elf", "synthetic.elf", "--top", "0",
-                              "--min-margin", "4000"]
+                              "--min-margin", "4000", "--legacy"]
         )
         self.assertEqual(code, 1, out)
         self.assertIn("FAIL: main stack margin below minimum", out)
 
-    def test_parse_args_accepts_an_explicit_argv(self) -> None:
+    def test_parse_args_accepts_explicit_modes_and_defaults_to_strict(self) -> None:
         args = stack_analysis.parse_args(
             ["--elf", "x.elf", "--top", "7", "--min-margin", "512",
              "--exclude-panic", "--strict", "--baseline-json", "base.json"]
@@ -1161,8 +1212,20 @@ class TestMain(unittest.TestCase):
             ("x.elf", 7, 512, True),
         )
         self.assertTrue(args.strict)
+        self.assertFalse(args.legacy)
         self.assertEqual(args.baseline_json, "base.json")
-        self.assertFalse(stack_analysis.parse_args([]).exclude_panic)
+
+        default_args = stack_analysis.parse_args([])
+        self.assertTrue(default_args.strict)
+        self.assertFalse(default_args.legacy)
+        self.assertFalse(default_args.exclude_panic)
+
+        legacy_args = stack_analysis.parse_args(["--legacy"])
+        self.assertFalse(legacy_args.strict)
+        self.assertTrue(legacy_args.legacy)
+
+        with self.assertRaises(SystemExit):
+            stack_analysis.parse_args(["--strict", "--legacy"])
 
 
 if __name__ == "__main__":

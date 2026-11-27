@@ -1,0 +1,184 @@
+# F-3 compatibility fixture: OTA, flash map, advertising, and SRAM identity
+
+ota.flash_adr_ota_ready_flag = 0x3f000
+ota.flash_ota_ready_flag = 0xa5
+ota.flash_adr_light_new_fw = 0x40000
+ota.fw_size_max_k = 128
+ota.erase_sectors_for_ota = 32
+ota.startup_flag = 0x544c4e4b
+ota.header_bin_size_offset = 0x18
+ota.timeout_default_s = 30
+ota.timeout_post_finish_s = 4
+ota.ble_packet_bytes = 20
+ota.ble_chunk_bytes = 16
+ota.mesh_packet_bytes = 10
+ota.mesh_chunk_bytes = 8
+ota.min_final_packet_count = 3
+ota.version_mask = 0x7fffffff
+ota.downgrade_refusal_exit_code = 2
+ota.gatt_crc_bytes = 2
+ota.mesh_final_header_payload_bytes = 0
+ota.stale_reject = true
+ota.gap_reject = true
+ota.overflow_reject = true
+
+ota.packet_window.staging_slots = 16
+ota.packet_window.packet_size = 48
+ota.packet_window.window_bytes = 768
+ota.packet_window.shared_buffer = true
+ota.packet_window.extra_sram_bytes = 0
+ota.chunk.index_width = 2
+ota.chunk.wrap_ffff_to_zero = true
+ota.chunk.first_index = 0
+ota.chunk.last_plus_one_rule = true
+ota.final_header.expected_packet_count_from_bin_size = true
+ota.final_header.accept_only_min_three = true
+ota.ready_flag.reboot_sequencing = arm_after_header_fixup
+ota.dirty_startup.recovery = erase_32_sectors
+
+flash.sector_size = 0x1000
+flash.total_size = 0x80000
+flash.region_count = 14
+flash.reset_erase_last_addr = 0x7a000
+
+flash.region.00.name = live_firmware
+flash.region.00.start = 0x00000
+flash.region.00.end = 0x3f000
+flash.region.00.sectors = 63
+flash.region.00.owner = firmware
+flash.region.00.reset_policy = preserve
+
+flash.region.01.name = ota_ready
+flash.region.01.start = 0x3f000
+flash.region.01.end = 0x40000
+flash.region.01.sectors = 1
+flash.region.01.owner = platform_special
+flash.region.01.reset_policy = ota_recovery_only
+
+flash.region.02.name = ota_staging
+flash.region.02.start = 0x40000
+flash.region.02.end = 0x60000
+flash.region.02.sectors = 32
+flash.region.02.owner = ota_controller
+flash.region.02.reset_policy = preserve
+
+flash.region.03.name = reserved_gap
+flash.region.03.start = 0x60000
+flash.region.03.end = 0x76000
+flash.region.03.sectors = 22
+flash.region.03.owner = reserved
+flash.region.03.reset_policy = preserve
+
+flash.region.04.name = mac
+flash.region.04.start = 0x76000
+flash.region.04.end = 0x77000
+flash.region.04.sectors = 1
+flash.region.04.owner = platform
+flash.region.04.reset_policy = preserve
+
+flash.region.05.name = pairing
+flash.region.05.start = 0x77000
+flash.region.05.end = 0x78000
+flash.region.05.sectors = 1
+flash.region.05.owner = platform
+flash.region.05.reset_policy = reset_erase
+
+flash.region.06.name = luminance
+flash.region.06.start = 0x78000
+flash.region.06.end = 0x79000
+flash.region.06.sectors = 1
+flash.region.06.owner = product_light
+flash.region.06.reset_policy = reset_erase
+
+flash.region.07.name = device_group
+flash.region.07.start = 0x79000
+flash.region.07.end = 0x7a000
+flash.region.07.sectors = 1
+flash.region.07.owner = platform
+flash.region.07.reset_policy = reset_erase
+
+flash.region.08.name = reset_count
+flash.region.08.start = 0x7a000
+flash.region.08.end = 0x7b000
+flash.region.08.sectors = 1
+flash.region.08.owner = platform_special
+flash.region.08.reset_policy = reset_erase_last
+
+flash.region.09.name = panic
+flash.region.09.start = 0x7b000
+flash.region.09.end = 0x7c000
+flash.region.09.sectors = 1
+flash.region.09.owner = platform
+flash.region.09.reset_policy = reset_erase
+
+flash.region.10.name = reserved_7c
+flash.region.10.start = 0x7c000
+flash.region.10.end = 0x7d000
+flash.region.10.sectors = 1
+flash.region.10.owner = reserved
+flash.region.10.reset_policy = reset_erase
+
+flash.region.11.name = reserved_7d
+flash.region.11.start = 0x7d000
+flash.region.11.end = 0x7e000
+flash.region.11.sectors = 1
+flash.region.11.owner = reserved
+flash.region.11.reset_policy = reset_erase
+
+flash.region.12.name = reserved_7e
+flash.region.12.start = 0x7e000
+flash.region.12.end = 0x7f000
+flash.region.12.sectors = 1
+flash.region.12.owner = reserved
+flash.region.12.reset_policy = reset_erase
+
+flash.region.13.name = reserved_7f
+flash.region.13.start = 0x7f000
+flash.region.13.end = 0x80000
+flash.region.13.sectors = 1
+flash.region.13.owner = reserved
+flash.region.13.reset_policy = reset_erase
+
+factory_reset.erase_start = 0x77000
+factory_reset.erase_end = 0x80000
+factory_reset.preserve_start = 0x00000
+factory_reset.preserve_end = 0x77000
+factory_reset.reset_count_erased_last = true
+
+advertising.init_flags = 02 01 05
+advertising.vendor_id = 0211
+advertising.canonical.mac = 11 22 33 44 55 66
+advertising.canonical.mac_prefix = 11 22 33 44
+advertising.canonical.dev_addr = 1f 00
+advertising.canonical.build_version = 78 56 34 12
+advertising.private_len = 8
+advertising.private.bytes = 11 02 11 02 11 22 33 44
+advertising.out_of_mesh.name = out_of_mesh
+advertising.out_of_mesh.name_len = 11
+advertising.out_of_mesh.primary_tlv = 02 01 05 0c 09 6f 75 74 5f 6f 66 5f 6d 65 73 68 09 ff 11 02 11 02 11 22 33 44
+advertising.out_of_mesh.primary_wire_len = 28
+advertising.out_of_mesh.rf_len = 34
+advertising.out_of_mesh.dma_len = 36
+# The paired canonical fixture uses MeshName, an existing test credential, to pin the in-mesh TLV shape.
+advertising.in_mesh.name = MeshName
+advertising.in_mesh.name_len = 8
+advertising.in_mesh.primary_tlv = 02 01 05 09 09 4d 65 73 68 4e 61 6d 65 09 ff 11 02 11 02 11 22 33 44
+advertising.in_mesh.primary_wire_len = 33
+advertising.in_mesh.rf_len = 39
+advertising.in_mesh.dma_len = 41
+advertising.scan_rsp.handle = ff1e
+advertising.scan_rsp.private_len = 28
+# Actual packed wire payload currently has 29 bytes because its reserved block is 16 bytes.
+advertising.scan_rsp.private_wire_len = 29
+advertising.scan_rsp.product_uuid = 02 00
+advertising.scan_rsp.status = 01
+advertising.scan_rsp.rsv = 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+advertising.scan_rsp.private_bytes = 11 02 11 02 11 22 33 44 02 00 01 1f 00 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+
+sram.ident.mac_addr = 0x808004
+sram.ident.version_addr = 0x808008
+sram.ident.crc_addr = 0x80800c
+sram.ident.golden_crc_input = 11 22 33 44 78 56 34 12
+sram.ident.golden_crc = 7819
+sram.ident.mac_u32 = 44332211
+sram.ident.version_u32 = 12345678

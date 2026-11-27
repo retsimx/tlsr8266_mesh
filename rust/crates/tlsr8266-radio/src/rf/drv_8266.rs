@@ -1362,6 +1362,10 @@ pub fn rf_set_ble_access_code_adv() {
 #[coverage(off)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/rust_parser.rs"
+    ));
     use crate::ble::pair::{pair_init, PAIR_STATE};
     use crate::ble::status::{
         DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
@@ -3561,5 +3565,146 @@ mod tests {
                 value: FLD_RF_IRQ_MASK::IRQ_RX.bits() as u32,
             }]
         );
+    }
+
+    #[test]
+    fn test_advertising_and_sram_identity_fixture_lock() {
+        let mut fixture = parse_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/ota_flash_adv_compat.txt"
+        )))
+        .expect("OTA/advertising fixture must parse");
+
+        let adv_flags = fixture.bytes("advertising.init_flags").unwrap();
+        assert_eq!(adv_flags.as_slice(), ADV_DATA_INIT);
+
+        let vendor_id =
+            u16::from_str_radix(fixture.str("advertising.vendor_id").unwrap(), 16).unwrap();
+        assert_eq!(vendor_id, 0x0211);
+        let pri_static = ADV_PRI_DATA.lock();
+        let pri_manufacture = pri_static.manufacture_id;
+        let pri_mesh_uuid = pri_static.mesh_product_uuid;
+        drop(pri_static);
+        assert_eq!(pri_manufacture, vendor_id);
+        assert_eq!(pri_mesh_uuid, vendor_id);
+        assert_eq!(
+            size_of::<AdvPrivate>(),
+            fixture.u8("advertising.private_len").unwrap() as usize
+        );
+
+        let canonical_mac = fixture.bytes("advertising.canonical.mac").unwrap();
+        let canonical_mac_prefix = fixture.bytes("advertising.canonical.mac_prefix").unwrap();
+        assert_eq!(canonical_mac_prefix, canonical_mac[..4]);
+        let canonical_addr = fixture.bytes("advertising.canonical.dev_addr").unwrap();
+        assert_eq!(canonical_addr, [0x1f, 0x00]);
+
+        reset_host_fakes();
+        crate::facade::reset_radio_state_for_test();
+
+        // Pin the canonical private and out-of-mesh primary advertisement payload.
+        let out_name = fixture.str("advertising.out_of_mesh.name").unwrap();
+        assert_eq!(out_name.as_bytes(), b"out_of_mesh");
+        let private_expected = fixture.bytes("advertising.private.bytes").unwrap();
+        let pri = AdvPrivate {
+            manufacture_id: vendor_id,
+            mesh_product_uuid: vendor_id,
+            mac_address: u32::from_le_bytes([
+                canonical_mac[0],
+                canonical_mac[1],
+                canonical_mac[2],
+                canonical_mac[3],
+            ]),
+        };
+        let rsp = AdvRspPrivate {
+            manufacture_id: vendor_id,
+            mesh_product_uuid: vendor_id,
+            mac_address: u32::from_le_bytes([
+                canonical_mac[0],
+                canonical_mac[1],
+                canonical_mac[2],
+                canonical_mac[3],
+            ]),
+            product_uuid: 0x0002,
+            status: 0x01,
+            device_address: 0x001f,
+            rsv: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        };
+
+        let pri_wire = unsafe {
+            core::slice::from_raw_parts(
+                core::ptr::addr_of!(pri) as *const u8,
+                size_of::<AdvPrivate>(),
+            )
+        };
+        assert_eq!(pri_wire, private_expected.as_slice()[..8].as_ref());
+
+        let rsp_manufacture = rsp.manufacture_id;
+        let rsp_product_uuid = rsp.product_uuid;
+        let rsp_status = rsp.status;
+        let rsp_device_address = rsp.device_address;
+        assert_eq!(rsp_manufacture, vendor_id);
+        assert_eq!(rsp_product_uuid, 0x0002);
+        assert_eq!(rsp_status, 0x01);
+        assert_eq!(rsp_device_address, 0x001f);
+
+        let rsp_expected = fixture.bytes("advertising.scan_rsp.private_bytes").unwrap();
+        // SAFETY: (4) AdvRspPrivate is repr(C, packed); fields/rsv are copied
+        // only through the packed wire view, with the fixture length as its bound.
+        let rsp_wire_len = fixture.u8("advertising.scan_rsp.private_wire_len").unwrap();
+        let rsp_wire = unsafe {
+            core::slice::from_raw_parts(
+                core::ptr::addr_of!(rsp) as *const u8,
+                rsp_wire_len as usize,
+            )
+        };
+        assert_eq!(
+            rsp_wire,
+            rsp_expected.as_slice(),
+            "canonical scan-response wire payload"
+        );
+
+        *PKT_ADV.lock() = Packet {
+            adv_ind_module: RfPacketAdvIndModuleT::default(),
+        };
+        rf_link_slave_set_adv(&ADV_DATA_INIT);
+        crate::mesh_ll::adv::set_advertisement_mesh_name(b"out_of_mesh");
+        crate::mesh_ll::adv::set_advertisement_manufacturer_data(&private_expected);
+        let pkt = PKT_ADV.lock();
+        let primary = fixture
+            .bytes("advertising.out_of_mesh.primary_tlv")
+            .unwrap();
+        let rf_len = pkt.head().rf_len;
+        let dma_len = pkt.head().dma_len;
+        assert_eq!(
+            rf_len,
+            fixture.u8("advertising.out_of_mesh.rf_len").unwrap()
+        );
+        assert_eq!(
+            dma_len,
+            fixture.u8("advertising.out_of_mesh.dma_len").unwrap() as u32
+        );
+        for (i, &expected) in primary.iter().enumerate() {
+            assert_eq!(
+                pkt.adv_ind_module().data[i],
+                expected,
+                "out-of-mesh primary TLV byte {i}"
+            );
+        }
+
+        drop(pkt);
+
+        assert_eq!(fixture.u32("sram.ident.mac_addr").unwrap(), 0x808004);
+        assert_eq!(fixture.u32("sram.ident.version_addr").unwrap(), 0x808008);
+        assert_eq!(fixture.u32("sram.ident.crc_addr").unwrap(), 0x80800c);
+        assert_eq!(fixture.u32("sram.ident.mac_u32").unwrap(), 44332211);
+        assert_eq!(fixture.u32("sram.ident.version_u32").unwrap(), 12345678);
+        assert_eq!(fixture.u16("sram.ident.golden_crc").unwrap(), 0x7819);
+
+        let golden = fixture.bytes("sram.ident.golden_crc_input").unwrap();
+        assert_eq!(crc16(golden.as_slice()), 0x7819);
+
+        assert_eq!(SRAM_IDENT_MAC, 0x808004);
+        assert_eq!(SRAM_IDENT_VERSION, 0x808008);
+        assert_eq!(SRAM_IDENT_CRC, 0x80800c);
     }
 }

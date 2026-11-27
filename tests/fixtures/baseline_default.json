@@ -1,0 +1,31 @@
+{
+  "allowed_indirect": 50,
+  "bin_bytes": 68796,
+  "elf_bytes": 224172,
+  "free_main_sram": 2832,
+  "gatt_edges_resolved": 5,
+  "indirect_functions": 40,
+  "irq_margin": 636,
+  "irq_max": 1156,
+  "legacy_edges_resolved": 21,
+  "main_margin": 1120,
+  "main_max": 1712,
+  "mode": "strict",
+  "parsed_functions": 261,
+  "runtime_allowed_indirect": 24,
+  "sections": {
+    ".ARM.attributes": 54,
+    ".bss": 8888,
+    ".data": 824,
+    ".ram_code": 1112,
+    ".retention_bss": 0,
+    ".retention_data": 0,
+    ".rodata": 6788,
+    ".shstrtab": 118,
+    ".strtab": 38286,
+    ".symtab": 16688,
+    ".text": 59892,
+    ".vectors": 176
+  },
+  "strict": true
+}

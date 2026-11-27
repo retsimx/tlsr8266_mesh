@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "secret_free": true,
+  "images": {
+    "rtt": {
+      "elf": "rtt.elf",
+      "bin": "rtt.bin",
+      "features": "rtt",
+      "description": "RTT-enabled firmware image"
+    },
+    "base": {
+      "elf": "base.elf",
+      "bin": "base.bin",
+      "features": "",
+      "description": "Current-version base firmware image"
+    },
+    "next": {
+      "elf": "next.elf",
+      "bin": "next.bin",
+      "features": "",
+      "description": "Temporary-worktree V+1 firmware image"
+    }
+  },
+  "bench": {
+    "host": "root@10.0.0.150",
+    "artifacts_dir": "/root/hil-accept/artifacts",
+    "runner": "/root/hil-accept/run.sh",
+    "env_policy": "off-repo-secret-never-inspect"
+  },
+  "preflight": {
+    "dut_mesh_addr_range": [1, 63],
+    "allow_silent_fallback": false,
+    "same_artifacts_across_crystals": true,
+    "env": "off-repo-secret-never-inspect",
+    "no_env_read": true
+  },
+  "stages": [0, 1, 2, 3, 4, 5],
+  "stage_assertions": {
+    "0": [
+      "RTT boot banner and HEARTBEAT present",
+      "zero panics",
+      "out_of_mesh advertising active"
+    ],
+    "1": [
+      "BLE pairing to mesh address 0x1f",
+      "pairing state persists across flash reset"
+    ],
+    "2": [
+      "UART bridge active",
+      "live peer status available"
+    ],
+    "3": [
+      "BLE and UART light control",
+      "PWM/analog output checked",
+      "reset persistence checked",
+      "groups checked"
+    ],
+    "4": [
+      "OTA downgrade guard blocks older versions",
+      "dirty 0x40000 staging recovery checked",
+      "BLE OTA installs next image"
+    ],
+    "5": [
+      "factory reset succeeds",
+      "five timed SWire resets complete",
+      "BLE kick-out succeeds"
+    ]
+  },
+  "profiles": {
+    "12mhz": {
+      "crystal_mhz": 12,
+      "stages": [0, 1, 2, 3, 4, 5]
+    },
+    "16mhz": {
+      "crystal_mhz": 16,
+      "timing_sensitive_stages": [0, 1, 2, 3, 4],
+      "stages": [0, 1, 2, 3, 4]
+    }
+  }
+}

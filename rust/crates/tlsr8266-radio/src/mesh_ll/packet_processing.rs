@@ -1572,6 +1572,10 @@ pub fn parse_ble_packet_op_params(
 #[coverage(off)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/rust_parser.rs"
+    ));
     use crate::callbacks::{set_ble_app_hooks, BleAppHooks};
     use crate::mesh_ll::node_status::{
         MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
@@ -3906,6 +3910,121 @@ mod tests {
             crate::queues::MESH_TX_QUEUE.lock().len(),
             0,
             "no response may be queued"
+        );
+    }
+
+    #[test]
+    fn test_mesh_fixture_notify_dedupe_ack_and_routing_matrix() {
+        let mut fixture = parse_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/mesh_uart_compat.txt"
+        )))
+        .expect("mesh fixture must parse");
+
+        reset_test_state();
+        crate::callbacks::test_ota::set_in_progress_for_test(false);
+
+        for key in [
+            "mesh.notify_req.1a",
+            "mesh.notify_req.1d",
+            "mesh.notify_req.20",
+            "mesh.notify_req.17",
+            "mesh.notify_req.2a",
+            "mesh.notify_req.24",
+            "mesh.notify_req.26",
+            "mesh.notify_req.28",
+        ] {
+            assert!(fixture.bool(key).unwrap(), "{key}");
+            let suffix = key.rsplit('.').next().unwrap();
+            let opcode = u8::from_str_radix(suffix, 16).unwrap();
+            assert!(
+                rf_link_is_notify_req(opcode),
+                "notify request opcode 0x{suffix}"
+            );
+        }
+
+        for key in [
+            "mesh.notify_rsp.14",
+            "mesh.notify_rsp.15",
+            "mesh.notify_rsp.16",
+            "mesh.notify_rsp.1b",
+            "mesh.notify_rsp.21",
+            "mesh.notify_rsp.2b",
+            "mesh.notify_rsp.25",
+            "mesh.notify_rsp.27",
+        ] {
+            assert!(fixture.bool(key).unwrap(), "{key}");
+            let suffix = key.rsplit('.').next().unwrap();
+            let opcode = u8::from_str_radix(suffix, 16).unwrap();
+            assert!(
+                rf_link_is_notify_rsp(opcode),
+                "notify response opcode 0x{suffix}"
+            );
+        }
+
+        assert_eq!(fixture.str("mesh.dedupe.key").unwrap(), "op_sno");
+        assert_eq!(fixture.str("mesh.dedupe.buffer").unwrap(), "rc_packet_fifo");
+        let ack_opcode =
+            u8::from_str_radix(fixture.str("mesh.automatic_ack.opcode").unwrap(), 16).unwrap();
+        let ack_high =
+            u8::from_str_radix(fixture.str("mesh.automatic_ack.high_bit").unwrap(), 16).unwrap();
+        assert_eq!(ack_opcode | ack_high, 0xf5);
+        assert_eq!(
+            fixture.str("mesh.automatic_ack.condition").unwrap(),
+            "addressed_non_notify_send_ack"
+        );
+
+        let packet = create_test_packet(ack_opcode, [0x10, 0x20, 0x30], 0x1234, 0x1234);
+        rc_pkt_buf_push(ack_opcode, &packet);
+        assert!(
+            is_exist_in_rc_pkt_buf(ack_opcode, &packet),
+            "op+sno dedupe key"
+        );
+        let different_sno = create_test_packet(ack_opcode, [0x10, 0x20, 0x31], 0x1234, 0x1234);
+        assert!(
+            !is_exist_in_rc_pkt_buf(ack_opcode, &different_sno),
+            "different sno must not dedupe"
+        );
+
+        req_cmd_set_notify_ok_flag(ack_opcode, &packet);
+        assert!(req_cmd_is_notify_ok(ack_opcode, &packet));
+
+        assert_eq!(
+            fixture.str("mesh.relay.foreign_traffic").unwrap(),
+            "forward"
+        );
+        crate::rf::drv_8266::DEVICE_ADDRESS.set(0x1234);
+
+        let foreign = create_test_packet(LGT_CMD_LIGHT_ONOFF, [1, 2, 3], 0x5678, 0x9abc);
+        let (group, device) = crate::mesh_ll::node_status::rf_link_match_group_mac(&foreign);
+        assert!(!group && !device, "foreign unicast is relayed");
+
+        let self_packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [1, 2, 4], 0x5678, 0x1234);
+        let (group, device) = crate::mesh_ll::node_status::rf_link_match_group_mac(&self_packet);
+        assert!(!group && device, "self unicast is local");
+
+        crate::rf::drv_8266::GROUP_ADDRESS.lock()[0] = 0x8001;
+        let mut group_packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [1, 2, 5], 0x5678, 0x8001);
+        let (group, device) = crate::mesh_ll::node_status::rf_link_match_group_mac(&group_packet);
+        assert!(group && !device, "matching group is local and relayed");
+        group_packet.mesh_mut().dst_adr = 0xffff;
+        let (broadcast, device) =
+            crate::mesh_ll::node_status::rf_link_match_group_mac(&group_packet);
+        assert!(broadcast && !device, "broadcast is local and relayed");
+
+        assert_eq!(
+            fixture.str("mesh.route.foreign_unicast").unwrap(),
+            "queue_tx_only"
+        );
+        assert_eq!(
+            fixture.str("mesh.route.self_unicast").unwrap(),
+            "local_delivery_only"
+        );
+        assert_eq!(
+            fixture
+                .str("mesh.route.matching_group_or_broadcast")
+                .unwrap(),
+            "local_delivery_and_queue_tx"
         );
     }
 }

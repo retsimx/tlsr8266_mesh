@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -1061,6 +1062,109 @@ def write_baseline_json(destination: str, baseline: dict) -> None:
     print(f"baseline JSON written to {destination}")
 
 
+def compare_baseline(current: dict, baseline_path: str) -> bool:
+    """Print a readable, informational delta against a baseline JSON file."""
+    try:
+        with open(baseline_path, "r", encoding="utf-8") as handle:
+            baseline = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"baseline comparison: INVALID SCHEMA: {baseline_path}: {exc}")
+        return False
+
+    if not isinstance(baseline, dict) or not isinstance(current, dict):
+        print(f"baseline comparison: INVALID SCHEMA: {baseline_path}: top-level object required")
+        return False
+
+    required_top_keys = (
+        "elf_bytes",
+        "bin_bytes",
+        "free_main_sram",
+        "main_max",
+        "irq_max",
+        "main_margin",
+        "irq_margin",
+        "allowed_indirect",
+    )
+    required_section_keys = (".text", ".rodata", ".data", ".bss", ".ram_code")
+
+    def schema_numeric(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, int):
+            return value
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
+
+    baseline_sections = baseline.get("sections")
+    current_sections = current.get("sections")
+    if not isinstance(baseline_sections, dict) or not isinstance(current_sections, dict):
+        print(f"baseline comparison: INVALID SCHEMA: {baseline_path}: sections object required")
+        return False
+
+    for name in required_top_keys:
+        if name not in baseline:
+            print(f"baseline comparison: INVALID SCHEMA: missing baseline metric {name}")
+            return False
+        if name not in current:
+            print(f"baseline comparison: INVALID SCHEMA: missing current metric {name}")
+            return False
+        if schema_numeric(baseline[name]) is None:
+            print(f"baseline comparison: INVALID SCHEMA: non-numeric baseline metric {name}")
+            return False
+        if schema_numeric(current[name]) is None:
+            print(f"baseline comparison: INVALID SCHEMA: non-numeric current metric {name}")
+            return False
+
+    for name in required_section_keys:
+        if name not in baseline_sections:
+            print(f"baseline comparison: INVALID SCHEMA: missing baseline section key {name}")
+            return False
+        if name not in current_sections:
+            print(f"baseline comparison: INVALID SCHEMA: missing current section key {name}")
+            return False
+        if schema_numeric(baseline_sections[name]) is None:
+            print(f"baseline comparison: INVALID SCHEMA: non-numeric baseline section key {name}")
+            return False
+        if schema_numeric(current_sections[name]) is None:
+            print(f"baseline comparison: INVALID SCHEMA: non-numeric current section key {name}")
+            return False
+
+    metrics = (
+        ("elf_bytes", "elf_bytes"),
+        ("bin_bytes", "bin_bytes"),
+        (".text", "sections"),
+        (".rodata", "sections"),
+        (".data", "sections"),
+        (".bss", "sections"),
+        (".ram_code", "sections"),
+        ("free_main_sram", "free_main_sram"),
+        ("main_max", "main_max"),
+        ("irq_max", "irq_max"),
+        ("main_margin", "main_margin"),
+        ("irq_margin", "irq_margin"),
+        ("allowed_indirect", "allowed_indirect"),
+    )
+
+    print(f"\nBASELINE DELTA (informational: {baseline_path})")
+    print(f"  {'metric':20s} {'baseline':>12s} {'current':>12s} {'delta':>12s}")
+    for label, location in metrics:
+        if location == "sections":
+            old = schema_numeric(baseline_sections[label])
+            new = schema_numeric(current_sections[label])
+        else:
+            old = schema_numeric(baseline[location])
+            new = schema_numeric(current[location])
+        assert old is not None and new is not None
+        delta = new - old
+        delta_text = f"{delta:+d}"
+        print(
+            f"  {label:20s} {old:12d} {new:12d} "
+            f"{delta_text:>12s}"
+        )
+    return True
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--elf", default="_build/lightblemesh")
@@ -1099,6 +1203,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         default=None,
         help="write a JSON stack/image baseline (use '-' or omit PATH for stdout)",
+    )
+    ap.add_argument(
+        "--compare-baseline",
+        dest="compare_baseline",
+        metavar="PATH",
+        default=None,
+        help="print an informational structured delta against a baseline JSON; never fails the gate",
     )
     args = ap.parse_args(argv)
     if args.legacy:
@@ -1266,6 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("  PASS" if ok else "  FAIL")
 
+    baseline = None
     if args.baseline_json is not None:
         baseline = build_baseline(
             args.elf,
@@ -1280,6 +1392,33 @@ def main(argv: list[str] | None = None) -> int:
             args.strict,
         )
         write_baseline_json(args.baseline_json, baseline)
+
+    if args.compare_baseline is not None:
+        if baseline is None:
+            baseline = build_baseline(
+                args.elf,
+                funcs,
+                syms,
+                main_max,
+                irq_max,
+                sections,
+                legacy_edges,
+                gatt_edges,
+                runtime_allowed,
+                args.strict,
+            )
+        try:
+            if not compare_baseline(baseline, args.compare_baseline):
+                print(
+                    f"GATE NOTE: baseline comparison could not be validated: "
+                    f"{args.compare_baseline}",
+                    file=sys.stderr,
+                )
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"GATE NOTE: could not compare baseline {args.compare_baseline}: {exc}",
+                file=sys.stderr,
+            )
 
     return 0 if ok else 1
 

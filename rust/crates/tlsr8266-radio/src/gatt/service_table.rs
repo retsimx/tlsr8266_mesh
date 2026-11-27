@@ -556,6 +556,10 @@ pub fn is_readonly_ram_attr(handle: usize) -> bool {
 #[coverage(off)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/rust_parser.rs"
+    ));
     use crate::mesh_ll::node_status::{
         MESH_NODE_MASK, MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
     };
@@ -1296,5 +1300,192 @@ mod tests {
             "the CCC handle must not be treated as read-only RAM"
         );
         assert_eq!(STATUS_CCC, [0x01, 0x00], "the CCC static is left alone");
+    }
+
+    #[test]
+    fn test_gatt_fixture_29_rows_and_config_invariants() {
+        let mut fixture = parse_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/gatt_compat.txt"
+        )))
+        .expect("gatt fixture must parse");
+
+        assert_eq!(
+            fixture.u8("gatt.table.count").unwrap(),
+            GATT_ATT_COUNT as u8
+        );
+        assert_eq!(fixture.u8("gatt.table.max_valid_handle").unwrap(), 28);
+        assert_eq!(fixture.u8("gatt.att.mtu").unwrap(), 23);
+        assert_eq!(
+            fixture.u8("gatt.att.read_by_type_max_value_len").unwrap(),
+            19
+        );
+        assert_eq!(fixture.u8("gatt.att.read_rsp_max_value_len").unwrap(), 22);
+
+        restore_default_profile();
+        // Reset test-owned scratch values used by fixture rows so the oracle
+        // observes the boot/default bytes regardless of test execution order.
+        SPP_DATA_SERVER2CLIENT_DATA.lock().copy_from_slice(&[0; 4]);
+        SEND_TO_MASTER.lock().fill(0);
+
+        // Re-seed the host-test table from the canonical GATT_TABLE. Previous
+        // tests intentionally patch entries temporarily; this oracle must never
+        // inherit any stale or dangling temporary pointer.
+        let table = get_g_attributes();
+        for (handle, attr) in table.iter_mut().enumerate().take(GATT_ATT_COUNT) {
+            let canonical = &GATT_TABLE.0[handle];
+            attr.att_num = canonical.att_num;
+            attr.uuid_len = canonical.uuid_len;
+            attr.attr_len = canonical.attr_len;
+            attr.attr_max_len = canonical.attr_max_len;
+            attr.uuid = canonical.uuid;
+            attr.p_attr_value = canonical.p_attr_value;
+            attr.w = canonical.w;
+            attr.r = canonical.r;
+        }
+
+        for (handle, attr) in table.iter().enumerate().take(GATT_ATT_COUNT) {
+            let row = format!("gatt.row.{handle:02}");
+            let span = fixture.u8(&format!("{row}.span")).unwrap();
+            let uuid_len = fixture.u8(&format!("{row}.uuid_len")).unwrap();
+            let uuid = fixture.bytes(&format!("{row}.uuid")).unwrap();
+            let default_len = fixture.u8(&format!("{row}.default_len")).unwrap();
+            let max_len = fixture.u8(&format!("{row}.max_len")).unwrap();
+            let behavior = fixture.str(&format!("{row}.behavior")).unwrap().to_owned();
+
+            assert_eq!(attr.att_num, span, "row {handle} span");
+            assert_eq!(attr.uuid_len, uuid_len, "row {handle} uuid_len");
+            assert_eq!(attr.attr_max_len, max_len, "row {handle} max_len");
+
+            if uuid_len == 0 {
+                assert!(attr.uuid.is_null(), "sentinel UUID pointer");
+            } else {
+                assert!(
+                    !attr.uuid.is_null(),
+                    "row {handle} UUID pointer must be present"
+                );
+
+                match uuid_len {
+                    2 => {
+                        // SAFETY: the table statics own two UUID bytes and
+                        // `read_unaligned` is valid even if the 16-bit value is
+                        // stored in a deliberately untrusted test pointer.
+                        let actual = unsafe { core::ptr::read_unaligned(attr.uuid.cast::<u16>()) };
+                        assert_eq!(
+                            actual.to_le_bytes(),
+                            uuid.as_slice(),
+                            "row {handle} 16-bit UUID bytes"
+                        );
+                    }
+                    16 => {
+                        assert_eq!(
+                            attr.uuid.align_offset(core::mem::align_of::<u8>()),
+                            0,
+                            "row {handle} 128-bit UUID pointer must be aligned for u8"
+                        );
+                        // SAFETY: uuid_len == 16 is fixture-pinned, the table
+                        // entry owns a public 16-byte UUID static, and the
+                        // pointer is non-null/aligned for u8 before the slice is formed.
+                        let actual =
+                            unsafe { core::slice::from_raw_parts(attr.uuid, uuid_len as usize) };
+                        assert_eq!(actual, uuid.as_slice(), "row {handle} 128-bit UUID bytes");
+                    }
+                    other => panic!("unexpected row {handle} uuid_len {other}"),
+                }
+            }
+
+            assert_eq!(
+                attr_effective_len(handle, attr),
+                if handle == 3 || handle == 11 || handle == 9 {
+                    default_len
+                } else {
+                    attr.attr_len
+                },
+                "row {handle} effective/default length"
+            );
+
+            match behavior.as_str() {
+                "sentinel" => assert_eq!(handle, 0),
+                "ro_static" | "ro_dynamic_config" | "ro_dynamic_build_version" => {
+                    assert!(attr.w.is_none(), "row {handle} must remain read-only")
+                }
+                "status_report_write" => assert!(attr.w.is_some(), "row {handle} write callback"),
+                "cccd_writable" => assert_eq!(attr.attr_len, 2),
+                "command_bridge_write_consume_on_read" => {
+                    assert!(attr.w.is_some(), "row {handle} write callback");
+                    assert!(attr.r.is_none(), "read consumes SEND_TO_MASTER");
+                }
+                "ota_write_terminate_on_completed_read" => {
+                    assert!(attr.w.is_some(), "row {handle} write callback");
+                    assert!(
+                        attr.r.is_none(),
+                        "OTA read side effect is handled by the ATT read path"
+                    );
+                }
+                "pair_write_deferred_read" => {
+                    assert!(attr.w.is_some(), "row {handle} write callback");
+                    assert!(attr.r.is_some(), "row {handle} pair read callback");
+                }
+                other => panic!("unexpected behavior class {other}"),
+            }
+
+            let value_key = format!("{row}.value");
+            let value_text = fixture.str(&value_key).unwrap();
+            if value_text == "none" {
+                assert_eq!(handle, 0);
+            } else if value_text == "build_version_u32_le" {
+                assert_eq!(handle, 9);
+                assert_eq!(default_len, 4);
+                assert_eq!(
+                    *FW_REVISION_BUF.lock(),
+                    radio_config().build_version.to_le_bytes(),
+                    "handle 9 must serve the live build-version LE bytes"
+                );
+            } else {
+                let expected = fixture.bytes(&value_key).unwrap();
+                if handle == 3 {
+                    assert_eq!(DEV_NAME_LEN.get(), 13);
+                    assert_eq!(&DEV_NAME_BUF.lock()[..13], expected.as_slice());
+                } else if handle == 11 {
+                    assert_eq!(MANU_NAME_LEN.get(), 11);
+                    assert_eq!(&MANU_NAME_BUF.lock()[..11], expected.as_slice());
+                } else if !attr.p_attr_value.is_null() {
+                    assert_eq!(
+                        expected.len(),
+                        default_len as usize,
+                        "row {handle} fixture value length"
+                    );
+                    assert_eq!(
+                        attr.p_attr_value.align_offset(core::mem::align_of::<u8>()),
+                        0,
+                        "row {handle} value pointer must be aligned for u8"
+                    );
+                    // SAFETY: default_len is fixture-pinned and every non-dynamic
+                    // row here points at immutable/static or test-reset scratch
+                    // storage with at least default_len readable bytes.
+                    let actual = unsafe {
+                        core::slice::from_raw_parts(attr.p_attr_value, default_len as usize)
+                    };
+                    assert_eq!(
+                        actual,
+                        expected.as_slice(),
+                        "row {handle} static value bytes"
+                    );
+                } else {
+                    panic!("row {handle} has fixture value bytes but no value pointer");
+                }
+            }
+        }
+
+        let mut cfg = radio_config();
+        cfg.build_version = 0x1234_5678;
+        set_radio_config(cfg);
+        init_gatt_profile(&cfg);
+        assert_eq!(*FW_REVISION_BUF.lock(), 0x1234_5678u32.to_le_bytes());
+        restore_default_profile();
+
+        let readonly = fixture.bytes("att.readonly_handles").unwrap();
+        assert_eq!(readonly, vec![0x03, 0x09, 0x11]);
+        assert_eq!(fixture.u8("att.write_gate_max_exclusive").unwrap(), 3);
     }
 }

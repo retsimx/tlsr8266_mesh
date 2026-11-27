@@ -939,6 +939,11 @@ mod tests {
 
     use tlsr8266_radio::types::{PairAuthState, LGT_CMD_MESH_PAIR_TIMEOUT, LGT_CMD_SET_MESH_INFO};
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/rust_parser.rs"
+    ));
+
     /// `reg_system_tick`: the free-running tick `clock_time()` reads.
     const REG_SYSTEM_TICK: u32 = 0x740;
     /// `reg_rnd_number`: the hardware entropy source `rand()` XORs in.
@@ -1137,6 +1142,124 @@ mod tests {
     /// A group address this node belongs to: the packet is delivered locally
     /// *and* re-transmitted, and the returned sequence number is the one
     /// `light_slave_tx_command` stamped into the constructed packet.
+    #[test]
+    fn compatibility_fixture_pins_ingress_routing_and_opcode_matrix() {
+        let source = include_str!("../../../tests/fixtures/mesh_uart_compat.txt");
+        let mut p = Parser::parse(source).unwrap();
+
+        assert_eq!(p.str("mesh.spp_handle_21.ingress").unwrap(), "mesh_routing");
+        assert_eq!(p.str("mesh.uart_02.ingress").unwrap(), "mesh_routing");
+        assert_eq!(
+            p.str("mesh.route.foreign_unicast").unwrap(),
+            "queue_tx_only"
+        );
+        assert_eq!(
+            p.str("mesh.route.self_unicast").unwrap(),
+            "local_delivery_only"
+        );
+        assert_eq!(
+            p.str("mesh.route.matching_group_or_broadcast").unwrap(),
+            "local_delivery_and_queue_tx"
+        );
+
+        let payload = Vec::<u8, 13>::from_slice(&[
+            LGT_CMD_LIGHT_ONOFF,
+            0,
+            0,
+            LIGHT_ON_PARAM,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ])
+        .unwrap();
+
+        reset_for_test();
+        set_device_address(0x1234);
+        fake_clock::set_ticks(0x5000);
+        let _ = send_mesh_message(&payload, 0x5678, 1, false);
+        assert_eq!(MESH_RX_CHANNEL.len(), 0);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
+
+        reset_for_test();
+        set_device_address(0x1234);
+        fake_clock::set_ticks(0x5000);
+        let _ = send_mesh_message(&payload, 0x1234, 0, false);
+        assert_eq!(MESH_RX_CHANNEL.len(), 1);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 0);
+
+        reset_for_test();
+        set_device_address(0x1234);
+        let mut groups = [0u16; MAX_GROUP_COUNT as usize];
+        groups[0] = 0x8001;
+        set_group_addresses(groups);
+        fake_clock::set_ticks(0x5000);
+        let _ = send_mesh_message(&payload, 0x8001, 1, false);
+        assert_eq!(MESH_RX_CHANNEL.len(), 1);
+        assert_eq!(MESH_TX_QUEUE.lock().len(), 1);
+
+        use mesh_protocol::mesh_types as m;
+        let matrix = [
+            ("mesh.opcode.product.light_onoff", m::LGT_CMD_LIGHT_ONOFF),
+            ("mesh.opcode.product.set_light", m::LGT_CMD_SET_LIGHT),
+            (
+                "mesh.opcode.product.light_read_status",
+                m::LGT_CMD_LIGHT_READ_STATUS,
+            ),
+            ("mesh.opcode.product.light_status", m::LGT_CMD_LIGHT_STATUS),
+            ("mesh.opcode.admin.notify_mesh", m::LGT_CMD_NOTIFY_MESH),
+            ("mesh.opcode.admin.mesh_pair", m::LGT_CMD_MESH_PAIR),
+            (
+                "mesh.opcode.admin.mesh_cmd_notify",
+                m::LGT_CMD_MESH_CMD_NOTIFY,
+            ),
+            ("mesh.opcode.admin.grp_rsp1", m::LGT_CMD_LIGHT_GRP_RSP1),
+            ("mesh.opcode.admin.grp_rsp2", m::LGT_CMD_LIGHT_GRP_RSP2),
+            ("mesh.opcode.admin.grp_rsp3", m::LGT_CMD_LIGHT_GRP_RSP3),
+            ("mesh.opcode.admin.config_grp", m::LGT_CMD_LIGHT_CONFIG_GRP),
+            ("mesh.opcode.admin.grp_req", m::LGT_CMD_LIGHT_GRP_REQ),
+            (
+                "mesh.opcode.admin.config_dev_addr",
+                m::LGT_CMD_CONFIG_DEV_ADDR,
+            ),
+            ("mesh.opcode.admin.dev_addr_rsp", m::LGT_CMD_DEV_ADDR_RSP),
+            ("mesh.opcode.admin.kick_out", m::LGT_CMD_KICK_OUT),
+            ("mesh.opcode.admin.ota_start_req", m::LGT_CMD_START_OTA_REQ),
+            ("mesh.opcode.admin.ota_start_rsp", m::LGT_CMD_START_OTA_RSP),
+            ("mesh.opcode.admin.ota_data_req", m::LGT_CMD_OTA_DATA_REQ),
+            ("mesh.opcode.admin.ota_data_rsp", m::LGT_CMD_OTA_DATA_RSP),
+            ("mesh.opcode.admin.ota_end_req", m::LGT_CMD_END_OTA_REQ),
+            ("mesh.opcode.admin.ota_end_rsp", m::LGT_CMD_END_OTA_RSP),
+            (
+                "mesh.opcode.admin.user_notify_req",
+                m::LGT_CMD_USER_NOTIFY_REQ,
+            ),
+            (
+                "mesh.opcode.admin.user_notify_rsp",
+                m::LGT_CMD_USER_NOTIFY_RSP,
+            ),
+            ("mesh.opcode.admin.set_mac_addr", m::LGT_CMD_SET_MAC_ADDR),
+            ("mesh.opcode.admin.power_on", m::LGT_POWER_ON),
+            ("mesh.opcode.admin.panic_msg", m::LGT_PANIC_MSG),
+            ("mesh.opcode.admin.light_ack", m::LGT_CMD_LIGHT_ACK),
+            ("mesh.opcode.admin.set_mesh_info", m::LGT_CMD_SET_MESH_INFO),
+            ("mesh.opcode.admin.set_dev_addr", m::LGT_CMD_SET_DEV_ADDR),
+            ("mesh.opcode.admin.del_pair", m::LGT_CMD_DEL_PAIR),
+            (
+                "mesh.opcode.admin.mesh_pair_timeout",
+                m::LGT_CMD_MESH_PAIR_TIMEOUT,
+            ),
+        ];
+        for (key, actual) in matrix {
+            assert_eq!(p.u8(key).unwrap(), actual, "opcode mismatch for {key}");
+        }
+    }
+
     #[test]
     fn test_send_mesh_message_group_match() {
         // Setup

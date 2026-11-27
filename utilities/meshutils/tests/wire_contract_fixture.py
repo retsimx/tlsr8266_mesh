@@ -82,9 +82,11 @@ CONSUMED_KEYS = set()
 class Fixture:
     """Read-only fixture view; every accessor records the key it read."""
 
-    def __init__(self, path):
+    def __init__(self, path, track_global=False):
         self.path = path
         self._values = _read_fixture(path)
+        self._consumed = set()
+        self._track_global = track_global
 
     def as_str(self, key):
         """Return the raw value as a string."""
@@ -94,6 +96,10 @@ class Fixture:
         """Return the value as an unsigned 8-bit integer."""
         return self._as_int(key, 0xFF)
 
+    def as_u16(self, key):
+        """Return the value as an unsigned 16-bit integer."""
+        return self._as_int(key, 0xFFFF)
+
     def as_u32(self, key):
         """Return the value as an unsigned 32-bit integer."""
         return self._as_int(key, 0xFFFFFFFF)
@@ -101,6 +107,8 @@ class Fixture:
     def as_bytes(self, key):
         """Return the value as bytes parsed from space-separated hex pairs."""
         text = self._lookup(key)
+        if text == "none":
+            return b""
         tokens = text.split()
         if not tokens:
             raise FixtureError(f"{key}: expected hex bytes, got an empty value")
@@ -113,14 +121,31 @@ class Fixture:
             value.append(int(token, 16))
         return bytes(value)
 
+    def as_bool(self, key):
+        """Return the value as a boolean (true/false)."""
+        text = self._lookup(key)
+        if text == "true":
+            return True
+        if text == "false":
+            return False
+        raise FixtureError(f"{key}: expected true or false, got {text!r}")
+
     def keys(self):
         """All keys present in the fixture."""
         return frozenset(self._values)
 
+    def consumed_keys(self):
+        """Keys accessed through this fixture instance."""
+        return frozenset(self._consumed)
+
+    def orphan_keys(self):
+        """Keys in this fixture that no accessor has read."""
+        return self.keys() - self.consumed_keys()
+
     def _as_int(self, key, maximum):
         text = self._lookup(key)
         try:
-            base = 16 if text.lower().startswith("0x") else 10
+            base = 16 if text.lower().startswith("0x") or re.search(r"[a-f]", text.lower()) else 10
             value = int(text, base)
         except ValueError:
             raise FixtureError(f"{key}: expected an integer, got {text!r}") from None
@@ -133,8 +158,10 @@ class Fixture:
             value = self._values[key]
         except KeyError:
             raise FixtureError(f"{key}: no such fixture key") from None
-        CONSUMED_KEYS.add(key)
+        self._consumed.add(key)
+        if self._track_global:
+            CONSUMED_KEYS.add(key)
         return value
 
 
-FIXTURE = Fixture(FIXTURE_PATH)
+FIXTURE = Fixture(FIXTURE_PATH, track_global=True)

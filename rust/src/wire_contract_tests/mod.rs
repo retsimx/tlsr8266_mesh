@@ -22,6 +22,7 @@
 //! pairing defaults), [`crypto`] (AES blocks/packets and command encryption)
 //! and [`firmware`] (OTA header and flash layout).
 
+mod compat;
 mod crypto;
 mod firmware;
 mod wire;

@@ -278,6 +278,7 @@ mod tests {
         }
         assert!(!enqueue_mesh_rx(&pkt));
         assert_eq!(MESH_RX_CHANNEL.len(), MESH_RX_QUEUE_CAPACITY);
+        assert_eq!(dropped_mesh_rx(), 1);
     }
 
     #[test]

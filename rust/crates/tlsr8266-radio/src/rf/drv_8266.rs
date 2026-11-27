@@ -39,6 +39,7 @@ use crate::mesh_ll::node_status::{
 use crate::mesh_ll::packet_processing::{
     parse_ble_packet_op_params, rf_link_is_notify_req, rf_link_slave_add_status,
 };
+use crate::queues::enqueue_mesh_rx;
 use crate::rf::tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
 use crate::types::{
     LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
@@ -869,29 +870,47 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     // Return true to indicate successful packet processing
 }
 
-/**
- * Process a received BLE packet with potential decryption
- *
- * This function handles incoming packet data that might be encrypted by:
- * 1. Creating a local copy of the packet data
- * 2. Checking if pairing is established and packet requires decryption
- * 3. Attempting to decrypt the packet using the pairing keys if required
- * 4. Passing the decrypted packet to the non-decryption handler
- *
- * Unlike the no_dec variant, this function handles the security layer
- * of the mesh protocol by decrypting packets before processing them.
- *
- * @param data - Reference to the received packet data
- * @return true if packet was processed successfully, false otherwise
- */
+/// True only for a paired-link handle-21 ATT Write Request or Write Command.
+///
+/// This is deliberately a shallow shape check: the packet is not decrypted and
+/// no mesh, product, administration, status or flash work belongs here.
+#[inline]
+pub fn is_gatt_spp_write_packet(data: &Packet) -> bool {
+    if data.head().chan_id != 4 {
+        return false;
+    }
+
+    let write = data.att_write();
+    matches!(write.opcode, 0x12 | 0x52) && write.handle == 21 && write.handle1 == 0
+}
+
+/// GATT/IRQ callback seam for handle-21 SPP ingress.
+///
+/// The callback validates the paired link and the ATT write shape, then copies
+/// one `Packet` into the existing mesh RX channel. Full/invalid/unpaired cases
+/// return normally; decryption and the no-decrypt bridge run only in task context.
 #[export_name = "tlsr8266_rf_link_slave_data_write"]
 pub fn rf_link_slave_data_write(data: &Packet) {
-    let mut data: Packet = *data;
+    if !PAIR_LOGIN_OK.get() || !is_gatt_spp_write_packet(data) {
+        return;
+    }
 
-    // Check if security is enabled and attempt packet decryption
-    if PAIR_LOGIN_OK.get() && pair_dec_packet(&mut data).is_ok() {
-        // Process the decrypted packet
-        rf_link_slave_data_write_no_dec(&data);
+    let _ = enqueue_mesh_rx(data);
+}
+
+/// Task-context SPP seam.
+///
+/// Receives a copied handle-21 packet from `MESH_RX_CHANNEL`, reuses the
+/// existing paired decryption and no-decrypt bridge path, and never executes
+/// from the GATT callback itself.
+#[export_name = "tlsr8266_rf_link_slave_data_write_task"]
+pub fn rf_link_slave_data_write_task(data: &mut Packet) {
+    if !PAIR_LOGIN_OK.get() || !is_gatt_spp_write_packet(data) {
+        return;
+    }
+
+    if pair_dec_packet(data).is_ok() {
+        rf_link_slave_data_write_no_dec(data);
     }
 }
 
@@ -1441,8 +1460,12 @@ mod tests {
                 head: PacketL2capHead {
                     rf_len: 0x11,
                     l2cap_len: (10 + 3 + params.len()) as u16,
+                    chan_id: 4,
                     ..Default::default()
                 },
+                opcode: 0x12,
+                handle: 21,
+                handle1: 0,
                 ..Default::default()
             },
         };
@@ -1459,6 +1482,7 @@ mod tests {
     /// membership, no address match, no in-flight status read.
     fn reset_packet_state() -> RecordingHooksGuard {
         reset_host_fakes();
+        crate::queues::reset_for_test();
         crate::facade::reset_radio_state_for_test();
         critical_section::with(|_| {
             *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = OLD_SNO;
@@ -3121,20 +3145,78 @@ mod tests {
 
     #[test]
     fn test_rf_link_slave_data_write_pair_login_false() {
-        // Arrange: pairing not established, so no decryption is attempted.
+        // Arrange: pairing is absent, so even a valid handle-21 frame stays inert.
         let _hooks = reset_packet_state();
         let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
 
-        // Act
         rf_link_slave_data_write(&packet);
 
-        // Assert: neither decryption nor the handler ran.
         assert_packet_not_processed();
         assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 0);
+        assert_eq!(crate::queues::dropped_mesh_rx(), 0);
     }
 
     #[test]
-    fn test_rf_link_slave_data_write_decryption_fails() {
+    fn test_rf_link_slave_data_write_rejects_invalid_spp_shape() {
+        let _hooks = reset_packet_state();
+        PAIR_LOGIN_OK.set(true);
+
+        let mut wrong_handle = decoded_packet(0x01, &[0x10, 0x11]);
+        wrong_handle.att_write_mut().handle = 22;
+        rf_link_slave_data_write(&wrong_handle);
+
+        let mut wrong_opcode = decoded_packet(0x01, &[0x10, 0x11]);
+        wrong_opcode.att_write_mut().opcode = 0x10;
+        rf_link_slave_data_write(&wrong_opcode);
+
+        let mut wrong_channel = decoded_packet(0x01, &[0x10, 0x11]);
+        wrong_channel.att_write_mut().head.chan_id = 0xff03;
+        rf_link_slave_data_write(&wrong_channel);
+
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 0);
+        assert_eq!(crate::queues::dropped_mesh_rx(), 0);
+    }
+
+    #[test]
+    fn test_rf_link_slave_data_write_full_queue_drops_without_side_effects() {
+        let _hooks = reset_packet_state();
+        PAIR_LOGIN_OK.set(true);
+        let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
+
+        for _ in 0..crate::queues::MESH_RX_QUEUE_CAPACITY {
+            assert!(crate::queues::enqueue_mesh_rx(&packet));
+        }
+        rf_link_slave_data_write(&packet);
+
+        assert_eq!(
+            crate::queues::MESH_RX_CHANNEL.len(),
+            crate::queues::MESH_RX_QUEUE_CAPACITY
+        );
+        assert_eq!(crate::queues::dropped_mesh_rx(), 1);
+        assert_packet_not_processed();
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
+        assert_eq!(RECORDED_LIGHT_RESPONSE.get(), 0);
+    }
+
+    #[test]
+    fn test_rf_link_slave_data_write_callback_defers_product_and_admin_side_effects() {
+        let _hooks = reset_packet_state();
+        PAIR_LOGIN_OK.set(true);
+        let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
+
+        rf_link_slave_data_write(&packet);
+
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 1);
+        assert_packet_not_processed();
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
+        assert_eq!(RECORDED_LIGHT_RESPONSE.get(), 0);
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+        assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0xff);
+    }
+
+    #[test]
+    fn test_rf_link_slave_data_write_task_decryption_fails() {
         // Arrange: pairing is up and security is on, but the MIC is wrong.
         let _hooks = reset_packet_state();
         PAIR_LOGIN_OK.set(true);
@@ -3144,16 +3226,24 @@ mod tests {
         // the all-zero session key.
         packet.att_write_mut().value.src = [0xAA, 0xBB];
 
-        // Act
+        // Callback: enqueue only; no decryption or product-side work.
         rf_link_slave_data_write(&packet);
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 1);
+        assert_packet_not_processed();
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
 
-        // Assert: a failed decryption drops the packet.
+        // Task context: failed decryption drops the copied packet.
+        let mut queued = crate::queues::MESH_RX_CHANNEL
+            .try_receive()
+            .expect("paired handle-21 frame must be queued");
+        rf_link_slave_data_write_task(&mut queued);
+
         assert_packet_not_processed();
         assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
     }
 
     #[test]
-    fn test_rf_link_slave_data_write_success() {
+    fn test_rf_link_slave_data_write_task_consumes_encrypted_frame() {
         // Arrange: pair the device, then seal a packet with the same session
         // key and IV that `pair_dec_packet` will use to open it.
         let _hooks = reset_packet_state();
@@ -3188,11 +3278,24 @@ mod tests {
             packet.att_write_mut().value.dst = [wire[0], wire[1]];
             packet.att_write_mut().value.val[0..3].copy_from_slice(&wire[2..5]);
 
-            // Each attempt must start from "nothing processed yet".
+            // Each attempt starts from no callback/product work.
             *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = OLD_SNO;
             BLE_PERIPHERAL_LINK_COMMAND.set(0xff);
+            RECORDED_LIGHT_DATA.store(0, Ordering::Relaxed);
 
             rf_link_slave_data_write(&packet);
+            assert_eq!(
+                crate::queues::MESH_RX_CHANNEL.len(),
+                1,
+                "callback must queue exactly one copied Packet"
+            );
+            assert_packet_not_processed();
+            assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
+
+            let mut queued = crate::queues::MESH_RX_CHANNEL
+                .try_receive()
+                .expect("task context must receive the copied Packet");
+            rf_link_slave_data_write_task(&mut queued);
 
             if BLE_PERIPHERAL_LINK_COMMAND.get() == 0x02 {
                 accepted_iv_byte = Some(iv_byte);
@@ -3200,10 +3303,10 @@ mod tests {
             }
         }
 
-        // Assert: decryption succeeded, so the plaintext reached the handler.
+        // Assert: task-context decryption succeeded, so plaintext reached no-dec bridge work.
         assert!(
             accepted_iv_byte.is_some(),
-            "a packet sealed with the session key must decrypt and reach rf_link_slave_data_write_no_dec"
+            "a packet sealed with the session key must decrypt in task context"
         );
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
         assert_eq!(
@@ -3211,6 +3314,7 @@ mod tests {
             1,
             "the decrypted packet is device-addressed and reaches on_light_data"
         );
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 0);
     }
 
     #[test]

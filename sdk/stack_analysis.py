@@ -40,6 +40,9 @@ Model and caveats (reported alongside the result):
 Usage:
     python3 sdk/stack_analysis.py [--elf _build/lightblemesh] [--top 15]
 
+Strict GATT/project-indirect modeling is the direct-CLI default. Pass
+``--legacy`` only to opt out to the compatibility 21-edge graph.
+
 It also acts as a build gate: it derives the main/IRQ stack budgets from the
 ELF's linker symbols and exits non-zero if either margin drops below
 ``--min-margin`` (default 400 B, >= the largest observed frame) or if a call
@@ -133,10 +136,10 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "dispatch_log_async": ("log_async_tx_hook",),
 }
 
-# Strict-only model of the five real callback slots in the GATT attribute table.
-# This is deliberately separate from INDIRECT_EDGES: normal/make stack-check
-# remains the staged 21-edge legacy graph, while --strict exposes the complete
-# GATT-inclusive path and will fail if that path violates the RAM margin.
+# Strict GATT model of the five real callback slots in the GATT attribute table.
+# This is deliberately separate from INDIRECT_EDGES: strict is the direct-CLI
+# and repository-gate default, while --legacy opts out to the compatibility
+# 21-edge graph.
 STRICT_GATT_EDGES: dict[str, tuple[str, ...]] = {
     "l2cap_att_handler": (
         "mesh_status_write",
@@ -1073,11 +1076,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="also report depth ignoring panic/unwind callees",
     )
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
         "--strict",
+        dest="strict",
         action="store_true",
-        help="fail closed on unknown project indirect branches and model strict GATT callbacks",
+        help="explicit strict GATT/project-indirect mode (the default)",
     )
+    mode.add_argument(
+        "--legacy",
+        dest="legacy",
+        action="store_true",
+        help="explicit legacy opt-out: model only the compatibility 21-edge graph",
+    )
+    ap.set_defaults(strict=True, legacy=False)
     ap.add_argument(
         "--baseline-json",
         "--baseline",
@@ -1088,7 +1100,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="write a JSON stack/image baseline (use '-' or omit PATH for stdout)",
     )
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.legacy:
+        args.strict = False
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1222,13 +1237,6 @@ def main(argv: list[str] | None = None) -> int:
                 funcs,
             )
 
-    if args.strict and gatt_edges:
-        print("\nSTRICT GATT-inclusive path model:")
-        print("  modeled targets: mesh_status_write, rf_link_slave_data_write, "
-              "dispatch_ota_write, pair_write, pair_read")
-        if main_max == 1684 or irq_max >= 1684:
-            print("  failing GATT-inclusive path fixture: 1,684 B-style (1684 B)")
-
     print(f"\ntop {args.top} functions by frame size:")
     for f in sorted(funcs.values(), key=lambda x: x.frame, reverse=True)[: args.top]:
         print(f"  {f.frame:5d} B  @0x{f.addr:06x}")
@@ -1248,9 +1256,6 @@ def main(argv: list[str] | None = None) -> int:
     ok = True
     if cycles:
         print(f"  FAIL: recursion detected via {sorted(set(cycles))}")
-        ok = False
-    if args.strict and gatt_edges:
-        print("  FAIL: strict GATT-inclusive path violates the fail-close policy")
         ok = False
     if main_margin < args.min_margin:
         print("  FAIL: main stack margin below minimum")

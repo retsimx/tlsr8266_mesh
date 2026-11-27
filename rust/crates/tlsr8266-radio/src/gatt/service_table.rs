@@ -1031,6 +1031,93 @@ mod tests {
         packet
     }
 
+    /// Handle 21 remains bound to the shallow callback for paired Write Request
+    /// and Write Command. The Write Response byte is preserved for the Request;
+    /// the Command remains silent and the queued Packet is unchanged.
+    #[test]
+    fn test_handle21_paired_write_request_and_command_queue_only() {
+        restore_default_profile();
+        crate::queues::reset_for_test();
+        PAIR_LOGIN_OK.set(true);
+
+        assert!(
+            get_g_attributes()[21].w.is_some(),
+            "handle 21 must keep a write callback"
+        );
+
+        let request = l2cap_att_handler(&write_packet(
+            GattOp::AttOpWriteReq as u8,
+            21,
+            &[0x10, 0x11, 0x12],
+        ))
+        .expect("a paired Write Request keeps its 0x13 response");
+        assert_eq!(request.att_write_rsp().opcode, GattOp::AttOpWriteRsp as u8);
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 1);
+
+        let queued = crate::queues::MESH_RX_CHANNEL
+            .try_receive()
+            .expect("paired Write Request must enqueue one Packet");
+        let queued_chan_id = queued.head().chan_id;
+        let queued_opcode = queued.att_write().opcode;
+        let queued_handle = queued.att_write().handle;
+        let queued_handle1 = queued.att_write().handle1;
+        assert_eq!(queued_chan_id, 4);
+        assert_eq!(queued_opcode, GattOp::AttOpWriteReq as u8);
+        assert_eq!(queued_handle, 21);
+        assert_eq!(queued_handle1, 0);
+
+        let command = l2cap_att_handler(&write_packet(
+            GattOp::AttOpWriteCmd as u8,
+            21,
+            &[0x20, 0x21, 0x22],
+        ));
+        assert!(command.is_none(), "a paired Write Command remains silent");
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 1);
+
+        let queued = crate::queues::MESH_RX_CHANNEL
+            .try_receive()
+            .expect("paired Write Command must enqueue one Packet");
+        let queued_chan_id = queued.head().chan_id;
+        let queued_opcode = queued.att_write().opcode;
+        let queued_handle = queued.att_write().handle;
+        let queued_handle1 = queued.att_write().handle1;
+        assert_eq!(queued_chan_id, 4);
+        assert_eq!(queued_opcode, GattOp::AttOpWriteCmd as u8);
+        assert_eq!(queued_handle, 21);
+        assert_eq!(queued_handle1, 0);
+
+        PAIR_LOGIN_OK.set(false);
+        crate::queues::reset_for_test();
+    }
+
+    /// Unpaired handle-21 writes stay inert: the ATT response contract is not
+    /// changed, but neither Write Request nor Write Command reaches the RX queue.
+    #[test]
+    fn test_handle21_unpaired_writes_remain_inert() {
+        restore_default_profile();
+        crate::queues::reset_for_test();
+        PAIR_LOGIN_OK.set(false);
+
+        let request = l2cap_att_handler(&write_packet(
+            GattOp::AttOpWriteReq as u8,
+            21,
+            &[0x01, 0x02, 0x03],
+        ))
+        .expect("unpaired Write Request still receives the legacy 0x13 response");
+        assert_eq!(request.att_write_rsp().opcode, GattOp::AttOpWriteRsp as u8);
+
+        let command = l2cap_att_handler(&write_packet(
+            GattOp::AttOpWriteCmd as u8,
+            21,
+            &[0x04, 0x05, 0x06],
+        ));
+        assert!(command.is_none(), "unpaired Write Command remains silent");
+        assert_eq!(crate::queues::MESH_RX_CHANNEL.len(), 0);
+        assert_eq!(crate::queues::dropped_mesh_rx(), 0);
+
+        crate::queues::reset_for_test();
+    }
+
     /// A 19-byte name, a distinct mesh name, a distinct build version and a
     /// shorter name: every config-driven GATT value follows `RadioConfig`.
     #[test]

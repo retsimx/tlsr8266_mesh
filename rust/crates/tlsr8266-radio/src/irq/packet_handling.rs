@@ -32,9 +32,36 @@ use crate::rf::drv_8266::{
 };
 use crate::types::{LightRxBuff, LIGHT_RX_BUFF_COUNT};
 use mesh_protocol::packet_types::{AdvRspPrivate, Packet, PacketScanRsp, ScanRspData};
-use tlsr8266_hal::common::sync::SimplifyLS;
+use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
+
+/// Single radio-owned scan-response packet for DMA3.
+///
+/// The `CriticalSectionMutex` guard is used only to update the packet. DMA3,
+/// scheduled transmission, and next-interrupt setup occur after the guard has
+/// dropped, so the static packet never aliases a stack frame or a live lock.
+#[link_section = ".data"]
+static PKT_SCAN_RSP: CriticalSectionMutex<Packet> = CriticalSectionMutex::new(Packet {
+    scan_rsp: PacketScanRsp {
+        dma_len: 0,
+        _type: 0,
+        rf_len: 0,
+        adv_a: [0; 6],
+        data: ScanRspData {
+            handle: 0,
+            data: AdvRspPrivate {
+                manufacture_id: 0,
+                mesh_product_uuid: 0,
+                mac_address: 0,
+                product_uuid: 0,
+                status: 0,
+                device_address: 0,
+                rsv: [0; 16],
+            },
+        },
+    },
+});
 
 /// Handles RF transmission complete interrupt.
 ///
@@ -232,25 +259,29 @@ fn handle_scan_request(entry: &LightRxBuff, rx_time: u32) {
         // Configure RF for single transmission mode (0x85)
         write_reg_rf_mode_control(0x85);
 
-        // Construct BLE scan response packet with device information
-        let pkt_scan_rsp = Packet {
-            scan_rsp: PacketScanRsp {
-                dma_len: 0x27,         // DMA transfer length (39 bytes)
-                _type: 0x4,            // BLE scan response packet type
-                rf_len: 0x25,          // RF payload length (37 bytes)
-                adv_a: *MAC_ID.lock(), // Advertiser's MAC address
-                data: ScanRspData {
-                    handle: 0xff1e, // Mesh-specific handle identifier
-                    data: AdvRspPrivate {
-                        device_address: DEVICE_ADDRESS.get(), // Device's mesh address
-                        ..*ADV_RSP_PRI_DATA.lock()            // Additional device-specific data
-                    },
-                },
-            },
-        };
+        // Snapshot the two non-static values before taking the static owner
+        // lock. This keeps construction lock-free of nested mutex acquisitions.
+        let mac = *MAC_ID.lock();
+        let mut adv_data = *ADV_RSP_PRI_DATA.lock();
+        adv_data.device_address = DEVICE_ADDRESS.get();
 
-        // Configure DMA to transmit the scan response packet
-        write_reg_dma3_addr(addr_of!(pkt_scan_rsp) as u16);
+        // Update the one radio-owned scan-response packet while interrupts are
+        // masked for construction only. No DMA or scheduled-TX register access
+        // is performed until this guard has dropped.
+        {
+            let mut pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp_mut();
+
+            scan_rsp.dma_len = 0x27; // DMA transfer length (39 bytes)
+            scan_rsp._type = 0x4; // BLE scan response packet type
+            scan_rsp.rf_len = 0x25; // RF payload length (37 bytes)
+            scan_rsp.adv_a = mac;
+            scan_rsp.data.handle = 0xff1e; // Mesh-specific handle identifier
+            scan_rsp.data.data = adv_data;
+        }
+
+        // DMA3 receives only the stable address of the radio-owned static packet.
+        write_reg_dma3_addr(PKT_SCAN_RSP.as_ptr() as u16);
 
         // Schedule next interrupt for 1ms to return to normal operation
         write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 1000 + read_reg_system_tick_irq());
@@ -493,6 +524,18 @@ mod tests {
         {
             let mut adv_data = ADV_RSP_PRI_DATA.lock();
             *adv_data = AdvRspPrivate::default();
+        }
+
+        // Keep the process-wide static scan packet deterministic across tests.
+        {
+            let mut pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp_mut();
+            scan_rsp.dma_len = 0;
+            scan_rsp._type = 0;
+            scan_rsp.rf_len = 0;
+            scan_rsp.adv_a = [0; 6];
+            scan_rsp.data.handle = 0;
+            scan_rsp.data.data = AdvRspPrivate::default();
         }
     }
 
@@ -907,12 +950,49 @@ mod tests {
             "the radio must be switched to single-transmission mode"
         );
 
-        // Verify DMA setup for scan response packet
+        // Verify DMA points at the exact radio-owned static packet address.
+        let dma_address = read_reg_dma3_addr();
+        let static_address = PKT_SCAN_RSP.as_ptr() as u16;
         assert_ne!(
-            read_reg_dma3_addr(),
-            0,
+            dma_address, 0,
             "the scan response packet must be handed to the TX DMA"
         );
+        assert_eq!(
+            dma_address, static_address,
+            "DMA3 must use the one stable static scan-response owner"
+        );
+
+        // Verify the exact legacy scan-response fields after the static update.
+        {
+            let pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp();
+            let dma_len = scan_rsp.dma_len;
+            let packet_type = scan_rsp._type;
+            let rf_len = scan_rsp.rf_len;
+            let adv_a = scan_rsp.adv_a;
+            let handle = scan_rsp.data.handle;
+            let private = scan_rsp.data.data;
+            let manufacture_id = private.manufacture_id;
+            let mesh_product_uuid = private.mesh_product_uuid;
+            let private_mac_address = private.mac_address;
+            let product_uuid = private.product_uuid;
+            let status = private.status;
+            let device_address = private.device_address;
+            let rsv = private.rsv;
+
+            assert_eq!(dma_len, 0x27);
+            assert_eq!(packet_type, 0x4);
+            assert_eq!(rf_len, 0x25);
+            assert_eq!(adv_a, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+            assert_eq!(handle, 0xff1e);
+            assert_eq!(manufacture_id, 0);
+            assert_eq!(mesh_product_uuid, 0);
+            assert_eq!(private_mac_address, 0);
+            assert_eq!(product_uuid, 0);
+            assert_eq!(status, 0);
+            assert_eq!(device_address, 0x1234);
+            assert_eq!(rsv, [0; 16]);
+        }
 
         // Verify next interrupt scheduling
         let expected_irq_time = CLOCK_SYS_CLOCK_1US * 1000 + 20_000;
@@ -932,6 +1012,137 @@ mod tests {
             mode_control_writes.as_slice(),
             [0x80, 0x85],
             "the radio must be stopped, then armed for the response"
+        );
+    }
+
+    /// Tests that repeated matching scan requests keep one DMA address and update
+    /// the in-place static owner instead of allocating or replacing the DMA target.
+    #[test]
+    fn test_handle_scan_request_static_address_stable_and_content_updates() {
+        reset_global_state();
+        seed_system_ticks(0, 20_000);
+
+        let cs_before = tlsr8266_hal::common::sync::cs_depth();
+
+        {
+            let mut mac = MAC_ID.lock();
+            *mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        }
+        {
+            let mut private = ADV_RSP_PRI_DATA.lock();
+            *private = AdvRspPrivate {
+                manufacture_id: 0x1122,
+                mesh_product_uuid: 0x3344,
+                mac_address: 0x55667788,
+                product_uuid: 0x1234,
+                status: 0x56,
+                device_address: 0,
+                rsv: [0xa5; 16],
+            };
+        }
+        DEVICE_ADDRESS.set(0xAABB);
+
+        let first_entry =
+            create_rx_buffer_entry(15000, 20, [0x11, 0x22, 0x33, 0x44], [0x03, 0x15, 0x10]);
+        handle_scan_request(&first_entry, 15000);
+
+        let first_dma_address = read_reg_dma3_addr();
+        let static_address = PKT_SCAN_RSP.as_ptr() as u16;
+        assert_eq!(first_dma_address, static_address);
+
+        {
+            let pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp();
+            let dma_len = scan_rsp.dma_len;
+            let packet_type = scan_rsp._type;
+            let rf_len = scan_rsp.rf_len;
+            let adv_a = scan_rsp.adv_a;
+            let handle = scan_rsp.data.handle;
+            let private = scan_rsp.data.data;
+            let manufacture_id = private.manufacture_id;
+            let mesh_product_uuid = private.mesh_product_uuid;
+            let private_mac_address = private.mac_address;
+            let product_uuid = private.product_uuid;
+            let status = private.status;
+            let device_address = private.device_address;
+            let rsv = private.rsv;
+
+            assert_eq!(dma_len, 0x27);
+            assert_eq!(packet_type, 0x4);
+            assert_eq!(rf_len, 0x25);
+            assert_eq!(adv_a, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+            assert_eq!(handle, 0xff1e);
+            assert_eq!(manufacture_id, 0x1122);
+            assert_eq!(mesh_product_uuid, 0x3344);
+            assert_eq!(private_mac_address, 0x55667788);
+            assert_eq!(product_uuid, 0x1234);
+            assert_eq!(status, 0x56);
+            assert_eq!(device_address, 0xAABB);
+            assert_eq!(rsv, [0xa5; 16]);
+        }
+
+        {
+            let mut mac = MAC_ID.lock();
+            *mac = [0x11, 0x22, 0x33, 0x44, 0xAA, 0xBB];
+        }
+        {
+            let mut private = ADV_RSP_PRI_DATA.lock();
+            *private = AdvRspPrivate {
+                manufacture_id: 0xBEEF,
+                mesh_product_uuid: 0xCAFE,
+                mac_address: 0x10203040,
+                product_uuid: 0x9876,
+                status: 0x03,
+                device_address: 0,
+                rsv: [0x5a; 16],
+            };
+        }
+        DEVICE_ADDRESS.set(0xCCDD);
+
+        let second_entry =
+            create_rx_buffer_entry(16000, 20, [0x11, 0x22, 0x33, 0x44], [0x03, 0x15, 0x10]);
+        handle_scan_request(&second_entry, 16000);
+
+        assert_eq!(
+            read_reg_dma3_addr(),
+            first_dma_address,
+            "a later matching request must retain the same static DMA address"
+        );
+        assert_eq!(read_reg_dma3_addr(), PKT_SCAN_RSP.as_ptr() as u16);
+
+        {
+            let pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp();
+            let dma_len = scan_rsp.dma_len;
+            let rf_len = scan_rsp.rf_len;
+            let adv_a = scan_rsp.adv_a;
+            let handle = scan_rsp.data.handle;
+            let private = scan_rsp.data.data;
+            let manufacture_id = private.manufacture_id;
+            let mesh_product_uuid = private.mesh_product_uuid;
+            let private_mac_address = private.mac_address;
+            let product_uuid = private.product_uuid;
+            let status = private.status;
+            let device_address = private.device_address;
+            let rsv = private.rsv;
+
+            assert_eq!(adv_a, [0x11, 0x22, 0x33, 0x44, 0xAA, 0xBB]);
+            assert_eq!(dma_len, 0x27);
+            assert_eq!(rf_len, 0x25);
+            assert_eq!(handle, 0xff1e);
+            assert_eq!(manufacture_id, 0xBEEF);
+            assert_eq!(mesh_product_uuid, 0xCAFE);
+            assert_eq!(private_mac_address, 0x10203040);
+            assert_eq!(product_uuid, 0x9876);
+            assert_eq!(status, 0x03);
+            assert_eq!(device_address, 0xCCDD);
+            assert_eq!(rsv, [0x5a; 16]);
+        }
+
+        assert_eq!(
+            tlsr8266_hal::common::sync::cs_depth(),
+            cs_before,
+            "the static packet guard must be released before DMA/TX scheduling returns"
         );
     }
 
@@ -960,6 +1171,28 @@ mod tests {
             FakeMmio::writes().is_empty(),
             "a scan request for another address must not touch the radio"
         );
+        assert_eq!(
+            read_reg_dma3_addr(),
+            0,
+            "a non-matching request must not program DMA3"
+        );
+
+        // The static owner must remain untouched because the MAC gate returns first.
+        {
+            let pkt = PKT_SCAN_RSP.lock();
+            let scan_rsp = pkt.scan_rsp();
+            let dma_len = scan_rsp.dma_len;
+            let packet_type = scan_rsp._type;
+            let rf_len = scan_rsp.rf_len;
+            let adv_a = scan_rsp.adv_a;
+            let handle = scan_rsp.data.handle;
+
+            assert_eq!(dma_len, 0);
+            assert_eq!(packet_type, 0);
+            assert_eq!(rf_len, 0);
+            assert_eq!(adv_a, [0; 6]);
+            assert_eq!(handle, 0);
+        }
     }
 
     // ================================================================================

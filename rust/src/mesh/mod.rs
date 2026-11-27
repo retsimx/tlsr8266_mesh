@@ -50,8 +50,8 @@ use tlsr8266_radio::queues::{self, SendPkt, MESH_RX_CHANNEL, MESH_TX_QUEUE, MESH
 #[cfg(test)]
 use tlsr8266_radio::reset_radio_state_for_test;
 use tlsr8266_radio::rf::drv_8266::{
-    rf_set_ble_access_code, rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode,
-    rf_set_tx_rx_off, rf_start_srx2tx,
+    is_gatt_spp_write_packet, rf_link_slave_data_write_task, rf_set_ble_access_code,
+    rf_set_ble_channel, rf_set_ble_crc_adv, rf_set_rxmode, rf_set_tx_rx_off, rf_start_srx2tx,
 };
 use tlsr8266_radio::types::*;
 use tlsr8266_radio::{
@@ -879,6 +879,11 @@ pub async fn mesh_packet_sender() {
     }
 }
 
+/// Shape-classify one `MESH_RX_CHANNEL` packet in task context.
+fn is_gatt_spp_rx_packet(packet: &Packet) -> bool {
+    is_gatt_spp_write_packet(packet)
+}
+
 /// Process a single iteration of the mesh message receiving task.
 ///
 /// RX queue overflow is reported here as well as in the send iteration: an idle
@@ -888,7 +893,11 @@ async fn mesh_packet_rcv_iteration() {
 
     let mut result = MESH_RX_CHANNEL.receive().await;
 
-    rf_link_rc_data(&mut result);
+    if is_gatt_spp_rx_packet(&result) {
+        rf_link_slave_data_write_task(&mut result);
+    } else {
+        rf_link_rc_data(&mut result);
+    }
 }
 
 /// Mesh receive task: hands [`MESH_RX_CHANNEL`] packets to the mesh decoder.
@@ -2934,6 +2943,52 @@ mod tests {
         // Verify - packet was processed, removed from the buffer, and relayed.
         assert_eq!(MESH_RX_CHANNEL.len(), 0);
         assert_eq!(relay::count(), 1);
+    }
+
+    #[test]
+    fn test_gatt_spp_shape_classifier_and_task_route() {
+        use futures::executor::block_on;
+        use mesh_protocol::packet_types::PacketAttWrite;
+
+        reset_for_test();
+        relay::install();
+
+        let mut gatt_write = Packet {
+            att_write: PacketAttWrite {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 2,
+                    rf_len: 0x11,
+                    l2cap_len: 0x11,
+                    chan_id: 4,
+                },
+                opcode: 0x12,
+                handle: 21,
+                handle1: 0,
+                value: PacketAttValue::default(),
+            },
+        };
+
+        assert!(is_gatt_spp_rx_packet(&gatt_write));
+        gatt_write.att_write_mut().opcode = 0x52;
+        assert!(is_gatt_spp_rx_packet(&gatt_write));
+        gatt_write.att_write_mut().handle = 22;
+        assert!(!is_gatt_spp_rx_packet(&gatt_write));
+        gatt_write.att_write_mut().handle = 21;
+        gatt_write.att_write_mut().head.chan_id = 0xff03;
+        assert!(!is_gatt_spp_rx_packet(&gatt_write));
+
+        // Restore a valid handle-21 Write Request, queue it, and run the receive task.
+        gatt_write.att_write_mut().head.chan_id = 4;
+        gatt_write.att_write_mut().opcode = 0x12;
+        assert!(queues::enqueue_mesh_rx(&gatt_write));
+        block_on(mesh_packet_rcv_iteration());
+
+        assert_eq!(MESH_RX_CHANNEL.len(), 0);
+        assert_eq!(relay::count(), 0, "GATT SPP must not enter rf_link_rc_data");
+
+        let ordinary = decodable_packet(0x77_8899);
+        assert!(!is_gatt_spp_rx_packet(&ordinary));
     }
 
     /// Whether any frame queued on the UART log transport contains `needle`.

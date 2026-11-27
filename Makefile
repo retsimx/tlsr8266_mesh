@@ -57,7 +57,7 @@ stack-check:
 		echo "stack-check: $(BUILD_DIR)/$(TARGET) not found; run 'make' first" >&2; \
 		exit 2; \
 	fi
-	python3 sdk/stack_analysis.py --elf $(BUILD_DIR)/$(TARGET) --baseline-json $(STACK_BASELINE)
+	python3 sdk/stack_analysis.py --strict --elf $(BUILD_DIR)/$(TARGET) --baseline-json $(STACK_BASELINE)
 
 # Every feature selection retains the 128 KiB (131072 B) application-slot ceiling.
 IMAGE_SIZE_LIMIT = 131072

@@ -87,7 +87,14 @@ pub struct AttrPermissions {
 impl AttrPermissions {
     pub const fn allows(&self, kind: GattWriteKind) -> bool {
         match kind {
-            GattWriteKind::Request => self.write,
+            // The deployed firmware had a single "writable" notion: a Write
+            // Request to an attribute that accepts write-without-response was
+            // still executed and acknowledged. Narrowing this to the `write`
+            // property would silently discard (and falsely ACK) a 0x12 write to
+            // the OTA or status characteristic, which declare only
+            // write-without-response. Migration must preserve the legacy
+            // response, not tighten it.
+            GattWriteKind::Request => self.write || self.write_without_rsp,
             GattWriteKind::Command => self.write_without_rsp,
         }
     }
@@ -886,6 +893,50 @@ mod tests {
         );
         assert_eq!(outcome, GattReadOutcome::Value(16));
         assert_eq!(*SEND_TO_MASTER.lock(), [0; 16]);
+    }
+
+    #[test]
+    fn write_request_reaches_a_write_without_rsp_attribute() {
+        // Regression (epic #111 audit, F-4/#115): the typed permission gate must
+        // not narrow the deployed behaviour. The OTA characteristic (handle 24)
+        // declares only write-without-response, yet the deployed firmware
+        // executed a 0x12 Write Request to it and answered 0x13. Requiring the
+        // `write` property acknowledged the packet and then dropped it, so a
+        // write-with-response client silently lost the whole OTA stream.
+        let perms_of = |index: usize| match LEGACY_PROFILE_ATTRS[index].role {
+            AttrRole::CharacteristicValue { permissions } => permissions,
+            other => panic!(
+                "handle {} is not a characteristic value: {other:?}",
+                index + 1
+            ),
+        };
+
+        let ota = perms_of(23); // handle 24
+        assert!(
+            ota.write_without_rsp && !ota.write,
+            "handle 24 must stay write-without-response only"
+        );
+        assert!(
+            ota.allows(GattWriteKind::Request),
+            "a 0x12 Write Request to the OTA characteristic must be executed, \
+             not ACKed and dropped"
+        );
+        assert!(ota.allows(GattWriteKind::Command));
+
+        // The status characteristic (handle 18) declares `write`, so it was
+        // never affected; pin it so a future edit cannot regress it silently.
+        let status = perms_of(17); // handle 18
+        assert!(status.allows(GattWriteKind::Request));
+
+        // The gate must still refuse a genuinely read-only attribute for both
+        // kinds, which is the case it exists for.
+        let read_only = AttrPermissions {
+            read: true,
+            write: false,
+            write_without_rsp: false,
+        };
+        assert!(!read_only.allows(GattWriteKind::Request));
+        assert!(!read_only.allows(GattWriteKind::Command));
     }
 
     #[test]

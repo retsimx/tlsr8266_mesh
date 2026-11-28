@@ -304,12 +304,12 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
       - name: Check RTT build stack/RAM budget
-        run: make stack-check
+        run: make stack-check FEATURES=rtt
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
       - name: Check RTT build image size (< 128 KiB)
-        run: make image-size-check
+        run: make image-size-check FEATURES=rtt
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 

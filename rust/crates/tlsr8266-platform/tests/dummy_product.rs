@@ -355,6 +355,49 @@ fn auxiliary_placeholder_has_no_shadow_queue() {
 }
 
 #[test]
+fn cccd_write_is_stored_and_read_back() {
+    // A CCCD write must persist. Acknowledging it and reading back zeros leaves
+    // every subscription silently dead (epic #111 audit, F-5/#116).
+    let written = PlatformGatt::<DummySwitch>::write(
+        AttrBinding::Cccd,
+        GattWriteRequest {
+            handle: 3,
+            kind: GattWriteKind::Request,
+            l2cap_len: 5,
+            payload: &[0x01, 0x00],
+        },
+    );
+    assert_eq!(written, GattWriteOutcome::Accepted);
+
+    let mut out = [0u8; 2];
+    let read = PlatformGatt::<DummySwitch>::read(
+        AttrBinding::Cccd,
+        GattReadRequest {
+            handle: 3,
+            kind: GattReadKind::Read,
+            out: &mut out,
+        },
+    );
+    assert_eq!(read, GattReadOutcome::Value(2));
+    assert_eq!(out, [0x01, 0x00], "the written CCCD value must read back");
+
+    // A write without two value bytes is rejected rather than acknowledged.
+    let short = PlatformGatt::<DummySwitch>::write(
+        AttrBinding::Cccd,
+        GattWriteRequest {
+            handle: 3,
+            kind: GattWriteKind::Request,
+            l2cap_len: 4,
+            payload: &[0x01],
+        },
+    );
+    assert_eq!(
+        short,
+        GattWriteOutcome::Error(tlsr8266_radio::AttError::InvalidAttributeValueLength)
+    );
+}
+
+#[test]
 fn task_macro_expands_concrete_wrappers_for_both_products() {
     let _ = core::any::type_name_of_val(&dummy_switch_tasks::mesh_rx);
     let _ = core::any::type_name_of_val(&dummy_switch_tasks::heartbeat);

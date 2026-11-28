@@ -1122,6 +1122,107 @@ mod tests {
         assert!(l2cap_att_handler(&command).is_none());
     }
 
+    /// Every ATT opcode the server accepts must reach its handler and answer
+    /// with the deployed response opcode.
+    ///
+    /// The discovery encoders in this file were previously reached by no test
+    /// at all — the ATT core sat at 42% line coverage while well-exercised
+    /// modules were above 97% (epic #111 audit).
+    #[test]
+    fn att_opcode_matrix_reaches_every_dispatch_arm() {
+        // MTU exchange -> Exchange MTU Response.
+        let mtu = l2cap_att_handler(&att_packet(0x02, 3, 0, &[])).expect("mtu response");
+        assert_eq!(mtu.att_read_rsp().opcode, 0x03);
+
+        // Read -> Read Response.
+        let read = l2cap_att_handler(&att_packet(0x0a, 3, 3, &[])).expect("read response");
+        assert_eq!(read.att_read_rsp().opcode, 0x0b);
+
+        // Read By Type -> Read By Type Response. The start handle rides in the
+        // ATT header; the value carries end handle + UUID.
+        let mut by_type = [0u8; 4];
+        by_type[0..2].copy_from_slice(&28u16.to_le_bytes());
+        by_type[2..4].copy_from_slice(&0x2a00u16.to_le_bytes());
+        let found = l2cap_att_handler(&att_packet(0x08, 7, 1, &by_type)).expect("read by type");
+        assert_eq!(found.att_read_rsp().opcode, 0x09);
+
+        // Find Information -> Find Information Response.
+        let mut info = [0u8; 2];
+        info[0..2].copy_from_slice(&28u16.to_le_bytes());
+        let entries = l2cap_att_handler(&att_packet(0x04, 5, 1, &info)).expect("find info");
+        assert_eq!(entries.att_read_rsp().opcode, 0x05);
+
+        // Read By Group Type -> Read By Group Type Response.
+        let mut group = [0u8; 4];
+        group[0..2].copy_from_slice(&28u16.to_le_bytes());
+        group[2..4].copy_from_slice(&0x2800u16.to_le_bytes());
+        let services = l2cap_att_handler(&att_packet(0x10, 7, 1, &group)).expect("read by group");
+        assert_eq!(services.att_read_rsp().opcode, 0x11);
+
+        // Write Request to a writable descriptor -> Write Response.
+        let acked =
+            l2cap_att_handler(&att_packet(0x12, 5, 19, &[0x01, 0x00])).expect("write response");
+        assert_eq!(acked.att_write_rsp().opcode, 0x13);
+
+        // Write Command -> never a response.
+        assert!(l2cap_att_handler(&att_packet(0x52, 5, 19, &[0x01, 0x00])).is_none());
+
+        // An opcode the server does not implement is silent, not a panic.
+        assert!(l2cap_att_handler(&att_packet(0x1e, 3, 0, &[])).is_none());
+
+        // A truncated Write Request carries no payload to parse. The deployed
+        // firmware still answered 0x13; today it is silent. Pinned so the
+        // difference is visible rather than implicit — #120 owns the full
+        // per-operation response matrix.
+        assert!(l2cap_att_handler(&att_packet(0x12, 2, 19, &[])).is_none());
+    }
+
+    /// The Read By Group Type encoder must lay out real service rows, not just
+    /// report a length. Mutating the field extraction used to change no test.
+    #[test]
+    fn read_by_group_type_encodes_service_rows() {
+        let mut req = [0u8; 4];
+        req[0..2].copy_from_slice(&0xffffu16.to_le_bytes());
+        req[2..4].copy_from_slice(&0x2800u16.to_le_bytes());
+
+        let response = l2cap_att_handler(&att_packet(0x10, 7, 1, &req)).expect("group response");
+        assert_eq!(response.att_read_rsp().opcode, 0x11);
+        let value = &response.att_read_rsp().value;
+
+        // Entry length: start(2) + end(2) + uuid16(2).
+        assert_eq!(value[0], 6, "entry length byte must describe the entry");
+
+        // First entry: GAP service covers handles 1..=6 with uuid 0x1800.
+        assert_eq!(u16::from_le_bytes([value[1], value[2]]), 1);
+        assert_eq!(u16::from_le_bytes([value[3], value[4]]), 6);
+        assert_eq!(u16::from_le_bytes([value[5], value[6]]), 0x1800);
+
+        // Second entry: Device Information covers 7..=9 with uuid 0x180a.
+        assert_eq!(u16::from_le_bytes([value[7], value[8]]), 7);
+        assert_eq!(u16::from_le_bytes([value[9], value[10]]), 9);
+        assert_eq!(u16::from_le_bytes([value[11], value[12]]), 0x180a);
+    }
+
+    /// The Find Information encoder must emit handle/uuid pairs.
+    #[test]
+    fn find_information_encodes_handle_uuid_pairs() {
+        let mut req = [0u8; 2];
+        req[0..2].copy_from_slice(&2u16.to_le_bytes());
+
+        let response =
+            l2cap_att_handler(&att_packet(0x04, 5, 1, &req)).expect("find info response");
+        assert_eq!(response.att_read_rsp().opcode, 0x05);
+        let value = &response.att_read_rsp().value;
+
+        // Format 0x01 selects 16-bit UUIDs; entries are bare handle/uuid pairs
+        // with no per-entry length byte.
+        assert_eq!(value[0], 1, "format byte selects 16-bit UUIDs");
+        assert_eq!(u16::from_le_bytes([value[1], value[2]]), 1);
+        assert_eq!(u16::from_le_bytes([value[3], value[4]]), 0x2800);
+        // Two handles were requested, so a second pair must follow.
+        assert_eq!(u16::from_le_bytes([value[5], value[6]]), 2);
+    }
+
     #[test]
     fn gatt_compat_fixture_profile_parity() {
         let source = include_str!(concat!(

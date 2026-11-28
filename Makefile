@@ -48,16 +48,26 @@ bump-version:
 
 STACK_BASELINE = $(BUILD_DIR)/stack-baseline-$(FEATURE_PROFILE).json
 
+# A feature build also refreshes the shared `_build/<TARGET>` copy, so a gate
+# that read that path blindly would measure whichever selection happens to have
+# been built last -- and would still pass. Resolve the artifact from the feature
+# profile instead: the default selection keeps the documented
+# `_build/lightblemesh` location, every other selection reads its own
+# `_build/<profile>/` directory.
+FEATURE_ELF = $(if $(filter default,$(FEATURE_PROFILE)),$(BUILD_DIR)/$(TARGET),$(BUILD_DIR)/$(FEATURE_PROFILE)/$(TARGET))
+FEATURE_BIN = $(FEATURE_ELF).bin
+BUILD_HINT = make$(if $(strip $(FEATURES)), FEATURES=$(FEATURES),)
+
 .PHONY: stack-check
 # Static stack/RAM gate: reads the linked ELF's symbols and fails on call cycles
 # or a main/IRQ margin below the analyzer's 400 B minimum. It also retains a
 # separate baseline JSON for default and RTT feature selections. Does not rebuild.
 stack-check:
-	@if [ ! -f $(BUILD_DIR)/$(TARGET) ]; then \
-		echo "stack-check: $(BUILD_DIR)/$(TARGET) not found; run 'make' first" >&2; \
+	@if [ ! -f $(FEATURE_ELF) ]; then \
+		echo "stack-check: $(FEATURE_ELF) not found for profile '$(FEATURE_PROFILE)'; run '$(BUILD_HINT)' first" >&2; \
 		exit 2; \
 	fi
-	python3 sdk/stack_analysis.py --strict --elf $(BUILD_DIR)/$(TARGET) --baseline-json $(STACK_BASELINE)
+	python3 sdk/stack_analysis.py --strict --elf $(FEATURE_ELF) --profile $(FEATURE_PROFILE) --baseline-json $(STACK_BASELINE)
 
 # Every feature selection retains the 128 KiB (131072 B) application-slot ceiling.
 IMAGE_SIZE_LIMIT = 131072
@@ -65,11 +75,11 @@ IMAGE_SIZE_LIMIT = 131072
 .PHONY: image-size-check
 # Fails if any build's application-slot image exceeds the flash limit. Does not rebuild.
 image-size-check:
-	@if [ ! -f $(BUILD_DIR)/$(TARGET).bin ]; then \
-		echo "image-size-check: $(BUILD_DIR)/$(TARGET).bin not found; run 'make' first" >&2; \
+	@if [ ! -f $(FEATURE_BIN) ]; then \
+		echo "image-size-check: $(FEATURE_BIN) not found for profile '$(FEATURE_PROFILE)'; run '$(BUILD_HINT)' first" >&2; \
 		exit 2; \
 	fi
-	@size=$$(wc -c < $(BUILD_DIR)/$(TARGET).bin); \
+	@size=$$(wc -c < $(FEATURE_BIN)); \
 	echo "firmware image: $$size bytes (profile $(FEATURE_PROFILE), application-slot limit $(IMAGE_SIZE_LIMIT) B)"; \
 	if [ $$size -gt $(IMAGE_SIZE_LIMIT) ]; then \
 		echo "ERROR: firmware image $$size B exceeds $(IMAGE_SIZE_LIMIT) B application-slot ceiling" >&2; \

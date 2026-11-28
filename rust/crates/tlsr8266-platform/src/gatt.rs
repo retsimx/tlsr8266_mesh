@@ -2,12 +2,22 @@
 
 use core::marker::PhantomData;
 
+use tlsr8266_hal::common::sync::CriticalSectionMutex;
 use tlsr8266_radio::{
     AttError, CompiledAttr, GattBackend, GattReadOutcome, GattReadRequest, GattWriteKind,
     GattWriteOutcome, GattWriteRequest, ProfileView,
 };
 
 use crate::api::Product;
+
+/// Stored Client Characteristic Configuration value.
+///
+/// A CCCD is the one platform attribute a central actually writes: it says
+/// whether notifications are enabled. Discarding it (acknowledging the write and
+/// reading back zeros) makes every subscription silently dead, so the value is
+/// kept here, exactly as the deployed single-CCCD slot did. There is one CCCD in
+/// the deployed profile, so one slot.
+static CCCD_VALUE: CriticalSectionMutex<[u8; 2]> = CriticalSectionMutex::new([0, 0]);
 
 /// Identity of a platform-owned GATT attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,12 +75,10 @@ impl<P: Product> GattBackend for PlatformGatt<P> {
                 GattReadOutcome::Value(len)
             }
             AttrBinding::Cccd => {
-                if request.out.len() >= 2 {
-                    request.out[0..2].copy_from_slice(&[0, 0]);
-                    GattReadOutcome::Value(2)
-                } else {
-                    GattReadOutcome::Value(0)
-                }
+                let value = *CCCD_VALUE.lock();
+                let len = value.len().min(request.out.len());
+                request.out[..len].copy_from_slice(&value[..len]);
+                GattReadOutcome::Value(len as u8)
             }
             AttrBinding::Platform(id) => match id {
                 PlatformAttrId::FirmwareVersion
@@ -87,10 +95,19 @@ impl<P: Product> GattBackend for PlatformGatt<P> {
             AttrBinding::Static | AttrBinding::ConstValue(_) => {
                 GattWriteOutcome::Error(AttError::WriteNotPermitted)
             }
-            AttrBinding::Cccd => match request.kind {
-                GattWriteKind::Request => GattWriteOutcome::Accepted,
-                GattWriteKind::Command => GattWriteOutcome::NoWriteResponse,
-            },
+            AttrBinding::Cccd => {
+                // The deployed backend rejected a CCCD write that did not carry
+                // two value bytes; acknowledging it would leave the central
+                // believing subscriptions were enabled.
+                if request.l2cap_len < 3 || request.payload.len() < 2 {
+                    return GattWriteOutcome::Error(AttError::InvalidAttributeValueLength);
+                }
+                CCCD_VALUE.lock().copy_from_slice(&request.payload[..2]);
+                match request.kind {
+                    GattWriteKind::Request => GattWriteOutcome::Accepted,
+                    GattWriteKind::Command => GattWriteOutcome::NoWriteResponse,
+                }
+            }
             AttrBinding::Platform(id) => match id {
                 PlatformAttrId::FirmwareVersion
                 | PlatformAttrId::ManufacturerName

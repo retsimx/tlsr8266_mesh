@@ -135,6 +135,12 @@ OPT_PRESERVE_ROOT_REGEXES = (
 OPT_PRESERVE_API_NAME = "opt_preserve_api.txt"
 
 LLC_FLAGS = "-march=thumb -mcpu=arm9 -mattr=+soft-float,-v6,+tc32"
+# Fixed per-stage flags that are not user-tunable but do change the image, so
+# they must participate in the cache manifest: editing them without recording
+# them here would produce a byte-identical manifest and silently reuse a stale
+# binary.
+LLC_EXTRA_FLAGS = "--filetype=obj --function-sections --data-sections"
+OBJCOPY_FLAGS = "-O binary"
 LLD_FLAGS = "--tc32 --gc-sections -T ./sdk/boot.link"
 
 VERSION_RS_REL = "rust/src/version.rs"
@@ -760,6 +766,8 @@ def _flags_block(ll_paths: Sequence[Path] = ()) -> dict[str, object]:
             rendered_api.encode("utf-8")
         ).hexdigest(),
         "llc_flags": LLC_FLAGS,
+        "llc_extra_flags": LLC_EXTRA_FLAGS,
+        "objcopy_flags": OBJCOPY_FLAGS,
         "ldflags": LLD_FLAGS,
     }
 
@@ -945,9 +953,7 @@ def _pipeline_commands(
             [
                 str(tools["llc"]),
                 *LLC_FLAGS.split(),
-                "--filetype=obj",
-                "--function-sections",
-                "--data-sections",
+                *LLC_EXTRA_FLAGS.split(),
                 paths["opt_bc"],
                 "-o",
                 paths["obj"],
@@ -966,7 +972,7 @@ def _pipeline_commands(
         ),
         (
             "objcopy",
-            [str(tools["objcopy"]), "-O", "binary", paths["elf"], paths["bin"]],
+            [str(tools["objcopy"]), *OBJCOPY_FLAGS.split(), paths["elf"], paths["bin"]],
         ),
     ]
 

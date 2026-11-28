@@ -81,9 +81,8 @@ use crate::ble::connection::{
     BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT, BLE_PERIPHERAL_CONNECTION_ACTIVE,
     BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, BLE_PERIPHERAL_LINK_COMMAND,
     BLE_PERIPHERAL_NEXT_UPDATE_INSTANT, BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL,
-    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP, BUFF_RESPONSE,
-    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
-    SLAVE_WINDOW_SIZE_UPDATE,
+    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
+    SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_WINDOW_SIZE_UPDATE,
 };
 use crate::ble::flash_config::rf_update_conn_para;
 use crate::ble::pair::pair_enc_packet;
@@ -100,10 +99,9 @@ use tlsr8266_pac::BIT;
 use tlsr8266_pac::*;
 
 use crate::ble::status::{
-    DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-    DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX, NOTIFICATION_REQUEST_MASK_INDEX,
-    SLAVE_READ_STATUS_BUSY, SLAVE_STATUS_RECORD,
+    DEVICE_STATUS_READ_UNICAST_MODE, NOTIFICATION_REQUEST_MASK_INDEX, SLAVE_READ_STATUS_BUSY,
 };
+use crate::coex::{RadioCoexistence, StatusEnqueueOutcome};
 use crate::mesh_ll::node_status::{
     mesh_node_update_status, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
     PKT_LIGHT_DATA, PKT_LIGHT_STATUS, RC_PKT_BUF, STATUS_MESSAGE_SEQUENCE_NUMBER,
@@ -517,100 +515,58 @@ fn rf_link_slave_notify_req_mask(adr: u8) {
 /// * `packet` - Mesh packet containing status information to buffer
 ///
 /// # Side Effects
-/// * Modifies global response buffer (BUFF_RESPONSE)
-/// * Updates buffer write pointer for next insertion
-/// * Modifies status record tracking (SLAVE_STATUS_RECORD)
+/// * Adds the formatted response through the coexistence status window
+/// * Updates the status-window write cursor for the next insertion
+/// * Updates status record tracking for duplicate detection
 /// * Calls notification request masking for address tracking
 /// * Increments device status record index
-pub fn rf_link_slave_add_status(packet: &Packet) {
-    let mut buf_response = BUFF_RESPONSE.lock();
-
-    // DUPLICATE DETECTION: Check if source address is already being tracked
+pub fn rf_link_slave_add_status<C: RadioCoexistence>(packet: &Packet) {
     let source_address = packet.mesh().src_adr as u8;
 
-    if DEVICE_STATUS_RECORD_INDEX.get() != 0 {
-        let status_records = SLAVE_STATUS_RECORD.lock();
-        let address_already_tracked = status_records
-            .iter()
-            .any(|st_rec| st_rec.adr[0] == source_address);
+    let mut formatted = Packet {
+        att_data: PacketAttData::default(),
+    };
 
-        if address_already_tracked {
-            // Address already tracked - update notification mask and exit
-            rf_link_slave_notify_req_mask(source_address);
-            return;
-        }
-    }
+    formatted.head_mut().dma_len = 0x1d;
+    formatted.head_mut()._type = 2;
+    formatted.head_mut().rf_len = 0x1b;
+    formatted.head_mut().l2cap_len = 0x17;
+    formatted.head_mut().chan_id = 4;
 
-    // BUFFER SPACE VALIDATION: Ensure circular buffer has room and record limit not exceeded
-    let write_ptr = DEVICE_STATUS_BUFFER_WRITE_POINTER.get();
-    let read_ptr = DEVICE_STATUS_BUFFER_READ_POINTER.get();
-    let record_index = DEVICE_STATUS_RECORD_INDEX.get();
+    formatted.att_data_mut().att = 0x1b;
+    formatted.att_data_mut().hl = 0x12;
 
-    let buffer_has_space = (write_ptr + 1) % BUFF_RESPONSE_PACKET_COUNT != read_ptr;
-    let within_node_limit = record_index < MESH_NODE_MAX_NUM;
-
-    if !buffer_has_space || !within_node_limit {
-        return;
-    }
-
-    // STATUS RECORD MANAGEMENT: Add new address to tracking system
-    SLAVE_STATUS_RECORD.lock()[record_index].adr[0] = source_address;
-    DEVICE_STATUS_RECORD_INDEX.inc();
-
-    // Update notification mask for this new address
-    rf_link_slave_notify_req_mask(source_address);
-
-    // CIRCULAR BUFFER POINTER UPDATE: Advance write pointer with wraparound
-    DEVICE_STATUS_BUFFER_WRITE_POINTER.set((write_ptr + 1) % BUFF_RESPONSE_PACKET_COUNT);
-
-    // PACKET STRUCTURE ASSEMBLY: Format response packet for BLE peripheral
-    let st_ptr = &mut buf_response[write_ptr];
-
-    // L2CAP Header Configuration
-    st_ptr.head_mut().dma_len = 0x1d; // DMA length: 29 bytes
-    st_ptr.head_mut()._type = 2; // Packet type: data
-    st_ptr.head_mut().rf_len = 0x1b; // RF payload: 27 bytes
-    st_ptr.head_mut().l2cap_len = 0x17; // L2CAP payload: 23 bytes
-    st_ptr.head_mut().chan_id = 4; // Channel ID: attribute protocol
-
-    // ATT Data Header Configuration
-    st_ptr.att_data_mut().att = 0x1b; // ATT opcode
-    st_ptr.att_data_mut().hl = 0x12; // Handle length
-
-    // MESH DATA COPY: Extract 20 bytes (0x14) of mesh packet data starting from sequence number
-    // Copy the sequence number (3 bytes)
-    st_ptr.att_data_mut().dat[0..3].copy_from_slice(&packet.mesh().sno);
-    // Copy the destination address (2 bytes)
+    formatted.att_data_mut().dat[0..3].copy_from_slice(&packet.mesh().sno);
     let dst_bytes = packet.mesh().dst_adr.to_le_bytes();
-    st_ptr.att_data_mut().dat[3..5].copy_from_slice(&dst_bytes);
-    // Copy the source address (2 bytes)
+    formatted.att_data_mut().dat[3..5].copy_from_slice(&dst_bytes);
     let src_bytes = packet.mesh().src_adr.to_le_bytes();
-    st_ptr.att_data_mut().dat[5..7].copy_from_slice(&src_bytes);
-    // Copy op (1 byte), vendor_id (2 bytes), and parameters (10 bytes) from the flat
-    // PacketAttValue.val overlay (MeshPkt is align(4) and inserts a 1-byte padding
-    // hole between op and vendor_id at offset 21).
-    let val = &packet.att_cmd().value.val;
-    st_ptr.att_data_mut().dat[7] = val[0];
-    st_ptr.att_data_mut().dat[8..10].copy_from_slice(&val[1..3]);
-    st_ptr.att_data_mut().dat[10..20].copy_from_slice(&val[3..13]);
+    formatted.att_data_mut().dat[5..7].copy_from_slice(&src_bytes);
 
-    // SPECIAL PARAMETER HANDLING: Only format mode 0 is used in practice
+    let val = &packet.att_cmd().value.val;
+    formatted.att_data_mut().dat[7] = val[0];
+    formatted.att_data_mut().dat[8..10].copy_from_slice(&val[1..3]);
+    formatted.att_data_mut().dat[10..20].copy_from_slice(&val[3..13]);
+
     let format_mode = packet.mesh().internal_par1[INTERNAL_PAR_PACKET_FORMAT_MODE];
     if format_mode == PACKET_FORMAT_STANDARD_PARAMS {
-        // Standard parameter mode: copy specific parameter values to response
-        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM] =
+        formatted.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM] =
             packet.mesh().par[MESH_PAR_STATUS_TICK];
-        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_DATA] =
+        formatted.att_data_mut().dat[PKT_ATT_DATA_STATUS_DATA] =
             packet.mesh().internal_par1[INTERNAL_PAR_STATUS_DATA];
     } else {
-        // All packets initialize with internal_par1: [0; 5], so this should never happen
-        // but we'll use the fallback behavior for safety
-        st_ptr.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM..=PKT_ATT_DATA_STATUS_DATA].fill(0xff);
+        formatted.att_data_mut().dat[PKT_ATT_DATA_STATUS_PARAM..=PKT_ATT_DATA_STATUS_DATA]
+            .fill(0xff);
     }
 
-    // SOURCE ADDRESS INSERTION: Add mesh source address to BLE packet
-    st_ptr.att_data_mut().dat[3] = packet.mesh().src_adr as u8; // Low byte
-    st_ptr.att_data_mut().dat[4] = (packet.mesh().src_adr >> 8) as u8; // High byte
+    formatted.att_data_mut().dat[3] = packet.mesh().src_adr as u8;
+    formatted.att_data_mut().dat[4] = (packet.mesh().src_adr >> 8) as u8;
+
+    match C::enqueue_status_response(source_address, &formatted) {
+        StatusEnqueueOutcome::Added | StatusEnqueueOutcome::Duplicate => {
+            rf_link_slave_notify_req_mask(source_address);
+        }
+        StatusEnqueueOutcome::Rejected => {}
+    }
 }
 
 /// Implements the central mesh packet processing and routing engine.
@@ -698,7 +654,7 @@ pub fn rf_link_slave_add_status(packet: &Packet) {
 /// * May trigger BLE peripheral status responses
 /// * May queue packets for mesh relay transmission
 /// * Modifies packet contents for relay operations
-pub fn rf_link_rc_data(packet: &mut Packet) {
+pub fn rf_link_rc_data<C: RadioCoexistence>(packet: &mut Packet) {
     // PACKET CLASSIFICATION: STATUS ADVERTISEMENT DETECTION
     // Status advertisements use channel ID 0xffff and have 0xa5a5a5a5 signature
     if packet.head().chan_id == 0xffff {
@@ -784,7 +740,7 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
         }
 
         // Forward response to BLE peripheral connection
-        rf_link_slave_add_status(packet);
+        rf_link_slave_add_status::<C>(packet);
         return; // Response forwarding complete - no further processing needed
     }
 
@@ -1822,13 +1778,15 @@ mod tests {
     }
 
     fn reset_test_state() {
+        crate::coex::TestRadioCoexistence::reset();
+        let _ = crate::coex::TestRadioCoexistence::start_status_window();
         reset_host_fakes();
         install_noop_hooks();
         RC_PKT_BUF.lock().clear();
         DEVICE_ADDRESS.set(0x1234);
-        DEVICE_STATUS_RECORD_INDEX.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        crate::coex::TestRadioCoexistence::set_record_index(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
         NOTIFICATION_REQUEST_MASK_INDEX.set(0);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
         SLAVE_READ_STATUS_BUSY.set(0);
@@ -1860,13 +1818,6 @@ mod tests {
                 },
             },
         };
-
-        // Reset SLAVE_STATUS_RECORD
-        let mut status_record = SLAVE_STATUS_RECORD.lock();
-        for record in status_record.iter_mut() {
-            record.adr[0] = 0;
-            record.alarm_id = 0;
-        }
 
         // Reset PKT_LIGHT_STATUS to clean state - CRITICAL for test isolation
         *PKT_LIGHT_STATUS.lock() = Packet {
@@ -2237,24 +2188,24 @@ mod tests {
 
         let packet = create_test_packet(LGT_CMD_LIGHT_STATUS, [0x01, 0x02, 0x03], 0x5678, 0x1234);
 
-        rf_link_slave_add_status(&packet);
+        rf_link_slave_add_status::<crate::coex::TestRadioCoexistence>(&packet);
 
         // Verify status record was added
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             1,
             "Status record index should increment"
         );
 
-        let status_record = SLAVE_STATUS_RECORD.lock();
         assert_eq!(
-            status_record[0].adr[0], 0x78,
+            crate::coex::TestRadioCoexistence::record_address(0),
+            0x78,
             "Status record should contain source address low byte"
         );
 
         // Verify buffer write pointer advanced
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             1,
             "Write pointer should advance"
         );
@@ -2268,22 +2219,22 @@ mod tests {
         let packet = create_test_packet(LGT_CMD_LIGHT_STATUS, [0x01, 0x02, 0x03], 0x5678, 0x1234);
 
         // Add first packet
-        rf_link_slave_add_status(&packet);
+        rf_link_slave_add_status::<crate::coex::TestRadioCoexistence>(&packet);
 
-        let initial_record_index = DEVICE_STATUS_RECORD_INDEX.get();
-        let initial_write_pointer = DEVICE_STATUS_BUFFER_WRITE_POINTER.get();
+        let initial_record_index = crate::coex::TestRadioCoexistence::record_index();
+        let initial_write_pointer = crate::coex::TestRadioCoexistence::write_pointer();
 
         // Add packet with same source address
-        rf_link_slave_add_status(&packet);
+        rf_link_slave_add_status::<crate::coex::TestRadioCoexistence>(&packet);
 
         // Verify no new record was added
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             initial_record_index,
             "Record index should not change for duplicate address"
         );
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             initial_write_pointer,
             "Write pointer should not advance for duplicate address"
         );
@@ -2295,18 +2246,18 @@ mod tests {
         reset_test_state();
 
         // Fill buffer to near capacity
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(BUFF_RESPONSE_PACKET_COUNT - 1);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(15);
 
         let packet = create_test_packet(LGT_CMD_LIGHT_STATUS, [0x01, 0x02, 0x03], 0x5678, 0x1234);
 
-        let initial_record_index = DEVICE_STATUS_RECORD_INDEX.get();
+        let initial_record_index = crate::coex::TestRadioCoexistence::record_index();
 
-        rf_link_slave_add_status(&packet);
+        rf_link_slave_add_status::<crate::coex::TestRadioCoexistence>(&packet);
 
         // Buffer should reject packet when full
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             initial_record_index,
             "Record index should not change when buffer is full"
         );
@@ -2342,16 +2293,15 @@ mod tests {
             val[8] = 0x66; // par[5] = Brightness hi
         }
 
-        rf_link_slave_add_status(&packet);
+        rf_link_slave_add_status::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             1,
             "Write pointer should advance"
         );
 
-        let buf = BUFF_RESPONSE.lock();
-        let st = &buf[0];
+        let st = crate::coex::TestRadioCoexistence::packet(0);
 
         // dat[0..3] = sno
         assert_eq!(
@@ -2806,7 +2756,7 @@ mod tests {
 
         let mut packet = create_status_adv_packet();
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify packet processing completed without error
         // The actual mesh_node_update_status call is tested in integration
@@ -2854,7 +2804,7 @@ mod tests {
             },
         };
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The status region is the first 24 bytes of `PacketAttValue`
         // (sno + src + dst + val[0..17]) read as six 4-byte node records:
@@ -2947,7 +2897,7 @@ mod tests {
             },
         };
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify MESH_NODE_MAX expanded to include the two new nodes
         assert_eq!(
@@ -3042,7 +2992,7 @@ mod tests {
             },
         };
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // A rejected signature must not touch the mesh node database at all.
         assert_eq!(
@@ -3073,7 +3023,7 @@ mod tests {
         let mut packet = create_test_packet(0x30, [0x01, 0x02, 0x03], 0x1234, 0x5678);
         packet.att_cmd_mut().head.l2cap_len = 100; // Set unreasonably large length to trigger overflow
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The parse failure returns before duplicate caching, UART forwarding,
         // address matching, application dispatch and the mesh database update.
@@ -3112,7 +3062,7 @@ mod tests {
         let mut packet =
             create_test_packet(LGT_CMD_LIGHT_ONOFF, [0xAA, 0xBB, 0xCC], 0x1234, 0x1234);
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // 1-byte opcodes use op_cmd[0] directly, so the command reaches the
         // application unchanged.
@@ -3145,7 +3095,7 @@ mod tests {
         packet.att_cmd_mut().value.val[1] = 0x44; // Second byte
         packet.att_cmd_mut().value.val[2] = 0x55; // Third byte
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // For 3-byte opcodes the masked opcode (0x1b) drives the routing, so the
         // packet is delivered locally even though its LSB byte is 0xdb.
@@ -3177,7 +3127,7 @@ mod tests {
         packet.att_cmd_mut().value.val[0] = 0x80; // 2-byte format (unsupported)
         packet.att_cmd_mut().value.val[1] = 0x1B; // Second byte
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The parse failure returns before address matching and caching.
         assert_eq!(
@@ -3212,7 +3162,7 @@ mod tests {
         // address and the peripheral link is active, so the bridge branch is
         // entered - but the pending status read expects LGT_CMD_LIGHT_STATUS.
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The mismatch returns before forwarding, before the address match and
         // before any local dispatch. The packet is already in the duplicate
@@ -3223,7 +3173,7 @@ mod tests {
             "the packet must be cached before the bridge branch"
         );
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             0,
             "rf_link_slave_add_status must not record a status responder"
         );
@@ -3254,7 +3204,7 @@ mod tests {
         // Operation matches (LGT_CMD_LIGHT_GRP_RSP1 == LGT_CMD_LIGHT_GRP_RSP1)
         // But sequence number is wrong: [0x99, 0x88, 0x77] != [0x01, 0x02, 0x03]
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The mismatch returns before forwarding and before local dispatch.
         assert_eq!(
@@ -3263,7 +3213,7 @@ mod tests {
             "the packet must be cached before the bridge branch"
         );
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             0,
             "rf_link_slave_add_status must not record a status responder"
         );
@@ -3286,7 +3236,7 @@ mod tests {
             create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x1234);
 
         // Process packet first time
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Check that packet was added to buffer
         let rc_pkt_buf = RC_PKT_BUF.lock();
@@ -3298,7 +3248,7 @@ mod tests {
         drop(rc_pkt_buf);
 
         // Process same packet again - should be filtered as duplicate
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Buffer should still only contain one packet (duplicate was filtered)
         let rc_pkt_buf = RC_PKT_BUF.lock();
@@ -3318,17 +3268,17 @@ mod tests {
         let mut packet =
             create_test_packet(LGT_CMD_LIGHT_STATUS, [0x01, 0x02, 0x03], 0x1234, 0x1234);
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // The matching response must be buffered as a status responder for the
         // waiting BLE peripheral connection.
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             1,
             "one status responder should be recorded"
         );
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             1,
             "the response buffer write pointer should advance"
         );
@@ -3350,7 +3300,7 @@ mod tests {
         // Set ACK request parameter in mesh internal_par1 field
         packet.mesh_mut().internal_par1[INTERNAL_PAR_SEND_ACK] = 1; // Request ACK
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify local processing callback was called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3395,7 +3345,7 @@ mod tests {
         let mut packet =
             create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x5678, 0x9ABC);
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify packet was marked for mesh transmission (bit 7 set)
         assert_eq!(
@@ -3429,7 +3379,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3462,7 +3412,7 @@ mod tests {
         packet.att_cmd_mut().value.val[1] = 0x01; // params[0] - non-zero to trigger response
         packet.att_cmd_mut().value.val[2] = 0x01; // params[1] - non-zero for condition check
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify that local processing was triggered
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3740,7 +3690,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3776,7 +3726,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3812,7 +3762,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3848,7 +3798,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3884,7 +3834,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3920,7 +3870,7 @@ mod tests {
         packet.att_cmd_mut().value.val[2] = 0x01; // Ensure params[1] != 0 condition is met
         packet.att_cmd_mut().value.val[9] = 0x42; // Set status parameter for response
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify callbacks were called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");
@@ -3965,7 +3915,7 @@ mod tests {
         // 3. params[1] == 0 (parameter is zero)
         packet.att_cmd_mut().value.val[2] = 0x00; // params[1] = val[2] = 0
 
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // Verify local processing callback was called
         assert_eq!(light_data_calls(), 1, "on_light_data must be called once");

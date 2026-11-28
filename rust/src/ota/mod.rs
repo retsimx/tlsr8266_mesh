@@ -47,6 +47,7 @@ use tlsr8266_hal::mcu::gpio::{gpio_set_func, gpio_set_output_en, gpio_write, AS_
 use tlsr8266_hal::mcu::irq_i::irq_disable;
 use tlsr8266_hal::mcu::watchdog::wd_clear;
 use tlsr8266_hal::pm::light_sw_reboot;
+use tlsr8266_platform::window::{active_ota_claimant, begin_ota, end_ota, OtaClaimant};
 
 mod fsm;
 
@@ -141,12 +142,11 @@ pub mod flash_layout {
     pub const ERASE_SECTORS_FOR_OTA: u32 = FW_SIZE_MAX_K.div_ceil(4);
 }
 
-/// Slots in the shared response buffer, and therefore the most GATT OTA packets
+/// Slots in the shared packet window, and therefore the most GATT OTA packets
 /// a single drain can stage.
 ///
-/// Must match `tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT`. `ota` may not
-/// name the radio crate (the layering gate forbids it), so the equality is
-/// asserted at compile time in `app.rs`, which owns both sides.
+/// The platform window and this compatibility fixture bound are asserted in
+/// `app.rs`; OTA staging uses the platform window directly.
 pub const OTA_STAGING_SLOTS: usize = 16;
 
 /// Apply a staged firmware image from the OTA area and reboot into it.
@@ -355,7 +355,7 @@ fn radio_begin_gatt_ota() -> bool {
 
 /// Stages one packet at `idx`, unwrapped.
 ///
-/// The provider (`stage_ota_packet`, which owns the 16-slot `BUFF_RESPONSE`)
+/// The provider (`stage_ota_packet`, which owns the 16-slot platform packet window)
 /// applies `idx % 16`, so the wrap has exactly one source of truth. The read
 /// side keeps the legacy unwrapped indexing.
 #[inline(never)]
@@ -437,6 +437,7 @@ pub fn rf_mesh_data_ota(pkt_data: &[u8], last: bool) -> u16 {
     if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue
         || OTA_UPDATE_IN_PROGRESS.get()
         || !OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get()
+        || active_ota_claimant() != Some(OtaClaimant::Mesh)
     {
         return u16::MAX;
     }
@@ -751,6 +752,7 @@ fn rf_slave_ota_finished_flag_set(reset_flag: OtaState) {
     let finished_time = clock_time();
     *RF_SLAVE_OTA_FINISHED_FLAG.lock() = reset_flag;
     LAST_INDEX.store(u16::MAX, Ordering::Relaxed);
+    end_ota();
 
     let mut st = OTA_STATE.lock();
     st.rf_slave_ota_finished_time = finished_time;
@@ -868,13 +870,25 @@ pub fn install_hooks_for_test() {
 
 // --- composition-root entry points ------------------------------------------
 
-/// Start a mesh OTA: claim the mesh path and arm the boot-time image copier.
-pub fn start_mesh_ota() {
+/// Start a mesh OTA only after the platform window grants the Mesh claim.
+///
+/// The abort closure is run if a BLE status window is active. It must report
+/// whether the status read was stopped safely.
+pub fn try_start_mesh_ota(abort_status: impl FnOnce() -> bool) -> bool {
+    if *RF_SLAVE_OTA_FINISHED_FLAG.lock() != OtaState::Continue || OTA_UPDATE_IN_PROGRESS.get() {
+        return false;
+    }
+
+    if begin_ota(OtaClaimant::Mesh, abort_status).is_err() {
+        return false;
+    }
+
     OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(true);
     // A new session starts over at index 0: clear the previous transfer's
     // monotonicity cursor so its final index cannot refuse the first packet.
     LAST_INDEX.store(u16::MAX, Ordering::Relaxed);
     tlsr8266_hal::pm::set_reboot_ota_active(true);
+    true
 }
 
 /// Is a mesh OTA receiving? Mesh forwarding is suppressed while it is.
@@ -929,6 +943,7 @@ pub fn on_1s_tick() -> Option<OtaState> {
 /// from one test into the next. There is no production cost.
 #[cfg(test)]
 pub fn reset_for_test() {
+    end_ota();
     *OTA_STATE.lock() = OtaRuntimeState::new();
     *RF_SLAVE_OTA_FINISHED_FLAG.lock() = OtaState::Continue;
     OTA_UPDATE_MESH_OPERATIONS_BLOCKED.set(false);
@@ -1209,7 +1224,7 @@ mod tests {
         assert_eq!(OTA_STAGING_SLOTS, slots);
         assert_eq!(
             OTA_STAGING_SLOTS,
-            tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT
+            tlsr8266_platform::window::PACKET_WINDOW_SLOTS
         );
         assert_eq!(packet_size, core::mem::size_of::<Packet>());
         assert_eq!(window_bytes, slots * packet_size);
@@ -2303,8 +2318,94 @@ mod tests {
         reset_for_test();
     }
 
+    #[test]
+    fn test_gatt_then_mesh_claim_order_rejects_mesh() {
+        reset_fakes();
+        reset_for_test();
+
+        let gatt = tlsr8266_platform::window::begin_ota(
+            tlsr8266_platform::window::OtaClaimant::Gatt,
+            || true,
+        );
+        assert!(gatt.is_ok(), "GATT must claim first");
+        assert!(
+            !try_start_mesh_ota(|| true),
+            "mesh OTA must not replace an active GATT claim"
+        );
+        assert!(!OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get());
+        assert_eq!(
+            tlsr8266_platform::window::active_ota_claimant(),
+            Some(tlsr8266_platform::window::OtaClaimant::Gatt)
+        );
+
+        tlsr8266_platform::window::end_ota();
+        reset_for_test();
+    }
+
+    #[test]
+    fn test_mesh_then_gatt_claim_order_rejects_gatt() {
+        reset_fakes();
+        reset_for_test();
+
+        assert!(try_start_mesh_ota(|| true), "mesh OTA must claim first");
+        assert_eq!(
+            tlsr8266_platform::window::active_ota_claimant(),
+            Some(tlsr8266_platform::window::OtaClaimant::Mesh)
+        );
+
+        let gatt = tlsr8266_platform::window::begin_ota(
+            tlsr8266_platform::window::OtaClaimant::Gatt,
+            || true,
+        );
+        assert!(
+            gatt.is_err(),
+            "GATT OTA must not replace an active mesh claim"
+        );
+        assert_eq!(
+            tlsr8266_platform::window::active_ota_claimant(),
+            Some(tlsr8266_platform::window::OtaClaimant::Mesh)
+        );
+
+        tlsr8266_platform::window::end_ota();
+        reset_for_test();
+    }
+
+    #[test]
+    fn test_mesh_start_aborts_active_status_only_when_abort_succeeds() {
+        reset_fakes();
+        reset_for_test();
+        assert!(tlsr8266_platform::window::start_status_window());
+
+        set_finished_flag_for_test(OtaState::Error);
+        assert!(!try_start_mesh_ota(|| true));
+        assert_eq!(LAST_INDEX.load(Ordering::Relaxed), u16::MAX);
+        set_finished_flag_for_test(OtaState::Continue);
+
+        LAST_INDEX.store(7, Ordering::Relaxed);
+        assert!(
+            !try_start_mesh_ota(|| false),
+            "a failed status abort must leave the mesh start retryable"
+        );
+        assert!(!OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get());
+        assert_eq!(LAST_INDEX.load(Ordering::Relaxed), 7);
+        assert_eq!(tlsr8266_platform::window::active_ota_claimant(), None);
+
+        assert!(
+            try_start_mesh_ota(|| true),
+            "a successful status abort must allow the mesh claim"
+        );
+        assert!(OTA_UPDATE_MESH_OPERATIONS_BLOCKED.get());
+        assert_eq!(
+            tlsr8266_platform::window::active_ota_claimant(),
+            Some(tlsr8266_platform::window::OtaClaimant::Mesh)
+        );
+        assert_eq!(LAST_INDEX.load(Ordering::Relaxed), u16::MAX);
+
+        reset_for_test();
+    }
+
     /// `LAST_INDEX` gates the mesh OTA index stream and both session boundaries
-    /// put it back to `u16::MAX`: the start ([`start_mesh_ota`]) and the
+    /// put it back to `u16::MAX`: the start (`try_start_mesh_ota`) and the
     /// abort/finish funnel ([`rf_slave_ota_finished_flag_set`]). Without that,
     /// the last index of one transfer refused index 0 of the next for good.
     #[test]
@@ -2314,7 +2415,7 @@ mod tests {
         // A stale cursor left behind by an earlier transfer.
         LAST_INDEX.store(7, Ordering::Relaxed);
 
-        start_mesh_ota();
+        assert!(try_start_mesh_ota(|| true));
         assert_eq!(
             LAST_INDEX.load(Ordering::Relaxed),
             u16::MAX,
@@ -2339,7 +2440,7 @@ mod tests {
 
         // Second session in the same boot: index 0 is accepted again.
         set_finished_flag_for_test(OtaState::Continue);
-        start_mesh_ota();
+        assert!(try_start_mesh_ota(|| true));
         let mut first = [0u8; 10];
         first[2] = 0xA5;
         assert_eq!(

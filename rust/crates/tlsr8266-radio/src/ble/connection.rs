@@ -55,59 +55,9 @@ use crate::rf::drv_8266::{
 };
 use crate::types::*;
 use mesh_protocol::packet_types::*;
-use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
-
-/// Response buffer for storing packets that need to be sent back to the BLE host.
-/// Contains an array of 16 Packet structures used to queue ATT responses before transmission.
-/// Protected by critical section mutex for thread-safe access in interrupt contexts.
-///
-/// Visibility is `pub(crate)`: the facade module is the only entry point from
-/// outside this crate, and the crate boundary is the fence C-10 established.
-pub(crate) static BUFF_RESPONSE: CriticalSectionMutex<[Packet; BUFF_RESPONSE_PACKET_COUNT]> =
-    CriticalSectionMutex::new(
-        [Packet {
-            att_data: PacketAttData {
-                head: PacketL2capHead {
-                    dma_len: 0,
-                    _type: 0,
-                    rf_len: 0,
-                    l2cap_len: 0,
-                    chan_id: 0,
-                },
-                att: 0,
-                hl: 0,
-                hh: 0,
-                dat: [0; 23],
-            },
-        }; BUFF_RESPONSE_PACKET_COUNT],
-    );
-
-/// `OtaRadioOps::stage_packet`: copy one OTA packet into the shared response
-/// buffer.
-///
-/// `ota` may not name this module, so it reaches the buffer through this shim.
-/// The `% 16` wrap is the legacy staging semantics; hardening a too-large
-/// `cache_idx` is C-13 (#75).
-///
-/// `#[inline(never)]`: `sdk/stack_analysis.py`'s indirect-edge table binds the
-/// `radio_stage_pkt` slot to this symbol.
-#[inline(never)]
-pub fn stage_ota_packet(idx: usize, pkt: &Packet) {
-    BUFF_RESPONSE.lock()[idx % 16] = *pkt;
-}
-
-/// `OtaRadioOps::read_staged_packet`: read one staged OTA packet back out.
-///
-/// The read indexes directly, exactly like the legacy `BUFF_RESPONSE[i]` in the
-/// save loop; only staging wraps.
-///
-/// `#[inline(never)]`: see [`stage_ota_packet`].
-#[inline(never)]
-pub fn read_staged_ota_packet(idx: usize) -> Packet {
-    BUFF_RESPONSE.lock()[idx]
-}
 
 /// Current state of the BLE connection as a peripheral device.
 /// Tracks connection status, advertising state, and link layer operations.
@@ -871,21 +821,6 @@ mod tests {
                 chm: [0xff, 0xff, 0xff, 0xff, 0x1f], // All channels enabled
                 hop: 5,                              // Valid hop increment (non-zero)
             },
-        }
-    }
-
-    /// The 48-byte wire image of a `Packet`, for before/after comparisons that
-    /// do not depend on which union field the code under test wrote.
-    fn packet_bytes(packet: &Packet) -> Vec<u8> {
-        // SAFETY: `Packet` is a `#[repr(C, align(4))]` union of wire-format
-        // structs; reading it as a byte slice of its own size is the same view
-        // the RF driver takes, and the reference is live for the whole call.
-        unsafe {
-            core::slice::from_raw_parts(
-                core::ptr::addr_of!(*packet) as *const u8,
-                core::mem::size_of::<Packet>(),
-            )
-            .to_vec()
         }
     }
 
@@ -2267,64 +2202,6 @@ mod tests {
             "callback must not be called at exactly the delay"
         );
         assert!(NEED_UPDATE_CONNECT_PARA.get());
-    }
-
-    /// Tests the OTA staging providers' wrap-on-stage / direct-index-on-read
-    /// asymmetry.
-    ///
-    /// `stage_ota_packet` copies `idx % 16` while `read_staged_ota_packet`
-    /// indexes the 16-slot window directly, exactly like the legacy save loop.
-    /// A round trip through both pins that asymmetry and proves both address the
-    /// same slot, so the save path reads back the packet it staged. The buffer is
-    /// process-global, so the test starts and ends at the zeroed default.
-    #[test]
-    fn test_stage_and_read_ota_packet_round_trip() {
-        let zeroed = Packet {
-            att_data: PacketAttData::default(),
-        };
-        BUFF_RESPONSE.lock().fill(zeroed);
-
-        let mut first = PacketAttData {
-            att: 0xA1,
-            ..Default::default()
-        };
-        first.dat[0] = 0x11;
-        let p1 = Packet { att_data: first };
-
-        let mut second = PacketAttData {
-            att: 0xB2,
-            ..Default::default()
-        };
-        second.dat[0] = 0x22;
-        let p2 = Packet { att_data: second };
-
-        // `17 % 16 == 1`: staging wraps the too-large index into slot 1, which a
-        // direct read of index 1 finds.
-        stage_ota_packet(BUFF_RESPONSE_PACKET_COUNT + 1, &p1);
-        assert_eq!(
-            packet_bytes(&read_staged_ota_packet(1)),
-            packet_bytes(&p1),
-            "a wrapped staging index must land in slot idx % 16"
-        );
-        assert_eq!(
-            packet_bytes(&BUFF_RESPONSE.lock()[0]),
-            packet_bytes(&zeroed),
-            "staging into slot 1 must leave slot 0 untouched"
-        );
-
-        stage_ota_packet(0, &p2);
-        assert_eq!(
-            packet_bytes(&read_staged_ota_packet(0)),
-            packet_bytes(&p2),
-            "a direct staging index must land in its own slot"
-        );
-        assert_eq!(
-            packet_bytes(&read_staged_ota_packet(1)),
-            packet_bytes(&p1),
-            "staging slot 0 must leave the wrapped slot 1 untouched"
-        );
-
-        BUFF_RESPONSE.lock().fill(zeroed);
     }
 
     /// Tests update_connect_para multiple calls scenario.

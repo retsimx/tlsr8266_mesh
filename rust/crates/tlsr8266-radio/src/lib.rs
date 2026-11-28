@@ -60,7 +60,7 @@ pub mod config;
 pub use coex::{
     AdvertisementSlot, AttTxPacket, AuxiliaryRfPlan, ConnectionPlan, ConnectionSlot,
     FrameIngressTag, LinkAction, LinkEvent, LinkIdentity, ListenSlot, QueueFull, RadioAction,
-    RadioCoexistence, RadioFrame, RxContext,
+    RadioCoexistence, RadioFrame, RxContext, StatusEnqueueOutcome,
 };
 
 pub use gatt::attribute::{l2cap_att_handler, AttRequest, AttResponse, GattOp, GattServer};

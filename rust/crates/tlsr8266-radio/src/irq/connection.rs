@@ -17,25 +17,24 @@ use crate::ble::connection::{
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_NEXT_UPDATE_INSTANT,
     BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
     BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_FLAG, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP2_OK_TIME,
-    BRIDGE_COMMAND_TIMESTAMP, BRIDGE_SEQUENCE_NUMBER, BUFF_RESPONSE,
-    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP, NEED_UPDATE_CONNECT_PARA, SLAVE_CONNECTED_TICK,
-    SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
-    SLAVE_WINDOW_SIZE_UPDATE,
+    BRIDGE_COMMAND_TIMESTAMP, BRIDGE_SEQUENCE_NUMBER, GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP,
+    NEED_UPDATE_CONNECT_PARA, SLAVE_CONNECTED_TICK, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
+    SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE, SLAVE_WINDOW_SIZE_UPDATE,
 };
 use crate::ble::flash_config::pair_load_key;
 use crate::ble::pair::{PAIR_LOGIN_OK, PAIR_SETTING_FLAG, SECURITY_ENABLE};
 use crate::ble::status::{
-    rf_link_slave_read_status_stop, tx_packet_bridge, DEVICE_STATUS_BUFFER_READ_POINTER,
-    DEVICE_STATUS_BUFFER_WRITE_POINTER, DEVICE_STATUS_READ_BUSY_TIMESTAMP, SLAVE_READ_STATUS_BUSY,
+    rf_link_slave_read_status_stop, tx_packet_bridge, DEVICE_STATUS_READ_BUSY_TIMESTAMP,
+    SLAVE_READ_STATUS_BUSY,
 };
 use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_tick};
+use crate::coex::RadioCoexistence;
 use crate::mesh_ll::node_status::{mesh_node_flush_status, mesh_report_status_enable};
 use crate::mesh_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
 use crate::rf::drv_8266::*;
 use crate::rf::drv_8266::{CURRENT_RF_STATE, PKT_INIT};
 use crate::types::{
-    BlePeripheralLinkState, PairAuthState, RfOperationState, BUFF_RESPONSE_PACKET_COUNT,
-    SLAVE_READ_STATUS_BUSY_TIMEOUT,
+    BlePeripheralLinkState, PairAuthState, RfOperationState, SLAVE_READ_STATUS_BUSY_TIMEOUT,
 };
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
@@ -159,7 +158,7 @@ pub fn handle_ble_connection_parameter_updates() {
 /// - Link state → Advertisement mode
 /// - Mesh reporting → Disabled
 /// - Pairing state → Reset or loaded from storage
-pub fn cleanup_ble_disconnection() {
+pub fn cleanup_ble_disconnection<C: RadioCoexistence>() {
     // Schedule transition to advertisement state with short delay (100µs)
     write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 100 + read_reg_system_tick());
     *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
@@ -184,7 +183,7 @@ pub fn cleanup_ble_disconnection() {
 
     // Stop any ongoing status read operations
     if SLAVE_READ_STATUS_BUSY.get() != 0 {
-        rf_link_slave_read_status_stop();
+        rf_link_slave_read_status_stop::<C>();
     }
 
     // Handle pairing key management based on current pairing state
@@ -270,7 +269,7 @@ fn initialize_connection_hardware() {
 /// - `Some(BleConnectionEvent::None)` if the connection timed out and cleanup was
 ///   performed, with nothing left for the composition root to do
 /// - `None` if the connection is still valid
-fn check_connection_supervision_timeout() -> Option<BleConnectionEvent> {
+fn check_connection_supervision_timeout<C: RadioCoexistence>() -> Option<BleConnectionEvent> {
     // Check for BLE connection supervision timeout
     // Per BLE specification, if no communication occurs within the supervision timeout,
     // the connection must be considered lost and terminated
@@ -278,7 +277,7 @@ fn check_connection_supervision_timeout() -> Option<BleConnectionEvent> {
         < read_reg_system_tick() - SLAVE_CONNECTED_TICK.get()
     {
         // Connection has timed out - handle cleanup first
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<C>();
 
         return Some(if dispatch_ota_snapshot().in_progress {
             BleConnectionEvent::OtaErrorReboot
@@ -294,14 +293,14 @@ fn check_connection_supervision_timeout() -> Option<BleConnectionEvent> {
 /// If a status read operation has been running too long, this function stops it
 /// to prevent the system from hanging. Uses SLAVE_READ_STATUS_BUSY_TIMEOUT to
 /// determine the maximum allowed duration.
-fn handle_status_read_timeout() {
+fn handle_status_read_timeout<C: RadioCoexistence>() {
     // Handle status read operation timeout
     // If a status read operation has been running too long, stop it to prevent hanging
     if SLAVE_READ_STATUS_BUSY.get() != 0
         && SLAVE_READ_STATUS_BUSY_TIMEOUT * CLOCK_SYS_CLOCK_1US * 1000
             < read_reg_system_tick() - DEVICE_STATUS_READ_BUSY_TIMESTAMP.get()
     {
-        rf_link_slave_read_status_stop();
+        rf_link_slave_read_status_stop::<C>();
     }
 }
 
@@ -385,7 +384,7 @@ fn handle_bridge_operations() {
 /// - Handling pairing operations when buffers are available
 /// - Flushing pending mesh node status updates
 /// - Generating and sending mesh status reports via BLE and UART
-fn process_mesh_operations() {
+fn process_mesh_operations<C: RadioCoexistence>() {
     use crate::ble::pair::pair_proc;
     use crate::facade::radio_config;
     use mesh_protocol::mesh_types::MESH_NODE_ST_VAL_LEN;
@@ -393,7 +392,7 @@ fn process_mesh_operations() {
 
     // Process any pending status read operations
     if SLAVE_READ_STATUS_BUSY.get() != 0 {
-        process_queued_status_responses();
+        process_queued_status_responses::<C>();
     }
 
     // Handle pairing operations if transmission buffer is available
@@ -557,17 +556,17 @@ fn schedule_next_connection_event() {
 /// - Implements supervision timeout according to BLE specification
 /// - Maintains connection event timing for reliable communication
 /// - Handles connection parameter update procedures
-pub fn handle_ble_connected_state() -> BleConnectionEvent {
+pub fn handle_ble_connected_state<C: RadioCoexistence>() -> BleConnectionEvent {
     // 1. Initialize hardware and registers for active connection
     initialize_connection_hardware();
 
     // 2. Check for connection supervision timeout (early exit if timed out)
-    if let Some(ev) = check_connection_supervision_timeout() {
+    if let Some(ev) = check_connection_supervision_timeout::<C>() {
         return ev;
     }
 
     // 3. Handle status read operation timeouts
-    handle_status_read_timeout();
+    handle_status_read_timeout::<C>();
 
     // 4. Handle OTA operations (early exit if OTA is active)
     if let Some(ev) = handle_ota_operations() {
@@ -578,7 +577,7 @@ pub fn handle_ble_connected_state() -> BleConnectionEvent {
     handle_bridge_operations();
 
     // 6. Process mesh operations (status, pairing, reporting)
-    process_mesh_operations();
+    process_mesh_operations::<C>();
 
     // 7. Manage connection event timing and synchronization
     manage_connection_event_timing();
@@ -604,28 +603,13 @@ pub fn handle_ble_connected_state() -> BleConnectionEvent {
 /// - Only sends packets when the TX buffer has space available
 /// - Prevents buffer overflow by checking `rf_link_add_tx_packet` return value
 /// - Maintains read pointer consistency for reliable packet delivery
-pub fn process_queued_status_responses() {
-    // Get the current read pointer from the status buffer
-    let mut rptr = DEVICE_STATUS_BUFFER_READ_POINTER.get();
-
-    // Process all queued response packets
-    while DEVICE_STATUS_BUFFER_WRITE_POINTER.get() != rptr {
-        // Ensure read pointer stays within buffer bounds
-        rptr %= BUFF_RESPONSE_PACKET_COUNT;
-
-        // Get the next packet from the response buffer
-        let packet = BUFF_RESPONSE.lock()[rptr];
-
-        // Try to add the packet to the transmission queue
-        // If the TX buffer is full, stop processing and try again later
+pub fn process_queued_status_responses<C: RadioCoexistence>() {
+    while let Some(packet) = C::peek_status_response() {
+        // Copy the packet under C's window lock, then release it before TX I/O.
         if rf_link_add_tx_packet(&packet).is_err() {
             return;
         }
-
-        // Advance the read pointer to the next packet
-        // Use atomic update to prevent race conditions
-        rptr = (DEVICE_STATUS_BUFFER_READ_POINTER.get() + 1) % BUFF_RESPONSE_PACKET_COUNT;
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(rptr);
+        C::advance_status_response();
     }
 }
 
@@ -720,8 +704,8 @@ mod tests {
         // parameters `rf_link_slave_read_status_stop` re-initialises.
         SLAVE_READ_STATUS_BUSY.set(0);
         DEVICE_STATUS_READ_UNICAST_MODE.set(false);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
 
         // Mesh status reporting off, table and mask blank.
         MESH_NODE_REPORT_ENABLE.set(false);
@@ -1341,7 +1325,7 @@ mod tests {
         assert!(PAIR_LOGIN_OK.get(), "Initial pair login should be true");
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify advertisement state transition scheduling
         let expected_irq_time = CLOCK_SYS_CLOCK_1US * 100 + 0x10000000;
@@ -1407,7 +1391,7 @@ mod tests {
         BLE_PERIPHERAL_FIRST_CONNECTION_TIMESTAMP.set(0x12345678);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify mesh status reporting is disabled
         assert!(
@@ -1439,7 +1423,7 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify security-specific cleanup
         assert_eq!(
@@ -1472,7 +1456,7 @@ mod tests {
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // The real stop handler clears the busy flag, drops unicast mode and
         // re-initialises the status parameters.
@@ -1499,11 +1483,11 @@ mod tests {
         // handler owns is non-default: if it ran, these would be cleared.
         SLAVE_READ_STATUS_BUSY.set(0);
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(2);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(3);
+        crate::coex::TestRadioCoexistence::set_read_pointer(2);
+        crate::coex::TestRadioCoexistence::set_write_pointer(3);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify status read stop is NOT called
         assert!(
@@ -1512,8 +1496,8 @@ mod tests {
         );
         assert_eq!(
             (
-                DEVICE_STATUS_BUFFER_READ_POINTER.get(),
-                DEVICE_STATUS_BUFFER_WRITE_POINTER.get()
+                crate::coex::TestRadioCoexistence::read_pointer(),
+                crate::coex::TestRadioCoexistence::write_pointer()
             ),
             (2, 3),
             "the stop handler's parameter re-init must not run"
@@ -1538,7 +1522,7 @@ mod tests {
         FLASH_CONFIGURATION_INDEX.set(7);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify data validity is cleared
         assert_eq!(
@@ -1578,7 +1562,7 @@ mod tests {
         FLASH_CONFIGURATION_INDEX.set(7);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify data validity is cleared
         assert_eq!(
@@ -1676,7 +1660,7 @@ mod tests {
         SLAVE_DATA_VALID.set(789);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify comprehensive state reset
         assert!(
@@ -1718,7 +1702,7 @@ mod tests {
         FLASH_CONFIGURATION_INDEX.set(7);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify security-enabled cleanup
         assert_eq!(
@@ -1763,7 +1747,7 @@ mod tests {
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
 
         // Execute cleanup
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify status read stop is called regardless of specific value
         assert_eq!(
@@ -1790,7 +1774,7 @@ mod tests {
         FakeMmio::clear_writes();
 
         // Execute cleanup first time
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Capture state after first cleanup
         let connection_active_after = BLE_PERIPHERAL_CONNECTION_ACTIVE.get();
@@ -1799,7 +1783,7 @@ mod tests {
         let pair_flag_after = *PAIR_SETTING_FLAG.lock();
 
         // Execute cleanup second time
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
 
         // Verify state remains consistent after second cleanup
         assert_eq!(
@@ -1850,7 +1834,7 @@ mod tests {
         // the pairing flag, so a second load would re-scan (and overwrite this
         // sentinel).
         FLASH_CONFIGURATION_INDEX.set(42);
-        cleanup_ble_disconnection();
+        cleanup_ble_disconnection::<crate::coex::TestRadioCoexistence>();
         assert_eq!(
             FLASH_CONFIGURATION_INDEX.get(),
             42,
@@ -1952,7 +1936,7 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
 
         // Execute function
-        let result = check_connection_supervision_timeout();
+        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
         // Verify no timeout detected
         assert_eq!(
@@ -1990,7 +1974,7 @@ mod tests {
         SLAVE_CONNECTED_TICK.set(10000); // Connected at tick 10000, now at 15000 = 5000 ticks elapsed
 
         // Execute function
-        let result = check_connection_supervision_timeout();
+        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
         // Verify timeout detected and cleanup performed, with nothing left for the
         // composition root to do.
@@ -2030,7 +2014,7 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
         crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let result = check_connection_supervision_timeout();
+        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             result,
@@ -2070,7 +2054,7 @@ mod tests {
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
 
         // Execute function
-        handle_status_read_timeout();
+        handle_status_read_timeout::<crate::coex::TestRadioCoexistence>();
 
         // Verify no action taken when no operation is busy
         assert!(
@@ -2095,7 +2079,7 @@ mod tests {
         fake_clock::set_ticks(800_100_000); // Large enough to exceed timeout
 
         // Execute function
-        handle_status_read_timeout();
+        handle_status_read_timeout::<crate::coex::TestRadioCoexistence>();
 
         // Verify timeout handling through the real stop handler's effects.
         assert_eq!(
@@ -2317,8 +2301,8 @@ mod tests {
         // processing loop must hand it to the DMA queue and advance the read
         // pointer.
         SLAVE_READ_STATUS_BUSY.set(5);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(1);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(1);
 
         // The mesh sweep only runs once per MESH_STATUS_SWEEP_MS: park the fake
         // clock far past any timestamp an earlier test can have left behind.
@@ -2332,11 +2316,11 @@ mod tests {
         }
 
         // Execute function
-        process_mesh_operations();
+        process_mesh_operations::<crate::coex::TestRadioCoexistence>();
 
         // Verify status processing ran (it consumed the queued response)
         assert_eq!(
-            DEVICE_STATUS_BUFFER_READ_POINTER.get(),
+            crate::coex::TestRadioCoexistence::read_pointer(),
             1,
             "the queued status response must be sent"
         );
@@ -2369,7 +2353,7 @@ mod tests {
         );
 
         SLAVE_READ_STATUS_BUSY.set(0);
-        process_mesh_operations();
+        process_mesh_operations::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             dma_tx_fifo_writes(),
@@ -2398,7 +2382,7 @@ mod tests {
         MESH_NODE_MASK.lock()[0] = 1;
 
         SLAVE_READ_STATUS_BUSY.set(0);
-        process_mesh_operations();
+        process_mesh_operations::<crate::coex::TestRadioCoexistence>();
 
         // BLE should not have been called (TX buffer not ready)
         assert_eq!(
@@ -2424,7 +2408,7 @@ mod tests {
         MESH_NODE_MASK.lock()[0] = 1;
 
         SLAVE_READ_STATUS_BUSY.set(0);
-        process_mesh_operations();
+        process_mesh_operations::<crate::coex::TestRadioCoexistence>();
 
         // BLE should have fired: an empty buffer also gets the one-shot marker
         // registration, so two FIFO writes are expected.
@@ -2545,7 +2529,7 @@ mod tests {
         BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.set(0);
 
         // Execute the main function
-        let result = handle_ble_connected_state();
+        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
         // The normal bridge path reports nothing for the composition root to do
         assert_eq!(result, BleConnectionEvent::None);
@@ -2611,7 +2595,7 @@ mod tests {
         BRIDGE_COMMAND_TIMESTAMP.set(0);
 
         // Execute the main function
-        let result = handle_ble_connected_state();
+        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
         // A timed-out connection reports Some(None): cleanup already ran and the
         // state must not be overwritten back to Receiving.
@@ -2661,7 +2645,7 @@ mod tests {
         BRIDGE_COMMAND_TIMESTAMP.set(0);
         crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let result = handle_ble_connected_state();
+        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(result, BleConnectionEvent::OtaErrorReboot);
         assert_eq!(
@@ -2709,7 +2693,7 @@ mod tests {
         FakeMmio::clear_writes();
 
         // Execute the main function
-        let result = handle_ble_connected_state();
+        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
         // The OTA event must be propagated unchanged
         assert_eq!(result, BleConnectionEvent::OtaFinishCheck);
@@ -2767,11 +2751,11 @@ mod tests {
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 0);
 
         // Setup: Multiple packets queued (start with clean state)
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(3); // 3 packets queued
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(3); // 3 packets queued
 
         // Execute function
-        process_queued_status_responses();
+        process_queued_status_responses::<crate::coex::TestRadioCoexistence>();
 
         // Verify all packets were processed: three successful queue
         // registrations, each preceded by the empty-buffer marker because the
@@ -2784,7 +2768,7 @@ mod tests {
 
         // Verify read pointer advanced
         assert_eq!(
-            DEVICE_STATUS_BUFFER_READ_POINTER.get(),
+            crate::coex::TestRadioCoexistence::read_pointer(),
             3,
             "Read pointer should advance to match write pointer"
         );
@@ -2799,11 +2783,11 @@ mod tests {
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 7);
 
         // Setup: Packets queued (start with clean state)
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(2); // 2 packets queued
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(2); // 2 packets queued
 
         // Execute function
-        process_queued_status_responses();
+        process_queued_status_responses::<crate::coex::TestRadioCoexistence>();
 
         // Verify only one packet was attempted (stopped on first failure)
         assert_eq!(
@@ -2814,7 +2798,7 @@ mod tests {
 
         // Verify read pointer did not advance (packet failed to send)
         assert_eq!(
-            DEVICE_STATUS_BUFFER_READ_POINTER.get(),
+            crate::coex::TestRadioCoexistence::read_pointer(),
             0,
             "Read pointer should not advance when transmission fails"
         );
@@ -2828,14 +2812,14 @@ mod tests {
         FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 0);
 
-        // Setup: Buffer wraparound scenario (need to understand BUFF_RESPONSE_PACKET_COUNT)
+        // Setup: Buffer wraparound scenario (need to understand 16)
         // Let's use a safer approach - start near the end and wrap to beginning
-        let wrap_point = BUFF_RESPONSE_PACKET_COUNT - 1;
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(wrap_point);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(1); // Wrapped around: 1 packet at end + 1 at start
+        let wrap_point = 15;
+        crate::coex::TestRadioCoexistence::set_read_pointer(wrap_point);
+        crate::coex::TestRadioCoexistence::set_write_pointer(1); // Wrapped around: 1 packet at end + 1 at start
 
         // Execute function
-        process_queued_status_responses();
+        process_queued_status_responses::<crate::coex::TestRadioCoexistence>();
 
         // Verify correct number of packets processed
         // Should process: [wrap_point], [0] = 2 packets total
@@ -2847,7 +2831,7 @@ mod tests {
 
         // Verify read pointer wrapped around correctly
         assert_eq!(
-            DEVICE_STATUS_BUFFER_READ_POINTER.get(),
+            crate::coex::TestRadioCoexistence::read_pointer(),
             1,
             "Read pointer should wrap around correctly"
         );
@@ -2858,11 +2842,11 @@ mod tests {
         reset_global_state();
 
         // Setup: Empty queue (read == write)
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(5);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(5);
+        crate::coex::TestRadioCoexistence::set_read_pointer(5);
+        crate::coex::TestRadioCoexistence::set_write_pointer(5);
 
         // Execute function
-        process_queued_status_responses();
+        process_queued_status_responses::<crate::coex::TestRadioCoexistence>();
 
         // Verify no packets processed
         assert_eq!(
@@ -2873,7 +2857,7 @@ mod tests {
 
         // Verify pointers unchanged
         assert_eq!(
-            DEVICE_STATUS_BUFFER_READ_POINTER.get(),
+            crate::coex::TestRadioCoexistence::read_pointer(),
             5,
             "Read pointer should remain unchanged for empty queue"
         );

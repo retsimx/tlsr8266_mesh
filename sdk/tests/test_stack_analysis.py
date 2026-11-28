@@ -70,13 +70,14 @@ def _text(*blocks: str) -> str:
 # The linked image's crate prefixes, spelled the way `llvm-nm` prints them after
 # C-10 (#72).  The radio modules moved into `tlsr8266_radio`, and several paths
 # changed with them (`rf_drv.rs` -> `rf::drv_8266`, `light_ll::mesh_management`
-# -> `mesh_ll::node_status`, the OTA staging shims -> `ble::connection`), so the
+# -> `mesh_ll::node_status`, the OTA staging shims -> `tlsr8266_platform::window`), so the
 # fixture below uses the paths the linked image actually has.  The
 # `_RN...<hash>` prefix objdump prints is omitted on purpose: the crate
 # disambiguator changes on every rebuild, which is exactly why ``INDIRECT_EDGES``
 # matches substrings rather than whole names.
 RADIO = "tlsr8266_radio"
 RADIO_CALLBACKS = RADIO + "9callbacks"
+PLATFORM = "tlsr8266_platform"
 MESH = "tlsr8266_mesh"
 
 # A miniature version of the real call graph: a root reaches the light-data
@@ -163,15 +164,15 @@ FIRMWARE_SHAPED = _text(
     _fn(f"{MESH}3ota28ota_request_termination_impl", 8),
     _fn(f"{RADIO_CALLBACKS}17dispatch_ota_tick", 24, indirect=True),
     _fn(f"{MESH}3ota24ota_tick_timeout_1s_impl", 8),
-    # OtaRadioOps: the four providers in ota/mod.rs, into the radio crate.
+    # OtaRadioOps: the four ota/mod.rs providers, with staging into the platform window.
     _fn(f"{MESH}3ota15radio_stage_pkt", 8, indirect=True),
-    _fn(f"{RADIO}3ble10connection16stage_ota_packet", 16),
+    _fn(f"{PLATFORM}6window16stage_ota_packet", 16),
     _fn(f"{MESH}3ota14radio_read_pkt", 8, indirect=True),
-    _fn(f"{RADIO}3ble10connection22read_staged_ota_packet", 16),
+    _fn(f"{PLATFORM}6window22read_staged_ota_packet", 16),
     _fn(f"{MESH}3ota18radio_terminate_tx", 8, indirect=True),
     _fn(f"{MESH}3app23ota_send_terminate_hook", 16),
     _fn(f"{MESH}3ota20radio_begin_gatt_ota", 8, indirect=True),
-    _fn(f"{MESH}3app19ota_begin_gatt_hook", 16),
+    _fn("tlsr8266_ota_begin_gatt_hook", 16),
     # C-8: mesh's three MeshEventHooks dispatchers. The light-event slot reaches
     # the same app callback the radio crate's emit seam does.
     _fn(f"{MESH}4mesh25dispatch_mesh_light_event", 24, indirect=True),
@@ -354,11 +355,11 @@ class TestApplyIndirectEdges(unittest.TestCase):
                 # ...then the four OtaRadioOps providers.
                 (
                     f"{MESH}3ota15radio_stage_pkt",
-                    f"{RADIO}3ble10connection16stage_ota_packet",
+                    f"{PLATFORM}6window16stage_ota_packet",
                 ),
                 (
                     f"{MESH}3ota14radio_read_pkt",
-                    f"{RADIO}3ble10connection22read_staged_ota_packet",
+                    f"{PLATFORM}6window22read_staged_ota_packet",
                 ),
                 (
                     f"{MESH}3ota18radio_terminate_tx",
@@ -366,7 +367,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
                 ),
                 (
                     f"{MESH}3ota20radio_begin_gatt_ota",
-                    f"{MESH}3app19ota_begin_gatt_hook",
+                    "tlsr8266_ota_begin_gatt_hook",
                 ),
                 # ...then the C-8 subsystem seams.
                 (
@@ -1134,7 +1135,7 @@ class TestMain(unittest.TestCase):
         )
         self.assertIn(
             f"{MESH}3ota15radio_stage_pkt -> "
-            f"{RADIO}3ble10connection16stage_ota_packet",
+            f"{PLATFORM}6window16stage_ota_packet",
             out,
         )
         # So must every C-8 seam, including the renamed status dispatcher.

@@ -29,6 +29,7 @@ use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use heapless::Vec;
 
 use crate::config::{FLASH_ADR_PAIRING, VENDOR_ID};
+use crate::product::LightPlatformRadio;
 use crate::{uprintln, BIT};
 pub use fsm::{
     MeshPairAction, MeshPairFsm, MeshPairState, MESH_PAIR_CMD_INTERVAL, MESH_PAIR_TIMEOUT,
@@ -894,9 +895,9 @@ async fn mesh_packet_rcv_iteration() {
     let mut result = MESH_RX_CHANNEL.receive().await;
 
     if is_gatt_spp_rx_packet(&result) {
-        rf_link_slave_data_write_task(&mut result);
+        rf_link_slave_data_write_task::<LightPlatformRadio>(&mut result);
     } else {
-        rf_link_rc_data(&mut result);
+        rf_link_rc_data::<LightPlatformRadio>(&mut result);
     }
 }
 

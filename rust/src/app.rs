@@ -1,4 +1,5 @@
 #![coverage(off)]
+use core::mem::size_of;
 use core::ptr::addr_of;
 use core::sync::atomic::Ordering;
 
@@ -56,17 +57,19 @@ use tlsr8266_radio::mesh_ll::packet_processing::parse_ble_packet_op_params;
 use tlsr8266_radio::rf::drv_8266::{rf_drv_init, rf_link_slave_init, rf_set_power_level_index};
 use tlsr8266_radio::types::*;
 use tlsr8266_radio::{
-    check_auth_timeout, device_address, group_addresses, is_paired_login, mac_id, radio_config,
-    set_adv_private_data, stop_slave_read_status_if_busy, try_send_terminate_packet,
+    abort_slave_read_status_if_busy, check_auth_timeout, device_address, group_addresses,
+    is_paired_login, mac_id, radio_config, set_adv_private_data, try_send_terminate_packet,
     write_out_of_mesh_credentials,
 };
 
-// One number, two crates: `ota` owns the staging bound but may not name the
-// radio (the layering gate forbids it), so the equality with the buffer the
-// radio actually provides is checked here, at compile time, for free.
+// One shared packet window owns BLE status and OTA staging. Keep the OTA
+// adapter bound, the platform window depth, and the 48-byte Packet layout in
+// sync at compile time.
 mesh_protocol::const_assert!(
-    crate::ota::OTA_STAGING_SLOTS == tlsr8266_radio::types::BUFF_RESPONSE_PACKET_COUNT
+    crate::ota::OTA_STAGING_SLOTS == tlsr8266_platform::window::PACKET_WINDOW_SLOTS
 );
+mesh_protocol::const_assert!(tlsr8266_platform::window::PACKET_WINDOW_SLOTS == 16);
+mesh_protocol::const_assert!(size_of::<[Packet; 16]>() == 768);
 
 /// The board configuration the radio layer runs with.
 ///
@@ -144,8 +147,8 @@ pub async fn main_task(spawner: Spawner) {
     // path can run, so neither slot is ever observed empty.
     set_ota_radio_ops(OtaRadioOps {
         try_begin_gatt_ota: ota_begin_gatt_hook,
-        stage_packet: tlsr8266_radio::ble::connection::stage_ota_packet,
-        read_staged_packet: tlsr8266_radio::ble::connection::read_staged_ota_packet,
+        stage_packet: tlsr8266_platform::window::stage_ota_packet,
+        read_staged_packet: tlsr8266_platform::window::read_staged_ota_packet,
         try_send_terminate_packet: ota_send_terminate_hook,
     });
     set_ota_hooks(OtaHooks {
@@ -550,7 +553,10 @@ pub fn rf_link_response_callback(
             ppp.val[5] = (BUILD_VERSION >> 16) as u8;
             ppp.val[6] = (BUILD_VERSION >> 24) as u8;
 
-            crate::ota::start_mesh_ota();
+            let _ = crate::ota::try_start_mesh_ota(|| {
+                abort_slave_read_status_if_busy();
+                true
+            });
         }
         CMD_OTA_DATA => {
             ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
@@ -759,12 +765,17 @@ fn mesh_pair_proc_hook() {
 /// `pm::set_reboot_ota_active(true)` stay owned by `ota`, which is why there is
 /// no `start_gatt_ota` for this hook to call.
 #[inline(never)]
+#[export_name = "tlsr8266_ota_begin_gatt_hook"]
 fn ota_begin_gatt_hook() -> bool {
     if !is_paired_login() {
         return false;
     }
-    stop_slave_read_status_if_busy();
-    true
+
+    tlsr8266_platform::window::begin_ota(tlsr8266_platform::window::OtaClaimant::Gatt, || {
+        abort_slave_read_status_if_busy();
+        true
+    })
+    .is_ok()
 }
 
 /// `OtaRadioOps::try_send_terminate_packet`: `true` only when `PKT_TERMINATE`
@@ -787,17 +798,12 @@ mod tests {
     use futures::executor::block_on;
     use mesh_protocol::packet_types::PacketL2capHead;
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
-    use tlsr8266_hal::common::sync::SimplifyLS;
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::analog::fake_analog::FakeAnalog;
     use tlsr8266_hal::mcu::clock::fake_clock;
     use tlsr8266_hal::mcu::crypto::{encode_password, fake_crypto};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{FLD_IRQ, FLD_MASTER_SPI, FLD_TMR};
-    use tlsr8266_radio::ble::status::{
-        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-        DEVICE_STATUS_RECORD_INDEX,
-    };
     use tlsr8266_radio::mesh_ll::node_status::{
         MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
     };
@@ -805,12 +811,12 @@ mod tests {
     use tlsr8266_radio::rf::drv_8266::BLE_PERIPHERAL_ADVERTISING_ENABLED;
     use tlsr8266_radio::rf::drv_8266::{BLE_SCAN_RESPONSE_INTERVAL_US, PKT_ADV};
     use tlsr8266_radio::{
-        adv_private_data, buffered_response, dev_addr_validation_pending,
-        first_connection_timestamp, flash_config_index, is_mesh_pair_enabled, is_security_enabled,
-        reset_radio_state_for_test, set_dev_addr_validation_pending, set_device_address,
-        set_first_connection_timestamp, set_flash_config_index, set_group_addresses, set_mac_id,
-        set_mesh_pair_enabled, set_pair_config_mesh_credentials, set_paired_login,
-        set_security_enabled, set_slave_read_status_busy,
+        adv_private_data, dev_addr_validation_pending, first_connection_timestamp,
+        flash_config_index, is_mesh_pair_enabled, is_security_enabled, reset_radio_state_for_test,
+        set_dev_addr_validation_pending, set_device_address, set_first_connection_timestamp,
+        set_flash_config_index, set_group_addresses, set_mac_id, set_mesh_pair_enabled,
+        set_pair_config_mesh_credentials, set_paired_login, set_security_enabled,
+        set_slave_read_status_busy,
     };
 
     /// `reg_irq_en`: the global interrupt enable register.
@@ -1154,6 +1160,7 @@ mod tests {
     /// `ota_begin_gatt_hook` must refuse a GATT OTA until pairing succeeds.
     #[test]
     fn test_ota_begin_gatt_hook_requires_pairing() {
+        reset_ota();
         set_slave_read_status_busy(0);
         set_paired_login(false);
         assert!(
@@ -1168,6 +1175,8 @@ mod tests {
         );
 
         set_paired_login(false);
+        tlsr8266_platform::window::end_ota();
+        reset_ota();
     }
 
     // --- Tests for light_hw_timer_config ---
@@ -1518,7 +1527,10 @@ mod tests {
         reset_ota();
         FakeFlash::reset();
         set_device_address(0x5678);
-        crate::ota::start_mesh_ota();
+        assert!(crate::ota::try_start_mesh_ota(|| {
+            abort_slave_read_status_if_busy();
+            true
+        }));
 
         let mut request = create_test_packet_att_value();
         request.src = [0xAA, 0xBB];
@@ -1557,7 +1569,10 @@ mod tests {
         reset_ota();
         FakeFlash::reset();
         set_device_address(0x5678);
-        crate::ota::start_mesh_ota();
+        assert!(crate::ota::try_start_mesh_ota(|| {
+            abort_slave_read_status_if_busy();
+            true
+        }));
 
         let mut request = create_test_packet_att_value();
         request.src = [0xCC, 0xDD];
@@ -2522,9 +2537,11 @@ mod tests {
         // packets are built locally below.
         crate::light::reset_for_test();
         set_device_address(0x001F);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_RECORD_INDEX.set(0);
+        tlsr8266_platform::window::end_ota();
+        assert!(
+            <LightPlatformRadio as tlsr8266_radio::RadioCoexistence>::start_status_window(),
+            "status window must start for the layout probe"
+        );
         set_slave_read_status_busy(LGT_CMD_LIGHT_STATUS);
 
         reset_fakes();
@@ -2558,10 +2575,10 @@ mod tests {
 
         rf_link_response_callback(&mut pkt_light_status.att_cmd_mut().value, &req)
             .expect("GET_STATUS response callback should succeed");
-        rf_link_slave_add_status(&pkt_light_status);
+        rf_link_slave_add_status::<LightPlatformRadio>(&pkt_light_status);
 
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 1);
-        let response = buffered_response(0);
+        let response = tlsr8266_platform::window::peek_status_response()
+            .expect("the status packet must be present in the shared window");
         let dat = &response.att_data().dat;
 
         assert_eq!(&dat[0..3], &[0xA2, 0x5F, 0xE3], "sno mismatch");
@@ -2591,10 +2608,8 @@ mod tests {
         assert_eq!(&dat[16..18], &[0x00, 0x00], "trailing params zero");
 
         // This test runs (alphabetically) before the SDK suites, which assume an
-        // empty shared status buffer. Leave the pointers where they were.
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-        DEVICE_STATUS_RECORD_INDEX.set(0);
+        // empty shared status buffer. Leave the window stopped.
+        <LightPlatformRadio as tlsr8266_radio::RadioCoexistence>::stop_status_window();
     }
 
     // --- Boot report and panic-info delivery ---

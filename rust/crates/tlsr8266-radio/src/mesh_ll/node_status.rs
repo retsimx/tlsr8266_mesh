@@ -2807,7 +2807,7 @@ mod tests {
 
         // Process the packet through the real receive path: the parser feeds
         // the six decoded records straight into the node table.
-        rf_link_rc_data(&mut packet);
+        rf_link_rc_data::<crate::coex::TestRadioCoexistence>(&mut packet);
 
         // With MESH_NODE_ST_VAL_LEN = 4, each entry is [dev_adr, sn, par[0], par[1]]
         // and the records come from PacketAttValue bytes 0-23:

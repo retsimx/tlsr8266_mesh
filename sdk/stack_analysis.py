@@ -137,27 +137,6 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "dispatch_log_async": ("log_async_tx_hook",),
 }
 
-# Strict GATT model of the five real callback slots in the GATT attribute table.
-# This is deliberately separate from INDIRECT_EDGES: strict is the direct-CLI
-# and repository-gate default, while --legacy opts out to the compatibility
-# 21-edge graph.
-STRICT_GATT_EDGES: dict[str, tuple[str, ...]] = {
-    "l2cap_att_handler": (
-        "mesh_status_write",
-        "rf_link_slave_data_write",
-        "dispatch_ota_write",
-        "pair_write",
-        "pair_read",
-    ),
-}
-# The GATT table callback dispatches occur in these two narrow ATT helpers in
-# the current firmware.  They are known GATT dispatch roots, not project callback
-# targets; strict classification does not use them to hide arbitrary callbacks.
-STRICT_GATT_HELPER_PATTERNS: tuple[str, ...] = (
-    "handle_write_request_or_command",
-    "handle_read_request",
-)
-
 # Narrow runtime allowlist used only by strict indirect classification.
 # Treatment semantics:
 #   leaf       - the runtime branch/target is stack-transparent or has no project frame;
@@ -416,21 +395,17 @@ def apply_indirect_edges(
 def apply_strict_indirect_edges(
     funcs: dict[str, Func],
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolve and append legacy plus strict GATT edges in one transaction.
+    """Resolve and append the 21 stable legacy indirect mappings.
 
-    Strict mode keeps the 21 legacy mappings and then applies the separate GATT
-    table.  Resolution is completed for both tables before any graph mutation,
-    so stale or ambiguous GATT roots leave the graph untouched on failure.
+    Project GATT callbacks are intentionally absent: monomorphized ATT dispatch
+    must contain no GATT indirect branches, and strict classification fails
+    closed on any unknown project indirect branch.
     """
     legacy_resolved = _resolve_indirect_table(
         funcs, INDIRECT_EDGES, "INDIRECT_EDGES"
     )
-    gatt_resolved = _resolve_indirect_table(
-        funcs, STRICT_GATT_EDGES, "STRICT_GATT_EDGES"
-    )
-
-    _append_indirect_edges(funcs, legacy_resolved + gatt_resolved)
-    return legacy_resolved, gatt_resolved
+    _append_indirect_edges(funcs, legacy_resolved)
+    return legacy_resolved, []
 
 
 def runtime_allowlist_treatment(name: str) -> str | None:
@@ -469,9 +444,6 @@ def collect_strict_indirect_failures(
     classified.update(
         callee for _caller, callee in list(resolved_legacy) + list(resolved_gatt)
     )
-    for name in funcs:
-        if any(pattern in name for pattern in STRICT_GATT_HELPER_PATTERNS):
-            classified.add(name)
     failures: list[str] = []
     allowed: list[str] = []
 
@@ -494,8 +466,8 @@ def collect_strict_indirect_failures(
             failures.append(
                 f"strict unknown indirect project branch: full symbol {name!r}, "
                 f"instruction 0x{inst_addr:08x} ({mnemonic}{operand_text}); "
-                "it is neither a legacy/GATT modeled edge nor a narrow "
-                "core/Embassy runtime allowlist entry"
+                "it is neither a modeled legacy edge nor a narrow "
+                "core/Embassy/runtime allowlist entry"
             )
 
     return failures, allowed, sorted(classified)
@@ -1185,7 +1157,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--strict",
         dest="strict",
         action="store_true",
-        help="explicit strict GATT/project-indirect mode (the default)",
+        help="explicit strict project-indirect mode (the default)",
     )
     mode.add_argument(
         "--legacy",
@@ -1235,12 +1207,7 @@ def main(argv: list[str] | None = None) -> int:
     # Must precede every root/depth query: an unmapped dispatcher would score
     # its callback as 0 B and silently understate the margin.
     if args.strict:
-        print("strict GATT model targets (5):")
-        print("  mesh_status_write")
-        print("  rf_link_slave_data_write")
-        print("  dispatch_ota_write")
-        print("  pair_write")
-        print("  pair_read")
+        print("strict mode: no project GATT indirect-edge model; failing closed on unknown branches")
         try:
             legacy_edges, gatt_edges = apply_strict_indirect_edges(funcs)
         except IndirectEdgeError as exc:
@@ -1250,10 +1217,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"legacy indirect dispatch edges ({len(legacy_edges)}):")
         for caller, callee in legacy_edges:
             print(f"  {caller} -> {callee}")
-        print(f"strict GATT dispatch edges ({len(gatt_edges)}):")
-        for caller, callee in gatt_edges:
-            print(f"  {caller} -> {callee}")
-
         try:
             runtime_allowed = validate_strict_indirect_branches(
                 funcs, legacy_edges, gatt_edges

@@ -23,7 +23,7 @@ use crate::ble::connection::{
     SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
 };
 use crate::ble::flash_config::{dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address};
-use crate::ble::pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK};
+use crate::ble::pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK, SECURITY_ENABLE};
 use crate::ble::status::{
     rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
     DEVICE_STATUS_READ_BUSY_TIMESTAMP, DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX,
@@ -56,8 +56,8 @@ use mesh_protocol::mesh_types::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP,
 };
 use mesh_protocol::packet_types::{
-    AdvPrivate, AdvRspPrivate, Packet, PacketAttData, PacketAttErrRsp, PacketAttValue,
-    PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+    AdvPrivate, AdvRspPrivate, Packet, PacketAttData, PacketAttErrRsp, PacketAttRawValue,
+    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::drivers::flash::{flash_read_page, flash_write_page};
@@ -898,6 +898,29 @@ pub fn rf_link_slave_data_write(data: &Packet) {
     let _ = enqueue_mesh_rx(data);
 }
 
+/// Direct slice adapter for handle-21 GATT writes.
+pub fn rf_link_slave_data_write_payload(kind: u8, l2cap_len: u16, payload: &[u8]) {
+    let mut value = [0u8; 30];
+    let copy_len = payload.len().min(value.len());
+    value[..copy_len].copy_from_slice(&payload[..copy_len]);
+    let packet = Packet {
+        att_val: PacketAttRawValue {
+            head: PacketL2capHead {
+                dma_len: (l2cap_len as u32).saturating_add(6),
+                _type: 0,
+                rf_len: (l2cap_len as u8).saturating_add(4),
+                l2cap_len,
+                chan_id: 4,
+            },
+            opcode: kind,
+            handle: 21,
+            handle1: 0,
+            value,
+        },
+    };
+    rf_link_slave_data_write(&packet);
+}
+
 /// Task-context SPP seam.
 ///
 /// Receives a copied handle-21 packet from `MESH_RX_CHANNEL`, reuses the
@@ -909,7 +932,12 @@ pub fn rf_link_slave_data_write_task(data: &mut Packet) {
         return;
     }
 
-    if pair_dec_packet(data).is_ok() {
+    let decrypted = if SECURITY_ENABLE.get() {
+        pair_dec_packet(data).is_ok()
+    } else {
+        true
+    };
+    if decrypted {
         rf_link_slave_data_write_no_dec(data);
     }
 }
@@ -1402,6 +1430,8 @@ mod tests {
 
     /// Count of `on_light_data` dispatches recorded by the installed hook.
     static RECORDED_LIGHT_DATA: AtomicUsize = AtomicUsize::new(0);
+    /// Device address applied by the provisioning-side test hook.
+    static RECORDED_DEVICE_ADDRESS: AtomicUsize = AtomicUsize::new(0);
     /// Count of `on_light_response` dispatches recorded by the installed hook.
     static RECORDED_LIGHT_RESPONSE: AtomicUsize = AtomicUsize::new(0);
 
@@ -1414,8 +1444,18 @@ mod tests {
 
     /// Records a `on_light_data` dispatch so a test can prove the SDK reached
     /// the application seam.
-    fn record_light_data(_pkt: &Packet) {
+    fn record_light_data(pkt: &Packet) {
         RECORDED_LIGHT_DATA.fetch_add(1, Ordering::Relaxed);
+        let val0 = pkt.att_write().value.val[0];
+        let val3 = pkt.att_write().value.val[3];
+        let val4 = pkt.att_write().value.val[4];
+        let op = val0 & 0x3f;
+        if op == LGT_CMD_CONFIG_DEV_ADDR {
+            let address = u16::from_le_bytes([val3, val4]);
+            RECORDED_DEVICE_ADDRESS.store(address as usize, Ordering::Relaxed);
+            crate::facade::set_device_address(address);
+            crate::facade::set_dev_addr_validation_pending(false);
+        }
     }
 
     /// Records a `on_light_response` dispatch and answers `Ok(())`, which is the
@@ -1429,6 +1469,7 @@ mod tests {
     fn install_recording_hooks() {
         RECORDED_LIGHT_DATA.store(0, Ordering::Relaxed);
         RECORDED_LIGHT_RESPONSE.store(0, Ordering::Relaxed);
+        RECORDED_DEVICE_ADDRESS.store(0, Ordering::Relaxed);
         set_ble_app_hooks(BleAppHooks {
             on_mesh_pair_proc: noop_mesh_pair_proc,
             on_light_data: record_light_data,
@@ -3217,6 +3258,27 @@ mod tests {
         assert_eq!(RECORDED_LIGHT_RESPONSE.get(), 0);
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
         assert_eq!(BLE_PERIPHERAL_LINK_COMMAND.get(), 0xff);
+    }
+
+    #[test]
+    fn test_typed_provisioning_address_reaches_device_in_simple_mode() {
+        let _hooks = reset_packet_state();
+        PAIR_LOGIN_OK.set(true);
+        crate::facade::set_security_enabled(false);
+        crate::facade::set_dev_addr_validation_pending(true);
+
+        let packet = decoded_packet(LGT_CMD_CONFIG_DEV_ADDR, &[31, 0]);
+        rf_link_slave_data_write(&packet);
+
+        let mut queued = crate::queues::MESH_RX_CHANNEL
+            .try_receive()
+            .expect("paired provisioning write must be queued");
+        rf_link_slave_data_write_task(&mut queued);
+
+        assert_eq!(RECORDED_LIGHT_DATA.get(), 1);
+        assert_eq!(RECORDED_DEVICE_ADDRESS.load(Ordering::Relaxed), 31);
+        assert_eq!(crate::facade::device_address(), 31);
+        assert!(!crate::facade::dev_addr_validation_pending());
     }
 
     #[test]

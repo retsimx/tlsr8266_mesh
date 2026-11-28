@@ -16,8 +16,8 @@ use mesh_protocol::mesh_types::{
     PAIR_OP_VERIFY_CREDENTIALS,
 };
 use mesh_protocol::packet_types::{
-    AppCmdValue, Packet, PacketAttReadRsp, PacketAttValue, PacketAttWrite, PacketL2capHead,
-    PacketLlApp,
+    AppCmdValue, Packet, PacketAttRawValue, PacketAttReadRsp, PacketAttValue, PacketAttWrite,
+    PacketL2capHead, PacketLlApp,
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::mcu::crypto::{
@@ -1001,6 +1001,39 @@ pub fn pair_set_key(key: &[u8]) {
     pair_update_key();
 }
 
+/// Arms the existing pairing deferred-read state without constructing a Packet.
+pub fn pair_read_arm() {
+    PAIR_READ_PENDING.set(true);
+}
+
+/// Processes a pairing write directly from the ATT payload slice.
+pub fn pair_write_payload(payload: &[u8]) {
+    if payload.is_empty() {
+        return;
+    }
+
+    let mut value = [0u8; 30];
+    let copy_len = payload.len().min(value.len());
+    value[..copy_len].copy_from_slice(&payload[..copy_len]);
+    let l2cap_len = (payload.len().min(30).saturating_add(3)) as u16;
+    let packet = Packet {
+        att_val: PacketAttRawValue {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len,
+                chan_id: 4,
+            },
+            opcode: 0x12,
+            handle: 27,
+            handle1: 0,
+            value,
+        },
+    };
+    pair_write(&packet);
+}
+
 /// Mark a pairing read request as pending
 ///
 /// This simple function sets a flag indicating that a pairing read request
@@ -1009,7 +1042,7 @@ pub fn pair_set_key(key: &[u8]) {
 /// @param _ Unused packet parameter
 #[export_name = "tlsr8266_pair_read"]
 pub fn pair_read(_: &Packet) {
-    PAIR_READ_PENDING.set(true);
+    pair_read_arm();
 }
 
 /// Process pairing commands from a connected BLE device

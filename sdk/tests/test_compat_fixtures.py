@@ -75,7 +75,7 @@ class BaselineFixtureTests(unittest.TestCase):
                 self.assertLessEqual(baseline["irq_max"], 1392)
                 self.assertGreaterEqual(baseline["main_margin"], 400)
                 self.assertGreaterEqual(baseline["irq_margin"], 400)
-                self.assertEqual(baseline["gatt_edges_resolved"], 5)
+                self.assertEqual(baseline["gatt_edges_resolved"], 0)
                 sections = baseline["sections"]
                 self.assertTrue(required_sections.issubset(sections))
                 for section in required_sections:

@@ -96,11 +96,9 @@ PRESERVE_ROOTS_LITERAL = (
     "memset",
     "memcmp",
     "tlsr8266_l2cap_att_handler",
-    "tlsr8266_mesh_status_write",
     "tlsr8266_rf_link_slave_data_write",
     "tlsr8266_dispatch_ota_write",
     "tlsr8266_pair_write",
-    "tlsr8266_pair_read",
     "tlsr8266_enqueue_mesh_rx",
     "tlsr8266_enqueue_mesh_tx",
     "tlsr8266_handle_system_interrupts",
@@ -782,7 +780,6 @@ class TestManifestAndCache(_RepoCase):
                     "declare void @_Unwind_Resume()",
                     "declare i32 @memcmp(ptr, ptr, i32)",
                     "declare void @tlsr8266_l2cap_att_handler()",
-                    "declare void @tlsr8266_mesh_status_write()",
                     "declare void @tlsr8266_pair_write()",
                     "declare void @_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg()",
                     "declare void @_RNvNtNtCsgudHjhsztDx_4core9panicking11panic_const23panic_const_rem_by_zero()",
@@ -802,7 +799,6 @@ class TestManifestAndCache(_RepoCase):
         self.assertIn("_Unwind_Resume", resolved)
         self.assertIn("memcmp", resolved)
         self.assertIn("tlsr8266_l2cap_att_handler", resolved)
-        self.assertIn("tlsr8266_mesh_status_write", resolved)
         self.assertIn("tlsr8266_pair_write", resolved)
         self.assertNotIn("_RNvNtNtCs7TpBKVb4AXc_14tlsr8266_radio4gatt9attribute17l2cap_att_handler", resolved)
         self.assertNotIn("_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg", resolved)

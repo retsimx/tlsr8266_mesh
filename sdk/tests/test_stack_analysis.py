@@ -200,50 +200,6 @@ FIRMWARE_SHAPED = _text(
 )
 
 
-# Strict GATT fixture.  The ATT handler is the only GATT root and it fans out
-# exclusively to the five real callback symbols below.  The deepest main chain is
-# 16 + 24 + 1644 = 1684 B, deliberately below the fixture's 2083 B free main
-# SRAM budget so it fails the 400 B margin policy.
-STRICT_GATT_FIXTURE = FIRMWARE_SHAPED.replace(
-    _fn(
-        "main_entrypoint",
-        40,
-        ((f"{RADIO}2rf8drv_826624rf_link_slave_data_write", False),),
-    ) + "\n",
-    _fn("main_entrypoint", 16, (("l2cap_att_handler", False),)) + "\n",
-).replace(
-    _fn(
-        "irq_handler",
-        24,
-        ((f"{MESH}3irq24handle_system_interrupts", False),),
-    ) + "\n",
-    _fn("irq_handler", 24, (("l2cap_att_handler", False),)) + "\n",
-).replace(
-    _fn(
-        f"{RADIO}2rf8drv_826624rf_link_slave_data_write",
-        184,
-        (
-            (f"{RADIO_CALLBACKS}13on_light_data", False),
-            (f"{RADIO_CALLBACKS}18dispatch_ota_write", False),
-        ),
-    ) + "\n",
-    "",
-) + _text(
-    _fn("l2cap_att_handler", 24, indirect=True),
-    _fn("mesh_status_write", 1644),
-    _fn("rf_link_slave_data_write", 184),
-    _fn("pair_write", 96),
-    _fn("pair_read", 64),
-)
-
-GATT_SYMS = {
-    "__RAM_START_ADDR": 0x808000,
-    "__RAM_SIZE_MAX": 16384,
-    "_end_bss_": 0x808000 + 16384 - 2083,
-    "IRQ_STK_SIZE": 1792,
-}
-
-
 def _parse(text: str = FIRMWARE_SHAPED) -> dict[str, stack_analysis.Func]:
     funcs = stack_analysis.parse_functions(text)
     assert funcs, "synthetic disassembly parsed to nothing"
@@ -622,19 +578,9 @@ class TestApplyIndirectEdges(unittest.TestCase):
 
 
 class TestStrictIndirectContract(unittest.TestCase):
-    def test_strict_gatt_table_is_exactly_the_five_real_callbacks(self) -> None:
-        self.assertEqual(
-            stack_analysis.STRICT_GATT_EDGES,
-            {
-                "l2cap_att_handler": (
-                    "mesh_status_write",
-                    "rf_link_slave_data_write",
-                    "dispatch_ota_write",
-                    "pair_write",
-                    "pair_read",
-                ),
-            },
-        )
+    def test_obsolete_strict_gatt_contract_is_absent(self) -> None:
+        self.assertFalse(hasattr(stack_analysis, "STRICT_GATT_EDGES"))
+        self.assertFalse(hasattr(stack_analysis, "STRICT_GATT_HELPER_PATTERNS"))
 
     def test_runtime_allowlist_models_narrow_stack_treatment(self) -> None:
         self.assertEqual(stack_analysis.runtime_allowlist_treatment("__pender"), "leaf")
@@ -734,55 +680,32 @@ class TestStrictIndirectContract(unittest.TestCase):
         self.assertIn("rf_link_data_callback", classified)
 
     def test_unknown_indirect_project_branch_fails_with_symbol_and_address(self) -> None:
-        text = STRICT_GATT_FIXTURE + "\n" + _fn(
+        text = FIRMWARE_SHAPED + "\n" + _fn(
             "project_unknown_dispatcher", 32, indirect=True
         )
         code, out = _run_main(
             text,
             ["--elf", "synthetic.elf", "--top", "3"],
-            GATT_SYMS,
         )
         self.assertEqual(code, 1, out)
         self.assertIn("project_unknown_dispatcher", out)
         self.assertIn("instruction 0x00000008", out)
         self.assertIn("strict unknown indirect project branch", out)
 
-    def test_ambiguous_gatt_root_is_rejected_before_mutation(self) -> None:
-        funcs = _parse(STRICT_GATT_FIXTURE)
-        funcs.update(
-            stack_analysis.parse_functions(
-                _text(_fn("l2cap_att_handler_other", 24, indirect=True))
-            )
-        )
-        before = {name: list(func.calls) for name, func in funcs.items()}
-        with self.assertRaises(stack_analysis.IndirectEdgeError) as ctx:
-            stack_analysis.apply_strict_indirect_edges(funcs)
-        message = str(ctx.exception)
-        self.assertIn("STRICT_GATT_EDGES", message)
-        self.assertIn("l2cap_att_handler", message)
-        self.assertIn("ambiguous", message)
-        self.assertEqual({name: func.calls for name, func in funcs.items()}, before)
-
-    def test_direct_default_strict_gatt_reports_five_targets_and_margin_failure(self) -> None:
+    def test_direct_default_strict_mode_has_zero_gatt_edge_model(self) -> None:
         code, out = _run_main(
-            STRICT_GATT_FIXTURE,
+            FIRMWARE_SHAPED,
             ["--elf", "synthetic.elf", "--top", "3",
              "--min-margin", "400"],
-            GATT_SYMS,
         )
-        self.assertEqual(code, 1, out)
-        self.assertIn("strict GATT dispatch edges (5):", out)
-        self.assertIn("l2cap_att_handler -> mesh_status_write", out)
-        self.assertIn("l2cap_att_handler -> rf_link_slave_data_write", out)
-        self.assertIn("dispatch_ota_write", out)
-        self.assertIn("l2cap_att_handler -> pair_write", out)
-        self.assertIn("l2cap_att_handler -> pair_read", out)
-        self.assertIn("FAIL: main stack margin below minimum", out)
-        self.assertNotIn("strict GATT-inclusive path violates", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("strict mode: no project GATT indirect-edge model", out)
+        self.assertIn("legacy indirect dispatch edges (21):", out)
+        self.assertNotIn("strict GATT dispatch edges", out)
 
     def test_legacy_mode_does_not_add_gatt_edges(self) -> None:
         code, out = _run_main(
-            STRICT_GATT_FIXTURE,
+            FIRMWARE_SHAPED,
             ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
         )
         self.assertEqual(code, 0, out)
@@ -986,13 +909,9 @@ class TestBaselineJson(unittest.TestCase):
                 ".rodata": (0x1000, 0x400),
                 ".ram_code": (0x1400, 0x400),
             }
-            strict_pass_fixture = STRICT_GATT_FIXTURE.replace(
-                _fn("mesh_status_write", 1644),
-                _fn("mesh_status_write", 64),
-            )
             buf = io.StringIO()
             with (
-                mock.patch.object(stack_analysis, "objdump", return_value=strict_pass_fixture),
+                mock.patch.object(stack_analysis, "objdump", return_value=FIRMWARE_SHAPED),
                 mock.patch.object(stack_analysis, "read_symbols", return_value=SYMS),
                 mock.patch.object(stack_analysis, "read_elf_sections", return_value=sections),
                 contextlib.redirect_stdout(buf),
@@ -1009,7 +928,7 @@ class TestBaselineJson(unittest.TestCase):
             self.assertEqual(baseline["mode"], "strict")
             self.assertTrue(baseline["strict"])
             self.assertEqual(baseline["legacy_edges_resolved"], 21)
-            self.assertEqual(baseline["gatt_edges_resolved"], 5)
+            self.assertEqual(baseline["gatt_edges_resolved"], 0)
 
     def test_compare_baseline_prints_structured_delta_without_failing(self) -> None:
         current = {

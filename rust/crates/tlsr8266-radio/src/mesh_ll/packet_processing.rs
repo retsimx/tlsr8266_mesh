@@ -79,9 +79,11 @@ use bytemuck;
 use crate::ble::channel_selection::SLAVE_CHN_MAP;
 use crate::ble::connection::{
     BLE_CONN_INTERVAL, BLE_CONN_OFFSET, BLE_CONN_TIMEOUT, BLE_PERIPHERAL_CONNECTION_ACTIVE,
-    BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_NEXT_UPDATE_INSTANT,
-    BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL, BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP,
-    BUFF_RESPONSE, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL, SLAVE_WINDOW_SIZE_UPDATE,
+    BLE_PERIPHERAL_CONNECTION_TIMEOUT_US, BLE_PERIPHERAL_LINK_COMMAND,
+    BLE_PERIPHERAL_NEXT_UPDATE_INSTANT, BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL,
+    BLE_PERIPHERAL_TIMING_UPDATE_TIMESTAMP, BUFF_RESPONSE,
+    GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP, SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
+    SLAVE_WINDOW_SIZE_UPDATE,
 };
 use crate::ble::flash_config::rf_update_conn_para;
 use crate::ble::pair::pair_enc_packet;
@@ -1111,6 +1113,65 @@ pub fn rf_link_rc_data(packet: &mut Packet) {
 /// * May queue response packets for transmission
 /// * Triggers timing adjustment algorithms
 /// * May change connection interval and timeout values
+#[inline(never)]
+pub fn is_ll_control_pdu(packet: &Packet) -> bool {
+    packet.head()._type & 3 == 3
+}
+
+#[inline(never)]
+fn handle_ll_control_pdu(packet: &Packet) -> Option<Packet> {
+    let typed_handle = packet.att_val().handle1 as u16;
+    let legacy_handle = packet.l2cap_data().handle1 as u16;
+    let handle = if typed_handle != 0 {
+        typed_handle
+    } else {
+        legacy_handle
+    };
+
+    if handle == 0x0c {
+        GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
+        return Some(Packet {
+            version_ind: PacketVersionInd {
+                dma_len: 8,
+                _type: 3,
+                rf_len: 6,
+                opcode: 0x0c,
+                main_ver: 0x08,
+                vendor: radio_config().vendor_id,
+                sub_ver: 0x08,
+            },
+        });
+    }
+
+    if handle == 2 {
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000000);
+        return None;
+    }
+
+    if handle == 8 {
+        GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP.set(read_reg_system_tick() | 1);
+        return Some(Packet {
+            feature_rsp: PacketFeatureRsp {
+                dma_len: 0x0b,
+                _type: 3,
+                rf_len: 0x09,
+                opcode: 0x09,
+                data: [1, 0, 0, 0, 0, 0, 0, 0],
+            },
+        });
+    }
+
+    Some(Packet {
+        ctrl_unknown: PacketCtrlUnknown {
+            dma_len: 0x04,
+            _type: 3,
+            rf_len: 0x02,
+            opcode: 0x07,
+            data: [handle as u8],
+        },
+    })
+}
+
 pub fn rf_link_slave_data(packet: &Packet, time: u32) {
     // Extract key packet header fields for processing decisions
     let header = packet.head();
@@ -1186,6 +1247,17 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) {
 
             return; // Connection parameter update processed (no further handling)
         }
+    }
+
+    // LL CONTROL PDUs are link-layer control frames, never ATT packets. Handle
+    // them before the ATT channel gate and before l2cap_att_handler.
+    if is_ll_control_pdu(packet) {
+        if let Some(res_pkt) = handle_ll_control_pdu(packet) {
+            if let Err(()) = rf_link_add_tx_packet(&res_pkt) {
+                // Best-effort: the peer retries the request.
+            }
+        }
+        return;
     }
 
     // L2CAP/ATT PROTOCOL PROCESSING: Route packet through protocol stack

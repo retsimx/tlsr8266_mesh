@@ -671,6 +671,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tlsr8266-platform"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-executor",
+ "embassy-sync",
+ "embassy-time",
+ "heapless",
+ "mesh-protocol",
+ "tlsr8266-hal",
+ "tlsr8266-radio",
+]
+
+[[package]]
 name = "tlsr8266-radio"
 version = "0.1.0"
 dependencies = [
@@ -701,6 +715,7 @@ dependencies = [
  "static_cell",
  "tlsr8266-hal",
  "tlsr8266-pac",
+ "tlsr8266-platform",
  "tlsr8266-radio",
 ]
 

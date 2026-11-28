@@ -1,0 +1,17 @@
+[package]
+name = "tlsr8266-platform"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tlsr8266-radio = { path = "../tlsr8266-radio" }
+tlsr8266-hal = { path = "../tlsr8266-hal" }
+mesh-protocol = { path = "../mesh-protocol" }
+embassy-executor = "0.10"
+embassy-sync = "0.8"
+embassy-time = "0.5"
+critical-section = { version = "1.2", features = ["restore-state-u8"] }
+heapless = "0.9"
+
+[features]
+rtt = ["tlsr8266-hal/rtt"]

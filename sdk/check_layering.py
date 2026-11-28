@@ -180,6 +180,7 @@ DEFAULT_CRATE_ROOTS = (
     # C-10 (#72): the radio layer, extracted from the `rust/src/sdk/` tree that
     # C-10 then deleted.
     os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-radio", "src"),
+    os.path.join(REPO_ROOT, "rust", "crates", "tlsr8266-platform", "src"),
 )
 
 # The firmware Cargo package.  Its source root is `rust/src`, so the package
@@ -217,8 +218,19 @@ CARGO_DAG = {
         None,
         None,
     ),
+    "tlsr8266-platform": (
+        frozenset({"tlsr8266-hal", "tlsr8266-radio", "mesh-protocol"}),
+        None,
+        None,
+    ),
     "tlsr8266_mesh": (
-        frozenset({"tlsr8266-pac", "tlsr8266-hal", "tlsr8266-radio", "mesh-protocol"}),
+        frozenset({
+            "tlsr8266-pac",
+            "tlsr8266-hal",
+            "tlsr8266-radio",
+            "tlsr8266-platform",
+            "mesh-protocol",
+        }),
         None,
         None,
     ),
@@ -363,8 +375,25 @@ MAX_PRODUCTION_UNSAFE_BY_CRATE = {
     "tlsr8266-pac": 6,
     "tlsr8266-hal": 16,
     "tlsr8266-radio": 22,
+    "tlsr8266-platform": 0,
     "mesh-protocol": 45,
 }
+
+# `tlsr8266-platform` is product-neutral.  Its production code may implement
+# the platform contracts, but may not reach back into the PAC or firmware
+# package or name concrete light/opcode/product implementations.
+_PLATFORM_PURITY_TERMS = (
+    re.compile(r"\btlsr8266_pac\b"),
+    re.compile(r"\btlsr8266_mesh\b"),
+    re.compile(r"\blight[a-z0-9_]*\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:lgt_[a-z0-9_]+|pmw_[a-z0-9_]+|pwm_[a-z0-9_]+)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:LightProduct|LightPlatform(?:Gatt|Radio)?)\b"),
+    re.compile(r"(?:crate|tlsr8266_mesh)\s*::\s*product\b"),
+)
+
 
 # Root-module file names: the only files for which "directly under the root"
 # means "the audited root's own module".
@@ -1528,6 +1557,10 @@ def audit_universal(
             composition_root=_is_composition_root(path, root),
         )
         violations.extend(found)
+        if name == "tlsr8266-platform":
+            violations.extend(
+                audit_platform_purity_source(text, _display_path(path))
+            )
         unsafe_total += count
 
     if enforce_budget and ceiling is not None and unsafe_total > ceiling:
@@ -1552,6 +1585,30 @@ def _display_path(path: str) -> str:
     except ValueError:  # different drive on Windows
         return path
     return path if relative.startswith(os.pardir) else relative
+
+
+def audit_platform_purity_source(text: str, path: str) -> list[Violation]:
+    """Reject concrete product/light implementation terms from the platform crate."""
+    code = production_code(text)
+    found: list[Violation] = []
+    reported: set[tuple[int, str]] = set()
+    for pattern in _PLATFORM_PURITY_TERMS:
+        for match in pattern.finditer(code):
+            line = code.count("\n", 0, match.start()) + 1
+            term = match.group(0)
+            key = (line, term)
+            if key in reported:
+                continue
+            reported.add(key)
+            found.append(
+                Violation(
+                    path,
+                    line,
+                    "platform-purity",
+                    f"forbidden platform source term `{term}`",
+                )
+            )
+    return found
 
 
 def rust_files(root: str) -> list[str]:

@@ -1140,6 +1140,15 @@ def compare_baseline(current: dict, baseline_path: str) -> bool:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--elf", default="_build/lightblemesh")
+    ap.add_argument(
+        "--profile",
+        default=None,
+        metavar="PROFILE",
+        help=(
+            "feature profile the ELF must be (default, rtt, or a feature slug); "
+            "guards against measuring a different selection's image"
+        ),
+    )
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument(
         "--min-margin",
@@ -1187,6 +1196,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.legacy:
         args.strict = False
     return args
+
+
+# The RTT feature is the only build variant that carries the log ring, so its
+# presence is a reliable fingerprint of which image a gate is looking at. A
+# feature build refreshes the shared `_build/lightblemesh` copy, so without this
+# check a gate could measure whichever selection was built last and still pass.
+RTT_MARKER = "_TLSR_RTT"
+
+
+def profile_mismatch(symbols: dict[str, int], profile: str) -> str | None:
+    """Return a diagnostic when ``symbols`` is not the requested feature profile.
+
+    ``profile`` is the Makefile's ``FEATURE_PROFILE`` (``default``, ``rtt`` or a
+    slug such as ``rtt-foo``). ``None`` disables the check.
+    """
+    if not profile:
+        return None
+    expects_rtt = "rtt" in profile.split("-")
+    has_rtt = any(RTT_MARKER in name for name in symbols)
+    if expects_rtt and not has_rtt:
+        return (
+            f"profile '{profile}' expects a build with {RTT_MARKER}, but the "
+            "analysed image has none (is this the default image?)"
+        )
+    if not expects_rtt and has_rtt:
+        return (
+            f"profile '{profile}' expects a build without {RTT_MARKER}, but the "
+            "analysed image carries it (build the requested profile first)"
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1247,6 +1286,10 @@ def main(argv: list[str] | None = None) -> int:
     # cannot be checked against missing linker state or silently score a flash
     # target as a normal caller.
     syms = read_symbols(args.elf)
+    mismatch = profile_mismatch(syms, args.profile or "")
+    if mismatch is not None:
+        print(f"\nGATE ERROR: {mismatch}")
+        return 2
     needed = ["__RAM_START_ADDR", "__RAM_SIZE_MAX", "_end_bss_", "IRQ_STK_SIZE"]
     missing = [n for n in needed if n not in syms]
     if missing:
@@ -1289,27 +1332,34 @@ def main(argv: list[str] | None = None) -> int:
             funcs,
         )
 
-    irq_max = 0
-    if "irq_handler" in funcs:
-        irq_bytes, irq_chain, irq_cycles = longest_path(funcs, "irq_handler")
-        irq_max = irq_bytes + IRQ_PREAMBLE_BYTES
+    # The IRQ stack is the number that matters most on this part: a missing
+    # `irq_handler` used to leave `irq_max` at 0 and report a full-budget
+    # margin, i.e. a gate satisfied by not measuring. A gate that cannot find
+    # its root has to fail, not pass.
+    if "irq_handler" not in funcs:
+        print(
+            "\nGATE ERROR: IRQ root 'irq_handler' is missing from the analysed "
+            "image, so the IRQ stack depth cannot be measured"
+        )
+        return 2
+
+    irq_bytes, irq_chain, irq_cycles = longest_path(funcs, "irq_handler")
+    irq_max = irq_bytes + IRQ_PREAMBLE_BYTES
+    report(
+        f"IRQ STACK (root irq_handler, +{IRQ_PREAMBLE_BYTES} B __irq preamble)",
+        irq_max,
+        irq_chain,
+        funcs,
+    )
+    cycles += irq_cycles
+    if args.exclude_panic:
+        calm, calm_chain, _ = longest_path(funcs, "irq_handler", ("panic", "unwind"))
         report(
-            f"IRQ STACK (root irq_handler, +{IRQ_PREAMBLE_BYTES} B __irq preamble)",
-            irq_max,
-            irq_chain,
+            "IRQ STACK excluding panic/unwind",
+            calm + IRQ_PREAMBLE_BYTES,
+            calm_chain,
             funcs,
         )
-        cycles += irq_cycles
-        if args.exclude_panic:
-            calm, calm_chain, _ = longest_path(
-                funcs, "irq_handler", ("panic", "unwind")
-            )
-            report(
-                "IRQ STACK excluding panic/unwind",
-                calm + IRQ_PREAMBLE_BYTES,
-                calm_chain,
-                funcs,
-            )
 
     print(f"\ntop {args.top} functions by frame size:")
     for f in sorted(funcs.values(), key=lambda x: x.frame, reverse=True)[: args.top]:

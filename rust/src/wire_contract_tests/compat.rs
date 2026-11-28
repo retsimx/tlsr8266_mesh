@@ -11,6 +11,61 @@ use crate::light::effects::{adv_private_to_bytes, build_vendor_adv_data};
 use compat_fixture::Parser;
 use mesh_protocol::crc::crc16;
 use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+use tlsr8266_radio::{AttrRole, AttrUuid, LEGACY_PROFILE};
+
+#[test]
+fn gatt_fixture_rows_match_the_compiled_profile() {
+    // The fixture is the *declared* wire contract for the 28 deployed handles,
+    // yet nothing compared it to `LEGACY_PROFILE`: editing a production UUID,
+    // length or value, or editing a fixture row, left every suite green
+    // (epic #111 audit, F-3 / #114). This pins the fields that have one
+    // unambiguous meaning per row.
+    let source = include_str!("../../../tests/fixtures/gatt_compat.txt");
+    let mut p = Parser::parse(source).unwrap();
+
+    for handle in 1..=28u8 {
+        let prefix = format!("gatt.row.{handle:02}");
+        let uuid = p.bytes(&format!("{prefix}.uuid")).unwrap();
+        let default_len = p.u8(&format!("{prefix}.default_len")).unwrap();
+        let max_len = p.u8(&format!("{prefix}.max_len")).unwrap();
+        let span = p.u8(&format!("{prefix}.span")).unwrap();
+
+        let attr = LEGACY_PROFILE
+            .get(handle as u16)
+            .unwrap_or_else(|| panic!("handle {handle} is missing from the compiled profile"));
+
+        let expected_uuid = match attr.uuid {
+            AttrUuid::Uuid16(value) => value.to_le_bytes().to_vec(),
+            AttrUuid::Uuid128(bytes) => bytes.to_vec(),
+        };
+        assert_eq!(
+            uuid, expected_uuid,
+            "handle {handle}: fixture uuid drifted from the compiled profile"
+        );
+        assert_eq!(
+            default_len, attr.len,
+            "handle {handle}: fixture default_len drifted from the compiled profile"
+        );
+        assert_eq!(
+            max_len, attr.max_len,
+            "handle {handle}: fixture max_len drifted from the compiled profile"
+        );
+
+        // `span` has no single meaning in this fixture (rows 01/07 hold the
+        // service end handle, row 16 holds the handle count), so only its
+        // presence is asserted here. F-9 / #120 re-composes the profile and owns
+        // making that field unambiguous.
+        let is_service = matches!(attr.role, AttrRole::PrimaryService { .. });
+        assert_eq!(
+            span != 0,
+            is_service,
+            "handle {handle}: a service declaration and only a service declaration takes a span"
+        );
+    }
+
+    // Foreign-characteristic check for a supplied part of the contract.
+    assert_eq!(p.u8("gatt.att.mtu").unwrap(), 23);
+}
 
 #[test]
 fn gatt_table_metadata_and_rows_match_fixture() {
@@ -195,10 +250,14 @@ fn domain_fixtures_have_closed_world_key_counts_and_no_implementation_symbols() 
     const COUNTS: [usize; 3] = [269, 105, 161];
 
     for (source, expected_count) in FILES.iter().zip(COUNTS.iter()) {
-        let mut p = Parser::parse(source).unwrap();
+        let p = Parser::parse(source).unwrap();
+        // The pinned key count *is* the closed-world guard: adding or removing a
+        // fixture key changes it and fails here, forcing whoever did it to look.
+        // An earlier revision also called `p.consume_all()` and asserted
+        // `p.unconsumed_keys().is_empty()`, which could never fail — it marked
+        // every key consumed first, and it parsed its own fresh `Parser` so it
+        // had no relationship to what the real tests read.
         assert_eq!(p.key_count(), *expected_count);
-        p.consume_all();
-        assert!(p.unconsumed_keys().is_empty());
 
         for forbidden in [
             "rf_link_",

@@ -714,6 +714,43 @@ class TestStrictIndirectContract(unittest.TestCase):
         self.assertNotIn("strict GATT dispatch edges", out)
 
 
+class TestProfileMarker(unittest.TestCase):
+    """A gate must not measure another feature selection's image.
+
+    Feature builds refresh the shared ``_build/lightblemesh`` copy, so without a
+    fingerprint check ``make stack-check`` after ``make FEATURES=rtt`` measured
+    the RTT image while labelling it ``default`` -- and passed.
+    """
+
+    def test_matching_profiles_are_accepted(self) -> None:
+        self.assertIsNone(
+            stack_analysis.profile_mismatch({"main_entrypoint": 0}, "default")
+        )
+        self.assertIsNone(
+            stack_analysis.profile_mismatch(
+                {"main_entrypoint": 0, "_TLSR_RTT": 0x100}, "rtt"
+            )
+        )
+        # A slug containing the feature is still an RTT build.
+        self.assertIsNone(
+            stack_analysis.profile_mismatch({"_TLSR_RTT": 0x100}, "rtt-extra")
+        )
+        # An empty profile disables the check.
+        self.assertIsNone(
+            stack_analysis.profile_mismatch({"_TLSR_RTT": 0x100}, "")
+        )
+
+    def test_wrong_image_is_rejected(self) -> None:
+        self.assertIn(
+            "_TLSR_RTT",
+            stack_analysis.profile_mismatch({"_TLSR_RTT": 0x100}, "default") or "",
+        )
+        self.assertIn(
+            "has none",
+            stack_analysis.profile_mismatch({"main_entrypoint": 0}, "rtt") or "",
+        )
+
+
 class TestRamReachability(unittest.TestCase):
     def test_elf_section_parser_classifies_ram_text_and_rodata_ranges(self) -> None:
         sections = stack_analysis.parse_elf_sections(

@@ -685,6 +685,8 @@ class TestManifestAndCache(_RepoCase):
                 "resolved_preserve_roots": resolved_literal,
                 "resolved_preserve_roots_sha256": hashlib.sha256(api_literal.encode()).hexdigest(),
                 "llc_flags": build_firmware.LLC_FLAGS,
+                "llc_extra_flags": build_firmware.LLC_EXTRA_FLAGS,
+                "objcopy_flags": build_firmware.OBJCOPY_FLAGS,
                 "ldflags": build_firmware.LLD_FLAGS,
             },
         )

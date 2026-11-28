@@ -116,9 +116,20 @@ OPT_PRESERVE_ROOTS = (
     "memcmp",
     # Stable namespaced ABI/runtime anchors. These replace Rust-v0 mangled-name
     # fragments and are exported by the firmware source with #[export_name = ...].
-    "tlsr8266_l2cap_att_handler",
+    #
+    # `tlsr8266_dispatch_ota_write` and `tlsr8266_l2cap_att_handler` are retired:
+    # F-7 (#118) replaced the OTA hook seam with static monomorphisation and the
+    # ATT entry point with `l2cap_att_handler_with::<C>` (a generic
+    # monomorphisation reached directly, so it needs no root).
+    #
+    # `tlsr8266_ota_boot_copy` is preserved so the `.ram_code` boot copier keeps a
+    # stable external name for the ELF gates. It stays safe only because the
+    # copier takes six scalars, not the `OtaBootConfig` aggregate: the aggregate
+    # would be passed by pointer and `opt` would then materialise it in `.rodata`,
+    # which the copy loop erases. `stack_analysis.check_ram_reachability` fails
+    # closed if that ever regresses.
     "tlsr8266_rf_link_slave_data_write",
-    "tlsr8266_dispatch_ota_write",
+    "tlsr8266_ota_boot_copy",
     "tlsr8266_pair_write",
     "tlsr8266_enqueue_mesh_rx",
     "tlsr8266_enqueue_mesh_tx",

@@ -26,14 +26,12 @@ use crate::mesh::{
     mesh_device_address_validation_completed, mesh_pair_cb, mesh_pair_init, mesh_pair_proc_effect,
     mesh_security_enable, set_mesh_event_hooks, MeshEventHooks,
 };
-use crate::ota::{check_ota_area_startup, rf_mesh_data_ota, set_ota_radio_ops, OtaRadioOps};
-use crate::product::{LightPlatform, LightPlatformGatt, LightPlatformRadio};
+use crate::product::{LightPlatform, LightPlatformGatt, LightPlatformRadio, LightProduct};
 use crate::uart::{self, uart_receiver, uart_sender, UartCommand, UartTxOps};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
 use heapless::Vec;
 use mesh_protocol::mesh_types::*;
-use mesh_protocol::mesh_types::{LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP};
 use mesh_protocol::packet_types::{Packet, PacketAttValue};
 use mesh_protocol::uart::UartData;
 use tlsr8266_hal::drivers::flash::{flash_erase_sector, flash_write_page};
@@ -50,24 +48,19 @@ use tlsr8266_radio::ble::connection::{
     light_check_tick_per_us, rf_link_slave_pairing_enable, rf_link_slave_proc,
 };
 use tlsr8266_radio::ble::flash_config::{dev_addr_with_mac_flag, dev_addr_with_mac_match};
-use tlsr8266_radio::callbacks::{set_ble_app_hooks, set_ota_hooks, BleAppHooks, OtaHooks};
+use tlsr8266_radio::callbacks::{set_ble_app_hooks, BleAppHooks};
 use tlsr8266_radio::mesh_ll::adv::*;
 use tlsr8266_radio::mesh_ll::node_status::mesh_node_table_init;
 use tlsr8266_radio::mesh_ll::packet_processing::parse_ble_packet_op_params;
 use tlsr8266_radio::rf::drv_8266::{rf_drv_init, rf_link_slave_init, rf_set_power_level_index};
 use tlsr8266_radio::types::*;
 use tlsr8266_radio::{
-    abort_slave_read_status_if_busy, check_auth_timeout, device_address, group_addresses,
-    is_paired_login, mac_id, radio_config, set_adv_private_data, try_send_terminate_packet,
-    write_out_of_mesh_credentials,
+    abort_slave_read_status_if_busy, check_auth_timeout, device_address, group_addresses, mac_id,
+    radio_config, set_adv_private_data, write_out_of_mesh_credentials,
 };
 
-// One shared packet window owns BLE status and OTA staging. Keep the OTA
-// adapter bound, the platform window depth, and the 48-byte Packet layout in
-// sync at compile time.
-mesh_protocol::const_assert!(
-    crate::ota::OTA_STAGING_SLOTS == tlsr8266_platform::window::PACKET_WINDOW_SLOTS
-);
+// One shared packet window owns BLE status and OTA staging. Keep the platform
+// window depth and the 48-byte Packet layout in sync at compile time.
 mesh_protocol::const_assert!(tlsr8266_platform::window::PACKET_WINDOW_SLOTS == 16);
 mesh_protocol::const_assert!(size_of::<[Packet; 16]>() == 768);
 
@@ -144,19 +137,9 @@ pub async fn main_task(spawner: Spawner) {
     );
 
     // Wire the SDK's callback seams to the application before any RF or pairing
-    // path can run, so neither slot is ever observed empty.
-    set_ota_radio_ops(OtaRadioOps {
-        try_begin_gatt_ota: ota_begin_gatt_hook,
-        stage_packet: tlsr8266_platform::window::stage_ota_packet,
-        read_staged_packet: tlsr8266_platform::window::read_staged_ota_packet,
-        try_send_terminate_packet: ota_send_terminate_hook,
-    });
-    set_ota_hooks(OtaHooks {
-        on_gatt_ota_write: crate::ota::on_gatt_ota_packet,
-        status_snapshot: crate::ota::ota_status_snapshot_impl,
-        request_termination: crate::ota::ota_request_termination_impl,
-        tick_timeout_1s: crate::ota::ota_tick_timeout_1s_impl,
-    });
+    // path can run, so the slot is never observed empty. OTA needs no seam here:
+    // the platform OTA engine owns every piece of OTA state, and the radio asks
+    // it through the static `RadioCoexistence` implementation.
     tlsr8266_radio::mesh_ll::adv::set_light_event_handler(rf_link_light_event_callback);
     set_ble_app_hooks(BleAppHooks {
         on_mesh_pair_proc: mesh_pair_proc_hook,
@@ -423,8 +406,9 @@ fn light_init_default() {
 /// Initialise the lamp and hand the caller the persisted-brightness store that
 /// the main loop owns from here on.
 pub fn user_init() -> LightFlashStore {
-    // for app ota
-    check_ota_area_startup();
+    // Recover a staging area left dirty by a reset mid-transfer, before any
+    // OTA machinery can run.
+    tlsr8266_platform::ota::check_ota_area_startup();
 
     light_init_default();
 
@@ -544,32 +528,32 @@ pub fn rf_link_response_callback(
     ppp.val[1] = (VENDOR_ID & 0xFF) as u8;
     ppp.val[2] = ((VENDOR_ID >> 8) & 0xff) as u8;
 
+    let identity = tlsr8266_platform::config::FirmwareIdentity::new(VENDOR_ID, 0, BUILD_VERSION);
+
     match ppp.val[15] {
         CMD_START_OTA => {
-            ppp.val[0] = LGT_CMD_START_OTA_RSP | 0xc0;
+            ppp.val[0] = OTA_CMD_START_RSP | 0xc0;
 
-            ppp.val[3] = BUILD_VERSION as u8;
-            ppp.val[4] = (BUILD_VERSION >> 8) as u8;
-            ppp.val[5] = (BUILD_VERSION >> 16) as u8;
-            ppp.val[6] = (BUILD_VERSION >> 24) as u8;
+            let (version, _started) =
+                tlsr8266_platform::ota::mesh_start_ota::<LightProduct>(identity, || {
+                    abort_slave_read_status_if_busy();
+                    true
+                });
 
-            let _ = crate::ota::try_start_mesh_ota(|| {
-                abort_slave_read_status_if_busy();
-                true
-            });
+            ppp.val[3..7].copy_from_slice(&version);
         }
         CMD_OTA_DATA => {
-            ppp.val[0] = LGT_CMD_OTA_DATA_RSP | 0xc0;
+            ppp.val[0] = OTA_CMD_DATA_RSP | 0xc0;
 
-            let idx = rf_mesh_data_ota(params, false);
+            let idx = tlsr8266_platform::ota::mesh_ota_data::<LightProduct>(params, false);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
         }
         CMD_END_OTA => {
-            ppp.val[0] = LGT_CMD_END_OTA_RSP | 0xc0;
+            ppp.val[0] = OTA_CMD_END_RSP | 0xc0;
 
-            let idx = rf_mesh_data_ota(params, true);
+            let idx = tlsr8266_platform::ota::mesh_ota_data::<LightProduct>(params, true);
 
             ppp.val[1] = idx as u8;
             ppp.val[2] = (idx >> 8) as u8;
@@ -758,33 +742,6 @@ fn mesh_pair_proc_hook() {
     crate::mesh::mesh_pair_proc();
 }
 
-/// `OtaRadioOps::try_begin_gatt_ota`: the pairing gate plus "stop a busy status
-/// read" from the old GATT OTA write prologue.
-///
-/// This only *reports* whether the GATT OTA may start. The in-progress flag and
-/// `pm::set_reboot_ota_active(true)` stay owned by `ota`, which is why there is
-/// no `start_gatt_ota` for this hook to call.
-#[inline(never)]
-#[export_name = "tlsr8266_ota_begin_gatt_hook"]
-fn ota_begin_gatt_hook() -> bool {
-    if !is_paired_login() {
-        return false;
-    }
-
-    tlsr8266_platform::window::begin_ota(tlsr8266_platform::window::OtaClaimant::Gatt, || {
-        abort_slave_read_status_if_busy();
-        true
-    })
-    .is_ok()
-}
-
-/// `OtaRadioOps::try_send_terminate_packet`: `true` only when `PKT_TERMINATE`
-/// was actually queued, so a full buffer neither arms the countdown nor reboots.
-#[inline(never)]
-fn ota_send_terminate_hook() -> bool {
-    try_send_terminate_packet()
-}
-
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
@@ -793,9 +750,11 @@ mod tests {
     use crate::light::effects::{pending_event, reset_for_test as reset_led_controller};
     use crate::light::status_probe;
     use crate::light::transitions::{begin_transition, LIGHT_CMD_CHANNEL};
-    use crate::ota::reset_for_test as reset_ota;
     use crate::uart::reset_for_test;
     use futures::executor::block_on;
+    use mesh_protocol::mesh_types::{
+        LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_RSP, LGT_CMD_START_OTA_RSP,
+    };
     use mesh_protocol::packet_types::PacketL2capHead;
     use mesh_protocol::uart::{UartData, UartMsg, UART_DATA_LEN};
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
@@ -804,6 +763,7 @@ mod tests {
     use tlsr8266_hal::mcu::crypto::{encode_password, fake_crypto};
     use tlsr8266_pac::fake_mmio::FakeMmio;
     use tlsr8266_pac::{FLD_IRQ, FLD_MASTER_SPI, FLD_TMR};
+    use tlsr8266_platform::ota::engine::reset_for_test as reset_ota;
     use tlsr8266_radio::mesh_ll::node_status::{
         MESH_NODE_MAX, MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
     };
@@ -841,6 +801,18 @@ mod tests {
         let mut got = [0u8; 1];
         FakeFlash::read_slice(addr, &mut got);
         got[0]
+    }
+
+    /// Start a mesh OTA session exactly the way `rf_link_response_callback`
+    /// does: with the build identity and the abort-status closure.
+    fn start_mesh_ota_for_test() -> bool {
+        let identity =
+            tlsr8266_platform::config::FirmwareIdentity::new(VENDOR_ID, 0, BUILD_VERSION);
+        let (_, started) = tlsr8266_platform::ota::mesh_start_ota::<LightProduct>(identity, || {
+            abort_slave_read_status_if_busy();
+            true
+        });
+        started
     }
 
     /// Build the packet a data callback receives: the 3-byte opcode at
@@ -958,12 +930,6 @@ mod tests {
             .find("\n}\n")
             .expect("main_task must be a well-formed task body")];
 
-        let ota_ops = task_body
-            .find("set_ota_radio_ops(OtaRadioOps {")
-            .expect("main_task must register the OTA radio ops");
-        let ota_hooks = task_body
-            .find("set_ota_hooks(OtaHooks {")
-            .expect("main_task must register the OTA hooks");
         let light = task_body
             .find("set_light_event_handler(")
             .expect("main_task must register the light event handler");
@@ -1012,18 +978,24 @@ mod tests {
              boot banner is dropped"
         );
         assert!(
-            ota_ops < rf_drv
-                && ota_hooks < rf_drv
-                && light < rf_drv
-                && hooks < rf_drv
-                && status_hook < rf_drv
-                && mesh_hooks < rf_drv,
+            light < rf_drv && hooks < rf_drv && status_hook < rf_drv && mesh_hooks < rf_drv,
             "every handler registration must precede rf_drv_init(true)"
         );
         assert!(
             radio_config < gatt_profile && gatt_profile < rf_drv,
             "the radio configuration must be installed and the config-driven GATT \
              values written before rf_drv_init(true)"
+        );
+
+        // The OTA seams are gone: the platform engine owns OTA, and the radio
+        // reaches it through the static `RadioCoexistence` implementation, so
+        // there is nothing left to register here.
+        assert!(
+            !task_body.contains("set_ota_radio_ops")
+                && !task_body.contains("set_ota_hooks")
+                && !task_body.contains("OtaRadioOps")
+                && !task_body.contains("OtaHooks"),
+            "main_task must not register an OTA seam any more"
         );
 
         // `RADIO_CONFIG` is defined above `main_task`, so search only the head of
@@ -1129,10 +1101,15 @@ mod tests {
         );
     }
 
-    /// `ota_send_terminate_hook` must report `false` without a free packet slot
+    /// `try_send_terminate_packet` must report `false` without a free packet slot
     /// and `true` once `PKT_TERMINATE` is queued.
+    ///
+    /// The radio facade still owns this queueing primitive; the platform's
+    /// completion handshake (`tlsr8266_platform::ota::engine::tests::
+    /// terminate_countdown_arms_at_six_and_reboots`) is its only production
+    /// caller, and it arms its countdown from this return value.
     #[test]
-    fn test_ota_send_terminate_hook_reports_whether_the_packet_was_queued() {
+    fn test_try_send_terminate_packet_reports_whether_the_packet_was_queued() {
         // Datasheet offsets of the DMA TX queue registers.
         const REG_DMA_TX_RPTR: u32 = 0x52a;
         const REG_DMA_TX_WPTR: u32 = 0x52b;
@@ -1143,7 +1120,7 @@ mod tests {
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 5);
         FakeMmio::set_reg8(REG_DMA_TX_RPTR, 2);
         assert!(
-            !ota_send_terminate_hook(),
+            !tlsr8266_radio::try_send_terminate_packet(),
             "a full packet buffer must not report a queued terminate packet"
         );
 
@@ -1152,31 +1129,9 @@ mod tests {
         FakeMmio::set_reg8(REG_DMA_TX_WPTR, 2);
         FakeMmio::set_reg8(REG_DMA_TX_RPTR, 0);
         assert!(
-            ota_send_terminate_hook(),
+            tlsr8266_radio::try_send_terminate_packet(),
             "a free packet buffer must report the queued terminate packet"
         );
-    }
-
-    /// `ota_begin_gatt_hook` must refuse a GATT OTA until pairing succeeds.
-    #[test]
-    fn test_ota_begin_gatt_hook_requires_pairing() {
-        reset_ota();
-        set_slave_read_status_busy(0);
-        set_paired_login(false);
-        assert!(
-            !ota_begin_gatt_hook(),
-            "an unpaired link must not begin a GATT OTA"
-        );
-
-        set_paired_login(true);
-        assert!(
-            ota_begin_gatt_hook(),
-            "a paired link with an idle status read may begin a GATT OTA"
-        );
-
-        set_paired_login(false);
-        tlsr8266_platform::window::end_ota();
-        reset_ota();
     }
 
     // --- Tests for light_hw_timer_config ---
@@ -1491,7 +1446,8 @@ mod tests {
 
         // Setup
         set_device_address(0x1234);
-        crate::ota::reset_for_test();
+        reset_ota();
+        FakeFlash::reset();
 
         let mut request = create_test_packet_att_value();
         request.src = [0x56, 0x78];
@@ -1513,8 +1469,8 @@ mod tests {
         assert_eq!(response.val[5], ((BUILD_VERSION >> 16) & 0xFF) as u8);
         assert_eq!(response.val[6], ((BUILD_VERSION >> 24) & 0xFF) as u8);
         assert!(
-            crate::ota::is_mesh_ota_blocked(),
-            "OTA operations should be blocked"
+            tlsr8266_platform::ota::is_mesh_ota_blocked(),
+            "the platform must claim the mesh OTA session"
         );
     }
 
@@ -1527,14 +1483,11 @@ mod tests {
         reset_ota();
         FakeFlash::reset();
         set_device_address(0x5678);
-        assert!(crate::ota::try_start_mesh_ota(|| {
-            abort_slave_read_status_if_busy();
-            true
-        }));
+        assert!(start_mesh_ota_for_test());
 
         let mut request = create_test_packet_att_value();
         request.src = [0xAA, 0xBB];
-        // `rf_mesh_data_ota` reads the packet index from the first two params.
+        // The mesh adapter reads the packet index from the first two params.
         request.val[3] = 0x34;
         request.val[4] = 0x12;
         request.val[5] = 0xA5; // first payload byte
@@ -1555,10 +1508,10 @@ mod tests {
         assert_eq!(response.val[1], 0x34); // idx low byte
         assert_eq!(response.val[2], 0x12); // idx high byte
         assert!(
-            crate::ota::is_mesh_ota_blocked(),
+            tlsr8266_platform::ota::is_mesh_ota_blocked(),
             "the mesh OTA stays open while data arrives"
         );
-        assert!(!crate::ota::is_timeout_expired());
+        assert!(!tlsr8266_platform::ota::is_timeout_expired());
     }
 
     /// The end-of-transfer path runs for real: the response carries the index
@@ -1569,10 +1522,7 @@ mod tests {
         reset_ota();
         FakeFlash::reset();
         set_device_address(0x5678);
-        assert!(crate::ota::try_start_mesh_ota(|| {
-            abort_slave_read_status_if_busy();
-            true
-        }));
+        assert!(start_mesh_ota_for_test());
 
         let mut request = create_test_packet_att_value();
         request.src = [0xCC, 0xDD];

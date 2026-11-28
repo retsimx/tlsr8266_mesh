@@ -222,7 +222,7 @@ pub fn rf_link_slave_read_status_stop<C: RadioCoexistence>() {
 /// * Updates command timing fields
 /// * Queues messages in mesh transmission system
 /// * Decrements pending command counters
-pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
+pub fn app_bridge_cmd_handle<C: RadioCoexistence>(bridge_cmd_time: u32) {
     let mut pkt_light_data = PKT_LIGHT_DATA.lock();
 
     // Check if valid command data is pending transmission
@@ -239,7 +239,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
             pkt_light_data.head_mut()._type |= tlsr8266_pac::BIT!(7);
 
             // Apply adaptive timing for notify request commands
-            if rf_link_is_notify_req(pkt_light_data.att_cmd().value.val[0] & 0x3f) {
+            if rf_link_is_notify_req::<C>(pkt_light_data.att_cmd().value.val[0] & 0x3f) {
                 // Calculate relay timing based on processing delay
                 // Formula: (elapsed_time_us + 500) / 1024, clamped to 255
                 let relay_time = min(
@@ -314,7 +314,7 @@ pub fn app_bridge_cmd_handle(bridge_cmd_time: u32) {
 /// * May trigger status broadcast transmission
 /// * Processes pending bridge commands
 /// * Updates transmission timing tracking
-pub fn tx_packet_bridge() {
+pub fn tx_packet_bridge<C: RadioCoexistence>() {
     // Static variable to track last bridge report transmission time
     static TICK_BRIDGE_REPORT: AtomicU32 = AtomicU32::new(0);
 
@@ -341,7 +341,7 @@ pub fn tx_packet_bridge() {
     }
 
     // Process any pending bridge commands with stored command timestamp
-    app_bridge_cmd_handle(BRIDGE_COMMAND_TIMESTAMP.get());
+    app_bridge_cmd_handle::<C>(BRIDGE_COMMAND_TIMESTAMP.get());
 }
 
 #[cfg(test)]
@@ -512,7 +512,7 @@ mod tests {
         SLAVE_DATA_VALID.set(0); // No valid data
 
         // Function should return early without doing anything
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Nothing may be transmitted for a zero countdown.
         assert_eq!(crate::queues::MESH_TX_QUEUE.lock().len(), 0);
@@ -524,7 +524,7 @@ mod tests {
         SLAVE_DATA_VALID.set(3); // Set countdown value
 
         // Execute function
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify countdown decremented
         assert_eq!(SLAVE_DATA_VALID.get(), 2);
@@ -543,7 +543,7 @@ mod tests {
         SLAVE_DATA_VALID.set(1); // Will become 0 after decrement
 
         // Execute function - immediate transmission case
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify countdown reached zero
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -567,7 +567,7 @@ mod tests {
         write_reg_system_tick(1000 + 16768); // 16768 ticks elapsed since bridge_cmd_time=1000
 
         // Execute function
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify packet was modified for mesh transmission
         let packet_data = PKT_LIGHT_DATA.lock();
@@ -593,7 +593,7 @@ mod tests {
         write_reg_system_tick(1000 + 16768);
 
         // Execute function
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify packet mesh flag was set but no timing applied
         let packet_data = PKT_LIGHT_DATA.lock();
@@ -614,7 +614,7 @@ mod tests {
         SLAVE_READ_STATUS_BUSY.set(1); // Busy state
 
         // Execute function
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify countdown decremented but no processing occurred
         assert_eq!(SLAVE_DATA_VALID.get(), 1);
@@ -633,7 +633,7 @@ mod tests {
         SLAVE_DATA_VALID.set(0); // No valid data, should exit early
 
         // Execute function
-        app_bridge_cmd_handle(1000);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(1000);
 
         // Verify value unchanged since function exits early for zero
         assert_eq!(SLAVE_DATA_VALID.get(), 0);
@@ -656,7 +656,7 @@ mod tests {
         queue_one_bridge_command(LGT_CMD_SET_LIGHT);
 
         // Execute function
-        tx_packet_bridge();
+        tx_packet_bridge::<crate::coex::TestRadioCoexistence>();
 
         // Verify the real RF setup sequence through the fake register bank.
         assert_rf_setup_writes(PAIR_AC.get());
@@ -687,7 +687,7 @@ mod tests {
         queue_one_bridge_command(LGT_CMD_SET_LIGHT);
 
         // Execute function
-        tx_packet_bridge();
+        tx_packet_bridge::<crate::coex::TestRadioCoexistence>();
 
         // Status should be sent because timing interval is met; the bridge
         // command follows it in the same queue.
@@ -724,7 +724,7 @@ mod tests {
         queue_one_bridge_command(LGT_CMD_SET_LIGHT);
 
         // Execute function
-        tx_packet_bridge();
+        tx_packet_bridge::<crate::coex::TestRadioCoexistence>();
 
         // Only the bridge command is queued; no status advertisement was built.
         let queue = crate::queues::MESH_TX_QUEUE.lock();
@@ -751,7 +751,7 @@ mod tests {
         queue_one_bridge_command(LGT_CMD_LIGHT_READ_STATUS);
 
         // Execute function
-        tx_packet_bridge();
+        tx_packet_bridge::<crate::coex::TestRadioCoexistence>();
 
         // Every RF setup step ran for real...
         assert_rf_setup_writes(PAIR_AC.get());
@@ -788,7 +788,7 @@ mod tests {
 
         write_reg_system_tick(large_tick);
 
-        app_bridge_cmd_handle(bridge_cmd_time);
+        app_bridge_cmd_handle::<crate::coex::TestRadioCoexistence>(bridge_cmd_time);
 
         // Verify timing was clamped to maximum (255)
         let packet_data = PKT_LIGHT_DATA.lock();

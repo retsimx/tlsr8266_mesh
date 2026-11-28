@@ -91,10 +91,22 @@ impl Product for DummySwitch {
             }
             _ => {}
         }
+        match event {
+            PlatformEvent::OtaStarted => {
+                SWITCH_OTA_STARTED.fetch_add(1, Ordering::Relaxed);
+            }
+            PlatformEvent::OtaCompleted => {
+                SWITCH_OTA_COMPLETED.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 
-    fn on_pre_reboot(_indication: RebootIndication) {
+    fn on_pre_reboot(indication: RebootIndication) {
         SWITCH_REBOOT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if indication == RebootIndication::OtaSuccess {
+            SWITCH_PRE_REBOOT_SUCCESS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -195,10 +207,22 @@ impl Product for DummySensor {
             }
             _ => {}
         }
+        match event {
+            PlatformEvent::OtaStarted => {
+                SENSOR_OTA_STARTED.fetch_add(1, Ordering::Relaxed);
+            }
+            PlatformEvent::OtaFailed => {
+                SENSOR_OTA_FAILED.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 
-    fn on_pre_reboot(_indication: RebootIndication) {
+    fn on_pre_reboot(indication: RebootIndication) {
         SENSOR_REBOOT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if indication == RebootIndication::OtaFailure {
+            SENSOR_PRE_REBOOT_FAILURE.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -406,4 +430,162 @@ fn task_macro_expands_concrete_wrappers_for_both_products() {
 
     let _ = core::any::type_name_of_val(&tasks::platform_mesh_rx_loop::<DummySwitch>);
     let _ = core::any::type_name_of_val(&tasks::platform_heartbeat_loop::<DummySensor>);
+}
+
+// --- non-light OTA lifecycle -------------------------------------------------------
+
+use std::sync::Mutex;
+
+use mesh_protocol::crc::crc16;
+use mesh_protocol::mesh_types::START_UP_FLAG;
+use tlsr8266_hal::drivers::flash::fake_flash::FakeFlash;
+use tlsr8266_hal::mcu::clock::fake_clock;
+use tlsr8266_platform::ota;
+
+/// One GATT OTA frame: index, 16 payload bytes and the trailing CRC-16.
+const GATT_FRAME_LEN: usize = 20;
+/// L2CAP length the radio reports for a 20-byte ATT write.
+const GATT_L2CAP_LEN: u16 = 23;
+const STAGING: u32 = 0x40000;
+const READY_FLAG_ADDR: u32 = 0x3f000;
+const READY_FLAG: u8 = 0xa5;
+
+static SWITCH_OTA_STARTED: AtomicU32 = AtomicU32::new(0);
+static SWITCH_OTA_COMPLETED: AtomicU32 = AtomicU32::new(0);
+static SWITCH_PRE_REBOOT_SUCCESS: AtomicU32 = AtomicU32::new(0);
+static SENSOR_OTA_STARTED: AtomicU32 = AtomicU32::new(0);
+static SENSOR_OTA_FAILED: AtomicU32 = AtomicU32::new(0);
+static SENSOR_PRE_REBOOT_FAILURE: AtomicU32 = AtomicU32::new(0);
+
+/// The OTA globals are process-wide, so the lifecycle tests must not interleave.
+static OTA_SERIAL: Mutex<()> = Mutex::new(());
+
+fn ota_reset() {
+    FakeFlash::reset();
+    fake_clock::reset();
+    ota::engine::reset_for_test();
+    tlsr8266_radio::set_paired_login(true);
+    SWITCH_OTA_STARTED.store(0, Ordering::Relaxed);
+    SWITCH_OTA_COMPLETED.store(0, Ordering::Relaxed);
+    SWITCH_PRE_REBOOT_SUCCESS.store(0, Ordering::Relaxed);
+    SENSOR_OTA_STARTED.store(0, Ordering::Relaxed);
+    SENSOR_OTA_FAILED.store(0, Ordering::Relaxed);
+    SENSOR_PRE_REBOOT_FAILURE.store(0, Ordering::Relaxed);
+}
+
+fn gatt_frame(index: u16, payload: &[u8; 16]) -> [u8; GATT_FRAME_LEN] {
+    let mut frame = [0u8; GATT_FRAME_LEN];
+    frame[0..2].copy_from_slice(&index.to_le_bytes());
+    frame[2..18].copy_from_slice(payload);
+    let crc = crc16(&frame[0..18]).to_le_bytes();
+    frame[18..20].copy_from_slice(&crc);
+    frame
+}
+
+fn final_frame(index: u16) -> [u8; 4] {
+    let mut frame = [0u8; 4];
+    frame[0..2].copy_from_slice(&index.to_le_bytes());
+    let crc = crc16(&frame[0..2]).to_le_bytes();
+    frame[2..4].copy_from_slice(&crc);
+    frame
+}
+
+fn ready_flag() -> u8 {
+    let mut value = [0u8; 1];
+    FakeFlash::read_slice(READY_FLAG_ADDR, &mut value);
+    value[0]
+}
+
+/// Drive the connection slot until the terminate countdown reboots.
+fn poll_until_disconnect<P: Product>() {
+    for slot in 0..6 {
+        let plan = ota::poll_connection_slot::<P>(0);
+        let disconnected = matches!(plan, tlsr8266_radio::ConnectionPlan::Disconnect);
+        assert_eq!(
+            disconnected,
+            slot == 5,
+            "the countdown reboots on the sixth slot"
+        );
+    }
+}
+
+/// A successful GATT transfer reaches the product as `OtaStarted`,
+/// `OtaCompleted` and `OtaSuccess`, and arms the boot-time sentinel.
+#[test]
+fn gatt_ota_success_lifecycle_reaches_the_product() {
+    let _serial = OTA_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    ota_reset();
+
+    // Three 16-byte chunks carrying a real header: the boot-flag word sits at
+    // header offset 8 (chunk 0's payload) and the image-size word at offset 0x18
+    // (chunk 1's payload), advertising exactly 48 bytes.
+    for index in 0..3u16 {
+        let mut payload = [0x40 + index as u8; 16];
+        if index == 0 {
+            payload[8..12].copy_from_slice(&START_UP_FLAG.to_le_bytes());
+        }
+        if index == 1 {
+            payload[8..12].copy_from_slice(&48u32.to_le_bytes());
+        }
+        ota::gatt::on_write::<DummySwitch>(GATT_L2CAP_LEN, &gatt_frame(index, &payload));
+    }
+    ota::gatt::on_write::<DummySwitch>(7, &final_frame(3));
+
+    assert!(matches!(
+        ota::poll_connection_slot::<DummySwitch>(0),
+        tlsr8266_radio::ConnectionPlan::SkipToNextEvent
+    ));
+    assert_eq!(
+        SWITCH_OTA_STARTED.load(Ordering::Relaxed),
+        1,
+        "the session start reaches the product exactly once"
+    );
+
+    // The initiator reads the result, then the terminate handshake runs.
+    ota::gatt::on_read();
+    poll_until_disconnect::<DummySwitch>();
+
+    assert_eq!(SWITCH_OTA_COMPLETED.load(Ordering::Relaxed), 1);
+    assert_eq!(SWITCH_PRE_REBOOT_SUCCESS.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        ready_flag(),
+        READY_FLAG,
+        "the Ok finish arms the boot-time sentinel"
+    );
+
+    ota_reset();
+    tlsr8266_radio::set_paired_login(false);
+}
+
+/// A corrupt GATT frame reaches the product as `OtaStarted`, `OtaFailed` and
+/// `OtaFailure`, and discards the staged image.
+#[test]
+fn gatt_ota_failure_lifecycle_reaches_the_product() {
+    let _serial = OTA_SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    ota_reset();
+
+    let mut frame = gatt_frame(0, &[0x5a; 16]);
+    frame[18] ^= 0xff;
+    ota::gatt::on_write::<DummySensor>(GATT_L2CAP_LEN, &frame);
+
+    assert!(matches!(
+        ota::poll_connection_slot::<DummySensor>(0),
+        tlsr8266_radio::ConnectionPlan::SkipToNextEvent
+    ));
+    assert_eq!(SENSOR_OTA_STARTED.load(Ordering::Relaxed), 1);
+
+    ota::gatt::on_read();
+    poll_until_disconnect::<DummySensor>();
+
+    assert_eq!(SENSOR_OTA_FAILED.load(Ordering::Relaxed), 1);
+    assert_eq!(SENSOR_PRE_REBOOT_FAILURE.load(Ordering::Relaxed), 1);
+    let mut staged = [0u8; 4];
+    FakeFlash::read_slice(STAGING, &mut staged);
+    assert_eq!(
+        staged, [0xff; 4],
+        "a failed transfer discards the staged image"
+    );
+
+    ota_reset();
+    tlsr8266_radio::set_paired_login(false);
 }

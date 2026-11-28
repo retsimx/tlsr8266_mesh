@@ -63,7 +63,7 @@ pub use coex::{
     RadioCoexistence, RadioFrame, RxContext, StatusEnqueueOutcome,
 };
 
-pub use gatt::attribute::{l2cap_att_handler, AttRequest, AttResponse, GattOp, GattServer};
+pub use gatt::attribute::{l2cap_att_handler_with, AttRequest, AttResponse, GattOp, GattServer};
 pub use gatt::service_table::{
     AttError, AttrPermissions, AttrRole, AttrUuid, CompiledAttr, GattBackend, GattReadKind,
     GattReadOutcome, GattReadRequest, GattWriteKind, GattWriteOutcome, GattWriteRequest,

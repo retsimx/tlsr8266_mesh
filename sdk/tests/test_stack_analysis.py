@@ -42,13 +42,18 @@ def _fn(
     calls: tuple[tuple[str, bool], ...] = (),
     *,
     indirect: bool = False,
+    addr: int = 0,
+    words: tuple[int, ...] = (),
 ) -> str:
     """Render one synthetic disassembly block with an exact ``frame``-byte frame.
 
     A dispatcher is written as an indirect branch with *no* ``bl`` edge to its
-    real callee, which is what the linked firmware looks like.
+    real callee, which is what the linked firmware looks like.  ``addr`` places
+    the symbol inside a synthetic section; ``words`` emits an inline ``.word``
+    literal pool at ``addr + 0x40 + 4 * index``, the way ``llvm-objdump`` prints
+    one.
     """
-    lines = [f"0000 <{name}>:", "\t0: 6580  \tpush\t{r7, lr}"]
+    lines = [f"{addr:04x} <{name}>:", "\t0: 6580  \tpush\t{r7, lr}"]
     rest = frame - 8
     if rest > 0:
         lines.append(f"\t2: 6084  \tsub\tsp, #0x{rest:x}")
@@ -60,6 +65,10 @@ def _fn(
     if indirect:
         lines.append("\t8: 4708  \tbx\tr1")
     lines.append("\t6: 6d80  \tpop\t{r7, pc}")
+    for index, value in enumerate(words):
+        pool_addr = addr + 0x40 + 4 * index
+        raw = " ".join(f"{byte:02x}" for byte in value.to_bytes(4, "little"))
+        lines.append(f"\t{pool_addr:x}: {raw}  \t.word\t0x{value:08x}")
     return "\n".join(lines)
 
 
@@ -70,15 +79,23 @@ def _text(*blocks: str) -> str:
 # The linked image's crate prefixes, spelled the way `llvm-nm` prints them after
 # C-10 (#72).  The radio modules moved into `tlsr8266_radio`, and several paths
 # changed with them (`rf_drv.rs` -> `rf::drv_8266`, `light_ll::mesh_management`
-# -> `mesh_ll::node_status`, the OTA staging shims -> `tlsr8266_platform::window`), so the
+# -> `mesh_ll::node_status`), so the
 # fixture below uses the paths the linked image actually has.  The
 # `_RN...<hash>` prefix objdump prints is omitted on purpose: the crate
 # disambiguator changes on every rebuild, which is exactly why ``INDIRECT_EDGES``
 # matches substrings rather than whole names.
 RADIO = "tlsr8266_radio"
 RADIO_CALLBACKS = RADIO + "9callbacks"
-PLATFORM = "tlsr8266_platform"
 MESH = "tlsr8266_mesh"
+
+# Section ranges for the synthetic image. `.text`/`.rodata` hold the ordinary
+# firmware shape at address 0; the boot OTA chain sits at 0x1400+ so it
+# classifies into `.ram_code`, exactly like the linked image.
+SECTIONS = {
+    ".text": (0x0, 0x1000),
+    ".rodata": (0x1000, 0x400),
+    ".ram_code": (0x1400, 0x400),
+}
 
 # A miniature version of the real call graph: a root reaches the light-data
 # dispatcher directly, the dispatcher reaches the app callback only through a
@@ -92,13 +109,13 @@ MESH = "tlsr8266_mesh"
 # which calls the ``notify_status_update`` dispatcher, which reaches the radio
 # crate's ``ll_device_status_update`` only through a ``bx rN``.
 #
-# The OTA seam is modelled the same way: one synthetic pair per ``INDIRECT_EDGES``
-# entry — the OTA write dispatcher 24 B / 40 B (the real shape: a GATT write
-# lands in ``dispatch_ota_write``, which reaches the OTA packet handler), the
-# snapshot hook 24 B / 16 B, the two flag-only hooks 24 B / 8 B, and the four
-# radio providers 8 B / 16 B. ``dispatch_ota_write`` is a *direct* callee of the
-# GATT write entry, because that is the real firmware shape; every other OTA
-# dispatcher stays a leaf, so the maxima do not move.
+# The OTA seam used to be modelled the same way: one synthetic pair per
+# ``INDIRECT_EDGES`` entry — the OTA write dispatcher 24 B / 40 B (the real
+# shape: a GATT write lands in ``dispatch_ota_write``, which reaches the OTA
+# packet handler), the snapshot hook 24 B / 16 B, the two flag-only hooks
+# 24 B / 8 B, and the four radio providers 8 B / 16 B. F-7 (#118) deleted that
+# whole seam: OTA now lives in ``tlsr8266-platform`` behind static generic
+# monomorphisations, so the fixture carries no OTA dispatcher and no OTA edge.
 #
 # The C-8 seams are the same shape and use the real symbol namespaces: `mesh`'s
 # three ``MeshEventHooks`` dispatchers (``mesh25dispatch_mesh_light_event``,
@@ -110,6 +127,28 @@ MESH = "tlsr8266_mesh"
 # fixture already carries as a direct callee above so the two light-event call
 # sites converge on one subtree.
 FIRMWARE_SHAPED = _text(
+    # The boot OTA chain: the only `.ram_code` residents in the fixture. F-7
+    # (#118) made it a short, fully RAM-resident chain rooted at
+    # `handle_ota_update`; `check_ram_reachability` walks exactly this subtree.
+    _fn(
+        f"{MESH}3ota19handle_ota_update",
+        8,
+        (("tlsr8266_ota_boot_copy", False),),
+        addr=0x1400,
+    ),
+    _fn(
+        "tlsr8266_ota_boot_copy",
+        8,
+        (("reboot_and_retry_copy", False),),
+        addr=0x1410,
+    ),
+    _fn(
+        "reboot_and_retry_copy",
+        8,
+        (("tlsr8266_hal::pm::ram_sw_reboot", False),),
+        addr=0x1420,
+    ),
+    _fn("tlsr8266_hal::pm::ram_sw_reboot", 8, addr=0x1430),
     _fn(
         "main_entrypoint",
         40,
@@ -118,10 +157,7 @@ FIRMWARE_SHAPED = _text(
     _fn(
         f"{RADIO}2rf8drv_826624rf_link_slave_data_write",
         184,
-        (
-            (f"{RADIO_CALLBACKS}13on_light_data", False),
-            (f"{RADIO_CALLBACKS}18dispatch_ota_write", False),
-        ),
+        ((f"{RADIO_CALLBACKS}13on_light_data", False),),
     ),
     _fn(f"{RADIO_CALLBACKS}13on_light_data", 24, indirect=True),
     _fn(
@@ -155,24 +191,6 @@ FIRMWARE_SHAPED = _text(
     _fn(f"{MESH}3app25rf_link_response_callback", 96),
     _fn(f"{RADIO_CALLBACKS}15on_uart_mesh_rx", 24, indirect=True),
     _fn(f"{MESH}3app17uart_mesh_rx_hook", 72),
-    # OtaHooks: the four dispatchers in the radio crate's `callbacks.rs`.
-    _fn(f"{RADIO_CALLBACKS}18dispatch_ota_write", 24, indirect=True),
-    _fn(f"{MESH}3ota18on_gatt_ota_packet", 40),
-    _fn(f"{RADIO_CALLBACKS}21dispatch_ota_snapshot", 24, indirect=True),
-    _fn(f"{MESH}3ota24ota_status_snapshot_impl", 16),
-    _fn(f"{RADIO_CALLBACKS}22dispatch_ota_terminate", 24, indirect=True),
-    _fn(f"{MESH}3ota28ota_request_termination_impl", 8),
-    _fn(f"{RADIO_CALLBACKS}17dispatch_ota_tick", 24, indirect=True),
-    _fn(f"{MESH}3ota24ota_tick_timeout_1s_impl", 8),
-    # OtaRadioOps: the four ota/mod.rs providers, with staging into the platform window.
-    _fn(f"{MESH}3ota15radio_stage_pkt", 8, indirect=True),
-    _fn(f"{PLATFORM}6window16stage_ota_packet", 16),
-    _fn(f"{MESH}3ota14radio_read_pkt", 8, indirect=True),
-    _fn(f"{PLATFORM}6window22read_staged_ota_packet", 16),
-    _fn(f"{MESH}3ota18radio_terminate_tx", 8, indirect=True),
-    _fn(f"{MESH}3app23ota_send_terminate_hook", 16),
-    _fn(f"{MESH}3ota20radio_begin_gatt_ota", 8, indirect=True),
-    _fn("tlsr8266_ota_begin_gatt_hook", 16),
     # C-8: mesh's three MeshEventHooks dispatchers. The light-event slot reaches
     # the same app callback the radio crate's emit seam does.
     _fn(f"{MESH}4mesh25dispatch_mesh_light_event", 24, indirect=True),
@@ -219,6 +237,7 @@ def _run_main(
     with (
         mock.patch.object(stack_analysis, "objdump", return_value=text),
         mock.patch.object(stack_analysis, "read_symbols", return_value=syms),
+        mock.patch.object(stack_analysis, "read_elf_sections", return_value=SECTIONS),
         contextlib.redirect_stdout(buf),
     ):
         code = stack_analysis.main(args)
@@ -292,6 +311,16 @@ class TestParseFunctions(unittest.TestCase):
         self.assertFalse(funcs["returner"].indirect)
         self.assertFalse(funcs["cpu_returner"].indirect)
 
+    def test_word_literal_pool_entries_are_parsed(self) -> None:
+        """objdump prints a literal pool as inline `.word` lines in the body."""
+        funcs = stack_analysis.parse_functions(
+            _text(_fn("pooled", 8, addr=0x400, words=(0x00800061, 0x0000f698)))
+        )
+        self.assertEqual(
+            funcs["pooled"].literals,
+            [(0x440, 0x00800061), (0x444, 0x0000F698)],
+        )
+
 
 class TestApplyIndirectEdges(unittest.TestCase):
     def test_adds_normal_call_edge(self) -> None:
@@ -335,41 +364,7 @@ class TestApplyIndirectEdges(unittest.TestCase):
                     f"{MESH}5light20notify_status_update",
                     f"{RADIO}7mesh_ll11node_status23ll_device_status_update",
                 ),
-                # The OTA seam, in table order: four OtaHooks dispatchers...
-                (
-                    f"{RADIO_CALLBACKS}18dispatch_ota_write",
-                    f"{MESH}3ota18on_gatt_ota_packet",
-                ),
-                (
-                    f"{RADIO_CALLBACKS}21dispatch_ota_snapshot",
-                    f"{MESH}3ota24ota_status_snapshot_impl",
-                ),
-                (
-                    f"{RADIO_CALLBACKS}22dispatch_ota_terminate",
-                    f"{MESH}3ota28ota_request_termination_impl",
-                ),
-                (
-                    f"{RADIO_CALLBACKS}17dispatch_ota_tick",
-                    f"{MESH}3ota24ota_tick_timeout_1s_impl",
-                ),
-                # ...then the four OtaRadioOps providers.
-                (
-                    f"{MESH}3ota15radio_stage_pkt",
-                    f"{PLATFORM}6window16stage_ota_packet",
-                ),
-                (
-                    f"{MESH}3ota14radio_read_pkt",
-                    f"{PLATFORM}6window22read_staged_ota_packet",
-                ),
-                (
-                    f"{MESH}3ota18radio_terminate_tx",
-                    f"{MESH}3app23ota_send_terminate_hook",
-                ),
-                (
-                    f"{MESH}3ota20radio_begin_gatt_ota",
-                    "tlsr8266_ota_begin_gatt_hook",
-                ),
-                # ...then the C-8 subsystem seams.
+                # The C-8 subsystem seams.
                 (
                     f"{MESH}4mesh25dispatch_mesh_light_event",
                     f"{MESH}3app28rf_link_light_event_callback",
@@ -492,10 +487,6 @@ class TestApplyIndirectEdges(unittest.TestCase):
             [
                 "dispatch_log_async",
                 "dispatch_mesh_light_event",
-                "dispatch_ota_snapshot",
-                "dispatch_ota_terminate",
-                "dispatch_ota_tick",
-                "dispatch_ota_write",
                 "dispatch_uart_cmd",
                 "dispatch_uart_mesh_rx",
                 "emit_light_event",
@@ -505,16 +496,38 @@ class TestApplyIndirectEdges(unittest.TestCase):
                 "on_mesh_pair_proc",
                 "on_uart_mesh_rx",
                 "publish_light_status",
-                "radio_begin_gatt_ota",
-                "radio_read_pkt",
-                "radio_stage_pkt",
-                "radio_terminate_tx",
                 "uart_tx_ops_dropped",
                 "uart_tx_ops_push",
             ],
         )
+        self.assertEqual(len(stack_analysis.INDIRECT_EDGES), 13)
         for caller, callees in stack_analysis.INDIRECT_EDGES.items():
             self.assertEqual(len(callees), 1, caller)
+
+    def test_retired_ota_seam_is_absent(self) -> None:
+        """F-7 (#118) deleted ``OtaHooks`` / ``OtaRadioOps``: no OTA row survives.
+
+        An entry for a symbol that no longer links is a hard gate failure, so a
+        reintroduced OTA row would fail every build rather than be ignored.
+        """
+        retired = {
+            "dispatch_ota_write",
+            "dispatch_ota_snapshot",
+            "dispatch_ota_terminate",
+            "dispatch_ota_tick",
+            "radio_stage_pkt",
+            "radio_read_pkt",
+            "radio_terminate_tx",
+            "radio_begin_gatt_ota",
+        }
+        self.assertEqual(retired & set(stack_analysis.INDIRECT_EDGES), set())
+        callees = {
+            callee
+            for callees in stack_analysis.INDIRECT_EDGES.values()
+            for callee in callees
+        }
+        for pattern in ("on_gatt_ota_packet", "stage_ota_packet", "ota_status_snapshot_impl"):
+            self.assertNotIn(pattern, callees)
 
     def test_no_pattern_is_a_substring_of_another(self) -> None:
         """`_resolve_one` fails closed on ambiguity, so the table must stay sharp.
@@ -522,16 +535,15 @@ class TestApplyIndirectEdges(unittest.TestCase):
         Every caller and callee pattern is a substring searched over the whole
         symbol table: if one pattern were contained in another, whichever
         symbol matched both would resolve as ambiguous and the gate would fail
-        on a correct image.  `stage_ota_packet` vs `read_staged_ota_packet` is
-        the pair this guards — the extra `d` is what keeps them distinct — and
-        `publish_light_status` vs `tlsr8266_mesh::light::device_status_update` is the C-8 pair:
-        the dispatcher was renamed precisely so its own name is not a substring
-        of its callee's.
+        on a correct image.  `publish_light_status` vs
+        `tlsr8266_mesh::light::device_status_update` is the C-8 pair: the
+        dispatcher was renamed precisely so its own name is not a substring of
+        its callee's.
         """
         patterns = list(stack_analysis.INDIRECT_EDGES)
         for callees in stack_analysis.INDIRECT_EDGES.values():
             patterns.extend(callees)
-        self.assertEqual(len(patterns), 42)
+        self.assertEqual(len(patterns), 26)
         # Caller patterns name distinct dispatchers, so they must be unique; a
         # *callee* pattern may legitimately be shared by two call sites, and the
         # pair test below is over the distinct set.
@@ -549,7 +561,6 @@ class TestApplyIndirectEdges(unittest.TestCase):
                     f"{pattern!r} is a substring of {other!r}: _resolve_one "
                     "would be ambiguous",
                 )
-        self.assertNotIn("stage_ota_packet", "read_staged_ota_packet")
         self.assertNotIn(
             "publish_light_status", "tlsr8266_mesh::light::device_status_update"
         )
@@ -701,7 +712,7 @@ class TestStrictIndirectContract(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         self.assertIn("strict mode: no project GATT indirect-edge model", out)
-        self.assertIn("legacy indirect dispatch edges (21):", out)
+        self.assertIn("legacy indirect dispatch edges (13):", out)
         self.assertNotIn("strict GATT dispatch edges", out)
 
     def test_legacy_mode_does_not_add_gatt_edges(self) -> None:
@@ -710,7 +721,7 @@ class TestStrictIndirectContract(unittest.TestCase):
             ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
         )
         self.assertEqual(code, 0, out)
-        self.assertIn("indirect dispatch edges (21):", out)
+        self.assertIn("indirect dispatch edges (13):", out)
         self.assertNotIn("strict GATT dispatch edges", out)
 
 
@@ -762,6 +773,90 @@ class TestRamReachability(unittest.TestCase):
         self.assertEqual(sections[".text"], (0x300, 0x80))
         self.assertEqual(sections[".rodata"], (0x400, 0x20))
 
+    def test_elf_section_parser_drops_non_allocatable_sections(self) -> None:
+        """`.symtab`/`.strtab` sit at address 0 with a huge size; they own no VMA.
+
+        Keeping them would make `classify_function_sections` report `.symtab`
+        for a `.text` function, which is a wrong name in a violation message.
+        """
+        sections = stack_analysis.parse_elf_sections(
+            "  [ 2] .ram_code      PROGBITS        000000b0 000100b0 000004c8 00  AX  0   0  4\n"
+            "  [ 3] .text          PROGBITS        00000578 00010578 0000f120 00  AX  0   0  4\n"
+            "  [12] .symtab        SYMTAB          00000000 0001f698 00003d70 10     13 247  4\n"
+            "  [13] .strtab        STRTAB          00000000 00023308 00009306 00      0   0  1\n"
+            "  [14] .comment       PROGBITS        00000000 0002c60e 0000002e 01  MS  0   0  1\n"
+        )
+        self.assertEqual(sections[".ram_code"], (0xB0, 0x4C8))
+        self.assertEqual(sections[".text"], (0x578, 0xF120))
+        self.assertNotIn(".symtab", sections)
+        self.assertNotIn(".strtab", sections)
+        self.assertNotIn(".comment", sections)
+
+    def test_offset_label_callee_resolves_into_ram_code(self) -> None:
+        """objdump renders a local branch as `<fn+0xNN>`; resolve it, never guess."""
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x1400,
+                frame=8,
+                calls=[("boot_copy+0x38", True)],
+                section=".ram_code",
+            ),
+            "boot_copy": stack_analysis.Func(0x1410, frame=16, section=".ram_code"),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, SECTIONS), []
+        )
+        # The same label pointing past the end of the section is not RAM-proven.
+        funcs["handle_ota_update"].calls = [("boot_copy+0x800", True)]
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, SECTIONS),
+            [
+                (
+                    "handle_ota_update",
+                    "boot_copy+0x800",
+                    stack_analysis.UNKNOWN_SECTION,
+                )
+            ],
+        )
+
+    def test_text_literal_pool_integer_constant_is_not_a_pointer(self) -> None:
+        """`.word 0x2710` is a 10000-iteration timeout, not a `.text` address.
+
+        `.text` values are anchored on the symbol table so an integer constant
+        that merely ranges over `.text` is not reported; an actual function
+        address in the same pool is.
+        """
+        sections = {".ram_code": (0xB0, 0x4C8), ".text": (0x578, 0x3000)}
+        symbols = {"flash_read_page": 0x500, "light_sw_reboot": 0x1E0E}
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x200,
+                frame=8,
+                calls=[("boot_copy", False)],
+                section=".ram_code",
+            ),
+            "boot_copy": stack_analysis.Func(
+                0x210,
+                frame=8,
+                section=".ram_code",
+                literals=[(0x250, 0x2710)],
+            ),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, sections, symbols), []
+        )
+        funcs["boot_copy"].literals = [(0x250, 0x1E0E)]
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, sections, symbols),
+            [
+                (
+                    "boot_copy",
+                    stack_analysis.LITERAL_POOL_VIOLATION,
+                    ".text 0x00001e0e",
+                )
+            ],
+        )
+
     def test_boot_ota_ram_chain_is_safe_through_direct_and_tail_edges(self) -> None:
         funcs = {
             "handle_ota_update": stack_analysis.Func(
@@ -785,7 +880,47 @@ class TestRamReachability(unittest.TestCase):
             [],
         )
 
-    def test_boot_ota_chain_to_flash_resident_reboot_leaf_is_safe(self) -> None:
+    def test_full_boot_ota_chain_in_ram_code_passes(self) -> None:
+        """The real image's chain, with the real demangled symbol names.
+
+        `handle_ota_update -> tlsr8266_ota_boot_copy -> reboot_and_retry_copy
+        -> ram_sw_reboot` — all four `.ram_code`, no indirect branch, no pool.
+        """
+        funcs = {
+            f"{MESH}3ota19handle_ota_update": stack_analysis.Func(
+                0x570,
+                frame=8,
+                calls=[("tlsr8266_ota_boot_copy", False)],
+                section=".ram_code",
+            ),
+            "tlsr8266_ota_boot_copy": stack_analysis.Func(
+                0x34C,
+                frame=300,
+                calls=[
+                    ("reboot_and_retry_copy", False),
+                    ("tlsr8266_hal::pm::ram_sw_reboot", False),
+                ],
+                section=".ram_code",
+            ),
+            "reboot_and_retry_copy": stack_analysis.Func(
+                0x470,
+                frame=0,
+                calls=[("tlsr8266_hal::pm::ram_sw_reboot", False)],
+                section=".ram_code",
+            ),
+            "tlsr8266_hal::pm::ram_sw_reboot": stack_analysis.Func(
+                0x120, frame=0, section=".ram_code"
+            ),
+        }
+        self.assertEqual(stack_analysis.check_ram_reachability(funcs), [])
+        self.assertEqual(stack_analysis.validate_ram_reachability(funcs), [])
+
+    def test_boot_ota_chain_to_flash_resident_reboot_leaf_is_a_violation(self) -> None:
+        """F-7 (#118) deleted the `light_sw_reboot` exemption.
+
+        A `.text` reboot leaf is unreachable once the copy loop erases sector 0,
+        so it is a hard violation now instead of a tolerated leaf.
+        """
         funcs = {
             "handle_ota_update": stack_analysis.Func(
                 0x200,
@@ -809,8 +944,62 @@ class TestRamReachability(unittest.TestCase):
             stack_analysis.check_ram_reachability(
                 funcs, root_pattern="handle_ota_update"
             ),
-            [],
+            [("reboot_and_retry_copy", "light_sw_reboot", ".text")],
         )
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(
+                funcs, root_pattern="handle_ota_update"
+            )
+        message = str(ctx.exception)
+        self.assertIn("reboot_and_retry_copy", message)
+        self.assertIn("light_sw_reboot", message)
+        self.assertIn(".text", message)
+
+    def test_zero_matched_roots_fails_closed(self) -> None:
+        """A renamed or inlined copier must never produce an empty, passing walk."""
+        funcs = {
+            "handle_ota_update_v2": stack_analysis.Func(
+                0x200, frame=8, section=".ram_code"
+            ),
+        }
+        violations = stack_analysis.check_ram_reachability(
+            funcs, root_pattern="handle_ota_update$"
+        )
+        self.assertEqual(len(violations), 1)
+        caller, callee, reason = violations[0]
+        self.assertEqual(caller, "handle_ota_update$")
+        self.assertEqual(callee, stack_analysis.ROOT_VIOLATION)
+        self.assertIn("matches no parsed function", reason)
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(
+                funcs, root_pattern="handle_ota_update$"
+            )
+        self.assertIn("is unusable", str(ctx.exception))
+        self.assertIn("matches no parsed function", str(ctx.exception))
+
+    def test_root_outside_ram_code_fails(self) -> None:
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x300, frame=8, section=".text"
+            ),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(
+                funcs, root_pattern="handle_ota_update"
+            ),
+            [
+                (
+                    "handle_ota_update",
+                    stack_analysis.ROOT_VIOLATION,
+                    "root is not in .ram_code (section .text)",
+                )
+            ],
+        )
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(
+                funcs, root_pattern="handle_ota_update"
+            )
+        self.assertIn("root is not in .ram_code", str(ctx.exception))
 
     def test_unrelated_irq_ram_flash_edge_is_outside_boot_ota_root(self) -> None:
         funcs = {
@@ -839,7 +1028,8 @@ class TestRamReachability(unittest.TestCase):
             [],
         )
 
-    def test_boot_ota_approved_indirect_chain_is_safe_when_targets_are_ram(self) -> None:
+    def test_reachable_indirect_branch_in_ram_code_fails(self) -> None:
+        """An indirect branch cannot be proven to stay in RAM, so it fails."""
         funcs = {
             "handle_ota_update": stack_analysis.Func(
                 0x200,
@@ -853,6 +1043,7 @@ class TestRamReachability(unittest.TestCase):
                 calls=[("reboot", False)],
                 section=".ram_code",
                 indirect=True,
+                indirect_insts=[(0x218, "bx", "r1")],
             ),
             "reboot": stack_analysis.Func(0x220, frame=8, section=".ram_code"),
         }
@@ -860,7 +1051,70 @@ class TestRamReachability(unittest.TestCase):
             stack_analysis.check_ram_reachability(
                 funcs, root_pattern="handle_ota_update"
             ),
-            [],
+            [
+                (
+                    "reboot_and_retry_copy",
+                    stack_analysis.INDIRECT_VIOLATION,
+                    "bx r1 at 0x00000218",
+                )
+            ],
+        )
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(
+                funcs, root_pattern="handle_ota_update"
+            )
+        self.assertIn("has an indirect branch", str(ctx.exception))
+
+    def test_literal_pool_pointer_into_rodata_fails(self) -> None:
+        """A `.word` pool entry into flash is a pointer the copy loop cannot follow."""
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x1400,
+                frame=8,
+                calls=[("tlsr8266_ota_boot_copy", False)],
+                section=".ram_code",
+            ),
+            "tlsr8266_ota_boot_copy": stack_analysis.Func(
+                0x1410,
+                frame=32,
+                section=".ram_code",
+                # 0x1010 is inside the fixture's `.rodata`; the other entry is a
+                # register address in RAM and must stay clean.
+                literals=[(0x1450, 0x00800061), (0x1454, 0x1010)],
+            ),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, SECTIONS),
+            [
+                (
+                    "tlsr8266_ota_boot_copy",
+                    stack_analysis.LITERAL_POOL_VIOLATION,
+                    ".rodata 0x00001010",
+                )
+            ],
+        )
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(funcs, SECTIONS)
+        self.assertIn("literal-pool pointer into flash", str(ctx.exception))
+
+    def test_ram_literal_pool_pointer_passes(self) -> None:
+        """The real pool values point at registers in RAM, not at flash."""
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x1400,
+                frame=8,
+                calls=[("tlsr8266_ota_boot_copy", False)],
+                section=".ram_code",
+            ),
+            "tlsr8266_ota_boot_copy": stack_analysis.Func(
+                0x1410,
+                frame=32,
+                section=".ram_code",
+                literals=[(0x1450, 0x00800061), (0x1454, 0x0080074F)],
+            ),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(funcs, SECTIONS), []
         )
 
     def test_flash_resident_wrapper_or_callee_fails_ram_reachability(self) -> None:
@@ -889,6 +1143,53 @@ class TestRamReachability(unittest.TestCase):
         self.assertIn("flash_callee", str(ctx.exception))
         self.assertIn(".text", str(ctx.exception))
 
+    def test_rodata_callee_fails_ram_reachability(self) -> None:
+        funcs = {
+            "ram_wrapper": stack_analysis.Func(
+                0x200,
+                frame=32,
+                calls=[("rodata_helper", True)],
+                section=".ram_code",
+            ),
+            "rodata_helper": stack_analysis.Func(
+                0x2000,
+                frame=0,
+                section=".rodata",
+            ),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(
+                funcs, root_pattern="ram_wrapper"
+            ),
+            [("ram_wrapper", "rodata_helper", ".rodata")],
+        )
+
+    def test_unknown_section_callee_fails_when_sections_are_supplied(self) -> None:
+        """With ELF sections known, an unclassifiable callee is not RAM-proven."""
+        sections = {
+            ".ram_code": (0x200, 0x100),
+            ".text": (0x400, 0x100),
+        }
+        funcs = {
+            "handle_ota_update": stack_analysis.Func(
+                0x210,
+                frame=8,
+                calls=[("mystery", False)],
+            ),
+            "mystery": stack_analysis.Func(0x900, frame=8),
+        }
+        self.assertEqual(
+            stack_analysis.check_ram_reachability(
+                funcs, sections, root_pattern="handle_ota_update"
+            ),
+            [("handle_ota_update", "mystery", stack_analysis.UNKNOWN_SECTION)],
+        )
+        with self.assertRaises(stack_analysis.RamReachabilityError) as ctx:
+            stack_analysis.validate_ram_reachability(
+                funcs, sections, root_pattern="handle_ota_update"
+            )
+        self.assertIn("no known ELF section", str(ctx.exception))
+
 
 class TestBaselineJson(unittest.TestCase):
     def test_legacy_baseline_reports_image_sections_and_stack_counts(self) -> None:
@@ -899,11 +1200,7 @@ class TestBaselineJson(unittest.TestCase):
             elf.write_bytes(b"ELF")
             bin_path.write_bytes(b"BIN")
 
-            sections = {
-                ".text": (0x0, 0x1000),
-                ".rodata": (0x1000, 0x400),
-                ".ram_code": (0x1400, 0x400),
-            }
+            sections = SECTIONS
             buf = io.StringIO()
             with (
                 mock.patch.object(stack_analysis, "objdump", return_value=FIRMWARE_SHAPED),
@@ -930,7 +1227,7 @@ class TestBaselineJson(unittest.TestCase):
             self.assertEqual(baseline["irq_margin"], 1188)
             self.assertGreater(baseline["parsed_functions"], 0)
             self.assertGreater(baseline["indirect_functions"], 0)
-            self.assertEqual(baseline["allowed_indirect"], 21)
+            self.assertEqual(baseline["allowed_indirect"], 13)
             self.assertEqual(baseline["mode"], "legacy")
             self.assertFalse(baseline["strict"])
 
@@ -942,11 +1239,7 @@ class TestBaselineJson(unittest.TestCase):
             elf.write_bytes(b"ELF")
             bin_path.write_bytes(b"BIN")
 
-            sections = {
-                ".text": (0x0, 0x1000),
-                ".rodata": (0x1000, 0x400),
-                ".ram_code": (0x1400, 0x400),
-            }
+            sections = SECTIONS
             buf = io.StringIO()
             with (
                 mock.patch.object(stack_analysis, "objdump", return_value=FIRMWARE_SHAPED),
@@ -965,7 +1258,7 @@ class TestBaselineJson(unittest.TestCase):
 
             self.assertEqual(baseline["mode"], "strict")
             self.assertTrue(baseline["strict"])
-            self.assertEqual(baseline["legacy_edges_resolved"], 21)
+            self.assertEqual(baseline["legacy_edges_resolved"], 13)
             self.assertEqual(baseline["gatt_edges_resolved"], 0)
 
     def test_compare_baseline_prints_structured_delta_without_failing(self) -> None:
@@ -1067,22 +1360,6 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertEqual(after - before, 408)
         self.assertEqual(cycles, [])
         self.assertIn(f"{MESH}3app28rf_link_light_event_callback", chain)
-        # The OTA branch of the same GATT write entry is real but shorter
-        # (24 + 40), so it is wired in without moving the maximum.
-        ota_depth, ota_chain, _ = stack_analysis.longest_path(
-            funcs, f"{RADIO_CALLBACKS}18dispatch_ota_write"
-        )
-        self.assertEqual(ota_depth, 24 + 40, "dispatch -> on_gatt_ota_packet")
-        self.assertEqual(
-            ota_chain,
-            [
-                f"{RADIO_CALLBACKS}18dispatch_ota_write",
-                f"{MESH}3ota18on_gatt_ota_packet",
-            ],
-        )
-        # The light-data branch (24 + 128 + 8 + 200) stays the deepest callee of
-        # the GATT write entry, so wiring the OTA branch in moves no maximum.
-        self.assertLess(ota_depth, 24 + 128 + 8 + 200)
 
     def test_irq_chain_reaches_through_the_dispatcher(self) -> None:
         funcs = _parse()
@@ -1098,10 +1375,7 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertIn(
             f"{RADIO}7mesh_ll11node_status23ll_device_status_update", chain
         )
-        # No OTA dispatcher is reachable from the IRQ root: the seam's frames
-        # only enter the IRQ stack through the handlers that call them.
-        self.assertNotIn(f"{RADIO_CALLBACKS}18dispatch_ota_write", chain)
-
+    
     def test_roots_no_longer_contain_indirect_only_callees(self) -> None:
         funcs = _parse()
         roots = set(stack_analysis.all_roots(funcs))
@@ -1110,9 +1384,6 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertIn(f"{MESH}3app17uart_mesh_rx_hook", roots)
         self.assertIn(f"{MESH}3app17uart_command_hook", roots)
         self.assertIn(f"{MESH}3app17log_async_tx_hook", roots)
-        # The OTA callees are roots only because nothing `bl`s them yet.
-        self.assertIn(f"{MESH}3ota18on_gatt_ota_packet", roots)
-        self.assertIn(f"{MESH}3app23ota_send_terminate_hook", roots)
         stack_analysis.apply_indirect_edges(funcs)
         roots = set(stack_analysis.all_roots(funcs))
         self.assertNotIn(f"{MESH}3app21rf_link_data_callback", roots)
@@ -1123,8 +1394,6 @@ class TestIndirectEdgesFeedDepth(unittest.TestCase):
         self.assertNotIn(f"{MESH}3app20enqueue_uart_tx_hook", roots)
         self.assertNotIn(f"{MESH}3app20dropped_uart_tx_hook", roots)
         self.assertNotIn(f"{MESH}3app17log_async_tx_hook", roots)
-        self.assertNotIn(f"{MESH}3ota18on_gatt_ota_packet", roots)
-        self.assertNotIn(f"{MESH}3app23ota_send_terminate_hook", roots)
         self.assertIn("main_entrypoint", roots)
 
     def test_introducing_a_cycle_fails_the_gate(self) -> None:
@@ -1153,7 +1422,7 @@ class TestMain(unittest.TestCase):
             ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
         )
         self.assertEqual(code, 0, out)
-        self.assertIn("indirect dispatch edges (21):", out)
+        self.assertIn("indirect dispatch edges (13):", out)
         self.assertIn(
             f"{MESH}5light20notify_status_update -> "
             f"{RADIO}7mesh_ll11node_status23ll_device_status_update",
@@ -1164,17 +1433,9 @@ class TestMain(unittest.TestCase):
             f"{MESH}3app17uart_mesh_rx_hook",
             out,
         )
-        # The OTA seam must be reported, not silently resolved.
-        self.assertIn(
-            f"{RADIO_CALLBACKS}18dispatch_ota_write -> "
-            f"{MESH}3ota18on_gatt_ota_packet",
-            out,
-        )
-        self.assertIn(
-            f"{MESH}3ota15radio_stage_pkt -> "
-            f"{PLATFORM}6window16stage_ota_packet",
-            out,
-        )
+        # F-7 (#118) deleted the OTA seam, so no OTA edge may be reported.
+        self.assertNotIn("dispatch_ota", out)
+        self.assertNotIn("stage_ota_packet", out)
         # So must every C-8 seam, including the renamed status dispatcher.
         self.assertIn(
             f"{MESH}4mesh20publish_light_status -> "
@@ -1217,21 +1478,21 @@ class TestMain(unittest.TestCase):
         # Fail closed before any depth number is reported as trustworthy.
         self.assertNotIn("RAM GATE", out)
 
-    def test_missing_ota_callee_fails_closed(self) -> None:
-        # A stale OTA entry is the failure this table exists to catch: without
-        # on_gatt_ota_packet the OTA write subtree would score as 0 B and the
+    def test_missing_callee_fails_closed(self) -> None:
+        # A stale entry is the failure this table exists to catch: without
+        # ll_device_status_update the status subtree would score as 0 B and the
         # gate would under-report both margins instead of failing.
-        callee = f"{MESH}3ota18on_gatt_ota_packet"
+        callee = f"{RADIO}7mesh_ll11node_status23ll_device_status_update"
         text = FIRMWARE_SHAPED.replace(_fn(callee, 40) + "\n", "")
         self.assertNotIn(callee, text)
         # The dispatcher survives; only its callee is gone.
-        self.assertIn(f"{RADIO_CALLBACKS}18dispatch_ota_write", text)
+        self.assertIn(f"{MESH}5light20notify_status_update", text)
         code, out = _run_main(
             text,
             ["--elf", "synthetic.elf", "--top", "3", "--legacy"],
         )
         self.assertEqual(code, 1, out)
-        self.assertIn("FAIL: INDIRECT_EDGES['dispatch_ota_write']", out)
+        self.assertIn("FAIL: INDIRECT_EDGES['notify_status_update']", out)
         self.assertIn("matches no parsed function", out)
         self.assertNotIn("RAM GATE", out)
 

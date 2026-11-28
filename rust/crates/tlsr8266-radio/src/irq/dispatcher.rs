@@ -16,7 +16,7 @@ use crate::types::RfOperationState;
 use tlsr8266_pac::*;
 
 use super::advertisement::handle_ble_advertisement_state;
-use super::connection::{handle_ble_connected_state, BleConnectionEvent};
+use super::connection::handle_ble_connected_state;
 use super::mesh::handle_mesh_listening_state;
 use super::packet_handling::{handle_rf_packet_reception, handle_rf_transmission_complete};
 use super::timing::configure_ble_receive_state;
@@ -36,7 +36,7 @@ use super::timing::configure_ble_receive_state;
 /// (no XIP flash jump during radio operations) and adds no extra interrupt
 /// stack frame.
 #[inline(always)]
-pub fn handle_rf_irq() {
+pub fn handle_rf_irq<C: RadioCoexistence>() {
     let irq = read_reg_rf_irq_status();
 
     // Handle RF transmission complete interrupt
@@ -46,7 +46,7 @@ pub fn handle_rf_irq() {
 
     // Handle RF reception complete interrupt
     if irq & FLD_RF_IRQ_MASK::IRQ_RX.bits() != 0 {
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<C>();
     }
 }
 
@@ -66,12 +66,8 @@ pub fn handle_rf_irq() {
 /// frame. It inlines into the crate root's `handle_system_interrupts`, which is
 /// `#[inline(never)]` and therefore stays in `.text` (only `irq_handler` itself
 /// is `.ram_code`) — the same placement the dispatch had before the move.
-///
-/// Returns the [`BleConnectionEvent`] reported by the connected-state handler so
-/// the interrupt composition root can own the `ota_manager` calls. Every other
-/// state reports [`BleConnectionEvent::None`].
 #[inline(always)]
-pub fn handle_ble_system_timer_irq<C: RadioCoexistence>() -> BleConnectionEvent {
+pub fn handle_ble_system_timer_irq<C: RadioCoexistence>() {
     // Clear the interrupt source
     write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits());
 
@@ -80,18 +76,15 @@ pub fn handle_ble_system_timer_irq<C: RadioCoexistence>() -> BleConnectionEvent 
     match state {
         RfOperationState::Advertising => {
             handle_ble_advertisement_state(); // Advertisement state
-            BleConnectionEvent::None
         }
         RfOperationState::Connected => handle_ble_connected_state::<C>(), // Connected bridge state
         RfOperationState::Receiving => {
-            configure_ble_receive_state(); // BLE receive state
-            BleConnectionEvent::None
+            configure_ble_receive_state::<C>(); // BLE receive state
         }
         RfOperationState::MeshListening => {
-            handle_mesh_listening_state(); // Mesh listening state
-            BleConnectionEvent::None
+            handle_mesh_listening_state::<C>(); // Mesh listening state
         }
-        RfOperationState::Idle => BleConnectionEvent::None, // Idle state
+        RfOperationState::Idle => {} // Idle state
     }
 }
 
@@ -135,7 +128,6 @@ mod tests {
         tlsr8266_hal::mcu::clock::fake_clock::reset();
         tlsr8266_hal::mcu::crypto::fake_crypto::reset();
         crate::queues::reset_for_test();
-        crate::callbacks::test_ota::reset_for_test();
         BLE_ADVERTISING_ENABLED.set(false);
         MESH_DEVICE_ONLINE_STATUS.set(false);
         LIGHT_RX_BUFFER_WRITE_POINTER.set(0);
@@ -158,7 +150,7 @@ mod tests {
         reset_rf_state();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, FLD_RF_IRQ_MASK::IRQ_TX.bits());
 
-        handle_rf_irq();
+        handle_rf_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             rf_irq_ack_writes(),
@@ -177,7 +169,7 @@ mod tests {
         // before it needs a real DMA frame in the buffer.
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x0b);
 
-        handle_rf_irq();
+        handle_rf_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             rf_irq_ack_writes(),
@@ -194,7 +186,7 @@ mod tests {
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, both_interrupts);
         FakeMmio::set_reg8(REG_RF_RX_STATUS, 0x0b);
 
-        handle_rf_irq();
+        handle_rf_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             rf_irq_ack_writes(),
@@ -209,7 +201,7 @@ mod tests {
         reset_rf_state();
         FakeMmio::set_reg16(REG_RF_IRQ_STATUS, 0);
 
-        handle_rf_irq();
+        handle_rf_irq::<crate::coex::TestRadioCoexistence>();
 
         assert!(
             rf_irq_ack_writes().is_empty(),
@@ -222,16 +214,15 @@ mod tests {
     // ================================================================================
 
     /// Tests that the system timer source is cleared before dispatching, and that
-    /// the advertising state handler runs and reports nothing to the composition root.
+    /// the advertising state handler runs.
     #[test]
     fn test_handle_ble_system_timer_irq_clears_source_and_dispatches_advertising() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
         FakeMmio::set_reg32(0x740, 10_000);
 
-        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
+        handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
-        assert_eq!(event, BleConnectionEvent::None);
         assert_eq!(
             FakeMmio::reg32(REG_IRQ_SRC),
             FLD_IRQ::SYSTEM_TIMER.bits(),
@@ -256,35 +247,31 @@ mod tests {
         );
     }
 
-    /// Tests dispatch to the connected state handler and that its event is
-    /// propagated unchanged to the caller.
+    /// Tests dispatch to the connected state handler through its observable
+    /// effects: an expired supervision timeout makes it configure the active link
+    /// and then hand the loss of the link to the coexistence implementation.
     #[test]
     fn test_handle_ble_system_timer_irq_dispatches_connected() {
         reset_rf_state();
         *CURRENT_RF_STATE.lock() = RfOperationState::Connected;
 
-        // The connected handler reports `OtaErrorReboot` when the supervision
-        // timeout expires while an OTA is in progress. Drive the real clock,
-        // timeout and OTA state through their seams instead of stubbing the
-        // handler.
         FakeMmio::set_reg32(0x740, 100_000);
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(0);
         SLAVE_CONNECTED_TICK.set(0);
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
+        handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
-        assert_eq!(
-            event,
-            BleConnectionEvent::OtaErrorReboot,
-            "the Connected arm must propagate the connection event unchanged"
-        );
         // The handler body really ran: it configures the link for an active
         // connection before it checks the timeout.
         assert_eq!(
             crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
             BlePeripheralLinkState::Connected,
             "the connected handler must configure the active link state"
+        );
+        assert_eq!(
+            crate::coex::TestRadioCoexistence::link_disconnects(),
+            1,
+            "the connected arm must report the lost link"
         );
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
@@ -294,14 +281,12 @@ mod tests {
     }
 
     /// Tests dispatch to the receiving and mesh-listening state handlers.
-    /// Neither of them reports anything to the composition root.
     #[test]
     fn test_handle_ble_system_timer_irq_dispatches_receiving_and_mesh_listening() {
         reset_rf_state();
 
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-        let receiving_event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
-        assert_eq!(receiving_event, BleConnectionEvent::None);
+        handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
         // The receive handler reconfigures the radio for the next connection
         // event and hands over to the connected state.
         assert_eq!(
@@ -311,8 +296,7 @@ mod tests {
         );
 
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
-        let mesh_event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
-        assert_eq!(mesh_event, BleConnectionEvent::None);
+        handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
         assert_eq!(
             crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
             BlePeripheralLinkState::Mesh,
@@ -320,15 +304,13 @@ mod tests {
         );
     }
 
-    /// Tests that the idle state clears the source, runs no state handler and
-    /// reports nothing to the composition root.
+    /// Tests that the idle state clears the source and runs no state handler.
     #[test]
     fn test_handle_ble_system_timer_irq_idle_runs_no_state_handler() {
         reset_rf_state();
 
-        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
+        handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
-        assert_eq!(event, BleConnectionEvent::None);
         assert_eq!(
             FakeMmio::reg32(REG_IRQ_SRC),
             FLD_IRQ::SYSTEM_TIMER.bits(),

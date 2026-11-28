@@ -86,9 +86,9 @@ use crate::ble::connection::{
 };
 use crate::ble::flash_config::rf_update_conn_para;
 use crate::ble::pair::pair_enc_packet;
-use crate::callbacks::{dispatch_ota_snapshot, on_light_data, on_light_response, on_uart_mesh_rx};
+use crate::callbacks::{on_light_data, on_light_response, on_uart_mesh_rx};
 use crate::facade::radio_config;
-use crate::gatt::attribute::l2cap_att_handler;
+use crate::gatt::attribute::l2cap_att_handler_with;
 use crate::rf::drv_8266::{DEVICE_ADDRESS, PKT_EMPTY};
 use crate::types::*;
 use mesh_protocol::mesh_types::*;
@@ -318,12 +318,13 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet) {
         .for_each(|v| v.notify_ok_flag = true);
 }
 
-/// Classifies operation codes as notify request types with OTA state awareness.
+/// Classifies operation codes as notify request types, respecting the
+/// coexistence implementation's auxiliary-RX gate.
 ///
-/// This function implements operation code classification for request packets,
-/// with special handling for OTA (Over-The-Air) update states. It ensures that
-/// normal request processing is suspended during firmware updates to prevent
-/// interference with the critical OTA process.
+/// This function implements operation code classification for request packets.
+/// It asks the coexistence implementation whether auxiliary reception is allowed
+/// right now, and suspends normal request processing when it is not, so a
+/// transfer the platform owns keeps exclusive access to the channel.
 ///
 /// # Request Classification Algorithm
 ///
@@ -334,32 +335,25 @@ fn req_cmd_set_notify_ok_flag(opcode: u8, cmd_pkt: &Packet) {
 /// - **User Requests**: LGT_CMD_USER_NOTIFY_REQ for custom notifications
 /// - **OTA Requests**: LGT_CMD_START_OTA_REQ, LGT_CMD_OTA_DATA_REQ, LGT_CMD_END_OTA_REQ
 ///
-/// # OTA State Protection
-///
-/// During OTA updates, the function returns false for all requests to:
-/// - Prevent normal operations from interfering with firmware updates
-/// - Ensure OTA process has exclusive access to communication resources
-/// - Maintain system stability during critical update operations
-/// - Avoid potential conflicts between OTA and normal mesh traffic
-///
 /// # Design Rationale
 ///
 /// Request classification enables:
 /// - Different handling paths for requests vs. responses
 /// - Appropriate acknowledgment and notification processing
-/// - Protocol flow control during special states (OTA)
+/// - Protocol flow control while auxiliary reception is suspended
 /// - Resource protection for critical operations
 ///
 /// # Parameters
 /// * `value` - Operation code to classify
 ///
 /// # Returns
-/// * `true` if opcode represents a notify request (and OTA is not in progress)
-/// * `false` if opcode is not a request or OTA update is active
-pub fn rf_link_is_notify_req(value: u8) -> bool {
-    // Suspend normal request processing during OTA updates
-    if dispatch_ota_snapshot().in_progress {
-        return false; // All requests disabled during OTA
+/// * `true` if opcode represents a notify request (and auxiliary RX is allowed)
+/// * `false` if opcode is not a request or auxiliary RX is suspended
+pub fn rf_link_is_notify_req<C: RadioCoexistence>(value: u8) -> bool {
+    // The policy lives in the platform: the radio only asks whether it may
+    // service auxiliary traffic at this point.
+    if !C::allow_aux_rx() {
+        return false; // All requests disabled while auxiliary RX is suspended
     }
 
     [
@@ -753,7 +747,9 @@ pub fn rf_link_rc_data<C: RadioCoexistence>(packet: &mut Packet) {
         on_light_data(packet);
 
         // ACKNOWLEDGMENT GENERATION: Create ACK for non-notify requests that require it
-        if !rf_link_is_notify_req(op) && packet.mesh().internal_par1[INTERNAL_PAR_SEND_ACK] != 0 {
+        if !rf_link_is_notify_req::<C>(op)
+            && packet.mesh().internal_par1[INTERNAL_PAR_SEND_ACK] != 0
+        {
             // Prepare acknowledgment packet
             let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
 
@@ -828,7 +824,7 @@ pub fn rf_link_rc_data<C: RadioCoexistence>(packet: &mut Packet) {
     let mut slave_read_status_response = device_match;
 
     // Prevent duplicate processing of notification requests
-    if rf_link_is_notify_req(op) {
+    if rf_link_is_notify_req::<C>(op) {
         if req_cmd_is_notify_ok(op, packet) {
             // Request already processed - suppress duplicate response
             slave_read_status_response = false;
@@ -853,7 +849,7 @@ pub fn rf_link_rc_data<C: RadioCoexistence>(packet: &mut Packet) {
     }
 
     // NOTIFICATION RESPONSE GENERATION: Create response packets for notify requests
-    if rf_link_is_notify_req(op) && slave_read_status_response {
+    if rf_link_is_notify_req::<C>(op) && slave_read_status_response {
         let mut pkt_light_status = PKT_LIGHT_STATUS.lock();
 
         // Set response sequence number to match request
@@ -1128,7 +1124,7 @@ fn handle_ll_control_pdu(packet: &Packet) -> Option<Packet> {
     })
 }
 
-pub fn rf_link_slave_data(packet: &Packet, time: u32) {
+pub fn rf_link_slave_data<C: RadioCoexistence>(packet: &Packet, time: u32) {
     // Extract key packet header fields for processing decisions
     let header = packet.head();
     let rf_len = header.rf_len;
@@ -1206,7 +1202,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) {
     }
 
     // LL CONTROL PDUs are link-layer control frames, never ATT packets. Handle
-    // them before the ATT channel gate and before l2cap_att_handler.
+    // them before the ATT channel gate and before the ATT dispatcher.
     if is_ll_control_pdu(packet) {
         if let Some(res_pkt) = handle_ll_control_pdu(packet) {
             if let Err(()) = rf_link_add_tx_packet(&res_pkt) {
@@ -1217,7 +1213,7 @@ pub fn rf_link_slave_data(packet: &Packet, time: u32) {
     }
 
     // L2CAP/ATT PROTOCOL PROCESSING: Route packet through protocol stack
-    if let Some(res_pkt) = l2cap_att_handler(packet) {
+    if let Some(res_pkt) = l2cap_att_handler_with::<C>(packet) {
         // Queue the generated response for transmission. A full TX FIFO drops
         // it: this path is best-effort and the peer retries the ATT request, so
         // there is no recovery action and no logging seam in this crate.
@@ -1795,7 +1791,7 @@ mod tests {
         SLAVE_DATA_VALID.set(0);
         *GENERAL_MESSAGE_SEQUENCE_NUMBER.lock() = [0x01, 0x02, 0x03];
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0x04, 0x05, 0x06];
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
         // Reset PKT_LIGHT_DATA to clean state
         *PKT_LIGHT_DATA.lock() = Packet {
@@ -1987,45 +1983,79 @@ mod tests {
     // Tests for rf_link_is_notify_req function
     // ================================================================================
 
-    /// Tests request classification during normal operation.
+    /// Tests request classification while auxiliary RX is allowed.
     #[test]
     fn test_rf_link_is_notify_req_normal_operation() {
         reset_test_state();
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
-        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS));
-        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ));
-        assert!(rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR));
-        assert!(rf_link_is_notify_req(LGT_CMD_LIGHT_CONFIG_GRP));
-        assert!(rf_link_is_notify_req(LGT_CMD_USER_NOTIFY_REQ));
-        assert!(rf_link_is_notify_req(LGT_CMD_START_OTA_REQ));
-        assert!(rf_link_is_notify_req(LGT_CMD_OTA_DATA_REQ));
-        assert!(rf_link_is_notify_req(LGT_CMD_END_OTA_REQ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_READ_STATUS
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_GRP_REQ
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_CONFIG_DEV_ADDR
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_CONFIG_GRP
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_USER_NOTIFY_REQ
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_START_OTA_REQ
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_OTA_DATA_REQ
+        ));
+        assert!(rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_END_OTA_REQ
+        ));
     }
 
-    /// Tests request classification during OTA update.
+    /// Tests request classification while auxiliary RX is suspended by the
+    /// coexistence implementation.
     #[test]
-    fn test_rf_link_is_notify_req_during_ota() {
+    fn test_rf_link_is_notify_req_aux_rx_suspended() {
         reset_test_state();
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(false);
 
-        // All requests should be blocked during OTA
-        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_READ_STATUS));
-        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_GRP_REQ));
-        assert!(!rf_link_is_notify_req(LGT_CMD_CONFIG_DEV_ADDR));
-        assert!(!rf_link_is_notify_req(LGT_CMD_START_OTA_REQ));
+        // All requests are refused while auxiliary RX is suspended.
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_READ_STATUS
+        ));
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_GRP_REQ
+        ));
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_CONFIG_DEV_ADDR
+        ));
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_START_OTA_REQ
+        ));
     }
 
     /// Tests request classification for non-request opcodes.
     #[test]
     fn test_rf_link_is_notify_req_non_requests() {
         reset_test_state();
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
-        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_STATUS));
-        assert!(!rf_link_is_notify_req(LGT_CMD_DEV_ADDR_RSP));
-        assert!(!rf_link_is_notify_req(LGT_CMD_LIGHT_ONOFF));
-        assert!(!rf_link_is_notify_req(0xFF)); // Invalid opcode
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_STATUS
+        ));
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_DEV_ADDR_RSP
+        ));
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            LGT_CMD_LIGHT_ONOFF
+        ));
+        // Invalid opcode
+        assert!(!rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(
+            0xFF
+        ));
     }
 
     // ================================================================================
@@ -2617,7 +2647,7 @@ mod tests {
         let packet = create_test_packet(LGT_CMD_LIGHT_ONOFF, [0x01, 0x02, 0x03], 0x1234, 0x5678);
         let time = 12345678;
 
-        rf_link_slave_data(&packet, time);
+        rf_link_slave_data::<crate::coex::TestRadioCoexistence>(&packet, time);
     }
 
     /// Tests connection parameter update channel handling.
@@ -2628,7 +2658,7 @@ mod tests {
         packet.head_mut().chan_id = 5; // Channel 5 is for connection parameter updates
         let time = 12345678;
 
-        rf_link_slave_data(&packet, time);
+        rf_link_slave_data::<crate::coex::TestRadioCoexistence>(&packet, time);
 
         // Function should handle connection parameter updates
     }
@@ -2642,7 +2672,7 @@ mod tests {
         packet.head_mut().chan_id = 10; // Invalid channel (> 6)
         let time = 12345678;
 
-        rf_link_slave_data(&packet, time);
+        rf_link_slave_data::<crate::coex::TestRadioCoexistence>(&packet, time);
     }
 
     /// Tests zero-length packet handling.
@@ -2653,7 +2683,7 @@ mod tests {
         packet.head_mut().rf_len = 0;
         let time = 12345678;
 
-        rf_link_slave_data(&packet, time);
+        rf_link_slave_data::<crate::coex::TestRadioCoexistence>(&packet, time);
 
         // void function: no return value to check
     }
@@ -2701,7 +2731,7 @@ mod tests {
         BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.set(0);
         SLAVE_CHN_MAP.lock().fill(0);
 
-        rf_link_slave_data(&packet, time);
+        rf_link_slave_data::<crate::coex::TestRadioCoexistence>(&packet, time);
 
         // Verify timing state updated (channel map update sets timestamp to 1)
 
@@ -3944,7 +3974,7 @@ mod tests {
         .expect("mesh fixture must parse");
 
         reset_test_state();
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
         for key in [
             "mesh.notify_req.1a",
@@ -3960,7 +3990,7 @@ mod tests {
             let suffix = key.rsplit('.').next().unwrap();
             let opcode = u8::from_str_radix(suffix, 16).unwrap();
             assert!(
-                rf_link_is_notify_req(opcode),
+                rf_link_is_notify_req::<crate::coex::TestRadioCoexistence>(opcode),
                 "notify request opcode 0x{suffix}"
             );
         }

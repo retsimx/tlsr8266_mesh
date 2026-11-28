@@ -16,7 +16,7 @@
 //! ## Key Responsibilities:
 //! - BLE connection states, timing synchronization, mesh packet processing
 //! - Advertisement and scan response handling, connection state management
-//! - OTA updates, RF channel hopping and access code management
+//! - RF channel hopping and access code management
 //!
 //! ## BLE Specification Compliance:
 //! This implementation follows BLE 4.0+ specifications for:
@@ -40,7 +40,7 @@ pub use mesh::mesh_node_report_status;
 pub use advertisement::{get_ble_advertisement_channel_count, handle_ble_advertisement_state};
 pub use connection::{
     cleanup_ble_disconnection, handle_ble_connected_state, handle_ble_connection_parameter_updates,
-    process_queued_status_responses, BleConnectionEvent,
+    process_queued_status_responses,
 };
 pub use mesh::{configure_rf_for_mesh_listening, handle_mesh_listening_state};
 pub use packet_handling::{handle_rf_packet_reception, handle_rf_transmission_complete};

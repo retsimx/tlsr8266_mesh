@@ -1,9 +1,10 @@
 //! Pure, hardware-free OTA chunk validation.
 //!
-//! The save path in [`super::rf_link_slave_data_ota_save`] used to carry four
-//! hand-written `if`/`else` arms that decided the same four outcomes this
-//! module returns. They live here instead so the index/size rules have one
-//! source of truth and can be exercised without a flash device or a clock.
+//! Ported verbatim from the firmware's `rust/src/ota/fsm.rs`. The save path used
+//! to carry four hand-written `if`/`else` arms that decided the same four
+//! outcomes this module returns; they live here instead so the index/size rules
+//! have one source of truth and can be exercised without a flash device or a
+//! clock.
 
 /// What the save path should do with one staged OTA packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,12 +22,12 @@ pub enum OtaChunkDecision {
 /// Decide what to do with one staged OTA packet.
 ///
 /// `n_data_len == 0` is the final (header-only) packet. `current_flash_addr` is
-/// the write cursor *before* this packet, `packet_len` the payload size (8 mesh,
-/// 16 BLE bridge) and `max_fw_bytes` the staging-area bound.
+/// the write cursor *before* this packet, `packet_len` the payload size (8 mesh
+/// and UART, 16 GATT bridge) and `max_fw_bytes` the staging-area bound.
 ///
 /// `wrapping_add(1)` reproduces the device's release-mode `u16 + 1`: an OTA that
 /// ends at index `0xffff` continues at 0. Resetting the cursor for a fresh
-/// transfer is C-13 (#75), not this validator's job.
+/// transfer is a session concern, not this validator's job.
 ///
 /// `current_flash_addr.saturating_add(packet_len)` keeps the bound total defined
 /// for a corrupt or over-max cursor: the legacy release build wrapped the sum
@@ -65,7 +66,6 @@ pub fn evaluate_chunk(
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
     use super::*;
 

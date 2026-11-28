@@ -2178,11 +2178,11 @@ class TestUnsafeRatchet(unittest.TestCase):
         self.assertEqual(
             check_layering.MAX_PRODUCTION_UNSAFE_BY_CRATE,
             {
-                "tlsr8266_mesh": 16,
+                "tlsr8266_mesh": 14,
                 "tlsr8266-pac": 6,
                 "tlsr8266-hal": 16,
                 "tlsr8266-radio": 22,
-                "tlsr8266-platform": 0,
+                "tlsr8266-platform": 2,
                 "mesh-protocol": 45,
             },
         )

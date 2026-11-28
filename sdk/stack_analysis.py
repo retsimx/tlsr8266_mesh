@@ -24,24 +24,36 @@ Model and caveats (reported alongside the result):
     ``bl`` edge to walk, so the known dispatchers are declared explicitly in
     ``INDIRECT_EDGES`` (caller substring -> callee substrings, resolved against
     the linked symbols). That covers every fn-pointer seam in the firmware: the
-    app callback seam, the OTA ``OtaHooks`` / ``OtaRadioOps`` seam, the light
-    subsystem's status-update hook (``light::notify_status_update``), and the
-    ``mesh`` / ``logging`` / ``uart`` seams C-8 (#70) introduced
-    (``MeshEventHooks``, ``LogSinks``, ``UartTxOps`` and the UART command
-    handler). C-10 (#72) moved the app callback dispatchers and the OTA radio
-    providers into ``tlsr8266-radio``, so those symbols now start with the
-    radio crate's prefix; F-6 staging now targets tlsr8266-platform and the
-    matched against the linked symbol names rather than module paths. An
-    indirect dispatch pushes a return address, so it is modelled as a *normal*
-    call, never a tail call. Every entry must resolve to exactly one function;
-    otherwise the gate fails rather than silently scoring the missing callee as
-    0 B (which is what ``longest_path`` does with an unknown name).
+    app callback seam, the light subsystem's status-update hook
+    (``light::notify_status_update``), and the ``mesh`` / ``logging`` / ``uart``
+    seams C-8 (#70) introduced (``MeshEventHooks``, ``LogSinks``,
+    ``UartTxOps`` and the UART command handler). C-10 (#72) moved the app
+    callback dispatchers into ``tlsr8266-radio``, so those symbols carry the
+    radio crate's prefix; the table is matched against the linked symbol names
+    rather than module paths. F-7 (#118) moved OTA wholesale into
+    ``tlsr8266-platform`` behind static ``<P: PlatformProduct>`` /
+    ``<C: RadioCoexistence>`` monomorphisations, so the OTA ``OtaHooks`` /
+    ``OtaRadioOps`` fn-pointer seams are *gone*: the table is now 13 legacy
+    edges and carries no OTA row. An indirect dispatch pushes a return address,
+    so it is modelled as a *normal* call, never a tail call. Every entry must
+    resolve to exactly one function; otherwise the gate fails rather than
+    silently scoring the missing callee as 0 B (which is what ``longest_path``
+    does with an unknown name).
+  * The ``.ram_code`` boot-copy gate (``check_ram_reachability``) is separate
+    from the stack model and fails closed: it is a reachability walk rooted at
+    the boot OTA entry point, not a whole-image claim. A misspelled or inlined
+    root, a root outside ``.ram_code``, a reachable callee in any non-``.ram_code``
+    section (or in no known section when ELF sections were supplied), a
+    reachable indirect branch, and a reachable ``.word`` literal-pool entry
+    pointing into flash are all violations. Flash code must survive the copy
+    loop erasing sector 0, so an unproven chain is a build failure, never a
+    silent pass.
 
 Usage:
     python3 sdk/stack_analysis.py [--elf _build/lightblemesh] [--top 15]
 
 Strict GATT/project-indirect modeling is the direct-CLI default. Pass
-``--legacy`` only to opt out to the compatibility 21-edge graph.
+``--legacy`` only to opt out to the compatibility 13-edge graph.
 
 It also acts as a build gate: it derives the main/IRQ stack budgets from the
 ELF's linker symbols and exits non-zero if either margin drops below
@@ -90,6 +102,14 @@ INDIRECT_RE = re.compile(
     r"(?:0x)?[0-9a-fA-F]+\b(?!\s+<))"
 )
 INSTRUCTION_ADDRESS_RE = re.compile(r"^\s*([0-9a-fA-F]+):")
+# `llvm-objdump` prints a literal pool as raw `.word` lines inside (or right
+# after) the function body: `     45c: 61 00 80 00  \t.word\t0x00800061`.
+# The boot-copy gate needs those constants: a pool entry that lands in flash is
+# a pointer the copy loop cannot follow once sector 0 is erased.
+WORD_RE = re.compile(
+    r"^\s*([0-9a-fA-F]+):\s+[0-9a-fA-F]{2}(?:\s+[0-9a-fA-F]{2})*\s+"
+    r"\.word\s+(?:0x)?([0-9a-fA-F]+)\s*$"
+)
 
 # Dispatchers that reach the application through a function pointer, so the
 # disassembly contains only a `bx rN` and no `bl` edge to the real callee.
@@ -102,17 +122,17 @@ INSTRUCTION_ADDRESS_RE = re.compile(r"^\s*([0-9a-fA-F]+):")
 # stale/ambiguous entry is a hard gate failure (see ``apply_indirect_edges``)
 # instead of a silently missing edge.
 #
-# The OTA seam is the same shape and therefore needs the same entries:
-# ``OtaHooks`` (``callbacks.rs`` in the radio crate) and ``OtaRadioOps``
-# (``ota/mod.rs``) are plain structs of ``fn`` pointers registered at boot, so
-# each of the eight seam calls compiles to a ``bx rN`` and its real callee — the
-# OTA write path, the flash save loop, the platform packet-window staging shims —
-# would otherwise be scored as 0 B, hiding an OTA frame from both stack maxima.
-#
 # C-8 (#70) added the last four subsystems' seams, so every fn-pointer slot in
 # the firmware is modelled: ``MeshEventHooks`` (`mesh`), ``LogSinks``
 # (`logging`), ``UartTxOps`` + the command handler (`uart`). The last block
 # below is those entries, in registration order.
+#
+# F-7 (#118) deleted the OTA seam entirely: ``OtaHooks`` / ``OtaRadioOps`` are
+# gone, OTA lives in ``tlsr8266-platform`` behind static ``<P>``/``<C>``
+# monomorphisations, and the radio crate keeps no OTA policy, state or hooks. So
+# the OTA rows that used to make 21 edges are deleted here too, and the table is
+# 13 entries. A row for a symbol that no longer exists is a hard gate failure
+# (``_resolve_one``), so leaving them in would fail every build.
 INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "emit_light_event": ("rf_link_light_event_callback",),
     "on_mesh_pair_proc": ("mesh_pair_proc_hook",),
@@ -120,14 +140,6 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "on_light_response": ("rf_link_response_callback",),
     "on_uart_mesh_rx": ("uart_mesh_rx_hook",),
     "notify_status_update": ("ll_device_status_update",),
-    "dispatch_ota_write": ("on_gatt_ota_packet",),
-    "dispatch_ota_snapshot": ("ota_status_snapshot_impl",),
-    "dispatch_ota_terminate": ("ota_request_termination_impl",),
-    "dispatch_ota_tick": ("ota_tick_timeout_1s_impl",),
-    "radio_stage_pkt": ("stage_ota_packet",),
-    "radio_read_pkt": ("read_staged_ota_packet",),
-    "radio_terminate_tx": ("ota_send_terminate_hook",),
-    "radio_begin_gatt_ota": ("tlsr8266_ota_begin_gatt_hook",),
     "dispatch_mesh_light_event": ("rf_link_light_event_callback",),
     "publish_light_status": ("tlsr8266_mesh::light::device_status_update",),
     "dispatch_uart_mesh_rx": ("uart_mesh_rx_hook",),
@@ -180,6 +192,8 @@ class Func:
     indirect: bool = False  # contains an indirect branch (bx rN / blx/tjex)
     section: str = ""  # .ram_code, .text, .rodata, or another ELF section
     indirect_insts: list[tuple[int, str, str]] = field(default_factory=list)
+    # (address, value) for every inline `.word` literal-pool entry in the body.
+    literals: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def indirect_sites(self) -> list[tuple[int, str, str]]:
@@ -245,6 +259,12 @@ def parse_functions(disasm: str) -> dict[str, Func]:
         add = ADD_RE.search(line)
         if add:
             sp_off = max(0, sp_off - int(add.group(1), 0))
+
+        word = WORD_RE.match(line)
+        if word:
+            current.literals.append(
+                (int(word.group(1), 16), int(word.group(2), 16))
+            )
 
         call = CALL_RE.search(line)
         if call:
@@ -693,12 +713,20 @@ def parse_elf_sections(readelf_text: str) -> dict[str, tuple[int, int]]:
     output and for a small synthetic ``objdump -h``/section fixture.  It returns
     ``{section_name: (start_address, size)}`` so function addresses can be
     classified without adding a dependency.
+
+    readelf rows are filtered to ``SHF_ALLOC`` sections: only those occupy the
+    address space.  A non-allocatable section such as ``.symtab`` reports
+    ``sh_addr = 0`` with a size that spans most of the file, so keeping it would
+    make ``classify_function_sections`` label address ``0x1e0e`` as ``.symtab``
+    instead of ``.text``.  The ``objdump -h`` and synthetic fixtures carry no
+    flag column, so they are kept as written.
     """
     sections: dict[str, tuple[int, int]] = {}
 
     readelf_re = re.compile(
         r"^\s*\[\s*\d+\]\s+(\.[^\s]+)\s+\S+\s+"
-        r"([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+([0-9a-fA-F]+)"
+        r"([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+([0-9a-fA-F]+)\s+"
+        r"[0-9a-fA-F]+\s+(.*)$"
     )
     objdump_re = re.compile(
         r"^\s*\d+\s+(\.[^\s]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)"
@@ -711,6 +739,12 @@ def parse_elf_sections(readelf_text: str) -> dict[str, tuple[int, int]]:
     for line in readelf_text.splitlines():
         match = readelf_re.match(line)
         if match:
+            # `Flg Lk Inf Al` follows the entry size; a blank flags column means
+            # the first trailing token is numeric (`Lk`), i.e. not allocatable.
+            trailing = match.group(4).split()
+            flags = trailing[0] if trailing else ""
+            if "A" not in flags or not flags.isalpha():
+                continue
             name = match.group(1)
             sections[name] = (_parse_hex(match.group(2)), _parse_hex(match.group(3)))
             continue
@@ -833,18 +867,110 @@ def _is_flash_or_rodata_section(name: str) -> bool:
     )
 
 
+# Stable, self-describing pseudo-callee labels for the non-edge violations, so a
+# caller never has to guess which half of the ``(caller, callee, section)``
+# tuple carries the reason.
+ROOT_VIOLATION = "<root>"
+INDIRECT_VIOLATION = "<indirect>"
+LITERAL_POOL_VIOLATION = "<literal-pool>"
+UNKNOWN_SECTION = "<unknown>"
+
+# `llvm-objdump` renders a branch to a local label as `<enclosing_symbol+0xNN>`
+# rather than a named function, so the callee has to be resolved through the
+# base symbol plus the offset before it can be classified.
+OFFSET_LABEL_RE = re.compile(r"^(?P<base>.+?)(?P<sign>[+-])0x(?P<offset>[0-9a-fA-F]+)$")
+
+
+def _section_of_address(
+    addr: int, normalized: dict[str, tuple[int, int]]
+) -> str:
+    """Return the smallest ELF section containing ``addr``, or ``""``."""
+    matches: list[tuple[str, int]] = []
+    for name, (start, size) in normalized.items():
+        if size > 0 and start <= addr < start + size:
+            matches.append((name, size))
+    if not matches:
+        return ""
+    return min(matches, key=lambda item: item[1])[0]
+
+
+def _offset_label_address(
+    name: str, funcs: dict[str, Func], symbols: dict[str, int] | None
+) -> int | None:
+    """Resolve ``<base_symbol+0xNN>`` to an absolute address, or ``None``."""
+    match = OFFSET_LABEL_RE.match(name)
+    if match is None:
+        return None
+    base = match.group("base")
+    offset = int(match.group("offset"), 16)
+    if match.group("sign") == "-":
+        offset = -offset
+    if symbols is not None and base in symbols:
+        return symbols[base] + offset
+    if base in funcs:
+        return funcs[base].addr + offset
+    return None
+
+
+def _literal_target(
+    value: int,
+    normalized: dict[str, tuple[int, int]],
+    symbol_addresses: frozenset[int] | None = None,
+) -> str:
+    """Return the flash section a literal-pool value points into, or ``""``.
+
+    ``.rodata``/``.init`` hold data, so an interior address there is a real
+    pointer (a string base, a table entry) and is flagged on range alone.
+    ``.text`` holds code, where the only pointer a pool can legitimately carry
+    is a function address — always a defined symbol.  A bare integer that merely
+    ranges over ``.text`` (``flash_read_page`` keeps its 10000-iteration timeout
+    in its pool as ``.word 0x2710``) is *not* a reference, so ``.text`` values
+    are anchored on the symbol table.  With no symbol table available the gate
+    fails closed and flags the range instead.
+    """
+    matches: list[tuple[str, int]] = []
+    for name, (start, size) in normalized.items():
+        if size <= 0 or not _is_flash_or_rodata_section(name):
+            continue
+        if not (start <= value < start + size):
+            continue
+        if name.startswith(".text") and symbol_addresses is not None:
+            if value not in symbol_addresses:
+                continue
+        matches.append((name, size))
+    if not matches:
+        return ""
+    return min(matches, key=lambda item: item[1])[0]
+
+
 def check_ram_reachability(
     funcs: dict[str, Func],
     sections: dict[str, tuple[int, int] | dict[str, int] | int] | None = None,
     symbols: dict[str, int] | None = None,
     root_pattern: str | tuple[str, ...] | list[str] = RAM_REACHABILITY_ROOT_PATTERN,
 ) -> list[tuple[str, str, str]]:
-    """Return flash/rodata targets reached by RAM callers below a boot OTA root.
+    """Return every reason the rooted ``.ram_code`` boot path is unsafe.
+
+    The gate fails closed on all five shapes, each as a
+    ``(caller, callee, section)`` tuple:
+
+    1. ``(patterns, "<root>", ...)`` — the root pattern matched *zero* functions.
+       A renamed or inlined boot copier must never silently pass.
+    2. ``(root, "<root>", ...)`` — a matched root is not in ``.ram_code``.
+    3. ``(caller, callee, <section>)`` — a reachable direct or tail callee lives
+       in ``.text``/``.rodata``/``.init``, any other non-``.ram_code`` section,
+       or in no known section while ELF sections were supplied
+       (``.ram_code`` is the *only* safe section once sector 0 is erased).
+    4. ``(func, "<indirect>", ...)`` — a reachable ``.ram_code`` function has an
+       indirect branch, so its real callee cannot be proven RAM-resident.
+    5. ``(func, "<literal-pool>", ...)`` — a reachable ``.ram_code`` function has
+       an inline ``.word`` literal-pool entry pointing into flash.
 
     The root pattern is a regex-friendly substring pattern.  String and sequence
     forms both support mangled ELF names (``handle_ota_update`` remains contained
     in the real Rust-v0 symbol).  Only the rooted call graph is walked; unrelated
-    IRQ/main RAM callers are deliberately outside this boot-erase safety check.
+    IRQ/main RAM callers (``irq_handler`` and friends) are deliberately outside
+    this boot-erase safety check.
     """
     # Backward-friendly positional form: a string/sequence in the legacy
     # ``sections`` slot is accepted as the root pattern.
@@ -857,6 +983,7 @@ def check_ram_reachability(
         classify_function_sections(funcs, sections)
 
     normalized = _normalize_section_map(sections)
+    sections_supplied = bool(normalized)
     patterns = (
         (root_pattern,)
         if isinstance(root_pattern, str)
@@ -878,29 +1005,38 @@ def check_ram_reachability(
 
     visited: set[str] = set()
     violations: list[tuple[str, str, str]] = []
+    symbol_addresses = (
+        frozenset(symbols.values()) if symbols is not None else None
+    )
+
+    # Fail closed on a stale root: no match means the copier was renamed or
+    # inlined, and a pass would be a pass over an empty set.
+    if not roots:
+        violations.append(
+            (
+                "/".join(patterns),
+                ROOT_VIOLATION,
+                "boot OTA root pattern matches no parsed function",
+            )
+        )
+        return violations
 
     def callee_section(name: str, callee: Func | None) -> str:
-        section = callee.section if callee is not None else ""
-        if section:
-            return section
+        if callee is not None and callee.section:
+            return callee.section
         if symbols is not None and name in symbols:
-            callee_addr = symbols[name]
-            matches: list[tuple[str, int, int]] = []
-            for section_name, (start, size) in normalized.items():
-                if size > 0 and start <= callee_addr < start + size:
-                    matches.append((section_name, start, size))
-            if matches:
-                return min(matches, key=lambda item: item[2])[0]
+            return _section_of_address(symbols[name], normalized)
+        offset_addr = _offset_label_address(name, funcs, symbols)
+        if offset_addr is not None:
+            return _section_of_address(offset_addr, normalized)
         return ""
 
-    def is_boot_reboot_leaf(name: str) -> bool:
-        return (
-            name == "reboot"
-            or name == "light_sw_reboot"
-            or "light_sw_reboot" in name
-            or name == "mcu_trigger_reboot"
-            or "mcu_trigger_reboot" in name
-        )
+    def indirect_reason(func: Func) -> str:
+        sites = func.indirect_insts or [(func.addr, "unknown", "")]
+        inst_addr, mnemonic, operand = sites[0]
+        operand_text = f" {operand}" if operand else ""
+        suffix = " (+more)" if len(sites) > 1 else ""
+        return f"{mnemonic}{operand_text} at 0x{inst_addr:08x}{suffix}"
 
     def visit(caller_name: str) -> None:
         if caller_name in visited:
@@ -910,24 +1046,82 @@ def check_ram_reachability(
         if caller is None or not _is_ram_section(caller.section):
             return
 
+        # 4. An indirect branch has no provable target, so it cannot be shown to
+        # stay in RAM after sector 0 is erased.
+        if caller.indirect:
+            violation = (caller_name, INDIRECT_VIOLATION, indirect_reason(caller))
+            if violation not in violations:
+                violations.append(violation)
+
+        # 5. A literal-pool pointer into flash code/rodata is just as fatal.
+        for _pool_addr, value in caller.literals:
+            target = _literal_target(value, normalized, symbol_addresses)
+            if target:
+                violation = (
+                    caller_name,
+                    LITERAL_POOL_VIOLATION,
+                    f"{target} 0x{value:08x}",
+                )
+                if violation not in violations:
+                    violations.append(violation)
+
+        # 3. `.ram_code` is the only section that survives the erase.
         for callee_name, _is_tail in caller.calls:
             callee = funcs.get(callee_name)
             section = callee_section(callee_name, callee)
 
-            if section and _is_flash_or_rodata_section(section):
-                if section == ".text" and is_boot_reboot_leaf(callee_name):
-                    continue
-                violation = (caller_name, callee_name, section)
-                if violation not in violations:
-                    violations.append(violation)
-
-            if callee is not None and _is_ram_section(callee.section):
+            if _is_ram_section(section):
                 visit(callee_name)
+                continue
+
+            if section:
+                violation = (caller_name, callee_name, section)
+            elif sections_supplied:
+                violation = (caller_name, callee_name, UNKNOWN_SECTION)
+            else:
+                continue
+            if violation not in violations:
+                violations.append(violation)
 
     for root in sorted(roots):
+        root_func = funcs.get(root)
+        root_section = root_func.section if root_func is not None else ""
+        # 2. A root outside `.ram_code` would run from flash: the whole gate is
+        # meaningless for it.
+        if not _is_ram_section(root_section):
+            violations.append(
+                (
+                    root,
+                    ROOT_VIOLATION,
+                    f"root is not in .ram_code (section {root_section or UNKNOWN_SECTION})",
+                )
+            )
+            continue
         visit(root)
 
     return violations
+
+
+def _describe_violation(caller: str, callee: str, section: str) -> str:
+    """Render one reachability violation so the reason is never ambiguous."""
+    if callee == ROOT_VIOLATION:
+        return f"boot OTA root {caller!r} is unusable: {section}"
+    if callee == INDIRECT_VIOLATION:
+        return f".ram_code boot function {caller!r} has an indirect branch ({section})"
+    if callee == LITERAL_POOL_VIOLATION:
+        return (
+            f".ram_code boot function {caller!r} has a literal-pool pointer into "
+            f"flash ({section})"
+        )
+    if section == UNKNOWN_SECTION:
+        return (
+            f".ram_code caller {caller!r} reaches {callee!r} in no known ELF "
+            f"section (cannot prove it is RAM-resident)"
+        )
+    return (
+        f".ram_code caller {caller!r} reaches flash/readonly target "
+        f"{callee!r} in {section}"
+    )
 
 
 def validate_ram_reachability(
@@ -940,8 +1134,7 @@ def validate_ram_reachability(
     violations = check_ram_reachability(funcs, sections, symbols, root_pattern)
     if violations:
         messages = [
-            f".ram_code caller {caller!r} reaches flash/readonly target "
-            f"{callee!r} in {section}"
+            _describe_violation(caller, callee, section)
             for caller, callee, section in violations
         ]
         raise RamReachabilityError("\n".join(messages))

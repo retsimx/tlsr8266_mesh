@@ -4,11 +4,36 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use mesh_protocol::mesh_types::MESH_NODE_MAX_NUM;
-use mesh_protocol::packet_types::{Packet, PacketL2capHead};
+use mesh_protocol::packet_types::{Packet, PacketAttData, PacketL2capHead};
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_radio::StatusEnqueueOutcome;
 
 pub const PACKET_WINDOW_SLOTS: usize = 16;
+
+/// Bytes of ATT payload a staged OTA frame can carry.
+///
+/// One `PacketAttData` is a 10-byte L2CAP head, three address bytes and this
+/// 23-byte payload, so a staged slot fits the window's existing `Packet` array
+/// exactly.
+pub const OTA_SLOT_DATA_MAX: usize = 23;
+
+/// One OTA frame as the engine sees it: no `Packet`, no union view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagedOtaSlot {
+    /// L2CAP length carried by the frame head; peer-controlled.
+    pub l2cap_len: u16,
+    /// ATT payload, zero-padded to [`OTA_SLOT_DATA_MAX`].
+    pub data: [u8; OTA_SLOT_DATA_MAX],
+}
+
+impl StagedOtaSlot {
+    pub const fn empty() -> Self {
+        Self {
+            l2cap_len: 0,
+            data: [0; OTA_SLOT_DATA_MAX],
+        }
+    }
+}
 
 const _: [(); 48] = [(); size_of::<Packet>()];
 const _: [(); 768] = [(); size_of::<[Packet; PACKET_WINDOW_SLOTS]>()];
@@ -65,13 +90,22 @@ pub struct PacketWindow<const N: usize> {
 }
 
 const fn zero_packet() -> Packet {
+    // Initialise the whole 36-byte `PacketAttData` view, not only the 10-byte
+    // head: `read_staged_ota_slot` reads the payload back out of an empty slot,
+    // and an empty slot must not expose uninitialised union bytes.
     Packet {
-        head: PacketL2capHead {
-            dma_len: 0,
-            _type: 0,
-            rf_len: 0,
-            l2cap_len: 0,
-            chan_id: 0,
+        att_data: PacketAttData {
+            head: PacketL2capHead {
+                dma_len: 0,
+                _type: 0,
+                rf_len: 0,
+                l2cap_len: 0,
+                chan_id: 0,
+            },
+            att: 0,
+            hl: 0,
+            hh: 0,
+            dat: [0; OTA_SLOT_DATA_MAX],
         },
     }
 }
@@ -288,6 +322,47 @@ impl<const N: usize> PacketWindow<N> {
         }
     }
 
+    /// Stage one OTA frame at `idx` (wrapped by `N`), mode-gated like
+    /// [`Self::stage_ota_packet`].
+    ///
+    /// The frame is encoded into the window's *existing* `[Packet; N]` array:
+    /// `PacketAttData` is exactly a 10-byte L2CAP head, three address bytes and
+    /// the 23-byte [`OTA_SLOT_DATA_MAX`] payload, so a slot maps one-to-one onto
+    /// a packet-sized cell. No second staging array exists and no `Packet`
+    /// crosses into the OTA module.
+    pub fn stage_ota_slot(&self, idx: usize, slot: &StagedOtaSlot) {
+        let packet = Packet {
+            att_data: PacketAttData {
+                head: PacketL2capHead {
+                    l2cap_len: slot.l2cap_len,
+                    ..PacketL2capHead::default()
+                },
+                // The three address bytes stay zero, as the legacy staging did;
+                // the payload length is implied by `l2cap_len`, not stored.
+                dat: slot.data,
+                ..PacketAttData::default()
+            },
+        };
+        self.stage_ota_packet(idx, &packet);
+    }
+
+    /// Read one staged OTA frame back out at exactly `idx`.
+    ///
+    /// The window stores the wire frame, so the payload comes back padded to
+    /// [`OTA_SLOT_DATA_MAX`] and the length is implied by `l2cap_len`.
+    pub fn read_staged_ota_slot(&self, idx: usize) -> StagedOtaSlot {
+        let packet = self.read_staged_ota_packet(idx);
+        if idx >= N || self.mode.load(Ordering::Relaxed) != PacketWindowMode::Ota as u8 {
+            return StagedOtaSlot::empty();
+        }
+
+        let frame = packet.att_data();
+        StagedOtaSlot {
+            l2cap_len: frame.head.l2cap_len,
+            data: frame.dat,
+        }
+    }
+
     pub fn end_ota(&self) {
         let _transition = self.transition.lock();
 
@@ -351,13 +426,13 @@ pub fn begin_ota(
 }
 
 #[inline(never)]
-pub fn stage_ota_packet(idx: usize, pkt: &Packet) {
-    PACKET_WINDOW.stage_ota_packet(idx, pkt)
+pub fn stage_ota_slot(idx: usize, slot: &StagedOtaSlot) {
+    PACKET_WINDOW.stage_ota_slot(idx, slot)
 }
 
 #[inline(never)]
-pub fn read_staged_ota_packet(idx: usize) -> Packet {
-    PACKET_WINDOW.read_staged_ota_packet(idx)
+pub fn read_staged_ota_slot(idx: usize) -> StagedOtaSlot {
+    PACKET_WINDOW.read_staged_ota_slot(idx)
 }
 
 pub fn end_ota() {
@@ -518,18 +593,19 @@ mod tests {
     fn ota_stage_read_wrap_and_inactive_rejection() {
         let _serial = serial();
         reset_static();
+        let before = ota_dropped_count();
 
-        stage_ota_packet(0, &packet(10));
-        assert_eq!(ota_dropped_count(), 1);
+        PACKET_WINDOW.stage_ota_packet(0, &packet(10));
+        assert_eq!(ota_dropped_count(), before + 1);
 
         let claim = begin_ota(OtaClaimant::Mesh, || true).unwrap();
         assert_eq!(claim.claimant, OtaClaimant::Mesh);
-        stage_ota_packet(17, &packet(17));
-        assert_eq!(mark(read_staged_ota_packet(1)), 17);
-        assert_eq!(mark(read_staged_ota_packet(16)), 0);
+        PACKET_WINDOW.stage_ota_packet(17, &packet(17));
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(1)), 17);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(16)), 0);
 
         end_ota();
-        assert_eq!(mark(read_staged_ota_packet(1)), 0);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(1)), 0);
     }
 
     #[test]
@@ -565,14 +641,14 @@ mod tests {
 
         let gatt = begin_ota(OtaClaimant::Gatt, || true).unwrap();
         assert_eq!(active_ota_claimant(), Some(OtaClaimant::Gatt));
-        stage_ota_packet(0, &packet(0x1234));
+        PACKET_WINDOW.stage_ota_packet(0, &packet(0x1234));
 
         assert_eq!(
             begin_ota(OtaClaimant::Mesh, || true),
             Err(OtaBeginError::AlreadyClaimed)
         );
         assert_eq!(active_ota_claim(), Some(gatt));
-        assert_eq!(mark(read_staged_ota_packet(0)), 0x1234);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(0)), 0x1234);
 
         end_ota();
         let mesh = begin_ota(OtaClaimant::Mesh, || true).unwrap();
@@ -605,7 +681,7 @@ mod tests {
         reset_static();
 
         let claim = begin_ota(OtaClaimant::Gatt, || true).unwrap();
-        stage_ota_packet(4, &packet(444));
+        PACKET_WINDOW.stage_ota_packet(4, &packet(444));
         PACKET_WINDOW.read.store(7, Ordering::Relaxed);
         PACKET_WINDOW.write.store(9, Ordering::Relaxed);
 
@@ -620,7 +696,7 @@ mod tests {
         );
         assert_eq!(PACKET_WINDOW.read.load(Ordering::Relaxed), 7);
         assert_eq!(PACKET_WINDOW.write.load(Ordering::Relaxed), 9);
-        assert_eq!(mark(read_staged_ota_packet(4)), 444);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(4)), 444);
 
         end_ota();
     }
@@ -631,7 +707,7 @@ mod tests {
         reset_static();
 
         let first = begin_ota(OtaClaimant::Mesh, || true).unwrap();
-        stage_ota_packet(2, &packet(222));
+        PACKET_WINDOW.stage_ota_packet(2, &packet(222));
         end_ota();
         assert_eq!(active_ota_claim(), None);
         assert_eq!(
@@ -641,7 +717,7 @@ mod tests {
         assert_eq!(PACKET_WINDOW.read.load(Ordering::Relaxed), 0);
         assert_eq!(PACKET_WINDOW.write.load(Ordering::Relaxed), 0);
         assert_eq!(PACKET_WINDOW.record_index.load(Ordering::Relaxed), 0);
-        assert_eq!(mark(read_staged_ota_packet(2)), 0);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(2)), 0);
 
         let second = begin_ota(OtaClaimant::Gatt, || true).unwrap();
         assert_ne!(first.session, second.session);
@@ -675,7 +751,7 @@ mod tests {
         reset_static();
 
         let claim = begin_ota(OtaClaimant::Mesh, || true).unwrap();
-        stage_ota_packet(3, &packet(303));
+        PACKET_WINDOW.stage_ota_packet(3, &packet(303));
         stop_status_window();
 
         assert_eq!(active_ota_claim(), Some(claim));
@@ -683,7 +759,7 @@ mod tests {
             PACKET_WINDOW.mode.load(Ordering::Relaxed),
             PacketWindowMode::Ota as u8
         );
-        assert_eq!(mark(read_staged_ota_packet(3)), 303);
+        assert_eq!(mark(PACKET_WINDOW.read_staged_ota_packet(3)), 303);
         end_ota();
     }
 
@@ -717,11 +793,14 @@ mod tests {
         assert!(begin_ota(OtaClaimant::Uart, || true).is_ok());
 
         for idx in 0..8 {
-            stage_ota_packet(idx, &packet(idx as u32 + 500));
+            PACKET_WINDOW.stage_ota_packet(idx, &packet(idx as u32 + 500));
         }
 
         for idx in 0..8 {
-            assert_eq!(mark(read_staged_ota_packet(idx)), idx as u32 + 500);
+            assert_eq!(
+                mark(PACKET_WINDOW.read_staged_ota_packet(idx)),
+                idx as u32 + 500
+            );
         }
         end_ota();
     }
@@ -738,5 +817,50 @@ mod tests {
         window.stop_status_window();
         assert_eq!(window.status_dropped_count(), 0);
         assert_eq!(window.ota_dropped_count(), 0);
+    }
+
+    /// A staged OTA slot round-trips through the window's packet array: the
+    /// frame head and all 23 payload bytes come back byte-exact, and the index
+    /// wraps at the window depth.
+    #[test]
+    fn ota_slot_round_trips_through_the_packet_array() {
+        let _serial = serial();
+        reset_static();
+        assert!(begin_ota(OtaClaimant::Gatt, || true).is_ok());
+
+        let mut slot = StagedOtaSlot::empty();
+        slot.l2cap_len = 23;
+        for (i, byte) in slot.data.iter_mut().enumerate() {
+            *byte = i as u8 + 1;
+        }
+
+        stage_ota_slot(2, &slot);
+        let read = read_staged_ota_slot(2);
+        assert_eq!(read.l2cap_len, 23);
+        assert_eq!(read.data, slot.data);
+
+        stage_ota_slot(18, &slot);
+        assert_eq!(read_staged_ota_slot(2).data, slot.data);
+
+        end_ota();
+        assert_eq!(read_staged_ota_slot(2), StagedOtaSlot::empty());
+    }
+
+    /// Staging a slot outside an OTA claim is dropped and counted, exactly like
+    /// a raw packet.
+    #[test]
+    fn ota_slot_stage_outside_a_claim_is_dropped() {
+        let _serial = serial();
+        reset_static();
+        let before = ota_dropped_count();
+
+        stage_ota_slot(0, &StagedOtaSlot::empty());
+        assert_eq!(ota_dropped_count(), before + 1);
+        assert_eq!(read_staged_ota_slot(0), StagedOtaSlot::empty());
+
+        let _ = begin_ota(OtaClaimant::Mesh, || true);
+        stage_ota_slot(0, &StagedOtaSlot::empty());
+        assert_eq!(ota_dropped_count(), before + 1);
+        end_ota();
     }
 }

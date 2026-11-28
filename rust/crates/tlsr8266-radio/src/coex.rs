@@ -94,6 +94,12 @@ pub struct ConnectionSlot {
     pub next_connect_tick: u32,
     pub interval_ticks: u32,
     pub tx_ready: bool,
+    /// The current system tick, sampled once by the radio.
+    ///
+    /// The coexistence implementation needs an elapsed-time reference for its
+    /// own supervision countdown, so the radio hands the tick over instead of
+    /// letting the implementation read a register.
+    pub current_tick: u32,
 }
 
 /// Action to take for a connection slot.
@@ -102,7 +108,14 @@ pub enum ConnectionPlan {
     Continue,
     Transmit(Packet),
     Disconnect,
-    Reschedule { delay_us: u32 },
+    Reschedule {
+        delay_us: u32,
+    },
+    /// The implementation serviced this slot itself.
+    ///
+    /// The radio must reschedule the next connection event and return without
+    /// running bridge or mesh work for this slot.
+    SkipToNextEvent,
 }
 
 /// Timing context for one auxiliary listen slot.
@@ -145,6 +158,30 @@ pub trait RadioCoexistence: 'static {
 
     fn poll_deferred_att() -> Option<AttTxPacket>;
 
+    /// Whether auxiliary RF reception may run right now.
+    ///
+    /// The policy lives in the platform; the radio only asks whether it may
+    /// service an auxiliary frame at this point.
+    fn allow_aux_rx() -> bool;
+
+    /// Optional override for the BLE receive window, in microseconds.
+    ///
+    /// The policy lives in the platform; the radio only asks how long to keep
+    /// the receiver open, and `None` means "use the normal window".
+    fn receive_window_override_us() -> Option<u32>;
+
+    /// A bulk GATT write arrived on the writable attribute.
+    ///
+    /// The policy lives in the platform; the radio only hands over the ATT
+    /// payload.
+    fn on_bulk_gatt_write(l2cap_len: u16, payload: &[u8]);
+
+    /// A bulk GATT read was issued for the readable attribute.
+    ///
+    /// The policy lives in the platform; the radio only reports that the read
+    /// happened.
+    fn on_bulk_gatt_read();
+
     fn start_status_window() -> bool;
 
     fn stop_status_window();
@@ -160,7 +197,7 @@ pub trait RadioCoexistence: 'static {
 mod test_window {
     use super::*;
     use crate::types::{StatusRecord, MESH_NODE_MAX_NUM};
-    use core::sync::atomic::{AtomicBool, AtomicUsize};
+    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
     use mesh_protocol::packet_types::{PacketAttData, PacketL2capHead};
     use tlsr8266_hal::common::sync::CriticalSectionMutex;
 
@@ -168,6 +205,15 @@ mod test_window {
     static TEST_STATUS_READ: AtomicUsize = AtomicUsize::new(0);
     static TEST_STATUS_WRITE: AtomicUsize = AtomicUsize::new(0);
     static TEST_STATUS_RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
+    /// The plan `on_connection_slot` reports, encoded as 0 = Continue,
+    /// 1 = `SkipToNextEvent`, 2 = `Disconnect`, 3 = `Reschedule`.
+    static TEST_CONNECTION_PLAN: AtomicU8 = AtomicU8::new(0);
+    /// Number of `LinkEvent::Disconnected` notifications the radio delivered.
+    static TEST_LINK_DISCONNECTS: AtomicUsize = AtomicUsize::new(0);
+    /// What `allow_aux_rx` reports; defaults to "allowed".
+    static TEST_ALLOW_AUX_RX: AtomicBool = AtomicBool::new(true);
+    /// What `receive_window_override_us` reports; `0` means "no override".
+    static TEST_RECEIVE_WINDOW_OVERRIDE_US: AtomicUsize = AtomicUsize::new(0);
     static TEST_STATUS_PACKETS: CriticalSectionMutex<[Packet; 16]> = CriticalSectionMutex::new(
         [Packet {
             att_data: PacketAttData {
@@ -201,6 +247,10 @@ mod test_window {
             TEST_STATUS_READ.store(0, core::sync::atomic::Ordering::Relaxed);
             TEST_STATUS_WRITE.store(0, core::sync::atomic::Ordering::Relaxed);
             TEST_STATUS_RECORD_INDEX.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_CONNECTION_PLAN.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_LINK_DISCONNECTS.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_ALLOW_AUX_RX.store(true, core::sync::atomic::Ordering::Relaxed);
+            TEST_RECEIVE_WINDOW_OVERRIDE_US.store(0, core::sync::atomic::Ordering::Relaxed);
             TEST_STATUS_PACKETS.lock().fill(Packet {
                 att_data: PacketAttData::default(),
             });
@@ -241,6 +291,34 @@ mod test_window {
         pub(crate) fn packet(index: usize) -> Packet {
             TEST_STATUS_PACKETS.lock()[index]
         }
+
+        /// How many link-layer disconnects the radio reported.
+        pub(crate) fn link_disconnects() -> usize {
+            TEST_LINK_DISCONNECTS.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Allow (or suspend) auxiliary RF reception.
+        pub(crate) fn set_allow_aux_rx_for_test(allowed: bool) {
+            TEST_ALLOW_AUX_RX.store(allowed, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Program the receive-window override the next slot reports, in µs;
+        /// `0` restores "no override".
+        pub(crate) fn set_receive_window_override_for_test(us: u32) {
+            TEST_RECEIVE_WINDOW_OVERRIDE_US
+                .store(us as usize, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Program the plan the next `on_connection_slot` reports.
+        pub(crate) fn set_connection_plan_for_test(plan: ConnectionPlan) {
+            let encoded = match plan {
+                ConnectionPlan::Continue => 0,
+                ConnectionPlan::SkipToNextEvent => 1,
+                ConnectionPlan::Disconnect => 2,
+                ConnectionPlan::Transmit(_) | ConnectionPlan::Reschedule { .. } => 3,
+            };
+            TEST_CONNECTION_PLAN.store(encoded, core::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     impl RadioCoexistence for TestRadioCoexistence {
@@ -271,12 +349,19 @@ mod test_window {
             Ok(())
         }
 
-        fn on_link_event(_event: LinkEvent) -> LinkAction {
+        fn on_link_event(event: LinkEvent) -> LinkAction {
+            if event == LinkEvent::Disconnected {
+                TEST_LINK_DISCONNECTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
             LinkAction::None
         }
 
         fn on_connection_slot(_slot: ConnectionSlot) -> ConnectionPlan {
-            ConnectionPlan::Continue
+            match TEST_CONNECTION_PLAN.load(core::sync::atomic::Ordering::Relaxed) {
+                1 => ConnectionPlan::SkipToNextEvent,
+                2 => ConnectionPlan::Disconnect,
+                _ => ConnectionPlan::Continue,
+            }
         }
 
         fn on_aux_listen_slot(_slot: ListenSlot) -> RadioAction {
@@ -290,6 +375,21 @@ mod test_window {
         fn poll_deferred_att() -> Option<AttTxPacket> {
             None
         }
+
+        fn allow_aux_rx() -> bool {
+            TEST_ALLOW_AUX_RX.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn receive_window_override_us() -> Option<u32> {
+            match TEST_RECEIVE_WINDOW_OVERRIDE_US.load(core::sync::atomic::Ordering::Relaxed) {
+                0 => None,
+                us => Some(us as u32),
+            }
+        }
+
+        fn on_bulk_gatt_write(_l2cap_len: u16, _payload: &[u8]) {}
+
+        fn on_bulk_gatt_read() {}
 
         fn start_status_window() -> bool {
             TEST_STATUS_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -430,6 +530,7 @@ mod tests {
             next_connect_tick: 148,
             interval_ticks: 48,
             tx_ready: true,
+            current_tick: 120,
         };
         let listen_slot = ListenSlot {
             tick: 200,
@@ -448,6 +549,7 @@ mod tests {
         assert_eq!(queue_full.dropped_total, 3);
         assert_eq!(rx_context.channel, 39);
         assert!(connection_slot.tx_ready);
+        assert_eq!(connection_slot.current_tick, 120);
         assert_eq!(listen_slot.cycle, 2);
         assert_eq!(advertisement_slot.cycle, 3);
     }
@@ -474,8 +576,10 @@ mod tests {
             ConnectionPlan::Transmit(packet()),
             ConnectionPlan::Disconnect,
             ConnectionPlan::Reschedule { delay_us: 500 },
+            ConnectionPlan::SkipToNextEvent,
         ];
         assert!(matches!(plans[2], ConnectionPlan::Disconnect));
+        assert!(matches!(plans[4], ConnectionPlan::SkipToNextEvent));
 
         let att = AttTxPacket { packet: packet() };
         let att_copy = att;
@@ -535,6 +639,18 @@ mod tests {
             None
         }
 
+        fn allow_aux_rx() -> bool {
+            true
+        }
+
+        fn receive_window_override_us() -> Option<u32> {
+            None
+        }
+
+        fn on_bulk_gatt_write(_l2cap_len: u16, _payload: &[u8]) {}
+
+        fn on_bulk_gatt_read() {}
+
         fn start_status_window() -> bool {
             false
         }
@@ -582,6 +698,7 @@ mod tests {
                 next_connect_tick: 2,
                 interval_ticks: 1,
                 tx_ready: false,
+                current_tick: 2,
             }),
             ConnectionPlan::Continue
         ));
@@ -594,5 +711,16 @@ mod tests {
             RadioAction::Continue
         ));
         assert!(CompatRadio::poll_deferred_att().is_none());
+        assert!(
+            CompatRadio::allow_aux_rx(),
+            "the compatibility adapter keeps auxiliary RX enabled"
+        );
+        assert_eq!(
+            CompatRadio::receive_window_override_us(),
+            None,
+            "the compatibility adapter keeps the normal receive window"
+        );
+        CompatRadio::on_bulk_gatt_write(7, &[0; 7]);
+        CompatRadio::on_bulk_gatt_read();
     }
 }

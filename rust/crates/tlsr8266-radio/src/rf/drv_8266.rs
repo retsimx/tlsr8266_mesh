@@ -748,7 +748,7 @@ fn rf_link_slave_data_write_no_dec<C: RadioCoexistence>(data: &Packet) {
     BLE_PERIPHERAL_LINK_COMMAND.set(op);
 
     // For non-notification commands, handle the command directly
-    if !rf_link_is_notify_req(op) {
+    if !rf_link_is_notify_req::<C>(op) {
         // If a status read operation was in progress, stop it
         if SLAVE_READ_STATUS_BUSY.get() != 0 {
             rf_link_slave_read_status_stop::<C>();

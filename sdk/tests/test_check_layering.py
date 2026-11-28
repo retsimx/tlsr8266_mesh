@@ -33,14 +33,16 @@ CRATE_ROOT = REPO_ROOT / "rust" / "crates" / "mesh-protocol" / "src"
 PAC_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-pac" / "src"
 HAL_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-hal" / "src"
 RADIO_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-radio" / "src"
+PLATFORM_ROOT = REPO_ROOT / "rust" / "crates" / "tlsr8266-platform" / "src"
 
-# The five shipping roots and the Cargo package each one belongs to.
+# The six shipping roots and the Cargo package each one belongs to.
 SHIPPING_ROOTS = {
     SRC_ROOT: "tlsr8266_mesh",
     CRATE_ROOT: "mesh-protocol",
     PAC_ROOT: "tlsr8266-pac",
     HAL_ROOT: "tlsr8266-hal",
     RADIO_ROOT: "tlsr8266-radio",
+    PLATFORM_ROOT: "tlsr8266-platform",
 }
 
 
@@ -81,6 +83,7 @@ def _shipping_metadata() -> dict:
                     _cargo_dependency("tlsr8266-pac"),
                     _cargo_dependency("tlsr8266-hal"),
                     _cargo_dependency("tlsr8266-radio"),
+                    _cargo_dependency("tlsr8266-platform"),
                     _cargo_dependency("embassy-time"),
                     _cargo_dependency("critical-section"),
                     _cargo_dependency("futures", "dev"),
@@ -108,6 +111,17 @@ def _shipping_metadata() -> dict:
                     _cargo_dependency("tlsr8266-pac"),
                     _cargo_dependency("tlsr8266-hal"),
                     _cargo_dependency("mesh-protocol"),
+                    _cargo_dependency("heapless"),
+                ],
+            ),
+            _cargo_package(
+                "tlsr8266-platform",
+                [
+                    _cargo_dependency("tlsr8266-hal"),
+                    _cargo_dependency("tlsr8266-radio"),
+                    _cargo_dependency("mesh-protocol"),
+                    _cargo_dependency("critical-section"),
+                    _cargo_dependency("embassy-executor"),
                     _cargo_dependency("heapless"),
                 ],
             ),
@@ -142,7 +156,7 @@ class TestRealTrees(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # The no-argument run audits ~80 files in five roots, so the two tests
+        # The no-argument run audits ~80 files in six roots, so the two tests
         # that assert on its output share one run rather than paying twice.
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -161,9 +175,8 @@ class TestRealTrees(unittest.TestCase):
         )
 
     def test_default_crate_roots_cover_every_workspace_crate(self) -> None:
-        # C-4 added the HAL and C-10 (#72) the radio crate: the no-argument run
-        # audits the composition root plus these four, and a new crate must be
-        # added here in the same change that creates it.
+        # C-4 added the HAL, C-10 (#72) the radio crate, and F-5 the platform
+        # crate: the no-argument run audits the composition root plus these five.
         roots = [Path(item).resolve() for item in check_layering.DEFAULT_CRATE_ROOTS]
         self.assertEqual(
             roots,
@@ -172,14 +185,15 @@ class TestRealTrees(unittest.TestCase):
                 PAC_ROOT.resolve(),
                 HAL_ROOT.resolve(),
                 RADIO_ROOT.resolve(),
+                PLATFORM_ROOT.resolve(),
             ],
         )
 
     def test_real_trees_are_clean(self) -> None:
         # The no-argument run is what CI executes: the Cargo DAG, the
-        # composition root and all four workspace crates, zero violations.
+        # composition root and all five workspace crates, zero violations.
         self.assertEqual(self.exit_code, 0, self.stdout + self.stderr)
-        self.assertEqual(self.stdout.count("0 violations"), 6)
+        self.assertEqual(self.stdout.count("0 violations"), 7)
         self.assertEqual(self.stderr, "")
         # Every tree is named in the summary, relative to the repo, so a root
         # silently dropped from the default list fails here.
@@ -188,13 +202,14 @@ class TestRealTrees(unittest.TestCase):
 
     def test_real_tree_reports_every_pass(self) -> None:
         lines = self.stdout.splitlines()
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 7)
         self.assertTrue(lines[0].startswith("cargo dag OK"), lines[0])
         self.assertIn("rust src audit OK", lines[1])
         self.assertIn("mesh-protocol audit OK", self.stdout)
         self.assertIn("tlsr8266-pac audit OK", self.stdout)
         self.assertIn("tlsr8266-hal audit OK", self.stdout)
         self.assertIn("tlsr8266-radio audit OK", self.stdout)
+        self.assertIn("tlsr8266-platform audit OK", self.stdout)
 
     def test_every_real_tree_passes_the_universal_rules(self) -> None:
         # Direct audit of each tree, independent of the CLI summary.
@@ -204,6 +219,7 @@ class TestRealTrees(unittest.TestCase):
             PAC_ROOT: 2,
             HAL_ROOT: 20,
             RADIO_ROOT: 20,
+            PLATFORM_ROOT: 5,
         }
         for root, floor in floors.items():
             with self.subTest(root=str(root.relative_to(REPO_ROOT))):
@@ -297,6 +313,13 @@ class TestRealTrees(unittest.TestCase):
                     check_layering.production_code(text)
                 ),
                 f"{path} references the PAC in production code",
+            )
+        for path in check_layering.rust_files(str(PLATFORM_ROOT)):
+            text = Path(path).read_text(encoding="utf-8")
+            self.assertEqual(
+                check_layering.audit_platform_purity_source(text, path),
+                [],
+                f"{path} contains a forbidden platform term",
             )
         for subsystem in check_layering.LOGGING_MACRO_FORBIDDEN_SUBSYSTEMS:
             root = SRC_ROOT / subsystem
@@ -914,6 +937,22 @@ class TestCargoDag(unittest.TestCase):
         )
         self.assertIn("tlsr8266-hal", " ".join(item.violation for item in violations))
 
+    def test_platform_crate_may_not_reach_the_pac_or_firmware(self) -> None:
+        pac_violations = check_layering.audit_cargo_dag(
+            _metadata_with("tlsr8266-platform", _cargo_dependency("tlsr8266-pac"))
+        )
+        self.assertTrue(
+            any("tlsr8266-pac" in item.violation for item in pac_violations),
+            [item.violation for item in pac_violations],
+        )
+        firmware_violations = check_layering.audit_cargo_dag(
+            _metadata_with("tlsr8266-platform", _cargo_dependency("tlsr8266_mesh"))
+        )
+        self.assertTrue(
+            any("firmware crate" in item.violation for item in firmware_violations),
+            [item.violation for item in firmware_violations],
+        )
+
     def test_library_crate_depending_on_the_firmware_crate_fails(self) -> None:
         violations = check_layering.audit_cargo_dag(
             _metadata_with("tlsr8266-pac", _cargo_dependency("tlsr8266_mesh"))
@@ -1029,6 +1068,29 @@ class TestCargoDag(unittest.TestCase):
             set(check_layering.CARGO_DAG),
         )
         self.assertEqual(check_layering.audit_cargo_dag(metadata), [])
+
+
+class TestPlatformPurityRule(unittest.TestCase):
+    """The platform crate stays product-neutral and platform-only."""
+
+    def test_forbidden_terms_are_rejected(self) -> None:
+        text = _lines(
+            "use tlsr8266_pac::write_reg8;",
+            "use tlsr8266_mesh::light::decode;",
+            "pub struct LightProduct;",
+            "pub const LGT_CMD_SET_LIGHT: u8 = 1;",
+        )
+        violations = check_layering.audit_platform_purity_source(text, "rust/crates/tlsr8266-platform/src/lib.rs")
+        self.assertTrue(violations)
+        self.assertTrue(all(item.rule == "platform-purity" for item in violations))
+
+    def test_pure_contract_code_is_clean(self) -> None:
+        text = _lines(
+            "pub trait Product: 'static {}",
+            "pub struct Platform<P>(core::marker::PhantomData<P>);",
+        )
+        violations = check_layering.audit_platform_purity_source(text, "rust/crates/tlsr8266-platform/src/api.rs")
+        self.assertEqual(violations, [])
 
 
 class TestOtaPurityRule(_TempSrcTree):
@@ -2120,6 +2182,7 @@ class TestUnsafeRatchet(unittest.TestCase):
                 "tlsr8266-pac": 6,
                 "tlsr8266-hal": 16,
                 "tlsr8266-radio": 22,
+                "tlsr8266-platform": 0,
                 "mesh-protocol": 45,
             },
         )

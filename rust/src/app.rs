@@ -26,6 +26,7 @@ use crate::mesh::{
     mesh_security_enable, set_mesh_event_hooks, MeshEventHooks,
 };
 use crate::ota::{check_ota_area_startup, rf_mesh_data_ota, set_ota_radio_ops, OtaRadioOps};
+use crate::product::{LightPlatform, LightPlatformGatt, LightPlatformRadio};
 use crate::uart::{self, uart_receiver, uart_sender, UartCommand, UartTxOps};
 use crate::uprintln;
 use crate::version::BUILD_VERSION;
@@ -97,6 +98,12 @@ pub(crate) const RADIO_CONFIG: tlsr8266_radio::RadioConfig = tlsr8266_radio::Rad
 /// main loop.
 #[embassy_executor::task]
 pub async fn main_task(spawner: Spawner) {
+    // Minimal compile-time product composition reference. Live callback and GATT
+    // dispatch continue to use the existing application ownership below.
+    let _light_platform = LightPlatform::new();
+    let _light_profile = LightPlatformGatt::profile_view(&[]);
+    let _light_rf_plan = <LightPlatformRadio as tlsr8266_radio::RadioCoexistence>::auxiliary_rf();
+
     // Initialise various subsystems needed by uart
     clock_init();
     dma_init();

@@ -54,7 +54,14 @@ pub mod rf {
 }
 
 pub mod callbacks;
+pub mod coex;
 pub mod config;
+
+pub use coex::{
+    AdvertisementSlot, AttTxPacket, AuxiliaryRfPlan, ConnectionPlan, ConnectionSlot,
+    FrameIngressTag, LinkAction, LinkEvent, LinkIdentity, ListenSlot, QueueFull, RadioAction,
+    RadioCoexistence, RadioFrame, RxContext,
+};
 
 pub use gatt::attribute::{l2cap_att_handler, AttRequest, AttResponse, GattOp, GattServer};
 pub use gatt::service_table::{

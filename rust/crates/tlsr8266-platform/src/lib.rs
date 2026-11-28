@@ -4,6 +4,7 @@ pub mod api;
 pub mod coex;
 pub mod config;
 pub mod gatt;
+pub mod ota;
 pub mod tasks;
 pub mod window;
 

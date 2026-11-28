@@ -16,7 +16,7 @@ use crate::ble::connection::{
     BLE_PERIPHERAL_LINK_STATE, BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED,
     BRIDGE_RECEIVE_TIMING_TICK, SLAVE_LINK_INTERVAL, SLAVE_NEXT_CONNECT_TICK, SLAVE_WINDOW_SIZE,
 };
-use crate::callbacks::dispatch_ota_snapshot;
+use crate::coex::RadioCoexistence;
 use crate::rf::drv_8266::*;
 use crate::rf::drv_8266::{CURRENT_RF_STATE, PKT_EMPTY, PKT_INIT};
 use crate::types::RfOperationState;
@@ -40,13 +40,13 @@ use tlsr8266_pac::*;
 /// ## Timing Management:
 /// - Schedules next connection event based on connection interval
 /// - Handles window size for slave listening duration
-/// - Adjusts timing for OTA operations
+/// - Asks the coexistence implementation for a receive-window override
 /// - Enables timing adjustment mechanisms
 ///
 /// ## Channel Hopping:
 /// - Selects next channel using BLE frequency hopping algorithm
 /// - Uses connection-specific channel map and hop increment
-pub fn configure_ble_receive_state() {
+pub fn configure_ble_receive_state<C: RadioCoexistence>() {
     // DMA3 (RF TX) mode byte (reg_dma3_ctrl[15:8]): bit7 is part of FIFO8 mode, exact role undocumented
     write_reg_dma3_mode(0x80);
     rf_stop_trx();
@@ -85,17 +85,21 @@ pub fn configure_ble_receive_state() {
     // Calculate next connection event timing
     SLAVE_NEXT_CONNECT_TICK.set(SLAVE_LINK_INTERVAL.get() + read_reg_system_tick_irq());
 
-    // Configure interrupt timing based on operational mode
-    if !dispatch_ota_snapshot().in_progress {
-        // Normal operation: use window size or minimum timing (0xed8 = ~3.8ms)
-        if SLAVE_WINDOW_SIZE.get() == 0 || SLAVE_WINDOW_SIZE.get() <= CLOCK_SYS_CLOCK_1US * 0xed8 {
-            write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());
-        } else {
-            write_reg_system_tick_irq(read_reg_system_tick() + SLAVE_WINDOW_SIZE.get());
+    // Configure interrupt timing: an override keeps the receiver open longer,
+    // otherwise the window size (or the 0xed8 = ~3.8ms minimum) applies. The
+    // policy behind the override lives in the platform.
+    match C::receive_window_override_us() {
+        None => {
+            // Normal operation: use window size or minimum timing (0xed8 = ~3.8ms)
+            if SLAVE_WINDOW_SIZE.get() == 0
+                || SLAVE_WINDOW_SIZE.get() <= CLOCK_SYS_CLOCK_1US * 0xed8
+            {
+                write_reg_system_tick_irq(CLOCK_SYS_CLOCK_1US * 0xed8 + read_reg_system_tick());
+            } else {
+                write_reg_system_tick_irq(read_reg_system_tick() + SLAVE_WINDOW_SIZE.get());
+            }
         }
-    } else {
-        // OTA operation in progress: use longer timeout (10ms)
-        write_reg_system_tick_irq(10000 * CLOCK_SYS_CLOCK_1US + read_reg_system_tick());
+        Some(us) => write_reg_system_tick_irq(us * CLOCK_SYS_CLOCK_1US + read_reg_system_tick()),
     }
 
     // Set next state to bridge mode for connection event processing
@@ -172,7 +176,7 @@ mod tests {
         SLAVE_WINDOW_SIZE.set(50000); // 50ms default
         SLAVE_NEXT_CONNECT_TICK.set(0);
         BRIDGE_RECEIVE_TIMING_TICK.set(0);
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::reset();
         BLE_PERIPHERAL_TIMING_ADJUSTMENT_ENABLED.set(false);
         BLE_PERIPHERAL_CONNECTION_INSTANT.set(0);
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
@@ -211,7 +215,7 @@ mod tests {
         reset_global_state();
 
         // Execute function
-        configure_ble_receive_state();
+        configure_ble_receive_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify link state was set to receiving
         assert_eq!(
@@ -284,9 +288,9 @@ mod tests {
         );
     }
 
-    /// Tests BLE receive state configuration with normal timing (no OTA).
+    /// Tests BLE receive state configuration with the normal window.
     ///
-    /// Verifies that when the OTA snapshot reports no OTA:
+    /// Verifies that when the coexistence implementation asks for no override:
     /// - Uses window size if it's greater than minimum timing
     /// - Uses minimum timing (0xed8 = ~3.8ms) if window size is too small
     /// - Calculates correct next connection event timing
@@ -295,12 +299,10 @@ mod tests {
         // Reset state for clean test
         reset_global_state();
 
-        // Setup: Normal operation, no OTA
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(150000); // 150ms, greater than minimum (121600)
 
         // Execute function
-        configure_ble_receive_state();
+        configure_ble_receive_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify timing calculation: current_tick + window_size
         // read_reg_system_tick() reads 50000, window_size is 150000
@@ -331,11 +333,10 @@ mod tests {
         reset_global_state();
 
         // Setup: Window size too small (less than 0xed8 * CLOCK_SYS_CLOCK_1US)
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
         SLAVE_WINDOW_SIZE.set(1000); // Very small, should trigger minimum timing
 
         // Execute function
-        configure_ble_receive_state();
+        configure_ble_receive_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify minimum timing is used: 0xed8 * CLOCK_SYS_CLOCK_1US + current_tick
         // 0xed8 = 3800, CLOCK_SYS_CLOCK_1US = 32, current_tick = 50000
@@ -347,31 +348,33 @@ mod tests {
         );
     }
 
-    /// Tests BLE receive state configuration during OTA update.
+    /// Tests the receive-window override path.
     ///
-    /// Verifies that when the OTA snapshot reports an OTA:
-    /// - Uses longer timeout (10ms) instead of normal timing
-    /// - Ignores window size settings
-    /// - Provides more time for OTA operations
+    /// Verifies that when the coexistence implementation asks for a longer
+    /// window:
+    /// - The override is used instead of the normal timing
+    /// - The window-size setting is ignored
+    /// - The override is converted from microseconds with the system clock
     #[test]
-    fn test_configure_ble_receive_state_ota_timing() {
+    fn test_configure_ble_receive_state_window_override() {
         // Reset state for clean test
         reset_global_state();
 
-        // Setup: OTA update in progress
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
-        SLAVE_WINDOW_SIZE.set(75000); // Should be ignored during OTA
+        // Setup: A 10 ms override, exactly what the platform adapter asks for
+        // while a GATT transfer is running.
+        crate::coex::TestRadioCoexistence::set_receive_window_override_for_test(10_000);
+        SLAVE_WINDOW_SIZE.set(75000); // ignored while the override is set
 
         // Execute function
-        configure_ble_receive_state();
+        configure_ble_receive_state::<crate::coex::TestRadioCoexistence>();
 
-        // Verify OTA timing is used: 10000 * CLOCK_SYS_CLOCK_1US + current_tick
+        // Verify the override is used: 10000 * CLOCK_SYS_CLOCK_1US + current_tick
         // 10000 * 32 + 50000 = 370000
-        let expected_ota_timing = 10000 * 32 + 50000;
+        let expected_override_timing = 10_000 * 32 + 50_000;
         assert_eq!(
             writes_to(REG_SYSTEM_TICK_IRQ),
-            [expected_ota_timing],
-            "the compare register should be armed once with the OTA timeout"
+            [expected_override_timing],
+            "the compare register should be armed once with the override window"
         );
     }
 }

@@ -113,6 +113,14 @@ pub fn irq_enable() -> u8 {
 /// * When interrupts are disabled, time-sensitive operations can be
 ///   performed without being interrupted, but this should be kept as
 ///   short as possible to avoid missing important interrupts
+///
+/// # Inlining
+///
+/// * Always inlined on purpose: this is load-bearing for the boot-time
+///   `.ram_code` OTA copy. That code runs after sector zero is erased, so it
+///   must not take a call edge into `.text`; inlining here keeps the guarantee
+///   independent of LTO decisions.
+#[inline(always)]
 pub fn irq_disable() -> u8 {
     // Step 1: Read current interrupt enable state before modification
     let r = read_reg_irq_en(); // don't worry, the compiler will optimize the return value if not used

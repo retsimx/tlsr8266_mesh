@@ -57,12 +57,15 @@ impl<P: Product> RadioCoexistence for PlatformRadio<P> {
         Ok(())
     }
 
-    fn on_link_event(_event: LinkEvent) -> LinkAction {
+    fn on_link_event(event: LinkEvent) -> LinkAction {
+        if event == LinkEvent::Disconnected {
+            crate::ota::on_link_disconnected::<P>();
+        }
         LinkAction::None
     }
 
-    fn on_connection_slot(_slot: ConnectionSlot) -> ConnectionPlan {
-        ConnectionPlan::Continue
+    fn on_connection_slot(slot: ConnectionSlot) -> ConnectionPlan {
+        crate::ota::poll_connection_slot::<P>(slot.current_tick)
     }
 
     fn on_aux_listen_slot(_slot: ListenSlot) -> RadioAction {
@@ -75,6 +78,26 @@ impl<P: Product> RadioCoexistence for PlatformRadio<P> {
 
     fn poll_deferred_att() -> Option<AttTxPacket> {
         None
+    }
+
+    fn allow_aux_rx() -> bool {
+        !crate::ota::is_gatt_ota_in_progress()
+    }
+
+    fn receive_window_override_us() -> Option<u32> {
+        if crate::ota::is_gatt_ota_in_progress() {
+            Some(10_000)
+        } else {
+            None
+        }
+    }
+
+    fn on_bulk_gatt_write(l2cap_len: u16, payload: &[u8]) {
+        crate::ota::gatt::on_write::<P>(l2cap_len, payload);
+    }
+
+    fn on_bulk_gatt_read() {
+        crate::ota::gatt::on_read();
     }
 
     fn start_status_window() -> bool {

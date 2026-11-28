@@ -13,6 +13,7 @@ use crate::ble::connection::BLE_PERIPHERAL_LINK_STATE;
 use crate::ble::flash_config::SYS_CHN_LISTEN;
 use crate::ble::pair::PAIR_AC;
 use crate::ble::status::app_bridge_cmd_handle;
+use crate::coex::RadioCoexistence;
 use crate::mesh_ll::node_status::{
     MESH_DEVICE_ONLINE_STATUS, MESH_LISTEN_CYCLE_COUNT, MESH_LISTEN_INTERVAL_US, MESH_NODE_MASK,
     MESH_NODE_REPORT_ENABLE, MESH_NODE_ST,
@@ -144,7 +145,7 @@ pub fn configure_rf_for_mesh_listening() {
 /// - Processes bridge commands that may have been received
 /// - Rotates through listening channels for comprehensive coverage
 /// - Handles periodic online status broadcasts
-pub fn handle_mesh_listening_state() {
+pub fn handle_mesh_listening_state<C: RadioCoexistence>() {
     // Set the link state to listening mode (state 4)
     BLE_PERIPHERAL_LINK_STATE.set(crate::types::BlePeripheralLinkState::Mesh);
 
@@ -153,7 +154,7 @@ pub fn handle_mesh_listening_state() {
 
     // Process any pending bridge commands that may have been received
     // This handles mesh network control messages
-    app_bridge_cmd_handle(read_reg_system_tick());
+    app_bridge_cmd_handle::<C>(read_reg_system_tick());
 
     // Configure the radio to listen for mesh packets
     configure_rf_for_mesh_listening();
@@ -734,7 +735,7 @@ mod tests {
         MESH_LISTEN_INTERVAL_US.set(50000); // 50ms
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify initial setup was done
         assert_eq!(
@@ -786,7 +787,7 @@ mod tests {
         MESH_LISTEN_CYCLE_COUNT.set(ADV_INTERVAL2LISTEN_INTERVAL as u32 - 1); // Should trigger advertising
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify the bridge-command handler ran for this path
         assert_bridge_command_handled_once();
@@ -835,7 +836,7 @@ mod tests {
         MESH_LISTEN_CYCLE_COUNT.set(1); // Will not trigger advertising or online status
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify the bridge-command handler ran for this path
         assert_bridge_command_handled_once();
@@ -901,7 +902,7 @@ mod tests {
         MESH_LISTEN_CYCLE_COUNT.set(ADV_INTERVAL2LISTEN_INTERVAL as u32); // Will trigger advertising
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify the bridge-command handler ran for this path
         assert_bridge_command_handled_once();
@@ -947,7 +948,7 @@ mod tests {
         MESH_DEVICE_ONLINE_STATUS.set(false);
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify the bridge-command handler ran for this path
         assert_bridge_command_handled_once();
@@ -1006,7 +1007,7 @@ mod tests {
         MESH_LISTEN_CYCLE_COUNT.set(5); // Arbitrary value
 
         // Execute function
-        handle_mesh_listening_state();
+        handle_mesh_listening_state::<crate::coex::TestRadioCoexistence>();
 
         // Verify the bridge-command handler ran for this path
         assert_bridge_command_handled_once();

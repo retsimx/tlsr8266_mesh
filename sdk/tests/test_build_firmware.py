@@ -95,9 +95,8 @@ PRESERVE_ROOTS_LITERAL = (
     "memmove",
     "memset",
     "memcmp",
-    "tlsr8266_l2cap_att_handler",
     "tlsr8266_rf_link_slave_data_write",
-    "tlsr8266_dispatch_ota_write",
+    "tlsr8266_ota_boot_copy",
     "tlsr8266_pair_write",
     "tlsr8266_enqueue_mesh_rx",
     "tlsr8266_enqueue_mesh_tx",
@@ -781,8 +780,11 @@ class TestManifestAndCache(_RepoCase):
                     "declare void @rust_eh_personality()",
                     "declare void @_Unwind_Resume()",
                     "declare i32 @memcmp(ptr, ptr, i32)",
-                    "declare void @tlsr8266_l2cap_att_handler()",
+                    "declare void @tlsr8266_rf_link_slave_data_write()",
+                    "declare void @tlsr8266_ota_boot_copy()",
                     "declare void @tlsr8266_pair_write()",
+                    "declare void @tlsr8266_dispatch_ota_write()",
+                    "declare void @tlsr8266_l2cap_att_handler()",
                     "declare void @_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg()",
                     "declare void @_RNvNtNtCsgudHjhsztDx_4core9panicking11panic_const23panic_const_rem_by_zero()",
                     "define void @unrelated_public_symbol() { ret void }",
@@ -800,8 +802,13 @@ class TestManifestAndCache(_RepoCase):
         self.assertIn("rust_eh_personality", resolved)
         self.assertIn("_Unwind_Resume", resolved)
         self.assertIn("memcmp", resolved)
-        self.assertIn("tlsr8266_l2cap_att_handler", resolved)
+        self.assertIn("tlsr8266_rf_link_slave_data_write", resolved)
+        self.assertIn("tlsr8266_ota_boot_copy", resolved)
         self.assertIn("tlsr8266_pair_write", resolved)
+        # F-7 (#118) retired both: they are no longer roots, so a stale IR symbol
+        # of that name must not be kept alive by the preserve list.
+        self.assertNotIn("tlsr8266_dispatch_ota_write", resolved)
+        self.assertNotIn("tlsr8266_l2cap_att_handler", resolved)
         self.assertNotIn("_RNvNtNtCs7TpBKVb4AXc_14tlsr8266_radio4gatt9attribute17l2cap_att_handler", resolved)
         self.assertNotIn("_RNvNtCsgudHjhsztDx_4core9panicking23unreachable_default_msg", resolved)
         self.assertNotIn("_RNvNtNtCsgudHjhsztDx_4core9panicking11panic_const23panic_const_rem_by_zero", resolved)

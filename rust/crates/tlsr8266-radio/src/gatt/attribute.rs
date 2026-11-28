@@ -1,6 +1,7 @@
 use core::marker::PhantomData;
 
 use crate::ble::connection::GATT_SERVICE_DISCOVERY_TIMEOUT_TIMESTAMP;
+use crate::coex::RadioCoexistence;
 use crate::gatt::service_table::{
     AttError, AttrRole, AttrUuid, GattBackend, GattReadKind, GattReadOutcome, GattReadRequest,
     GattWriteKind, GattWriteOutcome, GattWriteRequest, LegacyGattBackend, ProfileView,
@@ -895,11 +896,18 @@ impl<B: GattBackend> GattServer<B> {
     }
 }
 
-/// Exported firmware entry point. It dispatches only through the legacy profile.
-#[export_name = "tlsr8266_l2cap_att_handler"]
+/// Dispatches one received ATT frame through the legacy profile.
+///
+/// `#[inline(never)]` is load-bearing: ATT frames must stay isolated from the
+/// non-ATT RF stack branches, so the ATT stack frame never folds into the
+/// packet-reception path.
+///
+/// A generic function cannot carry an `export_name`, so there is no forced
+/// symbol here; the caller names the coexistence implementation that owns the
+/// policy the legacy bindings delegate to.
 #[inline(never)]
-pub fn l2cap_att_handler(packet: &Packet) -> Option<Packet> {
-    GattServer::<LegacyGattBackend>::new(LEGACY_PROFILE).handle_packet(packet)
+pub fn l2cap_att_handler_with<C: RadioCoexistence>(packet: &Packet) -> Option<Packet> {
+    GattServer::<LegacyGattBackend<C>>::new(LEGACY_PROFILE).handle_packet(packet)
 }
 
 #[cfg(test)]
@@ -1062,7 +1070,7 @@ mod tests {
         assert!(LEGACY_PROFILE.get(29).is_none());
 
         let mtu = att_packet(0x02, 3, 0, &[]);
-        let response = l2cap_att_handler(&mtu).unwrap();
+        let response = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&mtu).unwrap();
         assert_eq!(response.att_mtu().mtu, [0x17, 0x00]);
     }
 
@@ -1083,7 +1091,7 @@ mod tests {
         ];
         let packet = att_packet(0x52, 23, 21, &payload);
 
-        assert!(l2cap_att_handler(&packet).is_none());
+        assert!(l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&packet).is_none());
         let queued = crate::queues::MESH_RX_CHANNEL
             .try_receive()
             .expect("typed handle-21 provisioning write must enter mesh RX");
@@ -1107,19 +1115,44 @@ mod tests {
     #[test]
     fn legacy_read_write_and_invalid_cases() {
         let device_name = att_packet(0x0a, 3, 3, &[]);
-        let response = l2cap_att_handler(&device_name).unwrap();
+        let response =
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&device_name).unwrap();
         assert_eq!(response.att_read_rsp().opcode, 0x0b);
 
-        assert!(l2cap_att_handler(&att_packet(0x0a, 3, 0, &[])).is_none());
-        assert!(l2cap_att_handler(&att_packet(0x0a, 3, 29, &[])).is_none());
-        assert!(l2cap_att_handler(&att_packet(0x12, 3, 1, &[])).is_none());
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x0a,
+                3,
+                0,
+                &[]
+            ))
+            .is_none()
+        );
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x0a,
+                3,
+                29,
+                &[]
+            ))
+            .is_none()
+        );
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x12,
+                3,
+                1,
+                &[]
+            ))
+            .is_none()
+        );
 
         let cccd = att_packet(0x12, 5, 19, &[0x01, 0x00]);
-        let response = l2cap_att_handler(&cccd).unwrap();
+        let response = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&cccd).unwrap();
         assert_eq!(response.att_write_rsp().opcode, 0x13);
 
         let command = att_packet(0x52, 5, 21, &[0; 2]);
-        assert!(l2cap_att_handler(&command).is_none());
+        assert!(l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&command).is_none());
     }
 
     /// Every ATT opcode the server accepts must reach its handler and answer
@@ -1131,11 +1164,23 @@ mod tests {
     #[test]
     fn att_opcode_matrix_reaches_every_dispatch_arm() {
         // MTU exchange -> Exchange MTU Response.
-        let mtu = l2cap_att_handler(&att_packet(0x02, 3, 0, &[])).expect("mtu response");
+        let mtu = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x02,
+            3,
+            0,
+            &[],
+        ))
+        .expect("mtu response");
         assert_eq!(mtu.att_read_rsp().opcode, 0x03);
 
         // Read -> Read Response.
-        let read = l2cap_att_handler(&att_packet(0x0a, 3, 3, &[])).expect("read response");
+        let read = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x0a,
+            3,
+            3,
+            &[],
+        ))
+        .expect("read response");
         assert_eq!(read.att_read_rsp().opcode, 0x0b);
 
         // Read By Type -> Read By Type Response. The start handle rides in the
@@ -1143,38 +1188,76 @@ mod tests {
         let mut by_type = [0u8; 4];
         by_type[0..2].copy_from_slice(&28u16.to_le_bytes());
         by_type[2..4].copy_from_slice(&0x2a00u16.to_le_bytes());
-        let found = l2cap_att_handler(&att_packet(0x08, 7, 1, &by_type)).expect("read by type");
+        let found = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x08, 7, 1, &by_type,
+        ))
+        .expect("read by type");
         assert_eq!(found.att_read_rsp().opcode, 0x09);
 
         // Find Information -> Find Information Response.
         let mut info = [0u8; 2];
         info[0..2].copy_from_slice(&28u16.to_le_bytes());
-        let entries = l2cap_att_handler(&att_packet(0x04, 5, 1, &info)).expect("find info");
+        let entries = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x04, 5, 1, &info,
+        ))
+        .expect("find info");
         assert_eq!(entries.att_read_rsp().opcode, 0x05);
 
         // Read By Group Type -> Read By Group Type Response.
         let mut group = [0u8; 4];
         group[0..2].copy_from_slice(&28u16.to_le_bytes());
         group[2..4].copy_from_slice(&0x2800u16.to_le_bytes());
-        let services = l2cap_att_handler(&att_packet(0x10, 7, 1, &group)).expect("read by group");
+        let services = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x10, 7, 1, &group,
+        ))
+        .expect("read by group");
         assert_eq!(services.att_read_rsp().opcode, 0x11);
 
         // Write Request to a writable descriptor -> Write Response.
-        let acked =
-            l2cap_att_handler(&att_packet(0x12, 5, 19, &[0x01, 0x00])).expect("write response");
+        let acked = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x12,
+            5,
+            19,
+            &[0x01, 0x00],
+        ))
+        .expect("write response");
         assert_eq!(acked.att_write_rsp().opcode, 0x13);
 
         // Write Command -> never a response.
-        assert!(l2cap_att_handler(&att_packet(0x52, 5, 19, &[0x01, 0x00])).is_none());
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x52,
+                5,
+                19,
+                &[0x01, 0x00]
+            ))
+            .is_none()
+        );
 
         // An opcode the server does not implement is silent, not a panic.
-        assert!(l2cap_att_handler(&att_packet(0x1e, 3, 0, &[])).is_none());
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x1e,
+                3,
+                0,
+                &[]
+            ))
+            .is_none()
+        );
 
         // A truncated Write Request carries no payload to parse. The deployed
         // firmware still answered 0x13; today it is silent. Pinned so the
         // difference is visible rather than implicit — #120 owns the full
         // per-operation response matrix.
-        assert!(l2cap_att_handler(&att_packet(0x12, 2, 19, &[])).is_none());
+        assert!(
+            l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+                0x12,
+                2,
+                19,
+                &[]
+            ))
+            .is_none()
+        );
     }
 
     /// The Read By Group Type encoder must lay out real service rows, not just
@@ -1185,7 +1268,10 @@ mod tests {
         req[0..2].copy_from_slice(&0xffffu16.to_le_bytes());
         req[2..4].copy_from_slice(&0x2800u16.to_le_bytes());
 
-        let response = l2cap_att_handler(&att_packet(0x10, 7, 1, &req)).expect("group response");
+        let response = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x10, 7, 1, &req,
+        ))
+        .expect("group response");
         assert_eq!(response.att_read_rsp().opcode, 0x11);
         let value = &response.att_read_rsp().value;
 
@@ -1209,8 +1295,10 @@ mod tests {
         let mut req = [0u8; 2];
         req[0..2].copy_from_slice(&2u16.to_le_bytes());
 
-        let response =
-            l2cap_att_handler(&att_packet(0x04, 5, 1, &req)).expect("find info response");
+        let response = l2cap_att_handler_with::<crate::coex::TestRadioCoexistence>(&att_packet(
+            0x04, 5, 1, &req,
+        ))
+        .expect("find info response");
         assert_eq!(response.att_read_rsp().opcode, 0x05);
         let value = &response.att_read_rsp().value;
 

@@ -27,8 +27,7 @@ use crate::ble::status::{
     rf_link_slave_read_status_stop, tx_packet_bridge, DEVICE_STATUS_READ_BUSY_TIMESTAMP,
     SLAVE_READ_STATUS_BUSY,
 };
-use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_tick};
-use crate::coex::RadioCoexistence;
+use crate::coex::{ConnectionPlan, ConnectionSlot, LinkEvent, RadioCoexistence};
 use crate::mesh_ll::node_status::{mesh_node_flush_status, mesh_report_status_enable};
 use crate::mesh_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
 use crate::rf::drv_8266::*;
@@ -39,21 +38,6 @@ use crate::types::{
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::CLOCK_SYS_CLOCK_1US;
 use tlsr8266_pac::*;
-
-/// Outcome of one BLE connected-state dispatch, reported up to the interrupt
-/// composition root (the crate root) which owns the `ota_manager` calls.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum BleConnectionEvent {
-    /// Nothing for the composition root to do.
-    None,
-    /// OTA is active: poll the OTA manager's finish handler.
-    OtaFinishCheck,
-    /// Connection supervision timed out during OTA: finish with an error.
-    OtaErrorReboot,
-    /// OTA is active and the timeout counter reached zero: finish, then error-reboot
-    /// only if the finish handler did not refresh the counter.
-    OtaFinishCheckAndErrorReboot,
-}
 
 /// Handles BLE connection parameter and timing updates for the slave device.
 ///
@@ -210,26 +194,6 @@ pub fn cleanup_ble_disconnection<C: RadioCoexistence>() {
     NEED_UPDATE_CONNECT_PARA.set(false); // Clear connection parameter update flag
 }
 
-/// Handles the BLE bridge state interrupt for connected operation.
-///
-/// This is the main connection maintenance function that handles active BLE connections.
-/// It manages connection timeouts, OTA updates, mesh packet transmission, status reporting,
-/// and connection event timing. This function is called periodically during active
-/// BLE connections.
-///
-/// ## Key Responsibilities:
-/// - **Connection Supervision**: Monitors connection timeout and handles disconnection
-/// - **OTA Management**: Handles over-the-air firmware update timeouts and completion
-/// - **Mesh Communication**: Processes mesh packets and status reporting
-/// - **Timing Management**: Maintains precise connection event timing
-/// - **Bridge Operations**: Handles command bridging between BLE and mesh networks
-///
-/// ## State Management:
-/// - Maintains connection state (BLE_PERIPHERAL_LINK_STATE = 5)
-/// - Tracks OTA operation timeouts
-/// - Manages connection parameter updates
-/// - Coordinates mesh status reporting
-///
 /// Initializes hardware and registers for an active BLE connection.
 ///
 /// This function sets up the hardware state for bridge mode operation:
@@ -264,12 +228,11 @@ fn initialize_connection_hardware() {
 /// the timeout detection and appropriate cleanup.
 ///
 /// ## Returns
-/// - `Some(BleConnectionEvent::OtaErrorReboot)` if the connection timed out while
-///   an OTA update was in progress (cleanup already performed)
-/// - `Some(BleConnectionEvent::None)` if the connection timed out and cleanup was
-///   performed, with nothing left for the composition root to do
-/// - `None` if the connection is still valid
-fn check_connection_supervision_timeout<C: RadioCoexistence>() -> Option<BleConnectionEvent> {
+/// - `true` if the connection timed out: cleanup already ran and the link-layer
+///   disconnect event was handed to the coexistence implementation, which owns
+///   whether that means an OTA error reboot
+/// - `false` if the connection is still valid
+fn check_connection_supervision_timeout<C: RadioCoexistence>() -> bool {
     // Check for BLE connection supervision timeout
     // Per BLE specification, if no communication occurs within the supervision timeout,
     // the connection must be considered lost and terminated
@@ -279,13 +242,12 @@ fn check_connection_supervision_timeout<C: RadioCoexistence>() -> Option<BleConn
         // Connection has timed out - handle cleanup first
         cleanup_ble_disconnection::<C>();
 
-        return Some(if dispatch_ota_snapshot().in_progress {
-            BleConnectionEvent::OtaErrorReboot
-        } else {
-            BleConnectionEvent::None
-        });
+        // The platform decides whether a lost link during a transfer fails it.
+        C::on_link_event(LinkEvent::Disconnected);
+
+        return true;
     }
-    None
+    false
 }
 
 /// Handles timeouts for status read operations.
@@ -304,55 +266,6 @@ fn handle_status_read_timeout<C: RadioCoexistence>() {
     }
 }
 
-/// Handles active OTA (Over-The-Air) update operations and timeouts.
-///
-/// This function observes ongoing OTA operations, including:
-/// - Tracking the OTA timeout in 1-second intervals
-/// - Reporting when the timeout counter has reached zero
-/// - Scheduling the next connection event during OTA
-///
-/// The OTA manager itself is driven by the interrupt composition root
-/// (the crate root), which reacts to the returned event.
-///
-/// ## Returns
-/// - `Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)` if OTA is active and
-///   the timeout counter reads zero after this tick's countdown
-/// - `Some(BleConnectionEvent::OtaFinishCheck)` if OTA is active and the counter is
-///   still non-zero
-/// - `None` if no OTA is in progress
-fn handle_ota_operations() -> Option<BleConnectionEvent> {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
-    static RF_SLAVE_OTA_TIMEOUT_TICK: AtomicU32 = AtomicU32::new(0);
-
-    if !dispatch_ota_snapshot().in_progress {
-        return None;
-    }
-
-    // Check for OTA timeout (1 second intervals)
-    if CLOCK_SYS_CLOCK_1US * 1000000
-        < read_reg_system_tick() - RF_SLAVE_OTA_TIMEOUT_TICK.load(Ordering::Relaxed)
-    {
-        RF_SLAVE_OTA_TIMEOUT_TICK.store(read_reg_system_tick(), Ordering::Relaxed);
-
-        dispatch_ota_tick();
-    }
-
-    // During OTA, schedule next connection event and return to RX state
-    write_reg_system_tick_irq(SLAVE_NEXT_CONNECT_TICK.get());
-    *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-
-    // Read the snapshot again after the tick: `dispatch_ota_tick()` is what can
-    // zero the counter, so a value captured before it could never report the
-    // expiry. The composition root finishes the OTA (and may refresh the
-    // counter), so this is the candidate outcome, not the decision.
-    if dispatch_ota_snapshot().timeout_expired {
-        Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot)
-    } else {
-        Some(BleConnectionEvent::OtaFinishCheck)
-    }
-}
-
 /// Handles bridge packet transmission based on connection conditions.
 ///
 /// This function manages the transmission of bridge packets under specific conditions:
@@ -360,7 +273,7 @@ fn handle_ota_operations() -> Option<BleConnectionEvent> {
 /// 2. Connection parameter update is not at the target instant yet
 ///
 /// This prevents transmission during critical timing updates to maintain BLE compliance.
-fn handle_bridge_operations() {
+fn handle_bridge_operations<C: RadioCoexistence>() {
     // Set bridge command timeout (200µs from now)
     // This provides a time window for processing bridge commands
     BRIDGE_COMMAND_TIMESTAMP.set(CLOCK_SYS_CLOCK_1US * 200 + read_reg_system_tick());
@@ -373,7 +286,7 @@ fn handle_bridge_operations() {
         && BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.get() == 0
         || BLE_PERIPHERAL_NEXT_UPDATE_INSTANT.get() != BLE_PERIPHERAL_CONNECTION_INSTANT.get()
     {
-        tx_packet_bridge();
+        tx_packet_bridge::<C>();
     }
 }
 
@@ -548,33 +461,49 @@ fn schedule_next_connection_event() {
 /// ## Key Responsibilities:
 /// - **Hardware Setup**: Initialize connection hardware and registers
 /// - **Connection Supervision**: Monitor connection timeout per BLE specification
-/// - **Timeout Management**: Handle status read and OTA operation timeouts
-/// - **Operations Processing**: Manage bridge, mesh, and OTA operations
+/// - **Timeout Management**: Handle status read timeouts
+/// - **Slot Servicing**: Ask the coexistence implementation to service the slot
+///   before any bridge or mesh work runs
+/// - **Operations Processing**: Manage bridge and mesh operations
 /// - **Timing Management**: Maintain precise connection event timing
 ///
 /// ## BLE Specification Compliance:
 /// - Implements supervision timeout according to BLE specification
 /// - Maintains connection event timing for reliable communication
 /// - Handles connection parameter update procedures
-pub fn handle_ble_connected_state<C: RadioCoexistence>() -> BleConnectionEvent {
+pub fn handle_ble_connected_state<C: RadioCoexistence>() {
     // 1. Initialize hardware and registers for active connection
     initialize_connection_hardware();
 
     // 2. Check for connection supervision timeout (early exit if timed out)
-    if let Some(ev) = check_connection_supervision_timeout::<C>() {
-        return ev;
+    if check_connection_supervision_timeout::<C>() {
+        return;
     }
 
     // 3. Handle status read operation timeouts
     handle_status_read_timeout::<C>();
 
-    // 4. Handle OTA operations (early exit if OTA is active)
-    if let Some(ev) = handle_ota_operations() {
-        return ev;
+    // 4. Hand the slot to the coexistence implementation. It may have serviced
+    // the whole event itself (`SkipToNextEvent`), or latched a reboot
+    // (`Disconnect`); only `Continue` falls through to the bridge/mesh work.
+    let plan = C::on_connection_slot(ConnectionSlot {
+        connected_tick: SLAVE_CONNECTED_TICK.get(),
+        next_connect_tick: SLAVE_NEXT_CONNECT_TICK.get(),
+        interval_ticks: SLAVE_LINK_INTERVAL.get(),
+        tx_ready: is_add_packet_buf_ready(),
+        current_tick: read_reg_system_tick(),
+    });
+    match plan {
+        ConnectionPlan::SkipToNextEvent => {
+            schedule_next_connection_event();
+            return;
+        }
+        ConnectionPlan::Disconnect => return,
+        _ => {}
     }
 
     // 5. Process bridge packet transmission
-    handle_bridge_operations();
+    handle_bridge_operations::<C>();
 
     // 6. Process mesh operations (status, pairing, reporting)
     process_mesh_operations::<C>();
@@ -584,8 +513,6 @@ pub fn handle_ble_connected_state<C: RadioCoexistence>() -> BleConnectionEvent {
 
     // 8. Schedule next connection event and transition state
     schedule_next_connection_event();
-
-    BleConnectionEvent::None
 }
 
 /// Processes queued status response packets and sends them to the master.
@@ -721,9 +648,9 @@ mod tests {
         }
         PKT_INIT.lock().ll_init_mut().chm = [0xff, 0xff, 0xff, 0xff, 0x1f];
 
-        // The OTA seam is a process-wide singleton too: start every test with no
-        // update in progress and the default supervision counter.
-        crate::callbacks::test_ota::reset_for_test();
+        // The coexistence plan is process-wide too: start every test on the
+        // pass-through plan so the connected-state handler runs its full body.
+        crate::coex::TestRadioCoexistence::reset();
 
         // Reset the shared queues (this also drains MESH_TX_QUEUE and
         // MESH_RX_CHANNEL) so each test starts from a known-clean transport
@@ -1921,10 +1848,10 @@ mod tests {
     /// Tests connection supervision timeout detection.
     ///
     /// Verifies that check_connection_supervision_timeout correctly:
-    /// - Reports `None` while the connection is still inside its supervision timeout
-    /// - Reports `Some(BleConnectionEvent::None)` once it times out with no OTA active
-    /// - Reports `Some(BleConnectionEvent::OtaErrorReboot)` when it times out during OTA
-    /// - Always runs `cleanup_ble_disconnection` exactly once on the timeout path
+    /// - Reports `false` while the connection is still inside its supervision timeout
+    /// - Reports `true` once it times out, after running `cleanup_ble_disconnection`
+    ///   exactly once and reporting the disconnect to the coexistence
+    ///   implementation, which owns whether that fails an in-flight transfer
     #[test]
     fn test_check_connection_supervision_timeout_no_timeout() {
         reset_global_state();
@@ -1936,13 +1863,10 @@ mod tests {
         PAIR_LOGIN_OK.set(true);
 
         // Execute function
-        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
+        let timed_out = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
         // Verify no timeout detected
-        assert_eq!(
-            result, None,
-            "Should return None while the connection lives"
-        );
+        assert!(!timed_out, "the connection is still inside its timeout");
 
         // Verify cleanup did not run: the disconnect path clears the pairing
         // login flag and retargets the RF state at advertisement.
@@ -1974,14 +1898,12 @@ mod tests {
         SLAVE_CONNECTED_TICK.set(10000); // Connected at tick 10000, now at 15000 = 5000 ticks elapsed
 
         // Execute function
-        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
+        let timed_out = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
-        // Verify timeout detected and cleanup performed, with nothing left for the
-        // composition root to do.
-        assert_eq!(
-            result,
-            Some(BleConnectionEvent::None),
-            "A non-OTA supervision timeout must report Some(None)"
+        // Verify timeout detected and cleanup performed.
+        assert!(
+            timed_out,
+            "a supervision timeout must be reported to the caller"
         );
 
         // Verify the real cleanup ran exactly once.
@@ -2001,39 +1923,37 @@ mod tests {
         );
     }
 
-    /// A supervision timeout while OTA is active must report `OtaErrorReboot` so the
-    /// composition root (and only the composition root) drives the reboot, and it
-    /// must still run the disconnection cleanup first.
+    /// A supervision timeout must run the disconnection cleanup first and then
+    /// report the link-layer disconnect to the coexistence implementation, which
+    /// owns whether an in-flight transfer fails (the platform's
+    /// `failed_link_disconnect_discards_the_staged_image` covers that arm).
     #[test]
-    fn test_check_connection_supervision_timeout_with_timeout_during_ota() {
+    fn test_check_connection_supervision_timeout_reports_the_link_disconnect() {
         reset_global_state();
 
         fake_clock::set_ticks(15000);
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(100);
         SLAVE_CONNECTED_TICK.set(10000);
         PAIR_LOGIN_OK.set(true);
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let result = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
+        let timed_out = check_connection_supervision_timeout::<crate::coex::TestRadioCoexistence>();
 
+        assert!(timed_out, "the expired connection must report the timeout");
         assert_eq!(
-            result,
-            Some(BleConnectionEvent::OtaErrorReboot),
-            "A supervision timeout during OTA must report OtaErrorReboot"
+            crate::coex::TestRadioCoexistence::link_disconnects(),
+            1,
+            "the loss of the link must be reported exactly once"
         );
-
-        // The cleanup still ran before the reboot verdict was reported.
+        // The cleanup ran before the disconnect was handed over.
         assert!(
             !PAIR_LOGIN_OK.get(),
-            "cleanup must clear the pairing login flag before reboot"
+            "cleanup must clear the pairing login flag before the disconnect"
         );
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
             RfOperationState::Advertising,
-            "cleanup must still run during OTA"
+            "cleanup must retarget the RF state at advertisement"
         );
-
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
     }
 
     /// Tests status read timeout handling.
@@ -2093,130 +2013,6 @@ mod tests {
         );
     }
 
-    /// Tests OTA operations handling.
-    ///
-    /// Verifies that handle_ota_operations correctly:
-    /// - Returns `None` when no OTA is in progress
-    /// - Returns `Some(OtaFinishCheck)` while the timeout counter is non-zero
-    /// - Returns `Some(OtaFinishCheckAndErrorReboot)` once the counter is zero
-    /// - Still schedules the next connection event and returns to RX on every
-    ///   OTA-active path
-    #[test]
-    fn test_handle_ota_operations_not_active() {
-        reset_global_state();
-
-        // Setup: No OTA in progress
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
-        crate::callbacks::test_ota::set_timeout_for_test(0);
-
-        // Execute function
-        let result = handle_ota_operations();
-
-        // Verify no OTA handling
-        assert_eq!(result, None, "Should return None when OTA is not active");
-        assert!(
-            !wrote(REG_SYSTEM_TICK_IRQ),
-            "no connection event may be scheduled when OTA is inactive"
-        );
-    }
-
-    #[test]
-    fn test_handle_ota_operations_active() {
-        reset_global_state();
-
-        // One microsecond past the one-second gate, so the countdown branch runs
-        // on this pass. The gate is a strict `>` against the process-global tick
-        // stamp (which starts at 0), so exactly one second would not fire. This
-        // is also the largest tick any OTA-driving test in the crate uses, so
-        // leaving the stamp here keeps later tests' elapsed subtraction valid.
-        fake_clock::set_ticks(CLOCK_SYS_CLOCK_1US as u64 * 1_000_000 + 1);
-        FakeMmio::clear_writes();
-
-        // Setup: OTA in progress; the one-second countdown fires and leaves the
-        // counter non-zero.
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
-        crate::callbacks::test_ota::set_timeout_for_test(7);
-        SLAVE_NEXT_CONNECT_TICK.set(15000);
-        let timeout_before = crate::callbacks::test_ota::timeout_seconds_for_test();
-
-        // Execute function
-        let result = handle_ota_operations();
-
-        // Verify OTA handling
-        assert_eq!(
-            result,
-            Some(BleConnectionEvent::OtaFinishCheck),
-            "Should report OtaFinishCheck while the timeout counter is non-zero"
-        );
-        assert_eq!(
-            crate::callbacks::test_ota::timeout_seconds_for_test(),
-            timeout_before - 1,
-            "the one-second gate must decrement the countdown by exactly one"
-        );
-        assert_eq!(
-            writes_to(REG_SYSTEM_TICK_IRQ),
-            vec![RegWrite {
-                addr: REG_SYSTEM_TICK_IRQ | REG_BASE_ADDR,
-                width: 4,
-                value: 15000,
-            }],
-            "the next connection event must be scheduled during OTA"
-        );
-        assert_eq!(
-            *CURRENT_RF_STATE.lock(),
-            RfOperationState::Receiving,
-            "Should transition to RX state during OTA"
-        );
-
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
-        crate::callbacks::test_ota::set_timeout_for_test(0);
-    }
-
-    /// A zero OTA timeout counter must report `OtaFinishCheckAndErrorReboot` — the
-    /// composition root runs the finish handler first (it may refresh the counter)
-    /// and only then decides whether to reboot.
-    #[test]
-    fn test_handle_ota_operations_active_counter_zero() {
-        reset_global_state();
-
-        fake_clock::set_ticks(CLOCK_SYS_CLOCK_1US as u64 * 1_000_000 + 1);
-        // The OTA tick stamp is process-global and monotonic: the test above
-        // stores the instant it fired at (one microsecond past the one-second
-        // gate), so read the same instant back (elapsed 0, gate stays idle)
-        // instead of a smaller tick, which would underflow the elapsed
-        // subtraction. The countdown is already zero either way.
-        fake_clock::set_ticks(CLOCK_SYS_CLOCK_1US as u64 * 1_000_000 + 1);
-        FakeMmio::clear_writes();
-
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
-        crate::callbacks::test_ota::set_timeout_for_test(0);
-        SLAVE_NEXT_CONNECT_TICK.set(15000);
-
-        let result = handle_ota_operations();
-
-        assert_eq!(
-            result,
-            Some(BleConnectionEvent::OtaFinishCheckAndErrorReboot),
-            "A zero timeout counter must report OtaFinishCheckAndErrorReboot"
-        );
-        assert_eq!(
-            writes_to(REG_SYSTEM_TICK_IRQ),
-            vec![RegWrite {
-                addr: REG_SYSTEM_TICK_IRQ | REG_BASE_ADDR,
-                width: 4,
-                value: 15000,
-            }],
-            "the next connection event must be scheduled during OTA"
-        );
-        assert_eq!(
-            *CURRENT_RF_STATE.lock(),
-            RfOperationState::Receiving,
-            "Should still transition to RX state when the counter is zero"
-        );
-
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
-    }
-
     /// Tests bridge operations handling.
     ///
     /// Verifies that handle_bridge_operations correctly:
@@ -2238,7 +2034,7 @@ mod tests {
         BLE_PERIPHERAL_CONNECTION_INSTANT.set(99); // Not at update instant
 
         // Execute function
-        handle_bridge_operations();
+        handle_bridge_operations::<crate::coex::TestRadioCoexistence>();
 
         // Verify bridge timeout is set
         let expected_timeout = CLOCK_SYS_CLOCK_1US * 200 + 50000;
@@ -2275,7 +2071,7 @@ mod tests {
         BLE_PERIPHERAL_CONNECTION_INSTANT.set(100); // At update instant
 
         // Execute function
-        handle_bridge_operations();
+        handle_bridge_operations::<crate::coex::TestRadioCoexistence>();
 
         // The timeout is still armed, but no packet was transmitted.
         assert_eq!(
@@ -2529,10 +2325,7 @@ mod tests {
         BLE_PERIPHERAL_PREVIOUS_CONNECTION_INTERVAL.set(0);
 
         // Execute the main function
-        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
-
-        // The normal bridge path reports nothing for the composition root to do
-        assert_eq!(result, BleConnectionEvent::None);
+        handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
         // 1. initialize_connection_hardware
         assert_eq!(
@@ -2595,12 +2388,10 @@ mod tests {
         BRIDGE_COMMAND_TIMESTAMP.set(0);
 
         // Execute the main function
-        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
+        handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
-        // A timed-out connection reports Some(None): cleanup already ran and the
-        // state must not be overwritten back to Receiving.
-        assert_eq!(result, BleConnectionEvent::None);
-
+        // A timed-out connection returns after cleanup, so the state is not
+        // overwritten back to Receiving.
         // initialize_connection_hardware still ran first
         assert_eq!(
             BLE_PERIPHERAL_LINK_STATE.get(),
@@ -2633,21 +2424,26 @@ mod tests {
         );
     }
 
-    /// A supervision timeout during OTA must propagate `OtaErrorReboot` unchanged so
-    /// the composition root can reboot.
+    /// A supervision timeout must notify the coexistence implementation and stop
+    /// the bridge work, leaving the link advertising. Whether that fails an
+    /// in-flight transfer is the platform's decision, covered by
+    /// `tlsr8266_platform::ota::engine::tests::failed_link_disconnect_discards_the_staged_image`.
     #[test]
-    fn test_handle_ble_connected_state_propagates_ota_error_reboot() {
+    fn test_handle_ble_connected_state_timeout_notifies_the_disconnect() {
         reset_global_state();
 
         fake_clock::set_ticks(15000);
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(100);
         SLAVE_CONNECTED_TICK.set(10000);
         BRIDGE_COMMAND_TIMESTAMP.set(0);
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
+        handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
-        assert_eq!(result, BleConnectionEvent::OtaErrorReboot);
+        assert_eq!(
+            crate::coex::TestRadioCoexistence::link_disconnects(),
+            1,
+            "the connected-state handler must report the lost link"
+        );
         assert_eq!(
             BRIDGE_COMMAND_TIMESTAMP.get(),
             0,
@@ -2660,75 +2456,95 @@ mod tests {
                 width: 4,
                 value: CLOCK_SYS_CLOCK_1US * 100 + 15000,
             }],
-            "only the cleanup may schedule a wakeup before the reboot verdict"
+            "only the cleanup may schedule a wakeup on the timeout path"
         );
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
             RfOperationState::Advertising,
             "the connection must be left advertising"
         );
-
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
     }
 
+    /// `SkipToNextEvent` means the coexistence implementation serviced the slot
+    /// itself: the radio reschedules the next connection event and runs no bridge
+    /// or mesh work. The platform covers the GATT-OTA arm that produces it
+    /// (`tlsr8266_platform::ota::engine::tests::running_connection_slot_skips_bridge_work`).
     #[test]
-    fn test_handle_ble_connected_state_ota_early_exit() {
+    fn test_handle_ble_connected_state_skips_bridge_work_when_the_plan_skips() {
         reset_global_state();
 
-        // OTA active with a non-zero supervision counter. The clock stays below
-        // the one-second gate here: the process-global OTA tick stamp must not be
-        // advanced past `CLOCK_SYS_CLOCK_1US * 1_000_000 + 1`, the largest tick
-        // the other OTA-driving tests in the crate use (a larger stamp would
-        // underflow their elapsed subtraction).
-        let now = 500_000u64;
-        fake_clock::set_ticks(now);
-        // A live connection: the supervision timeout must not pre-empt the OTA path.
+        // A live connection, so the supervision timeout does not pre-empt the slot.
+        fake_clock::set_ticks(20_000);
         BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000);
-        SLAVE_CONNECTED_TICK.set(now as u32 - 100);
-        crate::callbacks::test_ota::set_in_progress_for_test(true);
-        crate::callbacks::test_ota::set_timeout_for_test(7);
-        SLAVE_NEXT_CONNECT_TICK.set(15000);
-        SLAVE_LINK_INTERVAL.set(20000);
+        SLAVE_CONNECTED_TICK.set(19_900);
+        SLAVE_NEXT_CONNECT_TICK.set(15_000);
+        SLAVE_LINK_INTERVAL.set(20_000);
         BRIDGE_COMMAND_TIMESTAMP.set(0);
         FakeMmio::clear_writes();
+        crate::coex::TestRadioCoexistence::set_connection_plan_for_test(
+            ConnectionPlan::SkipToNextEvent,
+        );
 
-        // Execute the main function
-        let result = handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
+        handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
 
-        // The OTA event must be propagated unchanged
-        assert_eq!(result, BleConnectionEvent::OtaFinishCheck);
-
-        // Only the OTA path scheduled the next connection event, from
-        // SLAVE_NEXT_CONNECT_TICK (the timing loop did not advance it).
+        // Only the reschedule ran, from SLAVE_NEXT_CONNECT_TICK.
         assert_eq!(
             writes_to(REG_SYSTEM_TICK_IRQ),
             vec![RegWrite {
                 addr: REG_SYSTEM_TICK_IRQ | REG_BASE_ADDR,
                 width: 4,
-                value: 15000,
+                value: 15_000,
             }],
-            "the OTA path must schedule the next connection event"
+            "the skip arm must arm the next connection event exactly once"
         );
         assert_eq!(
             SLAVE_NEXT_CONNECT_TICK.get(),
-            15000,
-            "the event-timing loop must not run during OTA"
+            15_000,
+            "the event-timing loop must not run on the skip arm"
         );
-
-        // These steps must NOT run due to the early exit.
         assert_eq!(
             BRIDGE_COMMAND_TIMESTAMP.get(),
             0,
-            "bridge operations must not run during OTA"
+            "bridge operations must not run on the skip arm"
         );
         assert_eq!(
             *CURRENT_RF_STATE.lock(),
             RfOperationState::Receiving,
-            "the OTA path returns to receive mode"
+            "the skip arm returns to receive mode"
         );
 
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
-        crate::callbacks::test_ota::set_timeout_for_test(0);
+        crate::coex::TestRadioCoexistence::reset();
+    }
+
+    /// `Disconnect` means the coexistence implementation has latched a reboot:
+    /// the handler returns without scheduling anything, so no further radio work
+    /// can run before the reset.
+    #[test]
+    fn test_handle_ble_connected_state_returns_when_the_plan_disconnects() {
+        reset_global_state();
+
+        fake_clock::set_ticks(20_000);
+        BLE_PERIPHERAL_CONNECTION_TIMEOUT_US.set(1000);
+        SLAVE_CONNECTED_TICK.set(19_900);
+        SLAVE_NEXT_CONNECT_TICK.set(15_000);
+        SLAVE_LINK_INTERVAL.set(20_000);
+        BRIDGE_COMMAND_TIMESTAMP.set(0);
+        FakeMmio::clear_writes();
+        crate::coex::TestRadioCoexistence::set_connection_plan_for_test(ConnectionPlan::Disconnect);
+
+        handle_ble_connected_state::<crate::coex::TestRadioCoexistence>();
+
+        assert!(
+            writes_to(REG_SYSTEM_TICK_IRQ).is_empty(),
+            "the disconnect arm must schedule nothing"
+        );
+        assert_eq!(
+            BRIDGE_COMMAND_TIMESTAMP.get(),
+            0,
+            "bridge operations must not run on the disconnect arm"
+        );
+
+        crate::coex::TestRadioCoexistence::reset();
     }
 
     // ================================================================================

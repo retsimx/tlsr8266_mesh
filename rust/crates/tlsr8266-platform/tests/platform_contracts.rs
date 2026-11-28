@@ -137,6 +137,7 @@ fn coexistence_placeholders_report_their_documented_defaults() {
             next_connect_tick: 0,
             interval_ticks: 0,
             tx_ready: false,
+            current_tick: 0,
         }),
         ConnectionPlan::Continue
     ));

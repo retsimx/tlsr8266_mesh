@@ -366,16 +366,20 @@ COMPOSITION_ROOT_FILES = frozenset({"app.rs", "irq.rs"})
 # issue #113 then removed 3 production `unsafe` sites, taking 40 -> 37.
 # A subsequent upstream implementation audit measured 22 production unsafe sites,
 # so this ceiling is ratcheted down to the current measured count.
+# F-7 (#118) moved the OTA engine, storage and XIP boot copier into
+# `tlsr8266-platform`, taking `rust/src/ota/` from 2 production `unsafe` sites to
+# 0 and this crate 16 -> 14 (the two sites are now counted in the platform crate,
+# which is why its ceiling rose 0 -> 2; the workspace total never increases).
 #
 # `sdk/tests` asserts `measured == ceiling` for all five roots.  The tool only
 # fails on an *excess*, so an improvement never blocks a developer; that
 # equality assertion is what forces the map down with the code.
 MAX_PRODUCTION_UNSAFE_BY_CRATE = {
-    "tlsr8266_mesh": 16,
+    "tlsr8266_mesh": 14,
     "tlsr8266-pac": 6,
     "tlsr8266-hal": 16,
     "tlsr8266-radio": 22,
-    "tlsr8266-platform": 0,
+    "tlsr8266-platform": 2,
     "mesh-protocol": 45,
 }
 

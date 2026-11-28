@@ -401,6 +401,17 @@ fn light_sw_reboot_ll() {
 }
 
 pub fn light_sw_reboot() {
+    mcu_sw_reboot();
+}
+
+/// Product-neutral software reboot, without the retained-state wrapper.
+///
+/// This is the body [`light_sw_reboot`] used to carry inline: mask interrupts,
+/// keep a pending panic sentinel, publish the retained light/OTA state, then
+/// fire the hardware reset. It exists so `tlsr8266-platform` can reboot at the
+/// end of an OTA without naming a `light*` identifier (banned there by
+/// `sdk/check_layering.py`).
+pub fn mcu_sw_reboot() {
     irq_disable();
 
     // A pending panic keeps its sentinel so the next boot can still report it
@@ -410,6 +421,36 @@ pub fn light_sw_reboot() {
 
     light_sw_reboot_callback();
     light_sw_reboot_ll();
+}
+
+/// RAM-resident, product-neutral reboot for code that can no longer reach
+/// `.text`.
+///
+/// The boot-time OTA copier erases the sectors holding the running `.text` and
+/// `.rodata`, so after the first erase every callee it reaches must be
+/// `.ram_code` or be inlined into it. [`light_sw_reboot`] / [`mcu_sw_reboot`]
+/// are `.text` wrappers (they read the analog sentinel and run the
+/// retained-state callback) and must not be on that path; this primitive does
+/// nothing but mask interrupts and write the reset latch.
+///
+/// Off target there is no reset to wait for, so the host build stops with an
+/// explicit diagnostic instead of hanging the test binary.
+#[inline(never)]
+#[link_section = ".ram_code"]
+pub fn ram_sw_reboot() -> ! {
+    irq_disable();
+    mcu_trigger_reboot();
+
+    #[cfg(target_os = "none")]
+    #[allow(clippy::empty_loop)]
+    {
+        loop {}
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        panic!("ram_sw_reboot: host build observed the MCU reset latch")
+    }
 }
 
 /// Blinks the OTA LED six times at 1 Hz to signal success. `pin` is passed by
@@ -850,6 +891,122 @@ mod tests {
             SENTINEL_PANIC,
             "a panic sentinel must survive the reboot"
         );
+    }
+
+    /// `ram_sw_reboot` is the `.ram_code` primitive the boot OTA copier uses: it
+    /// must mask interrupts, latch exactly the reboot bit, and touch nothing
+    /// else — no analog reset sentinel, no retained-state callback.
+    #[test]
+    fn test_ram_sw_reboot_masks_interrupts_and_latches_reboot() {
+        reset_fakes();
+        // The retained-state callback would write REGA_LIGHT_OFF if it ran.
+        set_reboot_ota_active(true);
+        set_reboot_light_off_state(true);
+        FakeAnalog::set(REGA_LIGHT_OFF, 0x77);
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
+
+        // The host build panics instead of parking, so catch that explicitly.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ram_sw_reboot();
+        }));
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            result.is_err(),
+            "the host build must stop explicitly instead of returning"
+        );
+
+        // Exactly two register writes, in order: mask interrupts, latch reboot.
+        assert_eq!(
+            FakeMmio::writes(),
+            vec![
+                RegWrite {
+                    addr: IRQ_EN | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0,
+                },
+                RegWrite {
+                    addr: PWDN_CTRL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x20,
+                },
+            ],
+            "only irq_disable and the reboot latch may run"
+        );
+        assert_eq!(FakeMmio::reg8(IRQ_EN), 0);
+        assert_eq!(FakeMmio::reg8(PWDN_CTRL), 0x20);
+
+        // No analog reset sentinel write and no retained-state callback run.
+        assert_eq!(
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            SENTINEL_RUNNING,
+            "the RAM path must not publish the analog reboot sentinel"
+        );
+        assert_eq!(
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            0x77,
+            "the RAM path must not run the retained-state callback"
+        );
+    }
+
+    /// `mcu_sw_reboot` is the product-neutral body `light_sw_reboot` delegates
+    /// to, so both must produce the identical register and analog sequence.
+    #[test]
+    fn test_mcu_sw_reboot_matches_light_sw_reboot() {
+        reset_fakes();
+        set_reboot_ota_active(true);
+        set_reboot_light_off_state(true);
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
+
+        mcu_sw_reboot();
+
+        let mcu_writes = FakeMmio::writes();
+        let mcu_sentinel = FakeAnalog::get(REGA_RESET_SENTINEL);
+        let mcu_light_off = FakeAnalog::get(REGA_LIGHT_OFF);
+
+        reset_fakes();
+        set_reboot_ota_active(true);
+        set_reboot_light_off_state(true);
+        FakeAnalog::set(REGA_RESET_SENTINEL, SENTINEL_RUNNING);
+
+        light_sw_reboot();
+
+        assert_eq!(
+            mcu_writes,
+            FakeMmio::writes(),
+            "both entry points must produce the same register sequence"
+        );
+        assert_eq!(
+            mcu_sentinel,
+            FakeAnalog::get(REGA_RESET_SENTINEL),
+            "both entry points must publish the same reset sentinel"
+        );
+        assert_eq!(
+            mcu_light_off,
+            FakeAnalog::get(REGA_LIGHT_OFF),
+            "both entry points must publish the same retained state"
+        );
+
+        // Pin the shared sequence: mask interrupts, then latch the reboot bit.
+        assert_eq!(
+            mcu_writes,
+            vec![
+                RegWrite {
+                    addr: IRQ_EN | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0,
+                },
+                RegWrite {
+                    addr: PWDN_CTRL | REG_BASE_ADDR,
+                    width: 1,
+                    value: 0x20,
+                },
+            ]
+        );
+        assert_eq!(mcu_sentinel, SENTINEL_CLEAN_REBOOT);
+        assert_eq!(mcu_light_off, RecoverStatus::LightOff as u8);
     }
 
     /// Tests PM_WAKEUP enum values

@@ -265,18 +265,6 @@ pub enum OtaState {
     MasterOtaRebootOnly = 3,
 }
 
-/// OTA state as observed by a layer that may not own it.
-///
-/// Not part of the wire contract: it is the read-only projection the BLE link
-/// layer needs, so a seam can carry three flags in one `fn() -> ..` call and
-/// `mergefunc` has nothing to fold.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct OtaStatusSnapshot {
-    pub in_progress: bool,
-    pub finish_status: OtaState,
-    pub timeout_expired: bool,
-}
-
 /// Boot flag word written into the new-firmware header.
 pub const START_UP_FLAG: u32 = 0x544c4e4b;
 
@@ -291,6 +279,15 @@ pub const LGT_CMD_OTA_DATA_REQ: u8 = 0x26;
 pub const LGT_CMD_OTA_DATA_RSP: u8 = 0x27;
 pub const LGT_CMD_END_OTA_REQ: u8 = 0x28;
 pub const LGT_CMD_END_OTA_RSP: u8 = 0x29;
+
+// Product-neutral aliases for the three OTA response opcodes. The OTA engine is
+// owned by `tlsr8266-platform`, which may not name `lgt_*` identifiers
+// (`sdk/check_layering.py` bans them there). The aliases carry the *same*
+// values as the `LGT_CMD_*` constants, so there is still exactly one wire
+// contract.
+pub const OTA_CMD_START_RSP: u8 = LGT_CMD_START_OTA_RSP;
+pub const OTA_CMD_DATA_RSP: u8 = LGT_CMD_OTA_DATA_RSP;
+pub const OTA_CMD_END_RSP: u8 = LGT_CMD_END_OTA_RSP;
 
 #[cfg(test)]
 mod tests {
@@ -325,31 +322,16 @@ mod tests {
         assert_eq!(LGT_CMD_END_OTA_RSP, 0x29);
     }
 
-    /// The snapshot is an ordinary `Copy` value type, not a wire struct: it is
-    /// constructed field-by-field and compared by value.
+    /// The product-neutral aliases exist so `tlsr8266-platform` can name the
+    /// response opcodes without `lgt_*`; they must pin the same wire values.
     #[test]
-    fn ota_status_snapshot_projects_state() {
-        let idle = OtaStatusSnapshot {
-            in_progress: false,
-            finish_status: OtaState::Continue,
-            timeout_expired: false,
-        };
-        assert_eq!(
-            idle,
-            OtaStatusSnapshot {
-                in_progress: false,
-                finish_status: OtaState::Continue,
-                timeout_expired: false,
-            }
-        );
-        assert_ne!(
-            idle,
-            OtaStatusSnapshot {
-                in_progress: true,
-                finish_status: OtaState::Ok,
-                timeout_expired: true,
-            }
-        );
+    fn ota_response_aliases_match_legacy_opcodes() {
+        assert_eq!(OTA_CMD_START_RSP, LGT_CMD_START_OTA_RSP);
+        assert_eq!(OTA_CMD_DATA_RSP, LGT_CMD_OTA_DATA_RSP);
+        assert_eq!(OTA_CMD_END_RSP, LGT_CMD_END_OTA_RSP);
+        assert_eq!(OTA_CMD_START_RSP, 0x25);
+        assert_eq!(OTA_CMD_DATA_RSP, 0x27);
+        assert_eq!(OTA_CMD_END_RSP, 0x29);
     }
 
     /// Tests the is_unicast_addr function.

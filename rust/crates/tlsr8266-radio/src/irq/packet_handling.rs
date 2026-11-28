@@ -21,7 +21,7 @@ use crate::ble::connection::{
     SLAVE_WINDOW_SIZE,
 };
 use crate::ble::pair::pair_dec_packet_mesh;
-use crate::callbacks::dispatch_ota_snapshot;
+use crate::coex::RadioCoexistence;
 use crate::mesh_ll::packet_processing::{
     is_exist_in_rc_pkt_buf, parse_ble_packet_op_params, rf_link_slave_data,
 };
@@ -99,7 +99,7 @@ pub fn handle_rf_transmission_complete() {
 /// - Minimal processing in fast path
 /// - Delegates complex processing to separate function
 #[inline(always)]
-pub fn handle_rf_packet_reception() {
+pub fn handle_rf_packet_reception<C: RadioCoexistence>() {
     // Static variable to track last received packet time (duplicate detection)
     static T_RX_LAST: AtomicU32 = AtomicU32::new(0);
 
@@ -152,7 +152,7 @@ pub fn handle_rf_packet_reception() {
     // Delegate complex packet processing to the slow path function
     // This separation keeps the interrupt handler fast path minimal while providing
     // comprehensive packet processing capabilities in the slow path
-    process_received_packet_slow_path(rx_index, dma_len, &mut light_rx_buff);
+    process_received_packet_slow_path::<C>(rx_index, dma_len, &mut light_rx_buff);
 }
 
 /// Complex packet processing function (marked inline(never) for code size optimization).
@@ -164,7 +164,7 @@ pub fn handle_rf_packet_reception() {
 /// - Connection timing and synchronization
 /// - Scan response generation
 #[inline(never)]
-fn process_received_packet_slow_path(
+fn process_received_packet_slow_path<C: RadioCoexistence>(
     rx_index: usize,
     dma_len: u8,
     light_rx_buff: &mut [LightRxBuff; LIGHT_RX_BUFF_COUNT],
@@ -218,8 +218,10 @@ fn process_received_packet_slow_path(
             }
         }
 
-        // Process mesh network packets (when not in OTA mode and not in active BLE RX state)
-        if !dispatch_ota_snapshot().in_progress
+        // Process mesh network packets (when auxiliary RX is allowed and not in
+        // active BLE RX state). The policy behind `allow_aux_rx` lives in the
+        // platform; the radio only asks whether it may service a mesh frame now.
+        if C::allow_aux_rx()
             && BLE_PERIPHERAL_LINK_STATE.get() != crate::types::BlePeripheralLinkState::Receiving
         {
             handle_mesh_packet(packet, rx_time);
@@ -227,7 +229,7 @@ fn process_received_packet_slow_path(
         }
 
         // Process BLE connection data packets
-        handle_ble_connection_data(entry, packet, rx_time);
+        handle_ble_connection_data::<C>(entry, packet, rx_time);
         return;
     }
 
@@ -380,7 +382,11 @@ fn handle_mesh_packet(packet: &Packet, _rx_time: u32) {
 ///
 /// This function processes data packets received during an active BLE connection,
 /// including timing adjustment and connection state management.
-fn handle_ble_connection_data(entry: &LightRxBuff, packet: &Packet, rx_time: u32) {
+fn handle_ble_connection_data<C: RadioCoexistence>(
+    entry: &LightRxBuff,
+    packet: &Packet,
+    rx_time: u32,
+) {
     // Extract master sequence number from packet header for connection tracking
     let master_sn = ((entry.sno[2] as u16) * 0x100) | ((entry.sno[0] >> 3) & 1) as u16;
 
@@ -404,7 +410,7 @@ fn handle_ble_connection_data(entry: &LightRxBuff, packet: &Packet, rx_time: u32
 
         // Process the connection data packet (may contain connection parameters,
         // L2CAP data, or other BLE protocol information)
-        rf_link_slave_data(packet, rx_time);
+        rf_link_slave_data::<C>(packet, rx_time);
     }
 
     // Handle connection window size management for timing synchronization
@@ -495,8 +501,7 @@ mod tests {
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected);
         BLE_PERIPHERAL_CONNECTION_ACTIVE.set(false);
         crate::ble::connection::rf_link_slave_pairing_enable(false);
-        crate::callbacks::test_ota::reset_for_test();
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::reset();
         SECURITY_ENABLE.set(false);
         LAST_PACKET_RECEIVED_TIMESTAMP.set(0);
         LIGHT_CONN_SN_MASTER.set(0);
@@ -690,7 +695,7 @@ mod tests {
         LIGHT_RX_BUFFER_WRITE_POINTER.set(initial_write_ptr);
 
         // Execute function
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify error handling
         assert_eq!(
@@ -733,7 +738,7 @@ mod tests {
             buff[1] = create_rx_buffer_entry(test_timestamp, 25, [0; 4], [0x05, 0x00, 0x00]);
         }
         LIGHT_RX_BUFFER_WRITE_POINTER.set(1);
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // The duplicate-detection writes are the subject of the second round.
         FakeMmio::clear_writes();
@@ -741,7 +746,7 @@ mod tests {
         // Second reception: the same timestamp again, and the entry is now
         // marked processed, which is exactly the duplicate signature.
         LIGHT_RX_BUFFER_WRITE_POINTER.set(1);
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify the radio was restarted for another receive attempt.
         assert_eq!(
@@ -796,7 +801,7 @@ mod tests {
         }
 
         // Execute function
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify basic operations
         assert_eq!(
@@ -849,7 +854,7 @@ mod tests {
         }
 
         // Execute function
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // The fast path marks the processed slot before delegating. The write
         // pointer names slot 1, so that is the slot it consumes.
@@ -892,7 +897,7 @@ mod tests {
         LIGHT_RX_BUFFER_WRITE_POINTER.set(initial_ptr);
 
         // Execute function
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify wraparound: (3 + 1) % 4 = 0
         assert_eq!(
@@ -1403,7 +1408,7 @@ mod tests {
         let rx_time = 40000u32;
 
         // Execute function
-        handle_ble_connection_data(&entry, &packet, rx_time);
+        handle_ble_connection_data::<crate::coex::TestRadioCoexistence>(&entry, &packet, rx_time);
 
         // Verify new session handling
         assert_eq!(
@@ -1452,7 +1457,7 @@ mod tests {
         SLAVE_NEXT_CONNECT_TICK.set(500_000);
 
         // Execute function
-        handle_ble_connection_data(&entry, &packet, rx_time);
+        handle_ble_connection_data::<crate::coex::TestRadioCoexistence>(&entry, &packet, rx_time);
 
         // Verify timing adjustment for existing session
         assert_eq!(
@@ -1498,7 +1503,7 @@ mod tests {
         let rx_time = 48000u32;
 
         // Execute function
-        handle_ble_connection_data(&entry, &packet, rx_time);
+        handle_ble_connection_data::<crate::coex::TestRadioCoexistence>(&entry, &packet, rx_time);
 
         // Verify window management
         assert_eq!(
@@ -1543,7 +1548,7 @@ mod tests {
         let rx_time = 54000u32;
 
         // Execute function
-        handle_ble_connection_data(&entry, &packet, rx_time);
+        handle_ble_connection_data::<crate::coex::TestRadioCoexistence>(&entry, &packet, rx_time);
 
         // The timing adjust ran for the existing session.
         assert_eq!(
@@ -1583,7 +1588,11 @@ mod tests {
             create_rx_buffer_entry(60000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]); // dma_len=10 < 0xe
 
         // Call the slow path function directly (normally called from handle_rf_packet_reception)
-        process_received_packet_slow_path(0, 10, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            10,
+            &mut light_rx_buff,
+        );
 
         // Verify cleanup operations for invalid packet in receiving state
         assert_eq!(
@@ -1619,7 +1628,11 @@ mod tests {
 
         // Execute the function. The synthetic buffer has no RF status byte after
         // the frame (`unk4` is zero), so validation fails and no handler runs.
-        process_received_packet_slow_path(0, 32, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            32,
+            &mut light_rx_buff,
+        );
 
         // The failed validation is visible in the untouched reception timestamp
         // and in a radio that was not reconfigured.
@@ -1654,7 +1667,7 @@ mod tests {
             LIGHT_RX_BUFFER_WRITE_POINTER.set(i);
 
             // Execute function
-            handle_rf_packet_reception();
+            handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
             // Verify write pointer advancement
             let expected_next = (i + 1) % LIGHT_RX_BUFF_COUNT;
@@ -1691,7 +1704,11 @@ mod tests {
             light_rx_buff[0] =
                 create_rx_buffer_entry(70000, 10, [0x11, 0x22, 0x33, 0x44], [0x05, 0x15, 0x10]);
 
-            process_received_packet_slow_path(0, 10, &mut light_rx_buff);
+            process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+                0,
+                10,
+                &mut light_rx_buff,
+            );
 
             assert_eq!(
                 MESH_RX_CHANNEL.len(),
@@ -1745,7 +1762,7 @@ mod tests {
         }
 
         // Execute function
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify function completes without issues
         assert_eq!(
@@ -1764,7 +1781,7 @@ mod tests {
             *buff = light_rx_buff;
         }
 
-        handle_rf_packet_reception();
+        handle_rf_packet_reception::<crate::coex::TestRadioCoexistence>();
 
         // Verify function handles zero timestamp correctly: the ack is
         // write-1-to-clear, so both receptions leave the same value behind
@@ -1883,7 +1900,11 @@ mod tests {
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Execute the function with our carefully constructed buffer
-        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            test_dma_len,
+            &mut light_rx_buff,
+        );
 
         // 1. Check that timestamp was stored
         assert_eq!(
@@ -1957,7 +1978,11 @@ mod tests {
         CONN_UPDATE_CNT.set(9);
 
         // Execute the function
-        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            test_dma_len,
+            &mut light_rx_buff,
+        );
 
         // Verify timestamp was stored
         assert_eq!(
@@ -1988,9 +2013,10 @@ mod tests {
     fn test_process_received_packet_slow_path_mesh_packet_path() {
         reset_global_state();
 
-        // Set state to NOT advertising and NOT in OTA to trigger mesh path
+        // Set state to NOT advertising with auxiliary RX allowed to trigger the
+        // mesh path.
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Disconnected); // Not advertising
-        crate::callbacks::test_ota::set_in_progress_for_test(false); // Not in OTA
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
         // Create a buffer structure for mesh packet (cmd != 3 and != 5).
         // The length self-check is `dma_len == (rf_len & 0x3f) + 0x11`, and a
@@ -2043,7 +2069,11 @@ mod tests {
         let mut light_rx_buff = [create_rx_buffer_entry(0, 0, [0; 4], [0; 3]); LIGHT_RX_BUFF_COUNT];
         light_rx_buff[0] = unsafe { *entry_ptr };
         // Execute the function
-        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            test_dma_len,
+            &mut light_rx_buff,
+        );
 
         // Verify timestamp was stored
         assert_eq!(
@@ -2073,10 +2103,11 @@ mod tests {
     fn test_process_received_packet_slow_path_ble_connection_data_path() {
         reset_global_state();
 
-        // Set state to trigger BLE connection data path (line 176)
-        // This happens when: NOT in advertising, AND (in OTA OR in Receiving state)
+        // Set state to trigger BLE connection data path
+        // This happens when: NOT in advertising, AND (auxiliary RX suspended OR
+        // in Receiving state)
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Receiving); // In receiving state
-        crate::callbacks::test_ota::set_in_progress_for_test(false);
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(true);
 
         // Create a buffer structure for BLE connection data
         let test_dma_len = 25u8;
@@ -2112,7 +2143,11 @@ mod tests {
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Execute the function
-        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            test_dma_len,
+            &mut light_rx_buff,
+        );
 
         // Verify timestamp was stored
         assert_eq!(
@@ -2200,14 +2235,15 @@ mod tests {
     /// - We enter the Advertising state check
     /// - We DON'T take the scan request branch (cmd != 3)
     /// - We DON'T take the connection request branch (cmd != 5)
-    /// - We DON'T take the mesh packet branch because an OTA is in progress
+    /// - We DON'T take the mesh packet branch because auxiliary RX is suspended
     /// - We fall through to handle_ble_connection_data
     #[test]
     fn test_process_received_packet_slow_path_fallthrough_line_180() {
         reset_global_state();
 
         BLE_PERIPHERAL_LINK_STATE.set(BlePeripheralLinkState::Advertising);
-        crate::callbacks::test_ota::set_in_progress_for_test(true); // In OTA mode to skip mesh handler
+        // Auxiliary RX suspended, so the mesh handler is skipped.
+        crate::coex::TestRadioCoexistence::set_allow_aux_rx_for_test(false);
 
         // Create a buffer structure with cmd that is neither 3 nor 5
         let test_dma_len = 25u8;
@@ -2243,14 +2279,18 @@ mod tests {
         light_rx_buff[0] = unsafe { *entry_ptr };
 
         // Execute the function
-        process_received_packet_slow_path(0, test_dma_len, &mut light_rx_buff);
+        process_received_packet_slow_path::<crate::coex::TestRadioCoexistence>(
+            0,
+            test_dma_len,
+            &mut light_rx_buff,
+        );
 
         // Only the BLE connection data handler ran: the other branches would
         // have queued a mesh packet or armed a response.
         assert_eq!(
             MESH_RX_CHANNEL.len(),
             0,
-            "the mesh path must be skipped during OTA"
+            "the mesh path must be skipped while auxiliary RX is suspended"
         );
         assert_eq!(
             read_reg_rf_mode_control(),

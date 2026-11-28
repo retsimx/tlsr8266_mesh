@@ -1,12 +1,11 @@
+use core::marker::PhantomData;
 use core::sync::atomic::AtomicU8;
 
 use crate::ble::pair::{pair_read_arm, pair_write_payload, PAIR_LOGIN_OK};
-use crate::callbacks::{dispatch_ota_snapshot, dispatch_ota_terminate, dispatch_ota_write};
+use crate::coex::RadioCoexistence;
 use crate::facade::RadioConfig;
 use crate::mesh_ll::node_status::{mesh_report_status_enable, mesh_report_status_enable_mask};
 use crate::rf::drv_8266::rf_link_slave_data_write_payload;
-use mesh_protocol::mesh_types::OtaState;
-use mesh_protocol::packet_types::{Packet, PacketAttRawValue, PacketL2capHead};
 use mesh_protocol::service::{
     TELINK_SPP_DATA_CLIENT2SERVER, TELINK_SPP_DATA_OTA, TELINK_SPP_DATA_PAIR,
     TELINK_SPP_DATA_SERVER2CLIENT, TELINK_SPP_UUID_SERVICE,
@@ -638,33 +637,15 @@ pub fn mesh_status_write_bytes(l2cap_len: u16, payload: &[u8]) {
     }
 }
 
-fn ota_write_packet(handle: u16, kind: GattWriteKind, l2cap_len: u16, payload: &[u8]) -> Packet {
-    let mut value = [0u8; 30];
-    let copy_len = payload.len().min(value.len());
-    value[..copy_len].copy_from_slice(&payload[..copy_len]);
-    Packet {
-        att_val: PacketAttRawValue {
-            head: PacketL2capHead {
-                dma_len: 0,
-                _type: 0,
-                rf_len: 0,
-                l2cap_len,
-                chan_id: 4,
-            },
-            opcode: match kind {
-                GattWriteKind::Request => 0x12,
-                GattWriteKind::Command => 0x52,
-            },
-            handle: handle as u8,
-            handle1: (handle >> 8) as u8,
-            value,
-        },
-    }
-}
+/// Legacy GATT profile backend.
+///
+/// The coexistence implementation owns every policy decision the legacy
+/// bindings used to make here: the OTA characteristic only hands the ATT
+/// payload over through [`RadioCoexistence::on_bulk_gatt_write`] /
+/// [`RadioCoexistence::on_bulk_gatt_read`].
+pub struct LegacyGattBackend<C: RadioCoexistence>(PhantomData<C>);
 
-pub struct LegacyGattBackend;
-
-impl GattBackend for LegacyGattBackend {
+impl<C: RadioCoexistence> GattBackend for LegacyGattBackend<C> {
     type Binding = LegacyBinding;
 
     fn read(binding: Self::Binding, request: GattReadRequest<'_>) -> GattReadOutcome {
@@ -702,10 +683,11 @@ impl GattBackend for LegacyGattBackend {
             }
             LegacyBinding::Ota => {
                 let outcome = copy_read_value(request.out, &SPP_DATA_OTA_DATA[..16]);
-                if request.kind == GattReadKind::Read
-                    && dispatch_ota_snapshot().finish_status != OtaState::Continue
-                {
-                    dispatch_ota_terminate();
+                if request.kind == GattReadKind::Read {
+                    // A read is the initiator asking for the terminate
+                    // notifications. Whether that means anything is the
+                    // platform's decision, not the radio's.
+                    C::on_bulk_gatt_read();
                 }
                 outcome
             }
@@ -762,13 +744,9 @@ impl GattBackend for LegacyGattBackend {
                 }
             }
             LegacyBinding::Ota => {
-                let packet = ota_write_packet(
-                    request.handle,
-                    request.kind,
-                    request.l2cap_len,
-                    request.payload,
-                );
-                dispatch_ota_write(&packet);
+                // Hand the ATT payload straight over: no 48-byte `Packet` is
+                // built on the ATT path any more, and no OTA policy lives here.
+                C::on_bulk_gatt_write(request.l2cap_len, request.payload);
                 if request.kind == GattWriteKind::Request {
                     GattWriteOutcome::Accepted
                 } else {
@@ -855,7 +833,7 @@ mod tests {
         );
 
         let mut out = [0u8; 22];
-        let result = LegacyGattBackend::read(
+        let result = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::read(
             LegacyBinding::Const(&GAP_SERVICE_VALUE),
             GattReadRequest {
                 handle: 1,
@@ -871,7 +849,7 @@ mod tests {
     fn spp_command_read_consumes_only_for_read_not_read_by_type() {
         SEND_TO_MASTER.lock().copy_from_slice(&[0x11; 16]);
         let mut first = [0u8; 22];
-        let outcome = LegacyGattBackend::read(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::read(
             LegacyBinding::SppCommand,
             GattReadRequest {
                 handle: 21,
@@ -883,7 +861,7 @@ mod tests {
         assert_eq!(first[0], 0x11);
 
         let mut second = [0u8; 22];
-        let outcome = LegacyGattBackend::read(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::read(
             LegacyBinding::SppCommand,
             GattReadRequest {
                 handle: 21,
@@ -942,7 +920,7 @@ mod tests {
     #[test]
     fn status_cccd_write_and_pair_read_are_independent() {
         STATUS_CCC.lock().copy_from_slice(&[0x01, 0x00]);
-        let outcome = LegacyGattBackend::write(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::write(
             LegacyBinding::StatusCccd,
             GattWriteRequest {
                 handle: 19,
@@ -955,7 +933,7 @@ mod tests {
         assert_eq!(*STATUS_CCC.lock(), [0x02, 0x00]);
 
         let mut out = [0u8; 22];
-        let outcome = LegacyGattBackend::read(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::read(
             LegacyBinding::Pair,
             GattReadRequest {
                 handle: 27,
@@ -969,7 +947,7 @@ mod tests {
     #[test]
     fn read_only_and_const_bindings_do_not_mutate() {
         let mut out = [0u8; 22];
-        let outcome = LegacyGattBackend::read(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::read(
             LegacyBinding::DeviceName,
             GattReadRequest {
                 handle: 3,
@@ -979,7 +957,7 @@ mod tests {
         );
         assert!(matches!(outcome, GattReadOutcome::Value(_)));
 
-        let outcome = LegacyGattBackend::write(
+        let outcome = LegacyGattBackend::<crate::coex::TestRadioCoexistence>::write(
             LegacyBinding::DeviceName,
             GattWriteRequest {
                 handle: 3,

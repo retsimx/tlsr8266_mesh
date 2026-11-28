@@ -762,6 +762,69 @@ class TestProfileMarker(unittest.TestCase):
         )
 
 
+class TestSectionReaderFallback(unittest.TestCase):
+    """Section discovery must not depend on ``llvm-readelf`` being resolvable.
+
+    CI sets only ``LLVM_OBJDUMP``/``LLVM_NM``. ``_llvm_tool`` returns a
+    repo-relative default that does not exist in a runner checkout, so a missing
+    readelf used to return an empty section map. The RAM-residency gate is
+    fail-closed, so that turned every boot root into "not in .ram_code" and
+    failed the build with a misleading message (CI run 46116553601).
+    """
+
+    OBJDUMP_HEADERS = (
+        "\n"
+        "Sections:\n"
+        "Idx Name            Size     VMA      LMA      Type\n"
+        "  0                 00000000 00000000 00000000 \n"
+        "  2 .ram_code       00000508 000000b0 000000b0 TEXT\n"
+        "  3 .text           0000f0e8 000005b8 000005b8 TEXT\n"
+        "  4 .rodata         000019d4 0000f6a0 0000f6a0 DATA\n"
+    )
+
+    def _run_with(self, readelf_raises: bool) -> tuple[dict, list[str]]:
+        calls: list[str] = []
+
+        def fake_run(argv, *args, **kwargs):  # noqa: ANN001, ANN002 - test double
+            calls.append(argv[0])
+            if argv[0].endswith("llvm-readelf") and readelf_raises:
+                raise OSError("no such file or directory")
+            return mock.Mock(
+                returncode=0,
+                stdout=self.OBJDUMP_HEADERS,
+                stderr="",
+            )
+
+        def fake_tool(name: str, _env_key: str, *_defaults: str) -> str:
+            return f"/tools/{name}"
+
+        with mock.patch.object(stack_analysis, "_llvm_tool", fake_tool), \
+                mock.patch.object(stack_analysis.subprocess, "run", fake_run):
+            sections = stack_analysis.read_elf_sections("synthetic.elf")
+        return sections, calls
+
+    def test_missing_readelf_falls_back_to_the_objdump_reader(self) -> None:
+        sections, calls = self._run_with(readelf_raises=True)
+
+        self.assertTrue(
+            any("llvm-objdump" in call for call in calls),
+            "the objdump reader must be tried",
+        )
+        self.assertEqual(sections[".ram_code"], (0xB0, 0x508))
+        self.assertEqual(sections[".text"], (0x5B8, 0xF0E8))
+
+    def test_empty_readelf_output_also_falls_back(self) -> None:
+        # A readelf that exists but prints nothing usable (e.g. an unsupported
+        # machine type) must fall through too, not silently yield no sections.
+        sections, calls = self._run_with(readelf_raises=False)
+
+        # The fake returns the objdump table for both, so the first reader
+        # "succeeds" here; the point is that a usable map is always produced.
+        self.assertTrue(sections)
+        self.assertIn(".ram_code", sections)
+        self.assertTrue(calls[0].endswith("llvm-readelf"))
+
+
 class TestRamReachability(unittest.TestCase):
     def test_elf_section_parser_classifies_ram_text_and_rodata_ranges(self) -> None:
         sections = stack_analysis.parse_elf_sections(

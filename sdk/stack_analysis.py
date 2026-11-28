@@ -764,7 +764,15 @@ def parse_elf_sections(readelf_text: str) -> dict[str, tuple[int, int]]:
 
 
 def read_elf_sections(elf: str) -> dict[str, tuple[int, int]]:
-    """Read linked ELF section ranges, using llvm-readelf when available."""
+    """Read linked ELF section ranges, preferring llvm-readelf then llvm-objdump.
+
+    CI sets only ``LLVM_OBJDUMP``/``LLVM_NM``, and ``_llvm_tool`` falls back to a
+    repo-relative default that does not exist in a runner checkout, so a missing
+    ``llvm-readelf`` must fall **through** to the objdump reader rather than
+    giving up: the RAM-residency gate is fail-closed, and returning an empty map
+    there would reject every boot root instead of classifying one. Both readers
+    are TC32-capable LLVM tools.
+    """
     tool = _llvm_tool(
         "llvm-readelf",
         "LLVM_READELF",
@@ -772,6 +780,7 @@ def read_elf_sections(elf: str) -> dict[str, tuple[int, int]]:
         "../llvm/build/bin/llvm-readelf",
         "readelf",
     )
+    proc = None
     try:
         proc = subprocess.run(
             [tool, "-S", "--wide", elf],
@@ -780,8 +789,9 @@ def read_elf_sections(elf: str) -> dict[str, tuple[int, int]]:
             check=False,
         )
     except OSError:
-        return {}
-    if proc.returncode == 0:
+        # No readelf (or the path does not exist): try the objdump reader below.
+        proc = None
+    if proc is not None and proc.returncode == 0:
         sections = parse_elf_sections(proc.stdout)
         if sections:
             return sections
@@ -1089,11 +1099,20 @@ def check_ram_reachability(
         # 2. A root outside `.ram_code` would run from flash: the whole gate is
         # meaningless for it.
         if not _is_ram_section(root_section):
+            # A missing section map is a tool-resolution problem, not a code
+            # problem, and it is the one failure mode where "not in .ram_code"
+            # would mislead: say so instead of blaming the copier. A root that
+            # carries its own section needs no map, so it gets no hint.
+            hint = (
+                ""
+                if root_section or normalized
+                else " (no ELF sections were readable: set LLVM_READELF or LLVM_OBJDUMP)"
+            )
             violations.append(
                 (
                     root,
                     ROOT_VIOLATION,
-                    f"root is not in .ram_code (section {root_section or UNKNOWN_SECTION})",
+                    f"root is not in .ram_code (section {root_section or UNKNOWN_SECTION}){hint}",
                 )
             )
             continue

@@ -352,6 +352,8 @@ COMPOSITION_ROOT_FILES = frozenset({"app.rs", "irq.rs"})
 # `tlsr8266-radio`: 132 - 45 - 6 - 17 - 4 - 44 = 16.  C-16 (#78) then deleted 4
 # empty `unsafe` blocks in `tlsr8266-radio`, taking that crate 44 -> 40;
 # issue #113 then removed 3 production `unsafe` sites, taking 40 -> 37.
+# A subsequent upstream implementation audit measured 22 production unsafe sites,
+# so this ceiling is ratcheted down to the current measured count.
 #
 # `sdk/tests` asserts `measured == ceiling` for all five roots.  The tool only
 # fails on an *excess*, so an improvement never blocks a developer; that
@@ -360,7 +362,7 @@ MAX_PRODUCTION_UNSAFE_BY_CRATE = {
     "tlsr8266_mesh": 16,
     "tlsr8266-pac": 6,
     "tlsr8266-hal": 16,
-    "tlsr8266-radio": 37,
+    "tlsr8266-radio": 22,
     "mesh-protocol": 45,
 }
 

@@ -114,15 +114,12 @@ OPT_PRESERVE_ROOTS = (
     "memmove",
     "memset",
     "memcmp",
-    # Stable namespaced ABI anchors for strict GATT/resolver evidence. These
-    # replace Rust-v0 mangled-name fragments and are exported by the firmware
-    # source with #[export_name = ...].
+    # Stable namespaced ABI/runtime anchors. These replace Rust-v0 mangled-name
+    # fragments and are exported by the firmware source with #[export_name = ...].
     "tlsr8266_l2cap_att_handler",
-    "tlsr8266_mesh_status_write",
     "tlsr8266_rf_link_slave_data_write",
     "tlsr8266_dispatch_ota_write",
     "tlsr8266_pair_write",
-    "tlsr8266_pair_read",
     "tlsr8266_enqueue_mesh_rx",
     "tlsr8266_enqueue_mesh_tx",
     "tlsr8266_handle_system_interrupts",

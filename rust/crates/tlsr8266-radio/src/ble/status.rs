@@ -70,13 +70,14 @@
 //! - **Load Balancing**: Distribution of traffic across multiple channels
 
 use core::cmp::min;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::ble::connection::{BRIDGE_COMMAND_TIMESTAMP, SLAVE_DATA_VALID};
 use crate::ble::pair::PAIR_AC;
+use crate::coex::RadioCoexistence;
 use crate::rf::drv_8266::*;
 use crate::types::*;
-use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
+use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::mcu::clock::{sleep_us, CLOCK_SYS_CLOCK_1US};
 use tlsr8266_pac::read_reg_system_tick;
 
@@ -86,31 +87,12 @@ use crate::mesh_ll::node_status::{
 };
 use crate::mesh_ll::packet_processing::rf_link_is_notify_req;
 
-/// Status record table for tracking mesh node communications.
-/// Records device addresses and alarm IDs for up to 64 nodes in the mesh network.
-/// Used to track which devices need status updates or have pending alarms.
-pub(crate) static SLAVE_STATUS_RECORD: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> =
-    CriticalSectionMutex::new(
-        [StatusRecord {
-            adr: [0],
-            alarm_id: 0,
-        }; MESH_NODE_MAX_NUM],
-    );
-
 /// Status indicating slave is busy reading mesh node states.
 /// Prevents concurrent status reading operations.
 ///
 /// Visibility is `pub(crate)`: the facade module is the only entry point from
 /// outside this crate, and the crate boundary is the fence C-10 established.
 pub(crate) static SLAVE_READ_STATUS_BUSY: AtomicU8 = AtomicU8::new(0);
-
-/// Write pointer for the device status buffer circular queue.
-/// Points to the next position for storing incoming status data.
-pub static DEVICE_STATUS_BUFFER_WRITE_POINTER: AtomicUsize = AtomicUsize::new(0);
-
-/// Read pointer for the device status buffer circular queue.
-/// Points to the next status entry to be processed.
-pub static DEVICE_STATUS_BUFFER_READ_POINTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Flag indicating unicast status reading is active.
 /// When true, status reads are directed to specific devices rather than broadcast.
@@ -119,10 +101,6 @@ pub(crate) static DEVICE_STATUS_READ_UNICAST_MODE: AtomicBool = AtomicBool::new(
 /// Status tick counter for device state machine.
 /// Used for timing device status operations and state transitions.
 pub(crate) static DEVICE_STATUS_TICK_COUNTER: AtomicU8 = AtomicU8::new(0);
-
-/// Current index into the device status record table.
-/// Points to the active entry in the status tracking array.
-pub static DEVICE_STATUS_RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 /// Notification request mask index for tracking pending requests.
 /// Used to track which devices have pending notification requests.
@@ -149,41 +127,24 @@ pub(crate) static DEVICE_STATUS_READ_BUSY_TIMESTAMP: AtomicU32 = AtomicU32::new(
 /// - Connection establishment
 /// - Error recovery procedures
 /// - Status reporting session reset
-pub fn rf_link_slave_read_status_par_init() {
-    // Reset circular buffer pointers to empty state
-    DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-    DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
-
+fn rf_link_slave_read_status_params_reset() {
     // Clear status message sequence number for fresh tracking
     *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [0; 3];
 }
 
-/// Terminates BLE slave status reporting operations and cleans up state.
+pub fn rf_link_slave_read_status_par_init<C: RadioCoexistence>() -> bool {
+    let started = C::start_status_window();
+    rf_link_slave_read_status_params_reset();
+    started
+}
+
+/// Abort a status read without changing the platform lifecycle lock.
 ///
-/// This function implements a comprehensive shutdown procedure for status reporting,
-/// ensuring all resources are properly released and state is reset to prevent
-/// interference with subsequent operations.
-///
-/// # Shutdown Algorithm
-/// 1. **Clear Busy Flag**: Marks status reporting as no longer active
-/// 2. **Reset Communication Mode**: Disables unicast-specific reporting modes  
-/// 3. **Invalidate Pending Data**: Clears any queued status data
-/// 4. **Reinitialize Parameters**: Calls initialization to reset all state
-///
-/// # State Cleanup
-/// The function ensures complete cleanup by:
-/// - Clearing operational flags and counters
-/// - Resetting communication mode settings
-/// - Invalidating pending response data
-/// - Reinitializing buffer management state
-///
-/// # Use Cases
-/// Called when:
-/// - BLE connection is terminated
-/// - Error conditions require status reporting reset
-/// - System transitions from status reporting to other modes
-/// - Clean shutdown is required before mode changes
-pub fn rf_link_slave_read_status_stop() {
+/// OTA begin calls this radio-only core while it already holds the platform
+/// transition lock, then claims OTA mode itself. Normal disconnect and timeout
+/// paths use `rf_link_slave_read_status_stop`, which also stops the platform
+/// status window.
+pub fn rf_link_slave_read_status_abort() {
     // Clear status reporting busy flag to mark operation as inactive
     SLAVE_READ_STATUS_BUSY.set(0);
 
@@ -193,8 +154,19 @@ pub fn rf_link_slave_read_status_stop() {
     // Invalidate any pending slave data to prevent stale responses
     SLAVE_DATA_VALID.set(0);
 
-    // Reinitialize all status reporting parameters for clean state
-    rf_link_slave_read_status_par_init();
+    // Reinitialize status reporting parameters for clean state.
+    rf_link_slave_read_status_params_reset();
+}
+
+/// Terminates BLE slave status reporting and stops the platform status window.
+/// This is the normal disconnect and timeout cleanup path.
+pub fn rf_link_slave_read_status_stop<C: RadioCoexistence>() {
+    rf_link_slave_read_status_abort();
+    C::stop_status_window();
+
+    // Keep this explicit for normal stop callers and tests that reset sequence
+    // state independently of the radio-only abort path.
+    rf_link_slave_read_status_params_reset();
 }
 
 /// Processes bridge commands with adaptive timing and mesh transmission.
@@ -398,10 +370,11 @@ mod tests {
     }
 
     fn setup_test_state() {
+        crate::coex::TestRadioCoexistence::reset();
         reset_host_fakes();
         // Reset all status management state
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
         STATUS_MESSAGE_SEQUENCE_NUMBER.lock().fill(0);
         SLAVE_READ_STATUS_BUSY.set(0);
         DEVICE_STATUS_READ_UNICAST_MODE.set(false);
@@ -476,17 +449,36 @@ mod tests {
     #[test]
     fn test_rf_link_slave_read_status_par_init() {
         // Setup initial non-zero state
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(5);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(3);
+        crate::coex::TestRadioCoexistence::set_write_pointer(5);
+        crate::coex::TestRadioCoexistence::set_read_pointer(3);
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [1, 2, 3];
 
         // Execute function
-        rf_link_slave_read_status_par_init();
+        rf_link_slave_read_status_par_init::<crate::coex::TestRadioCoexistence>();
 
         // Verify state is reset
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
-        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::write_pointer(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::read_pointer(), 0);
         assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn test_rf_link_slave_read_status_abort_is_radio_only() {
+        SLAVE_READ_STATUS_BUSY.set(1);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
+        SLAVE_DATA_VALID.set(5);
+        crate::coex::TestRadioCoexistence::set_write_pointer(7);
+        crate::coex::TestRadioCoexistence::set_read_pointer(4);
+        *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [3, 2, 1];
+
+        rf_link_slave_read_status_abort();
+
+        assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0);
+        assert!(!DEVICE_STATUS_READ_UNICAST_MODE.get());
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+        assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0, 0, 0]);
+        assert_eq!(crate::coex::TestRadioCoexistence::write_pointer(), 7);
+        assert_eq!(crate::coex::TestRadioCoexistence::read_pointer(), 4);
     }
 
     #[test]
@@ -495,12 +487,12 @@ mod tests {
         SLAVE_READ_STATUS_BUSY.set(1);
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
         SLAVE_DATA_VALID.set(5);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(7);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(4);
+        crate::coex::TestRadioCoexistence::set_write_pointer(7);
+        crate::coex::TestRadioCoexistence::set_read_pointer(4);
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [3, 2, 1];
 
         // Execute function
-        rf_link_slave_read_status_stop();
+        rf_link_slave_read_status_stop::<crate::coex::TestRadioCoexistence>();
 
         // Verify cleanup occurred
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0);
@@ -509,8 +501,8 @@ mod tests {
 
         // The real parameter reset ran as the last step of the shutdown: the
         // buffer pointers and sequence numbers it owns are zeroed.
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
-        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::write_pointer(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::read_pointer(), 0);
         assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0, 0, 0]);
     }
 

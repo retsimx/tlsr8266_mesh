@@ -30,7 +30,7 @@ Model and caveats (reported alongside the result):
     (``MeshEventHooks``, ``LogSinks``, ``UartTxOps`` and the UART command
     handler). C-10 (#72) moved the app callback dispatchers and the OTA radio
     providers into ``tlsr8266-radio``, so those symbols now start with the
-    radio crate's prefix; the patterns below did not change, because they are
+    radio crate's prefix; F-6 staging now targets tlsr8266-platform and the
     matched against the linked symbol names rather than module paths. An
     indirect dispatch pushes a return address, so it is modelled as a *normal*
     call, never a tail call. Every entry must resolve to exactly one function;
@@ -106,7 +106,7 @@ INSTRUCTION_ADDRESS_RE = re.compile(r"^\s*([0-9a-fA-F]+):")
 # ``OtaHooks`` (``callbacks.rs`` in the radio crate) and ``OtaRadioOps``
 # (``ota/mod.rs``) are plain structs of ``fn`` pointers registered at boot, so
 # each of the eight seam calls compiles to a ``bx rN`` and its real callee — the
-# OTA write path, the flash save loop, the ``BUFF_RESPONSE`` staging shims —
+# OTA write path, the flash save loop, the platform packet-window staging shims —
 # would otherwise be scored as 0 B, hiding an OTA frame from both stack maxima.
 #
 # C-8 (#70) added the last four subsystems' seams, so every fn-pointer slot in
@@ -127,7 +127,7 @@ INDIRECT_EDGES: dict[str, tuple[str, ...]] = {
     "radio_stage_pkt": ("stage_ota_packet",),
     "radio_read_pkt": ("read_staged_ota_packet",),
     "radio_terminate_tx": ("ota_send_terminate_hook",),
-    "radio_begin_gatt_ota": ("ota_begin_gatt_hook",),
+    "radio_begin_gatt_ota": ("tlsr8266_ota_begin_gatt_hook",),
     "dispatch_mesh_light_event": ("rf_link_light_event_callback",),
     "publish_light_status": ("tlsr8266_mesh::light::device_status_update",),
     "dispatch_uart_mesh_rx": ("uart_mesh_rx_hook",),

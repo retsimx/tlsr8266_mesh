@@ -32,7 +32,6 @@ pub const IRQ_TIMER1_ENABLE: bool = true;
 pub const AUTH_TIME: u32 = 60;
 
 pub const LIGHT_RX_BUFF_COUNT: usize = 8;
-pub const BUFF_RESPONSE_PACKET_COUNT: usize = 16;
 pub const BLT_FIFO_TX_PACKET_COUNT: usize = 12;
 
 pub enum LightOpType {
@@ -554,7 +553,6 @@ mod tests {
 
         // Buffer size constants
         assert_eq!(LIGHT_RX_BUFF_COUNT, 8);
-        assert_eq!(BUFF_RESPONSE_PACKET_COUNT, 16);
         assert_eq!(BLT_FIFO_TX_PACKET_COUNT, 12);
 
         // Bridge constants

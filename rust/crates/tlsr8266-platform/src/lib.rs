@@ -5,6 +5,7 @@ pub mod coex;
 pub mod config;
 pub mod gatt;
 pub mod tasks;
+pub mod window;
 
 pub use tlsr8266_radio::{
     AttError, CompiledAttr, GattBackend, GattReadOutcome, GattReadRequest, GattServer,

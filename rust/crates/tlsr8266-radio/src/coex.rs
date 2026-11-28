@@ -62,6 +62,14 @@ pub enum RadioAction {
     ScheduleListen { delay_us: u32 },
 }
 
+/// Outcome of adding a packet to the shared status response window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusEnqueueOutcome {
+    Added,
+    Duplicate,
+    Rejected,
+}
+
 /// Link-layer lifecycle event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkEvent {
@@ -136,7 +144,230 @@ pub trait RadioCoexistence: 'static {
     fn on_post_advertisement(slot: AdvertisementSlot) -> RadioAction;
 
     fn poll_deferred_att() -> Option<AttTxPacket>;
+
+    fn start_status_window() -> bool;
+
+    fn stop_status_window();
+
+    fn enqueue_status_response(source_addr: u8, packet: &Packet) -> StatusEnqueueOutcome;
+
+    fn peek_status_response() -> Option<Packet>;
+
+    fn advance_status_response();
 }
+
+#[cfg(test)]
+mod test_window {
+    use super::*;
+    use crate::types::{StatusRecord, MESH_NODE_MAX_NUM};
+    use core::sync::atomic::{AtomicBool, AtomicUsize};
+    use mesh_protocol::packet_types::{PacketAttData, PacketL2capHead};
+    use tlsr8266_hal::common::sync::CriticalSectionMutex;
+
+    static TEST_STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static TEST_STATUS_READ: AtomicUsize = AtomicUsize::new(0);
+    static TEST_STATUS_WRITE: AtomicUsize = AtomicUsize::new(0);
+    static TEST_STATUS_RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
+    static TEST_STATUS_PACKETS: CriticalSectionMutex<[Packet; 16]> = CriticalSectionMutex::new(
+        [Packet {
+            att_data: PacketAttData {
+                head: PacketL2capHead {
+                    dma_len: 0,
+                    _type: 0,
+                    rf_len: 0,
+                    l2cap_len: 0,
+                    chan_id: 0,
+                },
+                att: 0,
+                hl: 0,
+                hh: 0,
+                dat: [0; 23],
+            },
+        }; 16],
+    );
+    static TEST_STATUS_RECORDS: CriticalSectionMutex<[StatusRecord; MESH_NODE_MAX_NUM]> =
+        CriticalSectionMutex::new(
+            [StatusRecord {
+                adr: [0],
+                alarm_id: 0,
+            }; MESH_NODE_MAX_NUM],
+        );
+
+    pub(crate) struct TestRadioCoexistence;
+
+    impl TestRadioCoexistence {
+        pub(crate) fn reset() {
+            TEST_STATUS_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_READ.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_WRITE.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_RECORD_INDEX.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_PACKETS.lock().fill(Packet {
+                att_data: PacketAttData::default(),
+            });
+            TEST_STATUS_RECORDS.lock().fill(StatusRecord {
+                adr: [0],
+                alarm_id: 0,
+            });
+        }
+
+        pub(crate) fn read_pointer() -> usize {
+            TEST_STATUS_READ.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        pub(crate) fn write_pointer() -> usize {
+            TEST_STATUS_WRITE.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        pub(crate) fn record_index() -> usize {
+            TEST_STATUS_RECORD_INDEX.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        pub(crate) fn record_address(index: usize) -> u8 {
+            TEST_STATUS_RECORDS.lock()[index].adr[0]
+        }
+
+        pub(crate) fn set_read_pointer(index: usize) {
+            TEST_STATUS_READ.store(index, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        pub(crate) fn set_write_pointer(index: usize) {
+            TEST_STATUS_WRITE.store(index, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        pub(crate) fn set_record_index(index: usize) {
+            TEST_STATUS_RECORD_INDEX.store(index, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        pub(crate) fn packet(index: usize) -> Packet {
+            TEST_STATUS_PACKETS.lock()[index]
+        }
+    }
+
+    impl RadioCoexistence for TestRadioCoexistence {
+        fn link_identity() -> LinkIdentity {
+            LinkIdentity {
+                mac: [0; 6],
+                device_address: 0,
+                vendor_id: 0,
+                adv_payload: [0; 31],
+                adv_len: 0,
+                scan_rsp_payload: [0; 31],
+                scan_rsp_len: 0,
+            }
+        }
+
+        fn auxiliary_rf() -> AuxiliaryRfPlan {
+            AuxiliaryRfPlan {
+                access_code: 0,
+                listen_channels: [37, 38, 39, 40],
+            }
+        }
+
+        fn on_aux_receive(_frame: &RadioFrame, _context: RxContext) -> RadioAction {
+            RadioAction::Continue
+        }
+
+        fn submit_aux_frame(_frame: RadioFrame) -> Result<(), QueueFull> {
+            Ok(())
+        }
+
+        fn on_link_event(_event: LinkEvent) -> LinkAction {
+            LinkAction::None
+        }
+
+        fn on_connection_slot(_slot: ConnectionSlot) -> ConnectionPlan {
+            ConnectionPlan::Continue
+        }
+
+        fn on_aux_listen_slot(_slot: ListenSlot) -> RadioAction {
+            RadioAction::Ignore
+        }
+
+        fn on_post_advertisement(_slot: AdvertisementSlot) -> RadioAction {
+            RadioAction::Continue
+        }
+
+        fn poll_deferred_att() -> Option<AttTxPacket> {
+            None
+        }
+
+        fn start_status_window() -> bool {
+            TEST_STATUS_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_READ.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_WRITE.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_RECORD_INDEX.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_PACKETS.lock().fill(Packet {
+                att_data: PacketAttData::default(),
+            });
+            TEST_STATUS_RECORDS.lock().fill(StatusRecord {
+                adr: [0],
+                alarm_id: 0,
+            });
+            true
+        }
+
+        fn stop_status_window() {
+            TEST_STATUS_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_READ.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_WRITE.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_RECORD_INDEX.store(0, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_RECORDS.lock().fill(StatusRecord {
+                adr: [0],
+                alarm_id: 0,
+            });
+        }
+
+        fn enqueue_status_response(source_addr: u8, packet: &Packet) -> StatusEnqueueOutcome {
+            if !TEST_STATUS_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+                return StatusEnqueueOutcome::Rejected;
+            }
+
+            let record_index = TEST_STATUS_RECORD_INDEX.load(core::sync::atomic::Ordering::Relaxed);
+            if record_index != 0
+                && TEST_STATUS_RECORDS
+                    .lock()
+                    .iter()
+                    .take(record_index)
+                    .any(|record| record.adr[0] == source_addr)
+            {
+                return StatusEnqueueOutcome::Duplicate;
+            }
+
+            let read = TEST_STATUS_READ.load(core::sync::atomic::Ordering::Relaxed);
+            let write = TEST_STATUS_WRITE.load(core::sync::atomic::Ordering::Relaxed);
+            if (write + 1) % 16 == read || record_index >= MESH_NODE_MAX_NUM {
+                return StatusEnqueueOutcome::Rejected;
+            }
+
+            TEST_STATUS_RECORDS.lock()[record_index].adr[0] = source_addr;
+            TEST_STATUS_RECORD_INDEX.store(record_index + 1, core::sync::atomic::Ordering::Relaxed);
+            TEST_STATUS_PACKETS.lock()[write] = *packet;
+            TEST_STATUS_WRITE.store((write + 1) % 16, core::sync::atomic::Ordering::Relaxed);
+            StatusEnqueueOutcome::Added
+        }
+
+        fn peek_status_response() -> Option<Packet> {
+            let read = TEST_STATUS_READ.load(core::sync::atomic::Ordering::Relaxed);
+            let write = TEST_STATUS_WRITE.load(core::sync::atomic::Ordering::Relaxed);
+            if read == write {
+                None
+            } else {
+                Some(TEST_STATUS_PACKETS.lock()[read])
+            }
+        }
+
+        fn advance_status_response() {
+            let read = TEST_STATUS_READ.load(core::sync::atomic::Ordering::Relaxed);
+            let write = TEST_STATUS_WRITE.load(core::sync::atomic::Ordering::Relaxed);
+            if read != write {
+                TEST_STATUS_READ.store((read + 1) % 16, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) use test_window::TestRadioCoexistence;
 
 #[cfg(test)]
 mod tests {
@@ -224,6 +455,7 @@ mod tests {
     #[test]
     fn actions_plans_and_att_remain_copy() {
         assert_copy::<RadioAction>();
+        assert_copy::<StatusEnqueueOutcome>();
         assert_copy::<LinkEvent>();
         assert_copy::<LinkAction>();
         assert_copy::<ConnectionPlan>();
@@ -302,6 +534,22 @@ mod tests {
         fn poll_deferred_att() -> Option<AttTxPacket> {
             None
         }
+
+        fn start_status_window() -> bool {
+            false
+        }
+
+        fn stop_status_window() {}
+
+        fn enqueue_status_response(_source_addr: u8, _packet: &Packet) -> StatusEnqueueOutcome {
+            StatusEnqueueOutcome::Rejected
+        }
+
+        fn peek_status_response() -> Option<Packet> {
+            None
+        }
+
+        fn advance_status_response() {}
     }
 
     #[test]

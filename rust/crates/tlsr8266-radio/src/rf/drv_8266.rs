@@ -19,18 +19,19 @@ use core::ptr::addr_of;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicUsize};
 
 use crate::ble::connection::{
-    BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_LINK_STATE, BUFF_RESPONSE, SLAVE_CONNECTED_TICK,
-    SLAVE_DATA_VALID, SLAVE_LINK_INTERVAL,
+    BLE_PERIPHERAL_LINK_COMMAND, BLE_PERIPHERAL_LINK_STATE, SLAVE_CONNECTED_TICK, SLAVE_DATA_VALID,
+    SLAVE_LINK_INTERVAL,
 };
 use crate::ble::flash_config::{dev_addr_with_mac_flag, pair_load_key, retrieve_dev_grp_address};
 use crate::ble::pair::{pair_dec_packet, PAIR_AC, PAIR_LOGIN_OK, SECURITY_ENABLE};
 use crate::ble::status::{
-    rf_link_slave_read_status_par_init, rf_link_slave_read_status_stop,
-    DEVICE_STATUS_READ_BUSY_TIMESTAMP, DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_RECORD_INDEX,
-    DEVICE_STATUS_TICK_COUNTER, NOTIFICATION_REQUEST_MASK_INDEX, SLAVE_READ_STATUS_BUSY,
-    SLAVE_STATUS_RECORD,
+    rf_link_slave_read_status_abort, rf_link_slave_read_status_par_init,
+    rf_link_slave_read_status_stop, DEVICE_STATUS_READ_BUSY_TIMESTAMP,
+    DEVICE_STATUS_READ_UNICAST_MODE, DEVICE_STATUS_TICK_COUNTER, NOTIFICATION_REQUEST_MASK_INDEX,
+    SLAVE_READ_STATUS_BUSY,
 };
 use crate::callbacks::{on_light_data, on_light_response};
+use crate::coex::RadioCoexistence;
 use crate::config::radio_config;
 use crate::mesh_ll::node_status::{
     mesh_node_table_init, rf_link_match_group_mac, GENERAL_MESSAGE_SEQUENCE_NUMBER,
@@ -42,9 +43,9 @@ use crate::mesh_ll::packet_processing::{
 use crate::queues::enqueue_mesh_rx;
 use crate::rf::tables::{TBL_AGC, TBL_RF_INI, TBL_RF_POWER};
 use crate::types::{
-    LightRxBuff, RfOperationState, StatusRecord, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1,
-    GET_GROUP2, GET_GROUP3, GET_STATUS, GET_USER_NOTIFY, LGT_CMD_CONFIG_DEV_ADDR,
-    LGT_CMD_DEV_ADDR_RSP, LGT_CMD_LIGHT_CONFIG_GRP, LGT_CMD_LIGHT_GRP_REQ, LGT_CMD_LIGHT_GRP_RSP1,
+    LightRxBuff, RfOperationState, BRIDGE_MAX_CNT, GET_DEV_ADDR, GET_GROUP1, GET_GROUP2,
+    GET_GROUP3, GET_STATUS, GET_USER_NOTIFY, LGT_CMD_CONFIG_DEV_ADDR, LGT_CMD_DEV_ADDR_RSP,
+    LGT_CMD_LIGHT_CONFIG_GRP, LGT_CMD_LIGHT_GRP_REQ, LGT_CMD_LIGHT_GRP_RSP1,
     LGT_CMD_LIGHT_GRP_RSP2, LGT_CMD_LIGHT_GRP_RSP3, LGT_CMD_LIGHT_ONOFF, LGT_CMD_LIGHT_READ_STATUS,
     LGT_CMD_LIGHT_STATUS, LGT_CMD_USER_NOTIFY_REQ, LGT_CMD_USER_NOTIFY_RSP, LIGHT_RX_BUFF_COUNT,
     MAX_GROUP_COUNT, PKT_VAL_MAC_APP_HOP_COUNT, PKT_VAL_MAC_APP_LINK_INTERVAL,
@@ -56,8 +57,8 @@ use mesh_protocol::mesh_types::{
     LGT_CMD_END_OTA_REQ, LGT_CMD_END_OTA_RSP, LGT_CMD_OTA_DATA_REQ, LGT_CMD_OTA_DATA_RSP,
 };
 use mesh_protocol::packet_types::{
-    AdvPrivate, AdvRspPrivate, Packet, PacketAttData, PacketAttErrRsp, PacketAttRawValue,
-    PacketAttValue, PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
+    AdvPrivate, AdvRspPrivate, Packet, PacketAttErrRsp, PacketAttRawValue, PacketAttValue,
+    PacketCtrlUnknown, PacketL2capHead, PacketLlInit, RfPacketAdvIndModuleT,
 };
 use tlsr8266_hal::common::sync::{CriticalSectionMutex, SimplifyLS};
 use tlsr8266_hal::drivers::flash::{flash_read_page, flash_write_page};
@@ -578,7 +579,7 @@ fn rf_link_get_rsp_type(opcode: u8, param_val: u8) -> u8 {
  *
  * @param pkt_light_data - The packet to prepare for status response
  */
-fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet) {
+fn rf_link_slave_read_status_start<C: RadioCoexistence>(pkt_light_data: &mut Packet) {
     // Record the time when the status read operation started
     DEVICE_STATUS_READ_BUSY_TIMESTAMP.set(read_reg_system_tick());
 
@@ -611,21 +612,12 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet) {
     }
 
     // Initialize parameters for status response handling
-    rf_link_slave_read_status_par_init();
-
-    // Clear the response buffer for fresh status data
-    BUFF_RESPONSE.lock().fill(Packet {
-        att_data: PacketAttData::default(),
-    });
-
-    // Reset status record tracking indices
-    DEVICE_STATUS_RECORD_INDEX.set(0);
-    SLAVE_STATUS_RECORD.lock().fill(StatusRecord {
-        adr: [0; 1],
-        alarm_id: 0,
-    });
-
-    NOTIFICATION_REQUEST_MASK_INDEX.set(0);
+    if rf_link_slave_read_status_par_init::<C>() {
+        NOTIFICATION_REQUEST_MASK_INDEX.set(0);
+    } else {
+        rf_link_slave_read_status_abort();
+        NOTIFICATION_REQUEST_MASK_INDEX.set(0);
+    }
 }
 
 /**
@@ -653,7 +645,7 @@ fn rf_link_slave_read_status_start(pkt_light_data: &mut Packet) {
  * @param data - The BLE mesh packet to process
  * @return true if packet was successfully processed or is a duplicate, false otherwise
  */
-fn rf_link_slave_data_write_no_dec(data: &Packet) {
+fn rf_link_slave_data_write_no_dec<C: RadioCoexistence>(data: &Packet) {
     // Validate minimum packet size requirement
     // RF length must be at least 0x11 bytes for valid command packets
     if data.head().rf_len < 0x11 {
@@ -759,7 +751,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
     if !rf_link_is_notify_req(op) {
         // If a status read operation was in progress, stop it
         if SLAVE_READ_STATUS_BUSY.get() != 0 {
-            rf_link_slave_read_status_stop();
+            rf_link_slave_read_status_stop::<C>();
         }
 
         // Extract the destination address from the packet in a safe way
@@ -831,7 +823,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
 
     // Initialize the status read response operation
     // This sets up all necessary state for generating the status response
-    rf_link_slave_read_status_start(pkt_light_data.deref_mut());
+    rf_link_slave_read_status_start::<C>(pkt_light_data.deref_mut());
 
     // Store the sequence number for status tracking
     *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = sno;
@@ -863,7 +855,7 @@ fn rf_link_slave_data_write_no_dec(data: &Packet) {
         // Call the response callback to fill in application-specific status data
         // If the callback returns true, add the status packet to the response queue
         if on_light_response(&mut pkt_light_status.att_cmd_mut().value, &tmp_pkt).is_ok() {
-            rf_link_slave_add_status(&pkt_light_status);
+            rf_link_slave_add_status::<C>(&pkt_light_status);
         }
     }
 
@@ -926,8 +918,7 @@ pub fn rf_link_slave_data_write_payload(kind: u8, l2cap_len: u16, payload: &[u8]
 /// Receives a copied handle-21 packet from `MESH_RX_CHANNEL`, reuses the
 /// existing paired decryption and no-decrypt bridge path, and never executes
 /// from the GATT callback itself.
-#[export_name = "tlsr8266_rf_link_slave_data_write_task"]
-pub fn rf_link_slave_data_write_task(data: &mut Packet) {
+pub fn rf_link_slave_data_write_task<C: RadioCoexistence>(data: &mut Packet) {
     if !PAIR_LOGIN_OK.get() || !is_gatt_spp_write_packet(data) {
         return;
     }
@@ -938,7 +929,7 @@ pub fn rf_link_slave_data_write_task(data: &mut Packet) {
         true
     };
     if decrypted {
-        rf_link_slave_data_write_no_dec(data);
+        rf_link_slave_data_write_no_dec::<C>(data);
     }
 }
 
@@ -1395,9 +1386,7 @@ mod tests {
         "/../../../tests/fixtures/rust_parser.rs"
     ));
     use crate::ble::pair::{pair_init, PAIR_STATE};
-    use crate::ble::status::{
-        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-    };
+
     use crate::callbacks::{set_ble_app_hooks, BleAppHooks};
     use crate::config::set_radio_config;
     use crate::rf::tables::{TBL_AGC, TBL_RF_INI};
@@ -1420,6 +1409,7 @@ mod tests {
     /// `--test-threads=1`, so all of these are process-wide singletons).
     /// The NOR device is reset too: it stores what production code writes.
     fn reset_host_fakes() {
+        crate::coex::TestRadioCoexistence::reset();
         FakeMmio::reset();
         FakeAnalog::reset();
         fake_clock::reset();
@@ -1535,9 +1525,9 @@ mod tests {
         });
         BLE_PERIPHERAL_LINK_COMMAND.set(0xff);
         SLAVE_DATA_VALID.set(0);
-        DEVICE_STATUS_RECORD_INDEX.set(0);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(0);
+        crate::coex::TestRadioCoexistence::set_record_index(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
         NOTIFICATION_REQUEST_MASK_INDEX.set(0);
         SLAVE_LINK_INTERVAL.set(1000 * CLOCK_SYS_CLOCK_1US);
         write_reg_system_tick(0xaabbccdd);
@@ -1558,12 +1548,12 @@ mod tests {
     /// Asserts the status path queued exactly one responder record.
     fn assert_status_recorded() {
         assert_eq!(
-            DEVICE_STATUS_RECORD_INDEX.get(),
+            crate::coex::TestRadioCoexistence::record_index(),
             1,
             "add_status must record one status responder"
         );
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             1,
             "add_status must advance the response buffer write pointer"
         );
@@ -2633,12 +2623,12 @@ mod tests {
         DEVICE_STATUS_TICK_COUNTER.set(0x55);
 
         // Dirty the state the parameter initialiser must reset
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(9);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(9);
+        crate::coex::TestRadioCoexistence::set_write_pointer(9);
+        crate::coex::TestRadioCoexistence::set_read_pointer(9);
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [9, 9, 9];
 
         // Call the function under test
-        rf_link_slave_read_status_start(&mut test_packet);
+        rf_link_slave_read_status_start::<crate::coex::TestRadioCoexistence>(&mut test_packet);
 
         // Verify system tick was recorded
         assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0x12345678);
@@ -2670,12 +2660,12 @@ mod tests {
         assert_eq!(test_packet.att_cmd().value.val[3], 0x55); // Should contain DEVICE_STATUS_TICK_COUNTER
 
         // Verify the parameter initialiser reset the response buffer state
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
-        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::write_pointer(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::read_pointer(), 0);
         assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0; 3]);
 
         // Verify status record variables were reset
-        assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::record_index(), 0);
 
         // Verify notify request mask index was reset
         assert_eq!(NOTIFICATION_REQUEST_MASK_INDEX.get(), 0);
@@ -2700,12 +2690,12 @@ mod tests {
         test_packet.att_cmd_mut().value.dst[1] = 0x80; // Broadcast (MSB set)
 
         // Dirty the state the parameter initialiser must reset
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(9);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(9);
+        crate::coex::TestRadioCoexistence::set_write_pointer(9);
+        crate::coex::TestRadioCoexistence::set_read_pointer(9);
         *STATUS_MESSAGE_SEQUENCE_NUMBER.lock() = [9, 9, 9];
 
         // Call the function under test
-        rf_link_slave_read_status_start(&mut test_packet);
+        rf_link_slave_read_status_start::<crate::coex::TestRadioCoexistence>(&mut test_packet);
 
         // Verify system tick was recorded
         assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0x87654321);
@@ -2721,12 +2711,12 @@ mod tests {
         // and don't have special fields set
 
         // Verify the parameter initialiser reset the response buffer state
-        assert_eq!(DEVICE_STATUS_BUFFER_WRITE_POINTER.get(), 0);
-        assert_eq!(DEVICE_STATUS_BUFFER_READ_POINTER.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::write_pointer(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::read_pointer(), 0);
         assert_eq!(*STATUS_MESSAGE_SEQUENCE_NUMBER.lock(), [0; 3]);
 
         // Verify status record variables were reset
-        assert_eq!(DEVICE_STATUS_RECORD_INDEX.get(), 0);
+        assert_eq!(crate::coex::TestRadioCoexistence::record_index(), 0);
 
         // Verify notify request mask index was reset
         assert_eq!(NOTIFICATION_REQUEST_MASK_INDEX.get(), 0);
@@ -2756,7 +2746,7 @@ mod tests {
         }
 
         // Call the function under test
-        rf_link_slave_read_status_start(&mut test_packet);
+        rf_link_slave_read_status_start::<crate::coex::TestRadioCoexistence>(&mut test_packet);
 
         // Verify system tick was recorded
         assert_eq!(DEVICE_STATUS_READ_BUSY_TIMESTAMP.get(), 0xAABBCCDD);
@@ -2801,7 +2791,7 @@ mod tests {
         };
 
         // Test the function
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         // Invalid packet length should return false
     }
@@ -2827,7 +2817,7 @@ mod tests {
         });
 
         // Test the function
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         // Duplicate packet should return true (successful but no processing)
     }
@@ -2859,7 +2849,7 @@ mod tests {
         // dst == 0 is device-addressed and matches this device.
         let packet = decoded_packet(0x01, &[0x10, 0x11, 0x12, 0x13]);
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             RECORDED_LIGHT_DATA.get(),
@@ -2887,7 +2877,7 @@ mod tests {
         // Non-zero, in the device address space, but not this device.
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             RECORDED_LIGHT_DATA.get(),
@@ -2911,7 +2901,7 @@ mod tests {
         let mut packet = decoded_packet(0, &[]);
         packet.att_write_mut().value.val[0] = 0x80;
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             BLE_PERIPHERAL_LINK_COMMAND.get(),
@@ -2935,7 +2925,7 @@ mod tests {
         packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
         SLAVE_DATA_VALID.set(7);
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_packet_not_processed();
         assert_eq!(
@@ -2959,7 +2949,7 @@ mod tests {
         );
         packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(*GENERAL_MESSAGE_SEQUENCE_NUMBER.lock(), NEW_SNO);
         assert_eq!(
@@ -2982,7 +2972,7 @@ mod tests {
         SLAVE_READ_STATUS_BUSY.set(1);
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_READ_STATUS_BUSY.get(),
@@ -3007,7 +2997,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_LIGHT_GRP_REQ, &[0x05, GET_GROUP2, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3030,7 +3020,7 @@ mod tests {
         );
         packet.att_write_mut().value.dst = [0x56, 0x80 | 0x34]; // broadcast bit set
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3050,7 +3040,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_LIGHT_CONFIG_GRP, &[0x05, 0x11, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3071,7 +3061,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_LIGHT_CONFIG_GRP, &[0x05, 0x11, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3094,7 +3084,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_USER_NOTIFY_REQ, &[0x05, 0x11, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             light_data_response_type(),
@@ -3113,7 +3103,7 @@ mod tests {
         );
         packet.att_write_mut().value.dst = 0x3456u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3136,7 +3126,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_LIGHT_READ_STATUS, &[0x08, 0x11, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             SLAVE_DATA_VALID.get(),
@@ -3162,7 +3152,7 @@ mod tests {
         let mut packet = decoded_packet(LGT_CMD_USER_NOTIFY_REQ, &[0x05, 0x11, 0x12, 0x13]);
         packet.att_write_mut().value.dst = 0x1234u16.to_le_bytes();
 
-        rf_link_slave_data_write_no_dec(&packet);
+        rf_link_slave_data_write_no_dec::<crate::coex::TestRadioCoexistence>(&packet);
 
         assert_eq!(
             RECORDED_LIGHT_DATA.get(),
@@ -3273,7 +3263,7 @@ mod tests {
         let mut queued = crate::queues::MESH_RX_CHANNEL
             .try_receive()
             .expect("paired provisioning write must be queued");
-        rf_link_slave_data_write_task(&mut queued);
+        rf_link_slave_data_write_task::<crate::coex::TestRadioCoexistence>(&mut queued);
 
         assert_eq!(RECORDED_LIGHT_DATA.get(), 1);
         assert_eq!(RECORDED_DEVICE_ADDRESS.load(Ordering::Relaxed), 31);
@@ -3302,7 +3292,7 @@ mod tests {
         let mut queued = crate::queues::MESH_RX_CHANNEL
             .try_receive()
             .expect("paired handle-21 frame must be queued");
-        rf_link_slave_data_write_task(&mut queued);
+        rf_link_slave_data_write_task::<crate::coex::TestRadioCoexistence>(&mut queued);
 
         assert_packet_not_processed();
         assert_eq!(RECORDED_LIGHT_DATA.get(), 0);
@@ -3361,7 +3351,7 @@ mod tests {
             let mut queued = crate::queues::MESH_RX_CHANNEL
                 .try_receive()
                 .expect("task context must receive the copied Packet");
-            rf_link_slave_data_write_task(&mut queued);
+            rf_link_slave_data_write_task::<crate::coex::TestRadioCoexistence>(&mut queued);
 
             if BLE_PERIPHERAL_LINK_COMMAND.get() == 0x02 {
                 accepted_iv_byte = Some(iv_byte);

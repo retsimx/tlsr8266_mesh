@@ -24,15 +24,16 @@ use crate::ble::pair::{
     MESH_PAIR_ENABLE, PAIR_AC, PAIR_CONFIG_MESH_LTK, PAIR_CONFIG_MESH_NAME, PAIR_CONFIG_MESH_PWD,
     PAIR_CONFIG_PWD_ENCODE_SK, PAIR_LOGIN_OK, PAIR_SETTING_FLAG, PAIR_STATE, SECURITY_ENABLE,
 };
-use crate::ble::status::{rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY};
+use crate::ble::status::{
+    rf_link_slave_read_status_abort, rf_link_slave_read_status_stop, SLAVE_READ_STATUS_BUSY,
+};
+use crate::coex::RadioCoexistence;
 use crate::mesh_ll::packet_processing::{is_add_packet_buf_ready, rf_link_add_tx_packet};
 use crate::rf::drv_8266::{
     ADV_PRI_DATA, ADV_RSP_PRI_DATA, DEVICE_ADDRESS, FLASH_CONFIGURATION_INDEX, GROUP_ADDRESS,
     MAC_ID, MESH_DEVICE_ADDRESS_VALIDATION_PENDING, PKT_TERMINATE,
 };
 use crate::types::MAX_GROUP_COUNT;
-#[cfg(not(target_os = "none"))]
-use mesh_protocol::packet_types::Packet;
 use tlsr8266_hal::common::sync::SimplifyLS;
 use tlsr8266_hal::drivers::flash::flash_write_page;
 use tlsr8266_hal::mcu::clock::clock_time_exceed;
@@ -302,10 +303,20 @@ pub fn check_auth_timeout(auth_time_s: u32) {
     }
 }
 
-/// Abort an in-flight status read so the link is free for another operation.
-pub fn stop_slave_read_status_if_busy() {
+/// Radio-only abort for OTA begin. It does not stop the platform status window;
+/// `begin_ota` holds the platform transition lock and performs the lifecycle
+/// change itself.
+pub fn abort_slave_read_status_if_busy() {
     if SLAVE_READ_STATUS_BUSY.get() != 0 {
-        rf_link_slave_read_status_stop();
+        rf_link_slave_read_status_abort();
+    }
+}
+
+/// Abort an in-flight status read and stop the platform status window.
+/// Use this for normal disconnection and timeout cleanup, not OTA begin.
+pub fn stop_slave_read_status_if_busy<C: RadioCoexistence>() {
+    if SLAVE_READ_STATUS_BUSY.get() != 0 {
+        rf_link_slave_read_status_stop::<C>();
     }
 }
 
@@ -433,22 +444,12 @@ pub fn adv_private_data() -> (AdvPrivate, AdvRspPrivate) {
     (*ADV_PRI_DATA.lock(), *ADV_RSP_PRI_DATA.lock())
 }
 
-/// Read one staged response packet, for tests that assert what a response
-/// handler produced.
-#[cfg(not(target_os = "none"))]
-pub fn buffered_response(index: usize) -> Packet {
-    crate::ble::connection::BUFF_RESPONSE.lock()[index]
-}
-
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
     use super::*;
     use crate::ble::connection::SLAVE_DATA_VALID;
-    use crate::ble::status::{
-        DEVICE_STATUS_BUFFER_READ_POINTER, DEVICE_STATUS_BUFFER_WRITE_POINTER,
-        DEVICE_STATUS_READ_UNICAST_MODE,
-    };
+    use crate::ble::status::DEVICE_STATUS_READ_UNICAST_MODE;
     use core::sync::atomic::{AtomicU32, Ordering};
     use tlsr8266_hal::drivers::flash::fake_flash::{FakeFlash, FakeFlashMode};
     use tlsr8266_hal::mcu::crypto::fake_crypto;
@@ -523,6 +524,7 @@ mod tests {
     /// test here starts from the factory configuration, a blank NOR device, an
     /// idle register bank and the software AES path.
     fn reset_host_fakes() {
+        crate::coex::TestRadioCoexistence::reset();
         reset_radio_state_for_test();
         FakeMmio::reset();
         fake_crypto::reset();
@@ -626,6 +628,35 @@ mod tests {
         set_flash_config_index(0);
     }
 
+    #[test]
+    fn abort_slave_read_status_if_busy_is_radio_only() {
+        set_slave_read_status_busy(1);
+        SLAVE_DATA_VALID.set(1);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(true);
+        crate::coex::TestRadioCoexistence::set_write_pointer(3);
+        crate::coex::TestRadioCoexistence::set_read_pointer(2);
+
+        abort_slave_read_status_if_busy();
+
+        assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0);
+        assert_eq!(SLAVE_DATA_VALID.get(), 0);
+        assert!(!DEVICE_STATUS_READ_UNICAST_MODE.get());
+        assert_eq!(
+            (
+                crate::coex::TestRadioCoexistence::write_pointer(),
+                crate::coex::TestRadioCoexistence::read_pointer()
+            ),
+            (3, 2),
+            "OTA abort must not stop the platform status window"
+        );
+
+        set_slave_read_status_busy(0);
+        SLAVE_DATA_VALID.set(0);
+        DEVICE_STATUS_READ_UNICAST_MODE.set(false);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
+        crate::coex::TestRadioCoexistence::set_read_pointer(0);
+    }
+
     /// The busy branch of `stop_slave_read_status_if_busy` moved into this
     /// module with the refactor, so both branches are covered here.
     ///
@@ -638,10 +669,10 @@ mod tests {
         set_slave_read_status_busy(1);
         SLAVE_DATA_VALID.set(1);
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(3);
-        DEVICE_STATUS_BUFFER_READ_POINTER.set(2);
+        crate::coex::TestRadioCoexistence::set_write_pointer(3);
+        crate::coex::TestRadioCoexistence::set_read_pointer(2);
 
-        stop_slave_read_status_if_busy();
+        stop_slave_read_status_if_busy::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(SLAVE_READ_STATUS_BUSY.get(), 0, "the busy flag is cleared");
         assert_eq!(SLAVE_DATA_VALID.get(), 0, "pending status data is dropped");
@@ -651,8 +682,8 @@ mod tests {
         );
         assert_eq!(
             (
-                DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
-                DEVICE_STATUS_BUFFER_READ_POINTER.get()
+                crate::coex::TestRadioCoexistence::write_pointer(),
+                crate::coex::TestRadioCoexistence::read_pointer()
             ),
             (0, 0),
             "the status response buffer is reinitialised"
@@ -663,9 +694,9 @@ mod tests {
         set_slave_read_status_busy(0);
         SLAVE_DATA_VALID.set(3);
         DEVICE_STATUS_READ_UNICAST_MODE.set(true);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(5);
+        crate::coex::TestRadioCoexistence::set_write_pointer(5);
 
-        stop_slave_read_status_if_busy();
+        stop_slave_read_status_if_busy::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(SLAVE_DATA_VALID.get(), 3, "idle link keeps pending data");
         assert!(
@@ -673,7 +704,7 @@ mod tests {
             "idle link keeps its unicast window"
         );
         assert_eq!(
-            DEVICE_STATUS_BUFFER_WRITE_POINTER.get(),
+            crate::coex::TestRadioCoexistence::write_pointer(),
             5,
             "idle link keeps its buffer position"
         );
@@ -681,6 +712,6 @@ mod tests {
         set_slave_read_status_busy(0);
         SLAVE_DATA_VALID.set(0);
         DEVICE_STATUS_READ_UNICAST_MODE.set(false);
-        DEVICE_STATUS_BUFFER_WRITE_POINTER.set(0);
+        crate::coex::TestRadioCoexistence::set_write_pointer(0);
     }
 }

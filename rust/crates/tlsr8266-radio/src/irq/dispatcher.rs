@@ -10,6 +10,7 @@
 //! - RF interrupt handling (TX/RX complete)
 //! - BLE system timer state dispatch
 
+use crate::coex::RadioCoexistence;
 use crate::rf::drv_8266::CURRENT_RF_STATE;
 use crate::types::RfOperationState;
 use tlsr8266_pac::*;
@@ -70,7 +71,7 @@ pub fn handle_rf_irq() {
 /// the interrupt composition root can own the `ota_manager` calls. Every other
 /// state reports [`BleConnectionEvent::None`].
 #[inline(always)]
-pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
+pub fn handle_ble_system_timer_irq<C: RadioCoexistence>() -> BleConnectionEvent {
     // Clear the interrupt source
     write_reg_irq_src(FLD_IRQ::SYSTEM_TIMER.bits());
 
@@ -81,7 +82,7 @@ pub fn handle_ble_system_timer_irq() -> BleConnectionEvent {
             handle_ble_advertisement_state(); // Advertisement state
             BleConnectionEvent::None
         }
-        RfOperationState::Connected => handle_ble_connected_state(), // Connected bridge state
+        RfOperationState::Connected => handle_ble_connected_state::<C>(), // Connected bridge state
         RfOperationState::Receiving => {
             configure_ble_receive_state(); // BLE receive state
             BleConnectionEvent::None
@@ -228,7 +229,7 @@ mod tests {
         *CURRENT_RF_STATE.lock() = RfOperationState::Advertising;
         FakeMmio::set_reg32(0x740, 10_000);
 
-        let event = handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(event, BleConnectionEvent::None);
         assert_eq!(
@@ -271,7 +272,7 @@ mod tests {
         SLAVE_CONNECTED_TICK.set(0);
         crate::callbacks::test_ota::set_in_progress_for_test(true);
 
-        let event = handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(
             event,
@@ -299,7 +300,7 @@ mod tests {
         reset_rf_state();
 
         *CURRENT_RF_STATE.lock() = RfOperationState::Receiving;
-        let receiving_event = handle_ble_system_timer_irq();
+        let receiving_event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
         assert_eq!(receiving_event, BleConnectionEvent::None);
         // The receive handler reconfigures the radio for the next connection
         // event and hands over to the connected state.
@@ -310,7 +311,7 @@ mod tests {
         );
 
         *CURRENT_RF_STATE.lock() = RfOperationState::MeshListening;
-        let mesh_event = handle_ble_system_timer_irq();
+        let mesh_event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
         assert_eq!(mesh_event, BleConnectionEvent::None);
         assert_eq!(
             crate::ble::connection::BLE_PERIPHERAL_LINK_STATE.get(),
@@ -325,7 +326,7 @@ mod tests {
     fn test_handle_ble_system_timer_irq_idle_runs_no_state_handler() {
         reset_rf_state();
 
-        let event = handle_ble_system_timer_irq();
+        let event = handle_ble_system_timer_irq::<crate::coex::TestRadioCoexistence>();
 
         assert_eq!(event, BleConnectionEvent::None);
         assert_eq!(

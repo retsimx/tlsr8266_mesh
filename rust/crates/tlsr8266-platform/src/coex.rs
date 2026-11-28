@@ -2,10 +2,11 @@
 
 use core::marker::PhantomData;
 
+use mesh_protocol::packet_types::Packet;
 use tlsr8266_radio::{
     AdvertisementSlot, AttTxPacket, AuxiliaryRfPlan, ConnectionPlan, ConnectionSlot, LinkAction,
     LinkEvent, LinkIdentity, ListenSlot, QueueFull, RadioAction, RadioCoexistence, RadioFrame,
-    RxContext,
+    RxContext, StatusEnqueueOutcome,
 };
 
 use crate::api::Product;
@@ -74,5 +75,25 @@ impl<P: Product> RadioCoexistence for PlatformRadio<P> {
 
     fn poll_deferred_att() -> Option<AttTxPacket> {
         None
+    }
+
+    fn start_status_window() -> bool {
+        crate::window::start_status_window()
+    }
+
+    fn stop_status_window() {
+        crate::window::stop_status_window();
+    }
+
+    fn enqueue_status_response(source_addr: u8, packet: &Packet) -> StatusEnqueueOutcome {
+        crate::window::enqueue_status_response(source_addr, packet)
+    }
+
+    fn peek_status_response() -> Option<Packet> {
+        crate::window::peek_status_response()
+    }
+
+    fn advance_status_response() {
+        crate::window::advance_status_response();
     }
 }

@@ -17,6 +17,7 @@
 //! - System timer, Embassy timer, light transition and UART interrupt dispatch
 //! - OTA timeout countdown driven by `TMR0` elapsed time
 
+use crate::product::LightPlatformRadio;
 use mesh_protocol::mesh_types::OtaState;
 use tlsr8266_hal::mcu::irq_i::read_irq_sources;
 use tlsr8266_hal::mcu::timer::{tmr0_ack_irq, tmr1_ack_irq};
@@ -119,7 +120,7 @@ fn handle_system_interrupts() {
 /// the same interrupt source.
 #[inline(never)]
 fn handle_system_timer_irq() {
-    match tlsr8266_radio::irq::handle_ble_system_timer_irq() {
+    match tlsr8266_radio::irq::handle_ble_system_timer_irq::<LightPlatformRadio>() {
         BleConnectionEvent::None => {}
         BleConnectionEvent::OtaFinishCheck => {
             crate::ota::rf_link_slave_ota_finish_handle();
